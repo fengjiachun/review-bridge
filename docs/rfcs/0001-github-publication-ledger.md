@@ -186,7 +186,6 @@ The initial schema is:
         "source": "PULL_REQUEST_REVIEW_COMMIT_ID",
         "field": "commit_id"
       },
-      "verdict": "CLEAN",
       "body_sha256": "sha256...",
       "recorded_at": "2026-07-25T08:05:01.000Z"
     }
@@ -418,15 +417,18 @@ recreating the object cannot revive that publication ledger.
 Codex-review collection reconciles every actor-admitted candidate in `results`
 against prior history and appends newly observed results. Each entry records
 `result_id`, `resource_kind`, URL, `event_at`, `timestamp_field`, stable actor
-ID and type, reviewed-head and commit-binding provenance, parsed verdict, body
-digest, and server `recorded_at`; request association is deliberately excluded
-because the evaluator replays it from the complete histories. On every later
+ID and type, reviewed-head and commit-binding provenance, body digest, and
+server `recorded_at`; adapter-derived verdict and request
+association are deliberately excluded because the evaluator replays them from
+the complete histories and current complete collection. On every later
 complete collection, every historical result must still appear in `results`
-with the same immutable facts. A missing result, changed body or verdict,
-reused `(resource_kind, result_id)`, changed actor, or conflicting commit
-binding persists terminal `INVALIDATED`. Incomplete collections neither
-compare nor advance result history, and result disappearance receives no
-post-to-list grace.
+with the same immutable GitHub facts. A missing result, changed body, reused
+`(resource_kind, result_id)`, changed actor, or conflicting commit binding
+persists terminal `INVALIDATED`. A verdict difference under the same body
+digest is a changed adapter interpretation, not a changed GitHub fact; the
+evaluator uses the current complete collection's verdict without truncating
+history. Incomplete collections neither compare nor advance result history,
+and result disappearance receives no post-to-list grace.
 
 There is one bounded visibility exception for a post-time binding that is not
 yet present in a separate listing response. If a `RECORDED_AT_POST` history
@@ -694,9 +696,10 @@ The evaluator applies these checks in order:
     required app identity when pinned, and a passing conclusion. For
     `NONE_CONFIGURED`, the explicit-empty invariants hold, including
     `strict_policy.required: false`.
-12. Replay association from `codex_request_history`, `codex_result_history`,
+12. Replay event identity and association from `codex_request_history`,
+    `codex_result_history`, the current collection's validated parsed verdicts,
     and every stored ambiguity acknowledgement for the current head rather than
-    trusting only the latest observation's arrays.
+    trusting only the latest observation's identities.
     `foreign_actor_objects` never participates. An unacknowledged ambiguous
     result preserves its indeterminate request set and derives
     `GITHUB_REVIEW_UNKNOWN`. An unbound exact issue-comment request also derives
@@ -1204,10 +1207,12 @@ The evaluator independently replays this algorithm, validates each
 association from the reconciled request and result histories, and then selects
 the latest request; it never reconstructs a pairing from "created after latest
 request" alone. The adapter must return the complete current result collection,
-and the server rejects disappearance or mutation of an already recorded result
-instead of letting a later snapshot forget it. Older, duplicate, or ambiguous
-events cannot be discarded because doing so could let a delayed old `CLEAN`
-result mask a pending newer review.
+and the server rejects disappearance or mutation of an already recorded
+result's immutable GitHub facts instead of letting a later snapshot forget it.
+The current adapter may reparse an unchanged body digest to a different verdict
+without changing result history; derivation uses that current interpretation.
+Older, duplicate, or ambiguous events cannot be discarded because doing so
+could let a delayed old `CLEAN` result mask a pending newer review.
 
 If an old request produces a delayed result after an acknowledgement and a new
 request, the protocol cannot distinguish it from the new request's result. The
@@ -1283,8 +1288,10 @@ can operate from stale reads.
 - A previously observed exact request that is changed or deleted persists
   terminal `INVALIDATED`; an older `CLEAN` can never become latest again.
 - A previously observed actor-admitted Codex result that disappears or changes
-  persists terminal `INVALIDATED`. Deleting an ambiguous comment or review
-  cannot erase it from correlation history or restore an older `CLEAN`.
+  its body or provenance persists terminal `INVALIDATED`. Deleting an ambiguous
+  comment or review cannot erase it from correlation history or restore an
+  older `CLEAN`. Re-parsing an unchanged body to another verdict changes the
+  current interpretation, not the immutable history.
 - A manually posted exact issue-comment request has no
   `RECORDED_AT_POST` head binding. It is recorded as `UNBOUND`, never receives
   an inferred head, and derives `GITHUB_REVIEW_UNKNOWN` until a direct human
@@ -1358,7 +1365,8 @@ can operate from stale reads.
   still invalidates.
 - Actor-admitted Codex results are monotonic audit evidence. Editing or deleting
   one after observation terminally invalidates that ledger rather than allowing
-  correlation to forget a prior ambiguity.
+  correlation to forget a prior ambiguity. An adapter upgrade may reinterpret
+  the same pinned body digest without invalidating the ledger.
 - A new commit intentionally requires a new local review rather than resuming
   the existing publication ledger.
 
@@ -1438,8 +1446,10 @@ architecture.
   publication ledger.
 - Actor-admitted Codex results are accumulated in a separate server-owned
   monotonic history. The evaluator replays association from both histories; a
-  result that disappears, changes, or conflicts with its recorded provenance
-  terminally invalidates the ledger instead of clearing ambiguity.
+  result that disappears or changes immutable body or provenance facts
+  terminally invalidates the ledger instead of clearing ambiguity. A verdict
+  reparse under an unchanged body digest is evaluated currently and does not
+  rewrite or invalidate history.
 - Every recognized request is durably bound to the verified head immediately
   after its GitHub post response. Snapshot collection never infers that head;
   unbound requests can only be closed through directly approved ambiguity
@@ -1513,9 +1523,11 @@ The implementation must test:
   delayed old result after acknowledgement as an explicitly accepted risk; and
   a later ambiguity requiring another acknowledgement;
 - zero and multiple candidate results after the latest request;
-- an ambiguous result that is later edited, deleted, or reclassified, each
-  persisting terminal `INVALIDATED` so a remaining older `CLEAN` cannot regain
-  eligibility, plus incomplete result collection leaving result history
+- an ambiguous result that is later body-edited, deleted, or reported with
+  conflicting actor/commit provenance, each persisting terminal `INVALIDATED`
+  so a remaining older `CLEAN` cannot regain eligibility; an unchanged body
+  digest re-parsed to a different verdict under an updated adapter without
+  truncating history; and incomplete result collection leaving result history
   unchanged;
 - a reaction without a Codex result;
 - a result created before its request;
