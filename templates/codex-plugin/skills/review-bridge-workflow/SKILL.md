@@ -25,7 +25,10 @@ Claude Desktop.
    Desktop and review that ID.
 7. Use `wait_for_review_state` with the recorded `state_version` to observe the
    transition without repeatedly loading the full ledger. It waits 25 seconds
-   by default and accepts at most 30 seconds.
+   by default and accepts at most 30 seconds. A `timed_out` result is expected
+   while a human-paced review remains in progress; call it again with the same
+   `state_version` until `changed` is true, or report the returned summary and
+   resume when the user confirms the review is complete.
 
 Do not push or open a pull request while the task is waiting for Claude.
 
@@ -41,7 +44,8 @@ Do not push or open a pull request while the task is waiting for Claude.
 4. If the state is `AUTHOR_RESPONDED`, call `prepare_rereview`.
 5. Record the new summary's `state_version`, report `WAITING_FOR_REREVIEW`, ask
    the user to invoke Claude Desktop again, and use `wait_for_review_state` to
-   observe the next transition.
+   observe the next transition. Treat `timed_out` as an expected in-progress
+   result and continue with the same `state_version` as described above.
 
 Keep fixes surgical. Do not mark a finding fixed without verification evidence.
 

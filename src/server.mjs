@@ -146,7 +146,7 @@ if (role === "author") {
     {
       title: "Wait for local review state change",
       description:
-        "Wait 25 seconds by default, configurable up to 30 seconds, for review.json to advance beyond a known state_version, then return a compact summary.",
+        "Wait 25 seconds by default, configurable up to 30 seconds, for review.json to advance beyond a known state_version. A timeout is expected while review is in progress and returns the unchanged compact summary.",
       inputSchema: {
         review_id: z.string(),
         known_state_version: z

@@ -74,7 +74,9 @@ Use `get_review_summary` for the compact state, next action, current snapshot,
 and active versus all-time finding counts. Pass its `state_version` to
 `wait_for_review_state`; the tool waits 25 seconds by default, configurable up
 to 30 seconds, and returns the same compact summary without repeated full-ledger
-polling.
+polling. A timed-out wait is expected while a human-paced review is still in
+progress; call it again with the same `state_version`, or resume when the user
+confirms the review is complete.
 
 In Claude Desktop:
 
