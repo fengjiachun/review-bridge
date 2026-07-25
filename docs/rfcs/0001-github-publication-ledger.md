@@ -178,6 +178,7 @@ The initial schema is:
         "result": {
           "result_id": 91,
           "resource_kind": "PULL_REQUEST_REVIEW",
+          "native_review_state": "COMMENTED",
           "url": "https://github.com/...",
           "event_at": "2026-07-25T07:51:00.000Z",
           "timestamp_field": "submitted_at",
@@ -215,6 +216,7 @@ The initial schema is:
     {
       "result_id": 101,
       "resource_kind": "PULL_REQUEST_REVIEW",
+      "native_review_state": "COMMENTED",
       "url": "https://github.com/...",
       "event_at": "2026-07-25T08:04:00.000Z",
       "timestamp_field": "submitted_at",
@@ -379,6 +381,7 @@ The initial schema is:
         {
           "result_id": 101,
           "resource_kind": "PULL_REQUEST_REVIEW",
+          "native_review_state": "COMMENTED",
           "url": "https://github.com/...",
           "event_at": "2026-07-25T08:04:00.000Z",
           "timestamp_field": "submitted_at",
@@ -476,8 +479,11 @@ but until an ambiguity acknowledgement names and closes it, it must widen
 association when a later result could also answer an active request.
 
 Only a recognized exact issue-comment request can enter an excluded settled
-pair. Any preexisting exact request that is unmatched, overlapping, unbound,
-or in an unsupported resource kind is not silently cut off. `start_publication`
+pair, and its formal result must have a non-dismissed submitted native state.
+A `DISMISSED` result never settles a baseline request, and observing a
+`PENDING` review makes baseline collection incomplete. Any preexisting exact
+request that is unmatched, overlapping, unbound, or in an unsupported resource
+kind is not silently cut off. `start_publication`
 seeds it into `codex_request_history` at revision 1 with the corresponding
 `UNBOUND` or `UNSUPPORTED` classification and
 `binding_source: "OBSERVED_BASELINE"`. It therefore blocks under the normal
@@ -515,17 +521,18 @@ publication ledger.
 Codex-review collection reconciles every actor-admitted candidate in `results`
 against prior history and appends newly observed results. Each entry records
 `result_id`, `resource_kind`, URL, `event_at`, `timestamp_field`, stable actor
-ID and type, reviewed-head and commit-binding provenance, body digest, and
-server `recorded_at`; adapter-derived verdict and request
+ID and type, native review state, reviewed-head and commit-binding provenance,
+body digest, and server `recorded_at`; adapter-derived verdict and request
 association are deliberately excluded because the evaluator replays them from
 the immutable baseline, complete histories, and current complete collection.
 On every later complete collection, every historical result must still appear
 in `results`
 with the same immutable GitHub facts. A missing result, changed body, reused
-`(resource_kind, result_id)`, changed actor, or conflicting commit binding
-persists terminal `INVALIDATED`. A verdict difference under the same body
-digest is a changed adapter interpretation, not a changed GitHub fact; the
-evaluator uses the current complete collection's verdict without truncating
+`(resource_kind, result_id)`, changed actor, changed native review state, or
+conflicting commit binding persists terminal `INVALIDATED`. A verdict
+difference under the same body digest is a changed adapter interpretation, not
+a changed GitHub fact; the evaluator uses the current complete collection's
+verdict without truncating
 history. Incomplete collections neither compare nor advance result history,
 and result disappearance receives no post-to-list grace.
 
@@ -911,10 +918,13 @@ The evaluator applies these checks in order:
     request/result pairing.
 14. The single correlated result's actor ID and `Bot` type match the immutable
     expected Codex actor. It is a formal pull request review whose
-    `PULL_REQUEST_REVIEW_COMMIT_ID` binding names the current head SHA, and its
-    parser returns `CLEAN`. A result from another actor or resource kind, a
-    missing binding, a SHA copied from the pull request at collection time, a
-    stale SHA, or an unknown format fails closed.
+    `PULL_REQUEST_REVIEW_COMMIT_ID` binding names the current head SHA. Its
+    native review state is `APPROVED` or `COMMENTED`, and its parser returns
+    `CLEAN`. `CHANGES_REQUESTED` derives `CHANGES_REQUIRED`; `DISMISSED`
+    derives `GITHUB_REVIEW_UNKNOWN`. A result from another actor or resource
+    kind, a missing binding, a SHA copied from the pull request at collection
+    time, a stale SHA, or an unknown format fails closed. An expected-actor
+    `PENDING` review makes collection incomplete before this step.
 15. Thread collection is complete, its counts are internally consistent, and
     `unresolved_count` is zero.
 
@@ -1050,7 +1060,8 @@ collection metadata, thread counts, latest-run selection, exact request
 bodies, resource-kind-scoped event ordering, recognized requests being issue
 comments, complete reporting of unbound issue-comment requests and exact
 request text in unsupported resource kinds, result actor admission,
-foreign-actor partitioning, and commit-binding provenance,
+foreign-actor partitioning, native review state/resource-kind pairing, and
+commit-binding provenance,
 endpoint-specific authorization proof for a classic-protection
 `NOT_CONFIGURED`, request/result correlation, monotonic recognized and
 unbound/unsupported request history, monotonic actor-admitted result history,
@@ -1381,9 +1392,9 @@ review comments and returns:
   under `unsupported_requests`, so unsupported re-review intent blocks rather
   than disappearing from evaluation;
 - all candidate Codex results, with GitHub object ID, resource kind, URL,
-  stable actor ID and type, audit login, timestamp, reviewed commit SHA,
-  GitHub-native commit-binding source and field, `request_comment_id`, and
-  association method;
+  stable actor ID and type, audit login, timestamp, native review state,
+  reviewed commit SHA, GitHub-native commit-binding source and field,
+  `request_comment_id`, and association method;
 - response-shaped objects from any other actor under `foreign_actor_objects`
   for audit only;
 - `CLEAN`, `FINDINGS`, or `UNKNOWN` for each candidate result; and
@@ -1433,6 +1444,22 @@ body text, a SHA mentioned by Codex, a linked review, or the pull request head
 observed when the comment is fetched is never a commit binding. Such a result
 therefore has null `reviewed_head_sha` and `commit_binding` and returns
 `UNKNOWN`.
+
+Every `PULL_REQUEST_REVIEW` result records GitHub's native `state` as
+`native_review_state`, exactly one of `APPROVED`, `CHANGES_REQUESTED`,
+`COMMENTED`, or `DISMISSED`. Conversation and review-comment results record
+null. GitHub omits `submitted_at` from `PENDING` reviews, so they cannot be
+normalized as candidate results; observing one from the expected actor makes
+the Codex-review collection incomplete until it is submitted or deleted.
+Missing, null, or unrecognized state on a submitted formal review, and non-null
+state on another resource kind, is malformed evidence. A `DISMISSED` formal
+review derives `GITHUB_REVIEW_UNKNOWN` and can never satisfy a request. A
+current `CHANGES_REQUESTED` state derives `CHANGES_REQUIRED` regardless of a
+body parser disagreement; only `APPROVED` or `COMMENTED` may continue to the
+parsed verdict. Because dismissal mutates the same review object rather than
+creating a new result ID, any state change after that result enters
+`codex_result_history` is a monotonic-history conflict and persists terminal
+`INVALIDATED`.
 
 After actor admission, the adapter processes recognized requests, unbound
 requests, source-only settled baseline requests, and candidate results by
@@ -1597,10 +1624,12 @@ can operate from stale reads.
 - A previously observed exact request that is changed or deleted persists
   terminal `INVALIDATED`; an older `CLEAN` can never become latest again.
 - A previously observed actor-admitted Codex result that disappears or changes
-  its body or provenance persists terminal `INVALIDATED`. Deleting an ambiguous
-  comment or review cannot erase it from correlation history or restore an
-  older `CLEAN`. Re-parsing an unchanged body to another verdict changes the
-  current interpretation, not the immutable history.
+  its body, native review state, or provenance persists terminal `INVALIDATED`.
+  Dismissing a previously recorded formal review therefore cannot leave its old
+  `CLEAN` verdict eligible. Deleting an ambiguous comment or review cannot erase
+  it from correlation history or restore an older `CLEAN`. Re-parsing an
+  unchanged body to another verdict changes the current interpretation, not
+  the immutable history.
 - A manually posted exact issue-comment request has no
   `RECORDED_AT_POST` head binding. It is recorded as `UNBOUND`, never receives
   an inferred head, and derives `GITHUB_REVIEW_UNKNOWN` until a direct human
@@ -1779,6 +1808,10 @@ architecture.
   `BASELINE_LATE_RESULT`. Neither triggers the acknowledgement path alone.
 - Only a formal pull request review's GitHub-native `commit_id` can establish
   `reviewed_head_sha`; conversation comments and review comments are `UNKNOWN`.
+- A formal review's native `state` is a monotonic-reconciled result fact.
+  `DISMISSED` never satisfies, and `PENDING` cannot be normalized as a result
+  and makes collection incomplete. A later dismissal of an observed result
+  terminally invalidates the ledger instead of preserving its old body verdict.
 - Recognized requests are workflow-managed exact `@codex review` issue
   comments with a durable post-time binding. An exact issue comment without
   that binding is `UNBOUND`; the same exact text in another resource kind is
@@ -1916,18 +1949,24 @@ The implementation must test:
   delayed old result after acknowledgement as an explicitly accepted risk; and
   a later ambiguity requiring another acknowledgement;
 - zero and multiple candidate results after the latest request;
-- an ambiguous result that is later body-edited, deleted, or reported with
-  conflicting actor/commit provenance, each persisting terminal `INVALIDATED`
-  so a remaining older `CLEAN` cannot regain eligibility; an unchanged body
-  digest re-parsed to a different verdict under an updated adapter without
-  truncating history; and incomplete result collection leaving result history
-  unchanged;
+- an ambiguous result that is later body-edited, dismissed, deleted, or
+  reported with conflicting actor/commit provenance, each persisting terminal
+  `INVALIDATED` so a remaining older `CLEAN` cannot regain eligibility; an
+  unchanged body digest re-parsed to a different verdict under an updated
+  adapter without truncating history; and incomplete result collection leaving
+  result history unchanged;
 - a reaction without a Codex result;
 - a result created before its request;
 - a formal review with a GitHub-native `commit_id`, conversation-comment and
   review-comment results with no accepted commit binding, an attempted
   PR-head copy/body-SHA/linked-review binding, and a missing, malformed,
   unknown, or stale reviewed commit;
+- formal reviews first observed as `APPROVED`, `COMMENTED`,
+  `CHANGES_REQUESTED`, and `DISMISSED`, plus a first-observed `PENDING` review
+  deriving `EVIDENCE_INCOMPLETE`, missing or unknown native states, and
+  non-review results with a non-null state; and a previously satisfying review
+  changing to `DISMISSED` under the same review ID, body, actor, and commit
+  binding and persisting terminal `INVALIDATED`;
 - a formal review from the expected numeric Bot actor, a human review copying
   the recognized body and login, a different Bot ID, and missing or non-Bot
   actor provenance; foreign objects while one request is open and between two
@@ -2035,6 +2074,7 @@ None.
 - [GitHub REST API: Get a branch](https://docs.github.com/en/rest/branches/branches#get-a-branch)
 - [GitHub REST API: Get branch protection](https://docs.github.com/en/rest/branches/branch-protection#get-branch-protection)
 - [GitHub REST API: Pull requests](https://docs.github.com/en/rest/pulls/pulls)
+- [GitHub REST API: Pull request reviews](https://docs.github.com/en/rest/pulls/reviews)
 - [GitHub REST API: Check runs](https://docs.github.com/en/rest/checks/runs)
 - [GitHub REST API: Commit statuses](https://docs.github.com/en/rest/commits/statuses)
 - [GitHub Docs: Troubleshooting required status checks](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks)
