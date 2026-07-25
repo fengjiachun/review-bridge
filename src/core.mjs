@@ -41,7 +41,7 @@ function assertReviewId(reviewId) {
 
 function safeRelativePath(value, name = "path") {
   assertString(value, name, { max: 4096 });
-  const normalized = value.replaceAll("\\", "/").replace(/^\.\/+/, "");
+  const normalized = value.replace(/^\.\/+/, "");
   if (
     normalized === "" ||
     normalized.startsWith("/") ||
@@ -56,8 +56,7 @@ function splitNul(buffer) {
   return buffer
     .toString("utf8")
     .split("\0")
-    .filter(Boolean)
-    .map((item) => item.replaceAll("\\", "/"));
+    .filter(Boolean);
 }
 
 function runGit(repositoryPath, args, options = {}) {
@@ -129,6 +128,8 @@ export async function loadReview(storeRoot, reviewId) {
 }
 
 async function saveReview(storeRoot, review) {
+  // v0.1 assumes one state transition at a time. Atomic replacement prevents
+  // corruption, but concurrent author and reviewer writes can still lose updates.
   review.updated_at = now();
   await atomicWriteJson(reviewFile(storeRoot, review.id), review);
 }
@@ -225,6 +226,18 @@ async function buildSnapshot({
       ]),
     ),
   );
+  const deletedFromBase = new Set(
+    splitNul(
+      runGit(repository, [
+        "diff",
+        "--name-only",
+        "--diff-filter=D",
+        "-z",
+        baseSha,
+        "--",
+      ]),
+    ),
+  );
   const untracked = splitNul(
     runGit(repository, ["ls-files", "--others", "--exclude-standard", "-z"]),
   );
@@ -275,7 +288,10 @@ async function buildSnapshot({
   }
 
   const changedFiles = [...new Set([...changedFromBase, ...untracked])].sort();
-  const deletedFiles = [...workingTreeDeleted].sort();
+  const untrackedPaths = new Set(untracked);
+  const deletedFiles = [...deletedFromBase]
+    .filter((relativePath) => !untrackedPaths.has(relativePath))
+    .sort();
   const hash = crypto.createHash("sha256");
   hash.update(
     JSON.stringify({
@@ -630,7 +646,7 @@ export async function submitRereview(
     unresolved = true;
   }
 
-  if (unresolved || review.current_round >= review.max_rounds + 1) {
+  if (unresolved) {
     review.status = "HUMAN_REQUIRED";
     review.history.push({
       at: now(),
@@ -706,15 +722,10 @@ export async function readReviewArtifact(
   }
   const filePath = path.join(roundDirectory(storeRoot, reviewId, round), artifact);
   const content = await fsp.readFile(filePath);
-  const chunk = content.subarray(offset, offset + limit);
   return {
     artifact,
     round,
-    offset,
-    next_offset: offset + chunk.length < content.length ? offset + chunk.length : null,
-    total_bytes: content.length,
-    encoding: "utf8",
-    content: chunk.toString("utf8"),
+    ...bufferResult(content, offset, limit),
   };
 }
 
@@ -733,14 +744,49 @@ function bufferResult(content, offset, limit) {
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_READ_BYTES) {
     throw new Error(`limit must be between 1 and ${MAX_READ_BYTES}`);
   }
-  const chunk = content.subarray(offset, offset + limit);
-  const binary = chunk.includes(0);
+  let binary = content.includes(0);
+  if (!binary) {
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(content);
+    } catch {
+      binary = true;
+    }
+  }
+  if (binary) {
+    const chunk = content.subarray(offset, offset + limit);
+    return {
+      offset,
+      next_offset:
+        offset + chunk.length < content.length ? offset + chunk.length : null,
+      total_bytes: content.length,
+      encoding: "base64",
+      content: chunk.toString("base64"),
+    };
+  }
+
+  let start = Math.min(offset, content.length);
+  while (start < content.length && (content[start] & 0xc0) === 0x80) {
+    start += 1;
+  }
+  let end = Math.min(start + limit, content.length);
+  if (end < content.length) {
+    while (end > start && (content[end] & 0xc0) === 0x80) {
+      end -= 1;
+    }
+    if (end === start) {
+      end = Math.min(start + 1, content.length);
+      while (end < content.length && (content[end] & 0xc0) === 0x80) {
+        end += 1;
+      }
+    }
+  }
+  const chunk = content.subarray(start, end);
   return {
-    offset,
-    next_offset: offset + chunk.length < content.length ? offset + chunk.length : null,
+    offset: start,
+    next_offset: end < content.length ? end : null,
     total_bytes: content.length,
-    encoding: binary ? "base64" : "utf8",
-    content: binary ? chunk.toString("base64") : chunk.toString("utf8"),
+    encoding: "utf8",
+    content: chunk.toString("utf8"),
   };
 }
 
@@ -807,6 +853,7 @@ export async function searchSnapshot(
   const args = [
     "grep",
     "-n",
+    "-z",
     "-I",
     "-F",
     "-e",
@@ -819,26 +866,47 @@ export async function searchSnapshot(
   }
   const output = runGit(review.repository_path, args, {
     allowExitCodes: [0, 1],
-    encoding: "utf8",
   });
   const overlayPaths = new Set(selectedRound.overlays.map((entry) => entry.path));
   const deletedPaths = new Set(selectedRound.deleted_files);
   const results = [];
-  for (const line of output.split("\n")) {
-    if (!line) {
-      continue;
+  for (const overlay of selectedRound.overlays) {
+    if (
+      overlay.type === "too_large" &&
+      (!prefix || overlay.path.startsWith(prefix))
+    ) {
+      results.push({
+        path: overlay.path,
+        skipped: true,
+        reason: `modified snapshot file exceeds ${MAX_OVERLAY_BYTES} bytes and is not searchable`,
+      });
+      if (results.length >= maxResults) {
+        return results;
+      }
     }
-    const match = line.match(/^[^:]+:(.*?):(\d+):(.*)$/);
-    if (!match) {
-      continue;
+  }
+  const treePrefix = `${selectedRound.head_sha}:`;
+  let cursor = 0;
+  while (cursor < output.length) {
+    const pathEnd = output.indexOf(0, cursor);
+    const lineEnd = pathEnd === -1 ? -1 : output.indexOf(0, pathEnd + 1);
+    const recordEnd = lineEnd === -1 ? -1 : output.indexOf(10, lineEnd + 1);
+    if (pathEnd === -1 || lineEnd === -1 || recordEnd === -1) {
+      break;
     }
-    const [, filePath, lineNumber, text] = match;
+    const treePath = output.subarray(cursor, pathEnd).toString("utf8");
+    const filePath = treePath.startsWith(treePrefix)
+      ? treePath.slice(treePrefix.length)
+      : treePath;
+    const lineNumber = output.subarray(pathEnd + 1, lineEnd).toString("utf8");
+    const text = output.subarray(lineEnd + 1, recordEnd).toString("utf8");
     if (!overlayPaths.has(filePath) && !deletedPaths.has(filePath)) {
       results.push({ path: filePath, line: Number(lineNumber), text });
     }
     if (results.length >= maxResults) {
       return results;
     }
+    cursor = recordEnd + 1;
   }
   for (const overlay of selectedRound.overlays) {
     if (

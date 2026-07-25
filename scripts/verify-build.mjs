@@ -19,6 +19,7 @@ const reviewerRoot = path.join(outputRoot, "claude-extension-source");
 const reviewerServer = path.join(reviewerRoot, "server", "server.mjs");
 const mcpb = path.join(outputRoot, "review-bridge-reviewer-v0.1.0.mcpb");
 const dxt = path.join(outputRoot, "review-bridge-reviewer-v0.1.0.dxt");
+const sourceArchive = path.join(outputRoot, "review-bridge-source-v0.1.0.zip");
 
 function run(command, args, cwd) {
   const result = spawnSync(command, args, {
@@ -87,6 +88,19 @@ assert.equal(
   crypto.createHash("sha256").update(mcpbBytes).digest("hex"),
   crypto.createHash("sha256").update(dxtBytes).digest("hex"),
 );
+const archiveFiles = run("unzip", ["-Z1", sourceArchive], projectRoot)
+  .split("\n")
+  .filter((entry) => entry && !entry.endsWith("/"))
+  .sort();
+const trackedFiles = run(
+  "git",
+  ["ls-tree", "-r", "--name-only", "HEAD"],
+  projectRoot,
+)
+  .split("\n")
+  .filter(Boolean)
+  .sort();
+assert.deepEqual(archiveFiles, trackedFiles);
 
 const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-build-"));
 try {

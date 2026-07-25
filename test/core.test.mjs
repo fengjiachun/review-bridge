@@ -45,6 +45,18 @@ async function fixture() {
   return { root, repository, store };
 }
 
+async function readAll(readChunk) {
+  let offset = 0;
+  let content = "";
+  while (offset != null) {
+    const chunk = await readChunk(offset);
+    assert.doesNotMatch(chunk.content, /\uFFFD/);
+    content += chunk.content;
+    offset = chunk.next_offset;
+  }
+  return content;
+}
+
 test("two-round fixed finding reaches a local gate", async (t) => {
   const { root, repository, store } = await fixture();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
@@ -192,4 +204,139 @@ test("finalization fails closed when code changes after a clean verdict", async 
     finalizeLocalGate(store, prepared.id),
     /working tree changed after the clean verdict/,
   );
+});
+
+test("committed deletions are represented as deleted snapshot files", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const base = git(repository, "rev-parse", "HEAD");
+  await fsp.rm(path.join(repository, "README.md"));
+  git(repository, "add", "-A");
+  git(repository, "commit", "-m", "delete readme");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: base,
+    requirement: "Remove the obsolete README.",
+    implementationScope: "Delete README.md.",
+  });
+
+  assert.deepEqual(prepared.rounds[0].deleted_files, ["README.md"]);
+  assert.deepEqual(
+    await readSnapshotFile(store, prepared.id, 1, "README.md"),
+    { path: "README.md", round: 1, deleted: true },
+  );
+});
+
+test("chunked artifact and snapshot reads preserve UTF-8 characters", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const message = '你好';\n");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Expose a localized message.",
+    implementationScope: "Update app.js with a Chinese message.",
+  });
+  const patch = await readAll((offset) =>
+    readReviewArtifact(store, prepared.id, 1, "patch.diff", offset, 4),
+  );
+  const snapshot = await readAll((offset) =>
+    readSnapshotFile(store, prepared.id, 1, "app.js", offset, 4),
+  );
+
+  assert.match(patch, /你好/);
+  assert.equal(snapshot, "export const message = '你好';\n");
+});
+
+test("snapshot paths preserve literal backslashes", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const fileName = "back\\slash.txt";
+  await fsp.writeFile(path.join(repository, fileName), "literal backslash\n");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Add a file whose name contains a backslash.",
+    implementationScope: `Add ${fileName}.`,
+  });
+
+  assert.equal(prepared.rounds[0].changed_files.includes(fileName), true);
+  const snapshot = await readSnapshotFile(store, prepared.id, 1, fileName);
+  assert.equal(snapshot.content, "literal backslash\n");
+});
+
+test("snapshot search preserves paths containing colon-number segments", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const base = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "guide:123"), "search needle\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "add colon path");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: base,
+    requirement: "Add the numbered guide.",
+    implementationScope: "Add guide:123.",
+  });
+  const results = await searchSnapshot(store, prepared.id, 1, "search needle");
+
+  assert.deepEqual(results, [
+    { path: "guide:123", line: 1, text: "search needle" },
+  ]);
+});
+
+test("snapshot search reports modified files that are too large to inspect", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const largePath = path.join(repository, "large.bin");
+  const content = Buffer.alloc(10 * 1024 * 1024 + 1);
+  await fsp.writeFile(largePath, content);
+  git(repository, "add", "large.bin");
+  git(repository, "commit", "-m", "add large file");
+  content[0] = 1;
+  await fsp.writeFile(largePath, content);
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Update the large binary.",
+    implementationScope: "Modify large.bin.",
+  });
+  const results = await searchSnapshot(store, prepared.id, 1, "needle");
+
+  assert.deepEqual(results, [
+    {
+      path: "large.bin",
+      skipped: true,
+      reason: "modified snapshot file exceeds 10485760 bytes and is not searchable",
+    },
+  ]);
+});
+
+test("build refuses to package a dirty working tree", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-build-test-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.mkdir(path.join(root, "scripts"));
+  await fsp.copyFile(
+    path.resolve("scripts/build.mjs"),
+    path.join(root, "scripts", "build.mjs"),
+  );
+  git(root, "init", "-b", "main");
+  git(root, "config", "user.name", "Review Bridge Test");
+  git(root, "config", "user.email", "review-bridge@example.invalid");
+  git(root, "add", ".");
+  git(root, "commit", "-m", "base");
+  await fsp.writeFile(path.join(root, "dirty.txt"), "not committed\n");
+
+  const result = spawnSync(process.execPath, ["scripts/build.mjs"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /refusing to build from a dirty working tree/);
 });
