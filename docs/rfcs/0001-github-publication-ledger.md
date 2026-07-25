@@ -91,7 +91,8 @@ GitHub publication fields from becoming part of the reviewer protocol.
 written only after a fresh observation derives `MERGE_READY`. The gate is a
 revocable view of one ledger revision, not an independent durable verdict. It
 is valid only while its `publication_revision` equals the current ledger
-revision and that revision still derives `MERGE_READY`.
+revision, that revision still derives `MERGE_READY`, and the server clock has
+not passed the `expires_at` recomputed from the stored observation timestamps.
 
 All files use the existing private directory and file modes. Publication
 mutations must use the same atomic replacement mechanism as review mutations,
