@@ -119,8 +119,10 @@ If the GitHub review finds an actionable issue, commit the fix and start a new
 local Review Bridge task. Merge only after the new local gate, required checks,
 and a new GitHub Codex review all pass for the same PR head.
 
-For a publishable change, commit before local review and commit fixes before
-rereview. This binds the local snapshot to the exact commit later pushed as the
+For a publishable change, resolve the review base to an immutable commit SHA
+before committing, then pass that SHA to `prepare_review`. Commit before local
+review and commit fixes before rereview. This binds the reviewed diff to the
+pre-change base and the local snapshot to the exact commit later pushed as the
 PR head.
 
 ## Security and scope

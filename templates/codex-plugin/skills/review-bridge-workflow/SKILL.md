@@ -10,14 +10,16 @@ Claude Desktop.
 
 ## Prepare
 
-1. Confirm the repository path and choose the exact base ref. Do not silently
-   guess between `HEAD`, `origin/main`, or another release branch.
+1. Confirm the repository path and choose the exact base ref. Resolve it to an
+   immutable commit SHA before creating or committing publication changes, and
+   pass that SHA to `prepare_review`. Do not silently guess between `HEAD`,
+   `origin/main`, or another release branch.
 2. Summarize the user's requirement faithfully.
 3. State the implementation scope, changed behavior, and verification evidence.
 4. If the user intends to publish the change, create a topic branch and commit
    the intended diff before review. Commit later fixes before rereview. This
    lets the local gate attest the exact commit that will become the PR head.
-5. Call `prepare_review`.
+5. Call `prepare_review` with the base SHA captured in step 1.
 6. Report the returned `review_id` and state `WAITING_FOR_REVIEW`. Ask the user
    to open Claude Desktop and review that ID.
 

@@ -78,6 +78,10 @@ const workflowSkillPath = path.join(
 );
 assert.ok(await fsp.stat(workflowSkillPath));
 const workflowSkill = await fsp.readFile(workflowSkillPath, "utf8");
+assert.match(
+  workflowSkill,
+  /Resolve it to an\n   immutable commit SHA before creating or committing publication changes/,
+);
 assert.match(workflowSkill, /Post a PR comment containing exactly `@codex review`/);
 assert.match(
   workflowSkill,
