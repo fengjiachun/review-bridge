@@ -51,6 +51,8 @@ different commits can therefore produce an incorrect workflow decision.
 - Give the Claude reviewer GitHub access.
 - Support review providers other than GitHub Codex in the first version.
 - Migrate existing local review records when no publication was started.
+- Recover GitHub request or result objects deleted before the first complete
+  publication baseline.
 
 ## Security considerations
 
@@ -71,6 +73,28 @@ authentic. Before merge, Codex must refresh the live GitHub state, record that
 observation, finalize the publication gate, and use a head-matching merge
 operation. Stronger authenticity would require a future GitHub App or signed
 attestation.
+
+Version 1 also assumes that exact or trigger-shaped Codex review request
+objects are not deleted before the next publication baseline captures them.
+GitHub's
+current-object listing APIs cannot prove that an already deleted request once
+existed, so a repository that cannot enforce this operational rule must not
+treat the local publication gate as sufficient. Closing that historical gap
+requires a future PR-scoped webhook or append-only GitHub-side event ledger.
+
+GitHub also exposes no structural identifier tying a Codex result to the event
+that triggered it. Publication therefore starts under one immutable trigger
+policy. `EXPLICIT_ONLY` asserts that automatic Codex review is disabled.
+It also asserts that the packaged workflow is the only actor allowed to issue
+Codex review triggers.
+`AUTOMATIC_QUIESCENCE_ACKNOWLEDGED` requires direct human confirmation, bound
+to the current head and obtained immediately before the baseline, that every
+automatic review already triggered for that head has finished; it records the
+operator label, rationale, and acknowledgement time. The server cannot verify
+either repository setting or quiescence, so the latter explicitly accepts the
+risk of an undisclosed automatic result later being associated with a workflow
+request. The skill may never infer this acknowledgement from elapsed time,
+reactions, silence, or a general instruction to continue.
 
 ## Storage
 
@@ -132,10 +156,10 @@ The initial schema is:
 ```json
 {
   "version": 1,
-  "revision": 4,
+  "revision": 3,
   "review_id": "rb-...",
   "created_at": "2026-07-25T08:00:00.000Z",
-  "updated_at": "2026-07-25T08:05:00.000Z",
+  "updated_at": "2026-07-25T08:05:01.000Z",
   "local_gate": {
     "head_sha": "0123456789abcdef...",
     "base_sha": "abcdef0123456789...",
@@ -153,6 +177,12 @@ The initial schema is:
       "id": 987654,
       "type": "Bot",
       "login_at_start": "chatgpt-codex-connector[bot]"
+    },
+    "codex_trigger_policy": {
+      "mode": "EXPLICIT_ONLY",
+      "operator_label": null,
+      "rationale": null,
+      "acknowledged_at": null
     }
   },
   "terminal": null,
@@ -162,40 +192,36 @@ The initial schema is:
     "collection": {
       "status": "COMPLETE",
       "collected_at": "2026-07-25T07:59:58.000Z",
-      "source": "PULL_REQUEST_CONVERSATION_REVIEWS_AND_REVIEW_COMMENTS",
-      "pagination_complete": true
-    },
-    "excluded_request_pairs": [
-      {
-        "request": {
-          "resource_id": 90,
+      "adapter_version": 1,
+      "sources": [
+        {
           "resource_kind": "ISSUE_COMMENT",
-          "url": "https://github.com/...",
-          "event_at": "2026-07-25T07:50:00.000Z",
-          "timestamp_field": "created_at",
-          "body_sha256": "sha256..."
+          "endpoint": "GET /repos/{owner}/{repo}/issues/{pull_number}/comments",
+          "collected_at": "2026-07-25T07:59:58.000Z",
+          "status": "COMPLETE",
+          "pagination_complete": true,
+          "page_count": 1
         },
-        "result": {
-          "result_id": 91,
+        {
           "resource_kind": "PULL_REQUEST_REVIEW",
-          "native_review_state": "COMMENTED",
-          "url": "https://github.com/...",
-          "event_at": "2026-07-25T07:51:00.000Z",
-          "timestamp_field": "submitted_at",
-          "actor": {
-            "id": 987654,
-            "type": "Bot"
-          },
-          "reviewed_head_sha": "fedcba9876543210...",
-          "commit_binding": {
-            "source": "PULL_REQUEST_REVIEW_COMMIT_ID",
-            "field": "commit_id"
-          },
-          "association": "SINGLE_OPEN_REQUEST",
-          "body_sha256": "sha256..."
+          "endpoint": "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+          "collected_at": "2026-07-25T07:59:58.000Z",
+          "status": "COMPLETE",
+          "pagination_complete": true,
+          "page_count": 1
+        },
+        {
+          "resource_kind": "PULL_REQUEST_REVIEW_COMMENT",
+          "endpoint": "GET /repos/{owner}/{repo}/pulls/{pull_number}/comments",
+          "collected_at": "2026-07-25T07:59:58.000Z",
+          "status": "COMPLETE",
+          "pagination_complete": true,
+          "page_count": 1
         }
-      }
-    ]
+      ]
+    },
+    "requests": [],
+    "candidate_results": []
   },
   "codex_review_ambiguity_acknowledgements": [],
   "codex_request_history": [
@@ -215,20 +241,22 @@ The initial schema is:
   "codex_result_history": [
     {
       "result_id": 101,
-      "resource_kind": "PULL_REQUEST_REVIEW",
-      "native_review_state": "COMMENTED",
+      "resource_kind": "ISSUE_COMMENT",
+      "native_review_state": null,
       "url": "https://github.com/...",
       "event_at": "2026-07-25T08:04:00.000Z",
-      "timestamp_field": "submitted_at",
+      "timestamp_field": "created_at",
       "actor": {
         "id": 987654,
         "type": "Bot"
       },
       "reviewed_head_sha": "0123456789abcdef...",
       "commit_binding": {
-        "source": "PULL_REQUEST_REVIEW_COMMIT_ID",
-        "field": "commit_id"
+        "source": "CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD",
+        "field": "body.reviewed_commit",
+        "prefix": "0123456789"
       },
+      "attached_review_comments": [],
       "body_sha256": "sha256...",
       "recorded_at": "2026-07-25T08:05:01.000Z"
     }
@@ -240,7 +268,26 @@ The initial schema is:
       "collection": {
         "status": "COMPLETE",
         "collected_at": "2026-07-25T08:05:00.000Z",
-        "source": "REST_PULL_REQUEST"
+        "sources": [
+          {
+            "kind": "PULL_REQUEST",
+            "endpoint": "GET /repos/{owner}/{repo}/pulls/{pull_number}",
+            "collected_at": "2026-07-25T08:05:00.000Z",
+            "status": "COMPLETE"
+          },
+          {
+            "kind": "BASE_HEAD_COMPARISON",
+            "endpoint": "GET /repos/{owner}/{repo}/compare/{base}...{head}",
+            "collected_at": "2026-07-25T08:05:00.000Z",
+            "status": "COMPLETE"
+          },
+          {
+            "kind": "REVIEWED_BASE_CURRENT_BASE_COMPARISON",
+            "endpoint": "GET /repos/{owner}/{repo}/compare/{reviewed_base}...{current_base}",
+            "collected_at": "2026-07-25T08:05:00.000Z",
+            "status": "COMPLETE"
+          }
+        ]
       },
       "repository_id": 123456,
       "number": 5,
@@ -298,19 +345,23 @@ The initial schema is:
           {
             "kind": "APPLICABLE_RULES",
             "endpoint": "GET /repos/{owner}/{repo}/rules/branches/{branch}",
+            "collected_at": "2026-07-25T08:05:00.000Z",
             "result": "SUCCESS",
             "binding_field": "rules[].parameters.required_status_checks[].integration_id",
-            "pagination_complete": true
+            "pagination_complete": true,
+            "page_count": 1
           },
           {
             "kind": "BRANCH_METADATA",
             "endpoint": "GET /repos/{owner}/{repo}/branches/{branch}",
+            "collected_at": "2026-07-25T08:05:00.000Z",
             "result": "SUCCESS",
             "protected": true
           },
           {
             "kind": "CLASSIC_BRANCH_PROTECTION",
             "endpoint": "GET /repos/{owner}/{repo}/branches/{branch}/protection",
+            "collected_at": "2026-07-25T08:05:00.000Z",
             "result": "SUCCESS",
             "binding_field": "required_status_checks.checks[].app_id"
           }
@@ -335,7 +386,8 @@ The initial schema is:
           "binding_sources": [
             {
               "kind": "CLASSIC_BRANCH_PROTECTION",
-              "field": "required_status_checks.checks[].app_id"
+              "field": "required_status_checks.checks[].app_id",
+              "raw_representation": "POSITIVE_INTEGER"
             }
           ]
         }
@@ -360,9 +412,36 @@ The initial schema is:
       "collection": {
         "status": "COMPLETE",
         "collected_at": "2026-07-25T08:05:00.000Z",
-        "source": "PULL_REQUEST_CONVERSATION_REVIEWS_AND_REVIEW_COMMENTS",
-        "pagination_complete": true
+        "adapter_version": 1,
+        "sources": [
+          {
+            "resource_kind": "ISSUE_COMMENT",
+            "endpoint": "GET /repos/{owner}/{repo}/issues/{pull_number}/comments",
+            "collected_at": "2026-07-25T08:05:00.000Z",
+            "status": "COMPLETE",
+            "pagination_complete": true,
+            "page_count": 1
+          },
+          {
+            "resource_kind": "PULL_REQUEST_REVIEW",
+            "endpoint": "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+            "collected_at": "2026-07-25T08:05:00.000Z",
+            "status": "COMPLETE",
+            "pagination_complete": true,
+            "page_count": 1
+          },
+          {
+            "resource_kind": "PULL_REQUEST_REVIEW_COMMENT",
+            "endpoint": "GET /repos/{owner}/{repo}/pulls/{pull_number}/comments",
+            "collected_at": "2026-07-25T08:05:00.000Z",
+            "status": "COMPLETE",
+            "pagination_complete": true,
+            "page_count": 1
+          }
+        ]
       },
+      "preexisting_requests": [],
+      "preexisting_candidate_results": [],
       "requests": [
         {
           "comment_id": 100,
@@ -380,23 +459,29 @@ The initial schema is:
       "results": [
         {
           "result_id": 101,
-          "resource_kind": "PULL_REQUEST_REVIEW",
-          "native_review_state": "COMMENTED",
+          "resource_kind": "ISSUE_COMMENT",
+          "native_review_state": null,
           "url": "https://github.com/...",
           "event_at": "2026-07-25T08:04:00.000Z",
-          "timestamp_field": "submitted_at",
+          "timestamp_field": "created_at",
           "actor": {
             "id": 987654,
             "type": "Bot",
             "login": "chatgpt-codex-connector[bot]"
           },
-          "request_comment_id": 100,
+          "request_ref": {
+            "resource_kind": "ISSUE_COMMENT",
+            "resource_id": 100
+          },
           "association": "SINGLE_OPEN_REQUEST",
           "reviewed_head_sha": "0123456789abcdef...",
           "commit_binding": {
-            "source": "PULL_REQUEST_REVIEW_COMMIT_ID",
-            "field": "commit_id"
+            "source": "CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD",
+            "field": "body.reviewed_commit",
+            "prefix": "0123456789"
           },
+          "attached_review_comments": [],
+          "format": "CODEX_CLEAN_COMMENT_V1",
           "verdict": "CLEAN",
           "body_sha256": "sha256..."
         }
@@ -406,8 +491,16 @@ The initial schema is:
       "collection": {
         "status": "COMPLETE",
         "collected_at": "2026-07-25T08:05:00.000Z",
-        "source": "GRAPHQL_PULL_REQUEST_REVIEW_THREADS",
-        "pagination_complete": true
+        "sources": [
+          {
+            "kind": "PULL_REQUEST_REVIEW_THREADS",
+            "endpoint": "GraphQL PullRequest.reviewThreads",
+            "collected_at": "2026-07-25T08:05:00.000Z",
+            "status": "COMPLETE",
+            "pagination_complete": true,
+            "page_count": 1
+          }
+        ]
       },
       "total_count": 0,
       "unresolved_count": 0,
@@ -417,9 +510,23 @@ The initial schema is:
   "status": "MERGE_READY",
   "history": [
     {
-      "at": "2026-07-25T08:05:00.000Z",
+      "at": "2026-07-25T08:00:00.000Z",
+      "event": "PUBLICATION_STARTED",
+      "revision": 1,
+      "status": "PR_PENDING",
+      "head_sha": "0123456789abcdef..."
+    },
+    {
+      "at": "2026-07-25T08:03:01.000Z",
+      "event": "CODEX_REVIEW_REQUEST_RECORDED",
+      "revision": 2,
+      "status": "PR_PENDING",
+      "head_sha": "0123456789abcdef..."
+    },
+    {
+      "at": "2026-07-25T08:05:01.000Z",
       "event": "GITHUB_SNAPSHOT_RECORDED",
-      "revision": 4,
+      "revision": 3,
       "status": "MERGE_READY",
       "head_sha": "0123456789abcdef..."
     }
@@ -437,6 +544,27 @@ namespace; an unrecognized value is rejected rather than treated as a new
 namespace. Recognized review requests are always `ISSUE_COMMENT` objects, so
 their native API field remains `comment_id`.
 
+Every numeric GitHub identifier accepted by schema version 1 must be a positive
+JavaScript safe integer. The server rejects larger JSON numbers rather than
+risk precision loss; a future schema may encode REST identifiers as decimal
+strings. Identity comparisons remain scoped by resource kind even when two
+objects have the same numeric value.
+
+Version 1 accepts full Git object IDs only as 40 lowercase hexadecimal
+characters and SHA-256 digests only as 64 lowercase hexadecimal characters.
+The shortened values ending in `...` in this RFC are readability placeholders,
+not schema-valid inputs.
+
+All normalized timestamps use canonical UTC RFC 3339 with millisecond
+precision (`YYYY-MM-DDTHH:mm:ss.sssZ`). Validation compares parsed instants and
+rejects invalid or non-canonical strings rather than relying on caller locale.
+
+Server-derived digests of JSON values, including
+`github_observation_sha256` and `backing_observation_sha256`, hash the UTF-8
+RFC 8785 JSON Canonicalization Scheme representation of the normalized value.
+Digests of existing files such as `local_gate_sha256` hash the exact file
+bytes. Body-digest semantics are defined separately in the adapter section.
+
 `event_at` is the normalized ordering timestamp. Its `timestamp_field` must be
 `created_at` for issue comments and review comments, and `submitted_at` for
 formal pull request reviews. The adapter records both so the evaluator can
@@ -453,6 +581,7 @@ An exact request in a review comment is recorded, but unsupported:
       "url": "https://github.com/...",
       "event_at": "2026-07-25T08:03:30.000Z",
       "timestamp_field": "created_at",
+      "reason": "WRONG_RESOURCE_KIND",
       "body_sha256": "sha256..."
     }
   ]
@@ -460,36 +589,65 @@ An exact request in a review comment is recorded, but unsupported:
 ```
 
 Empty arrays never imply that collection succeeded. Each evidence class carries
-`collection.status`, its source, collection time, and pagination completeness
-where applicable. Any missing field, failed query, ambiguous permission error,
-or incomplete page sequence makes the whole observation incomplete.
+`collection.status`, a parent collection time, and one source entry for every
+independent GitHub endpoint or GraphQL connection used to produce it. Every
+source records its endpoint, endpoint-specific outcome, and
+response-completion `collected_at`; paginated sources also record
+`pagination_complete` and a positive `page_count`. The parent
+`collection.collected_at` must equal the maximum source time, while every
+source time independently participates in freshness and
+atomic-window validation. Reusing a cached response preserves its original
+source time; normalizing it later cannot refresh it. Any missing source, failed
+query, ambiguous permission error, or incomplete page sequence makes the whole
+observation incomplete.
+
+Both the immutable baseline and each current Codex-review collection record
+the positive `adapter_version` used to parse all three Codex feeds. This RFC
+supports only adapter version 1. `start_publication` and
+`record_github_snapshot` reject a missing, mixed, or unsupported adapter
+version before state derivation; changing adapter semantics therefore requires
+a new version and a new publication ledger rather than silently reinterpreting
+an existing history.
+
+For `codex_trigger_policy.mode: "EXPLICIT_ONLY"`, `operator_label`,
+`rationale`, and `acknowledged_at` are all null. For
+`AUTOMATIC_QUIESCENCE_ACKNOWLEDGED`, the first two are non-empty direct-human
+inputs and `acknowledged_at` is the server timestamp assigned by
+`start_publication`.
 
 `codex_review_baseline` is an immutable publication-start cutoff captured from
 a fresh, complete, fully paginated collection immediately before
 `start_publication`. It uses stable `(resource_kind, resource_id)` identities,
-not a comparison between GitHub and server timestamps. The baseline adapter
-replays all preexisting exact requests and actor-admitted results with the same
-single-open-request rules. It excludes a request from active history and review
-satisfaction only when one unambiguous preexisting result already settled it;
-the server stores that exact request/result pair under
-`excluded_request_pairs`. The stored request remains a source-only candidate
-for later actor-admitted results bound to the same reviewed head. It cannot
-satisfy the new ledger, become the latest active request, or block by itself,
-but until an ambiguity acknowledgement names and closes it, it must widen
-association when a later result could also answer an active request.
+not a comparison between GitHub and server timestamps. It stores every
+preexisting exact or trigger-shaped request from all three supported resource
+kinds and every
+preexisting actor-admitted candidate result. Baseline objects are audit-only:
+they never satisfy the new ledger and are never retrospectively paired.
 
-Only a recognized exact issue-comment request can enter an excluded settled
-pair, and its formal result must have a non-dismissed submitted native state.
-A `DISMISSED` result never settles a baseline request, and observing a
-`PENDING` review makes baseline collection incomplete. Any preexisting exact
-request that is unmatched, overlapping, unbound, or in an unsupported resource
-kind is not silently cut off. `start_publication`
-seeds it into `codex_request_history` at revision 1 with the corresponding
-`UNBOUND` or `UNSUPPORTED` classification and
-`binding_source: "OBSERVED_BASELINE"`. It therefore blocks under the normal
-direct-human acknowledgement rule before a new request can satisfy the gate.
-A request object first appearing after the complete baseline is likewise never
-grandfathered: it must have a `RECORDED_AT_POST` binding or enter history as
+Every baseline request remains an open source candidate until an operator
+explicitly acknowledges its exact resource-scoped reference and accepts that
+it will produce no further result. Therefore the first complete snapshot
+derives `GITHUB_REVIEW_UNKNOWN` while any baseline request remains open, and
+the workflow must obtain that acknowledgement before posting its first new
+request. This one-time fail-closed boundary avoids inventing a historical head
+binding or assuming that an old result proves no delayed duplicate can arrive.
+Preexisting results remain audit-only and do not themselves require
+acknowledgement unless a later active association makes a new result
+indeterminate.
+
+Each baseline request records the same identity, URL, event timestamp,
+timestamp field, and body digest as an active request. An exact issue comment
+uses classification `BASELINE_EXACT`; exact text in another resource kind and
+trigger-shaped non-exact text use `BASELINE_UNSUPPORTED` plus
+`WRONG_RESOURCE_KIND` or `NON_EXACT_TRIGGER_SHAPE`. These classifications are
+immutable audit facts, not active-history bindings.
+
+The server later requires every baseline object still returned by the three
+feeds to match its stored immutable identity, body digest, actor, timestamp,
+native state, and commit provenance. Deletion or mutation persists terminal
+`INVALIDATED`; a new object cannot be smuggled into the baseline by giving it
+an old GitHub timestamp. A request object first appearing after the complete
+baseline must have a `RECORDED_AT_POST` binding or enter active history as
 unbound or unsupported.
 
 `codex_request_history` is server-maintained and monotonic. A workflow-managed
@@ -521,20 +679,21 @@ publication ledger.
 Codex-review collection reconciles every actor-admitted candidate in `results`
 against prior history and appends newly observed results. Each entry records
 `result_id`, `resource_kind`, URL, `event_at`, `timestamp_field`, stable actor
-ID and type, native review state, reviewed-head and commit-binding provenance,
-body digest, and server `recorded_at`; adapter-derived verdict and request
-association are deliberately excluded because the evaluator replays them from
-the immutable baseline, complete histories, and current complete collection.
+ID and type, nullable resource-kind-appropriate native review state,
+reviewed-head and commit-binding provenance, immutable attached
+review-comment evidence for formal findings, body digest, and server
+`recorded_at`; adapter-derived format, verdict, and request association are
+deliberately excluded because the evaluator replays them from the immutable
+baseline, complete histories, and current complete collection.
 On every later complete collection, every historical result must still appear
 in `results`
 with the same immutable GitHub facts. A missing result, changed body, reused
-`(resource_kind, result_id)`, changed actor, changed native review state, or
-conflicting commit binding persists terminal `INVALIDATED`. A verdict
-difference under the same body digest is a changed adapter interpretation, not
-a changed GitHub fact; the evaluator uses the current complete collection's
-verdict without truncating
-history. Incomplete collections neither compare nor advance result history,
-and result disappearance receives no post-to-list grace.
+`(resource_kind, result_id)`, changed actor, changed resource-kind-appropriate
+native review state, conflicting commit binding, or missing or changed
+attached review-comment evidence persists terminal `INVALIDATED`. Adapter
+semantics cannot change inside one version-1
+publication ledger. Incomplete collections neither compare nor advance result
+history, and result disappearance receives no post-to-list grace.
 
 There is one bounded visibility exception for a post-time binding that is not
 yet present in a separate listing response. If a `RECORDED_AT_POST` history
@@ -578,26 +737,39 @@ no total count. An absent, failed, unknown, or partially paginated source makes
 required-check evidence incomplete; completeness of one kind never substitutes
 for the other.
 
-The required-check keys are the union of both successful policy reads. Each
-requirement records:
+The required-check keys are the union of both successful policy reads. A key is
+the exact tuple `(context, app_binding, required_app_id)`. Duplicate instances
+of one tuple are coalesced and retain every distinct `binding_source`; tuples
+that share a context but differ in binding or App ID remain separate required
+checks. Each requirement records:
 
 - `app_binding`: `PINNED` or `EXPLICITLY_UNBOUND`;
 - `required_app_id`, which is a positive integer exactly when the binding is
   `PINNED` and null exactly when it is `EXPLICITLY_UNBOUND`; and
-- every identity-capable response field that supplied the binding.
+- every identity-capable response field and raw representation that supplied
+  the binding.
 
 The adapter normalizes a ruleset `integration_id` and a classic
-branch-protection `checks[].app_id` into `required_app_id`. `PINNED` requires a
-check run with the same `context` and exact producing GitHub App ID.
-`EXPLICITLY_UNBOUND` means GitHub returned an explicit null from an
-identity-capable field and permits a matching check run or commit status from
-any producer.
+branch-protection `checks[].app_id` into `required_app_id`. A positive integer
+produces `PINNED`. Classic branch protection's documented `-1` sentinel
+produces `EXPLICITLY_UNBOUND`; ruleset `integration_id` being null or absent
+inside an otherwise valid required-status-check object also produces
+`EXPLICITLY_UNBOUND`, because that field is optional in GitHub's schema.
+Zero or a negative ruleset `integration_id` is `UNKNOWN`; the `-1` sentinel is
+accepted only from classic branch protection.
+`EXPLICITLY_UNBOUND` permits a matching check run or commit status from any
+producer. Each binding source records the raw representation
+(`POSITIVE_INTEGER`, `NEGATIVE_ONE`, `NULL`, or `ABSENT`) as well as the field
+path, so the normalization is replayable.
 
-Reading the legacy classic `contexts[]` field, omitting
-`rules[].parameters.required_status_checks[].integration_id`, or otherwise
-using a response shape that cannot expose app identity is `UNKNOWN`, never
-`SUCCESS` or `EXPLICITLY_UNBOUND`. Each policy source and requirement records
-the exact binding field used, so the server can enforce this distinction.
+Reading only the legacy classic `contexts[]` field, a classic `checks[]` entry
+with missing, null, zero, or another negative `app_id`, or otherwise using a
+response shape that cannot expose app identity is `UNKNOWN`, never `SUCCESS`
+or `EXPLICITLY_UNBOUND`. A ruleset's documented absent
+`integration_id` remains distinguishable from a response shape that omitted
+the containing required-status-check object. Each policy source and requirement
+records the exact binding field and raw representation, so the server can
+enforce this distinction.
 
 Each check run records its positive `app.id` as `app_id` and
 `app_id_source: "CHECK_RUN_APP_ID"`. Check runs are the only version 1
@@ -609,16 +781,25 @@ must not infer an App ID from the creator login, user ID, target URL, token
 used to read the status, or any external mapping.
 
 An authorization error or ambiguous `404` is `UNKNOWN`, not evidence that no
-checks are configured. Successful branch-metadata or applicable-rules reads do
-not prove access to classic protection because that endpoint has a separate
-Administration permission. A classic-protection `404` may be classified as
+checks are configured. There is one positive no-protection shortcut: a
+successful branch read with `protected: false`, together with a complete empty
+applicable-rules response, proves that neither classic protection nor a
+ruleset applies. In that case the classic-protection endpoint is not queried,
+its policy-source entry is conditionally omitted, and policy discovery records
+the branch field as the `NOT_CONFIGURED` provenance. When `protected` is true,
+successful branch-metadata or applicable-rules reads do not prove access to
+classic protection because that endpoint has a separate Administration
+permission. A classic-protection `404` may then be classified as
 `NOT_CONFIGURED` only when the connector also supplies this endpoint-specific
 authorization proof:
 
 ```json
 {
-  "status": "ESTABLISHED",
-  "source": "GITHUB_APP_INSTALLATION_PERMISSIONS",
+  "kind": "GITHUB_APP_INSTALLATION_PERMISSIONS",
+  "endpoint": "GET /repos/{owner}/{repo}/installation",
+  "collected_at": "2026-07-25T08:05:00.000Z",
+  "result": "SUCCESS",
+  "credential_type": "GITHUB_APP",
   "field": "permissions.administration",
   "level": "READ"
 }
@@ -628,12 +809,18 @@ Version 1 accepts only an authenticated GitHub App installation-permission map
 whose `administration` grant is `read` or `write`; the server normalizes those
 values to `READ` or `WRITE`. A missing permission map, another credential
 class, an inferred repository role, or successful lower-privilege calls leave
-the `404` as `UNKNOWN`.
+the `404` as `UNKNOWN`. Whenever this proof is used, it is a conditionally
+mandatory `policy_sources` entry with its own endpoint, success status, and
+response-completion `collected_at`; it participates in source coverage,
+freshness, and the atomic-observation window exactly like the policy read it
+authorizes.
 
 `policy: "NONE_CONFIGURED"` is permitted only when complete policy discovery
 produces an explicit empty result: the applicable-rules response contains no
 required status-check rule, and classic protection is either present with no
-required checks or conclusively `NOT_CONFIGURED`. It must accompany
+required checks, conclusively `NOT_CONFIGURED` through authorized `404`
+evidence, or conditionally omitted under the successful
+`branch.protected: false` shortcut. It must accompany
 `strict_policy.required: false` and `requirements: []`; otherwise the
 observation is invalid. Fully collected runs may be present because GitHub
 still reports optional checks and commit statuses. They remain subject to
@@ -692,7 +879,9 @@ even if a same-context commit status passed.
 
 Normalized run status is one of `QUEUED`, `IN_PROGRESS`, `WAITING`,
 `REQUESTED`, `PENDING`, or `COMPLETED`. A non-completed latest run derives
-`CHECKS_PENDING`. A completed run must have exactly one of these conclusions:
+`CHECKS_PENDING`; every non-completed run must have null `completed_at` and
+null conclusion. A completed run must have non-null `completed_at` and exactly
+one of these conclusions:
 
 - `SUCCESS`, `SKIPPED`, or `NEUTRAL` satisfies the requirement;
 - `FAILURE`, `CANCELLED`, `TIMED_OUT`, `ACTION_REQUIRED`, or
@@ -722,8 +911,9 @@ total_count == threads.length
 unresolved_count == threads.filter(thread => !thread.is_resolved).length
 ```
 
-An empty thread array is acceptable only with `status: "COMPLETE"`,
-`pagination_complete: true`, and both counts set to zero.
+An empty thread array is acceptable only with parent `status: "COMPLETE"`, one
+complete review-thread source whose `pagination_complete` is true, and both
+counts set to zero.
 
 ## Atomic GitHub observations
 
@@ -734,15 +924,16 @@ the same time:
 - draft, open, mergeability, and base-branch state;
 - required-check policy provenance, separate complete run feeds, and every run
   for the head;
-- every exact `@codex review` request object, partitioned against the immutable
-  publication-start baseline;
+- every exact or trigger-shaped Codex review request object, partitioned
+  against the immutable publication-start baseline;
 - every candidate Codex result needed to partition the immutable baseline and
   replay the active epoch with unclosed source-only baseline requests;
 - the complete paginated review-thread collection and resolution counts; and
 - the observation timestamp.
 
 `observed_at` is captured immediately after the final GitHub response. Every
-nested evidence collection has its own `collected_at`, and the server requires:
+parent collection and every independent source has its own `collected_at`, and
+the server requires all of them to satisfy:
 
 ```text
 publication.created_at <= collected_at <= observed_at
@@ -750,18 +941,19 @@ observed_at - collected_at <= 2 minutes
 max(collected_at) - min(collected_at) <= 2 minutes
 ```
 
-Each `required_checks.collection.run_sources[].collected_at` participates in
-these freshness and atomic-window calculations independently; the parent
-required-check timestamp cannot refresh a stale run feed.
+This includes pull-request and comparison sources, required-check policy and
+run sources, each Codex issue-comment/review/review-comment feed, and the
+review-thread source. A parent collection timestamp cannot refresh any stale
+source.
 
-At both recording and finalization, every `collected_at` must also be no more
-than five minutes old relative to the server clock and no more than 30 seconds
-in the future. A current top-level `observed_at` cannot refresh cached check,
-review, or thread evidence.
+At both recording and finalization, every parent and source `collected_at` must
+also be no more than five minutes old relative to the server clock and no more
+than 30 seconds in the future. A current top-level `observed_at` cannot refresh
+cached pull-request, comparison, policy, run, review, or thread evidence.
 
 The separate start baseline is collected immediately before
-`start_publication`, so its collection and observation timestamps may precede
-`publication.created_at`; they must still satisfy the same freshness,
+`start_publication`, so its parent, source, and observation timestamps may
+precede `publication.created_at`; they must still satisfy the same freshness,
 future-tolerance, and two-minute atomic-collection bounds when revision 1 is
 created. GitHub object `event_at` values may predate either collection. They
 never establish the publication-start cutoff.
@@ -787,12 +979,17 @@ every mutation and finalization unless `terminal` is set. State derivation is
 pure: it returns a status and, when applicable, a proposed terminal record but
 never changes the ledger, request or result history, gate, or filesystem. Only
 `record_codex_review_request` and `record_github_snapshot` advance request
-history after `start_publication` seeds any unsettled baseline requests at
-revision 1; only `record_github_snapshot` advances result history or persists
-a newly proposed terminal state. `record_codex_review_request` first clears
+history; only `record_github_snapshot` advances result history or persists a
+newly proposed terminal state. Baseline requests remain in their immutable
+baseline collection and are closed only by an ambiguity acknowledgement.
+`record_codex_review_request` first clears
 replaceable observation evidence, so its pure no-observation derivation is
 `PR_PENDING` rather than a comparison between new history and a pre-post
 snapshot.
+
+Non-terminal statuses report the first applicable blocking condition in the
+ordered derivation below. A later condition may also be false; its table
+description does not override that priority.
 
 | Status | Sticky | Meaning |
 | --- | --- | --- |
@@ -806,14 +1003,15 @@ snapshot.
 | `CHECKS_FAILED` | No | A latest required-check attempt has a blocking conclusion. |
 | `GITHUB_REVIEW_NOT_REQUESTED` | No | No valid exact request exists for the head. |
 | `GITHUB_REVIEW_PENDING` | No | The latest request has no corresponding result. |
-| `GITHUB_REVIEW_UNKNOWN` | No | A request is unbound, or the result format, association, or verdict is ambiguous. |
+| `GITHUB_REVIEW_UNKNOWN` | No | A baseline, unbound, or unsupported request is open, or the result format, association, or verdict is ambiguous. |
 | `CHANGES_REQUIRED` | No | Codex reported findings or any review thread is unresolved. |
 | `MERGE_READY` | No | Every required invariant passes for the current head. |
 | `INVALIDATED` | Yes | The pull request identity/head no longer matches the local gate, the current base no longer preserves the reviewed base ancestry, or an observed request or Codex result disappeared or changed. |
 | `CLOSED` | Yes | The pull request closed without a recorded merge. |
 | `MERGED` | Yes | A live observation confirms the merge and its commit SHA. |
 
-When `record_github_snapshot` first receives a sticky derivation, it writes:
+In a separate invalidation scenario, when `record_github_snapshot` first
+receives a sticky derivation, it writes:
 
 ```json
 {
@@ -854,7 +1052,7 @@ The evaluator applies these checks in order:
    terminal `CLOSED`.
 8. Every remaining evidence collection reports `COMPLETE`, is fresh, has
    complete pagination, and satisfies its internal counts and provenance rules.
-   Partition the immutable baseline's excluded request/result pairs before
+   Partition the immutable baseline objects by stored identity before
    requiring the complete current recognized/unbound/unsupported request union
    to match the already-reconciled `codex_request_history` and the complete
    current actor-admitted non-baseline result set to match
@@ -862,7 +1060,8 @@ The evaluator applies these checks in order:
    returns a proposed terminal `INVALIDATED` without mutating either structure,
    except that a just-recorded request absent within the bounded post-to-list
    visibility grace derives `EVIDENCE_INCOMPLETE`.
-9. An open pull request is no longer a draft.
+9. An open pull request with `is_draft: true` derives `PR_DRAFT`; otherwise
+   continue.
 10. The adapter normalizes GitHub's mergeability result to `MERGEABLE`,
    `CONFLICTING`, or `UNKNOWN`.
    `UNKNOWN` derives `PR_STATE_PENDING`; `CONFLICTING` derives
@@ -887,16 +1086,17 @@ The evaluator applies these checks in order:
 12. Replay event identity and association from `codex_request_history`,
     `codex_result_history`, the current collection's validated parsed verdicts,
     and every stored ambiguity acknowledgement for the current head rather than
-    trusting only the latest observation's identities. A request from an
-    immutable settled baseline pair never enters active history or satisfies
-    this ledger, but while unclosed it remains a source-only candidate for any
-    later actor-admitted result whose reviewed head matches that pair's stored
-    result head. A result that could answer both such a baseline source and an
-    active request is ambiguous. A result arriving before any active request
-    and uniquely attributable to a baseline source is retained as
-    `BASELINE_LATE_RESULT` audit evidence and cannot satisfy or block the new
-    ledger. Only an acknowledgement that names the source-only baseline request
-    closes it for later epochs.
+    trusting only the latest observation's identities. An immutable baseline
+    request never enters active history or satisfies this ledger, but while
+    unclosed it remains a source-only candidate for every later actor-admitted
+    result because no trustworthy historical head binding exists. Any
+    unacknowledged baseline request therefore derives
+    `GITHUB_REVIEW_UNKNOWN`, even before a new request is posted. A result
+    arriving before any active request and uniquely attributable to one
+    baseline source is retained as `BASELINE_LATE_RESULT` audit evidence and
+    cannot satisfy the new ledger; multiple eligible baseline sources make it
+    ambiguous. Only an acknowledgement that names every open baseline request
+    closes them for later epochs.
     `foreign_actor_objects` never participates. An unacknowledged ambiguous
     result preserves its indeterminate request set and derives
     `GITHUB_REVIEW_UNKNOWN`. An unbound exact issue-comment request also derives
@@ -911,13 +1111,19 @@ The evaluator applies these checks in order:
     from wall-clock timestamps. A result before the epoch's first exact request
     and with no eligible baseline source is retained as `UNSOLICITED` audit
     evidence; a unique eligible baseline source instead produces
-    `BASELINE_LATE_RESULT`. Neither can satisfy or block.
-13. Any unacknowledged exact `@codex review` text in a pull request review or
-    review comment after publication starts is an unsupported request location,
-    derives `GITHUB_REVIEW_UNKNOWN`, and remains blocking until a valid
-    acknowledgement closes its resource-scoped reference; it is never silently
-    discarded. Exclude `closed_requests` and `foreign_actor_objects`. From the
-    remaining recognized `ISSUE_COMMENT` requests, select the latest by
+    `BASELINE_LATE_RESULT`. Neither result can satisfy review; an open baseline
+    request remains independently blocking. A result arriving after its
+    epoch's last request was already closed and before another request opens is
+    ambiguous: every previously closed recognized request in the current epoch
+    whose full head matches the formal review commit or clean marker prefix
+    re-enters the indeterminate set; an unbound result includes all of them.
+13. Any unacknowledged unsupported request after publication starts, including
+    exact text in a pull request review or review comment and any
+    trigger-shaped non-exact text in any of the three resource kinds, derives
+    `GITHUB_REVIEW_UNKNOWN` and remains blocking until a valid acknowledgement
+    closes its resource-scoped reference; it is never silently discarded.
+    Exclude `closed_requests` and `foreign_actor_objects`. From the remaining
+    recognized `ISSUE_COMMENT` requests, select the latest by
     `(event_at, comment_id)`. This tie-break is within one resource kind and ID
     namespace. If none exists, derive `GITHUB_REVIEW_NOT_REQUESTED`. Zero
     correlated results derives `GITHUB_REVIEW_PENDING`; an ambiguous result
@@ -925,16 +1131,28 @@ The evaluator applies these checks in order:
     `GITHUB_REVIEW_UNKNOWN`. Timestamps widen ambiguity but never establish a
     request/result pairing.
 14. The single correlated result's actor ID and `Bot` type match the immutable
-    expected Codex actor. It is a formal pull request review whose
-    `PULL_REQUEST_REVIEW_COMMIT_ID` binding names the current head SHA. Its
-    native review state is `APPROVED` or `COMMENTED`, and its parser returns
-    `CLEAN`. `CHANGES_REQUESTED` derives `CHANGES_REQUIRED`; `DISMISSED`
-    derives `GITHUB_REVIEW_UNKNOWN`. A result from another actor or resource
-    kind, a missing binding, a SHA copied from the pull request at collection
-    time, a stale SHA, or an unknown format fails closed. An expected-actor
-    `PENDING` review makes collection incomplete before this step.
-15. Thread collection is complete, its counts are internally consistent, and
-    `unresolved_count` is zero.
+    expected Codex actor. An expected-actor formal review in native
+    `CHANGES_REQUESTED` state and bound to the current head derives
+    `CHANGES_REQUIRED` regardless of body parsing; `DISMISSED` derives
+    `GITHUB_REVIEW_UNKNOWN`. Only submitted `APPROVED` or `COMMENTED` states
+    continue to format parsing. Version 1 accepts exactly two result formats:
+    - `CODEX_CLEAN_COMMENT_V1` is an `ISSUE_COMMENT` with null native review
+      state, a recognized clean body, and a reviewed-commit prefix. Its
+      `SINGLE_OPEN_REQUEST` association must identify a workflow-bound request
+      whose full `requested_head_sha` equals the current head, and the marker
+      must be a prefix of that same SHA. Only then does
+      `CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD` bind the result and allow
+      verdict `CLEAN`.
+    - `CODEX_FINDINGS_REVIEW_V1` is a formal pull request review whose
+      `PULL_REQUEST_REVIEW_COMMIT_ID` binding names the current head and whose
+      attached Codex review comments establish verdict `FINDINGS`.
+      `FINDINGS` derives `CHANGES_REQUIRED`.
+    A reaction alone, another resource kind, missing or conflicting binding,
+    stale SHA, unrecognized format, or `UNKNOWN` verdict derives
+    `GITHUB_REVIEW_UNKNOWN`. An expected-actor `PENDING` formal review makes
+    collection incomplete before this step.
+15. Thread collection is complete and its counts are internally consistent.
+    A positive `unresolved_count` derives `CHANGES_REQUIRED`; zero may continue.
 
 Only an observation that passes every check derives `MERGE_READY`.
 
@@ -953,8 +1171,8 @@ rejected or silently paired.
 Ambiguity never clears automatically. Publication can recover on the same head
 only after the operator explicitly acknowledges the exact indeterminate
 resource-scoped request references, including any unbound or unsupported
-requests and any source-only settled baseline requests that could own the
-result, and resource-scoped result references, asserting that those old
+requests and every open source-only baseline request, and resource-scoped
+result references, asserting that those old
 requests will produce no further results and accepting the risk if that
 assertion is wrong. The next workflow-managed
 exact request admitted by `record_codex_review_request` in a revision after the
@@ -978,24 +1196,35 @@ Inputs:
 - `pr_number`
 - `base_branch`
 - `head_branch`
-- the positive numeric `codex_actor_id` resolved by the GitHub connector for
-  the configured Codex bot, plus `codex_actor_login` for audit display
+- the positive numeric `codex_actor_id`, exact `codex_actor_type`, and
+  `codex_actor_login` returned by a GitHub actor object for the configured
+  Codex bot; the type must be exactly `Bot`, while login is audit display only
+- `codex_trigger_mode`, exactly `EXPLICIT_ONLY` or
+  `AUTOMATIC_QUIESCENCE_ACKNOWLEDGED`; the latter also requires a directly
+  supplied non-empty `operator_label` and `rationale`
 - one fresh, complete, fully paginated normalized baseline of preexisting exact
-  requests and actor-admitted candidate results from conversation comments,
-  formal reviews, and review comments
+  or trigger-shaped requests and actor-admitted candidate results from
+  conversation comments, formal reviews, and review comments
 
 The tool requires `LOCAL_GATE_PASSED`, reloads `gate.json`, verifies the local
 working tree is clean, and verifies local `HEAD` equals the gate `head_sha`.
+It rejects an existing `publication.json` or orphaned
+`publication-gate.json`; publication is never reset or rebound in place.
 It validates the baseline's identity, completeness, pagination, freshness, and
-event provenance, then replays its requests and results with the expected actor
-and the normal association algorithm. Unambiguously settled request/result
-pairs become the immutable `codex_review_baseline`; their recognized request
-components remain source-only candidates for later results on the same
-reviewed head. Any unsettled preexisting request is seeded into
-`codex_request_history` with `recorded_revision: 1` and
-`binding_source: "OBSERVED_BASELINE"`. The tool stores the actor ID with fixed
-`type: "Bot"` and creates revision 1 with status `PR_PENDING`, the pure
-evaluator's no-observation result. The audit history records a
+event provenance, stores every exact or trigger-shaped request and
+expected-actor candidate result without pairing them, and rejects a baseline
+containing an
+expected-actor `PENDING` formal review. The tool rejects any actor type other
+than `Bot`. For automatic-quiescence mode it records the server
+acknowledgement time and requires the fresh baseline observation to immediately
+precede that instant for the unchanged local head, with
+`acknowledged_at - baseline.observed_at <= 30 seconds`; caller timestamps
+cannot backdate the boundary. It stores the validated actor and trigger policy,
+then creates revision 1 with status `PR_PENDING`, the pure evaluator's
+no-observation result. Baseline requests are not copied into active request
+history; their immutable
+resource-scoped identities remain open until explicit acknowledgement. The
+audit history records a
 `PUBLICATION_STARTED` event, but that event name is not a second status. The
 target, expected actor, and baseline are immutable after creation.
 
@@ -1061,15 +1290,16 @@ Inputs:
 The tool validates sizes, enums, timestamps, SHA formats, URLs, unique
 requirement keys, run IDs unique within each run resource kind, GitHub object
 IDs unique within each review resource kind, binding-field and timestamp-field
-provenance, per-kind run-source endpoint and pagination proof, run-source item
+provenance, exact source coverage for every independently fetched endpoint,
+per-source collection times and pagination proof, per-kind run-source item
 counts, required-app identity, strict-policy provenance and base/head
 comparison, run ordering and status/conclusion pairs, evidence provenance and
 collection metadata, thread counts, latest-run selection, exact request
 bodies, resource-kind-scoped event ordering, recognized requests being issue
 comments, complete reporting of unbound issue-comment requests and exact
 request text in unsupported resource kinds, result actor admission,
-foreign-actor partitioning, native review state/resource-kind pairing, and
-commit-binding provenance,
+foreign-actor partitioning, native review state/resource-kind pairing,
+versioned Codex result format, and commit-binding provenance,
 endpoint-specific authorization proof for a classic-protection
 `NOT_CONFIGURED`, request/result correlation, monotonic recognized and
 unbound/unsupported request history, monotonic actor-admitted result history,
@@ -1077,25 +1307,28 @@ latest-request selection, merge fields, and cross-field ordering. An incomplete
 but well-formed collection is recorded and derives `EVIDENCE_INCOMPLETE`.
 
 It applies the five-minute age and 30-second future limits to `observed_at` and
-every collection's `collected_at`, rejects an observation or collection
-timestamp earlier than the publication `created_at`, and enforces the
-two-minute atomic observation interval. GitHub object `event_at` values may be
-older and are partitioned by stable baseline identity rather than wall-clock
-comparison. The server sets `recorded_at` from its own clock, derives status,
-and atomically records the next revision.
+every parent and source `collected_at`, rejects a post-start observation,
+parent, or source timestamp earlier than the publication `created_at`, and
+enforces the two-minute atomic observation interval. GitHub object `event_at`
+values may be older and are partitioned by stable baseline identity rather than
+wall-clock comparison. The server sets `recorded_at` from its own clock,
+derives status, and atomically records the next revision. Server-authored
+`updated_at` and the appended history event's `at` both equal that
+`recorded_at`.
 
 For a complete Codex-review collection, the server compares and advances
 `codex_request_history` against the non-baseline union of `requests`,
 `unbound_requests`, and `unsupported_requests`, and compares and advances
 `codex_result_history` against non-baseline `results`, in the same locked
 mutation before calling the pure state evaluator. The adapter reports baseline
-pairs separately; the server requires exact identity membership in the
-immutable baseline and rejects any attempt to place a baseline object in an
-active array or a non-baseline object in the excluded partition. Exclusion from
-the active arrays does not remove a settled baseline request from source
-association: every unclosed baseline request whose stored result head matches
-the candidate result head participates as a source-only candidate. Every
-recognized request must already have a
+requests and candidate results separately; the server requires exact set
+equality with the immutable baseline and rejects any changed, missing, or
+additional baseline object, any baseline identity in an active array, and any
+non-baseline identity in a baseline array. Exclusion from the active arrays
+does not remove a baseline request from source association: every unclosed
+baseline request is a source-only candidate for every later result because its
+historical head is deliberately unknown. Every recognized request must already
+have a
 `RECORDED_AT_POST` entry. An exact issue comment without one is reported under
 `unbound_requests`, appended with `OBSERVED_UNBOUND`, and blocks without
 receiving an inferred head. If prior entries all match, the tool appends newly
@@ -1108,8 +1341,7 @@ When a just-recorded recognized entry is absent from the collection within the
 the next revision without advancing request history and derives retryable
 `EVIDENCE_INCOMPLETE`; absence after the grace is a history conflict and writes
 terminal `INVALIDATED`. Other history conflicts have no grace. Caller input
-cannot replace or truncate history. After revision 1 has seeded unsettled
-baseline requests, only `record_codex_review_request` and
+cannot replace or truncate history. Only `record_codex_review_request` and
 `record_github_snapshot` advance request history; only the latter advances
 result history or materializes a newly derived terminal record.
 
@@ -1135,11 +1367,11 @@ Inputs:
 - `head_sha`
 - the exact non-empty `request_refs` that the boundary will close; each
   reference names `resource_kind` and `resource_id` and the set includes every
-  indeterminate, unbound, unsupported, still-open recovery, and source-only
-  settled baseline request participating in the ambiguity
+  indeterminate, unbound, unsupported, still-open recovery, and open
+  source-only baseline request
 - the exact `ambiguous_results`; each result names both `resource_kind` and
-  `result_id`. `ambiguous_results` may be empty when an unbound or unsupported
-  request alone is blocking
+  `result_id`. `ambiguous_results` may be empty when a baseline, unbound, or
+  unsupported request alone is blocking
 - `acknowledgement: "NO_FURTHER_RESULTS_EXPECTED"`
 - a non-empty `operator_label` and `rationale`
 
@@ -1160,23 +1392,25 @@ every exact request post and `verify_publication_gate` immediately before
 merge. It must collect the complete preexisting Codex baseline immediately
 before `start_publication`, tell operators never to post exact request comments
 by hand, and recover an observed unbound or unsupported request only through
-the direct-human acknowledgement path. When a settled baseline request is a
-source candidate for an ambiguous result, the skill must include its exact
-resource-scoped reference in the closure set presented for approval.
+the direct-human acknowledgement path. It must obtain direct approval for
+automatic-quiescence mode rather than inferring it. The skill must include
+every open baseline request's exact resource-scoped reference in the closure
+set presented for approval.
 `scripts/verify-build.mjs` must assert these requirements in the packaged
 skill, so losing one fails the build rather than silently changing the
 workflow.
 
 The normative sequence is: collect a fresh, complete, fully paginated
 preexisting Codex request/result baseline; call `start_publication` with it;
-refresh and verify the head; post one exact request and immediately call
-`record_codex_review_request`; use `get_publication` as needed; then record a
-complete snapshot. Only if ambiguity or an unbound or unsupported request
-blocks it, stop for direct human approval of the full resource-scoped closure
-set before acknowledgement; then refresh the head, post a new exact request,
-immediately record its binding, and record a new snapshot. After `MERGE_READY`,
-finalize the gate and call `verify_publication_gate` immediately before the
-head-matching merge.
+when the baseline contains any request, record a complete snapshot, stop for
+direct human approval of the complete resource-scoped baseline closure set,
+and acknowledge it before posting. When it contains none, the fresh baseline
+is sufficient to continue. Then refresh and verify the head, post one exact
+request, immediately call `record_codex_review_request`, and record a complete
+snapshot. If later ambiguity or an unbound or unsupported request blocks it,
+repeat the direct-human full-closure acknowledgement before posting a recovery
+request. After `MERGE_READY`, finalize the gate and call
+`verify_publication_gate` immediately before the head-matching merge.
 
 Under the publication lock, the server reloads the current observation,
 requires `head_sha` to match the local gate and pull request, independently
@@ -1185,7 +1419,7 @@ and the entire request set the boundary would close and the current
 indeterminate result set, comparing requests by
 `(resource_kind, resource_id)` and results by `(resource_kind, result_id)`. The
 request set includes every indeterminate recognized, unbound, unsupported,
-recovery, and source-only settled baseline request in the current open epoch.
+recovery, and open source-only baseline request in the current epoch.
 The backing observation must satisfy the same five-minute age limit, 30-second
 future tolerance, post-publication ordering, and two-minute atomic-collection
 window used by finalization. Otherwise the call fails with an instruction to
@@ -1193,12 +1427,12 @@ record a fresh snapshot first.
 
 The acknowledgement closes the entire observed correlation epoch. Every
 indeterminate recognized, unbound, unsupported, recovery, and source-only
-settled baseline request in that epoch must be present in the directly approved
+baseline request in that epoch must be present in the directly approved
 `request_refs`. The server copies that exact set to `closed_requests`; the
 boundary cannot close an unapproved request.
 It likewise copies the exact supplied `ambiguous_results` set to
 `closed_results`; the boundary cannot close an unapproved result.
-The server-generated record is:
+In a separate ambiguity-recovery scenario, the server-generated record is:
 
 ```json
 {
@@ -1289,7 +1523,7 @@ It returns:
   "valid": true,
   "status": "MERGE_READY",
   "head_sha": "0123456789abcdef...",
-  "publication_revision": 4,
+  "publication_revision": 3,
   "expires_at": "2026-07-25T08:09:58.000Z",
   "verified_at": "2026-07-25T08:05:02.000Z"
 }
@@ -1319,11 +1553,11 @@ these freshness rules:
 - server `recorded_at` is no more than five minutes old;
 - caller `observed_at` is no more than five minutes old and no more than 30
   seconds in the future;
-- every collection `collected_at` is no more than five minutes old, no more
-  than 30 seconds in the future, and still satisfies the two-minute atomic
-  observation interval;
-- all caller and server timestamps are later than the publication `created_at`;
-  and
+- every parent and source `collected_at` is no more than five minutes old, no
+  more than 30 seconds in the future, and still satisfies the two-minute
+  atomic observation interval;
+- all post-start caller and server timestamps are at or later than the
+  publication `created_at`; and
 - the revision being finalized is still the latest revision.
 
 It then writes:
@@ -1332,12 +1566,12 @@ It then writes:
 {
   "version": 1,
   "review_id": "rb-...",
-  "passed_at": "2026-07-25T08:05:01.000Z",
+  "passed_at": "2026-07-25T08:05:01.500Z",
   "repository_id": 123456,
   "pr_number": 5,
   "head_sha": "0123456789abcdef...",
   "local_gate_sha256": "sha256...",
-  "publication_revision": 4,
+  "publication_revision": 3,
   "github_observation_sha256": "sha256...",
   "github_observed_at": "2026-07-25T08:05:00.000Z",
   "github_oldest_collection_at": "2026-07-25T08:04:58.000Z",
@@ -1346,6 +1580,9 @@ It then writes:
   "status": "MERGE_READY"
 }
 ```
+
+`passed_at` is the server clock at successful gate issuance; it is not copied
+from the observation's `recorded_at`.
 
 Finalization does not modify `publication.json`: it does not change
 `revision`, `updated_at`, status, or history. `publication-gate.json` is the
@@ -1364,31 +1601,37 @@ The five-minute bound is an upper limit, not a target delay. A stale or
 future-dated top-level observation or nested collection cannot produce
 `publication-gate.json`, even if its cached status is `MERGE_READY`.
 
-`github_oldest_collection_at` is the minimum across the pull-request,
-required-check, each required-check run-source, Codex-review, and review-thread
-collection timestamps.
+`github_oldest_collection_at` is the minimum across every parent collection and
+every source timestamp, including pull-request comparisons, policy reads, run
+feeds, the three Codex feeds, and review threads.
 `expires_at` is exactly five minutes after the minimum of
-`github_recorded_at`, `github_observed_at`, and every collection
+`github_recorded_at`, `github_observed_at`, and every parent and source
 `collected_at`. Finalization and verification both recompute it from
-`publication.json`; caller input cannot choose or extend it.
+`publication.json`; caller input cannot choose or extend it. Finalization
+refuses issuance when the server's `passed_at` would be later than that
+deadline.
 
 ## Codex result adapter
 
-Version 1 requires the GitHub Codex integration to produce a formal pull
-request review. Conversation comments and review comments cannot satisfy the
-publication gate because neither carries its own GitHub-native reviewed-commit
-binding. The adapter still collects them as `UNKNOWN` evidence instead of
-silently ignoring them. Parsing belongs in a small, versioned adapter in the
+Observed GitHub Codex behavior has two result shapes: a clean review is an
+expected-bot issue comment containing a reviewed-commit marker, while a review
+with suggestions is a formal pull request review with attached inline review
+comments. Version 1 supports exactly those two versioned formats. Other
+conversation comments, formal reviews, review comments, and reactions remain
+`UNKNOWN` or pending. Parsing belongs in a small, versioned adapter in the
 Codex plugin, not in the generic ledger evaluator.
 
-The adapter collects every page of conversation comments, formal reviews, and
-review comments and returns:
+The adapter independently collects every page of issue comments, formal
+reviews, and review comments. Its collection metadata contains exactly one
+source entry for each endpoint, with independent completion time, pagination
+flag, and page count. The adapter returns:
 
-- every immutable publication-baseline request/result pair still present under
-  `preexisting_pairs`; these objects are matched only by their stored
-  `(resource_kind, resource_id)` identities and never enter the active arrays,
-  while each recognized request component remains a source-only association
-  candidate for later results on its stored reviewed head;
+- every immutable publication-baseline request still present under
+  `preexisting_requests` and every baseline candidate result still present
+  under `preexisting_candidate_results`; these objects are matched only by
+  their stored `(resource_kind, resource_id)` identities and never enter the
+  active arrays, while each unacknowledged baseline request remains a
+  source-only association candidate for every later result;
 - every exact `@codex review` issue comment whose object ID already has a
   `RECORDED_AT_POST` history entry as a recognized request, with GitHub object
   ID, URL, timestamp, the `ISSUE_COMMENT` resource kind, and the head SHA from
@@ -1399,37 +1642,60 @@ review comments and returns:
 - every exact `@codex review` body found in a formal review or review comment
   under `unsupported_requests`, so unsupported re-review intent blocks rather
   than disappearing from evaluation;
+- every review-trigger-shaped but non-exact issue comment, formal review, or
+  review comment under `unsupported_requests`, with reason
+  `NON_EXACT_TRIGGER_SHAPE`;
 - all candidate Codex results, with GitHub object ID, resource kind, URL,
-  stable actor ID and type, audit login, timestamp, native review state,
-  reviewed commit SHA, GitHub-native commit-binding source and field,
-  `request_comment_id`, and association method;
+  stable actor ID and type, active-result audit login, timestamp,
+  resource-kind-appropriate native review state, reviewed commit SHA, validated
+  commit-binding source and field, structurally attached review-comment
+  evidence where applicable (comment ID, actor ID/type, commit SHA, and body
+  digest), adapter format, resource-scoped `request_ref`, and association
+  method;
 - response-shaped objects from any other actor under `foreign_actor_objects`
   for audit only;
 - `CLEAN`, `FINDINGS`, or `UNKNOWN` for each candidate result; and
 - a SHA-256 digest of each original response body.
 
-An object absent from the immutable baseline cannot be reported under
-`preexisting_pairs`, even when its GitHub timestamp predates publication
-creation. A baseline object that is edited or deleted remains outside the new
-epoch; the stored baseline pair is audit evidence from the prior publication
-cycle, not monotonic evidence for this one, but its stored request identity
-remains source-only until directly acknowledged. This prevents previous,
-already settled requests on the same pull request from being reclassified as
-unbound on every new local task without allowing a delayed duplicate result to
-masquerade as the response to a new request. Unsettled baseline requests were
-seeded into active history at revision 1 and are therefore never returned as
-preexisting pairs.
+All request, result, baseline, and foreign-actor partitions are disjoint by
+`(resource_kind, resource_id)`. An object matching more than one role makes the
+Codex collection malformed instead of allowing caller-chosen precedence.
+
+An object absent from the immutable baseline cannot be reported under either
+preexisting array, even when its GitHub timestamp predates publication
+creation. Both arrays must exactly reproduce the stored baseline objects on
+every complete collection. A missing, edited, reclassified, or
+provenance-changed baseline object terminally invalidates the ledger; a new
+object enters an active array and cannot be grandfathered by timestamp. This
+prevents old identities from being reclassified on every snapshot without
+allowing mutation or deletion to erase the evidence that justified the
+operator's acknowledgement.
 
 Each `unbound_requests` and `unsupported_requests` entry carries `resource_id`,
 `resource_kind`, URL, `event_at`, `timestamp_field`, and `body_sha256`.
-Unbound entries additionally carry the fixed reason above. An unbound request
-participates only as an indeterminate request that widens or preserves
+Unbound entries additionally carry the fixed reason above. Unsupported entries
+carry exactly `WRONG_RESOURCE_KIND` or `NON_EXACT_TRIGGER_SHAPE`. An unbound
+request participates only as an indeterminate request that widens or preserves
 ambiguity; it can never satisfy review. An unsupported request is not
 correlated with a result. Either blocks after publication starts, and neither
 is converted into a recognized request.
 
-Any unrecognized response format returns `UNKNOWN`. A reaction without a
-response is still pending.
+The exact request body is byte-for-byte UTF-8 string equality with
+`@codex review`; leading or trailing whitespace, additional instructions, a
+different case, or another line is not the workflow request. To avoid silently
+missing an out-of-band trigger, the adapter conservatively treats any other
+body containing an ASCII-case-insensitive command-shaped
+`@codex` + whitespace + `review` word sequence as unsupported. False positives
+must be closed through the same direct-human acknowledgement path; the adapter
+never upgrades them into recognized requests. Each body digest is SHA-256 over
+the decoded GitHub `body` string re-encoded as UTF-8, without whitespace,
+Unicode, or line-ending normalization; it is not a digest of the JSON
+response's escaped wire representation.
+
+Any unrecognized response format returns `UNKNOWN`. An eyes or thumbs-up
+reaction without a supported result object is still pending because reactions
+are transient and carry neither the reviewed commit nor the adapter result
+format.
 
 `start_publication` binds the expected Codex actor by its numeric GitHub actor
 ID and requires `type: "Bot"`; the login captured at start is audit metadata,
@@ -1444,13 +1710,40 @@ associated, or allowed to open, close, satisfy, or make ambiguous any request.
 Each audit entry records its resource identity, URL, timestamp provenance,
 actor fields, and body digest.
 
-A formal pull request review binds to its reviewed commit through the review
-object's GitHub-native `commit_id`. The only accepted source/field pair is
-`PULL_REQUEST_REVIEW_COMMIT_ID`/`commit_id`. Conversation issue comments and
-review comments have no accepted reviewed-commit field in version 1. Comment
-body text, a SHA mentioned by Codex, a linked review, or the pull request head
-observed when the comment is fetched is never a commit binding. Such a result
-therefore has null `reviewed_head_sha` and `commit_binding` and returns
+A `CODEX_FINDINGS_REVIEW_V1` formal review binds to its reviewed commit through
+the review object's GitHub-native `commit_id`. Its only accepted source/field
+pair is `PULL_REQUEST_REVIEW_COMMIT_ID`/`commit_id`. The adapter requires the
+recognized Codex findings-review body shape and at least one attached review
+comment whose `pull_request_review_id` names that same formal review, whose
+actor ID/type matches the expected bot, and whose `commit_id` matches the
+formal review. Each attachment has a positive safe-integer ID and body digest;
+duplicate IDs are rejected. The result records the complete set of
+expected-actor comments attached to that review from the fully paginated
+review-comment feed, sorted by comment ID; a caller cannot submit only a
+favorable subset. Comments from other actors remain represented by the thread
+collection but do not become Codex result evidence. The adapter then returns
+`FINDINGS`. A generic formal review without that structural evidence is
+`UNKNOWN`.
+
+A `CODEX_CLEAN_COMMENT_V1` issue comment is accepted only after actor admission
+and only when all of these predicates hold:
+
+- its body begins with the recognized Codex clean sentence and contains exactly
+  one fixed `**Reviewed commit:**` Markdown field whose code value is 10 to 40
+  lowercase hexadecimal characters;
+- association independently produces `SINGLE_OPEN_REQUEST` for one
+  `RECORDED_AT_POST` request;
+- that request's full `requested_head_sha` equals the immutable local-gate and
+  current pull-request head; and
+- the marker is a prefix of that same full SHA.
+
+The result then records the full request-bound SHA and
+`CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD` with the exact marker prefix.
+The body marker is an expected-bot provider assertion and a cross-check, not
+free-form request linkage: it cannot create an association, bind an unbound
+request, or override a mismatching head. Any other conversation comment,
+arbitrary SHA mention, linked review, copied current pull-request head, or
+review comment has null `reviewed_head_sha` and `commit_binding` and returns
 `UNKNOWN`.
 
 Every `PULL_REQUEST_REVIEW` result records GitHub's native `state` as
@@ -1469,45 +1762,50 @@ creating a new result ID, any state change after that result enters
 `codex_result_history` is a monotonic-history conflict and persists terminal
 `INVALIDATED`.
 
-After actor admission, the adapter processes recognized requests, unbound
-requests, source-only settled baseline requests, and candidate results by
-`event_at`. It maintains the unmatched recognized requests for each head, the
-unbound indeterminate requests for the publication epoch, and every unclosed
-source-only baseline request whose stored result is bound to that head. The
-presence of an unbound or source-only request prevents a result from
-establishing a unique active association until a human acknowledgement closes
-it. GitHub object IDs break timestamp ties only when both events have the same
-`resource_kind` and therefore share an ID namespace. An equal-timestamp tie
-across issue comments, pull request reviews, or review comments has no total
-order; if it can affect request/result association, the result is `AMBIGUOUS`
-and derivation returns
+After actor admission, the adapter processes active recognized requests,
+unbound requests, open baseline requests, and active candidate results by
+`event_at`. A formal review begins with its native full `commit_id`. A clean
+issue comment begins only with its validated commit prefix and may obtain a
+full `reviewed_head_sha` only from one uniquely associated active recognized
+request. The adapter never expands the prefix from the currently observed pull
+request head. Because baseline and unbound requests have no trusted historical
+head, every open one is conservatively eligible for every later result. Their
+presence prevents a result from establishing a unique active association until
+a human acknowledgement closes them. GitHub object IDs break timestamp ties
+only when both events have the same `resource_kind` and therefore share an ID
+namespace. An equal-timestamp tie across issue comments, pull request reviews,
+or review comments has no total order; if it can affect request/result
+association, the result is `AMBIGUOUS` and derivation returns
 `GITHUB_REVIEW_UNKNOWN` unless a future structural ordering signal exists.
 The accepted resource-kind values are the three enums defined in the schema;
 the adapter rejects any other value.
 Version 1 accepts only these association values:
 
 - a result created before any exact request in the current correlation epoch
-  and with no eligible source-only baseline request uses
-  `association: "UNSOLICITED"` with a null `request_comment_id`; it is retained
-  for audit but never opens, closes, or satisfies a request;
-- a result that can answer exactly one source-only baseline request and no
-  active request uses `association: "BASELINE_LATE_RESULT"` and records that
-  recognized issue-comment request's `comment_id`; it is audit evidence that
+  and with no open baseline or unbound request uses
+  `association: "UNSOLICITED"` with a null `request_ref`; it is retained for
+  audit but never opens, closes, or satisfies a request;
+- a result that can answer exactly one open baseline request and no active or
+  unbound request uses `association: "BASELINE_LATE_RESULT"` and records that
+  baseline request's resource-scoped `request_ref`; it is audit evidence that
   does not close the baseline source or satisfy the new ledger;
 - a result uses `association: "SINGLE_OPEN_REQUEST"` only when exactly one
   unmatched prior recognized request exists for that head and no unbound
-  request or source-only baseline request exists in the open epoch, and records
-  that request's comment ID;
-- when multiple recognized requests or any unbound or source-only baseline
-  request could own the result, the adapter returns
-  `association: "AMBIGUOUS"` and a null `request_comment_id`; and
-- after at least one request has existed in the epoch, a result with no open
-  request is a possible duplicate result and is also `AMBIGUOUS`.
+  or baseline request exists in the open epoch, and records that issue
+  comment's resource-scoped `request_ref`;
+- when more than one recognized or baseline request could own the result, or
+  any unbound request exists, the adapter returns
+  `association: "AMBIGUOUS"` and a null `request_ref`; and
+- after at least one active request existed in the current epoch but none
+  remains open, a later result is also `AMBIGUOUS` and makes every previously
+  closed recognized request whose head matches its full commit or clean marker
+  prefix indeterminate; a result with no usable binding includes every closed
+  request in the epoch.
 
 A correlated result closes its request. An ambiguous result marks every
 currently unmatched recognized request for that head and every open unbound
-or source-only baseline request in the epoch indeterminate, but does not close
-or discard the set. A `BASELINE_LATE_RESULT` does not close its source-only
+or baseline request in the epoch indeterminate, but does not close or discard
+the set. A `BASELINE_LATE_RESULT` does not close its source-only
 request because GitHub provides no signal that another delayed or duplicate
 result cannot follow.
 Every later result for that head therefore remains ambiguous until
@@ -1525,9 +1823,11 @@ exact response field.
 An automatic Codex result that predates the workflow's first exact request and
 has no eligible baseline source is therefore harmless `UNSOLICITED` evidence.
 A result uniquely attributable to one source-only baseline request is harmless
-`BASELINE_LATE_RESULT` evidence. Neither can correlate to a later request or
-force routine human acknowledgement in repositories with automatic review
-enabled.
+`BASELINE_LATE_RESULT` evidence. Neither can correlate to a later active
+request; the baseline request still requires the same explicit acknowledgement
+it required before the result arrived. A later result after an active request
+closed is not harmless: it reopens the epoch's possible request sources as an
+indeterminate set and blocks until direct acknowledgement.
 
 The evaluator independently replays this algorithm, validates each
 association from the reconciled request and result histories, and then selects
@@ -1535,8 +1835,8 @@ the latest request; it never reconstructs a pairing from "created after latest
 request" alone. The adapter must return the complete current result collection,
 and the server rejects disappearance or mutation of an already recorded
 result's immutable GitHub facts instead of letting a later snapshot forget it.
-The current adapter may reparse an unchanged body digest to a different verdict
-without changing result history; derivation uses that current interpretation.
+The ledger pins adapter version 1, so an adapter semantic change requires a new
+publication ledger.
 Older, duplicate, or ambiguous events cannot be discarded because doing so
 could let a delayed old `CLEAN` result mask a pending newer review.
 
@@ -1594,7 +1894,10 @@ can operate from stale reads.
 ## Failure and recovery
 
 - Missing or malformed evidence never advances the state.
-- A GitHub read failure leaves the previous revision unchanged.
+- A GitHub read failure leaves the previous revision unchanged when the
+  workflow does not submit a snapshot; a deliberately submitted well-formed
+  incomplete collection advances the revision and derives
+  `EVIDENCE_INCOMPLETE`.
 - An interrupted atomic write leaves the previous complete JSON file.
 - A revision conflict requires a new `get_publication` call.
 - Recording a workflow-managed request clears the pre-post
@@ -1611,11 +1914,11 @@ can operate from stale reads.
   revive that ledger.
 - A later observation cannot clear `INVALIDATED`, `CLOSED`, or `MERGED`.
 - An incomplete or stale publication-start Codex baseline prevents revision 1
-  from being created. Settled preexisting request/result pairs remain outside
-  active history and cannot satisfy the new ledger, but their recognized
-  request components remain source-only candidates for later same-head
-  results; every unsettled preexisting request is seeded into active history
-  and blocks until normal acknowledgement recovery.
+  from being created. All preexisting requests and candidate results remain
+  outside active history and cannot satisfy the new ledger. Every baseline
+  request remains an open source candidate and blocks until explicit
+  acknowledgement; missing or changed baseline objects terminally invalidate
+  the ledger.
 - An incomplete pull-request collection derives `EVIDENCE_INCOMPLETE` before
   identity comparison and cannot write a sticky terminal state.
 - An incomplete check, request, result, or thread collection derives
@@ -1624,20 +1927,21 @@ can operate from stale reads.
   including an item-count or check-run reported-total mismatch, derives
   `EVIDENCE_INCOMPLETE` before latest-attempt selection. A complete feed of one
   kind cannot cover the other.
-- A stale or future-dated top-level observation or nested evidence collection
-  cannot be finalized.
+- A stale or future-dated top-level observation, parent collection, or
+  independent source cannot be finalized.
 - A finalized gate expires at the earliest underlying five-minute evidence
   deadline. `verify_publication_gate` returns `EVIDENCE_STALE` after that
   instant even when the ledger revision and head are unchanged.
 - A previously observed exact request that is changed or deleted persists
   terminal `INVALIDATED`; an older `CLEAN` can never become latest again.
 - A previously observed actor-admitted Codex result that disappears or changes
-  its body, native review state, or provenance persists terminal `INVALIDATED`.
+  its body, resource-kind-appropriate native review state, commit provenance,
+  or attached review-comment evidence persists terminal `INVALIDATED`.
   Dismissing a previously recorded formal review therefore cannot leave its old
-  `CLEAN` verdict eligible. Deleting an ambiguous comment or review cannot erase
-  it from correlation history or restore an older `CLEAN`. Re-parsing an
-  unchanged body to another verdict changes the current interpretation, not
-  the immutable history.
+  verdict eligible. Deleting an ambiguous comment or review cannot erase it
+  from correlation history or restore an older `CLEAN`. A changed adapter
+  version is rejected rather than re-parsing the stored body under different
+  semantics.
 - A manually posted exact issue-comment request has no
   `RECORDED_AT_POST` head binding. It is recorded as `UNBOUND`, never receives
   an inferred head, and derives `GITHUB_REVIEW_UNKNOWN` until a direct human
@@ -1652,11 +1956,16 @@ can operate from stale reads.
   any gate and creates an auditable risk-acceptance boundary; it does not prove
   that old requests have stopped.
 - A pre-request automatic result with no eligible baseline source is
-  `UNSOLICITED`; one uniquely attributable to a source-only baseline request
+  `UNSOLICITED`; one uniquely attributable to one open baseline request
   is `BASELINE_LATE_RESULT`. Both remain audit evidence and cannot poison or
-  satisfy a later exact request.
-- A comment-only result without a GitHub-native reviewed-commit binding is
-  `UNKNOWN`; copying the pull request head or parsing body text is forbidden.
+  satisfy a later exact request. A result arriving after a request has closed
+  and before another opens instead makes the possible closed request sources
+  indeterminate and blocks.
+- An issue-comment result can satisfy only the exact
+  `CODEX_CLEAN_COMMENT_V1` actor, format, association, bound-request head, and
+  reviewed-commit-prefix predicates. Any other comment-only result is
+  `UNKNOWN`; copying the pull request head or using an arbitrary SHA mention is
+  forbidden.
 - A response-shaped object whose stable actor ID/type does not match the
   expected Codex bot is audit-only and never enters association. An observation
   that places it in `results` is rejected.
@@ -1693,14 +2002,25 @@ can operate from stale reads.
 - The ledger records normalized claims supplied by Codex; it cannot
   independently authenticate GitHub without expanding the credential boundary.
 - GitHub response-format changes can move a previously understood Codex result
-  to `GITHUB_REVIEW_UNKNOWN` until the adapter is updated.
+  to `GITHUB_REVIEW_UNKNOWN`; supporting the new shape requires a versioned
+  adapter update and a new publication ledger.
 - Version 1 cannot satisfy an App-pinned required check using only a legacy
   commit status because GitHub's status response does not expose the producing
   App ID. Such repositories must emit a check run from the pinned App or remain
   `CHECKS_PENDING`.
-- Version 1 cannot publish through a Codex integration that emits only
-  conversation comments or review comments. An adopter must verify that the
-  connector produces formal pull request reviews before enabling publication.
+- A connector that cannot expose authenticated GitHub App installation
+  permissions cannot classify a classic-protection `404` on a protected branch
+  as not configured; it remains fail-closed as `UNKNOWN`.
+- Version 1 depends on two provider-specific response shapes: a recognized
+  clean issue comment and a findings review with attached inline comments. A
+  connector that changes either body shape moves that result to
+  `GITHUB_REVIEW_UNKNOWN` until its versioned adapter and fixture are updated;
+  review-comment-only output remains unsupported.
+- A clean comment's reviewed-commit marker is a provider assertion checked
+  against the uniquely associated workflow-bound full head, not a
+  GitHub-native commit field. Stable bot identity, exact format, monotonic body
+  history, and the bound request constrain it, but stronger authenticity would
+  require a provider-signed or GitHub-native full commit binding.
 - Per-review locking adds complexity to the otherwise simple atomic-file store.
 - `verify_publication_gate` is a point-in-time local verdict. The local lock
   cannot span GitHub's merge execution: `--match-head-commit` closes a head
@@ -1712,13 +2032,15 @@ can operate from stale reads.
   Explicitly acknowledging ambiguity restores progress but accepts the risk
   that an old delayed result may later be attributed to the new request. The
   ledger records that human decision; it cannot eliminate the uncertainty.
+- When automatic Codex review is enabled, GitHub exposes no pending-job or
+  trigger identity that the ledger can verify. Automatic-quiescence mode
+  therefore depends on a direct human assertion and retains the disclosed risk
+  of a late automatic result being attributed to an explicit request.
 - Starting a new ledger on an existing pull request requires a complete
-  preexisting Codex baseline. Only unambiguously settled pairs are excluded
-  from active history; their requests remain source-only candidates, so a later
-  same-head result that overlaps a new request can still require explicit
-  acknowledgement. Unsettled requests carry forward directly. This trades an
-  extra full pagination pass and occasional acknowledgement for avoiding both
-  silent cutoff and misattribution of delayed duplicate results.
+  preexisting Codex baseline and explicit acknowledgement of every old exact
+  request before a new one is posted. This trades an extra full pagination pass
+  and a one-time human decision for avoiding both historical head inference and
+  misattribution of delayed duplicate results.
 - Exact `@codex review` conversation comments must be posted through the
   packaged workflow so they can be bound to the verified head. A manual exact
   comment is fail-closed as `UNBOUND` and requires explicit human
@@ -1730,8 +2052,8 @@ can operate from stale reads.
   still invalidates.
 - Actor-admitted Codex results are monotonic audit evidence. Editing or deleting
   one after observation terminally invalidates that ledger rather than allowing
-  correlation to forget a prior ambiguity. An adapter upgrade may reinterpret
-  the same pinned body digest without invalidating the ledger.
+  correlation to forget a prior ambiguity. An adapter semantic change requires
+  a new publication ledger.
 - A new commit intentionally requires a new local review rather than resuming
   the existing publication ledger.
 
@@ -1768,15 +2090,20 @@ architecture.
 
 ## Resolved design decisions
 
-- Required-check keys, including any GitHub App binding, are the union of active
-  applicable rules and classic branch protection. Ambiguous access, discovery,
-  or producer identity results fail closed.
+- Required-check keys are exact `(context, app_binding, required_app_id)`
+  tuples from the union of active applicable rules and classic branch
+  protection. Identical tuples coalesce their provenance; differing tuples
+  remain independently required. Ambiguous access, discovery, or producer
+  identity results fail closed.
 - A classic-protection `404` is `NOT_CONFIGURED` only with endpoint-specific
   GitHub App installation permission evidence; successful branch or rules
-  reads are not authorization proof.
+  reads are not authorization proof when `branch.protected` is true. A
+  successful `protected: false` branch read plus empty applicable rules is the
+  only no-query shortcut.
 - App bindings are explicitly `PINNED` or `EXPLICITLY_UNBOUND` and must cite an
-  identity-capable response field; legacy context-only policy reads are
-  incomplete evidence.
+  identity-capable response field and raw representation. Classic `app_id: -1`
+  and ruleset null or absent `integration_id` normalize to unbound; legacy
+  context-only policy reads are incomplete evidence.
 - Only `CHECK_RUN.app.id` proves run producer identity in version 1. Commit
   statuses record unavailable App identity, are never enriched from `creator`,
   and cannot satisfy a pinned producer predicate.
@@ -1790,32 +2117,49 @@ architecture.
 - Check-run and commit-status feeds carry separate endpoint, collection-time,
   pagination, page-count, and item-count proof. Both must be complete before
   latest-attempt selection, including when one feed is empty.
+- Every independent GitHub endpoint or GraphQL connection carries its own
+  source status, response-completion time, and pagination proof where
+  applicable. Parent collection times cannot refresh stale pull-request,
+  comparison, policy, run, Codex, or thread sources.
 - Strict-update policy is the union of every applicable policy source. A strict
   head must contain the current base or derive `PR_UPDATE_REQUIRED`.
 - The current target base must independently descend from or equal the local
   gate's reviewed base. This identity invariant applies regardless of
   strict-update policy; a behind or diverged target base is terminal
   `INVALIDATED`.
-- Pull-request identity, head, and reviewed-base ancestry evidence participates
+- Pull-request identity, head, and reviewed-base ancestry evidence participate
   in the same collection freshness and atomic-observation window as checks,
   reviews, and threads.
 - Every unresolved review thread blocks publication, regardless of author.
 - Codex result evidence stores a digest and GitHub URL, not the response body.
 - The expected Codex bot is bound by stable numeric actor ID and `Bot` type at
-  publication start; login text is audit metadata only. Foreign-actor objects
-  are separated before parsing or association.
+  publication start; the caller supplies both values from the GitHub actor
+  object and the server rejects another type. Login text is audit metadata
+  only. Foreign-actor objects are separated before parsing or association.
+- The trigger policy is immutable. Explicit-only mode asserts automatic review
+  is disabled; automatic-quiescence mode records direct human approval bound to
+  the current head and a baseline no more than 30 seconds older than the
+  server acknowledgement.
 - Every Codex result is correlated by the single-open-request rule; overlapping
-  requests are ambiguous, and free-form text never supplies linkage.
-- Ambiguity involving source-only baseline requests, and any unbound or
-  unsupported request, remains blocking until a human acknowledges the exact
-  resource-scoped results and requests the boundary will close, and asserts
-  that none will reply. The acknowledgement is revisioned, revokes any gate,
-  and starts a new correlation epoch.
+  requests are ambiguous, and free-form text never supplies request linkage.
+- Every source-only baseline request, and any unbound or unsupported request,
+  remains blocking until a human acknowledges the exact resource-scoped
+  requests and indeterminate results the boundary will close, and asserts that
+  the requests will not receive further replies. The acknowledgement is
+  revisioned, revokes any gate, and starts a new correlation epoch.
 - Automatic results before the epoch's first exact request are `UNSOLICITED`
   only when no baseline source is eligible; a unique baseline source produces
-  `BASELINE_LATE_RESULT`. Neither triggers the acknowledgement path alone.
-- Only a formal pull request review's GitHub-native `commit_id` can establish
-  `reviewed_head_sha`; conversation comments and review comments are `UNKNOWN`.
+  `BASELINE_LATE_RESULT`. Neither creates an additional request to close;
+  every open baseline request already requires acknowledgement.
+- A result observed after the last active request closed and before another
+  request opens is ambiguous and reopens every possible closed request source
+  for direct acknowledgement; a later finding can never be ignored behind an
+  earlier clean result.
+- A findings review uses its GitHub-native `commit_id`. A recognized clean
+  issue comment may establish `reviewed_head_sha` only by combining its single
+  reviewed-commit prefix with one uniquely associated workflow-bound full
+  request head; arbitrary comments, copied heads, and review comments remain
+  `UNKNOWN`.
 - A formal review's native `state` is a monotonic-reconciled result fact.
   `DISMISSED` never satisfies, and `PENDING` cannot be normalized as a result
   and makes collection incomplete. A later dismissal of an observed result
@@ -1830,10 +2174,9 @@ architecture.
   publication ledger.
 - Actor-admitted Codex results are accumulated in a separate server-owned
   monotonic history. The evaluator replays association from both histories; a
-  result that disappears or changes immutable body or provenance facts
-  terminally invalidates the ledger instead of clearing ambiguity. A verdict
-  reparse under an unchanged body digest is evaluated currently and does not
-  rewrite or invalidate history.
+  result that disappears or changes immutable body, commit, native-state, or
+  attached-comment facts terminally invalidates the ledger instead of clearing
+  ambiguity. Adapter semantics are pinned for the ledger's lifetime.
 - Every recognized request is durably bound to the verified head immediately
   after its GitHub post response. Snapshot collection never infers that head;
   unbound or unsupported requests can only be closed through directly approved
@@ -1857,12 +2200,11 @@ architecture.
   review before publication can restart.
 - Revision 1 has status `PR_PENDING`, the evaluator's single no-observation
   result; `PUBLICATION_STARTED` is only its audit event name.
-- A fresh, complete publication-start baseline excludes only unambiguously
-  settled preexisting request/result pairs from active history and
-  satisfaction. Their recognized request components remain source-only
-  candidates for delayed same-head results until directly acknowledged.
-  Unsettled preexisting requests enter revision-1 request history and remain
-  fail-closed.
+- A fresh, complete publication-start baseline keeps all preexisting requests
+  and expected-actor candidate results outside active history and satisfaction.
+  Every baseline request remains a source-only candidate for all later results
+  and blocks until directly acknowledged; no historical head or pairing is
+  inferred.
 - Correlation epochs are ordered by server-assigned request
   `recorded_revision` relative to the acknowledgement's
   `publication_revision`, never by comparing GitHub `created_at` with the
@@ -1875,17 +2217,18 @@ The implementation must test:
 - the successful path from local gate to `MERGE_READY`;
 - `start_publication` creating revision 1 with status `PR_PENDING` and a
   `PUBLICATION_STARTED` audit event, including rejection of stale, incomplete,
-  or partially paginated baselines;
-- a new local task on an existing pull request whose prior exact requests have
-  unambiguous results, proving those stored baseline pairs stay outside active
-  history and satisfaction while their request components remain source-only,
-  plus an unmatched, overlapping, unbound, or unsupported preexisting request
-  seeded at revision 1 and blocking normally;
-- a delayed or duplicate same-head result from a settled baseline request
-  arriving before any new request and becoming non-blocking
-  `BASELINE_LATE_RESULT`, then another arriving after a new request and
-  becoming ambiguous; acknowledgement must name the exact baseline source,
-  active request, and result before a recovery request can start a new epoch;
+  or partially paginated baselines and existing or orphaned publication files;
+- explicit-only and automatic-quiescence trigger policies, including rejection
+  of an unknown mode, missing direct-human label or rationale, a changed head,
+  and a baseline more than 30 seconds older than the server acknowledgement;
+- a new local task on an existing pull request whose prior requests and
+  expected-actor candidate results all remain audit-only baseline objects,
+  with every baseline request blocking until its complete resource-scoped set is
+  directly acknowledged;
+- one delayed result arriving while exactly one baseline request remains open
+  becoming `BASELINE_LATE_RESULT` without closing that request, followed by
+  acknowledgement, a new workflow request, and an old delayed duplicate that
+  demonstrates the explicitly accepted residual misattribution risk;
 - `record_codex_review_request` after an existing snapshot and after ambiguity
   acknowledgement, each revoking any gate, clearing only
   `latest_observation`, preserving baseline and both histories, and returning
@@ -1894,17 +2237,30 @@ The implementation must test:
 - an incomplete policy query, ambiguous `404`, explicit no-check policy with
   both zero and nonzero optional runs, empty incomplete collections, incomplete
   pagination, and count mismatches;
+- missing, failed, stale, future-dated, and partially paginated independent
+  sources for pull-request identity, both comparisons, every policy endpoint,
+  both run feeds, each of the three Codex feeds, and review threads; a fresh
+  parent timestamp paired with any stale source must remain incomplete;
 - independently missing, partial, stale, and empty-complete check-run and
   commit-status feeds, per-kind item-count and reported-total mismatches, and a
   check-run query using the default latest-only filter instead of `filter=all`;
 - a classic-protection `404` after successful branch/rules reads but without
   endpoint-specific authorization proof, plus GitHub App installation
-  `administration` grants of missing, `read`, and `write`;
+  `administration` grants of missing, `read`, and `write`, and missing, stale,
+  or future-dated installation-permission policy-source metadata;
+- the `branch.protected: false` plus empty-rules shortcut omitting the classic
+  endpoint, and rejection of that omission when the branch is protected or
+  applicable rules are nonempty;
 - required checks from a different head or with pending, failed, cancelled, or
   missing results;
 - a required check produced by the wrong GitHub App, an explicitly unbound
   requirement, a check run with missing app identity, a commit status with an
-  invented App mapping, and a legacy `contexts[]` policy read;
+  invented App mapping, classic `app_id` values of positive, `-1`, null, zero,
+  and another negative value, ruleset `integration_id` values of positive,
+  null, absent, zero, and negative, and a legacy `contexts[]` policy read;
+- identical required-check tuples from multiple sources coalescing all
+  provenance, plus same-context tuples with different bindings or App IDs
+  remaining independently required;
 - a pinned requirement with only a passing commit status remaining
   `CHECKS_PENDING`, plus a pinned matching check run accompanied by passing,
   pending, and failing same-context commit statuses, and an explicitly unbound
@@ -1927,15 +2283,18 @@ The implementation must test:
   ledger;
 - `SKIPPED`, `NEUTRAL`, `TIMED_OUT`, `ACTION_REQUIRED`, `STALE`, and an
   unrecognized future check conclusion;
-- a missing request, a non-exact request, duplicate requests, and a newer
-  request that supersedes an older `CLEAN` result;
+- a missing request, trigger-shaped non-exact requests with whitespace,
+  different case, extra text, and extra lines all becoming unsupported,
+  duplicate requests, and a newer request that supersedes an older `CLEAN`
+  result;
 - immediate post-response request binding, restart after binding, a crash
   between posting and binding, a changed head before binding, a manual exact
   issue-comment request from a non-workflow actor recorded as `UNBOUND`, and
   direct-human acknowledgement recovery without inferring its head;
 - baseline partition validation that rejects an active baseline identity, a
-  non-baseline identity smuggled into `preexisting_pairs`, and a newly seen
-  request with an old `event_at` that must still become unbound or unsupported;
+  non-baseline identity smuggled into either preexisting array, a missing or
+  changed baseline object, and a newly seen request with an old `event_at` that
+  must still become unbound or unsupported;
 - a complete listing that temporarily omits a just-recorded request within the
   30-second visibility grace, a successful retry after it appears, and
   persistent absence or deletion after the grace becoming terminal;
@@ -1951,6 +2310,9 @@ The implementation must test:
   `UNSOLICITED`, followed by a normal explicit request and result reaching
   `MERGE_READY` without acknowledgement, with the unsolicited result never
   correlating later;
+- a second result after one request closes and before another opens, proving
+  the closed request and new result become an acknowledgeable indeterminate
+  set and an earlier clean result cannot remain eligible;
 - a recovery request admitted before acknowledgement, with every subsequent
   result remaining ambiguous and the early recovery request reported as
   closed only when its ID is included in the directly approved and supplied
@@ -1962,16 +2324,21 @@ The implementation must test:
 - zero and multiple candidate results after the latest request;
 - an ambiguous result that is later body-edited, dismissed, deleted, or
   reported with conflicting actor/commit provenance, each persisting terminal
-  `INVALIDATED` so a remaining older `CLEAN` cannot regain eligibility; an
-  unchanged body digest re-parsed to a different verdict under an updated
-  adapter without truncating history; and incomplete result collection leaving
-  result history unchanged;
-- a reaction without a Codex result;
+  `INVALIDATED` so a remaining older `CLEAN` cannot regain eligibility;
+  missing, mixed, or unsupported adapter versions; and incomplete result
+  collection leaving result history unchanged;
+- eyes and thumbs-up reactions without a supported Codex result object;
 - a result created before its request;
-- a formal review with a GitHub-native `commit_id`, conversation-comment and
-  review-comment results with no accepted commit binding, an attempted
-  PR-head copy/body-SHA/linked-review binding, and a missing, malformed,
-  unknown, or stale reviewed commit;
+- a `CODEX_CLEAN_COMMENT_V1` issue comment with exactly one valid commit marker,
+  expected Bot actor, unique workflow-bound request, and matching full head
+  reaching `CLEAN`; wrong actor, unbound or ambiguous request, zero or multiple
+  markers, malformed or mismatching prefixes, arbitrary SHA mentions, copied
+  PR heads, and linked reviews all remaining `UNKNOWN`;
+- a `CODEX_FINDINGS_REVIEW_V1` formal review with a GitHub-native `commit_id`
+  and at least one structurally attached review comment deriving `FINDINGS`,
+  plus attachments with a wrong actor, wrong commit, duplicate ID, or changed
+  body digest, a generic formal review without attached findings, and every
+  review-comment result remaining `UNKNOWN`;
 - formal reviews first observed as `APPROVED`, `COMMENTED`,
   `CHANGES_REQUESTED`, and `DISMISSED`, plus a first-observed `PENDING` review
   deriving `EVIDENCE_INCOMPLETE`, missing or unknown native states, and
@@ -1988,7 +2355,9 @@ The implementation must test:
   derives `GITHUB_REVIEW_UNKNOWN`;
 - every accepted `resource_kind`, an unrecognized kind, and object-ID
   uniqueness scoped separately to each kind, including acknowledgement records
-  that distinguish equal numeric result IDs from different kinds;
+  that distinguish equal numeric result IDs from different kinds, plus
+  rejection of one resource-scoped object appearing in multiple adapter
+  partitions;
 - findings and unresolved, resolved, and outdated threads;
 - a superseding exact request that is later edited, deleted, or recreated under
   a new ID after being observed, each persisting terminal `INVALIDATED` so an
@@ -2007,8 +2376,9 @@ The implementation must test:
   merged state, timestamp, and merge commit SHA;
 - stale, future-dated, pre-publication, and stale-at-finalization observations,
   including a fresh `observed_at` with stale nested collections and collections
-  spanning more than two minutes, plus fresh nested collections paired with a
-  stale pull-request read;
+  spanning more than two minutes, fresh parent collections paired with a stale
+  independent source, and fresh nested collections paired with a stale
+  pull-request read;
 - concurrent mutations, stale expected revisions, and independent review and
   publication lock domains;
 - a same-head request or unresolved thread recorded after finalization, gate
@@ -2037,12 +2407,20 @@ The implementation must test:
   later `recorded_revision` correctly places it in the new epoch;
 - packaged-skill assertions for the complete seven-tool ordering, immediate
   pre-start baseline collection, request binding, prohibition of manual exact
-  request comments, unbound or unsupported request recovery through
-  full-closure direct-human ambiguity approval, stable Bot actor-ID resolution,
-  and immediate pre-merge gate verification;
+  or trigger-shaped request comments, unbound or unsupported request recovery
+  through full-closure direct-human ambiguity approval, direct
+  automatic-quiescence approval when applicable, stable Bot actor-ID
+  resolution, and immediate pre-merge gate verification;
 - lock timeout errors, PID reuse, heartbeat expiry, owner-token mismatch, and
   inconclusive owner-liveness checks;
-- malformed and oversized inputs;
+- malformed and oversized inputs, including numeric GitHub IDs outside the
+  positive safe-integer range;
+- rejection of a non-`Bot` `codex_actor_type`, plus persistence of the exact
+  validated actor ID/type pair while login changes only audit display;
+- server-authored `updated_at` and history `at` matching `recorded_at`, parent
+  collection times matching their latest source, and executable validation of
+  every RFC JSON example and cross-example expiry calculation, plus RFC 8785
+  observation digest stability across caller key ordering;
 - failure to finalize from every state except `MERGE_READY`; and
 - recording a squash merge whose merge commit differs from the reviewed head.
 
@@ -2061,17 +2439,20 @@ Implement this design in two changes:
    publication-state lock, and packaged-client verification; update the
    packaged Codex workflow skill with the seven-tool ordering, complete
    pre-start baseline collection, immediate post-response request binding,
-   immediate pre-merge gate verification, no-manual-request guidance,
+   immediate pre-merge gate verification, no-manual-trigger guidance,
    unbound-or-unsupported-request recovery through the full-closure
-   direct-human ambiguity approval rule, and stable Codex Bot actor-ID
-   resolution; and make
+   direct-human ambiguity approval rule, direct automatic-quiescence approval,
+   and stable Codex Bot actor-ID resolution; and make
    `scripts/verify-build.mjs` assert those skill requirements. Adapter fixtures
    also cover the 30-second post-to-list visibility grace and endpoint-specific
    installation-permission evidence for classic-protection `404` responses.
-   Before enabling publication, capture an adapter fixture from the connector's
-   observed output and verify that it contains a formal pull request review;
-   conversation-comment-only and review-comment-only fixtures are unsupported
-   in version 1.
+   Before enabling publication, capture adapter fixtures from the connector's
+   observed output for both a clean issue comment and a findings formal review
+   with attached review comments. A clean fixture must exercise its
+   reviewed-commit marker and request-bound full-head checks; a findings fixture
+   must exercise native `commit_id` and review-comment attachment. Reactions
+   alone, generic conversation comments, generic formal reviews, and
+   review-comment-only fixtures are unsupported in version 1.
 
 Each implementation change requires its own local Claude review and GitHub
 Codex review.
@@ -2082,11 +2463,15 @@ None.
 
 ## References
 
+- [RFC 8785: JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785)
 - [GitHub REST API: Get rules for a branch](https://docs.github.com/en/rest/repos/rules#get-rules-for-a-branch)
+- [GitHub REST API: GitHub App installations](https://docs.github.com/en/rest/apps/installations)
 - [GitHub REST API: Get a branch](https://docs.github.com/en/rest/branches/branches#get-a-branch)
 - [GitHub REST API: Get branch protection](https://docs.github.com/en/rest/branches/branch-protection#get-branch-protection)
 - [GitHub REST API: Pull requests](https://docs.github.com/en/rest/pulls/pulls)
+- [GitHub REST API: Issue comments](https://docs.github.com/en/rest/issues/comments)
 - [GitHub REST API: Pull request reviews](https://docs.github.com/en/rest/pulls/reviews)
+- [GitHub REST API: Pull request review comments](https://docs.github.com/en/rest/pulls/comments)
 - [GitHub REST API: Check runs](https://docs.github.com/en/rest/checks/runs)
 - [GitHub REST API: Commit statuses](https://docs.github.com/en/rest/commits/statuses)
 - [GitHub Docs: Troubleshooting required status checks](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks)
