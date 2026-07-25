@@ -32,6 +32,7 @@ function run(command, args, cwd) {
   if (result.stderr.trim()) {
     process.stderr.write(result.stderr);
   }
+  return result.stdout;
 }
 
 async function installRuntime(target) {
@@ -70,6 +71,17 @@ async function copyServer(target) {
   await fsp.copyFile(
     path.join(projectRoot, "src", "core.mjs"),
     path.join(serverTarget, "core.mjs"),
+  );
+}
+
+const workingTreeStatus = run(
+  "git",
+  ["status", "--porcelain", "--untracked-files=all"],
+  projectRoot,
+);
+if (workingTreeStatus.trim()) {
+  throw new Error(
+    "refusing to build from a dirty working tree; commit or stash changes first",
   );
 }
 
@@ -124,16 +136,8 @@ await fsp.copyFile(mcpbOutput, dxtOutput);
 
 await fsp.copyFile(path.join(projectRoot, "README.md"), path.join(outputRoot, "README.md"));
 run(
-  "zip",
-  [
-    "-q",
-    "-r",
-    sourceOutput,
-    ".",
-    "-x",
-    "node_modules/*",
-    ".DS_Store",
-  ],
+  "git",
+  ["archive", "--format=zip", "-o", sourceOutput, "HEAD"],
   projectRoot,
 );
 

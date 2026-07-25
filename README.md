@@ -102,6 +102,8 @@ CLEAN -> snapshot recheck -> LOCAL_GATE_PASSED
 - Working-tree overlays are copied into the private review store. Unchanged
   files are read from the captured Git object ID.
 - Files larger than 10 MiB are recorded but not copied into the snapshot.
+- v0.1 does not serialize state changes across the author and reviewer
+  processes. Do not invoke state-changing tools concurrently for one review.
 - The local gate is a workflow attestation, not a Git or GitHub security
   boundary. v0.1 intentionally does not install a `pre-push` hook or integrate
   with GitHub.
@@ -112,7 +114,7 @@ reviewing confidential code.
 
 ## Develop
 
-Requirements: Node.js 18 or newer, npm, Git, and `zip`.
+Requirements: Node.js 18 or newer, npm, Git, and `unzip`.
 
 ```bash
 npm ci
