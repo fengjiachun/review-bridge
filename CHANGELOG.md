@@ -16,3 +16,5 @@
   backslashes, colon-containing paths, and oversized modified files correctly.
 - Publication reviews bind the immutable base SHA, local gate, CI result, and
   GitHub review to the intended pull-request head.
+- The release build overrides the vulnerable transitive `tmp` version used by
+  the MCP Bundle development toolchain.
