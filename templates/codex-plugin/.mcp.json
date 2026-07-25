@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "review-bridge-author": {
+      "command": "node",
+      "args": [
+        "./server/server.mjs",
+        "--role",
+        "author"
+      ],
+      "cwd": ".",
+      "tool_timeout_sec": 120
+    }
+  }
+}

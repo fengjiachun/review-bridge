@@ -1,0 +1,81 @@
+{
+  "manifest_version": "0.3",
+  "name": "review-bridge-reviewer",
+  "display_name": "Review Bridge Reviewer",
+  "version": "0.1.0",
+  "description": "Review immutable Codex code snapshots and return structured findings.",
+  "long_description": "Lists review tasks prepared by Codex, lets Claude inspect the exact requirement, implementation scope, patch, and immutable source snapshot, and submits a structured initial review or round-two verdict.",
+  "author": {
+    "name": "Review Bridge contributors"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/server.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/server.mjs",
+        "--role",
+        "reviewer"
+      ],
+      "env": {
+        "REVIEW_BRIDGE_HOME": "${user_config.review_store}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "list_pending_reviews",
+      "description": "List Codex review tasks waiting for Claude."
+    },
+    {
+      "name": "open_review",
+      "description": "Open the requirement, scope, snapshot manifest, and review history."
+    },
+    {
+      "name": "read_review_artifact",
+      "description": "Read the patch or snapshot manifest in chunks."
+    },
+    {
+      "name": "read_snapshot_file",
+      "description": "Read a file from the immutable review snapshot."
+    },
+    {
+      "name": "search_snapshot",
+      "description": "Search the immutable review snapshot."
+    },
+    {
+      "name": "submit_review",
+      "description": "Submit structured initial findings."
+    },
+    {
+      "name": "submit_rereview",
+      "description": "Resolve, accept, or keep open each finding in round two."
+    }
+  ],
+  "keywords": [
+    "code-review",
+    "codex",
+    "developer-tools",
+    "mcp"
+  ],
+  "license": "MIT",
+  "user_config": {
+    "review_store": {
+      "type": "directory",
+      "title": "Review Bridge data directory",
+      "description": "Shared local directory used by the Codex plugin and Claude reviewer.",
+      "required": true,
+      "default": "${HOME}/Library/Application Support/ReviewBridge"
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  },
+  "privacy_policies": []
+}

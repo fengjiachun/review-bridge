@@ -1,0 +1,35 @@
+{
+  "name": "review-bridge",
+  "version": "0.1.0",
+  "description": "Coordinate a two-round local code review between Codex and Claude Desktop.",
+  "author": {
+    "name": "Review Bridge contributors"
+  },
+  "license": "MIT",
+  "keywords": [
+    "code-review",
+    "claude",
+    "mcp",
+    "workflow"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Review Bridge",
+    "shortDescription": "Hand code snapshots to Claude for local review",
+    "longDescription": "Create immutable review snapshots, receive structured Claude findings, respond with fixes or evidence, and stop after two rounds when human arbitration is required.",
+    "developerName": "Review Bridge contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Prepare the current changes for a Claude Desktop review.",
+      "Check whether Claude has returned findings for this review."
+    ],
+    "brandColor": "#6D5BD0",
+    "screenshots": []
+  }
+}

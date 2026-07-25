@@ -1,0 +1,25 @@
+{
+  "name": "review-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local review handoff bridge between Codex and Claude Desktop",
+  "scripts": {
+    "test": "node --test",
+    "build": "node scripts/build.mjs",
+    "verify:build": "node scripts/verify-build.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "3.25.76"
+  },
+  "overrides": {
+    "@hono/node-server": "2.0.11"
+  },
+  "devDependencies": {
+    "@anthropic-ai/mcpb": "2.1.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
