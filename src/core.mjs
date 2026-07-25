@@ -4,6 +4,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { atomicWriteFile, withStateLock } from "./storage.mjs";
 
 export const MAX_ROUNDS = 2;
 const MAX_GIT_OUTPUT = 64 * 1024 * 1024;
@@ -84,10 +85,7 @@ function runGit(repositoryPath, args, options = {}) {
 }
 
 async function atomicWriteJson(filePath, value) {
-  await fsp.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const temporary = `${filePath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
-  await fsp.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  await fsp.rename(temporary, filePath);
+  await atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 async function writePrivateFile(filePath, data) {
@@ -109,6 +107,17 @@ function roundDirectory(storeRoot, reviewId, round) {
 
 function reviewFile(storeRoot, reviewId) {
   return path.join(reviewDirectory(storeRoot, reviewId), "review.json");
+}
+
+function withReviewMutationLock(storeRoot, reviewId, operation) {
+  return withStateLock(
+    {
+      directory: reviewDirectory(storeRoot, reviewId),
+      reviewId,
+      domain: "review",
+    },
+    operation,
+  );
 }
 
 async function loadJson(filePath) {
@@ -434,37 +443,39 @@ export async function prepareReview(
   const id = createReviewId();
   const root = reviewDirectory(storeRoot, id);
   await fsp.mkdir(root, { recursive: true, mode: 0o700 });
-  const roundRoot = roundDirectory(storeRoot, id, 1);
-  const { manifest } = await buildSnapshot({
-    repositoryPath,
-    baseRef,
-    requirement,
-    implementationScope,
-    roundRoot,
-    writeFiles: true,
+  return withReviewMutationLock(storeRoot, id, async () => {
+    const roundRoot = roundDirectory(storeRoot, id, 1);
+    const { manifest } = await buildSnapshot({
+      repositoryPath,
+      baseRef,
+      requirement,
+      implementationScope,
+      roundRoot,
+      writeFiles: true,
+    });
+    const timestamp = now();
+    const review = {
+      version: 1,
+      id,
+      created_at: timestamp,
+      updated_at: timestamp,
+      state_version: 1,
+      repository_path: manifest.repository_path,
+      base_ref: baseRef,
+      requirement,
+      implementation_scope: implementationScope,
+      status: "WAITING_FOR_REVIEW",
+      current_round: 1,
+      max_rounds: MAX_ROUNDS,
+      rounds: [{ round: 1, ...manifest }],
+      findings: [],
+      resolutions: [],
+      rereview_decisions: [],
+      history: [{ at: timestamp, event: "REVIEW_PREPARED", round: 1 }],
+    };
+    await atomicWriteJson(reviewFile(storeRoot, review.id), review);
+    return publicReview(review);
   });
-  const timestamp = now();
-  const review = {
-    version: 1,
-    id,
-    created_at: timestamp,
-    updated_at: timestamp,
-    state_version: 1,
-    repository_path: manifest.repository_path,
-    base_ref: baseRef,
-    requirement,
-    implementation_scope: implementationScope,
-    status: "WAITING_FOR_REVIEW",
-    current_round: 1,
-    max_rounds: MAX_ROUNDS,
-    rounds: [{ round: 1, ...manifest }],
-    findings: [],
-    resolutions: [],
-    rereview_decisions: [],
-    history: [{ at: timestamp, event: "REVIEW_PREPARED", round: 1 }],
-  };
-  await atomicWriteJson(reviewFile(storeRoot, review.id), review);
-  return publicReview(review);
 }
 
 export async function listReviews(storeRoot, statuses = null) {
@@ -580,95 +591,105 @@ function normalizeFinding(input, id, round) {
 }
 
 export async function submitInitialReview(storeRoot, reviewId, findingsInput) {
-  const review = await loadReview(storeRoot, reviewId);
-  if (review.status !== "WAITING_FOR_REVIEW" || review.current_round !== 1) {
-    throw new Error(`review is not waiting for its initial review (status=${review.status})`);
-  }
-  if (!Array.isArray(findingsInput) || findingsInput.length > MAX_FINDINGS) {
-    throw new Error(`findings must be an array with at most ${MAX_FINDINGS} items`);
-  }
-  const findings = findingsInput.map((finding, index) =>
-    normalizeFinding(finding, `F-${String(index + 1).padStart(3, "0")}`, 1),
-  );
-  review.findings = findings;
-  if (findings.length === 0) {
-    review.status = "CLEAN";
-    review.clean_snapshot_hash = review.rounds[0].snapshot_hash;
-    review.history.push({ at: now(), event: "INITIAL_REVIEW_CLEAN", round: 1 });
-  } else {
-    review.status = "REVIEW_SUBMITTED";
-    review.history.push({
-      at: now(),
-      event: "FINDINGS_SUBMITTED",
-      round: 1,
-      count: findings.length,
-    });
-  }
-  await saveReview(storeRoot, review);
-  return publicReview(review);
+  return withReviewMutationLock(storeRoot, reviewId, async () => {
+    const review = await loadReview(storeRoot, reviewId);
+    if (review.status !== "WAITING_FOR_REVIEW" || review.current_round !== 1) {
+      throw new Error(`review is not waiting for its initial review (status=${review.status})`);
+    }
+    if (!Array.isArray(findingsInput) || findingsInput.length > MAX_FINDINGS) {
+      throw new Error(`findings must be an array with at most ${MAX_FINDINGS} items`);
+    }
+    const findings = findingsInput.map((finding, index) =>
+      normalizeFinding(finding, `F-${String(index + 1).padStart(3, "0")}`, 1),
+    );
+    review.findings = findings;
+    if (findings.length === 0) {
+      review.status = "CLEAN";
+      review.clean_snapshot_hash = review.rounds[0].snapshot_hash;
+      review.history.push({ at: now(), event: "INITIAL_REVIEW_CLEAN", round: 1 });
+    } else {
+      review.status = "REVIEW_SUBMITTED";
+      review.history.push({
+        at: now(),
+        event: "FINDINGS_SUBMITTED",
+        round: 1,
+        count: findings.length,
+      });
+    }
+    await saveReview(storeRoot, review);
+    return publicReview(review);
+  });
 }
 
 export async function submitResolutions(storeRoot, reviewId, inputs) {
-  const review = await loadReview(storeRoot, reviewId);
-  if (review.status !== "REVIEW_SUBMITTED") {
-    throw new Error(`review is not waiting for author resolutions (status=${review.status})`);
-  }
-  if (!Array.isArray(inputs)) {
-    throw new Error("resolutions must be an array");
-  }
-  const openFindings = review.findings.filter((finding) => finding.status === "OPEN");
-  const byId = new Map(inputs.map((item) => [item?.finding_id, item]));
-  if (byId.size !== openFindings.length || inputs.length !== openFindings.length) {
-    throw new Error("provide exactly one resolution for every open finding");
-  }
-  const resolutions = [];
-  let humanRequired = false;
-  for (const finding of openFindings) {
-    const input = byId.get(finding.id);
-    if (!input) {
-      throw new Error(`missing resolution for ${finding.id}`);
+  return withReviewMutationLock(storeRoot, reviewId, async () => {
+    const review = await loadReview(storeRoot, reviewId);
+    if (review.status !== "REVIEW_SUBMITTED") {
+      throw new Error(`review is not waiting for author resolutions (status=${review.status})`);
     }
-    const disposition = String(input.disposition ?? "");
-    if (!["fixed", "rejected", "human_required"].includes(disposition)) {
-      throw new Error("resolution disposition must be fixed, rejected, or human_required");
+    if (!Array.isArray(inputs)) {
+      throw new Error("resolutions must be an array");
     }
-    const resolution = {
-      finding_id: finding.id,
-      disposition,
-      rationale: assertString(input.rationale, "resolution.rationale", {
-        max: 20_000,
-      }),
-      evidence:
-        typeof input.evidence === "string"
-          ? assertString(input.evidence, "resolution.evidence", {
-              allowEmpty: true,
-              max: 20_000,
-            })
-          : "",
-      submitted_at: now(),
-    };
-    resolutions.push(resolution);
-    if (disposition === "fixed") {
-      finding.status = "AUTHOR_FIXED";
-    } else if (disposition === "rejected") {
-      finding.status = "AUTHOR_REJECTED";
-    } else {
-      finding.status = "HUMAN_REQUIRED";
-      humanRequired = true;
+    const openFindings = review.findings.filter((finding) => finding.status === "OPEN");
+    const byId = new Map(inputs.map((item) => [item?.finding_id, item]));
+    if (byId.size !== openFindings.length || inputs.length !== openFindings.length) {
+      throw new Error("provide exactly one resolution for every open finding");
     }
-  }
-  review.resolutions.push(...resolutions);
-  review.status = humanRequired ? "HUMAN_REQUIRED" : "AUTHOR_RESPONDED";
-  review.history.push({
-    at: now(),
-    event: humanRequired ? "AUTHOR_ESCALATED" : "AUTHOR_RESPONDED",
-    round: review.current_round,
+    const resolutions = [];
+    let humanRequired = false;
+    for (const finding of openFindings) {
+      const input = byId.get(finding.id);
+      if (!input) {
+        throw new Error(`missing resolution for ${finding.id}`);
+      }
+      const disposition = String(input.disposition ?? "");
+      if (!["fixed", "rejected", "human_required"].includes(disposition)) {
+        throw new Error("resolution disposition must be fixed, rejected, or human_required");
+      }
+      const resolution = {
+        finding_id: finding.id,
+        disposition,
+        rationale: assertString(input.rationale, "resolution.rationale", {
+          max: 20_000,
+        }),
+        evidence:
+          typeof input.evidence === "string"
+            ? assertString(input.evidence, "resolution.evidence", {
+                allowEmpty: true,
+                max: 20_000,
+              })
+            : "",
+        submitted_at: now(),
+      };
+      resolutions.push(resolution);
+      if (disposition === "fixed") {
+        finding.status = "AUTHOR_FIXED";
+      } else if (disposition === "rejected") {
+        finding.status = "AUTHOR_REJECTED";
+      } else {
+        finding.status = "HUMAN_REQUIRED";
+        humanRequired = true;
+      }
+    }
+    review.resolutions.push(...resolutions);
+    review.status = humanRequired ? "HUMAN_REQUIRED" : "AUTHOR_RESPONDED";
+    review.history.push({
+      at: now(),
+      event: humanRequired ? "AUTHOR_ESCALATED" : "AUTHOR_RESPONDED",
+      round: review.current_round,
+    });
+    await saveReview(storeRoot, review);
+    return publicReview(review);
   });
-  await saveReview(storeRoot, review);
-  return publicReview(review);
 }
 
 export async function prepareRereview(storeRoot, reviewId) {
+  return withReviewMutationLock(storeRoot, reviewId, () =>
+    prepareRereviewUnlocked(storeRoot, reviewId),
+  );
+}
+
+async function prepareRereviewUnlocked(storeRoot, reviewId) {
   const review = await loadReview(storeRoot, reviewId);
   if (review.status !== "AUTHOR_RESPONDED") {
     throw new Error(`review is not ready for rereview (status=${review.status})`);
@@ -697,6 +718,22 @@ export async function prepareRereview(storeRoot, reviewId) {
 }
 
 export async function submitRereview(
+  storeRoot,
+  reviewId,
+  decisionInputs,
+  newFindingInputs,
+) {
+  return withReviewMutationLock(storeRoot, reviewId, () =>
+    submitRereviewUnlocked(
+      storeRoot,
+      reviewId,
+      decisionInputs,
+      newFindingInputs,
+    ),
+  );
+}
+
+async function submitRereviewUnlocked(
   storeRoot,
   reviewId,
   decisionInputs,
@@ -786,6 +823,12 @@ export async function submitRereview(
 }
 
 export async function finalizeLocalGate(storeRoot, reviewId) {
+  return withReviewMutationLock(storeRoot, reviewId, () =>
+    finalizeLocalGateUnlocked(storeRoot, reviewId),
+  );
+}
+
+async function finalizeLocalGateUnlocked(storeRoot, reviewId) {
   const review = await loadReview(storeRoot, reviewId);
   if (review.status !== "CLEAN") {
     throw new Error(`only a CLEAN review can be finalized (status=${review.status})`);
