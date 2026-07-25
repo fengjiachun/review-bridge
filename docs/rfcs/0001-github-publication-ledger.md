@@ -1830,18 +1830,19 @@ It then writes:
 from the observation's `recorded_at`.
 
 Finalization does not modify `publication.json`: it does not change
-`revision`, `updated_at`, status, or history. It first atomically writes the
-candidate gate with `issuance_committed: false`, then durably appends and
-commits a `GATE_FINALIZATION_PASSED` audit event containing the
-prospectively computed `gate_sha256` of the final committed payload, then
-atomically replaces the gate with that final payload, which is
-identical except `issuance_committed: true`. It returns success only after the
-final replacement and directory sync. Verification rejects an uncommitted
-candidate. Therefore a crash can leave an audit-only issuance attempt or an
-unusable candidate gate, but every usable gate has a preceding durable audit
-record without consulting the audit log during authorization. The committed
-gate names the unchanged ledger revision that was validated. These audit and
-gate writes are not later ledger mutations and do not revoke themselves.
+`revision`, `updated_at`, status, or history. Before its first write,
+finalization completes the audit-pair preflight defined below. It then
+atomically writes the candidate gate with `issuance_committed: false`, durably
+appends and commits a `GATE_FINALIZATION_PASSED` audit event containing the
+prospectively computed `gate_sha256` of the final committed payload, and
+atomically replaces the gate with that final payload, which is identical
+except `issuance_committed: true`. It returns success only after the final
+replacement and directory sync. Verification rejects an uncommitted candidate.
+Therefore a crash can leave an audit-only issuance attempt or an unusable
+candidate gate, but every usable gate has a preceding durable audit record
+without consulting the audit log during authorization. The committed gate
+names the unchanged ledger revision that was validated. These audit and gate
+writes are not later ledger mutations and do not revoke themselves.
 
 Codex must perform a fresh GitHub read immediately before this call. It then
 calls `verify_publication_gate` immediately before merging and passes the
@@ -1865,6 +1866,21 @@ refuses issuance when the server's `passed_at` would be later than that
 deadline.
 
 ## Gate audit
+
+Every tool that may append an audit event first performs a non-mutating
+preflight under the publication lock. Before evaluator execution, gate
+replacement, crash-tail recovery, or temporary cleanup, it opens both audit
+paths without following symlinks; validates their regular-file type and mode
+`0600` from the descriptors; validates matching audit-head temporaries; and
+reads enough of the head and bounded suffix to classify the current state. It
+retains those validated audit descriptors for any subsequent recovery and
+append in the same lock hold.
+`finalize_publication_gate` therefore cannot write or replace a candidate gate
+before this preflight succeeds. A mode mismatch on the log, head, or matching
+temporary returns `STORE_MODE_MISMATCH` without changing the existing gate,
+audit pair, temporary files, or any other artifact. After a successful
+preflight, the tool performs any permitted tail recovery or temporary cleanup,
+then continues with finalization or verification.
 
 `start_publication` exclusively creates an empty
 `publication-gate-audit.jsonl` with mode `0600`, file-syncs it, then atomically
@@ -2905,6 +2921,9 @@ The implementation must test:
 - committed issuance requiring an uncommitted candidate gate, a durable
   `GATE_FINALIZATION_PASSED` audit event, and the final committed gate in that
   order, including crashes at both boundaries leaving no usable unaudited gate;
+- finalization with mode drift on the audit log, head, or matching temporary
+  returning `STORE_MODE_MISMATCH` before replacing an existing committed gate,
+  recovering a tail, cleaning a temporary, or changing any audit bytes;
 - valid and invalid `verify_publication_gate` calls that leave
   `publication.json` byte-identical, including request and result histories,
   terminal, revision, and cached status, with exact boundary tests immediately
