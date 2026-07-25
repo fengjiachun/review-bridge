@@ -790,13 +790,14 @@ The evaluator applies these checks in order:
     from wall-clock timestamps. An
     `UNSOLICITED` result before the epoch's first exact request is retained for
     audit but does not block or correlate.
-13. Any exact `@codex review` text in a pull request review or review comment
-    after publication starts derives `GITHUB_REVIEW_UNKNOWN`; it is an
-    unsupported request location and is never silently discarded. Ignore
-    `foreign_actor_objects` and acknowledged unbound or unsupported requests.
-    From the remaining recognized `ISSUE_COMMENT` requests, select the latest by
-    `(event_at, comment_id)`. This tie-break is within one resource kind and
-    ID namespace. If none exists, derive `GITHUB_REVIEW_NOT_REQUESTED`. Zero
+13. Any unacknowledged exact `@codex review` text in a pull request review or
+    review comment after publication starts is an unsupported request location,
+    derives `GITHUB_REVIEW_UNKNOWN`, and remains blocking until a valid
+    acknowledgement closes its resource-scoped reference; it is never silently
+    discarded. Exclude `closed_requests` and `foreign_actor_objects`. From the
+    remaining recognized `ISSUE_COMMENT` requests, select the latest by
+    `(event_at, comment_id)`. This tie-break is within one resource kind and ID
+    namespace. If none exists, derive `GITHUB_REVIEW_NOT_REQUESTED`. Zero
     correlated results derives `GITHUB_REVIEW_PENDING`; an ambiguous result
     created after the latest request or more than one correlated result derives
     `GITHUB_REVIEW_UNKNOWN`. Timestamps widen ambiguity but never establish a
