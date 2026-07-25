@@ -70,7 +70,25 @@ assert.equal(marketplace.plugins[0].source.path, "./plugins/review-bridge");
 const plugin = await readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
 assert.equal(plugin.name, "review-bridge");
 assert.equal(plugin.mcpServers, "./.mcp.json");
-assert.ok(await fsp.stat(path.join(pluginRoot, "skills", "review-bridge-workflow", "SKILL.md")));
+const workflowSkillPath = path.join(
+  pluginRoot,
+  "skills",
+  "review-bridge-workflow",
+  "SKILL.md",
+);
+assert.ok(await fsp.stat(workflowSkillPath));
+const workflowSkill = await fsp.readFile(workflowSkillPath, "utf8");
+assert.match(
+  workflowSkill,
+  /Resolve it to an\n   immutable commit SHA before creating or committing publication changes/,
+);
+assert.match(workflowSkill, /Post a PR comment containing exactly `@codex review`/);
+assert.match(
+  workflowSkill,
+  /Require the PR head commit to equal that same local-gate `head_sha`/,
+);
+assert.match(workflowSkill, /Any new commit invalidates the GitHub review gate/);
+assert.match(workflowSkill, /start a new local Review Bridge task/);
 
 const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
 assert.equal(mcpConfig.mcpServers["review-bridge-author"].cwd, ".");

@@ -93,6 +93,38 @@ WAITING_FOR_REVIEW
 CLEAN -> snapshot recheck -> LOCAL_GATE_PASSED
 ```
 
+## GitHub publication gate
+
+The installed Codex skill adds a second gate after the local review:
+
+```text
+LOCAL_GATE_PASSED
+  -> PR_OPEN
+  -> CHECKS_PASSED
+  -> CODEX_REVIEW_REQUESTED
+  -> CODEX_REVIEW_PASSED
+  -> MERGE_READY
+```
+
+Codex must post a pull-request comment containing exactly `@codex review`, wait
+for the resulting GitHub review, and verify that it applies to the current PR
+head. No response is not a pass. Any new commit invalidates the GitHub review
+gate.
+
+Before requesting GitHub review, both the local branch head and PR head must
+equal the `head_sha` returned by `finalize_local_gate`. A mismatch invalidates
+the local gate and requires a new local Review Bridge task.
+
+If the GitHub review finds an actionable issue, commit the fix and start a new
+local Review Bridge task. Merge only after the new local gate, required checks,
+and a new GitHub Codex review all pass for the same PR head.
+
+For a publishable change, resolve the review base to an immutable commit SHA
+before committing, then pass that SHA to `prepare_review`. Commit before local
+review and commit fixes before rereview. This binds the reviewed diff to the
+pre-change base and the local snapshot to the exact commit later pushed as the
+PR head.
+
 ## Security and scope
 
 - Claude receives read-only snapshot/search tools and verdict-writing tools. It
@@ -104,9 +136,11 @@ CLEAN -> snapshot recheck -> LOCAL_GATE_PASSED
 - Files larger than 10 MiB are recorded but not copied into the snapshot.
 - v0.1 does not serialize state changes across the author and reviewer
   processes. Do not invoke state-changing tools concurrently for one review.
-- The local gate is a workflow attestation, not a Git or GitHub security
-  boundary. v0.1 intentionally does not install a `pre-push` hook or integrate
-  with GitHub.
+- The local gate and publication gate are workflow attestations, not Git or
+  GitHub security boundaries. v0.1 does not install a `pre-push` hook.
+- The Review Bridge MCP server receives no GitHub credentials. The packaged
+  Codex skill uses the user's separately configured GitHub tools after the
+  local gate passes.
 
 Claude Desktop is a local application, but that does not imply local model
 inference. Apply your Anthropic account and organization data policy before

@@ -1,6 +1,6 @@
 ---
 name: review-bridge-workflow
-description: Use when preparing local code for Claude Desktop review, handling Claude findings, or deciding whether the local review gate is clean before publishing.
+description: Use when preparing local code for Claude Desktop review, handling Claude findings, or publishing reviewed code through GitHub.
 ---
 
 # Review Bridge workflow
@@ -10,12 +10,17 @@ Claude Desktop.
 
 ## Prepare
 
-1. Confirm the repository path and choose the exact base ref. Do not silently
-   guess between `HEAD`, `origin/main`, or another release branch.
+1. Confirm the repository path and choose the exact base ref. Resolve it to an
+   immutable commit SHA before creating or committing publication changes, and
+   pass that SHA to `prepare_review`. Do not silently guess between `HEAD`,
+   `origin/main`, or another release branch.
 2. Summarize the user's requirement faithfully.
 3. State the implementation scope, changed behavior, and verification evidence.
-4. Call `prepare_review`.
-5. Report the returned `review_id` and state `WAITING_FOR_REVIEW`. Ask the user
+4. If the user intends to publish the change, create a topic branch and commit
+   the intended diff before review. Commit later fixes before rereview. This
+   lets the local gate attest the exact commit that will become the PR head.
+5. Call `prepare_review` with the base SHA captured in step 1.
+6. Report the returned `review_id` and state `WAITING_FOR_REVIEW`. Ask the user
    to open Claude Desktop and review that ID.
 
 Do not push or open a pull request while the task is waiting for Claude.
@@ -44,3 +49,34 @@ Keep fixes surgical. Do not mark a finding fixed without verification evidence.
 - If the state is `HUMAN_REQUIRED`, stop. Do not start a third model round.
 
 The review ledger, not free-form chat text, is the source of truth.
+
+## Publish through GitHub
+
+After `LOCAL_GATE_PASSED`:
+
+1. Confirm the working tree is clean and compare `git rev-parse HEAD` with the
+   `head_sha` returned by `finalize_local_gate`. If they differ, the local gate
+   is invalid; start a new local Review Bridge task. Otherwise push the reviewed
+   topic branch and open a draft pull request.
+2. Require the PR head commit to equal that same local-gate `head_sha`. If it
+   differs, stop and start a new local Review Bridge task. Record the matching
+   PR head, wait for required checks to pass, and mark the PR ready for review.
+3. Post a PR comment containing exactly `@codex review`. Do not rely on
+   automatic review being enabled.
+4. Wait for Codex to react and post a GitHub review. No response is a pending
+   review, not a pass.
+5. Read the Codex review and its unresolved threads, then read the PR head
+   again. The completed review must apply to the same PR head commit recorded
+   when review was requested.
+6. If Codex reports an actionable finding, make and commit the fix, run the
+   relevant checks, and start a new local Review Bridge task. After its local
+   gate passes, push the new commit and request `@codex review` again.
+7. Merge only when the local gate, required checks, and completed GitHub Codex
+   review all apply to the current PR head and no actionable finding remains.
+
+Any new commit invalidates the GitHub review gate. Compare the reviewed PR head
+before merge; a squash merge naturally creates a different merge commit.
+
+The Review Bridge MCP server does not receive GitHub credentials. The Codex
+skill orchestrates the repository's configured GitHub tools after the local
+gate passes.
