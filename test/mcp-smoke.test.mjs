@@ -34,10 +34,12 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
   assert.deepEqual(author, [
     "finalize_local_gate",
     "get_review",
+    "get_review_summary",
     "list_reviews",
     "prepare_rereview",
     "prepare_review",
     "submit_resolutions",
+    "wait_for_review_state",
   ]);
   assert.deepEqual(reviewer, [
     "list_pending_reviews",

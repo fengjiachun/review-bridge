@@ -130,6 +130,7 @@ export async function loadReview(storeRoot, reviewId) {
 async function saveReview(storeRoot, review) {
   // v0.1 assumes one state transition at a time. Atomic replacement prevents
   // corruption, but concurrent author and reviewer writes can still lose updates.
+  review.state_version = (review.state_version ?? 0) + 1;
   review.updated_at = now();
   await atomicWriteJson(reviewFile(storeRoot, review.id), review);
 }
@@ -334,6 +335,7 @@ function publicReview(review) {
     status: review.status,
     created_at: review.created_at,
     updated_at: review.updated_at,
+    state_version: review.state_version ?? 0,
     repository_path: review.repository_path,
     base_ref: review.base_ref,
     requirement: review.requirement,
@@ -346,6 +348,79 @@ function publicReview(review) {
     rereview_decisions: review.rereview_decisions,
     clean_snapshot_hash: review.clean_snapshot_hash ?? null,
     history: review.history,
+  };
+}
+
+function actionRequired(status) {
+  const actions = {
+    WAITING_FOR_REVIEW: "CLAUDE_INITIAL_REVIEW",
+    REVIEW_SUBMITTED: "AUTHOR_RESOLUTIONS",
+    AUTHOR_RESPONDED: "PREPARE_REREVIEW",
+    WAITING_FOR_REREVIEW: "CLAUDE_REREVIEW",
+    CLEAN: "FINALIZE_LOCAL_GATE",
+    LOCAL_GATE_PASSED: "PUBLISH",
+    HUMAN_REQUIRED: "HUMAN_ARBITRATION",
+  };
+  return actions[status] ?? "INSPECT_REVIEW";
+}
+
+function countBy(values) {
+  const result = {};
+  for (const value of values) {
+    result[value] = (result[value] ?? 0) + 1;
+  }
+  return Object.fromEntries(Object.entries(result).sort());
+}
+
+function reviewSummary(review) {
+  const currentSnapshot = review.rounds.at(-1) ?? null;
+  const activeFindings = review.findings.filter(
+    (finding) =>
+      !["RESOLVED", "REBUTTAL_ACCEPTED"].includes(finding.status),
+  );
+  return {
+    id: review.id,
+    status: review.status,
+    created_at: review.created_at,
+    updated_at: review.updated_at,
+    state_version: review.state_version ?? 0,
+    current_round: review.current_round,
+    max_rounds: review.max_rounds,
+    action_required: actionRequired(review.status),
+    current_snapshot:
+      currentSnapshot == null
+        ? null
+        : {
+            round: currentSnapshot.round,
+            base_sha: currentSnapshot.base_sha,
+            head_sha: currentSnapshot.head_sha,
+            snapshot_hash: currentSnapshot.snapshot_hash,
+            changed_file_count: currentSnapshot.changed_files.length,
+            deleted_file_count: currentSnapshot.deleted_files.length,
+            overlay_count: currentSnapshot.overlays.length,
+            patch_bytes: currentSnapshot.patch_bytes,
+          },
+    findings: {
+      total: review.findings.length,
+      active: activeFindings.length,
+      total_by_severity: countBy(
+        review.findings.map((finding) => finding.severity),
+      ),
+      active_by_severity: countBy(
+        activeFindings.map((finding) => finding.severity),
+      ),
+      by_status: countBy(review.findings.map((finding) => finding.status)),
+    },
+    active_findings: activeFindings.map((finding) => ({
+      id: finding.id,
+      severity: finding.severity,
+      title: finding.title,
+      status: finding.status,
+      ...(finding.path == null ? {} : { path: finding.path }),
+      ...(finding.line == null ? {} : { line: finding.line }),
+    })),
+    latest_event: review.history.at(-1) ?? null,
+    clean_snapshot_hash: review.clean_snapshot_hash ?? null,
   };
 }
 
@@ -374,6 +449,7 @@ export async function prepareReview(
     id,
     created_at: timestamp,
     updated_at: timestamp,
+    state_version: 1,
     repository_path: manifest.repository_path,
     base_ref: baseRef,
     requirement,
@@ -387,7 +463,7 @@ export async function prepareReview(
     rereview_decisions: [],
     history: [{ at: timestamp, event: "REVIEW_PREPARED", round: 1 }],
   };
-  await saveReview(storeRoot, review);
+  await atomicWriteJson(reviewFile(storeRoot, review.id), review);
   return publicReview(review);
 }
 
@@ -423,6 +499,47 @@ export async function listReviews(storeRoot, statuses = null) {
 
 export async function getReview(storeRoot, reviewId) {
   return publicReview(await loadReview(storeRoot, reviewId));
+}
+
+export async function getReviewSummary(storeRoot, reviewId) {
+  return reviewSummary(await loadReview(storeRoot, reviewId));
+}
+
+export async function waitForReviewState(
+  storeRoot,
+  reviewId,
+  knownStateVersion,
+  timeoutMs = 25_000,
+) {
+  if (
+    !Number.isSafeInteger(knownStateVersion) ||
+    knownStateVersion < 0
+  ) {
+    throw new Error("known_state_version must be a non-negative safe integer");
+  }
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
+    throw new Error("timeout_ms must be between 1 and 30000");
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let review = await loadReview(storeRoot, reviewId);
+  while ((review.state_version ?? 0) === knownStateVersion) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      return {
+        changed: false,
+        timed_out: true,
+        summary: reviewSummary(review),
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(100, remaining)));
+    review = await loadReview(storeRoot, reviewId);
+  }
+  return {
+    changed: true,
+    timed_out: false,
+    summary: reviewSummary(review),
+  };
 }
 
 function normalizeFinding(input, id, round) {

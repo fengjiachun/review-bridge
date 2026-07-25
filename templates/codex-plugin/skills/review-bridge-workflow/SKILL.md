@@ -20,22 +20,32 @@ Claude Desktop.
    the intended diff before review. Commit later fixes before rereview. This
    lets the local gate attest the exact commit that will become the PR head.
 5. Call `prepare_review` with the base SHA captured in step 1.
-6. Report the returned `review_id` and state `WAITING_FOR_REVIEW`. Ask the user
-   to open Claude Desktop and review that ID.
+6. Call `get_review_summary`, record its `state_version`, report the returned
+   `review_id` and state `WAITING_FOR_REVIEW`, and ask the user to open Claude
+   Desktop and review that ID.
+7. Use `wait_for_review_state` with the recorded `state_version` to observe the
+   transition without repeatedly loading the full ledger. It waits 25 seconds
+   by default and accepts at most 30 seconds. A `timed_out` result is expected
+   while a human-paced review remains in progress; call it again with the same
+   `state_version` until `changed` is true, or report the returned summary and
+   resume when the user confirms the review is complete.
 
 Do not push or open a pull request while the task is waiting for Claude.
 
 ## Handle findings
 
-1. Call `get_review`.
+1. Call `get_review_summary` first. If it reports `REVIEW_SUBMITTED`, call
+   `get_review` once to load the full findings and evidence.
 2. Address every open finding. For each finding choose exactly one:
    - `fixed`: change the code and verify the fix.
    - `rejected`: provide concrete technical evidence.
    - `human_required`: stop and request human arbitration.
 3. Call `submit_resolutions` with one entry for every finding.
 4. If the state is `AUTHOR_RESPONDED`, call `prepare_rereview`.
-5. Report `WAITING_FOR_REREVIEW` and ask the user to invoke Claude Desktop
-   again.
+5. Record the new summary's `state_version`, report `WAITING_FOR_REREVIEW`, ask
+   the user to invoke Claude Desktop again, and use `wait_for_review_state` to
+   observe the next transition. Treat `timed_out` as an expected in-progress
+   result and continue with the same `state_version` as described above.
 
 Keep fixes surgical. Do not mark a finding fixed without verification evidence.
 
@@ -61,17 +71,34 @@ After `LOCAL_GATE_PASSED`:
 2. Require the PR head commit to equal that same local-gate `head_sha`. If it
    differs, stop and start a new local Review Bridge task. Record the matching
    PR head, wait for required checks to pass, and mark the PR ready for review.
-3. Post a PR comment containing exactly `@codex review`. Do not rely on
-   automatic review being enabled.
-4. Wait for Codex to react and post a GitHub review. No response is a pending
-   review, not a pass.
-5. Read the Codex review and its unresolved threads, then read the PR head
-   again. The completed review must apply to the same PR head commit recorded
-   when review was requested.
-6. If Codex reports an actionable finding, make and commit the fix, run the
+3. Read the PR head again, post one PR comment containing exactly
+   `@codex review`, and record the exact request comment ID, URL, creation time,
+   and requested head. Do not rely on automatic review being enabled and do not
+   post another exact request for that head while this one is pending.
+4. Before evaluating a result, obtain the expected Codex GitHub App's stable
+   numeric actor ID and `Bot` type from a maintainer-approved repository setting
+   or previously pinned trusted record. Never learn that identity from the
+   candidate result; if no trusted source exists, stop for human confirmation.
+   Inspect issue comments and pull-request reviews after the request. A completed
+   result may be an issue comment or pull-request review. Inline review comments
+   are evidence only when structurally attached to that formal review; a
+   standalone review comment is unsupported.
+5. A result must explicitly report either actionable findings or the known
+   clean outcome, carry a reviewed-commit binding that uniquely matches the
+   requested full head, and be attributable to the recorded request. The
+   standard clean issue-comment form includes
+   `Codex Review: Didn't find any major issues.` and `Reviewed commit:`.
+   An eyes reaction is pending, never a pass. A removed reaction, silence, an
+   unbound result, or an ambiguous result also remains pending and must not
+   authorize merge.
+6. After a completed result, read all unresolved review threads, required
+   checks, and the PR head again. The completed result, local gate, and checks
+   must apply to the same current head, and no unresolved actionable thread may
+   remain.
+7. If Codex reports an actionable finding, make and commit the fix, run the
    relevant checks, and start a new local Review Bridge task. After its local
    gate passes, push the new commit and request `@codex review` again.
-7. Merge only when the local gate, required checks, and completed GitHub Codex
+8. Merge only when the local gate, required checks, and completed GitHub Codex
    review all apply to the current PR head and no actionable finding remains.
 
 Any new commit invalidates the GitHub review gate. Compare the reviewed PR head

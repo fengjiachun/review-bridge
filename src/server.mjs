@@ -7,6 +7,7 @@ import {
   defaultStoreRoot,
   finalizeLocalGate,
   getReview,
+  getReviewSummary,
   listReviews,
   openReview,
   prepareRereview,
@@ -17,6 +18,7 @@ import {
   submitInitialReview,
   submitRereview,
   submitResolutions,
+  waitForReviewState,
 } from "./core.mjs";
 
 function parseRole(argv) {
@@ -126,6 +128,42 @@ if (role === "author") {
       inputSchema: { review_id: z.string() },
     },
     (input) => getReview(storeRoot, input.review_id),
+  );
+
+  register(
+    "get_review_summary",
+    {
+      title: "Get compact local review status",
+      description:
+        "Read current state, next action, snapshot identity, and compact finding counts without returning the full review ledger.",
+      inputSchema: { review_id: z.string() },
+    },
+    (input) => getReviewSummary(storeRoot, input.review_id),
+  );
+
+  register(
+    "wait_for_review_state",
+    {
+      title: "Wait for local review state change",
+      description:
+        "Wait 25 seconds by default, configurable up to 30 seconds, for review.json to advance beyond a known state_version. A timeout is expected while a human-paced review is in progress and returns the unchanged compact summary; call this tool again with the same known_state_version until changed is true, or resume when the user confirms the review is complete.",
+      inputSchema: {
+        review_id: z.string(),
+        known_state_version: z
+          .number()
+          .int()
+          .min(0)
+          .max(Number.MAX_SAFE_INTEGER),
+        timeout_ms: z.number().int().min(1).max(30_000).optional(),
+      },
+    },
+    (input) =>
+      waitForReviewState(
+        storeRoot,
+        input.review_id,
+        input.known_state_version,
+        input.timeout_ms ?? 25_000,
+      ),
   );
 
   register(
