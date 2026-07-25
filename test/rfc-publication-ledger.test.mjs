@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -20,13 +21,30 @@ function collectionTimes(collection) {
   return [collection.collected_at, ...sources.map((source) => source.collected_at)];
 }
 
+function canonicalizeJson(value) {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalizeJson).join(",")}]`;
+  }
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalizeJson(value[key])}`)
+    .join(",")}}`;
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 test("publication ledger RFC JSON examples are internally consistent", async () => {
   const markdown = await readFile(RFC_URL, "utf8");
   const examples = [...markdown.matchAll(/```json\n([\s\S]*?)\n```/g)].map(
     (match) => JSON.parse(match[1]),
   );
 
-  assert.equal(examples.length, 10);
+  assert.equal(examples.length, 11);
   const [
     ledger,
     clearedObservationEvent,
@@ -38,6 +56,7 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
     verification,
     gate,
     gateAudit,
+    gateAuditHead,
   ] = examples;
   const observation = ledger.latest_observation;
   const baselineCollection = ledger.codex_review_baseline.collection;
@@ -319,7 +338,20 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
   assert.equal(gateAudit.events[0].at, gate.passed_at);
   assert.equal(gateAudit.events[1].at, verification.verified_at);
   assert.equal(gateAudit.events[0].previous_event_sha256, null);
-  assert.notEqual(gateAudit.events[1].previous_event_sha256, null);
+  const auditLines = gateAudit.events.map(canonicalizeJson);
+  assert.equal(gateAudit.version, gateAuditHead.version);
+  assert.equal(gateAudit.review_id, gateAuditHead.review_id);
+  assert.equal(gateAuditHead.next_sequence, gateAudit.events.at(-1).sequence + 1);
+  assert.match(gateAuditHead.last_event_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(
+    gateAudit.events[1].previous_event_sha256,
+    sha256(auditLines[0]),
+  );
+  assert.equal(gateAuditHead.last_event_sha256, sha256(auditLines.at(-1)));
+  assert.equal(
+    gateAuditHead.committed_bytes,
+    Buffer.byteLength(`${auditLines.join("\n")}\n`),
+  );
   assert.equal(
     gateAudit.events[0].gate_sha256,
     gateAudit.events[1].gate_sha256,

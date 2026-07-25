@@ -132,6 +132,13 @@ review mutations; audit records use the append-and-commit protocol below. All
 publication mutations also use a per-review inter-process lock and revision
 check so concurrent Codex sessions cannot overwrite each other's observations.
 
+Whenever `gate.json`, `publication.json`, or `publication-gate.json` is read to
+issue or verify a merge-authorizing gate, the server opens the canonical path
+without following symlinks and confirms from the opened descriptor that it is a
+regular file with mode `0600`. A symlink, another file type, a permission
+mismatch, or a file above the size limit is an unrecoverable local store error;
+path validation is not based on a separate time-of-check lookup.
+
 Under that lock, any later ledger mutation must durably remove the canonical
 `publication-gate.json` before replacing `publication.json`. If gate removal or
 the parent-directory sync fails, the mutation aborts. A crash after removal can
@@ -1511,6 +1518,43 @@ directory-syncs it under the publication lock before replacing the ledger.
 This is required even when the new observation is for the same head and still
 derives `MERGE_READY`.
 
+## Resource bounds
+
+Version 1 applies these limits before accepting publication evidence:
+
+- the RFC 8785 canonical form of one normalized GitHub observation is at most
+  8 MiB;
+- `requirements` has at most 1,000 entries;
+- `runs` and `review_threads.threads` each have at most 10,000 entries;
+- all current Codex request/result arrays and attached review comments in one
+  observation have at most 10,000 entries in aggregate;
+- the publication-start baseline has at most 10,000 request and candidate-result
+  entries in aggregate;
+- `codex_request_history`, `codex_result_history`, and ledger `history` each
+  have at most 10,000 entries, while
+  `codex_review_ambiguity_acknowledgements` has at most 1,000; and
+- every other caller-controlled array has at most 10,000 entries.
+
+The exact UTF-8 bytes written as `publication.json` must never exceed 10 MiB.
+A non-terminal mutation is accepted only when its prospective file is at most
+10 MiB minus 64 KiB; that reserve is exclusively for a minimal server-authored
+terminal record and its history event. For the same reason, a non-terminal
+ledger may contain at most 9,999 history entries; the 10,000th slot is reserved
+for terminal history. The server measures the candidate buffer produced by the
+same serializer used for the atomic write, not a caller-reported size. Before
+parsing any existing publication or gate file, the server checks its file size
+against the same 10 MiB absolute limit.
+
+`start_publication` validates baseline counts and the prospective initial
+ledger before creating any audit remnant; exceeding a limit returns
+non-retryable `PUBLICATION_LIMIT_EXCEEDED` without creating publication state.
+After publication starts, any otherwise valid mutation whose input, monotonic
+history append, or prospective file crosses a limit first revokes an existing
+publication gate and then persists terminal `INVALIDATED` with reason
+`publication evidence exceeds version 1 resource limits`, without storing the
+rejected payload. This fail-closed transition uses the reserved 64 KiB. A new
+local task can proceed only if its bounded baseline fits these limits.
+
 ### `get_publication`
 
 Returns the ledger without accessing GitHub.
@@ -1800,6 +1844,14 @@ cannot contain publication evidence. An existing ledger, gate, populated log
 or head, head without a log, malformed audit state, or permission mismatch
 fails rather than overwriting evidence.
 
+Every audit-head replacement uses an exclusively created
+`publication-gate-audit-head.json.<temp_id>.tmp` sibling, where `temp_id` is
+fresh 128-bit lowercase hex. Under the publication lock, start and append
+ignore only that exact temporary-file pattern during orphan checks, remove
+matching leftovers after the canonical log/head state validates, and reject a
+temporary that is not a regular mode-`0600` file. Other review-directory files
+are outside the audit-pair state and are not deleted.
+
 Each log record is the UTF-8 RFC 8785 canonical representation of one event
 object followed by exactly one newline. The canonical object is at most
 16 KiB before the newline and contains `version: 1`, the owning `review_id`, a
@@ -1822,8 +1874,12 @@ chain digest is an unrecoverable local store error. Bytes after
 uncommitted crash-tail record because no second append starts until recovery.
 If that suffix is one complete, canonical, newline-terminated event matching
 the next sequence and chain digest, recovery commits it by advancing the head.
-Otherwise recovery truncates the uncommitted suffix back to
-`committed_bytes` and file-syncs the log before proceeding.
+If it contains no newline and is no larger than the maximum event size, it is
+one incomplete crash-tail record; recovery truncates it back to
+`committed_bytes` and file-syncs the log before proceeding. Any other suffix,
+including an invalid complete line, multiple lines, or one valid line followed
+by extra bytes, violates the single-writer invariant and is preserved as an
+unrecoverable audit-corruption error rather than silently discarded.
 
 To append, the server writes the complete canonical line through a file
 descriptor opened with append semantics, handling partial writes, then
@@ -1832,7 +1888,8 @@ next sequence, and event digest through a mode-`0600` temporary file and syncs
 the review directory. A current
 finalization or verification succeeds only after both durability steps.
 Failure before the head replacement leaves an uncommitted tail that the next
-operation deterministically adopts or truncates; failure after replacement
+operation deterministically adopts, truncates, or rejects under the rules
+above; failure after replacement
 leaves a committed event even if the caller did not receive the response.
 Events in the committed prefix are never deleted, overwritten, or reordered.
 Appending is O(1) in event count and has no event-count cliff; the append-only
@@ -1881,7 +1938,7 @@ retains gate history after `publication-gate.json` is revoked:
       "review_id": "rb-...",
       "sequence": 2,
       "event_id": "22222222222222222222222222222222",
-      "previous_event_sha256": "sha256...",
+      "previous_event_sha256": "693f0ac40fb3ebc938367e19079de5f01743f05a30d159554dd15f18eaae4249",
       "event": "GATE_VERIFIED",
       "outcome": "SUCCESS",
       "normalized_reason": null,
@@ -1895,6 +1952,21 @@ retains gate history after `publication-gate.json` is revoked:
   ]
 }
 ```
+
+The corresponding committed audit head is:
+
+```json
+{
+  "version": 1,
+  "review_id": "rb-...",
+  "committed_bytes": 849,
+  "next_sequence": 3,
+  "last_event_sha256": "e085d78e03a76c28ab3d892caf7e895e14a2e1410c90a928fb678743d1ba907d"
+}
+```
+
+`next_sequence` is always the sequence assigned to the next append, never the
+sequence most recently committed.
 
 An invalid verification records `outcome: "FAILURE"`, a normalized non-null
 reason, the available identity fields, and null for facts that could not be
@@ -2198,6 +2270,11 @@ can operate from stale reads.
 ## Failure and recovery
 
 - Missing or malformed evidence never advances the state.
+- Publication-start evidence above a version 1 resource limit creates no
+  publication state. A post-start mutation that would cross a count or byte
+  limit revokes any gate and records terminal `INVALIDATED` without storing the
+  oversized payload; the reserved terminal space keeps that fail-closed write
+  within the absolute file limit.
 - `start_publication` durably creates the empty gate-audit log and head before
   the ledger. A crash between those writes leaves one of the exact empty
   pre-start remnants that a retry for the same review validates and completes
@@ -2254,9 +2331,10 @@ can operate from stale reads.
   authorization never depends on replaying them.
 - A crash during audit append leaves at most one suffix after the head's
   `committed_bytes`. The next locked operation adopts one complete valid next
-  record or truncates any incomplete or invalid uncommitted suffix; truncation
-  below the committed offset or a committed-tail digest mismatch is an
-  unrecoverable store error.
+  record or truncates one bounded incomplete record with no newline. A
+  complete-invalid, multi-record, or valid-plus-extra suffix, truncation below
+  the committed offset, or a committed-tail digest mismatch is an
+  unrecoverable store error and is preserved for diagnosis.
 - A previously observed exact request that is changed or deleted persists
   terminal `INVALIDATED`; an older `CLEAN` can never become latest again.
 - A previously observed actor-admitted Codex result that disappears or changes
@@ -2347,6 +2425,10 @@ can operate from stale reads.
   can grow without a fixed count limit. Appends remain O(1), but long-lived
   automation that verifies repeatedly consumes disk until the review store is
   archived or removed under the existing local-store lifecycle.
+- Version 1 rejects very large pull requests or long publication histories
+  that exceed the explicit evidence, collection, history, or 10 MiB ledger
+  limits. Shrinking current GitHub collections does not erase monotonic history;
+  publication may require a new bounded task or a manual merge decision.
 - Version 1 depends on two provider-specific response shapes: a recognized
   clean issue comment and a findings review with attached inline comments. A
   connector that changes either body shape moves that result to
@@ -2547,6 +2629,10 @@ architecture.
   append work is O(1), a crash tail is recoverable, and an audit append failure
   cannot yield a usable gate or merge-authorizing verification response.
   Audit events are never used as authorization evidence.
+- Publication evidence and monotonic histories have explicit count and byte
+  limits. The writer measures the prospective serialized ledger, reserves room
+  for a terminal record, and fails closed without retaining an oversized
+  payload.
 - Ledger-history and gate-audit event names are separate closed domains.
   Observation digests always name their exact normalized observation subtree,
   including the server-authored `recorded_at`, so copied digests retain one
@@ -2781,9 +2867,18 @@ The implementation must test:
 - gate-audit sequence and digest-chain continuity, 128-bit event-ID uniqueness,
   the 16 KiB per-event limit, event enums, mode `0600`, O(1) append without a
   total-count cliff, and crash boundaries before log fsync, between log and
-  head sync, and after head sync; recovery must adopt one complete valid tail,
-  truncate an incomplete or invalid uncommitted tail, and reject corruption
-  inside the committed prefix;
+  head sync, and after head sync; executable examples must bind the head's
+  `committed_bytes`, next sequence, review ID, and last digest to the canonical
+  event lines; recovery must adopt one complete valid tail,
+  truncate one bounded incomplete tail, reject a complete-invalid,
+  multi-record, or valid-plus-extra suffix, and validate the last committed
+  record against the audit head without scanning the committed prefix;
+- offline full audit inspection detecting corruption anywhere in the committed
+  digest chain and reporting it without changing gate validity;
+- authorization-time rejection of symlinks, non-regular files, wrong modes,
+  and oversized `gate.json`, `publication.json`, and
+  `publication-gate.json`, plus exact audit-head temporary-pattern cleanup and
+  rejection of malformed or wrong-mode matching temporaries;
 - exact ledger-history event emission for all four mutation kinds and rejection
   of every unrecognized history event;
 - ambiguity acknowledgement with wrong head, stale revision, missing or extra
@@ -2808,7 +2903,12 @@ The implementation must test:
   `PUBLICATION_TERMINAL` against each terminal status without changing the
   ledger, gate, or audit entries;
 - malformed and oversized inputs, including numeric GitHub IDs outside the
-  positive safe-integer range;
+  positive safe-integer range; exact boundary tests for the 8 MiB observation,
+  10 MiB publication file, 64 KiB terminal reserve, every 10,000-entry
+  collection or monotonic-history limit, the 9,999-entry non-terminal ledger
+  history limit and reserved 10,000th terminal event, and the 1,000-entry
+  requirement and acknowledgement limits, including gate revocation and
+  terminal `INVALIDATED` on post-start overflow;
 - rejection of a non-`Bot` `codex_actor_type`, plus persistence of the exact
   validated actor ID/type pair while login changes only audit display;
 - server-authored `updated_at` and history `at` matching `recorded_at`, parent
