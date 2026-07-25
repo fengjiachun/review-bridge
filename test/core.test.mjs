@@ -201,6 +201,8 @@ test("compact review summaries support bounded state-change waits", async (t) =>
     requirement: "Update the exported value.",
     implementationScope: "Change app.js.",
   });
+  assert.equal(prepared.state_version, 1);
+  assert.equal(prepared.created_at, prepared.updated_at);
   const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
   const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
   ledger.updated_at = "2099-01-01T00:00:00.000Z";
@@ -212,9 +214,11 @@ test("compact review summaries support bounded state-change waits", async (t) =>
   assert.deepEqual(summary.findings, {
     total: 0,
     active: 0,
-    by_severity: {},
+    total_by_severity: {},
+    active_by_severity: {},
     by_status: {},
   });
+  assert.equal(summary.state_version, 1);
   assert.deepEqual(summary.active_findings, []);
   assert.equal(summary.current_snapshot.head_sha, git(repository, "rev-parse", "HEAD"));
   assert.equal(summary.current_snapshot.changed_file_count, 1);
@@ -225,7 +229,7 @@ test("compact review summaries support bounded state-change waits", async (t) =>
   const waiting = waitForReviewState(
     store,
     prepared.id,
-    summary.updated_at,
+    summary.state_version,
     1_000,
   );
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -235,17 +239,96 @@ test("compact review summaries support bounded state-change waits", async (t) =>
   assert.equal(changed.timed_out, false);
   assert.equal(changed.summary.status, "CLEAN");
   assert.equal(changed.summary.action_required, "FINALIZE_LOCAL_GATE");
-  assert.ok(changed.summary.updated_at > summary.updated_at);
+  assert.equal(changed.summary.state_version, 2);
+  assert.ok(changed.summary.updated_at < summary.updated_at);
 
   const timedOut = await waitForReviewState(
     store,
     prepared.id,
-    changed.summary.updated_at,
+    changed.summary.state_version,
     10,
   );
   assert.equal(timedOut.changed, false);
   assert.equal(timedOut.timed_out, true);
   assert.equal(timedOut.summary.status, "CLEAN");
+  await assert.rejects(
+    waitForReviewState(store, prepared.id, changed.summary.state_version, 30_001),
+    /timeout_ms must be between 1 and 30000/,
+  );
+});
+
+test("compact finding histograms distinguish active and all-time severity", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 3;\n");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Update the exported value.",
+    implementationScope: "Change app.js.",
+  });
+  await submitInitialReview(store, prepared.id, [
+    {
+      severity: "blocker",
+      title: "First finding",
+      explanation: "Needs a fix.",
+    },
+    {
+      severity: "major",
+      title: "Second finding",
+      explanation: "Needs evidence.",
+    },
+  ]);
+  await submitResolutions(store, prepared.id, [
+    {
+      finding_id: "F-001",
+      disposition: "fixed",
+      rationale: "Fixed.",
+    },
+    {
+      finding_id: "F-002",
+      disposition: "rejected",
+      rationale: "Not applicable.",
+    },
+  ]);
+  await prepareRereview(store, prepared.id);
+  await submitRereview(
+    store,
+    prepared.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "resolved",
+        rationale: "Verified.",
+      },
+      {
+        finding_id: "F-002",
+        decision: "rebuttal_accepted",
+        rationale: "Evidence accepted.",
+      },
+    ],
+    [
+      {
+        severity: "nit",
+        title: "New finding",
+        explanation: "One small issue remains.",
+      },
+    ],
+  );
+
+  const summary = await getReviewSummary(store, prepared.id);
+  assert.deepEqual(summary.findings, {
+    total: 3,
+    active: 1,
+    total_by_severity: { blocker: 1, major: 1, nit: 1 },
+    active_by_severity: { nit: 1 },
+    by_status: { OPEN: 1, REBUTTAL_ACCEPTED: 1, RESOLVED: 1 },
+  });
+  assert.deepEqual(
+    summary.active_findings.map((finding) => finding.id),
+    ["F-003"],
+  );
 });
 
 test("finalization fails closed when code changes after a clean verdict", async (t) => {

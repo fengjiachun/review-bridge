@@ -5,12 +5,15 @@
 ### Added
 
 - Compact author-side review summaries and bounded state-change waits.
+- Integer state versions keep wait cursors independent from wall-clock
+  formatting and clock skew.
 
 ### Fixed
 
 - The packaged GitHub workflow now recognizes Codex results delivered as issue
-  comments, pull-request reviews, or review comments while requiring trusted
-  actor, exact request, and reviewed-head binding.
+  comments or pull-request reviews while treating attached review comments as
+  supporting evidence and requiring trusted actor, exact request, and
+  reviewed-head binding.
 - Receipt reactions and ambiguous or unbound results remain pending rather than
   being treated as a publication pass.
 

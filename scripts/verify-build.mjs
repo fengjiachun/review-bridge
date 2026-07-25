@@ -95,11 +95,15 @@ assert.match(workflowSkill, /Any new commit invalidates the GitHub review gate/)
 assert.match(workflowSkill, /start a new local Review Bridge task/);
 assert.match(
   workflowSkill,
-  /issue comment, pull-request review, or pull-request review\s+comment/,
+  /issue comment or pull-request review/,
 );
 assert.match(workflowSkill, /An eyes reaction is pending, never a pass/);
 assert.match(workflowSkill, /record the exact request comment ID/);
 assert.match(workflowSkill, /reviewed-commit binding/);
+assert.match(workflowSkill, /get_review_summary/);
+assert.match(workflowSkill, /wait_for_review_state/);
+assert.match(workflowSkill, /a standalone review comment is unsupported/);
+assert.match(workflowSkill, /Never learn that identity from the\s+candidate result/);
 
 const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
 assert.equal(mcpConfig.mcpServers["review-bridge-author"].cwd, ".");
@@ -169,13 +173,13 @@ try {
       review_id: prepared.id,
     });
     assert.equal(summary.action_required, "CLAUDE_INITIAL_REVIEW");
-    const observed = await call(author, "wait_for_review_state", {
+    const timedOut = await call(author, "wait_for_review_state", {
       review_id: prepared.id,
-      known_updated_at: "1970-01-01T00:00:00.000Z",
-      timeout_ms: 1_000,
+      known_state_version: summary.state_version,
+      timeout_ms: 10,
     });
-    assert.equal(observed.changed, true);
-    assert.equal(observed.summary.status, "WAITING_FOR_REVIEW");
+    assert.equal(timedOut.changed, false);
+    assert.equal(timedOut.timed_out, true);
 
     const pending = await call(reviewer, "list_pending_reviews", {});
     assert.equal(pending[0].id, prepared.id);
@@ -190,6 +194,11 @@ try {
     });
     assert.match(patch.content, /value = 2/);
 
+    const observedPromise = call(author, "wait_for_review_state", {
+      review_id: prepared.id,
+      known_state_version: summary.state_version,
+      timeout_ms: 30_000,
+    });
     await call(reviewer, "submit_review", {
       review_id: prepared.id,
       findings: [
@@ -203,6 +212,9 @@ try {
         },
       ],
     });
+    const observed = await observedPromise;
+    assert.equal(observed.changed, true);
+    assert.equal(observed.summary.status, "REVIEW_SUBMITTED");
     await call(author, "submit_resolutions", {
       review_id: prepared.id,
       resolutions: [

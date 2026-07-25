@@ -130,10 +130,8 @@ export async function loadReview(storeRoot, reviewId) {
 async function saveReview(storeRoot, review) {
   // v0.1 assumes one state transition at a time. Atomic replacement prevents
   // corruption, but concurrent author and reviewer writes can still lose updates.
-  const previous = Date.parse(review.updated_at);
-  review.updated_at = new Date(
-    Math.max(Date.now(), Number.isFinite(previous) ? previous + 1 : 0),
-  ).toISOString();
+  review.state_version = (review.state_version ?? 0) + 1;
+  review.updated_at = now();
   await atomicWriteJson(reviewFile(storeRoot, review.id), review);
 }
 
@@ -337,6 +335,7 @@ function publicReview(review) {
     status: review.status,
     created_at: review.created_at,
     updated_at: review.updated_at,
+    state_version: review.state_version ?? 0,
     repository_path: review.repository_path,
     base_ref: review.base_ref,
     requirement: review.requirement,
@@ -384,6 +383,7 @@ function reviewSummary(review) {
     status: review.status,
     created_at: review.created_at,
     updated_at: review.updated_at,
+    state_version: review.state_version ?? 0,
     current_round: review.current_round,
     max_rounds: review.max_rounds,
     action_required: actionRequired(review.status),
@@ -403,7 +403,12 @@ function reviewSummary(review) {
     findings: {
       total: review.findings.length,
       active: activeFindings.length,
-      by_severity: countBy(review.findings.map((finding) => finding.severity)),
+      total_by_severity: countBy(
+        review.findings.map((finding) => finding.severity),
+      ),
+      active_by_severity: countBy(
+        activeFindings.map((finding) => finding.severity),
+      ),
       by_status: countBy(review.findings.map((finding) => finding.status)),
     },
     active_findings: activeFindings.map((finding) => ({
@@ -444,6 +449,7 @@ export async function prepareReview(
     id,
     created_at: timestamp,
     updated_at: timestamp,
+    state_version: 1,
     repository_path: manifest.repository_path,
     base_ref: baseRef,
     requirement,
@@ -457,7 +463,7 @@ export async function prepareReview(
     rereview_decisions: [],
     history: [{ at: timestamp, event: "REVIEW_PREPARED", round: 1 }],
   };
-  await saveReview(storeRoot, review);
+  await atomicWriteJson(reviewFile(storeRoot, review.id), review);
   return publicReview(review);
 }
 
@@ -502,20 +508,22 @@ export async function getReviewSummary(storeRoot, reviewId) {
 export async function waitForReviewState(
   storeRoot,
   reviewId,
-  knownUpdatedAt,
-  timeoutMs = 30_000,
+  knownStateVersion,
+  timeoutMs = 25_000,
 ) {
-  assertString(knownUpdatedAt, "known_updated_at", { max: 100 });
-  if (!Number.isFinite(Date.parse(knownUpdatedAt))) {
-    throw new Error("known_updated_at must be an ISO timestamp");
+  if (
+    !Number.isSafeInteger(knownStateVersion) ||
+    knownStateVersion < 0
+  ) {
+    throw new Error("known_state_version must be a non-negative safe integer");
   }
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
-    throw new Error("timeout_ms must be between 1 and 60000");
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
+    throw new Error("timeout_ms must be between 1 and 30000");
   }
 
   const deadline = Date.now() + timeoutMs;
   let review = await loadReview(storeRoot, reviewId);
-  while (review.updated_at === knownUpdatedAt) {
+  while ((review.state_version ?? 0) === knownStateVersion) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       return {

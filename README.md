@@ -71,9 +71,10 @@ In Codex:
 
 Codex returns a `review_id` and waits in `WAITING_FOR_REVIEW`.
 Use `get_review_summary` for the compact state, next action, current snapshot,
-and finding counts. `wait_for_review_state` waits up to 60 seconds for
-`updated_at` to advance and returns the same compact summary, avoiding repeated
-full-ledger polling.
+and active versus all-time finding counts. Pass its `state_version` to
+`wait_for_review_state`; the tool waits 25 seconds by default, configurable up
+to 30 seconds, and returns the same compact summary without repeated full-ledger
+polling.
 
 In Claude Desktop:
 
@@ -120,12 +121,13 @@ LOCAL_GATE_PASSED
 
 Codex must post one pull-request comment containing exactly `@codex review`,
 record that request's identity and head, and wait for a bound result. GitHub
-Codex may return that result as an issue comment, pull-request review, or
-pull-request review comment. A trusted result must explicitly report findings
-or the known clean outcome and bind its reviewed commit to the current PR head.
-An eyes reaction is only receipt acknowledgement; silence, a removed reaction,
-or an unbound result is not a pass. Any new commit invalidates the GitHub review
-gate.
+Codex may return that result as an issue comment or pull-request review. Inline
+review comments are evidence only when structurally attached to that formal
+review; a standalone review comment is not a trusted result. A trusted result
+must explicitly report findings or the known clean outcome and bind its reviewed
+commit to the current PR head. An eyes reaction is only receipt acknowledgement;
+silence, a removed reaction, or an unbound result is not a pass. Any new commit
+invalidates the GitHub review gate.
 
 Before requesting GitHub review, both the local branch head and PR head must
 equal the `head_sha` returned by `finalize_local_gate`. A mismatch invalidates

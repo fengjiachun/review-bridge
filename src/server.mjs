@@ -146,19 +146,23 @@ if (role === "author") {
     {
       title: "Wait for local review state change",
       description:
-        "Wait up to 60 seconds for review.json to advance beyond a known updated_at value, then return a compact summary.",
+        "Wait 25 seconds by default, configurable up to 30 seconds, for review.json to advance beyond a known state_version, then return a compact summary.",
       inputSchema: {
         review_id: z.string(),
-        known_updated_at: z.string(),
-        timeout_ms: z.number().int().min(1).max(60_000).optional(),
+        known_state_version: z
+          .number()
+          .int()
+          .min(0)
+          .max(Number.MAX_SAFE_INTEGER),
+        timeout_ms: z.number().int().min(1).max(30_000).optional(),
       },
     },
     (input) =>
       waitForReviewState(
         storeRoot,
         input.review_id,
-        input.known_updated_at,
-        input.timeout_ms ?? 30_000,
+        input.known_state_version,
+        input.timeout_ms ?? 25_000,
       ),
   );
 

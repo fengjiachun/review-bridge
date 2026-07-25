@@ -20,22 +20,28 @@ Claude Desktop.
    the intended diff before review. Commit later fixes before rereview. This
    lets the local gate attest the exact commit that will become the PR head.
 5. Call `prepare_review` with the base SHA captured in step 1.
-6. Report the returned `review_id` and state `WAITING_FOR_REVIEW`. Ask the user
-   to open Claude Desktop and review that ID.
+6. Call `get_review_summary`, record its `state_version`, report the returned
+   `review_id` and state `WAITING_FOR_REVIEW`, and ask the user to open Claude
+   Desktop and review that ID.
+7. Use `wait_for_review_state` with the recorded `state_version` to observe the
+   transition without repeatedly loading the full ledger. It waits 25 seconds
+   by default and accepts at most 30 seconds.
 
 Do not push or open a pull request while the task is waiting for Claude.
 
 ## Handle findings
 
-1. Call `get_review`.
+1. Call `get_review_summary` first. If it reports `REVIEW_SUBMITTED`, call
+   `get_review` once to load the full findings and evidence.
 2. Address every open finding. For each finding choose exactly one:
    - `fixed`: change the code and verify the fix.
    - `rejected`: provide concrete technical evidence.
    - `human_required`: stop and request human arbitration.
 3. Call `submit_resolutions` with one entry for every finding.
 4. If the state is `AUTHOR_RESPONDED`, call `prepare_rereview`.
-5. Report `WAITING_FOR_REREVIEW` and ask the user to invoke Claude Desktop
-   again.
+5. Record the new summary's `state_version`, report `WAITING_FOR_REREVIEW`, ask
+   the user to invoke Claude Desktop again, and use `wait_for_review_state` to
+   observe the next transition.
 
 Keep fixes surgical. Do not mark a finding fixed without verification evidence.
 
@@ -65,11 +71,14 @@ After `LOCAL_GATE_PASSED`:
    `@codex review`, and record the exact request comment ID, URL, creation time,
    and requested head. Do not rely on automatic review being enabled and do not
    post another exact request for that head while this one is pending.
-4. Inspect all supported Codex result resources after the request. A completed
-   result may be an issue comment, pull-request review, or pull-request review
-   comment; do not require a pull-request review object. Require the configured
-   Codex GitHub App's stable actor ID and `Bot` type rather than trusting a
-   mutable login alone.
+4. Before evaluating a result, obtain the expected Codex GitHub App's stable
+   numeric actor ID and `Bot` type from a maintainer-approved repository setting
+   or previously pinned trusted record. Never learn that identity from the
+   candidate result; if no trusted source exists, stop for human confirmation.
+   Inspect issue comments and pull-request reviews after the request. A completed
+   result may be an issue comment or pull-request review. Inline review comments
+   are evidence only when structurally attached to that formal review; a
+   standalone review comment is unsupported.
 5. A result must explicitly report either actionable findings or the known
    clean outcome, carry a reviewed-commit binding that uniquely matches the
    requested full head, and be attributable to the recorded request. The
