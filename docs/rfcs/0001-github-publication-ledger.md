@@ -281,6 +281,7 @@ The initial schema is:
           "requested_head_sha": "0123456789abcdef..."
         }
       ],
+      "unbound_requests": [],
       "unsupported_requests": [],
       "foreign_actor_objects": [],
       "results": [
@@ -369,28 +370,37 @@ Empty arrays never imply that collection succeeded. Each evidence class carries
 where applicable. Any missing field, failed query, ambiguous permission error,
 or incomplete page sequence makes the whole observation incomplete.
 
-`codex_request_history` is server-maintained and monotonic. A recognized issue
-comment enters history only through `record_codex_review_request`, immediately
-after the comment-post response, with
+`codex_request_history` is server-maintained and monotonic. A workflow-managed
+issue-comment request enters history through `record_codex_review_request`,
+immediately after the comment-post response, with
 `binding_source: "RECORDED_AT_POST"`. The mutation binds the returned comment
 ID and creation time to the already verified pull request head; a later
 snapshot never infers `requested_head_sha` from the then-current pull request.
-A complete Codex-review collection reconciles recognized entries and appends
-newly observed unsupported requests with
-`binding_source: "OBSERVED_UNSUPPORTED"`.
+A complete Codex-review collection reconciles those recognized entries and
+appends newly observed exact issue-comment requests lacking a post-time binding
+as `UNBOUND` with `binding_source: "OBSERVED_UNBOUND"`, plus unsupported
+requests with `binding_source: "OBSERVED_UNSUPPORTED"`.
 
 Each history entry records `resource_id`, `resource_kind`, `classification`
-(`RECOGNIZED` or `UNSUPPORTED`), binding source, URL, `event_at`,
+(`RECOGNIZED`, `UNBOUND`, or `UNSUPPORTED`), binding source, URL, `event_at`,
 server `recorded_at`, `body_sha256`, and nullable `requested_head_sha`; the SHA
-is required for recognized requests and null for unsupported requests. On
-every later complete collection, every historical request must still appear in
-the union of `requests` and `unsupported_requests` with the same immutable
-facts. A
-recognized request without a pre-recorded binding, missing request, changed
-body, reclassification, reused `(resource_kind, resource_id)`, or conflicting
-provenance persists terminal `INVALIDATED`; restoring or recreating the object
-cannot revive that publication ledger. Incomplete collections neither compare
-nor advance the history.
+is required for recognized requests and null for unbound or unsupported
+requests. On every later complete collection, every historical request must
+still appear in the union of `requests`, `unbound_requests`, and
+`unsupported_requests` with the same immutable facts. A missing request,
+changed body, reclassification, reused `(resource_kind, resource_id)`, or
+conflicting provenance persists terminal `INVALIDATED`; restoring or
+recreating the object cannot revive that publication ledger.
+
+There is one bounded visibility exception for a post-time binding that is not
+yet present in a separate listing response. If a `RECORDED_AT_POST` history
+entry is absent and the Codex-review collection's `collected_at` is no more
+than 30 seconds after the entry's server `recorded_at`, the snapshot derives
+`EVIDENCE_INCOMPLETE` without advancing history or writing a terminal state and
+instructs the caller to retry. Once that window expires, continued absence is
+a missing request and persists `INVALIDATED`. Changed bodies,
+reclassifications, and provenance conflicts receive no grace. Other incomplete
+collections neither compare nor advance the history.
 
 `collection.status` is `COMPLETE`, `INCOMPLETE`, or `UNKNOWN`. Policy-source
 results are `SUCCESS`, `NOT_CONFIGURED`, `ERROR`, or `UNKNOWN`. Incomplete or
@@ -585,7 +595,7 @@ state.
 | `CHECKS_FAILED` | No | A latest required-check attempt has a blocking conclusion. |
 | `GITHUB_REVIEW_NOT_REQUESTED` | No | No valid exact request exists for the head. |
 | `GITHUB_REVIEW_PENDING` | No | The latest request has no corresponding result. |
-| `GITHUB_REVIEW_UNKNOWN` | No | The result format, association, or verdict is ambiguous. |
+| `GITHUB_REVIEW_UNKNOWN` | No | A request is unbound, or the result format, association, or verdict is ambiguous. |
 | `CHANGES_REQUIRED` | No | Codex reported findings or any review thread is unresolved. |
 | `MERGE_READY` | No | Every required invariant passes for the current head. |
 | `INVALIDATED` | Yes | The pull request identity/head no longer matches the local gate, or an observed exact request disappeared or changed. |
@@ -629,10 +639,12 @@ The evaluator applies these checks in order:
    terminal `CLOSED`.
 8. Every remaining evidence collection reports `COMPLETE`, is fresh, has
    complete pagination, and satisfies its internal counts and provenance rules.
-   Require the complete current recognized/unsupported request union to match
-   the already-reconciled `codex_request_history`. A disappearance, change, or
-   missing history entry returns a proposed terminal `INVALIDATED` without
-   mutating either structure.
+   Require the complete current recognized/unbound/unsupported request union to
+   match the already-reconciled `codex_request_history`. A disappearance,
+   change, or missing history entry outside the bounded post-to-list visibility
+   grace returns a proposed terminal `INVALIDATED` without mutating either
+   structure. A just-recorded request absent within that grace derives
+   `EVIDENCE_INCOMPLETE`.
 9. An open pull request is no longer a draft.
 10. The adapter normalizes GitHub's mergeability result to `MERGEABLE`,
    `CONFLICTING`, or `UNKNOWN`.
@@ -650,8 +662,11 @@ The evaluator applies these checks in order:
     ambiguity acknowledgement for the current head.
     `foreign_actor_objects` never participates. An unacknowledged ambiguous
     result preserves its indeterminate request set and derives
-    `GITHUB_REVIEW_UNKNOWN`. A valid acknowledgement closes exactly its named
-    observed epoch without correlating a result retroactively. Any
+    `GITHUB_REVIEW_UNKNOWN`. An unbound exact issue-comment request also derives
+    `GITHUB_REVIEW_UNKNOWN`, can never satisfy review, and remains in the
+    correlation epoch until a valid acknowledgement closes it. A valid
+    acknowledgement closes exactly its named observed epoch without
+    correlating a result retroactively. Any
     later-discovered pre-boundary event absent from its closed request IDs or
     resource-scoped result references derives `GITHUB_REVIEW_UNKNOWN`. An
     `UNSOLICITED` result before the epoch's first exact request is retained for
@@ -659,8 +674,8 @@ The evaluator applies these checks in order:
 13. Any exact `@codex review` text in a pull request review or review comment
     after publication starts derives `GITHUB_REVIEW_UNKNOWN`; it is an
     unsupported request location and is never silently discarded. Ignore
-    `foreign_actor_objects`. From the remaining recognized `ISSUE_COMMENT`
-    requests, select the latest by
+    `foreign_actor_objects` and acknowledged unbound requests. From the
+    remaining recognized `ISSUE_COMMENT` requests, select the latest by
     `(event_at, comment_id)`. This tie-break is within one resource kind and
     ID namespace. If none exists, derive `GITHUB_REVIEW_NOT_REQUESTED`. Zero
     correlated results derives `GITHUB_REVIEW_PENDING`; an ambiguous result
@@ -692,11 +707,12 @@ rejected or silently paired.
 
 Ambiguity never clears automatically. Publication can recover on the same head
 only after the operator explicitly acknowledges the exact indeterminate
-request IDs and resource-scoped result references, asserting that those old
-requests will produce no further results and accepting the risk if that
-assertion is wrong. The next exact request posted after `acknowledged_at`
-starts a new correlation epoch; requests posted before acknowledgement are
-reported and closed by that boundary.
+request IDs, including any unbound request IDs, and resource-scoped result
+references, asserting that those old requests will produce no further results
+and accepting the risk if that assertion is wrong. The next workflow-managed
+exact request posted after `acknowledged_at` starts a new correlation epoch;
+requests posted before acknowledgement are reported and closed by that
+boundary.
 
 ## Author tools
 
@@ -740,12 +756,27 @@ is fresh, and appends a `RECORDED_AT_POST` recognized request to
 `recorded_at`; callers cannot choose them. A duplicate comment ID, conflicting
 binding, stale response, or changed local head fails without writing.
 
+Under the publication lock, this revision-advancing tool follows the universal
+revoke-before-write rule: if `publication-gate.json` exists, it removes and
+directory-syncs the gate before replacing the ledger. Failure to remove or
+sync the gate aborts the mutation.
+
 This local mutation cannot be atomic with GitHub comment creation. The packaged
 workflow therefore performs a fresh head check, posts exactly one request, and
 calls this tool immediately with the post response before any other workflow
-step. If the process crashes in that interval, a later snapshot treats the
-unbound recognized comment as terminal `INVALIDATED`; it never infers the
-request head from the current pull request.
+step. If the process crashes in that interval, a later snapshot records the
+comment as `UNBOUND` and derives `GITHUB_REVIEW_UNKNOWN`; it never infers the
+request head from the current pull request. Recovery requires direct human
+approval to close that unbound request in the complete acknowledgement set,
+followed by a new workflow-managed request.
+
+Exact `@codex review` conversation comments must therefore be posted only by
+the packaged workflow. A human who wants a re-review asks the workflow to post
+and bind it rather than commenting directly. A manually posted exact request
+is retained as unbound audit evidence and blocks publication until the human
+explicitly acknowledges that it will produce no further result. Editing or
+deleting it is not recovery: once observed, the monotonic-history rules make
+that change terminally invalidating.
 
 ### `record_github_snapshot`
 
@@ -763,11 +794,12 @@ provenance, required-app identity, strict-policy provenance and base/head
 comparison, run ordering and status/conclusion pairs, evidence provenance and
 collection metadata, thread counts, latest-run selection, exact request bodies,
 resource-kind-scoped event ordering, recognized requests being issue comments,
-complete reporting of exact request text in unsupported resource kinds, result
-actor admission, foreign-actor partitioning, and commit-binding provenance,
+complete reporting of unbound issue-comment requests and exact request text in
+unsupported resource kinds, result actor admission, foreign-actor partitioning,
+and commit-binding provenance,
 endpoint-specific authorization proof for a classic-protection
 `NOT_CONFIGURED`, request/result correlation, monotonic recognized and
-unsupported request history, latest-request selection, merge fields, and
+unbound/unsupported request history, latest-request selection, merge fields, and
 cross-field ordering. An incomplete but well-formed collection is recorded and
 derives `EVIDENCE_INCOMPLETE`.
 
@@ -778,15 +810,22 @@ interval. The server sets `recorded_at` from its own clock, derives status, and
 atomically records the next revision.
 
 For a complete Codex-review collection, the server compares and advances
-`codex_request_history` against the union of `requests` and
-`unsupported_requests` in the same locked mutation before calling the pure
+`codex_request_history` against the union of `requests`, `unbound_requests`,
+and `unsupported_requests` in the same locked mutation before calling the pure
 state evaluator. Every recognized request must already have a
-`RECORDED_AT_POST` entry; if prior entries all match, the tool appends only
-newly observed unsupported entries and then derives status. A history conflict
-writes terminal `INVALIDATED` in that revision; caller input cannot replace or
-truncate the history. Only `record_codex_review_request` and
-`record_github_snapshot` advance request history; only the latter materializes
-a newly derived terminal record.
+`RECORDED_AT_POST` entry. An exact issue comment without one is reported under
+`unbound_requests`, appended with `OBSERVED_UNBOUND`, and blocks without
+receiving an inferred head. If prior entries all match, the tool appends newly
+observed unbound and unsupported entries and then derives status.
+
+When a just-recorded recognized entry is absent from the collection within the
+30-second post-to-list visibility grace, the tool records the observation in
+the next revision without advancing request history and derives retryable
+`EVIDENCE_INCOMPLETE`; absence after the grace is a history conflict and writes
+terminal `INVALIDATED`. Other history conflicts have no grace. Caller input
+cannot replace or truncate history. Only
+`record_codex_review_request` and `record_github_snapshot` advance request
+history; only the latter materializes a newly derived terminal record.
 
 The first observation must be recorded after `start_publication`. The target
 and expected Codex actor are immutable after creation; there is no rebinding
@@ -809,9 +848,10 @@ Inputs:
 - `expected_revision`
 - `head_sha`
 - the exact non-empty `request_comment_ids` that the boundary will close,
-  including every indeterminate and still-open recovery request, plus the
-  exact `ambiguous_results`; each ambiguous result names both `resource_kind`
-  and `result_id`
+  including every indeterminate, unbound, and still-open recovery request,
+  plus the exact `ambiguous_results`; each ambiguous result names both
+  `resource_kind` and `result_id`. `ambiguous_results` may be empty when an
+  unbound request alone is blocking
 - `acknowledgement: "NO_FURTHER_RESULTS_EXPECTED"`
 - a non-empty `operator_label` and `rationale`
 
@@ -824,35 +864,39 @@ instruction to finish the workflow is not approval.
 The shipped Codex workflow skill must carry that approval rule and the complete
 seven-tool ordering, including `record_codex_review_request` immediately after
 every exact request post and `verify_publication_gate` immediately before
-merge. `scripts/verify-build.mjs` must assert these requirements in the
-packaged skill, so losing one fails the build rather than silently changing the
-workflow.
+merge. It must also tell operators never to post exact request comments by hand
+and to recover an observed unbound request only through the direct-human
+acknowledgement path. `scripts/verify-build.mjs` must assert these requirements
+in the packaged skill, so losing one fails the build rather than silently
+changing the workflow.
 
 The normative sequence is: `start_publication`; refresh and verify the head;
 post one exact request and immediately call `record_codex_review_request`; use
 `get_publication` as needed; then record a complete snapshot. Only if ambiguity
-blocks it, stop for direct human approval of the full closure set before
-acknowledgement; then refresh the head, post a new exact request, immediately
-record its binding, and record a new snapshot. After `MERGE_READY`, finalize
-the gate and call `verify_publication_gate` immediately before the
-head-matching merge.
+or an unbound request blocks it, stop for direct human approval of the full
+closure set before acknowledgement; then refresh the head, post a new exact
+request, immediately record its binding, and record a new snapshot. After
+`MERGE_READY`, finalize the gate and call `verify_publication_gate` immediately
+before the head-matching merge.
 
 Under the publication lock, the server reloads the current observation,
 requires `head_sha` to match the local gate and pull request, independently
 replays association, and requires set equality between the supplied IDs and
 the entire request set the boundary would close and the current indeterminate
 result set, comparing results by `(resource_kind, result_id)`. The request set
-includes recovery requests posted after ambiguity but before acknowledgement.
+includes unbound requests and recovery requests posted after ambiguity but
+before acknowledgement.
 The backing observation must satisfy the same five-minute age limit, 30-second
 future tolerance, post-publication ordering, and two-minute atomic-collection
 window used by finalization. Otherwise the call fails with an instruction to
 record a fresh snapshot first.
 
 The acknowledgement closes the entire observed correlation epoch. Every
-recovery request posted after the ambiguity but before acknowledgement must
-already be present in the directly approved `request_comment_ids`. The server
-copies that exact set to `closed_request_comment_ids`; the boundary cannot close
-an unapproved request. The server-generated record is:
+unbound request and every recovery request posted after the ambiguity but
+before acknowledgement must already be present in the directly approved
+`request_comment_ids`. The server copies that exact set to
+`closed_request_comment_ids`; the boundary cannot close an unapproved request.
+The server-generated record is:
 
 ```json
 {
@@ -1007,9 +1051,13 @@ Codex plugin, not in the generic ledger evaluator.
 The adapter collects every page of conversation comments, formal reviews, and
 review comments and returns:
 
-- every exact `@codex review` issue comment as a recognized request, with
-  GitHub object ID, URL, timestamp, the `ISSUE_COMMENT` resource kind, and the
-  head SHA recorded when the request was made;
+- every exact `@codex review` issue comment whose object ID already has a
+  `RECORDED_AT_POST` history entry as a recognized request, with GitHub object
+  ID, URL, timestamp, the `ISSUE_COMMENT` resource kind, and the head SHA from
+  that entry;
+- every other exact issue-comment request under `unbound_requests`, with no
+  head SHA and `reason: "MISSING_POST_BINDING"`; the adapter never adopts it
+  using the pull request head observed later;
 - every exact `@codex review` body found in a formal review or review comment
   under `unsupported_requests`, so unsupported re-review intent blocks rather
   than disappearing from evaluation;
@@ -1022,10 +1070,13 @@ review comments and returns:
 - `CLEAN`, `FINDINGS`, or `UNKNOWN` for each candidate result; and
 - a SHA-256 digest of each original response body.
 
-Each `unsupported_requests` entry carries `resource_id`, `resource_kind`, URL,
-`event_at`, `timestamp_field`, and `body_sha256`. Its presence after
-publication starts is sufficient to block; it is not converted into a
-recognized request or correlated with a result.
+Each `unbound_requests` and `unsupported_requests` entry carries `resource_id`,
+`resource_kind`, URL, `event_at`, `timestamp_field`, and `body_sha256`.
+Unbound entries additionally carry the fixed reason above. An unbound request
+participates only as an indeterminate request that widens or preserves
+ambiguity; it can never satisfy review. An unsupported request is not
+correlated with a result. Either blocks after publication starts, and neither
+is converted into a recognized request.
 
 Any unrecognized response format returns `UNKNOWN`. A reaction without a
 response is still pending.
@@ -1052,9 +1103,13 @@ observed when the comment is fetched is never a commit binding. Such a result
 therefore has null `reviewed_head_sha` and `commit_binding` and returns
 `UNKNOWN`.
 
-After actor admission, the adapter processes requests and candidate results by
-`event_at` and maintains the unmatched exact requests for each head. GitHub
-object IDs break timestamp ties only when both events have the same
+After actor admission, the adapter processes recognized requests, unbound
+requests, and candidate results by `event_at`. It maintains the unmatched
+recognized requests for each head and the unbound indeterminate requests for
+the publication epoch. The presence of an unbound request prevents any result
+in that epoch from establishing a unique satisfactory association until a
+human acknowledgement closes it. GitHub object IDs break timestamp ties only
+when both events have the same
 `resource_kind` and therefore share an ID namespace. An equal-timestamp tie
 across issue comments, pull request reviews, or review comments has no total
 order; if it can affect request/result association, the result is `AMBIGUOUS`
@@ -1068,19 +1123,21 @@ Version 1 accepts only these association values:
   uses `association: "UNSOLICITED"` with a null `request_comment_id`; it is
   retained for audit but never opens, closes, or satisfies a request;
 - a result uses `association: "SINGLE_OPEN_REQUEST"` only when exactly one
-  unmatched prior exact request exists for that head, and records that
-  request's comment ID;
-- when multiple requests could own the result, the adapter returns
+  unmatched prior recognized request exists for that head and no unbound
+  request exists in the open epoch, and records that request's comment ID;
+- when multiple recognized requests or any unbound request could own the
+  result, the adapter returns
   `association: "AMBIGUOUS"` and a null `request_comment_id`; and
 - after at least one request has existed in the epoch, a result with no open
   request is a possible duplicate result and is also `AMBIGUOUS`.
 
 A correlated result closes its request. An ambiguous result marks every
-currently unmatched request for that head indeterminate but does not close or
-discard the set. Every later result for that head therefore remains ambiguous
-until `acknowledge_codex_review_ambiguity` closes the exact indeterminate set.
-The acknowledgement is a server-recorded correlation-epoch boundary, not a
-result association. A request posted after it starts the next open set.
+currently unmatched recognized request for that head and every open unbound
+request in the epoch indeterminate, but does not close or discard the set.
+Every later result for that head therefore remains ambiguous until
+`acknowledge_codex_review_ambiguity` closes the exact indeterminate set. The
+acknowledgement is a server-recorded correlation-epoch boundary, not a result
+association. A request posted after it starts the next open set.
 
 Response body text, mentions, permalinks, and all other free-form content never
 supply request linkage. Version 1 has no `EXPLICIT_LINK`; adding a future
@@ -1168,12 +1225,19 @@ can operate from stale reads.
   cannot be finalized.
 - A previously observed exact request that is changed or deleted persists
   terminal `INVALIDATED`; an older `CLEAN` can never become latest again.
-- A recognized request without a `RECORDED_AT_POST` head binding persists
-  terminal `INVALIDATED`; a later snapshot never guesses its head.
-- Ambiguous Codex results remain `GITHUB_REVIEW_UNKNOWN` until an explicit
-  acknowledgement names the exact indeterminate IDs. An acknowledgement
-  revokes any gate and creates an auditable risk-acceptance boundary; it does
-  not prove that old requests have stopped.
+- A manually posted exact issue-comment request has no
+  `RECORDED_AT_POST` head binding. It is recorded as `UNBOUND`, never receives
+  an inferred head, and derives `GITHUB_REVIEW_UNKNOWN` until a direct human
+  acknowledgement closes it. Operators must not edit or delete it after
+  observation.
+- A just-recorded request missing from a complete listing within the 30-second
+  visibility grace derives retryable `EVIDENCE_INCOMPLETE`; continued absence
+  after the grace persists terminal `INVALIDATED`.
+- Ambiguous Codex results and unbound requests remain
+  `GITHUB_REVIEW_UNKNOWN` until an explicit acknowledgement names the exact
+  indeterminate IDs. An acknowledgement revokes any gate and creates an
+  auditable risk-acceptance boundary; it does not prove that old requests have
+  stopped.
 - A pre-request automatic result is `UNSOLICITED`, remains audit evidence, and
   cannot poison or satisfy a later exact request.
 - A comment-only result without a GitHub-native reviewed-commit binding is
@@ -1195,7 +1259,8 @@ can operate from stale reads.
 - When any policy source requires strict updates, a head that does not contain
   the current base derives `PR_UPDATE_REQUIRED`.
 - Ambiguity acknowledgement fails unless direct human approval and tool input
-  cover every request the correlation-epoch boundary would close.
+  cover every request the correlation-epoch boundary would close, including
+  unbound requests.
 - Stale evidence cannot back an ambiguity acknowledgement; the operator must
   record a fresh snapshot first.
 - A merged pull request may be recorded only when a live observation supplies
@@ -1221,6 +1286,15 @@ can operate from stale reads.
   Explicitly acknowledging ambiguity restores progress but accepts the risk
   that an old delayed result may later be attributed to the new request. The
   ledger records that human decision; it cannot eliminate the uncertainty.
+- Exact `@codex review` conversation comments must be posted through the
+  packaged workflow so they can be bound to the verified head. A manual exact
+  comment is fail-closed as `UNBOUND` and requires explicit human
+  acknowledgement before recovery; editing or deleting it after observation
+  invalidates the monotonic ledger.
+- The post response and paginated comment listing can briefly disagree. The
+  30-second visibility grace trades a short retry delay for avoiding terminal
+  invalidation during normal write-to-list propagation; persistent absence
+  still invalidates.
 - A new commit intentionally requires a new local review rather than resuming
   the existing publication ledger.
 
@@ -1282,28 +1356,31 @@ architecture.
   are separated before parsing or association.
 - Every Codex result is correlated by the single-open-request rule; overlapping
   requests are ambiguous, and free-form text never supplies linkage.
-- Ambiguity remains blocking until a human acknowledges the exact indeterminate
-  results and every request the boundary will close, and asserts that none will
-  reply. The acknowledgement is revisioned, revokes any gate, and starts a new
-  correlation epoch.
+- Ambiguity and unbound requests remain blocking until a human acknowledges
+  the exact indeterminate results and every request the boundary will close,
+  and asserts that none will reply. The acknowledgement is revisioned, revokes
+  any gate, and starts a new correlation epoch.
 - Automatic results before the epoch's first exact request are `UNSOLICITED`
   and never trigger the acknowledgement path.
 - Only a formal pull request review's GitHub-native `commit_id` can establish
   `reviewed_head_sha`; conversation comments and review comments are `UNKNOWN`.
-- Recognized requests are exact `@codex review` issue comments. The same exact
-  text in another resource kind is an unsupported request that blocks
-  publication rather than being silently discarded.
-- Recognized and unsupported exact requests are accumulated in one
+- Recognized requests are workflow-managed exact `@codex review` issue
+  comments with a durable post-time binding. An exact issue comment without
+  that binding is `UNBOUND`; the same exact text in another resource kind is
+  unsupported. Both block publication rather than being silently discarded.
+- Recognized, unbound, and unsupported exact requests are accumulated in one
   server-owned monotonic history. Any previously observed request that
   disappears, changes, or is reclassified terminally invalidates the
   publication ledger.
 - Every recognized request is durably bound to the verified head immediately
-  after its GitHub post response. Snapshot collection never infers that head.
+  after its GitHub post response. Snapshot collection never infers that head;
+  unbound requests can only be closed through directly approved ambiguity
+  acknowledgement.
 - Object IDs order equal-time events only within one resource kind. A
   cross-resource timestamp tie that affects association is ambiguous.
 - The packaged workflow skill carries the seven-tool ordering, immediate
-  request-binding mutation, and complete direct-human approval rule; build
-  verification asserts all three properties.
+  request-binding mutation, no-manual-request guidance, and complete
+  direct-human approval rule; build verification asserts all four properties.
 - A publication gate is valid only for the current ledger revision. Every
   later ledger mutation revokes it before writing, including same-head changes.
 - Lock acquisition waits ten seconds; a lock is only eligible for reclamation
@@ -1338,9 +1415,12 @@ The implementation must test:
 - a missing request, a non-exact request, duplicate requests, and a newer
   request that supersedes an older `CLEAN` result;
 - immediate post-response request binding, restart after binding, a crash
-  between posting and binding, a changed head before binding, and snapshot
-  reconciliation that rejects any recognized request lacking a
-  `RECORDED_AT_POST` history entry;
+  between posting and binding, a changed head before binding, a manual exact
+  issue-comment request from a non-workflow actor recorded as `UNBOUND`, and
+  direct-human acknowledgement recovery without inferring its head;
+- a complete listing that temporarily omits a just-recorded request within the
+  30-second visibility grace, a successful retry after it appears, and
+  persistent absence or deletion after the grace becoming terminal;
 - an exact request posted as a pull request review body or review comment,
   each recorded as an unsupported request and deriving
   `GITHUB_REVIEW_UNKNOWN` instead of leaving an older request eligible;
@@ -1397,6 +1477,8 @@ The implementation must test:
 - a same-head request or unresolved thread recorded after finalization, gate
   revocation before the new ledger revision, a crash after revocation, and
   rejection of a cached or revision-mismatched gate;
+- `record_codex_review_request` after finalization revoking and
+  directory-syncing the existing gate before writing its new revision;
 - a freshly finalized gate that validates against its unchanged ledger
   revision, plus a same-head mutation landing after verification but before
   merge to document the residual point-in-time limitation;
@@ -1404,13 +1486,15 @@ The implementation must test:
   `publication.json` byte-identical, including request history, terminal,
   revision, and cached status;
 - ambiguity acknowledgement with wrong head, stale revision, missing or extra
-  request IDs or resource-scoped result references, missing rationale, or the
-  wrong acknowledgement enum, plus a stale or future-dated backing observation,
-  gate revocation, closed-reference reporting, the backing observation
-  timestamp/hash, and the revisioned audit record on success;
+  request IDs (including unbound IDs) or resource-scoped result references,
+  missing rationale, or the wrong acknowledgement enum, plus a stale or
+  future-dated backing observation, gate revocation, closed-reference
+  reporting, the backing observation timestamp/hash, and the revisioned audit
+  record on success;
 - packaged-skill assertions for the complete seven-tool ordering, immediate
-  request binding, full-closure direct-human ambiguity approval, stable Bot
-  actor-ID resolution, and immediate pre-merge gate verification;
+  request binding, prohibition of manual exact request comments, unbound
+  request recovery through full-closure direct-human ambiguity approval,
+  stable Bot actor-ID resolution, and immediate pre-merge gate verification;
 - lock timeout errors, PID reuse, heartbeat expiry, owner-token mismatch, and
   inconclusive owner-liveness checks;
 - malformed and oversized inputs;
@@ -1430,13 +1514,15 @@ Implement this design in two changes:
    state transitions remain unchanged; and
 2. add publication storage, state derivation, author tools, the Codex adapter,
    publication-state lock, and packaged-client verification; update the
-   packaged Codex workflow skill with the seven-tool ordering, immediate
-   post-response request binding, immediate pre-merge gate verification,
-   full-closure direct-human ambiguity approval rule, and stable Codex Bot
-   actor-ID resolution; and make `scripts/verify-build.mjs` assert those skill
-   requirements. Adapter fixtures also cover
-   endpoint-specific installation-permission evidence for classic-protection
-   `404` responses. Before
+packaged Codex workflow skill with the seven-tool ordering, immediate
+post-response request binding, immediate pre-merge gate verification,
+no-manual-request guidance, unbound-request recovery through the
+full-closure direct-human ambiguity approval rule, and stable Codex Bot
+actor-ID resolution; and make `scripts/verify-build.mjs` assert those skill
+requirements. Adapter fixtures also cover the 30-second post-to-list visibility
+grace and
+endpoint-specific installation-permission evidence for classic-protection
+`404` responses. Before
    enabling publication, capture an adapter fixture from the connector's
    observed output and verify that it contains a formal pull request review;
    conversation-comment-only and review-comment-only fixtures are unsupported
