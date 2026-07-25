@@ -123,14 +123,19 @@ not passed the `expires_at` recomputed from the stored observation timestamps.
 `publication-gate-audit-head.json` is a small atomic cursor that commits a
 prefix of that log. Appending never rewrites prior events; only the cursor is
 replaced. Together they record accepted finalization attempts and every
-gate-verification outcome for post-publication audit, but neither is read to
-authorize a merge.
+completed gate-verification verdict for post-publication audit, but neither is
+read to authorize a merge.
 
 All files use the existing private directory and file modes. Publication
-JSON snapshots and the audit head use the same atomic replacement mechanism as
-review mutations; audit records use the append-and-commit protocol below. All
-publication mutations also use a per-review inter-process lock and revision
-check so concurrent Codex sessions cannot overwrite each other's observations.
+JSON snapshots and the audit head use the same exclusive temporary-file,
+file-sync, atomic-rename, and directory-sync procedure as review mutations, but
+not their serializer. `publication.json`, `publication-gate.json`, and
+`publication-gate-audit-head.json` are each one RFC 8785 canonical UTF-8 JSON
+value followed by one newline. Existing `review.json` and `gate.json` retain
+their current formatting so their file-byte digests stay stable. Audit records
+use the append-and-commit protocol below. All publication mutations also use a
+per-review inter-process lock and revision check so concurrent Codex sessions
+cannot overwrite each other's observations.
 
 Whenever `gate.json`, `publication.json`, or `publication-gate.json` is read to
 issue or verify a merge-authorizing gate, the server opens the canonical path
@@ -140,8 +145,10 @@ mismatch, or a file above the size limit never authorizes a gate. A symlink,
 non-regular file, or oversized file is an unrecoverable local store error. A
 mode mismatch returns actionable, non-mutating `STORE_MODE_MISMATCH` with the
 canonical path, actual mode, required mode `0600`, and instruction to correct
-the mode and retry. Path validation is not based on a separate time-of-check
-lookup.
+the mode and retry. It is a store-precondition failure before a verification
+verdict or gate-finalization decision, so it short-circuits before any audit
+append and changes no file. Path validation is not based on a separate
+time-of-check lookup.
 
 Under that lock, any later ledger mutation must durably remove the canonical
 `publication-gate.json` before replacing `publication.json`. If gate removal or
@@ -1552,9 +1559,13 @@ prospective ledger:
 - all monotonic ledger arrays have at most 20,000 entries in aggregate,
   counting request history, result history, acknowledgement records, every
   nested acknowledgement reference, and ledger history;
-- no individual monotonic array has more than 10,000 entries; and
-- acknowledgements number at most 1,000, and each acknowledgement has at most
-  1,000 request and result references in aggregate.
+- no individual monotonic array has more than 10,000 entries; a non-terminal
+  ledger history has at most 9,999 entries, reserving its 10,000th slot for a
+  capacity-terminal history event; and
+- acknowledgements number at most 1,000, and each stored acknowledgement has
+  at most 1,000 references in aggregate across `closed_requests` and
+  `closed_results`. The monotonic aggregate counts each of those stored
+  references exactly once.
 
 The 6 MiB observation ceiling leaves at least 4 MiB minus the terminal reserve
 for the baseline, target, local-gate identity, and histories in an otherwise
@@ -1574,12 +1585,15 @@ terminal state.
 After input validation, the server separately projects only mandatory
 server-owned monotonic appends for the mutation, with replaceable
 `latest_observation` omitted. If that minimal state would exceed the 19,999
-non-terminal aggregate-entry allowance or the non-terminal file budget, the
-tool revokes any gate and writes terminal `INVALIDATED` with reason
-`server-owned monotonic publication state exceeds version 1 capacity`; its
-history event is the reserved 20,000th aggregate entry. This is the only
-out-of-band capacity transition. If the monotonic projection fits but the full
-candidate with a replaceable observation does not, the tool returns
+non-terminal aggregate-entry allowance, an individual monotonic array's
+10,000-entry allowance, the 9,999-entry non-terminal ledger-history allowance,
+or the non-terminal file budget, the tool revokes any gate and writes terminal
+`INVALIDATED` with reason `server-owned monotonic publication state exceeds
+version 1 capacity`. Its history event uses the reserved aggregate entry,
+ledger-history slot, and byte space; it is the 20,000th aggregate entry only
+when the aggregate-count boundary triggered. This is the only out-of-band
+capacity transition. If the monotonic projection fits but the full candidate
+with a replaceable observation does not, the tool returns
 `PUBLICATION_LIMIT_EXCEEDED` without writing. Before parsing an existing
 publication or gate file, the server checks its actual file size against the
 10 MiB absolute limit.
@@ -1658,32 +1672,19 @@ record a fresh snapshot first.
 The acknowledgement closes the entire observed correlation epoch. Every
 indeterminate recognized, unbound, unsupported, recovery, and source-only
 baseline request in that epoch must be present in the directly approved
-`request_refs`. The server copies that exact set to `closed_requests`; the
-boundary cannot close an unapproved request.
-It likewise copies the exact supplied `ambiguous_results` set to
-`closed_results`; the boundary cannot close an unapproved result.
+`request_refs`. The server stores that exact set once as `closed_requests`; the
+input alias `request_refs` is not persisted, and the boundary cannot close an
+unapproved request. It likewise stores the exact supplied `ambiguous_results`
+set once as `closed_results`; the input alias is not persisted, and the
+boundary cannot close an unapproved result. These two stored arrays are the
+only nested acknowledgement references counted by the per-acknowledgement and
+monotonic aggregate limits.
 In a separate ambiguity-recovery scenario, the server-generated record is:
 
 ```json
 {
   "acknowledgement_id": "ack-...",
   "head_sha": "0123456789abcdef...",
-  "request_refs": [
-    {
-      "resource_kind": "ISSUE_COMMENT",
-      "resource_id": 100
-    },
-    {
-      "resource_kind": "PULL_REQUEST_REVIEW_COMMENT",
-      "resource_id": 104
-    }
-  ],
-  "ambiguous_results": [
-    {
-      "resource_kind": "PULL_REQUEST_REVIEW",
-      "result_id": 101
-    }
-  ],
   "closed_requests": [
     {
       "resource_kind": "ISSUE_COMMENT",
@@ -1770,8 +1771,14 @@ Verification invokes the pure evaluator against the already-reconciled stored
 ledger. It never advances request or result history, writes a terminal record,
 changes a revision, or otherwise modifies `publication.json`; that file remains
 byte-identical on both valid and invalid returns. Before returning either
-outcome, the tool durably appends and commits a `GATE_VERIFIED` audit event
-under the same lock. A valid response and head SHA are returned only after the
+completed verdict (`valid: true` or `valid: false`), the tool durably appends
+and commits a `GATE_VERIFIED` audit event under the same lock. A descriptor or
+store-precondition error, including `STORE_MODE_MISMATCH`, short-circuits
+before evaluator execution and is not a verification verdict or
+`GATE_VERIFIED` event. If the audit log or head itself has mode drift, the tool
+returns the same actionable path, actual mode, required mode, and repair
+instruction without changing any file; it does not replace that error with an
+opaque audit failure. A valid response and head SHA are returned only after the
 appended line is file-synced and the audit-head replacement and directory sync
 succeed.
 
@@ -1932,12 +1939,13 @@ is exactly `SUCCESS` or `FAILURE`; any other value is malformed.
 `GATE_FINALIZATION_PASSED` always has `SUCCESS` and a null normalized reason.
 `GATE_VERIFIED` has `SUCCESS` and a null reason exactly when verification
 returns `valid: true`; otherwise it has `FAILURE` and the same non-null
-normalized reason as the invalid response. An inability to durably append the
-current event prevents a valid gate or merge-authorizing verification response
-from being returned. The log and head are not authorization inputs. Offline
-audit inspection validates the complete digest chain for reporting; historical
-corruption is reported as audit corruption but cannot make an otherwise
-invalid gate valid.
+normalized reason as the completed `valid: false` response. Store-precondition
+errors return before either verdict and therefore have no `GATE_VERIFIED`
+event. An inability to durably append the current event prevents a valid gate
+or merge-authorizing verification response from being returned. The log and
+head are not authorization inputs. Offline audit inspection validates the
+complete digest chain for reporting; historical corruption is reported as
+audit corruption but cannot make an otherwise invalid gate valid.
 
 The following is a logical projection of two consecutive log records. It
 records what the server evaluated so a completed or invalidated publication
@@ -2663,11 +2671,12 @@ architecture.
 - A publication gate also expires at the earliest five-minute deadline among
   its stored observation timestamps; verification reapplies that deadline
   against the server clock and never treats finalization as timeless.
-- Gate issuance and every verification outcome append to the durable
+- Gate issuance and every completed verification verdict append to the durable
   server-owned gate-audit log. A small atomic head commits the file prefix, so
   append work is O(1), a crash tail is recoverable, and an audit append failure
   cannot yield a usable gate or merge-authorizing verification response.
-  Audit events are never used as authorization evidence.
+  Store-precondition errors occur before a verdict and do not append. Audit
+  events are never used as authorization evidence.
 - Publication evidence and monotonic histories have explicit count and byte
   limits in the same canonical encoding used on disk. Caller and replaceable
   input overflow is non-mutating; only exhaustion by validated mandatory
@@ -2902,7 +2911,9 @@ The implementation must test:
   before, at, and after `expires_at`, while appending the exact durable
   `GATE_VERIFIED` success or failure audit event before returning, including
   equal finalization and verification gate digests for an unchanged gate and a
-  null verification digest when no parseable gate exists;
+  null verification digest when no parseable gate exists; descriptor and store
+  precondition failures must instead return before evaluator execution and
+  append no event;
 - gate-audit sequence and digest-chain continuity, 128-bit event-ID uniqueness,
   the 16 KiB per-event limit, event enums, mode `0600`, O(1) append without a
   total-count cliff, and crash boundaries before log fsync, between log and
@@ -2947,8 +2958,10 @@ The implementation must test:
   positive safe-integer range; exact independent rejection tests for the 6 MiB
   observation, 2 MiB baseline, 10,000-entry observation aggregate, 5,000-entry
   baseline, 1,000 requirements, 1,000 acknowledgements, and 1,000 references
-  per acknowledgement, plus binding 10 MiB file, 64 KiB terminal reserve, and
-  19,999/20,000 monotonic aggregate boundaries. Caller or replaceable overflow
+  per stored acknowledgement, plus binding 10 MiB file, 64 KiB terminal
+  reserve, 19,999/20,000 monotonic aggregate boundaries, each individual
+  10,000-entry monotonic-array boundary, and the 9,999/10,000 non-terminal and
+  reserved-terminal ledger-history boundary. Caller or replaceable overflow
   must change no artifact; only mandatory monotonic exhaustion revokes the gate
   and records capacity `INVALIDATED`;
 - rejection of a non-`Bot` `codex_actor_type`, plus persistence of the exact

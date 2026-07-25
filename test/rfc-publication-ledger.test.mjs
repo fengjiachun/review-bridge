@@ -107,11 +107,10 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
   assert.equal(permissionProof.result, "SUCCESS");
   assert.equal(permissionProof.credential_type, "GITHUB_APP");
   assert.equal(terminalExample.status, "INVALIDATED");
-  assert.deepEqual(acknowledgement.request_refs, acknowledgement.closed_requests);
-  assert.deepEqual(
-    acknowledgement.ambiguous_results,
-    acknowledgement.closed_results,
-  );
+  assert.equal("request_refs" in acknowledgement, false);
+  assert.equal("ambiguous_results" in acknowledgement, false);
+  assert.equal(acknowledgement.closed_requests.length, 2);
+  assert.equal(acknowledgement.closed_results.length, 1);
   assert.equal(baselineCollection.adapter_version, 1);
   assert.equal(codexCollection.adapter_version, 1);
   assert.equal(ledger.codex_review_baseline.requests.length, 0);
