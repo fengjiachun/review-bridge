@@ -102,7 +102,7 @@ assert.match(workflowSkill, /record the exact request comment ID/);
 assert.match(workflowSkill, /reviewed-commit binding/);
 assert.match(workflowSkill, /get_review_summary/);
 assert.match(workflowSkill, /wait_for_review_state/);
-assert.match(workflowSkill, /a standalone review comment is unsupported/);
+assert.match(workflowSkill, /a\s+standalone review comment is unsupported/);
 assert.match(workflowSkill, /Never learn that identity from the\s+candidate result/);
 
 const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
