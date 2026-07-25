@@ -166,6 +166,7 @@ The initial schema is:
       "url": "https://github.com/...",
       "event_at": "2026-07-25T08:03:00.000Z",
       "recorded_at": "2026-07-25T08:03:01.000Z",
+      "recorded_revision": 2,
       "body_sha256": "sha256...",
       "requested_head_sha": "0123456789abcdef..."
     }
@@ -404,14 +405,17 @@ requests with `binding_source: "OBSERVED_UNSUPPORTED"`.
 
 Each history entry records `resource_id`, `resource_kind`, `classification`
 (`RECOGNIZED`, `UNBOUND`, or `UNSUPPORTED`), binding source, URL, `event_at`,
-server `recorded_at`, `body_sha256`, and nullable `requested_head_sha`; the SHA
-is required for recognized requests and null for unbound or unsupported
-requests. On every later complete collection, every historical request must
-still appear in the union of `requests`, `unbound_requests`, and
-`unsupported_requests` with the same immutable facts. A missing request,
-changed body, reclassification, reused `(resource_kind, resource_id)`, or
-conflicting provenance persists terminal `INVALIDATED`; restoring or
-recreating the object cannot revive that publication ledger.
+server `recorded_at`, server `recorded_revision`, `body_sha256`, and nullable
+`requested_head_sha`; the SHA is required for recognized requests and null for
+unbound or unsupported requests. `recorded_revision` is the ledger revision
+whose mutation first admitted the request and is the authoritative ordering
+signal across acknowledgement boundaries. On every later complete collection,
+every historical request must still appear in the union of `requests`,
+`unbound_requests`, and `unsupported_requests` with the same immutable facts. A
+missing request, changed body, reclassification, reused
+`(resource_kind, resource_id)`, or conflicting provenance persists terminal
+`INVALIDATED`; restoring or recreating the object cannot revive that
+publication ledger.
 
 `codex_result_history` is also server-maintained and monotonic. A complete
 Codex-review collection reconciles every actor-admitted candidate in `results`
@@ -706,9 +710,12 @@ The evaluator applies these checks in order:
     `GITHUB_REVIEW_UNKNOWN`, can never satisfy review, and remains in the
     correlation epoch until a valid acknowledgement closes it. A valid
     acknowledgement closes exactly its named observed epoch without
-    correlating a result retroactively. Any
-    later-discovered pre-boundary event absent from its closed request IDs or
-    resource-scoped result references derives `GITHUB_REVIEW_UNKNOWN`. An
+    correlating a result retroactively. Requests admitted in revisions at or
+    before that acknowledgement are pre-boundary; a request admitted by a
+    later revision belongs to the next epoch even if its GitHub timestamp is
+    equal to or earlier than `acknowledged_at`. The boundary is validated from
+    the closed references captured by the acknowledgement, not reconstructed
+    from wall-clock timestamps. An
     `UNSOLICITED` result before the epoch's first exact request is retained for
     audit but does not block or correlate.
 13. Any exact `@codex review` text in a pull request review or review comment
@@ -750,9 +757,11 @@ only after the operator explicitly acknowledges the exact indeterminate
 request IDs, including any unbound request IDs, and resource-scoped result
 references, asserting that those old requests will produce no further results
 and accepting the risk if that assertion is wrong. The next workflow-managed
-exact request posted after `acknowledged_at` starts a new correlation epoch;
-requests posted before acknowledgement are reported and closed by that
-boundary.
+exact request admitted by `record_codex_review_request` in a revision after the
+acknowledgement's `publication_revision` starts a new correlation epoch;
+requests already admitted when acknowledgement runs are reported and closed by
+that boundary. GitHub `created_at` and server `acknowledged_at` remain audit
+timestamps and are never compared to choose an epoch.
 
 ## Author tools
 
@@ -794,8 +803,9 @@ The tool requires the requested head to equal the immutable local-gate head and
 local `HEAD`, requires a clean working tree, validates that the comment response
 is fresh, and appends a `RECORDED_AT_POST` recognized request to
 `codex_request_history`. The server supplies the exact-body digest and
-`recorded_at`; callers cannot choose them. A duplicate comment ID, conflicting
-binding, stale response, or changed local head fails without writing.
+`recorded_at` and assigns `recorded_revision` to the new ledger revision;
+callers cannot choose them. A duplicate comment ID, conflicting binding, stale
+response, or changed local head fails without writing.
 
 Under the publication lock, this revision-advancing tool follows the universal
 revoke-before-write rule: if `publication-gate.json` exists, it removes and
@@ -859,7 +869,8 @@ evaluator. Every recognized request must already have a
 `unbound_requests`, appended with `OBSERVED_UNBOUND`, and blocks without
 receiving an inferred head. If prior entries all match, the tool appends newly
 observed unbound and unsupported requests and newly observed actor-admitted
-results, then derives status by replaying both histories.
+results, assigning new request entries the revision written by this mutation,
+then derives status by replaying both histories.
 
 When a just-recorded recognized entry is absent from the collection within the
 30-second post-to-list visibility grace, the tool records the observation in
@@ -928,17 +939,17 @@ requires `head_sha` to match the local gate and pull request, independently
 replays association, and requires set equality between the supplied IDs and
 the entire request set the boundary would close and the current indeterminate
 result set, comparing results by `(resource_kind, result_id)`. The request set
-includes unbound requests and recovery requests posted after ambiguity but
-before acknowledgement.
+includes every unbound request and recovery request already admitted in the
+current open epoch.
 The backing observation must satisfy the same five-minute age limit, 30-second
 future tolerance, post-publication ordering, and two-minute atomic-collection
 window used by finalization. Otherwise the call fails with an instruction to
 record a fresh snapshot first.
 
 The acknowledgement closes the entire observed correlation epoch. Every
-unbound request and every recovery request posted after the ambiguity but
-before acknowledgement must already be present in the directly approved
-`request_comment_ids`. The server copies that exact set to
+unbound request and every recovery request already admitted in that epoch must
+be present in the directly approved `request_comment_ids`. The server copies
+that exact set to
 `closed_request_comment_ids`; the boundary cannot close an unapproved request.
 It likewise copies the exact supplied `ambiguous_results` set to
 `closed_results`; the boundary cannot close an unapproved result.
@@ -982,13 +993,17 @@ decision.
 Like every later ledger mutation, the tool first revokes and directory-syncs
 an existing publication gate, then appends the acknowledgement and history
 event and advances the revision. After acknowledgement, no active request
-exists until the operator posts a new exact `@codex review` comment after
-`acknowledged_at`. A request already present in the backing observation is
-reported in `closed_request_comment_ids` and cannot become active silently.
-If a later snapshot discovers any pre-boundary request or result that was not
-recorded in the closed request IDs or resource-scoped result references,
-derivation returns
-`GITHUB_REVIEW_UNKNOWN` and requires a fresh human decision.
+exists until `record_codex_review_request` admits a new exact
+`@codex review` comment in a revision greater than the acknowledgement's
+`publication_revision`. A request already admitted or present in the backing
+observation is reported in `closed_request_comment_ids` and cannot become
+active silently. GitHub `created_at` is not compared with `acknowledged_at`;
+this avoids using independent clocks to decide ledger order. A request first
+admitted by a later snapshot has a later `recorded_revision` and belongs to the
+new epoch; if it is unbound or unsupported, it blocks under the normal rules
+and is never added retroactively to the prior closed set. A result first
+observed later is evaluated in the then-open epoch under the delayed-result
+risk the operator accepted.
 
 ### `verify_publication_gate`
 
@@ -1191,7 +1206,9 @@ request in the epoch indeterminate, but does not close or discard the set.
 Every later result for that head therefore remains ambiguous until
 `acknowledge_codex_review_ambiguity` closes the exact indeterminate set. The
 acknowledgement is a server-recorded correlation-epoch boundary, not a result
-association. A request posted after it starts the next open set.
+association. A request whose server-assigned `recorded_revision` is greater
+than the acknowledgement's `publication_revision` starts the next open set;
+GitHub and server wall-clock timestamps do not establish that ordering.
 
 Response body text, mentions, permalinks, and all other free-form content never
 supply request linkage. Version 1 has no `EXPLICIT_LINK`; adding a future
@@ -1470,6 +1487,10 @@ architecture.
   review before publication can restart.
 - Revision 1 has status `PR_PENDING`, the evaluator's single no-observation
   result; `PUBLICATION_STARTED` is only its audit event name.
+- Correlation epochs are ordered by server-assigned request
+  `recorded_revision` relative to the acknowledgement's
+  `publication_revision`, never by comparing GitHub `created_at` with the
+  server clock.
 
 ## Test plan
 
@@ -1515,11 +1536,12 @@ The implementation must test:
 - an automatic pre-request result recorded as `UNSOLICITED`, followed by a
   normal explicit request and result reaching `MERGE_READY` without
   acknowledgement, with the unsolicited result never correlating later;
-- a recovery request posted before acknowledgement, with every subsequent
+- a recovery request admitted before acknowledgement, with every subsequent
   result remaining ambiguous and the early recovery request reported as
   closed only when its ID is included in the directly approved and supplied
   closure set; omission of any open recovery request fails acknowledgement;
-  exact-set acknowledgement followed by a post-acknowledgement request; a
+  exact-set acknowledgement followed by a request admitted in a later
+  revision; a
   delayed old result after acknowledgement as an explicitly accepted risk; and
   a later ambiguity requiring another acknowledgement;
 - zero and multiple candidate results after the latest request;
@@ -1584,7 +1606,9 @@ The implementation must test:
   missing rationale, or the wrong acknowledgement enum, plus a stale or
   future-dated backing observation, gate revocation, closed-reference
   reporting, the backing observation timestamp/hash, and the revisioned audit
-  record on success;
+  record on success, including a recovery request whose GitHub `created_at` is
+  equal to or earlier than `acknowledged_at` but whose later
+  `recorded_revision` correctly places it in the new epoch;
 - packaged-skill assertions for the complete seven-tool ordering, immediate
   request binding, prohibition of manual exact request comments, unbound
   request recovery through full-closure direct-human ambiguity approval,
