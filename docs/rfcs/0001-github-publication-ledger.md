@@ -180,10 +180,17 @@ The initial schema is:
         ]
       },
       "policy": "REQUIRED",
-      "contexts": ["test"],
+      "requirements": [
+        {
+          "context": "test",
+          "required_app_id": 12345
+        }
+      ],
       "runs": [
         {
-          "name": "test",
+          "run_id": 9001,
+          "context": "test",
+          "app_id": 12345,
           "head_sha": "0123456789abcdef...",
           "status": "COMPLETED",
           "conclusion": "SUCCESS",
@@ -266,8 +273,20 @@ Required-check policy discovery reads both:
   `GET /repos/{owner}/{repo}/branches/{branch}` and
   `GET /repos/{owner}/{repo}/branches/{branch}/protection`.
 
-The required contexts are the union of both successful policy reads. An
-authorization error or ambiguous `404` is `UNKNOWN`, not evidence that no
+The required-check keys are the union of both successful policy reads. Each key
+is `(context, required_app_id)`. The adapter normalizes a ruleset
+`integration_id` and a classic branch-protection `app_id` into
+`required_app_id`. A non-null value requires a run with the same `context` and
+the exact producing GitHub App ID. A null value is allowed only when GitHub
+explicitly leaves the requirement unbound; it means a matching check run or
+commit status from any producer may satisfy the requirement, not that app
+identity collection failed.
+
+Each run records the actual producing `app_id`, or null for a legacy commit
+status without a GitHub App. A pinned requirement never matches a null producer
+identity.
+
+An authorization error or ambiguous `404` is `UNKNOWN`, not evidence that no
 checks are configured. A classic-protection `404` may be classified as
 `NOT_CONFIGURED` only when the same authenticated client successfully read the
 branch metadata and every page of applicable rules immediately beforehand.
@@ -277,8 +296,9 @@ Otherwise it remains `UNKNOWN`.
 produces an explicit empty result: the applicable-rules response contains no
 required status-check rule, and classic protection is either present with no
 required checks or conclusively `NOT_CONFIGURED`. It must accompany
-`contexts: []` and `runs: []`; otherwise the observation is invalid. A caller
-that cannot establish the policy derives `EVIDENCE_INCOMPLETE`.
+`requirements: []` and `runs: []`; otherwise the observation is invalid. A
+caller that cannot establish the policy or a required app binding derives
+`EVIDENCE_INCOMPLETE`.
 
 For an open pull request, `state` is `OPEN`, `is_merged` is false,
 `merged_at` is null, and `merge_commit_sha` is normalized to null because
@@ -310,6 +330,20 @@ the same time:
 - every candidate Codex result after those requests;
 - the complete paginated review-thread collection and resolution counts; and
 - the observation timestamp.
+
+`observed_at` is captured immediately after the final GitHub response. Every
+nested evidence collection has its own `collected_at`, and the server requires:
+
+```text
+publication.created_at <= collected_at <= observed_at
+observed_at - collected_at <= 2 minutes
+max(collected_at) - min(collected_at) <= 2 minutes
+```
+
+At both recording and finalization, every `collected_at` must also be no more
+than five minutes old relative to the server clock and no more than 30 seconds
+in the future. A current top-level `observed_at` cannot refresh cached check,
+review, or thread evidence.
 
 The server must not expose independent mutations such as
 `record_checks_passed` and `record_codex_passed`. Separate mutations could
@@ -383,8 +417,10 @@ The evaluator applies these checks in order:
    `UNKNOWN` derives `PR_STATE_PENDING`; `CONFLICTING` derives
    `PR_CONFLICTING`; only `MERGEABLE` may continue.
 10. Required-check policy discovery is complete. For `REQUIRED`, every
-    required context has a run bound to the pull request head and completed
-    successfully. For `NONE_CONFIGURED`, the explicit-empty invariants hold.
+    `(context, required_app_id)` has a run bound to the pull request head and
+    completed successfully. A non-null `required_app_id` must equal the run's
+    `app_id`; a run with the same context from another app does not satisfy it.
+    For `NONE_CONFIGURED`, the explicit-empty invariants hold.
 11. From the complete request collection, select the latest exact
     `@codex review` request for the current head by `(created_at, comment_id)`.
     If none exists, derive `GITHUB_REVIEW_NOT_REQUESTED`.
@@ -435,14 +471,18 @@ Inputs:
 - one normalized GitHub observation with collection metadata for every evidence
   class
 
-The tool validates sizes, enums, timestamps, SHA formats, URLs, unique check
-names, unique GitHub object IDs, evidence provenance and collection metadata,
-thread counts, exact request bodies, latest-request selection, merge fields,
-and cross-field ordering. An incomplete but well-formed collection is recorded
-and derives `EVIDENCE_INCOMPLETE`. It rejects observations more than five
-minutes old, more than 30 seconds in the future, or earlier than the
-publication `created_at`. The server sets `recorded_at` from its own clock,
-derives status, and atomically records the next revision.
+The tool validates sizes, enums, timestamps, SHA formats, URLs, unique
+requirement keys, unique run and GitHub object IDs, required-app identity,
+evidence provenance and collection metadata, thread counts, exact request
+bodies, latest-request selection, merge fields, and cross-field ordering. An
+incomplete but well-formed collection is recorded and derives
+`EVIDENCE_INCOMPLETE`.
+
+It applies the five-minute age and 30-second future limits to `observed_at` and
+every collection's `collected_at`, rejects any timestamp earlier than the
+publication `created_at`, and enforces the two-minute atomic observation
+interval. The server sets `recorded_at` from its own clock, derives status, and
+atomically records the next revision.
 
 The first observation must be recorded after `start_publication`. The target is
 immutable after creation; there is no target-rebinding operation.
@@ -465,7 +505,11 @@ rules:
 - server `recorded_at` is no more than five minutes old;
 - caller `observed_at` is no more than five minutes old and no more than 30
   seconds in the future;
-- both timestamps are later than the publication `created_at`; and
+- every collection `collected_at` is no more than five minutes old, no more
+  than 30 seconds in the future, and still satisfies the two-minute atomic
+  observation interval;
+- all caller and server timestamps are later than the publication `created_at`;
+  and
 - the revision being finalized is still the latest revision.
 
 It then writes:
@@ -482,6 +526,7 @@ It then writes:
   "publication_revision": 4,
   "github_observation_sha256": "sha256...",
   "github_observed_at": "2026-07-25T08:05:00.000Z",
+  "github_oldest_collection_at": "2026-07-25T08:05:00.000Z",
   "github_recorded_at": "2026-07-25T08:05:01.000Z",
   "status": "MERGE_READY"
 }
@@ -571,7 +616,8 @@ can operate from stale reads.
 - A later observation cannot clear `INVALIDATED`, `CLOSED`, or `MERGED`.
 - An incomplete check, request, result, or thread collection derives
   `EVIDENCE_INCOMPLETE`; an empty list alone never proves absence.
-- A stale or future-dated observation cannot be finalized.
+- A stale or future-dated top-level observation or nested evidence collection
+  cannot be finalized.
 - A changed or deleted GitHub comment makes the next fresh observation pending
   or unknown; it does not retain a stale pass.
 - A merged pull request may be recorded only when a live observation supplies
@@ -621,8 +667,9 @@ architecture.
 
 ## Resolved design decisions
 
-- Required-check contexts are the union of active applicable rules and classic
-  branch protection. Ambiguous access or discovery results fail closed.
+- Required-check keys, including any GitHub App binding, are the union of active
+  applicable rules and classic branch protection. Ambiguous access, discovery,
+  or producer identity results fail closed.
 - Every unresolved review thread blocks publication, regardless of author.
 - Codex result evidence stores a digest and GitHub URL, not the response body.
 - Lock acquisition waits ten seconds; a lock is only eligible for reclamation
@@ -640,6 +687,8 @@ The implementation must test:
   incomplete collections, incomplete pagination, and count mismatches;
 - required checks from a different head or with pending, failed, cancelled, or
   missing results;
+- a required check produced by the wrong GitHub App, an explicitly unbound
+  requirement, and a missing app identity;
 - a missing request, a non-exact request, duplicate requests, and a newer
   request that supersedes an older `CLEAN` result;
 - zero and multiple candidate results after the latest request;
@@ -653,7 +702,9 @@ The implementation must test:
 - closing and reopening a pull request without clearing terminal `CLOSED`;
 - `UNKNOWN`, `CONFLICTING`, and `MERGEABLE` mergeability, plus validation of
   merged state, timestamp, and merge commit SHA;
-- stale, future-dated, pre-publication, and stale-at-finalization observations;
+- stale, future-dated, pre-publication, and stale-at-finalization observations,
+  including a fresh `observed_at` with stale nested collections and collections
+  spanning more than two minutes;
 - concurrent mutations, stale expected revisions, and independent review and
   publication lock domains;
 - lock timeout errors, PID reuse, heartbeat expiry, owner-token mismatch, and
