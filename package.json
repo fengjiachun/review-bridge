@@ -1,9 +1,19 @@
 {
   "name": "review-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Local review handoff bridge between Codex and Claude Desktop",
+  "license": "MIT",
+  "author": "Review Bridge contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fengjiachun/review-bridge.git"
+  },
+  "homepage": "https://github.com/fengjiachun/review-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/fengjiachun/review-bridge/issues"
+  },
   "scripts": {
     "test": "node --test",
     "build": "node scripts/build.mjs",
