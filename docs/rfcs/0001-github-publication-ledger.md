@@ -258,6 +258,12 @@ The initial schema is:
         "source": "REST_COMPARE_BASE_TO_HEAD",
         "base_sha": "abcdef0123456789...",
         "head_sha": "0123456789abcdef..."
+      },
+      "reviewed_base_current_base_comparison": {
+        "status": "IDENTICAL",
+        "source": "REST_COMPARE_REVIEWED_BASE_TO_CURRENT_BASE",
+        "base_sha": "abcdef0123456789...",
+        "head_sha": "abcdef0123456789..."
       }
     },
     "required_checks": {
@@ -586,6 +592,16 @@ collection.
 incomplete comparison derives `EVIDENCE_INCOMPLETE`. Updating the branch
 changes the reviewed head and therefore requires a new local review.
 
+Independently of strict-update policy, every pull-request collection records a
+complete compare response for `local_gate.base_sha...pull_request.base_sha`.
+The comparison's base SHA must exactly match the local gate and its head SHA
+must exactly match the current pull-request base. `AHEAD` or `IDENTICAL` proves
+that the current target base preserves the locally reviewed base ancestry.
+`BEHIND` or `DIVERGED` persists terminal `INVALIDATED`; an unknown or
+incomplete comparison derives `EVIDENCE_INCOMPLETE`. This ancestry check is
+always required, including when no status checks are configured or strict
+updates are disabled.
+
 Multiple runs may share one requirement key. Every run records `started_at` and
 `completed_at`; the latter is null until completion. `resource_kind` is exactly
 `CHECK_RUN` or `COMMIT_STATUS`, and each kind has its own numeric ID namespace.
@@ -640,7 +656,7 @@ An empty thread array is acceptable only with `status: "COMPLETE"`,
 One `record_github_snapshot` call records all publication evidence observed at
 the same time:
 
-- pull request identity and current head SHA;
+- pull request identity, current head and base SHAs, and reviewed-base ancestry;
 - draft, open, mergeability, and base-branch state;
 - required-check policy provenance and every required run for the head;
 - every exact `@codex review` request object, partitioned against the immutable
@@ -714,7 +730,7 @@ snapshot.
 | `GITHUB_REVIEW_UNKNOWN` | No | A request is unbound, or the result format, association, or verdict is ambiguous. |
 | `CHANGES_REQUIRED` | No | Codex reported findings or any review thread is unresolved. |
 | `MERGE_READY` | No | Every required invariant passes for the current head. |
-| `INVALIDATED` | Yes | The pull request identity/head no longer matches the local gate, or an observed request or Codex result disappeared or changed. |
+| `INVALIDATED` | Yes | The pull request identity/head no longer matches the local gate, the current base no longer preserves the reviewed base ancestry, or an observed request or Codex result disappeared or changed. |
 | `CLOSED` | Yes | The pull request closed without a recorded merge. |
 | `MERGED` | Yes | A live observation confirms the merge and its commit SHA. |
 
@@ -746,8 +762,12 @@ The evaluator applies these checks in order:
    `EVIDENCE_INCOMPLETE` without evaluating identity or writing a terminal
    state; malformed or stale collection metadata is rejected before derivation.
 5. The repository identity, pull request number, base branch, head branch, and
-   pull request head match the bound target and local gate. Any mismatch
-   persists terminal `INVALIDATED`.
+   pull request head match the bound target and local gate. The complete
+   `reviewed_base_current_base_comparison` must compare the local gate's
+   `base_sha` with the current pull-request `base_sha`; `AHEAD` or `IDENTICAL`
+   may continue, while `BEHIND` or `DIVERGED` persists terminal `INVALIDATED`.
+   Unknown or incomplete comparison evidence derives `EVIDENCE_INCOMPLETE`.
+   Any other identity mismatch persists terminal `INVALIDATED`.
 6. A merged pull request has `is_merged: true`, `state: "CLOSED"`, a valid
    `merged_at`, and a full `merge_commit_sha`. If so, persist terminal `MERGED`;
    the merge commit may differ from the reviewed head after squash merge.
@@ -1443,6 +1463,10 @@ can operate from stale reads.
   `publication-gate.json` before replacing the ledger. Failure after removal
   requires finalization again; it cannot preserve a stale gate.
 - A changed head records `INVALIDATED` and requires a new local review.
+- A current target base that is behind or diverged from the local gate's
+  reviewed base records `INVALIDATED`, even when strict updates are disabled or
+  no status checks are configured. Restoring the target base later does not
+  revive that ledger.
 - A later observation cannot clear `INVALIDATED`, `CLOSED`, or `MERGED`.
 - An incomplete or stale publication-start Codex baseline prevents revision 1
   from being created. Settled preexisting request/result pairs remain outside
@@ -1600,8 +1624,13 @@ architecture.
   and IDs are never compared.
 - Strict-update policy is the union of every applicable policy source. A strict
   head must contain the current base or derive `PR_UPDATE_REQUIRED`.
-- Pull-request identity and head evidence participates in the same collection
-  freshness and atomic-observation window as checks, reviews, and threads.
+- The current target base must independently descend from or equal the local
+  gate's reviewed base. This identity invariant applies regardless of
+  strict-update policy; a behind or diverged target base is terminal
+  `INVALIDATED`.
+- Pull-request identity, head, and reviewed-base ancestry evidence participates
+  in the same collection freshness and atomic-observation window as checks,
+  reviews, and threads.
 - Every unresolved review thread blocks publication, regardless of author.
 - Codex result evidence stores a digest and GitHub URL, not the response body.
 - The expected Codex bot is bound by stable numeric actor ID and `Bot` type at
@@ -1697,6 +1726,11 @@ The implementation must test:
 - classic and ruleset strict-update flags in every true/false combination, a
   missing strict field, and strict heads that are `AHEAD`, `IDENTICAL`,
   `BEHIND`, `DIVERGED`, or have incomplete comparison evidence;
+- reviewed-base ancestry with a current base that is `AHEAD` or `IDENTICAL`,
+  plus `BEHIND`, `DIVERGED`, and incomplete comparisons when strict updates
+  are false and when no checks are configured, proving only the first two can
+  reach `MERGE_READY` and that restoring an invalidated base cannot revive the
+  ledger;
 - `SKIPPED`, `NEUTRAL`, `TIMED_OUT`, `ACTION_REQUIRED`, `STALE`, and an
   unrecognized future check conclusion;
 - a missing request, a non-exact request, duplicate requests, and a newer
@@ -1762,6 +1796,9 @@ The implementation must test:
   being observed, with the same terminal invalidation and monotonic history
   behavior;
 - a pull request retargeted to another base branch;
+- a target branch force-pushed or reset behind the locally reviewed base,
+  including restoring the original base without clearing terminal
+  `INVALIDATED`;
 - a force-push after `MERGE_READY`, including restoring the original head
   without clearing terminal `INVALIDATED`;
 - closing and reopening a pull request without clearing terminal `CLOSED`;
