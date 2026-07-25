@@ -106,7 +106,8 @@ reviews/<review_id>/
 ├── gate.json
 ├── publication.json
 ├── publication-gate.json
-└── publication-gate-audit.json
+└── publication-gate-audit/
+    └── <sequence>-<event_id>.json
 ```
 
 Separating the files keeps the Claude review lifecycle unchanged and prevents
@@ -118,10 +119,11 @@ revocable view of one ledger revision, not an independent durable verdict. It
 is valid only while its `publication_revision` equals the current ledger
 revision, that revision still derives `MERGE_READY`, and the server clock has
 not passed the `expires_at` recomputed from the stored observation timestamps.
-`publication-gate-audit.json` is a server-maintained, append-only logical event
-log stored by atomic file replacement. It records accepted finalization
-attempts and every gate-verification outcome for post-publication audit, but is
-never read to authorize a merge.
+`publication-gate-audit/` is a server-maintained directory of immutable event
+files. Appending atomically installs one new file; it never rewrites prior
+events. The directory records accepted finalization attempts and every
+gate-verification outcome for post-publication audit, but is never read to
+authorize a merge.
 
 All files use the existing private directory and file modes. Publication
 mutations must use the same atomic replacement mechanism as review mutations,
@@ -552,7 +554,10 @@ The initial schema is:
 ```
 
 Every history event records `at`, `event`, `revision`, `status`, and
-`head_sha`. A `CODEX_REVIEW_REQUEST_RECORDED` event additionally records
+`head_sha`. `event` is exactly `PUBLICATION_STARTED`,
+`CODEX_REVIEW_REQUEST_RECORDED`, `GITHUB_SNAPSHOT_RECORDED`, or
+`CODEX_REVIEW_AMBIGUITY_ACKNOWLEDGED`; any other value is rejected. A
+`CODEX_REVIEW_REQUEST_RECORDED` event additionally records
 `cleared_observation_sha256`: null when no observation existed, otherwise the
 64-hex RFC 8785 digest of the exact normalized `latest_observation` discarded
 by that mutation. No other event may carry that field. A populated event is:
@@ -596,11 +601,16 @@ All normalized timestamps use canonical UTC RFC 3339 with millisecond
 precision (`YYYY-MM-DDTHH:mm:ss.sssZ`). Validation compares parsed instants and
 rejects invalid or non-canonical strings rather than relying on caller locale.
 
-Server-derived digests of JSON values, including
-`github_observation_sha256` and `backing_observation_sha256`, hash the UTF-8
-RFC 8785 JSON Canonicalization Scheme representation of the normalized value.
-Digests of existing files such as `local_gate_sha256` hash the exact file
-bytes. Body-digest semantics are defined separately in the adapter section.
+Server-derived digests of JSON values hash the UTF-8 RFC 8785 JSON
+Canonicalization Scheme representation of the named normalized value.
+`github_observation_sha256`, including every copy in a gate or gate-audit
+event, hashes the exact normalized `latest_observation` object, including its
+server-authored `recorded_at`. `backing_observation_sha256` hashes the exact
+normalized observation that backs the acknowledgement, also including its
+server-authored `recorded_at`. The same normalized observation therefore has
+the same digest wherever that digest is copied. Digests of existing files such
+as `local_gate_sha256` hash the exact file bytes. Body-digest semantics are
+defined separately in the adapter section.
 
 `event_at` is the normalized ordering timestamp. Its `timestamp_field` must be
 `created_at` for issue comments and review comments, and `submitted_at` for
@@ -899,18 +909,28 @@ response-completion `collected_at`; it participates in source coverage,
 freshness, and the atomic-observation window exactly like the policy read it
 authorizes.
 
-`policy: "NONE_CONFIGURED"` is permitted only when complete policy discovery
-produces an explicit empty result: the applicable-rules response contains no
-required status-check rule, and classic protection is either present with no
-required checks, conclusively `NOT_CONFIGURED` through authorized `404`
-evidence, or conditionally omitted under the successful
-`branch.protected: false` shortcut. It must accompany
-`strict_policy.required: false` and `requirements: []`; otherwise the
-observation is invalid. Fully collected runs may be present because GitHub
-still reports optional checks and commit statuses. They remain subject to
-run-source counts, schema, and head-binding validation, but do not participate
-in required-check satisfaction. A caller that cannot establish the policy or
-a required app binding derives `EVIDENCE_INCOMPLETE`.
+`policy` is exactly `REQUIRED`, `STRICT_ONLY`, or `NONE_CONFIGURED`.
+`REQUIRED` is valid only with a non-empty `requirements` array and may have
+either boolean strict value. Complete policy discovery that produces zero
+required-check keys never normalizes to `REQUIRED`. It becomes `STRICT_ONLY`
+when `strict_policy.required` is true and `NONE_CONFIGURED` when it is false;
+both require `requirements: []`.
+
+Either empty-key policy is permitted only when discovery proves an explicit
+empty result: the applicable-rules response contains no required status-check
+key, and classic protection is either present with no required checks,
+conclusively `NOT_CONFIGURED` through authorized `404` evidence, or
+conditionally omitted under the successful `branch.protected: false`
+shortcut. `STRICT_ONLY` additionally proves a successful applicable source
+whose strict flag is true; `NONE_CONFIGURED` proves that every applicable
+strict flag is false or no required-status-check policy exists. Any
+policy/strict/requirements combination outside these three cases is malformed,
+not vacuously satisfied. Fully collected runs may be present under either
+empty-key policy because GitHub still reports optional checks and commit
+statuses. They remain subject to run-source counts, schema, and head-binding
+validation, but do not participate in required-check satisfaction. A caller
+that cannot establish the policy or a required app binding derives
+`EVIDENCE_INCOMPLETE`.
 
 The authoritative current base is the live `commit.sha` returned by
 `GET /repos/{owner}/{repo}/branches/{branch}`. The normalized pull-request
@@ -1140,7 +1160,7 @@ Once `terminal` is non-null, `record_codex_review_request`,
 `record_github_snapshot`, `acknowledge_codex_review_ambiguity`, and
 `finalize_publication_gate` fail with non-retryable
 `PUBLICATION_TERMINAL` before revoking a gate or changing any file; the ledger
-and audit files remain byte-identical. `get_publication` remains readable and
+and audit entries remain byte-identical. `get_publication` remains readable and
 `verify_publication_gate` remains callable, but verification necessarily
 returns invalid because a terminal ledger cannot derive `MERGE_READY`.
 
@@ -1188,7 +1208,10 @@ The evaluator applies these checks in order:
    `CONFLICTING`, or `UNKNOWN`.
    `UNKNOWN` derives `PR_STATE_PENDING`; `CONFLICTING` derives
    `PR_CONFLICTING`; only `MERGEABLE` may continue.
-11. Required-check policy discovery is complete. If any source requires strict
+11. Required-check policy discovery is complete, and reject every combination
+    except `REQUIRED` with non-empty requirements, `STRICT_ONLY` with empty
+    requirements and strict updates required, or `NONE_CONFIGURED` with empty
+    requirements and strict updates not required. If any source requires strict
     updates, require
     `base_head_comparison` to prove the head contains the current base; `BEHIND`
     or `DIVERGED` derives `PR_UPDATE_REQUIRED` before any run conclusion is
@@ -1202,10 +1225,10 @@ The evaluator applies these checks in order:
     a commit status cannot establish that identity, but any same-context commit
     status kind must independently pass. Every explicitly unbound requirement
     has at least one latest run bound to the head, and every participating kind
-    has a passing conclusion. For `NONE_CONFIGURED`, policy discovery is
-    explicitly empty, `requirements` is empty, and
-    `strict_policy.required` is false. Optional fully collected runs may be
-    present but do not participate in satisfaction.
+    has a passing conclusion. For `STRICT_ONLY` and `NONE_CONFIGURED`, policy
+    discovery is explicitly empty and optional fully collected runs may be
+    present but do not participate in satisfaction. `STRICT_ONLY` reaches this
+    point only after its mandatory base-to-head comparison passes.
 12. Replay event identity and association from `codex_request_history`,
     `codex_result_history`, the current collection's validated parsed verdicts,
     and every stored ambiguity acknowledgement for the current head rather than
@@ -1333,10 +1356,10 @@ The tool requires `LOCAL_GATE_PASSED`, reloads `gate.json`, verifies the local
 working tree is clean, and verifies local `HEAD` equals the gate `head_sha`.
 It rejects an existing `publication.json` or orphaned
 `publication-gate.json`; publication is never reset or rebound in place. An
-existing gate-audit file is accepted only as the exact canonical pre-start
-remnant for this review ID: version 1, `next_sequence: 1`, and an empty
-`events` array with no ledger or gate. Any populated, malformed, mismatched, or
-otherwise orphaned audit file is rejected.
+existing gate-audit directory is accepted only as the exact canonical
+pre-start remnant for this review ID: an empty private directory with no ledger
+or gate. Any populated, non-directory, permission-mismatched, or otherwise
+orphaned audit path is rejected.
 It validates the baseline's identity, completeness, pagination, freshness, and
 event provenance, stores every exact or trigger-shaped request and
 expected-actor candidate result without pairing them, and rejects a baseline
@@ -1618,8 +1641,9 @@ decision.
 
 Like every later ledger mutation, the tool first revokes and directory-syncs
 an existing publication gate, then appends the acknowledgement and history
-event and advances the revision. After acknowledgement, no active request
-exists until `record_codex_review_request` admits a new exact
+event named `CODEX_REVIEW_AMBIGUITY_ACKNOWLEDGED` and advances the revision.
+After acknowledgement, no active request exists until
+`record_codex_review_request` admits a new exact
 `@codex review` comment in a revision greater than the acknowledgement's
 `publication_revision`. A request already admitted or present in the backing
 observation is reported in `closed_requests` and cannot become active silently.
@@ -1669,8 +1693,8 @@ ledger. It never advances request or result history, writes a terminal record,
 changes a revision, or otherwise modifies `publication.json`; that file remains
 byte-identical on both valid and invalid returns. Before returning either
 outcome, the tool atomically appends a `GATE_VERIFIED` audit event under the
-same lock. A valid response and head SHA are returned only after the audit
-replacement and directory sync succeed.
+same lock. A valid response and head SHA are returned only after the new event
+file and audit-directory sync succeed.
 
 ### `finalize_publication_gate`
 
@@ -1729,7 +1753,7 @@ identical except `issuance_committed: true`. It returns success only after the
 final replacement and directory sync. Verification rejects an uncommitted
 candidate. Therefore a crash can leave an audit-only issuance attempt or an
 unusable candidate gate, but every usable gate has a preceding durable audit
-record without consulting the audit file during authorization. The committed
+record without consulting the audit directory during authorization. The committed
 gate names the unchanged ledger revision that was validated. These audit and
 gate writes are not later ledger mutations and do not revoke themselves.
 
@@ -1756,36 +1780,64 @@ deadline.
 
 ## Gate audit
 
-`start_publication` creates `publication-gate-audit.json` with version 1,
-the review ID, `next_sequence: 1`, and an empty `events` array first, atomically
-replaces and directory-syncs it, and only then atomically creates
-`publication.json`, all during one publication-lock hold. A crash between the
-two writes leaves only the exact empty pre-start audit remnant; retrying
-`start_publication` for the same review validates and reuses that remnant before
-creating the ledger. Because every audit append requires an existing ledger,
-an empty remnant cannot contain publication evidence and is the only audit file
-that start may reuse. An existing ledger, gate, populated audit, or malformed
-audit still fails rather than overwriting evidence. Every append is a
-server-authored atomic replacement under the publication lock followed by a
-directory sync; callers cannot supply sequence numbers or timestamps. Events
-are never deleted or reordered, and audit failure prevents a valid gate or
-merge-authorizing verification response from being returned.
-After publication starts, a missing, malformed, truncated, or non-monotonic
-audit file is an unrecoverable local store error for finalization and
+`start_publication` creates the private `publication-gate-audit/` directory and
+syncs its parent before atomically creating `publication.json`, all during one
+publication-lock hold. A crash between the two operations leaves only the exact
+empty pre-start directory; retrying `start_publication` for the same review
+validates and reuses that remnant before creating the ledger. Because every
+audit append requires an existing ledger, an empty remnant cannot contain
+publication evidence and is the only audit path that start may reuse. An
+existing ledger, gate, populated audit directory, non-directory audit path, or
+permission mismatch fails rather than overwriting evidence.
+
+Each event is one canonical JSON object of at most 16 KiB in an immutable file
+named by its 20-digit zero-padded sequence, a hyphen, a cryptographically random
+128-bit lowercase-hex `event_id`, and `.json`. The object repeats that exact
+positive sequence and `event_id`, plus `version: 1` and the owning
+`review_id`. The audit directory uses mode `0700` and final event files use
+mode `0600`. Under the publication lock, append scans and validates at most
+1024 event files: filenames and object identities match, sequences are
+contiguous from one, every file is within the size limit, every version and
+review ID matches, and no other directory entry exists. The next event is
+written and file-synced to an exclusively created temporary file in the review
+directory, atomically hard-linked to the final audit path with create-if-absent
+semantics, and then the audit directory is synced before the temporary link is
+removed. Callers cannot supply sequence numbers, event IDs, or timestamps. At
+1024 events the operation fails closed with non-retryable
+`AUDIT_CAPACITY_EXCEEDED` before writing or returning a merge-authorizing head;
+publication can continue only under a new local-review task. These limits bound
+both storage to about 16 MiB per review and append-validation time.
+
+`event` is exactly `GATE_FINALIZATION_PASSED` or `GATE_VERIFIED`, and `outcome`
+is exactly `SUCCESS` or `FAILURE`; any other value is malformed.
+`GATE_FINALIZATION_PASSED` always has `SUCCESS` and a null normalized reason.
+`GATE_VERIFIED` has `SUCCESS` and a null reason exactly when verification
+returns `valid: true`; otherwise it has `FAILURE` and the same non-null
+normalized reason as the invalid response. Events are never deleted,
+overwritten, or reordered, and audit failure prevents a valid gate or
+merge-authorizing verification response from being returned. A crash before
+installation can leave only an ignorable sibling temporary file; a crash after
+installation can additionally leave a second link to the complete immutable
+entry, never a partial audit entry. After publication starts, a
+missing, malformed, oversized, non-contiguous, or permission-mismatched audit
+directory is an unrecoverable local store error for finalization and
 verification; the server never reconstructs it from the current gate.
 
-The audit file is not an authorization input. It records what the server
-evaluated so a completed or invalidated publication retains gate history after
-`publication-gate.json` is revoked:
+The audit directory is not an authorization input. The following is a logical
+projection of its two event files, ordered by sequence. It records what the
+server evaluated so a completed or invalidated publication retains gate
+history after `publication-gate.json` is revoked:
 
 ```json
 {
   "version": 1,
   "review_id": "rb-...",
-  "next_sequence": 3,
   "events": [
     {
+      "version": 1,
+      "review_id": "rb-...",
       "sequence": 1,
+      "event_id": "11111111111111111111111111111111",
       "event": "GATE_FINALIZATION_PASSED",
       "outcome": "SUCCESS",
       "normalized_reason": null,
@@ -1797,7 +1849,10 @@ evaluated so a completed or invalidated publication retains gate history after
       "expires_at": "2026-07-25T08:09:58.000Z"
     },
     {
+      "version": 1,
+      "review_id": "rb-...",
       "sequence": 2,
+      "event_id": "22222222222222222222222222222222",
       "event": "GATE_VERIFIED",
       "outcome": "SUCCESS",
       "normalized_reason": null,
@@ -2078,7 +2133,7 @@ reviews/<review_id>/.publication-state.lock
 
 Existing `review.json` and `gate.json` mutations use the review-state lock.
 `publication.json`, `publication-gate.json`, and
-`publication-gate-audit.json` mutations use the publication lock. Publication
+`publication-gate-audit/` mutations use the publication lock. Publication
 never starts before the local review becomes terminal, so
 there is no need to serialize both domains behind one lock.
 
@@ -2110,7 +2165,7 @@ can operate from stale reads.
 ## Failure and recovery
 
 - Missing or malformed evidence never advances the state.
-- `start_publication` durably creates the empty gate-audit file before the
+- `start_publication` durably creates the empty gate-audit directory before the
   ledger. A crash between those writes leaves an exact empty pre-start remnant
   that a retry for the same review validates and reuses; no populated or
   malformed audit is ever overwritten.
@@ -2160,10 +2215,10 @@ can operate from stale reads.
   deadline. `verify_publication_gate` returns `EVIDENCE_STALE` after that
   instant even when the ledger revision and head are unchanged.
 - A crash before committed issuance can leave an uncommitted candidate gate or
-  an audit-only `GATE_FINALIZATION_PASSED` event; verification rejects the candidate. Audit
-  replacement or sync failure prevents a committed gate or valid verification
-  response, while prior audit events remain durable and authorization never
-  depends on replaying them.
+  an audit-only `GATE_FINALIZATION_PASSED` event; verification rejects the
+  candidate. Audit installation or sync failure prevents a committed gate or
+  valid verification response, while prior audit events remain durable and
+  authorization never depends on replaying them.
 - A previously observed exact request that is changed or deleted persists
   terminal `INVALIDATED`; an older `CLEAN` can never become latest again.
 - A previously observed actor-admitted Codex result that disappears or changes
@@ -2357,6 +2412,10 @@ architecture.
 - Check-run and commit-status feeds carry separate endpoint, collection-time,
   pagination, page-count, and item-count proof. Both must be complete before
   latest-attempt selection, including when one feed is empty.
+- Required-check `policy` is a closed three-value domain. `REQUIRED` has at
+  least one requirement; `STRICT_ONLY` has none but still requires the strict
+  base comparison; `NONE_CONFIGURED` has none and is non-strict. No empty list
+  can pass by vacuous `REQUIRED` evaluation.
 - Every independent GitHub endpoint or GraphQL connection carries its own
   source status, response-completion time, and pagination proof where
   applicable. Parent collection times cannot refresh stale pull-request,
@@ -2442,9 +2501,14 @@ architecture.
   its stored observation timestamps; verification reapplies that deadline
   against the server clock and never treats finalization as timeless.
 - Gate issuance and every verification outcome append to the durable
-  server-owned gate-audit file. An audit append failure cannot yield a usable
-  gate or merge-authorizing verification response, and the audit file is never
-  used as authorization evidence.
+  server-owned gate-audit directory. Each bounded immutable event is installed
+  independently; an audit append failure cannot yield a usable gate or
+  merge-authorizing verification response, and audit events are never used as
+  authorization evidence.
+- Ledger-history and gate-audit event names are separate closed domains.
+  Observation digests always name their exact normalized observation subtree,
+  including the server-authored `recorded_at`, so copied digests retain one
+  meaning across ledger, acknowledgement, gate, and audit records.
 - Lock acquisition waits ten seconds; a lock is only eligible for reclamation
   after a 30-second heartbeat timeout and a conclusive owner-identity check.
 - A closed, unmerged pull request terminates the ledger and requires a new local
@@ -2452,7 +2516,7 @@ architecture.
 - Every state-changing publication tool rejects a terminal ledger before
   touching any publication file.
 - Revision 1 has status `PR_PENDING`, the evaluator's single no-observation
-  result; `PUBLICATION_STARTED` is only its audit event name.
+  result; `PUBLICATION_STARTED` is only its ledger-history event name.
 - A fresh, complete publication-start baseline keeps all preexisting requests
   and expected-actor candidate results outside active history and satisfaction.
   Every baseline request remains a source-only candidate for all later results
@@ -2469,10 +2533,11 @@ The implementation must test:
 
 - the successful path from local gate to `MERGE_READY`;
 - `start_publication` creating revision 1 with status `PR_PENDING` and a
-  `PUBLICATION_STARTED` audit event, including rejection of stale, incomplete,
-  or partially paginated baselines; recovery from an exact empty pre-start
-  gate-audit remnant; and rejection of existing publication or gate files and
-  populated, malformed, or mismatched audit files;
+  `PUBLICATION_STARTED` ledger-history event, including rejection of stale,
+  incomplete, or partially paginated baselines; recovery from an exact empty pre-start
+  gate-audit directory remnant; and rejection of existing publication or gate
+  files and populated, malformed, non-directory, or permission-mismatched audit
+  paths;
 - explicit-only and automatic-quiescence trigger policies, including rejection
   of an unknown mode, missing direct-human label or rationale, a changed head,
   and a baseline more than 30 seconds older than the server acknowledgement;
@@ -2492,9 +2557,12 @@ The implementation must test:
   RFC 8785 cleared-observation digest or explicit null on its history event,
   and returning `PR_PENDING` until a replacement snapshot is recorded;
 - a pull request head changed before and after Codex review;
-- an incomplete policy query, ambiguous `404`, explicit no-check policy with
-  both zero and nonzero optional runs, empty incomplete collections, incomplete
-  pagination, and count mismatches;
+- an incomplete policy query, ambiguous `404`, every invalid
+  policy/strict/requirements combination (including `REQUIRED` with no
+  requirements), `STRICT_ONLY` with empty requirements and both passing and
+  failing strict base comparisons, `NONE_CONFIGURED` with zero and nonzero
+  optional runs, empty incomplete collections, incomplete pagination, and
+  count mismatches;
 - missing, failed, stale, future-dated, and partially paginated independent
   sources for pull-request identity, both comparisons, every policy endpoint,
   both run feeds, each of the three Codex feeds, and review threads; a fresh
@@ -2666,13 +2734,20 @@ The implementation must test:
   terminal, revision, and cached status, with exact boundary tests immediately
   before, at, and after `expires_at`, while appending the exact durable
   `GATE_VERIFIED` success or failure audit event before returning;
+- gate-audit sequence continuity, 128-bit event-ID uniqueness, 16 KiB event and
+  1024-event directory limits, malformed filenames or event enums, crash
+  boundaries before and after hard-link installation, and
+  `AUDIT_CAPACITY_EXCEEDED` returning no merge-authorizing head;
+- exact ledger-history event emission for all four mutation kinds and rejection
+  of every unrecognized history event;
 - ambiguity acknowledgement with wrong head, stale revision, missing or extra
   resource-scoped request references (including unbound and unsupported
   requests) or resource-scoped result references, equal numeric request IDs in
   different resource kinds, missing rationale, or the wrong acknowledgement
   enum, plus a stale or future-dated backing observation, gate revocation,
   closed-reference reporting, the backing observation timestamp/hash, and the
-  revisioned audit record on success, including a recovery request whose
+  named `CODEX_REVIEW_AMBIGUITY_ACKNOWLEDGED` ledger-history record on success,
+  including a recovery request whose
   GitHub `created_at` is equal to or earlier than `acknowledged_at` but whose
   later `recorded_revision` correctly places it in the new epoch;
 - packaged-skill assertions for the complete seven-tool ordering, immediate
@@ -2685,15 +2760,16 @@ The implementation must test:
   inconclusive owner-liveness checks;
 - every state-changing publication tool returning
   `PUBLICATION_TERMINAL` against each terminal status without changing the
-  ledger, gate, or audit file;
+  ledger, gate, or audit entries;
 - malformed and oversized inputs, including numeric GitHub IDs outside the
   positive safe-integer range;
 - rejection of a non-`Bot` `codex_actor_type`, plus persistence of the exact
   validated actor ID/type pair while login changes only audit display;
 - server-authored `updated_at` and history `at` matching `recorded_at`, parent
   collection times matching their latest source, and executable validation of
-  every RFC JSON example and cross-example expiry calculation, plus RFC 8785
-  observation digest stability across caller key ordering;
+  every RFC JSON example, all four comparison SHA bindings, and cross-example
+  expiry calculation, plus RFC 8785 observation digest stability across caller
+  key ordering and equality of every copied observation digest;
 - failure to finalize from every state except `MERGE_READY`; and
 - recording a squash merge whose merge commit differs from the reviewed head.
 

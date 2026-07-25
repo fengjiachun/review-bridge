@@ -218,6 +218,14 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
     observation.pull_request.base_sha,
   );
   assert.equal(
+    observation.pull_request.base_head_comparison.head_sha,
+    observation.pull_request.head_sha,
+  );
+  assert.equal(
+    observation.pull_request.reviewed_base_current_base_comparison.base_sha,
+    ledger.local_gate.base_sha,
+  );
+  assert.equal(
     observation.pull_request.reviewed_base_current_base_comparison.head_sha,
     observation.pull_request.base_sha,
   );
@@ -283,7 +291,6 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
   assert.equal(gate.repository_id, ledger.target.repository_id);
   assert.equal(gate.pr_number, ledger.target.pr_number);
   assert.equal(gateAudit.review_id, ledger.review_id);
-  assert.equal(gateAudit.next_sequence, gateAudit.events.length + 1);
   assert.deepEqual(
     gateAudit.events.map((event) => [event.sequence, event.event]),
     [
@@ -291,12 +298,23 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
       [2, "GATE_VERIFIED"],
     ],
   );
+  assert.equal(
+    new Set(gateAudit.events.map((event) => event.event_id)).size,
+    gateAudit.events.length,
+  );
   for (const event of gateAudit.events) {
+    assert.equal(event.version, gateAudit.version);
+    assert.equal(event.review_id, gateAudit.review_id);
+    assert.match(event.event_id, /^[0-9a-f]{32}$/);
     assert.equal(event.outcome, "SUCCESS");
     assert.equal(event.normalized_reason, null);
     assert.equal(event.publication_revision, ledger.revision);
     assert.equal(event.head_sha, gate.head_sha);
     assert.equal(event.expires_at, gate.expires_at);
+    assert.equal(
+      event.github_observation_sha256,
+      gate.github_observation_sha256,
+    );
   }
   assert.equal(gateAudit.events[0].at, gate.passed_at);
   assert.equal(gateAudit.events[1].at, verification.verified_at);
