@@ -85,7 +85,7 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /post one PR comment containing exactly\n   `@codex review`/,
+  /post one PR comment containing exactly\s+`@codex review`/,
 );
 assert.match(
   workflowSkill,
@@ -95,10 +95,10 @@ assert.match(workflowSkill, /Any new commit invalidates the GitHub review gate/)
 assert.match(workflowSkill, /start a new local Review Bridge task/);
 assert.match(
   workflowSkill,
-  /issue comment, pull-request review, or pull-request review comment/,
+  /issue comment, pull-request review, or pull-request review\s+comment/,
 );
 assert.match(workflowSkill, /An eyes reaction is pending, never a pass/);
-assert.match(workflowSkill, /Record the exact request comment ID/);
+assert.match(workflowSkill, /record the exact request comment ID/);
 assert.match(workflowSkill, /reviewed-commit binding/);
 
 const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
