@@ -136,8 +136,12 @@ Whenever `gate.json`, `publication.json`, or `publication-gate.json` is read to
 issue or verify a merge-authorizing gate, the server opens the canonical path
 without following symlinks and confirms from the opened descriptor that it is a
 regular file with mode `0600`. A symlink, another file type, a permission
-mismatch, or a file above the size limit is an unrecoverable local store error;
-path validation is not based on a separate time-of-check lookup.
+mismatch, or a file above the size limit never authorizes a gate. A symlink,
+non-regular file, or oversized file is an unrecoverable local store error. A
+mode mismatch returns actionable, non-mutating `STORE_MODE_MISMATCH` with the
+canonical path, actual mode, required mode `0600`, and instruction to correct
+the mode and retry. Path validation is not based on a separate time-of-check
+lookup.
 
 Under that lock, any later ledger mutation must durably remove the canonical
 `publication-gate.json` before replacing `publication.json`. If gate removal or
@@ -1117,8 +1121,13 @@ pure: it returns a status and, when applicable, a proposed terminal record but
 never changes the ledger, request or result history, gate, or filesystem. Only
 `record_codex_review_request` and `record_github_snapshot` advance request
 history; only `record_github_snapshot` advances result history or persists a
-newly proposed terminal state. Baseline requests remain in their immutable
-baseline collection and are closed only by an ambiguity acknowledgement.
+newly proposed terminal state from the pure evaluator. Separately, after input
+validation and before evaluation, any mutating publication tool may persist the
+single out-of-band capacity terminal defined under Resource bounds, but only
+when its mandatory server-owned monotonic projection no longer fits; rejected
+caller input and replaceable observations never cause that transition.
+Baseline requests remain in their immutable baseline collection and are closed
+only by an ambiguity acknowledgement.
 `record_codex_review_request` first clears
 replaceable observation evidence, so its pure no-observation derivation is
 `PR_PENDING` rather than a comparison between new history and a pre-post
@@ -1128,6 +1137,9 @@ The numbered derivation below is the single normative priority order.
 Non-terminal statuses report its first applicable blocking condition. The
 table mirrors that order for reference and is descriptive; if future editing
 ever makes the two disagree, the numbered derivation controls.
+The capacity transition is a storage precondition, not a GitHub-evidence
+status; once written, derivation step 1 observes its ordinary `INVALIDATED`
+terminal record.
 
 | Status | Sticky | Meaning |
 | --- | --- | --- |
@@ -1520,40 +1532,57 @@ derives `MERGE_READY`.
 
 ## Resource bounds
 
-Version 1 applies these limits before accepting publication evidence:
+`publication.json` is stored as one RFC 8785 canonical UTF-8 JSON value followed
+by one newline. Its absolute size is 10 MiB, including that newline. A
+non-terminal ledger may use at most 10 MiB minus 64 KiB; the reserved 64 KiB is
+large enough for the fixed-schema minimal terminal record and its one history
+event, as asserted by a boundary test.
 
-- the RFC 8785 canonical form of one normalized GitHub observation is at most
-  8 MiB;
+Version 1 applies these cheaper first-pass limits before serializing a
+prospective ledger:
+
+- one normalized GitHub observation is at most 6 MiB in the same RFC 8785
+  encoding used inside `publication.json`;
+- the publication-start baseline is at most 2 MiB in that encoding;
 - `requirements` has at most 1,000 entries;
-- `runs` and `review_threads.threads` each have at most 10,000 entries;
-- all current Codex request/result arrays and attached review comments in one
-  observation have at most 10,000 entries in aggregate;
-- the publication-start baseline has at most 10,000 request and candidate-result
-  entries in aggregate;
-- `codex_request_history`, `codex_result_history`, and ledger `history` each
-  have at most 10,000 entries, while
-  `codex_review_ambiguity_acknowledgements` has at most 1,000; and
-- every other caller-controlled array has at most 10,000 entries.
+- all variable-length evidence arrays in one observation have at most 10,000
+  entries in aggregate, including runs, threads, every Codex object array, and
+  attached review comments;
+- the baseline has at most 5,000 request and candidate-result entries;
+- all monotonic ledger arrays have at most 20,000 entries in aggregate,
+  counting request history, result history, acknowledgement records, every
+  nested acknowledgement reference, and ledger history;
+- no individual monotonic array has more than 10,000 entries; and
+- acknowledgements number at most 1,000, and each acknowledgement has at most
+  1,000 request and result references in aggregate.
 
-The exact UTF-8 bytes written as `publication.json` must never exceed 10 MiB.
-A non-terminal mutation is accepted only when its prospective file is at most
-10 MiB minus 64 KiB; that reserve is exclusively for a minimal server-authored
-terminal record and its history event. For the same reason, a non-terminal
-ledger may contain at most 9,999 history entries; the 10,000th slot is reserved
-for terminal history. The server measures the candidate buffer produced by the
-same serializer used for the atomic write, not a caller-reported size. Before
-parsing any existing publication or gate file, the server checks its file size
-against the same 10 MiB absolute limit.
+The 6 MiB observation ceiling leaves at least 4 MiB minus the terminal reserve
+for the baseline, target, local-gate identity, and histories in an otherwise
+empty ledger. The prospective canonical-file check is nevertheless the binding
+constraint as histories grow. Count limits are independent cheap rejection
+guards and are not a promise that every maximum can coexist in one file.
+Tests exercise each count rejection with a small valid fixture rather than
+requiring simultaneous maxima.
 
-`start_publication` validates baseline counts and the prospective initial
-ledger before creating any audit remnant; exceeding a limit returns
-non-retryable `PUBLICATION_LIMIT_EXCEEDED` without creating publication state.
-After publication starts, any otherwise valid mutation whose input, monotonic
-history append, or prospective file crosses a limit first revokes an existing
-publication gate and then persists terminal `INVALIDATED` with reason
-`publication evidence exceeds version 1 resource limits`, without storing the
-rejected payload. This fail-closed transition uses the reserved 64 KiB. A new
-local task can proceed only if its bounded baseline fits these limits.
+`start_publication` validates the caller-supplied baseline and prospective
+initial file before creating an audit remnant. Every post-start tool validates
+its caller-supplied arrays and byte-bounded objects before gate revocation or
+any write. An input-side violation returns non-retryable
+`PUBLICATION_LIMIT_EXCEEDED` without changing the ledger, gate, audit, or
+terminal state.
+
+After input validation, the server separately projects only mandatory
+server-owned monotonic appends for the mutation, with replaceable
+`latest_observation` omitted. If that minimal state would exceed the 19,999
+non-terminal aggregate-entry allowance or the non-terminal file budget, the
+tool revokes any gate and writes terminal `INVALIDATED` with reason
+`server-owned monotonic publication state exceeds version 1 capacity`; its
+history event is the reserved 20,000th aggregate entry. This is the only
+out-of-band capacity transition. If the monotonic projection fits but the full
+candidate with a replaceable observation does not, the tool returns
+`PUBLICATION_LIMIT_EXCEEDED` without writing. Before parsing an existing
+publication or gate file, the server checks its actual file size against the
+10 MiB absolute limit.
 
 ### `get_publication`
 
@@ -1867,9 +1896,11 @@ Under the publication lock, append reads the small head and only the
 bounded suffix needed to validate the last committed record and any bytes
 after `committed_bytes`; it never scans or parses the committed prefix. Both
 audit paths must be regular non-symlink files with mode `0600`. A permission or
-file-type mismatch, a log shorter than `committed_bytes`, a last committed
-record that disagrees with the head, or a mismatched review ID, sequence, or
-chain digest is an unrecoverable local store error. Bytes after
+file-type mismatch never permits append: mode drift returns the same actionable
+`STORE_MODE_MISMATCH`, while a file-type mismatch, a log shorter than
+`committed_bytes`, a last committed record that disagrees with the head, or a
+mismatched review ID, sequence, or chain digest is an unrecoverable local store
+error. Bytes after
 `committed_bytes` can only be one
 uncommitted crash-tail record because no second append starts until recovery.
 If that suffix is one complete, canonical, newline-terminated event matching
@@ -2270,11 +2301,16 @@ can operate from stale reads.
 ## Failure and recovery
 
 - Missing or malformed evidence never advances the state.
-- Publication-start evidence above a version 1 resource limit creates no
-  publication state. A post-start mutation that would cross a count or byte
-  limit revokes any gate and records terminal `INVALIDATED` without storing the
-  oversized payload; the reserved terminal space keeps that fail-closed write
-  within the absolute file limit.
+- Caller input above a version 1 count or byte limit returns
+  `PUBLICATION_LIMIT_EXCEEDED` without changing any publication artifact.
+  Replaceable evidence that cannot fit the prospective file is handled the same
+  way. Only a validated mutation whose mandatory server-owned monotonic
+  projection no longer fits revokes the gate and records the out-of-band
+  capacity `INVALIDATED`; the reserved entry and byte space keep that
+  fail-closed write within the absolute limits.
+- `STORE_MODE_MISMATCH` changes no state and identifies the exact `chmod 0600`
+  repair before retry. Symlink, non-regular-file, and oversize store errors
+  remain unrecoverable.
 - `start_publication` durably creates the empty gate-audit log and head before
   the ledger. A crash between those writes leaves one of the exact empty
   pre-start remnants that a retry for the same review validates and completes
@@ -2426,9 +2462,12 @@ can operate from stale reads.
   automation that verifies repeatedly consumes disk until the review store is
   archived or removed under the existing local-store lifecycle.
 - Version 1 rejects very large pull requests or long publication histories
-  that exceed the explicit evidence, collection, history, or 10 MiB ledger
-  limits. Shrinking current GitHub collections does not erase monotonic history;
-  publication may require a new bounded task or a manual merge decision.
+  that exceed the explicit evidence, aggregate-entry, or 10 MiB ledger limits.
+  Caller-input and replaceable-observation overflow is non-mutating, but cannot
+  progress until the GitHub evidence fits or the operator chooses a manual
+  merge path. Exhausted server-owned monotonic capacity is terminal; shrinking
+  current collections does not erase that history and requires a new bounded
+  task or a manual merge decision.
 - Version 1 depends on two provider-specific response shapes: a recognized
   clean issue comment and a findings review with attached inline comments. A
   connector that changes either body shape moves that result to
@@ -2630,9 +2669,9 @@ architecture.
   cannot yield a usable gate or merge-authorizing verification response.
   Audit events are never used as authorization evidence.
 - Publication evidence and monotonic histories have explicit count and byte
-  limits. The writer measures the prospective serialized ledger, reserves room
-  for a terminal record, and fails closed without retaining an oversized
-  payload.
+  limits in the same canonical encoding used on disk. Caller and replaceable
+  input overflow is non-mutating; only exhaustion by validated mandatory
+  monotonic state uses the reserved capacity terminal.
 - Ledger-history and gate-audit event names are separate closed domains.
   Observation digests always name their exact normalized observation subtree,
   including the server-authored `recorded_at`, so copied digests retain one
@@ -2875,10 +2914,12 @@ The implementation must test:
   record against the audit head without scanning the committed prefix;
 - offline full audit inspection detecting corruption anywhere in the committed
   digest chain and reporting it without changing gate validity;
-- authorization-time rejection of symlinks, non-regular files, wrong modes,
+- authorization-time unrecoverable rejection of symlinks, non-regular files,
   and oversized `gate.json`, `publication.json`, and
-  `publication-gate.json`, plus exact audit-head temporary-pattern cleanup and
-  rejection of malformed or wrong-mode matching temporaries;
+  `publication-gate.json`; wrong modes must instead return non-mutating,
+  actionable `STORE_MODE_MISMATCH` and succeed after `chmod 0600`. Also test
+  exact audit-head temporary-pattern cleanup and rejection of malformed or
+  wrong-mode matching temporaries;
 - exact ledger-history event emission for all four mutation kinds and rejection
   of every unrecognized history event;
 - ambiguity acknowledgement with wrong head, stale revision, missing or extra
@@ -2903,12 +2944,13 @@ The implementation must test:
   `PUBLICATION_TERMINAL` against each terminal status without changing the
   ledger, gate, or audit entries;
 - malformed and oversized inputs, including numeric GitHub IDs outside the
-  positive safe-integer range; exact boundary tests for the 8 MiB observation,
-  10 MiB publication file, 64 KiB terminal reserve, every 10,000-entry
-  collection or monotonic-history limit, the 9,999-entry non-terminal ledger
-  history limit and reserved 10,000th terminal event, and the 1,000-entry
-  requirement and acknowledgement limits, including gate revocation and
-  terminal `INVALIDATED` on post-start overflow;
+  positive safe-integer range; exact independent rejection tests for the 6 MiB
+  observation, 2 MiB baseline, 10,000-entry observation aggregate, 5,000-entry
+  baseline, 1,000 requirements, 1,000 acknowledgements, and 1,000 references
+  per acknowledgement, plus binding 10 MiB file, 64 KiB terminal reserve, and
+  19,999/20,000 monotonic aggregate boundaries. Caller or replaceable overflow
+  must change no artifact; only mandatory monotonic exhaustion revokes the gate
+  and records capacity `INVALIDATED`;
 - rejection of a non-`Bot` `codex_actor_type`, plus persistence of the exact
   validated actor ID/type pair while login changes only audit display;
 - server-authored `updated_at` and history `at` matching `recorded_at`, parent
