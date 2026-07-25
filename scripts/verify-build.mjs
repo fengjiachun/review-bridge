@@ -11,15 +11,15 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = process.env.REVIEW_BRIDGE_OUTPUT_ROOT
   ? path.resolve(process.env.REVIEW_BRIDGE_OUTPUT_ROOT)
-  : path.join(projectRoot, "dist", "review-bridge-v0.1.1");
+  : path.join(projectRoot, "dist", "review-bridge-v0.2.0");
 const marketplaceRoot = path.join(outputRoot, "codex-marketplace");
 const pluginRoot = path.join(marketplaceRoot, "plugins", "review-bridge");
 const authorServer = path.join(pluginRoot, "server", "server.mjs");
 const reviewerRoot = path.join(outputRoot, "claude-extension-source");
 const reviewerServer = path.join(reviewerRoot, "server", "server.mjs");
-const mcpb = path.join(outputRoot, "review-bridge-reviewer-v0.1.1.mcpb");
-const dxt = path.join(outputRoot, "review-bridge-reviewer-v0.1.1.dxt");
-const sourceArchive = path.join(outputRoot, "review-bridge-source-v0.1.1.zip");
+const mcpb = path.join(outputRoot, "review-bridge-reviewer-v0.2.0.mcpb");
+const dxt = path.join(outputRoot, "review-bridge-reviewer-v0.2.0.dxt");
+const sourceArchive = path.join(outputRoot, "review-bridge-source-v0.2.0.zip");
 
 function run(command, args, cwd) {
   const result = spawnSync(command, args, {
@@ -42,7 +42,7 @@ async function connect(serverPath, role, store) {
     env: { ...process.env, REVIEW_BRIDGE_HOME: store },
     stderr: "pipe",
   });
-  const client = new Client({ name: "review-bridge-verifier", version: "0.1.1" });
+  const client = new Client({ name: "review-bridge-verifier", version: "0.2.0" });
   await client.connect(transport);
   return client;
 }
@@ -61,6 +61,226 @@ async function call(client, name, args) {
   return parseToolResult(await client.callTool({ name, arguments: args }));
 }
 
+function iso(milliseconds) {
+  return new Date(milliseconds).toISOString();
+}
+
+function publicationBaseline(at) {
+  const collectedAt = iso(at - 10);
+  const source = (kind) => ({
+    kind,
+    endpoint: `GET /fixture/${kind}`,
+    collected_at: collectedAt,
+    status: "COMPLETE",
+    pagination_complete: true,
+    page_count: 1,
+  });
+  return {
+    observed_at: iso(at),
+    collection: {
+      status: "COMPLETE",
+      collected_at: collectedAt,
+      adapter_version: 1,
+      sources: [
+        source("ISSUE_COMMENTS"),
+        source("PULL_REQUEST_REVIEWS"),
+        source("PULL_REQUEST_REVIEW_COMMENTS"),
+      ],
+    },
+    requests: [],
+    candidate_results: [],
+  };
+}
+
+function publicationObservation({ at, baseSha, headSha, requestAt }) {
+  const pullBaseAt = iso(at - 90);
+  const checksBaseAt = iso(at - 80);
+  const collectedAt = iso(at - 50);
+  const complete = (kind, extra = {}) => ({
+    kind,
+    endpoint: `GET /fixture/${kind}`,
+    collected_at: collectedAt,
+    status: "COMPLETE",
+    ...extra,
+  });
+  const requestBodyHash = crypto
+    .createHash("sha256")
+    .update("@codex review")
+    .digest("hex");
+  return {
+    observed_at: iso(at),
+    pull_request: {
+      collection: {
+        status: "COMPLETE",
+        collected_at: collectedAt,
+        sources: [
+          complete("PULL_REQUEST"),
+          {
+            ...complete("BASE_BRANCH_METADATA"),
+            collected_at: pullBaseAt,
+            branch_tip_sha: baseSha,
+          },
+          complete("BASE_HEAD_COMPARISON"),
+          complete("REVIEWED_BASE_CURRENT_BASE_COMPARISON"),
+        ],
+      },
+      repository_id: 42,
+      number: 7,
+      url: "https://github.com/owner/repo/pull/7",
+      state: "OPEN",
+      is_merged: false,
+      merged_at: null,
+      merge_commit_sha: null,
+      is_draft: false,
+      head_sha: headSha,
+      head_branch: "agent/change",
+      base_branch: "main",
+      pr_reported_base_sha: baseSha,
+      base_sha: baseSha,
+      mergeable: "MERGEABLE",
+      base_head_comparison: {
+        status: "AHEAD",
+        source: "REST_COMPARE_BASE_TO_HEAD",
+        base_sha: baseSha,
+        head_sha: headSha,
+      },
+      reviewed_base_current_base_comparison: {
+        status: "IDENTICAL",
+        source: "REST_COMPARE_REVIEWED_BASE_TO_CURRENT_BASE",
+        base_sha: baseSha,
+        head_sha: baseSha,
+      },
+    },
+    required_checks: {
+      collection: {
+        status: "COMPLETE",
+        collected_at: collectedAt,
+        policy_sources: [
+          {
+            kind: "APPLICABLE_RULES",
+            endpoint: "GET /fixture/rules",
+            collected_at: checksBaseAt,
+            result: "SUCCESS",
+            pagination_complete: true,
+            page_count: 1,
+          },
+          {
+            kind: "BRANCH_METADATA",
+            endpoint: "GET /fixture/branch",
+            collected_at: checksBaseAt,
+            result: "SUCCESS",
+            protected: false,
+            branch_tip_sha: baseSha,
+          },
+        ],
+        run_sources: [
+          {
+            ...complete("CHECK_RUN", {
+              pagination_complete: true,
+              page_count: 1,
+              item_count: 0,
+              reported_total_count: 0,
+            }),
+            endpoint: "GET /fixture/check-runs?filter=all",
+          },
+          complete("COMMIT_STATUS", {
+            pagination_complete: true,
+            page_count: 1,
+            item_count: 0,
+            reported_total_count: null,
+          }),
+        ],
+      },
+      policy: "NONE_CONFIGURED",
+      strict_policy: { required: false, sources: [] },
+      requirements: [],
+      runs: [],
+    },
+    codex_review: {
+      collection: {
+        status: "COMPLETE",
+        collected_at: collectedAt,
+        adapter_version: 1,
+        sources: [
+          complete("ISSUE_COMMENTS", {
+            pagination_complete: true,
+            page_count: 1,
+          }),
+          complete("PULL_REQUEST_REVIEWS", {
+            pagination_complete: true,
+            page_count: 1,
+          }),
+          complete("PULL_REQUEST_REVIEW_COMMENTS", {
+            pagination_complete: true,
+            page_count: 1,
+          }),
+        ],
+      },
+      preexisting_requests: [],
+      preexisting_candidate_results: [],
+      requests: [
+        {
+          comment_id: 100,
+          resource_kind: "ISSUE_COMMENT",
+          url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+          event_at: iso(requestAt),
+          timestamp_field: "created_at",
+          body: "@codex review",
+          body_sha256: requestBodyHash,
+          requested_head_sha: headSha,
+        },
+      ],
+      unbound_requests: [],
+      unsupported_requests: [],
+      foreign_actor_objects: [],
+      results: [
+        {
+          result_id: 101,
+          resource_kind: "ISSUE_COMMENT",
+          native_review_state: null,
+          url: "https://github.com/owner/repo/issues/7#issuecomment-101",
+          event_at: iso(requestAt + 10),
+          timestamp_field: "created_at",
+          actor: { id: 99, type: "Bot", login: "codex[bot]" },
+          request_ref: {
+            resource_kind: "ISSUE_COMMENT",
+            resource_id: 100,
+          },
+          association: "SINGLE_OPEN_REQUEST",
+          reviewed_head_sha: headSha,
+          commit_binding: {
+            source: "CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD",
+            field: "body.reviewed_commit",
+            prefix: headSha.slice(0, 10),
+          },
+          attached_review_comments: [],
+          format: "CODEX_CLEAN_COMMENT_V1",
+          verdict: "CLEAN",
+          body_sha256: crypto
+            .createHash("sha256")
+            .update("clean result")
+            .digest("hex"),
+        },
+      ],
+    },
+    review_threads: {
+      collection: {
+        status: "COMPLETE",
+        collected_at: collectedAt,
+        sources: [
+          complete("PULL_REQUEST_REVIEW_THREADS", {
+            pagination_complete: true,
+            page_count: 1,
+          }),
+        ],
+      },
+      total_count: 0,
+      unresolved_count: 0,
+      threads: [],
+    },
+  };
+}
+
 const marketplace = await readJson(
   path.join(marketplaceRoot, ".agents", "plugins", "marketplace.json"),
 );
@@ -69,7 +289,7 @@ assert.equal(marketplace.plugins[0].source.path, "./plugins/review-bridge");
 
 const plugin = await readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
 assert.equal(plugin.name, "review-bridge");
-assert.equal(plugin.version, "0.1.1");
+assert.equal(plugin.version, "0.2.0");
 assert.equal(plugin.mcpServers, "./.mcp.json");
 const workflowSkillPath = path.join(
   pluginRoot,
@@ -85,7 +305,7 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /post one PR comment containing exactly\s+`@codex review`/,
+  /Post exactly\s+one issue comment whose entire body is `@codex review`/,
 );
 assert.match(
   workflowSkill,
@@ -95,11 +315,11 @@ assert.match(workflowSkill, /Any new commit invalidates the GitHub review gate/)
 assert.match(workflowSkill, /start a new local Review Bridge task/);
 assert.match(
   workflowSkill,
-  /issue comment or pull-request review/,
+  /clean issue comment.*Findings must be a formal review/s,
 );
-assert.match(workflowSkill, /An eyes reaction is pending, never a pass/);
-assert.match(workflowSkill, /record the exact request comment ID/);
-assert.match(workflowSkill, /reviewed-commit binding/);
+assert.match(workflowSkill, /Treat an eyes reaction.*as non-passing/s);
+assert.match(workflowSkill, /immediately call\s+`record_codex_review_request`/);
+assert.match(workflowSkill, /formal review bound by native\s+`commit_id`/);
 assert.match(workflowSkill, /get_review_summary/);
 assert.match(workflowSkill, /wait_for_review_state/);
 assert.match(workflowSkill, /A `timed_out` result is expected/);
@@ -118,8 +338,40 @@ assert.match(workflowSkill, /`details\.state_may_have_changed: true`/);
 assert.match(workflowSkill, /`LOCK_CLEANUP_FAILED`/);
 assert.match(workflowSkill, /`STORE_WRITE_INDETERMINATE`/);
 assert.match(workflowSkill, /do not\s+loop on the same mutation/);
-assert.match(workflowSkill, /a\s+standalone review comment is unsupported/);
-assert.match(workflowSkill, /Never learn that identity from the\s+candidate result/);
+assert.match(
+  workflowSkill,
+  /an unsupported\s+standalone review comment/,
+);
+assert.match(
+  workflowSkill,
+  /Never learn or replace this identity from a candidate\s+result/,
+);
+for (const tool of [
+  "start_publication",
+  "get_publication",
+  "record_codex_review_request",
+  "record_github_snapshot",
+  "acknowledge_codex_review_ambiguity",
+  "finalize_publication_gate",
+  "verify_publication_gate",
+]) {
+  assert.match(workflowSkill, new RegExp(`\\b${tool}\\b`));
+}
+assert.match(workflowSkill, /Immediately before `start_publication`/);
+assert.match(workflowSkill, /immediately call\s+`record_codex_review_request`/);
+assert.match(workflowSkill, /Never post an exact or\s+trigger-shaped Codex review request manually/);
+assert.match(workflowSkill, /direct approval of that exact\s+full set/);
+assert.match(
+  workflowSkill,
+  /`AUTOMATIC_QUIESCENCE_ACKNOWLEDGED` requires direct human/,
+);
+assert.match(workflowSkill, /Immediately\s+before merge call `verify_publication_gate`/);
+assert.match(workflowSkill, /normalize-codex-evidence\.mjs/);
+assert.ok(
+  await fsp.stat(
+    path.join(pluginRoot, "scripts", "normalize-codex-evidence.mjs"),
+  ),
+);
 
 const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
 assert.equal(mcpConfig.mcpServers["review-bridge-author"].cwd, ".");
@@ -130,7 +382,7 @@ assert.equal(
 
 const extension = await readJson(path.join(reviewerRoot, "manifest.json"));
 assert.equal(extension.manifest_version, "0.3");
-assert.equal(extension.version, "0.1.1");
+assert.equal(extension.version, "0.2.0");
 assert.equal(extension.server.entry_point, "server/server.mjs");
 
 const [mcpbBytes, dxtBytes] = await Promise.all([fsp.readFile(mcpb), fsp.readFile(dxt)]);
@@ -170,17 +422,21 @@ try {
   );
   run("git", ["add", "."], repository);
   run("git", ["commit", "-m", "base"], repository);
+  const baseSha = run("git", ["rev-parse", "HEAD"], repository);
+  run("git", ["switch", "-c", "agent/change"], repository);
   await fsp.writeFile(
     path.join(repository, "value.js"),
     "export const value = 2;\n",
   );
+  run("git", ["add", "."], repository);
+  run("git", ["commit", "-m", "change value"], repository);
 
   const author = await connect(authorServer, "author", store);
   const reviewer = await connect(reviewerServer, "reviewer", store);
   try {
     const prepared = await call(author, "prepare_review", {
       repository_path: repository,
-      base_ref: "HEAD",
+      base_ref: baseSha,
       requirement: "Change the exported value to 2.",
       implementation_scope: "Update value.js and add a focused test.",
     });
@@ -246,6 +502,8 @@ try {
       path.join(repository, "value.test.js"),
       "import assert from 'node:assert/strict';\nimport { value } from './value.js';\nassert.equal(value, 2);\n",
     );
+    run("git", ["add", "."], repository);
+    run("git", ["commit", "-m", "add focused test"], repository);
     await call(author, "prepare_rereview", { review_id: prepared.id });
     const clean = await call(reviewer, "submit_rereview", {
       review_id: prepared.id,
@@ -263,6 +521,54 @@ try {
       review_id: prepared.id,
     });
     assert.equal(finalized.gate.status, "LOCAL_GATE_PASSED");
+    const headSha = finalized.gate.head_sha;
+    const startedAt = Date.now();
+    const publication = await call(author, "start_publication", {
+      review_id: prepared.id,
+      repository_id: 42,
+      owner: "owner",
+      repo: "repo",
+      pr_number: 7,
+      base_branch: "main",
+      head_branch: "agent/change",
+      codex_actor_id: 99,
+      codex_actor_type: "Bot",
+      codex_actor_login: "codex[bot]",
+      codex_trigger_mode: "EXPLICIT_ONLY",
+      codex_review_baseline: publicationBaseline(startedAt - 10),
+    });
+    assert.equal(publication.status, "PR_PENDING");
+    const requestAt = Date.now();
+    const requested = await call(author, "record_codex_review_request", {
+      review_id: prepared.id,
+      expected_revision: publication.revision,
+      comment_id: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      created_at: iso(requestAt),
+      requested_head_sha: headSha,
+    });
+    const observedAt = Date.now() + 1_000;
+    const ready = await call(author, "record_github_snapshot", {
+      review_id: prepared.id,
+      expected_revision: requested.revision,
+      observation: publicationObservation({
+        at: observedAt,
+        baseSha,
+        headSha,
+        requestAt,
+      }),
+    });
+    assert.equal(ready.status, "MERGE_READY");
+    const publicationGate = await call(author, "finalize_publication_gate", {
+      review_id: prepared.id,
+      expected_revision: ready.revision,
+    });
+    assert.equal(publicationGate.issuance_committed, true);
+    const verified = await call(author, "verify_publication_gate", {
+      review_id: prepared.id,
+    });
+    assert.equal(verified.valid, true);
+    assert.equal(verified.head_sha, headSha);
   } finally {
     await reviewer.close();
     await author.close();
@@ -271,4 +577,6 @@ try {
   await fsp.rm(temporary, { recursive: true, force: true });
 }
 
-process.stdout.write("Packaged Codex and Claude clients completed the two-round flow.\n");
+process.stdout.write(
+  "Packaged Codex and Claude clients completed the local and publication flows.\n",
+);

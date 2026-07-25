@@ -1,0 +1,50 @@
+{
+  "collection": {
+    "status": "COMPLETE",
+    "collected_at": "2026-07-25T23:10:24.000Z",
+    "sources": []
+  },
+  "expected_actor": {
+    "id": 199175422,
+    "type": "Bot"
+  },
+  "local_gate_head_sha": "e059e4f846e9e55890dc44e656ed653431d812d5",
+  "baseline": {
+    "requests": [],
+    "candidate_results": []
+  },
+  "request_history": [
+    {
+      "resource_id": 5080965488,
+      "resource_kind": "ISSUE_COMMENT",
+      "requested_head_sha": "e059e4f846e9e55890dc44e656ed653431d812d5"
+    }
+  ],
+  "ambiguity_acknowledgements": [],
+  "issue_comments": [
+    {
+      "id": 5080965488,
+      "html_url": "https://github.com/fengjiachun/review-bridge/pull/6#issuecomment-5080965488",
+      "created_at": "2026-07-25T23:08:01Z",
+      "body": "@codex review",
+      "user": {
+        "id": 3860496,
+        "type": "User",
+        "login": "fengjiachun"
+      }
+    },
+    {
+      "id": 5080972188,
+      "html_url": "https://github.com/fengjiachun/review-bridge/pull/6#issuecomment-5080972188",
+      "created_at": "2026-07-25T23:10:23Z",
+      "body": "Codex Review: Didn't find any major issues. You're on a roll.\n\n**Reviewed commit:** `e059e4f846`\n\nReviews can be triggered by commenting \"@codex review\".",
+      "user": {
+        "id": 199175422,
+        "type": "Bot",
+        "login": "chatgpt-codex-connector[bot]"
+      }
+    }
+  ],
+  "pull_request_reviews": [],
+  "pull_request_review_comments": []
+}

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-07-26
 
 ### Added
 
@@ -9,6 +9,8 @@
   formatting and clock skew.
 - Per-review cross-process locking serializes author and reviewer state
   mutations.
+- A revisioned GitHub publication ledger, versioned Codex response adapter,
+  expiring `MERGE_READY` gate, and append-only gate audit chain.
 
 ### Changed
 

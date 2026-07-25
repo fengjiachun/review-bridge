@@ -1,0 +1,67 @@
+{
+  "collection": {
+    "status": "COMPLETE",
+    "collected_at": "2026-07-25T12:08:54.000Z",
+    "sources": []
+  },
+  "expected_actor": {
+    "id": 199175422,
+    "type": "Bot"
+  },
+  "local_gate_head_sha": "ec32bd284e383bf5e618cbb2ae1ae04ea8302416",
+  "baseline": {
+    "requests": [],
+    "candidate_results": []
+  },
+  "request_history": [
+    {
+      "resource_id": 500,
+      "resource_kind": "ISSUE_COMMENT",
+      "requested_head_sha": "ec32bd284e383bf5e618cbb2ae1ae04ea8302416"
+    }
+  ],
+  "ambiguity_acknowledgements": [],
+  "issue_comments": [
+    {
+      "id": 500,
+      "html_url": "https://github.com/fengjiachun/review-bridge/pull/5#issuecomment-500",
+      "created_at": "2026-07-25T12:00:00Z",
+      "body": "@codex review",
+      "user": {
+        "id": 3860496,
+        "type": "User",
+        "login": "fengjiachun"
+      }
+    }
+  ],
+  "pull_request_reviews": [
+    {
+      "id": 4779232250,
+      "html_url": "https://github.com/fengjiachun/review-bridge/pull/5#pullrequestreview-4779232250",
+      "submitted_at": "2026-07-25T12:08:53Z",
+      "commit_id": "ec32bd284e383bf5e618cbb2ae1ae04ea8302416",
+      "state": "COMMENTED",
+      "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `ec32bd284e`\n\nReviews can be triggered by commenting \"@codex review\".",
+      "user": {
+        "id": 199175422,
+        "type": "Bot",
+        "login": "chatgpt-codex-connector[bot]"
+      }
+    }
+  ],
+  "pull_request_review_comments": [
+    {
+      "id": 3650141329,
+      "pull_request_review_id": 4779232250,
+      "html_url": "https://github.com/fengjiachun/review-bridge/pull/5#discussion_r3650141329",
+      "created_at": "2026-07-25T12:08:53Z",
+      "commit_id": "ec32bd284e383bf5e618cbb2ae1ae04ea8302416",
+      "body": "Preserve the required GitHub App binding.",
+      "user": {
+        "id": 199175422,
+        "type": "Bot",
+        "login": "chatgpt-codex-connector[bot]"
+      }
+    }
+  ]
+}
