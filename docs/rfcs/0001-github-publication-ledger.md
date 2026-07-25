@@ -102,6 +102,12 @@ before this RFC have no publication ledger and continue to support the local
 Claude workflow. Publication tools are opt-in and available only after
 `LOCAL_GATE_PASSED`.
 
+The locking prerequisite adds a retryable `REVIEW_BUSY` failure to existing
+state-changing author and reviewer tools. Clients that already surface MCP
+errors require no schema migration, but release notes must document that a
+caller should retry after rereading the review. Successful tool responses and
+review-state transitions remain compatible.
+
 The new files begin at schema version 1. Readers must reject unsupported future
 versions instead of attempting a best-effort interpretation. A future schema
 change must define an explicit migration or create a new publication ledger.
@@ -127,45 +133,103 @@ The initial schema is:
     "repository_id": 123456,
     "owner": "owner",
     "repo": "repository",
+    "pr_number": 5,
     "base_branch": "main",
     "head_branch": "agent/change"
   },
+  "terminal": null,
   "latest_observation": {
     "observed_at": "2026-07-25T08:05:00.000Z",
+    "recorded_at": "2026-07-25T08:05:01.000Z",
     "pull_request": {
+      "repository_id": 123456,
       "number": 5,
       "url": "https://github.com/owner/repository/pull/5",
       "state": "OPEN",
+      "is_merged": false,
+      "merged_at": null,
+      "merge_commit_sha": null,
       "is_draft": false,
       "head_sha": "0123456789abcdef...",
+      "head_branch": "agent/change",
       "base_branch": "main",
       "mergeable": "MERGEABLE"
     },
-    "required_checks": [
-      {
-        "name": "test",
-        "status": "COMPLETED",
-        "conclusion": "SUCCESS",
-        "details_url": "https://github.com/..."
-      }
-    ],
-    "codex_request": {
-      "comment_id": 100,
-      "url": "https://github.com/...",
-      "created_at": "2026-07-25T08:03:00.000Z",
-      "body": "@codex review",
-      "requested_head_sha": "0123456789abcdef..."
+    "required_checks": {
+      "collection": {
+        "status": "COMPLETE",
+        "collected_at": "2026-07-25T08:05:00.000Z",
+        "policy_sources": [
+          {
+            "kind": "APPLICABLE_RULES",
+            "endpoint": "GET /repos/{owner}/{repo}/rules/branches/{branch}",
+            "result": "SUCCESS",
+            "pagination_complete": true
+          },
+          {
+            "kind": "BRANCH_METADATA",
+            "endpoint": "GET /repos/{owner}/{repo}/branches/{branch}",
+            "result": "SUCCESS",
+            "protected": true
+          },
+          {
+            "kind": "CLASSIC_BRANCH_PROTECTION",
+            "endpoint": "GET /repos/{owner}/{repo}/branches/{branch}/protection",
+            "result": "SUCCESS"
+          }
+        ]
+      },
+      "policy": "REQUIRED",
+      "contexts": ["test"],
+      "runs": [
+        {
+          "name": "test",
+          "head_sha": "0123456789abcdef...",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "details_url": "https://github.com/..."
+        }
+      ]
     },
-    "codex_result": {
-      "comment_id": 101,
-      "url": "https://github.com/...",
-      "created_at": "2026-07-25T08:04:00.000Z",
-      "author": "chatgpt-codex-connector",
-      "reviewed_head_sha": "0123456789abcdef...",
-      "verdict": "CLEAN",
-      "body_sha256": "sha256..."
+    "codex_review": {
+      "collection": {
+        "status": "COMPLETE",
+        "collected_at": "2026-07-25T08:05:00.000Z",
+        "source": "PULL_REQUEST_CONVERSATION_AND_REVIEWS",
+        "pagination_complete": true
+      },
+      "requests": [
+        {
+          "comment_id": 100,
+          "url": "https://github.com/...",
+          "created_at": "2026-07-25T08:03:00.000Z",
+          "body": "@codex review",
+          "requested_head_sha": "0123456789abcdef..."
+        }
+      ],
+      "results": [
+        {
+          "comment_id": 101,
+          "url": "https://github.com/...",
+          "created_at": "2026-07-25T08:04:00.000Z",
+          "author": "chatgpt-codex-connector",
+          "reviewed_head_sha": "0123456789abcdef...",
+          "verdict": "CLEAN",
+          "body_sha256": "sha256..."
+        }
+      ]
     },
-    "unresolved_threads": []
+    "review_threads": {
+      "collection": {
+        "status": "COMPLETE",
+        "collected_at": "2026-07-25T08:05:00.000Z",
+        "source": "GRAPHQL_PULL_REQUEST_REVIEW_THREADS",
+        "pagination_complete": true
+      },
+      "total_count": 0,
+      "unresolved_count": 0,
+      "threads": []
+    }
   },
   "status": "MERGE_READY",
   "history": [
@@ -184,6 +248,56 @@ GitHub object IDs and URLs are evidence locators. The ledger stores normalized
 facts and a hash of the Codex response body instead of depending on mutable
 free-form chat text as its source of truth.
 
+Empty arrays never imply that collection succeeded. Each evidence class carries
+`collection.status`, its source, collection time, and pagination completeness
+where applicable. Any missing field, failed query, ambiguous permission error,
+or incomplete page sequence makes the whole observation incomplete.
+
+`collection.status` is `COMPLETE`, `INCOMPLETE`, or `UNKNOWN`. Policy-source
+results are `SUCCESS`, `NOT_CONFIGURED`, `ERROR`, or `UNKNOWN`. Incomplete or
+unknown collections are valid observations that derive
+`EVIDENCE_INCOMPLETE`; malformed collection metadata is rejected.
+
+Required-check policy discovery reads both:
+
+- active rules applying to the base branch from
+  `GET /repos/{owner}/{repo}/rules/branches/{branch}`; and
+- branch metadata and classic branch protection from
+  `GET /repos/{owner}/{repo}/branches/{branch}` and
+  `GET /repos/{owner}/{repo}/branches/{branch}/protection`.
+
+The required contexts are the union of both successful policy reads. An
+authorization error or ambiguous `404` is `UNKNOWN`, not evidence that no
+checks are configured. A classic-protection `404` may be classified as
+`NOT_CONFIGURED` only when the same authenticated client successfully read the
+branch metadata and every page of applicable rules immediately beforehand.
+Otherwise it remains `UNKNOWN`.
+
+`policy: "NONE_CONFIGURED"` is permitted only when complete policy discovery
+produces an explicit empty result: the applicable-rules response contains no
+required status-check rule, and classic protection is either present with no
+required checks or conclusively `NOT_CONFIGURED`. It must accompany
+`contexts: []` and `runs: []`; otherwise the observation is invalid. A caller
+that cannot establish the policy derives `EVIDENCE_INCOMPLETE`.
+
+For an open pull request, `state` is `OPEN`, `is_merged` is false,
+`merged_at` is null, and `merge_commit_sha` is normalized to null because
+GitHub's pre-merge value may describe a test merge. Only `is_merged: true`
+together with `state: "CLOSED"`, `merged_at`, and `merge_commit_sha` is merge
+evidence.
+
+Thread collection reads the complete paginated `reviewThreads` connection. It
+records every normalized thread, not only unresolved threads, and the server
+requires:
+
+```text
+total_count == threads.length
+unresolved_count == threads.filter(thread => !thread.is_resolved).length
+```
+
+An empty thread array is acceptable only with `status: "COMPLETE"`,
+`pagination_complete: true`, and both counts set to zero.
+
 ## Atomic GitHub observations
 
 One `record_github_snapshot` call records all publication evidence observed at
@@ -191,10 +305,10 @@ the same time:
 
 - pull request identity and current head SHA;
 - draft, open, mergeability, and base-branch state;
-- every required check and its conclusion;
-- the exact `@codex review` request;
-- the resulting Codex response and reviewed commit;
-- all unresolved review threads; and
+- required-check policy provenance and every required run for the head;
+- every exact `@codex review` request for the head;
+- every candidate Codex result after those requests;
+- the complete paginated review-thread collection and resolution counts; and
 - the observation timestamp.
 
 The server must not expose independent mutations such as
@@ -209,49 +323,88 @@ and requires the caller to read the ledger again.
 ## Derived states
 
 `status` is cached for display but recomputed from the latest observation on
-every mutation and finalization.
+every mutation and finalization unless `terminal` is set.
 
-| Status | Meaning |
-| --- | --- |
-| `PUBLICATION_STARTED` | The local gate and GitHub target are bound. |
-| `PR_PENDING` | No pull request observation exists yet. |
-| `PR_DRAFT` | The pull request is still a draft. |
-| `CHECKS_PENDING` | At least one required check has not completed. |
-| `CHECKS_FAILED` | At least one required check failed or was cancelled. |
-| `GITHUB_REVIEW_NOT_REQUESTED` | No valid exact request exists for the head. |
-| `GITHUB_REVIEW_PENDING` | A request exists but no later Codex result exists. |
-| `GITHUB_REVIEW_UNKNOWN` | The result format or verdict cannot be recognized. |
-| `CHANGES_REQUIRED` | Codex reported findings or any review thread is unresolved. |
-| `MERGE_READY` | Every required invariant passes for the current head. |
-| `INVALIDATED` | The pull request identity or head no longer matches the local gate. |
-| `CLOSED` | The pull request closed without a recorded merge. |
-| `MERGED` | A later observation confirms the pull request was merged. |
+| Status | Sticky | Meaning |
+| --- | --- | --- |
+| `PUBLICATION_STARTED` | No | The local gate and GitHub target are bound. |
+| `PR_PENDING` | No | No pull request observation exists yet. |
+| `EVIDENCE_INCOMPLETE` | No | A required evidence collection is absent, ambiguous, or incomplete. |
+| `PR_DRAFT` | No | The pull request is still a draft. |
+| `PR_STATE_PENDING` | No | GitHub has not finished computing mergeability. |
+| `PR_CONFLICTING` | No | GitHub reports that the pull request conflicts. |
+| `CHECKS_PENDING` | No | At least one required check has not completed. |
+| `CHECKS_FAILED` | No | At least one required check failed or was cancelled. |
+| `GITHUB_REVIEW_NOT_REQUESTED` | No | No valid exact request exists for the head. |
+| `GITHUB_REVIEW_PENDING` | No | The latest request has no corresponding result. |
+| `GITHUB_REVIEW_UNKNOWN` | No | The result format, association, or verdict is ambiguous. |
+| `CHANGES_REQUIRED` | No | Codex reported findings or any review thread is unresolved. |
+| `MERGE_READY` | No | Every required invariant passes for the current head. |
+| `INVALIDATED` | Yes | The pull request identity or head no longer matches the local gate. |
+| `CLOSED` | Yes | The pull request closed without a recorded merge. |
+| `MERGED` | Yes | A live observation confirms the merge and its commit SHA. |
 
-`INVALIDATED` is terminal for this review. A code change requires a new local
-Review Bridge task and a new publication ledger.
+When a sticky state is first derived, the server writes:
+
+```json
+{
+  "status": "INVALIDATED",
+  "at": "2026-07-25T08:06:00.000Z",
+  "revision": 5,
+  "reason": "pull request head differs from local gate"
+}
+```
+
+to `terminal`. Later derivation short-circuits to `terminal.status`, and no
+mutation may clear or replace it. Restoring a force-pushed branch to the
+reviewed SHA does not revive the ledger. `INVALIDATED` and `CLOSED` require a
+new local Review Bridge task; `MERGED` completes the lifecycle.
 
 ## State derivation
 
 The evaluator applies these checks in order:
 
-1. The ledger references an existing `LOCAL_GATE_PASSED` gate.
-2. The repository identity, pull request base, and pull request number match
-   the bound target.
-3. The pull request head equals the local gate `head_sha`.
-4. The pull request is open and no longer a draft.
-5. Every required check is completed successfully.
-6. The request body is exactly `@codex review`, and the request is bound to the
-   current head.
-7. The Codex result was created after the request.
-8. The result names the same reviewed head SHA.
-9. The result parser returns `CLEAN`; an unknown format fails closed.
-10. No review thread remains unresolved.
+1. If `terminal` is set, return its status without inspecting later evidence.
+2. The ledger references an existing `LOCAL_GATE_PASSED` gate.
+3. If no observation exists, derive `PR_PENDING`.
+4. The repository identity, pull request number, base branch, head branch, and
+   pull request head match the bound target and local gate. Any mismatch
+   persists terminal `INVALIDATED`.
+5. A merged pull request has `is_merged: true`, `state: "CLOSED"`, a valid
+   `merged_at`, and a full `merge_commit_sha`. If so, persist terminal `MERGED`;
+   the merge commit may differ from the reviewed head after squash merge.
+6. A pull request with `state: "CLOSED"` and `is_merged: false` persists
+   terminal `CLOSED`.
+7. Every required evidence collection reports `COMPLETE`, has complete
+   pagination, and satisfies its internal counts and provenance rules.
+8. An open pull request is no longer a draft.
+9. The adapter normalizes GitHub's mergeability result to `MERGEABLE`,
+   `CONFLICTING`, or `UNKNOWN`.
+   `UNKNOWN` derives `PR_STATE_PENDING`; `CONFLICTING` derives
+   `PR_CONFLICTING`; only `MERGEABLE` may continue.
+10. Required-check policy discovery is complete. For `REQUIRED`, every
+    required context has a run bound to the pull request head and completed
+    successfully. For `NONE_CONFIGURED`, the explicit-empty invariants hold.
+11. From the complete request collection, select the latest exact
+    `@codex review` request for the current head by `(created_at, comment_id)`.
+    If none exists, derive `GITHUB_REVIEW_NOT_REQUESTED`.
+12. Consider only candidate results created after that latest request. Zero
+    results derives `GITHUB_REVIEW_PENDING`; more than one result or an
+    ambiguous association derives `GITHUB_REVIEW_UNKNOWN`.
+13. The single result names the current head SHA and its parser returns
+    `CLEAN`; a stale SHA or unknown format fails closed.
+14. Thread collection is complete, its counts are internally consistent, and
+    `unresolved_count` is zero.
 
 Only an observation that passes every check derives `MERGE_READY`.
 
 Outdated but unresolved threads still block publication. A human must resolve
 or dismiss them explicitly instead of relying on the ledger to infer that they
 are harmless.
+
+A later exact request always supersedes an earlier request for the same head.
+An earlier `CLEAN` result cannot satisfy a later request. Duplicate requests
+are therefore represented and evaluated rather than rejected as malformed.
 
 ## Author tools
 
@@ -265,6 +418,7 @@ Inputs:
 - `repository_id`
 - `owner`
 - `repo`
+- `pr_number`
 - `base_branch`
 - `head_branch`
 
@@ -278,11 +432,20 @@ Inputs:
 
 - `review_id`
 - `expected_revision`
-- one complete normalized GitHub observation
+- one normalized GitHub observation with collection metadata for every evidence
+  class
 
 The tool validates sizes, enums, timestamps, SHA formats, URLs, unique check
-names, unique thread IDs, exact request body, and cross-field ordering. It then
-derives status and atomically records the next revision.
+names, unique GitHub object IDs, evidence provenance and collection metadata,
+thread counts, exact request bodies, latest-request selection, merge fields,
+and cross-field ordering. An incomplete but well-formed collection is recorded
+and derives `EVIDENCE_INCOMPLETE`. It rejects observations more than five
+minutes old, more than 30 seconds in the future, or earlier than the
+publication `created_at`. The server sets `recorded_at` from its own clock,
+derives status, and atomically records the next revision.
+
+The first observation must be recorded after `start_publication`. The target is
+immutable after creation; there is no target-rebinding operation.
 
 ### `get_publication`
 
@@ -296,7 +459,16 @@ Inputs:
 - `expected_revision`
 
 The tool requires the latest derived status to be `MERGE_READY`, rechecks the
-local gate file and local repository head, and writes:
+local gate file and local repository head, and enforces all of these freshness
+rules:
+
+- server `recorded_at` is no more than five minutes old;
+- caller `observed_at` is no more than five minutes old and no more than 30
+  seconds in the future;
+- both timestamps are later than the publication `created_at`; and
+- the revision being finalized is still the latest revision.
+
+It then writes:
 
 ```json
 {
@@ -309,6 +481,8 @@ local gate file and local repository head, and writes:
   "local_gate_sha256": "sha256...",
   "publication_revision": 4,
   "github_observation_sha256": "sha256...",
+  "github_observed_at": "2026-07-25T08:05:00.000Z",
+  "github_recorded_at": "2026-07-25T08:05:01.000Z",
   "status": "MERGE_READY"
 }
 ```
@@ -317,40 +491,75 @@ Codex must perform a fresh GitHub read immediately before this call. It then
 merges with an operation that rejects a changed PR head, such as
 `gh pr merge --match-head-commit <head_sha>`.
 
+The five-minute bound is an upper limit, not a target delay. A stale or
+future-dated observation cannot produce `publication-gate.json`, even if its
+cached status is `MERGE_READY`.
+
 ## Codex result adapter
 
 GitHub Codex may report success in a pull request conversation comment rather
 than a formal GitHub review. Parsing therefore belongs in a small,
 versioned adapter in the Codex plugin, not in the generic ledger evaluator.
 
-The adapter returns:
+The adapter collects every page of conversation comments and formal reviews
+and returns:
 
-- the GitHub object ID, URL, author, and timestamp;
-- the reviewed commit SHA;
-- `CLEAN`, `FINDINGS`, or `UNKNOWN`; and
-- a SHA-256 digest of the original response body.
+- all exact request comments, with GitHub object ID, URL, timestamp, and the
+  head SHA recorded when the request was made;
+- all candidate Codex results, with GitHub object ID, URL, author, timestamp,
+  and reviewed commit SHA;
+- `CLEAN`, `FINDINGS`, or `UNKNOWN` for each candidate result; and
+- a SHA-256 digest of each original response body.
 
 Any unrecognized response format returns `UNKNOWN`. A reaction without a
-response is still pending. Thread collection remains separate from result
-parsing and includes thread resolution state.
+response is still pending. The evaluator, rather than the adapter, selects the
+latest request and associates its result. The adapter must not discard older
+or duplicate requests because doing so could let an old `CLEAN` result mask a
+pending newer review.
+
+Thread collection remains separate from result parsing, follows every GraphQL
+page, and includes every thread's stable ID, resolution state, outdated state,
+path, line, and latest-comment author.
 
 ## Locking and revisions
 
-Before adding publication mutations, Review Bridge must introduce a shared
-per-review lock used by both existing review mutations and new publication
-mutations. Atomic rename prevents corrupt JSON but does not prevent lost
-updates.
+Before adding publication mutations, Review Bridge introduces one lock utility
+with separate per-review lock domains:
 
-The lock must:
+```text
+reviews/<review_id>/.review-state.lock
+reviews/<review_id>/.publication-state.lock
+```
 
-- have an acquisition timeout;
-- record owner PID and acquisition time;
-- recover only locks whose owner is no longer alive and whose age exceeds the
-  stale threshold; and
-- always release in a `finally` block.
+Existing `review.json` and `gate.json` mutations use the review-state lock.
+`publication.json` and `publication-gate.json` mutations use the publication
+lock. Publication never starts before the local review becomes terminal, so
+there is no need to serialize both domains behind one lock.
 
-Revision checks remain necessary even with a lock because callers can operate
-from stale reads.
+Atomic rename prevents corrupt JSON but does not prevent lost updates. Each
+lock record therefore contains:
+
+- a cryptographically random 128-bit owner token;
+- owner PID and process start time;
+- acquisition and heartbeat timestamps; and
+- the lock domain and review ID.
+
+The holder refreshes a heartbeat every five seconds and releases in a `finally`
+block only after rereading the lock and matching its owner token. Acquisition
+waits at most ten seconds. A contender may reclaim a lock only when its
+heartbeat is older than 30 seconds and the operating-system probe confirms that
+no process with both the recorded PID and process start time is alive. PID
+liveness alone is insufficient because PIDs can be reused. An inconclusive
+identity probe fails closed with an actionable error and never steals the lock.
+
+An acquisition timeout returns a documented retryable `REVIEW_BUSY` or
+`PUBLICATION_BUSY` error without changing state. Adding `REVIEW_BUSY` to
+existing reviewer mutations is an intentional client-visible behavior change,
+although it does not change tool inputs, successful outputs, or review-state
+transitions.
+
+Publication revision checks remain necessary even with a lock because callers
+can operate from stale reads.
 
 ## Failure and recovery
 
@@ -359,6 +568,10 @@ from stale reads.
 - An interrupted atomic write leaves the previous complete JSON file.
 - A revision conflict requires a new `get_publication` call.
 - A changed head records `INVALIDATED` and requires a new local review.
+- A later observation cannot clear `INVALIDATED`, `CLOSED`, or `MERGED`.
+- An incomplete check, request, result, or thread collection derives
+  `EVIDENCE_INCOMPLETE`; an empty list alone never proves absence.
+- A stale or future-dated observation cannot be finalized.
 - A changed or deleted GitHub comment makes the next fresh observation pending
   or unknown; it does not retain a stale pass.
 - A merged pull request may be recorded only when a live observation supplies
@@ -406,19 +619,16 @@ requires a GitHub App, credential management, and a larger deployment model.
 The local ledger is the smallest improvement that preserves the existing
 architecture.
 
-## Unresolved questions
+## Resolved design decisions
 
-Claude review should resolve these before implementation:
-
-1. Which GitHub API response is authoritative for the set of required checks
-   when rulesets and classic branch protection coexist?
-2. Should every unresolved thread block publication, or only threads created
-   by GitHub Codex? This RFC currently chooses every unresolved thread.
-3. Should the first implementation store the normalized Codex response body in
-   addition to its digest, or rely on its GitHub URL for full audit context?
-4. What acquisition timeout and stale threshold should the per-review lock use?
-5. Should a closed, unmerged pull request permit starting another publication
-   ledger for the same local gate, or require a fresh local review?
+- Required-check contexts are the union of active applicable rules and classic
+  branch protection. Ambiguous access or discovery results fail closed.
+- Every unresolved review thread blocks publication, regardless of author.
+- Codex result evidence stores a digest and GitHub URL, not the response body.
+- Lock acquisition waits ten seconds; a lock is only eligible for reclamation
+  after a 30-second heartbeat timeout and a conclusive owner-identity check.
+- A closed, unmerged pull request terminates the ledger and requires a new local
+  review before publication can restart.
 
 ## Test plan
 
@@ -426,16 +636,28 @@ The implementation must test:
 
 - the successful path from local gate to `MERGE_READY`;
 - a pull request head changed before and after Codex review;
+- an incomplete policy query, ambiguous `404`, explicit no-check policy, empty
+  incomplete collections, incomplete pagination, and count mismatches;
 - required checks from a different head or with pending, failed, cancelled, or
   missing results;
-- a missing request, a non-exact request, and duplicate requests;
+- a missing request, a non-exact request, duplicate requests, and a newer
+  request that supersedes an older `CLEAN` result;
+- zero and multiple candidate results after the latest request;
 - a reaction without a Codex result;
 - a result created before its request;
 - a missing, malformed, unknown, or stale reviewed commit;
 - findings and unresolved, resolved, and outdated threads;
 - a pull request retargeted to another base branch;
-- a force-push after `MERGE_READY`;
-- concurrent mutations and stale expected revisions;
+- a force-push after `MERGE_READY`, including restoring the original head
+  without clearing terminal `INVALIDATED`;
+- closing and reopening a pull request without clearing terminal `CLOSED`;
+- `UNKNOWN`, `CONFLICTING`, and `MERGEABLE` mergeability, plus validation of
+  merged state, timestamp, and merge commit SHA;
+- stale, future-dated, pre-publication, and stale-at-finalization observations;
+- concurrent mutations, stale expected revisions, and independent review and
+  publication lock domains;
+- lock timeout errors, PID reuse, heartbeat expiry, owner-token mismatch, and
+  inconclusive owner-liveness checks;
 - malformed and oversized inputs;
 - failure to finalize from every state except `MERGE_READY`; and
 - recording a squash merge whose merge commit differs from the reviewed head.
@@ -448,10 +670,18 @@ network calls.
 
 Implement this design in two changes:
 
-1. add the shared per-review lock and revision support without changing the
-   review protocol; and
+1. add the lock utility and review-state lock, document retryable
+   `REVIEW_BUSY`, and verify existing successful tool inputs, outputs, and
+   state transitions remain unchanged; and
 2. add publication storage, state derivation, author tools, the Codex adapter,
-   and packaged-client verification.
+   publication-state lock, and packaged-client verification.
 
 Each implementation change requires its own local Claude review and GitHub
 Codex review.
+
+## References
+
+- [GitHub REST API: Get rules for a branch](https://docs.github.com/en/rest/repos/rules#get-rules-for-a-branch)
+- [GitHub REST API: Get a branch](https://docs.github.com/en/rest/branches/branches#get-a-branch)
+- [GitHub REST API: Get branch protection](https://docs.github.com/en/rest/branches/branch-protection#get-branch-protection)
+- [GitHub REST API: Pull requests](https://docs.github.com/en/rest/pulls/pulls)
