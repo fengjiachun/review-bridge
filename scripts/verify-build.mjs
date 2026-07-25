@@ -79,6 +79,10 @@ const workflowSkillPath = path.join(
 assert.ok(await fsp.stat(workflowSkillPath));
 const workflowSkill = await fsp.readFile(workflowSkillPath, "utf8");
 assert.match(workflowSkill, /Post a PR comment containing exactly `@codex review`/);
+assert.match(
+  workflowSkill,
+  /Require the PR head commit to equal that same local-gate `head_sha`/,
+);
 assert.match(workflowSkill, /Any new commit invalidates the GitHub review gate/);
 assert.match(workflowSkill, /start a new local Review Bridge task/);
 

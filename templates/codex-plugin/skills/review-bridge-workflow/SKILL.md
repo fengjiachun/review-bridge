@@ -52,10 +52,13 @@ The review ledger, not free-form chat text, is the source of truth.
 
 After `LOCAL_GATE_PASSED`:
 
-1. Confirm the working tree is clean. Push the reviewed topic branch and open a
-   draft pull request without changing the reviewed commit.
-2. Record the PR head commit, wait for required checks to pass, and mark the PR
-   ready for review.
+1. Confirm the working tree is clean and compare `git rev-parse HEAD` with the
+   `head_sha` returned by `finalize_local_gate`. If they differ, the local gate
+   is invalid; start a new local Review Bridge task. Otherwise push the reviewed
+   topic branch and open a draft pull request.
+2. Require the PR head commit to equal that same local-gate `head_sha`. If it
+   differs, stop and start a new local Review Bridge task. Record the matching
+   PR head, wait for required checks to pass, and mark the PR ready for review.
 3. Post a PR comment containing exactly `@codex review`. Do not rely on
    automatic review being enabled.
 4. Wait for Codex to react and post a GitHub review. No response is a pending

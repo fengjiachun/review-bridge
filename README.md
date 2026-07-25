@@ -111,6 +111,10 @@ for the resulting GitHub review, and verify that it applies to the current PR
 head. No response is not a pass. Any new commit invalidates the GitHub review
 gate.
 
+Before requesting GitHub review, both the local branch head and PR head must
+equal the `head_sha` returned by `finalize_local_gate`. A mismatch invalidates
+the local gate and requires a new local Review Bridge task.
+
 If the GitHub review finds an actionable issue, commit the fix and start a new
 local Review Bridge task. Merge only after the new local gate, required checks,
 and a new GitHub Codex review all pass for the same PR head.
