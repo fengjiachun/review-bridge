@@ -1514,15 +1514,14 @@ Implement this design in two changes:
    state transitions remain unchanged; and
 2. add publication storage, state derivation, author tools, the Codex adapter,
    publication-state lock, and packaged-client verification; update the
-packaged Codex workflow skill with the seven-tool ordering, immediate
-post-response request binding, immediate pre-merge gate verification,
-no-manual-request guidance, unbound-request recovery through the
-full-closure direct-human ambiguity approval rule, and stable Codex Bot
-actor-ID resolution; and make `scripts/verify-build.mjs` assert those skill
-requirements. Adapter fixtures also cover the 30-second post-to-list visibility
-grace and
-endpoint-specific installation-permission evidence for classic-protection
-`404` responses. Before
+   packaged Codex workflow skill with the seven-tool ordering, immediate
+   post-response request binding, immediate pre-merge gate verification,
+   no-manual-request guidance, unbound-request recovery through the
+   full-closure direct-human ambiguity approval rule, and stable Codex Bot
+   actor-ID resolution; and make `scripts/verify-build.mjs` assert those skill
+   requirements. Adapter fixtures also cover the 30-second post-to-list
+   visibility grace and endpoint-specific installation-permission evidence for
+   classic-protection `404` responses. Before
    enabling publication, capture an adapter fixture from the connector's
    observed output and verify that it contains a formal pull request review;
    conversation-comment-only and review-comment-only fixtures are unsupported
@@ -1530,6 +1529,10 @@ endpoint-specific installation-permission evidence for classic-protection
 
 Each implementation change requires its own local Claude review and GitHub
 Codex review.
+
+## Unresolved questions
+
+None.
 
 ## References
 
