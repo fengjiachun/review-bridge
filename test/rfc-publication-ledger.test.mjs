@@ -318,4 +318,10 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
   }
   assert.equal(gateAudit.events[0].at, gate.passed_at);
   assert.equal(gateAudit.events[1].at, verification.verified_at);
+  assert.equal(gateAudit.events[0].previous_event_sha256, null);
+  assert.notEqual(gateAudit.events[1].previous_event_sha256, null);
+  assert.equal(
+    gateAudit.events[0].gate_sha256,
+    gateAudit.events[1].gate_sha256,
+  );
 });

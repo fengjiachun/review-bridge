@@ -106,8 +106,8 @@ reviews/<review_id>/
 ├── gate.json
 ├── publication.json
 ├── publication-gate.json
-└── publication-gate-audit/
-    └── <sequence>-<event_id>.json
+├── publication-gate-audit.jsonl
+└── publication-gate-audit-head.json
 ```
 
 Separating the files keeps the Claude review lifecycle unchanged and prevents
@@ -119,16 +119,18 @@ revocable view of one ledger revision, not an independent durable verdict. It
 is valid only while its `publication_revision` equals the current ledger
 revision, that revision still derives `MERGE_READY`, and the server clock has
 not passed the `expires_at` recomputed from the stored observation timestamps.
-`publication-gate-audit/` is a server-maintained directory of immutable event
-files. Appending atomically installs one new file; it never rewrites prior
-events. The directory records accepted finalization attempts and every
-gate-verification outcome for post-publication audit, but is never read to
+`publication-gate-audit.jsonl` is a server-maintained append-only event log.
+`publication-gate-audit-head.json` is a small atomic cursor that commits a
+prefix of that log. Appending never rewrites prior events; only the cursor is
+replaced. Together they record accepted finalization attempts and every
+gate-verification outcome for post-publication audit, but neither is read to
 authorize a merge.
 
 All files use the existing private directory and file modes. Publication
-mutations must use the same atomic replacement mechanism as review mutations,
-plus a per-review inter-process lock and revision check so concurrent Codex
-sessions cannot overwrite each other's observations.
+JSON snapshots and the audit head use the same atomic replacement mechanism as
+review mutations; audit records use the append-and-commit protocol below. All
+publication mutations also use a per-review inter-process lock and revision
+check so concurrent Codex sessions cannot overwrite each other's observations.
 
 Under that lock, any later ledger mutation must durably remove the canonical
 `publication-gate.json` before replacing `publication.json`. If gate removal or
@@ -1356,10 +1358,13 @@ The tool requires `LOCAL_GATE_PASSED`, reloads `gate.json`, verifies the local
 working tree is clean, and verifies local `HEAD` equals the gate `head_sha`.
 It rejects an existing `publication.json` or orphaned
 `publication-gate.json`; publication is never reset or rebound in place. An
-existing gate-audit directory is accepted only as the exact canonical
-pre-start remnant for this review ID: an empty private directory with no ledger
-or gate. Any populated, non-directory, permission-mismatched, or otherwise
-orphaned audit path is rejected.
+existing gate-audit pair is accepted only as the exact canonical pre-start
+remnant for this review ID: an empty `publication-gate-audit.jsonl` plus a
+version 1 head with `committed_bytes: 0`, `next_sequence: 1`, and
+`last_event_sha256: null`, with no ledger or gate. If a crash left only the
+empty log before the head was created, retry may create that exact empty head.
+Any populated, malformed, permission-mismatched, head-only, or otherwise
+orphaned audit state is rejected.
 It validates the baseline's identity, completeness, pagination, freshness, and
 event provenance, stores every exact or trigger-shaped request and
 expected-actor candidate result without pairing them, and rejects a baseline
@@ -1692,9 +1697,10 @@ Verification invokes the pure evaluator against the already-reconciled stored
 ledger. It never advances request or result history, writes a terminal record,
 changes a revision, or otherwise modifies `publication.json`; that file remains
 byte-identical on both valid and invalid returns. Before returning either
-outcome, the tool atomically appends a `GATE_VERIFIED` audit event under the
-same lock. A valid response and head SHA are returned only after the new event
-file and audit-directory sync succeed.
+outcome, the tool durably appends and commits a `GATE_VERIFIED` audit event
+under the same lock. A valid response and head SHA are returned only after the
+appended line is file-synced and the audit-head replacement and directory sync
+succeed.
 
 ### `finalize_publication_gate`
 
@@ -1745,15 +1751,15 @@ from the observation's `recorded_at`.
 
 Finalization does not modify `publication.json`: it does not change
 `revision`, `updated_at`, status, or history. It first atomically writes the
-candidate gate with `issuance_committed: false`, then atomically appends and
-directory-syncs a `GATE_FINALIZATION_PASSED` audit event containing the
+candidate gate with `issuance_committed: false`, then durably appends and
+commits a `GATE_FINALIZATION_PASSED` audit event containing the
 prospectively computed `gate_sha256` of the final committed payload, then
 atomically replaces the gate with that final payload, which is
 identical except `issuance_committed: true`. It returns success only after the
 final replacement and directory sync. Verification rejects an uncommitted
 candidate. Therefore a crash can leave an audit-only issuance attempt or an
 unusable candidate gate, but every usable gate has a preceding durable audit
-record without consulting the audit directory during authorization. The committed
+record without consulting the audit log during authorization. The committed
 gate names the unchanged ledger revision that was validated. These audit and
 gate writes are not later ledger mutations and do not revoke themselves.
 
@@ -1780,53 +1786,74 @@ deadline.
 
 ## Gate audit
 
-`start_publication` creates the private `publication-gate-audit/` directory and
-syncs its parent before atomically creating `publication.json`, all during one
-publication-lock hold. A crash between the two operations leaves only the exact
-empty pre-start directory; retrying `start_publication` for the same review
-validates and reuses that remnant before creating the ledger. Because every
-audit append requires an existing ledger, an empty remnant cannot contain
-publication evidence and is the only audit path that start may reuse. An
-existing ledger, gate, populated audit directory, non-directory audit path, or
-permission mismatch fails rather than overwriting evidence.
+`start_publication` exclusively creates an empty
+`publication-gate-audit.jsonl` with mode `0600`, file-syncs it, then atomically
+creates `publication-gate-audit-head.json` through a mode-`0600` temporary file
+and syncs the review directory before atomically creating `publication.json`,
+all during one publication-lock hold. The initial head has version 1, the review ID,
+`committed_bytes: 0`, `next_sequence: 1`, and
+`last_event_sha256: null`. A crash before the head write leaves only the exact
+empty log; a crash before the ledger write leaves the exact empty pair.
+Retrying `start_publication` validates and completes or reuses either remnant.
+Because every audit append requires an existing ledger, these empty remnants
+cannot contain publication evidence. An existing ledger, gate, populated log
+or head, head without a log, malformed audit state, or permission mismatch
+fails rather than overwriting evidence.
 
-Each event is one canonical JSON object of at most 16 KiB in an immutable file
-named by its 20-digit zero-padded sequence, a hyphen, a cryptographically random
-128-bit lowercase-hex `event_id`, and `.json`. The object repeats that exact
-positive sequence and `event_id`, plus `version: 1` and the owning
-`review_id`. The audit directory uses mode `0700` and final event files use
-mode `0600`. Under the publication lock, append scans and validates at most
-1024 event files: filenames and object identities match, sequences are
-contiguous from one, every file is within the size limit, every version and
-review ID matches, and no other directory entry exists. The next event is
-written and file-synced to an exclusively created temporary file in the review
-directory, atomically hard-linked to the final audit path with create-if-absent
-semantics, and then the audit directory is synced before the temporary link is
-removed. Callers cannot supply sequence numbers, event IDs, or timestamps. At
-1024 events the operation fails closed with non-retryable
-`AUDIT_CAPACITY_EXCEEDED` before writing or returning a merge-authorizing head;
-publication can continue only under a new local-review task. These limits bound
-both storage to about 16 MiB per review and append-validation time.
+Each log record is the UTF-8 RFC 8785 canonical representation of one event
+object followed by exactly one newline. The canonical object is at most
+16 KiB before the newline and contains `version: 1`, the owning `review_id`, a
+positive contiguous `sequence`, a cryptographically random 128-bit
+lowercase-hex `event_id`, and `previous_event_sha256`. The first event has a
+null previous digest; every later event stores the SHA-256 digest of the exact
+previous canonical event bytes, excluding its newline. The head's
+`last_event_sha256` stores the same digest for the last committed event, and
+`committed_bytes` ends immediately after that event's newline. Callers cannot
+supply sequence numbers, event IDs, timestamps, or chain digests.
+
+Under the publication lock, append reads the small head and only the
+bounded suffix needed to validate the last committed record and any bytes
+after `committed_bytes`; it never scans or parses the committed prefix. Both
+audit paths must be regular non-symlink files with mode `0600`. A permission or
+file-type mismatch, a log shorter than `committed_bytes`, a last committed
+record that disagrees with the head, or a mismatched review ID, sequence, or
+chain digest is an unrecoverable local store error. Bytes after
+`committed_bytes` can only be one
+uncommitted crash-tail record because no second append starts until recovery.
+If that suffix is one complete, canonical, newline-terminated event matching
+the next sequence and chain digest, recovery commits it by advancing the head.
+Otherwise recovery truncates the uncommitted suffix back to
+`committed_bytes` and file-syncs the log before proceeding.
+
+To append, the server writes the complete canonical line through a file
+descriptor opened with append semantics, handling partial writes, then
+file-syncs the log. It atomically replaces the head with the new byte offset,
+next sequence, and event digest through a mode-`0600` temporary file and syncs
+the review directory. A current
+finalization or verification succeeds only after both durability steps.
+Failure before the head replacement leaves an uncommitted tail that the next
+operation deterministically adopts or truncates; failure after replacement
+leaves a committed event even if the caller did not receive the response.
+Events in the committed prefix are never deleted, overwritten, or reordered.
+Appending is O(1) in event count and has no event-count cliff; the append-only
+log can grow for the lifetime of the review, which is an intentional audit
+retention trade-off.
 
 `event` is exactly `GATE_FINALIZATION_PASSED` or `GATE_VERIFIED`, and `outcome`
 is exactly `SUCCESS` or `FAILURE`; any other value is malformed.
 `GATE_FINALIZATION_PASSED` always has `SUCCESS` and a null normalized reason.
 `GATE_VERIFIED` has `SUCCESS` and a null reason exactly when verification
 returns `valid: true`; otherwise it has `FAILURE` and the same non-null
-normalized reason as the invalid response. Events are never deleted,
-overwritten, or reordered, and audit failure prevents a valid gate or
-merge-authorizing verification response from being returned. A crash before
-installation can leave only an ignorable sibling temporary file; a crash after
-installation can additionally leave a second link to the complete immutable
-entry, never a partial audit entry. After publication starts, a
-missing, malformed, oversized, non-contiguous, or permission-mismatched audit
-directory is an unrecoverable local store error for finalization and
-verification; the server never reconstructs it from the current gate.
+normalized reason as the invalid response. An inability to durably append the
+current event prevents a valid gate or merge-authorizing verification response
+from being returned. The log and head are not authorization inputs. Offline
+audit inspection validates the complete digest chain for reporting; historical
+corruption is reported as audit corruption but cannot make an otherwise
+invalid gate valid.
 
-The audit directory is not an authorization input. The following is a logical
-projection of its two event files, ordered by sequence. It records what the
-server evaluated so a completed or invalidated publication retains gate
-history after `publication-gate.json` is revoked:
+The following is a logical projection of two consecutive log records. It
+records what the server evaluated so a completed or invalidated publication
+retains gate history after `publication-gate.json` is revoked:
 
 ```json
 {
@@ -1838,6 +1865,7 @@ history after `publication-gate.json` is revoked:
       "review_id": "rb-...",
       "sequence": 1,
       "event_id": "11111111111111111111111111111111",
+      "previous_event_sha256": null,
       "event": "GATE_FINALIZATION_PASSED",
       "outcome": "SUCCESS",
       "normalized_reason": null,
@@ -1853,6 +1881,7 @@ history after `publication-gate.json` is revoked:
       "review_id": "rb-...",
       "sequence": 2,
       "event_id": "22222222222222222222222222222222",
+      "previous_event_sha256": "sha256...",
       "event": "GATE_VERIFIED",
       "outcome": "SUCCESS",
       "normalized_reason": null,
@@ -1869,9 +1898,13 @@ history after `publication-gate.json` is revoked:
 
 An invalid verification records `outcome: "FAILURE"`, a normalized non-null
 reason, the available identity fields, and null for facts that could not be
-validated. `GATE_FINALIZATION_PASSED` is appended between the uncommitted and
-committed gate writes described above; its `gate_sha256` hashes the final committed
-RFC 8785-normalized gate payload. A crash before the final gate replacement
+validated. A `GATE_VERIFIED` event's `gate_sha256` hashes the exact RFC
+8785-normalized gate payload read by verification, even when that parsed gate
+fails validation, and is null when no parseable gate could be read. It equals
+the finalization digest when both events refer to the same unchanged gate.
+`GATE_FINALIZATION_PASSED` is appended between the uncommitted and committed
+gate writes described above; its `gate_sha256` hashes the final committed RFC
+8785-normalized gate payload. A crash before the final gate replacement
 therefore leaves an honest record of an accepted issuance attempt but no usable
 gate. The audit log proves workflow history, not GitHub authenticity, and never
 revives, extends, or substitutes for a gate.
@@ -2133,7 +2166,7 @@ reviews/<review_id>/.publication-state.lock
 
 Existing `review.json` and `gate.json` mutations use the review-state lock.
 `publication.json`, `publication-gate.json`, and
-`publication-gate-audit/` mutations use the publication lock. Publication
+both `publication-gate-audit` files use the publication lock. Publication
 never starts before the local review becomes terminal, so
 there is no need to serialize both domains behind one lock.
 
@@ -2165,10 +2198,10 @@ can operate from stale reads.
 ## Failure and recovery
 
 - Missing or malformed evidence never advances the state.
-- `start_publication` durably creates the empty gate-audit directory before the
-  ledger. A crash between those writes leaves an exact empty pre-start remnant
-  that a retry for the same review validates and reuses; no populated or
-  malformed audit is ever overwritten.
+- `start_publication` durably creates the empty gate-audit log and head before
+  the ledger. A crash between those writes leaves one of the exact empty
+  pre-start remnants that a retry for the same review validates and completes
+  or reuses; no populated or malformed audit is ever overwritten.
 - A GitHub read failure leaves the previous revision unchanged when the
   workflow does not submit a snapshot; a deliberately submitted well-formed
   incomplete collection advances the revision and derives
@@ -2216,9 +2249,14 @@ can operate from stale reads.
   instant even when the ledger revision and head are unchanged.
 - A crash before committed issuance can leave an uncommitted candidate gate or
   an audit-only `GATE_FINALIZATION_PASSED` event; verification rejects the
-  candidate. Audit installation or sync failure prevents a committed gate or
+  candidate. Audit-line or head sync failure prevents a committed gate or
   valid verification response, while prior audit events remain durable and
   authorization never depends on replaying them.
+- A crash during audit append leaves at most one suffix after the head's
+  `committed_bytes`. The next locked operation adopts one complete valid next
+  record or truncates any incomplete or invalid uncommitted suffix; truncation
+  below the committed offset or a committed-tail digest mismatch is an
+  unrecoverable store error.
 - A previously observed exact request that is changed or deleted persists
   terminal `INVALIDATED`; an older `CLEAN` can never become latest again.
 - A previously observed actor-admitted Codex result that disappears or changes
@@ -2305,6 +2343,10 @@ can operate from stale reads.
   non-strict update policy; repositories requiring an exact reviewed-base diff
   must enable strict required-status-check updates or start a new local review
   after every base movement.
+- The per-review gate-audit log intentionally retains every committed event and
+  can grow without a fixed count limit. Appends remain O(1), but long-lived
+  automation that verifies repeatedly consumes disk until the review store is
+  archived or removed under the existing local-store lifecycle.
 - Version 1 depends on two provider-specific response shapes: a recognized
   clean issue comment and a findings review with attached inline comments. A
   connector that changes either body shape moves that result to
@@ -2501,10 +2543,10 @@ architecture.
   its stored observation timestamps; verification reapplies that deadline
   against the server clock and never treats finalization as timeless.
 - Gate issuance and every verification outcome append to the durable
-  server-owned gate-audit directory. Each bounded immutable event is installed
-  independently; an audit append failure cannot yield a usable gate or
-  merge-authorizing verification response, and audit events are never used as
-  authorization evidence.
+  server-owned gate-audit log. A small atomic head commits the file prefix, so
+  append work is O(1), a crash tail is recoverable, and an audit append failure
+  cannot yield a usable gate or merge-authorizing verification response.
+  Audit events are never used as authorization evidence.
 - Ledger-history and gate-audit event names are separate closed domains.
   Observation digests always name their exact normalized observation subtree,
   including the server-authored `recorded_at`, so copied digests retain one
@@ -2534,10 +2576,10 @@ The implementation must test:
 - the successful path from local gate to `MERGE_READY`;
 - `start_publication` creating revision 1 with status `PR_PENDING` and a
   `PUBLICATION_STARTED` ledger-history event, including rejection of stale,
-  incomplete, or partially paginated baselines; recovery from an exact empty pre-start
-  gate-audit directory remnant; and rejection of existing publication or gate
-  files and populated, malformed, non-directory, or permission-mismatched audit
-  paths;
+  incomplete, or partially paginated baselines; recovery from an exact empty
+  pre-start audit log or log-and-head remnant; and rejection of existing
+  publication or gate files and populated, malformed, head-only, or
+  permission-mismatched audit state;
 - explicit-only and automatic-quiescence trigger policies, including rejection
   of an unknown mode, missing direct-human label or rationale, a changed head,
   and a baseline more than 30 seconds older than the server acknowledgement;
@@ -2733,11 +2775,15 @@ The implementation must test:
   `publication.json` byte-identical, including request and result histories,
   terminal, revision, and cached status, with exact boundary tests immediately
   before, at, and after `expires_at`, while appending the exact durable
-  `GATE_VERIFIED` success or failure audit event before returning;
-- gate-audit sequence continuity, 128-bit event-ID uniqueness, 16 KiB event and
-  1024-event directory limits, malformed filenames or event enums, crash
-  boundaries before and after hard-link installation, and
-  `AUDIT_CAPACITY_EXCEEDED` returning no merge-authorizing head;
+  `GATE_VERIFIED` success or failure audit event before returning, including
+  equal finalization and verification gate digests for an unchanged gate and a
+  null verification digest when no parseable gate exists;
+- gate-audit sequence and digest-chain continuity, 128-bit event-ID uniqueness,
+  the 16 KiB per-event limit, event enums, mode `0600`, O(1) append without a
+  total-count cliff, and crash boundaries before log fsync, between log and
+  head sync, and after head sync; recovery must adopt one complete valid tail,
+  truncate an incomplete or invalid uncommitted tail, and reject corruption
+  inside the committed prefix;
 - exact ledger-history event emission for all four mutation kinds and rejection
   of every unrecognized history event;
 - ambiguity acknowledgement with wrong head, stale revision, missing or extra
