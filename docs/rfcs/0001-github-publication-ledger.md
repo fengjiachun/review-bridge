@@ -589,16 +589,19 @@ changes the reviewed head and therefore requires a new local review.
 Multiple runs may share one requirement key. Every run records `started_at` and
 `completed_at`; the latter is null until completion. `resource_kind` is exactly
 `CHECK_RUN` or `COMMIT_STATUS`, and each kind has its own numeric ID namespace.
-For each `(context, app_id, resource_kind)` producer key, the evaluator selects
-the latest attempt by `(started_at, run_id)`. A `PINNED` requirement evaluates
-the exact app identity across both resource kinds. An
-`EXPLICITLY_UNBOUND` requirement selects the latest attempt across all producer
-keys with the same context. Across resource kinds, `started_at` alone orders
-attempts; an equal timestamp is `EVIDENCE_INCOMPLETE` because raw IDs cannot
-break a cross-namespace tie. Within one kind, `run_id` breaks a timestamp tie.
-A missing ordering field, duplicate within-kind ordering key, or unrecognized
-kind is incomplete evidence. Older attempts remain in the ledger for audit but
-never satisfy a requirement or override the latest attempt.
+The evaluator partitions matching attempts by `resource_kind` before selecting
+latest runs. For a `PINNED` requirement, each present kind selects the latest
+attempt for the exact `(context, app_id, resource_kind)` producer key. For an
+`EXPLICITLY_UNBOUND` requirement, each present kind selects the latest attempt
+across producer keys with that context inside the kind. Selection uses
+`(started_at, run_id)`, so `run_id` breaks a timestamp tie only within its own
+ID namespace. At least one matching kind must be present. If both a check run
+and a commit status report the required context, both independently selected
+latest attempts must pass; neither can supersede or hide the other. Their
+timestamps and numeric IDs are never compared across kinds. A missing ordering
+field, duplicate within-kind ordering key, or unrecognized kind is incomplete
+evidence. Older attempts within a kind remain in the ledger for audit but never
+satisfy a requirement or override that kind's latest attempt.
 
 Normalized run status is one of `QUEUED`, `IN_PROGRESS`, `WAITING`,
 `REQUESTED`, `PENDING`, or `COMPLETED`. A non-completed latest run derives
@@ -765,12 +768,15 @@ The evaluator applies these checks in order:
    `CONFLICTING`, or `UNKNOWN`.
    `UNKNOWN` derives `PR_STATE_PENDING`; `CONFLICTING` derives
    `PR_CONFLICTING`; only `MERGEABLE` may continue.
-11. Required-check policy discovery is complete. For `REQUIRED`, select the
-    latest attempt per producer key and evaluate only it. If any source requires
-    strict updates, require `base_head_comparison` to prove the head contains
-    the current base; `BEHIND` or `DIVERGED` derives `PR_UPDATE_REQUIRED`.
-    Every requirement has a latest run bound to the pull request head, with the
-    required app identity when pinned, and a passing conclusion. For
+11. Required-check policy discovery is complete. For `REQUIRED`, partition
+    matching runs by `resource_kind`, select the latest attempt independently
+    inside every present kind, and require every selected attempt to pass. A
+    check run and commit status with the same required context both participate;
+    neither supersedes the other. If any source requires strict updates, require
+    `base_head_comparison` to prove the head contains the current base; `BEHIND`
+    or `DIVERGED` derives `PR_UPDATE_REQUIRED`. Every requirement has at least
+    one latest run bound to the pull request head, with the required app identity
+    when pinned, and every present kind has a passing conclusion. For
     `NONE_CONFIGURED`, the explicit-empty invariants hold, including
     `strict_policy.required: false`.
 12. Replay event identity and association from `codex_request_history`,
@@ -1488,8 +1494,9 @@ can operate from stale reads.
 - A classic-protection `404` without GitHub App installation evidence of
   `administration: read` or `write` is `UNKNOWN`; lower-privilege reads never
   upgrade it to `NOT_CONFIGURED`.
-- Equal `started_at` values across a check run and commit status are incomplete
-  ordering evidence; their unrelated numeric IDs never break the tie.
+- A check run and commit status with the same required context are evaluated
+  independently. A pass in one kind never hides a pending or failing latest
+  attempt in the other, regardless of timestamps.
 - When any policy source requires strict updates, a head that does not contain
   the current base derives `PR_UPDATE_REQUIRED`.
 - Ambiguity acknowledgement fails unless direct human approval and tool input
@@ -1584,11 +1591,13 @@ architecture.
 - App bindings are explicitly `PINNED` or `EXPLICITLY_UNBOUND` and must cite an
   identity-capable response field; legacy context-only policy reads are
   incomplete evidence.
-- Only the latest check attempt can satisfy a requirement. `SUCCESS`,
-  `SKIPPED`, and `NEUTRAL` pass to match GitHub; blocking, stale, pending, and
-  unknown outcomes fail closed as specified above.
-- Check runs and commit statuses are separate ID namespaces. Cross-kind
-  timestamp ties are incomplete evidence rather than ordered by numeric ID.
+- Only the latest attempt within each present resource kind can satisfy that
+  kind's side of a requirement. `SUCCESS`, `SKIPPED`, and `NEUTRAL` pass to
+  match GitHub; blocking, stale, pending, and unknown outcomes fail closed as
+  specified above.
+- Check runs and commit statuses are separate ID namespaces and independently
+  required when both report the same required context. Cross-kind timestamps
+  and IDs are never compared.
 - Strict-update policy is the union of every applicable policy source. A strict
   head must contain the current base or derive `PR_UPDATE_REQUIRED`.
 - Pull-request identity and head evidence participates in the same collection
@@ -1681,8 +1690,10 @@ The implementation must test:
   requirement, a missing app identity, and a legacy `contexts[]` policy read;
 - a failed rerun after success, a successful rerun after failure, a pending
   rerun after success, and runs with missing or ambiguous ordering;
-- a check run and commit status with equal `started_at` but unrelated IDs,
-  plus same-kind timestamp ties ordered by `run_id`;
+- same-name check runs and commit statuses in every pass/fail/pending
+  combination, proving each present kind is evaluated independently and
+  cross-kind timestamps never suppress one side, plus same-kind timestamp ties
+  ordered by `run_id`;
 - classic and ruleset strict-update flags in every true/false combination, a
   missing strict field, and strict heads that are `AHEAD`, `IDENTICAL`,
   `BEHIND`, `DIVERGED`, or have incomplete comparison evidence;
