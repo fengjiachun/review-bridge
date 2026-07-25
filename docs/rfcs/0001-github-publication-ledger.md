@@ -1867,20 +1867,33 @@ deadline.
 
 ## Gate audit
 
-Every tool that may append an audit event first performs a non-mutating
+Every tool that may append an audit event first performs one non-mutating store
 preflight under the publication lock. Before evaluator execution, gate
-replacement, crash-tail recovery, or temporary cleanup, it opens both audit
-paths without following symlinks; validates their regular-file type and mode
-`0600` from the descriptors; validates matching audit-head temporaries; and
-reads enough of the head and bounded suffix to classify the current state. It
-retains those validated audit descriptors for any subsequent recovery and
-append in the same lock hold.
-`finalize_publication_gate` therefore cannot write or replace a candidate gate
-before this preflight succeeds. A mode mismatch on the log, head, or matching
-temporary returns `STORE_MODE_MISMATCH` without changing the existing gate,
+replacement, crash-tail recovery, or temporary cleanup, it opens `gate.json`
+and `publication.json`, and opens `publication-gate.json` when present, as
+read-only without following symlinks. In the same preflight it opens
+`publication-gate-audit.jsonl` read-write with append semantics and opens
+`publication-gate-audit-head.json` read-only, both without following symlinks.
+It validates regular-file type, mode `0600`, and applicable size limits from
+all opened descriptors; validates that matching audit-head temporaries are
+regular non-symlink files; and reads enough of the audit head and bounded
+suffix to classify the current audit state. An absent `publication-gate.json`
+is not a preflight failure: verification evaluates it as an invalid gate, while
+finalization may create a new candidate after the preflight succeeds.
+
+The tool retains the validated authorization-file and audit descriptors for
+all subsequent reads, recovery, and append in the same lock hold rather than
+resolving those paths again. Positional reads and any `ftruncate` use the
+retained read-write append-mode log descriptor; appending uses that descriptor
+with its append semantics. The audit head is replaced through a fresh
+temporary and atomic rename rather than written through its read-only
+descriptor. `finalize_publication_gate` therefore cannot write or replace a
+candidate gate before every applicable file passes this preflight. A mode
+mismatch returns `STORE_MODE_MISMATCH` without changing the existing gate,
 audit pair, temporary files, or any other artifact. After a successful
-preflight, the tool performs any permitted tail recovery or temporary cleanup,
-then continues with finalization or verification.
+preflight, the tool removes matching regular temporary files regardless of
+their mode, performs any permitted tail recovery, and then continues with
+finalization or verification.
 
 `start_publication` exclusively creates an empty
 `publication-gate-audit.jsonl` with mode `0600`, file-syncs it, then atomically
@@ -1901,8 +1914,12 @@ Every audit-head replacement uses an exclusively created
 fresh 128-bit lowercase hex. Under the publication lock, start and append
 ignore only that exact temporary-file pattern during orphan checks, remove
 matching leftovers after the canonical log/head state validates, and reject a
-temporary that is not a regular mode-`0600` file. Other review-directory files
-are outside the audit-pair state and are not deleted.
+temporary that is a symlink or not a regular file as an unrecoverable local
+store error. A matching regular file is never reused and is removed regardless
+of its mode; unlink authority comes from the private review directory, so
+requiring an operator to change the mode of crash garbage would add no safety.
+Other review-directory files are outside the audit-pair state and are not
+deleted.
 
 Each log record is the UTF-8 RFC 8785 canonical representation of one event
 object followed by exactly one newline. The canonical object is at most
@@ -2921,9 +2938,13 @@ The implementation must test:
 - committed issuance requiring an uncommitted candidate gate, a durable
   `GATE_FINALIZATION_PASSED` audit event, and the final committed gate in that
   order, including crashes at both boundaries leaving no usable unaudited gate;
-- finalization with mode drift on the audit log, head, or matching temporary
-  returning `STORE_MODE_MISMATCH` before replacing an existing committed gate,
-  recovering a tail, cleaning a temporary, or changing any audit bytes;
+- finalization or verification with mode drift on any present authorization
+  file, audit log, or audit head returning `STORE_MODE_MISMATCH` before
+  replacing an existing committed gate, recovering a tail, cleaning a
+  temporary, or changing any audit bytes; instrumented tests must also assert
+  that the preflight opens the log read-write with append semantics, opens the
+  head and authorization files read-only, and performs no second path-based
+  open for their later reads, recovery, or append;
 - valid and invalid `verify_publication_gate` calls that leave
   `publication.json` byte-identical, including request and result histories,
   terminal, revision, and cached status, with exact boundary tests immediately
@@ -2948,8 +2969,9 @@ The implementation must test:
   and oversized `gate.json`, `publication.json`, and
   `publication-gate.json`; wrong modes must instead return non-mutating,
   actionable `STORE_MODE_MISMATCH` and succeed after `chmod 0600`. Also test
-  exact audit-head temporary-pattern cleanup and rejection of malformed or
-  wrong-mode matching temporaries;
+  exact audit-head temporary-pattern cleanup, cleanup of matching regular
+  temporaries regardless of mode, and unrecoverable rejection of matching
+  symlinks or non-regular files;
 - exact ledger-history event emission for all four mutation kinds and rejection
   of every unrecognized history event;
 - ambiguity acknowledgement with wrong head, stale revision, missing or extra
