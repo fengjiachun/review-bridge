@@ -90,6 +90,13 @@ assert.match(
 );
 assert.match(workflowSkill, /Any new commit invalidates the GitHub review gate/);
 assert.match(workflowSkill, /start a new local Review Bridge task/);
+assert.match(
+  workflowSkill,
+  /issue comment, pull-request review, or pull-request review comment/,
+);
+assert.match(workflowSkill, /An eyes reaction is pending, never a pass/);
+assert.match(workflowSkill, /Record the exact request comment ID/);
+assert.match(workflowSkill, /reviewed-commit binding/);
 
 const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
 assert.equal(mcpConfig.mcpServers["review-bridge-author"].cwd, ".");
@@ -155,6 +162,17 @@ try {
       implementation_scope: "Update value.js and add a focused test.",
     });
     assert.equal(prepared.status, "WAITING_FOR_REVIEW");
+    const summary = await call(author, "get_review_summary", {
+      review_id: prepared.id,
+    });
+    assert.equal(summary.action_required, "CLAUDE_INITIAL_REVIEW");
+    const observed = await call(author, "wait_for_review_state", {
+      review_id: prepared.id,
+      known_updated_at: "1970-01-01T00:00:00.000Z",
+      timeout_ms: 1_000,
+    });
+    assert.equal(observed.changed, true);
+    assert.equal(observed.summary.status, "WAITING_FOR_REVIEW");
 
     const pending = await call(reviewer, "list_pending_reviews", {});
     assert.equal(pending[0].id, prepared.id);

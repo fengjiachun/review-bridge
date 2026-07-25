@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   finalizeLocalGate,
   getReview,
+  getReviewSummary,
   prepareRereview,
   prepareReview,
   readReviewArtifact,
@@ -15,6 +16,7 @@ import {
   submitInitialReview,
   submitRereview,
   submitResolutions,
+  waitForReviewState,
 } from "../src/core.mjs";
 
 function git(cwd, ...args) {
@@ -186,6 +188,64 @@ test("unresolved round-two finding escalates to a human", async (t) => {
     [],
   );
   assert.equal(result.status, "HUMAN_REQUIRED");
+});
+
+test("compact review summaries support bounded state-change waits", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Update the exported value.",
+    implementationScope: "Change app.js.",
+  });
+  const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  ledger.updated_at = "2099-01-01T00:00:00.000Z";
+  await fsp.writeFile(reviewPath, `${JSON.stringify(ledger, null, 2)}\n`);
+
+  const summary = await getReviewSummary(store, prepared.id);
+  assert.equal(summary.status, "WAITING_FOR_REVIEW");
+  assert.equal(summary.action_required, "CLAUDE_INITIAL_REVIEW");
+  assert.deepEqual(summary.findings, {
+    total: 0,
+    active: 0,
+    by_severity: {},
+    by_status: {},
+  });
+  assert.deepEqual(summary.active_findings, []);
+  assert.equal(summary.current_snapshot.head_sha, git(repository, "rev-parse", "HEAD"));
+  assert.equal(summary.current_snapshot.changed_file_count, 1);
+  assert.equal("history" in summary, false);
+  assert.equal("rounds" in summary, false);
+  assert.equal("requirement" in summary, false);
+
+  const waiting = waitForReviewState(
+    store,
+    prepared.id,
+    summary.updated_at,
+    1_000,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await submitInitialReview(store, prepared.id, []);
+  const changed = await waiting;
+  assert.equal(changed.changed, true);
+  assert.equal(changed.timed_out, false);
+  assert.equal(changed.summary.status, "CLEAN");
+  assert.equal(changed.summary.action_required, "FINALIZE_LOCAL_GATE");
+  assert.ok(changed.summary.updated_at > summary.updated_at);
+
+  const timedOut = await waitForReviewState(
+    store,
+    prepared.id,
+    changed.summary.updated_at,
+    10,
+  );
+  assert.equal(timedOut.changed, false);
+  assert.equal(timedOut.timed_out, true);
+  assert.equal(timedOut.summary.status, "CLEAN");
 });
 
 test("finalization fails closed when code changes after a clean verdict", async (t) => {

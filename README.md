@@ -70,6 +70,10 @@ In Codex:
 > "...", the implementation scope is "...", and the base ref is `origin/main`.
 
 Codex returns a `review_id` and waits in `WAITING_FOR_REVIEW`.
+Use `get_review_summary` for the compact state, next action, current snapshot,
+and finding counts. `wait_for_review_state` waits up to 60 seconds for
+`updated_at` to advance and returns the same compact summary, avoiding repeated
+full-ledger polling.
 
 In Claude Desktop:
 
@@ -114,9 +118,13 @@ LOCAL_GATE_PASSED
   -> MERGE_READY
 ```
 
-Codex must post a pull-request comment containing exactly `@codex review`, wait
-for the resulting GitHub review, and verify that it applies to the current PR
-head. No response is not a pass. Any new commit invalidates the GitHub review
+Codex must post one pull-request comment containing exactly `@codex review`,
+record that request's identity and head, and wait for a bound result. GitHub
+Codex may return that result as an issue comment, pull-request review, or
+pull-request review comment. A trusted result must explicitly report findings
+or the known clean outcome and bind its reviewed commit to the current PR head.
+An eyes reaction is only receipt acknowledgement; silence, a removed reaction,
+or an unbound result is not a pass. Any new commit invalidates the GitHub review
 gate.
 
 Before requesting GitHub review, both the local branch head and PR head must

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Compact author-side review summaries and bounded state-change waits.
+
+### Fixed
+
+- The packaged GitHub workflow now recognizes Codex results delivered as issue
+  comments, pull-request reviews, or review comments while requiring trusted
+  actor, exact request, and reviewed-head binding.
+- Receipt reactions and ambiguous or unbound results remain pending rather than
+  being treated as a publication pass.
+
 ## 0.1.1 - 2026-07-25
 
 ### Added

@@ -61,17 +61,31 @@ After `LOCAL_GATE_PASSED`:
 2. Require the PR head commit to equal that same local-gate `head_sha`. If it
    differs, stop and start a new local Review Bridge task. Record the matching
    PR head, wait for required checks to pass, and mark the PR ready for review.
-3. Post a PR comment containing exactly `@codex review`. Do not rely on
-   automatic review being enabled.
-4. Wait for Codex to react and post a GitHub review. No response is a pending
-   review, not a pass.
-5. Read the Codex review and its unresolved threads, then read the PR head
-   again. The completed review must apply to the same PR head commit recorded
-   when review was requested.
-6. If Codex reports an actionable finding, make and commit the fix, run the
+3. Read the PR head again, post one PR comment containing exactly
+   `@codex review`, and record the exact request comment ID, URL, creation time,
+   and requested head. Do not rely on automatic review being enabled and do not
+   post another exact request for that head while this one is pending.
+4. Inspect all supported Codex result resources after the request. A completed
+   result may be an issue comment, pull-request review, or pull-request review
+   comment; do not require a pull-request review object. Require the configured
+   Codex GitHub App's stable actor ID and `Bot` type rather than trusting a
+   mutable login alone.
+5. A result must explicitly report either actionable findings or the known
+   clean outcome, carry a reviewed-commit binding that uniquely matches the
+   requested full head, and be attributable to the recorded request. The
+   standard clean issue-comment form includes
+   `Codex Review: Didn't find any major issues.` and `Reviewed commit:`.
+   An eyes reaction is pending, never a pass. A removed reaction, silence, an
+   unbound result, or an ambiguous result also remains pending and must not
+   authorize merge.
+6. After a completed result, read all unresolved review threads, required
+   checks, and the PR head again. The completed result, local gate, and checks
+   must apply to the same current head, and no unresolved actionable thread may
+   remain.
+7. If Codex reports an actionable finding, make and commit the fix, run the
    relevant checks, and start a new local Review Bridge task. After its local
    gate passes, push the new commit and request `@codex review` again.
-7. Merge only when the local gate, required checks, and completed GitHub Codex
+8. Merge only when the local gate, required checks, and completed GitHub Codex
    review all apply to the current PR head and no actionable finding remains.
 
 Any new commit invalidates the GitHub review gate. Compare the reviewed PR head
