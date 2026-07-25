@@ -501,8 +501,10 @@ The evaluator applies these checks in order:
     acknowledgement for the current head. An unacknowledged ambiguous result
     preserves its indeterminate request set and derives
     `GITHUB_REVIEW_UNKNOWN`. A valid acknowledgement closes exactly its named
-    indeterminate requests and ambiguous results without correlating a result
-    retroactively.
+    observed epoch without correlating a result retroactively. Any
+    later-discovered pre-boundary event absent from its closed-ID lists derives
+    `GITHUB_REVIEW_UNKNOWN`. An `UNSOLICITED` result before the epoch's first
+    exact request is retained for audit but does not block or correlate.
 13. From the remaining requests, select the latest exact `@codex review`
     request by `(created_at, comment_id)`. If none exists, derive
     `GITHUB_REVIEW_NOT_REQUESTED`. Zero correlated results derives
@@ -533,7 +535,9 @@ Ambiguity never clears automatically. Publication can recover on the same head
 only after the operator explicitly acknowledges the exact indeterminate
 request and result IDs, asserting that those old requests will produce no
 further results and accepting the risk if that assertion is wrong. The next
-exact request starts a new correlation epoch.
+exact request posted after `acknowledged_at` starts a new correlation epoch;
+requests posted before acknowledgement are reported and closed by that
+boundary.
 
 ## Author tools
 
@@ -607,10 +611,31 @@ The skill must invoke it only after a human directly approves the named
 acknowledgement; silence, a retry request, or a previous general instruction to
 finish the workflow is not approval.
 
-Under the publication lock, the server reloads the current fresh observation,
+The shipped Codex workflow skill must carry that approval rule and the complete
+six-tool ordering, including `verify_publication_gate` immediately before
+merge. `scripts/verify-build.mjs` must assert both requirements in the packaged
+skill, so losing either rule fails the build rather than silently changing the
+workflow.
+
+The normative sequence is: `start_publication`, use `get_publication` as needed,
+record a complete snapshot, and, only if ambiguity blocks it, stop for direct
+human approval before acknowledgement; then post a new exact request and
+record a new snapshot. After `MERGE_READY`, finalize the gate and call
+`verify_publication_gate` immediately before the head-matching merge.
+
+Under the publication lock, the server reloads the current observation,
 requires `head_sha` to match the local gate and pull request, independently
 replays association, and requires set equality between the supplied IDs and
-the current indeterminate request/result sets. The server-generated record is:
+the current indeterminate request/result sets. The backing observation must
+satisfy the same five-minute age limit, 30-second future tolerance,
+post-publication ordering, and two-minute atomic-collection window used by
+finalization. Otherwise the call fails with an instruction to record a fresh
+snapshot first.
+
+The acknowledgement closes the entire observed correlation epoch, including
+any recovery request posted after the ambiguity but before acknowledgement.
+The server records every request and result ID closed by the boundary, not just
+the indeterminate IDs supplied by the caller. The server-generated record is:
 
 ```json
 {
@@ -618,9 +643,13 @@ the current indeterminate request/result sets. The server-generated record is:
   "head_sha": "0123456789abcdef...",
   "request_comment_ids": [100, 102],
   "ambiguous_result_ids": [101],
+  "closed_request_comment_ids": [100, 102, 104],
+  "closed_result_ids": [101, 103],
   "acknowledgement": "NO_FURTHER_RESULTS_EXPECTED",
   "operator_label": "local maintainer",
   "rationale": "Old requests are no longer expected to answer.",
+  "backing_observed_at": "2026-07-25T08:05:00.000Z",
+  "backing_observation_sha256": "sha256...",
   "acknowledged_at": "2026-07-25T08:06:00.000Z",
   "publication_revision": 5
 }
@@ -635,7 +664,12 @@ unacknowledged ambiguity requires a new human decision.
 Like every later ledger mutation, the tool first revokes and directory-syncs
 an existing publication gate, then appends the acknowledgement and history
 event and advances the revision. After acknowledgement, no active request
-exists until the operator posts a new exact `@codex review` comment.
+exists until the operator posts a new exact `@codex review` comment after
+`acknowledged_at`. A request already present in the backing observation is
+reported in `closed_request_comment_ids` and cannot become active silently.
+If a later snapshot discovers any pre-boundary request or result that was not
+recorded in the closed-ID lists, derivation returns
+`GITHUB_REVIEW_UNKNOWN` and requires a fresh human decision.
 
 ### `verify_publication_gate`
 
@@ -745,12 +779,16 @@ response is still pending. The adapter processes requests and results in
 `(created_at, GitHub object ID)` order and maintains the unmatched exact
 requests for each head. Version 1 accepts only these association values:
 
+- a result created before any exact request in the current correlation epoch
+  uses `association: "UNSOLICITED"` with a null `request_comment_id`; it is
+  retained for audit but never opens, closes, or satisfies a request;
 - a result uses `association: "SINGLE_OPEN_REQUEST"` only when exactly one
   unmatched prior exact request exists for that head, and records that
   request's comment ID;
-- when zero or multiple requests could own the result, the adapter returns
+- when multiple requests could own the result, the adapter returns
   `association: "AMBIGUOUS"` and a null `request_comment_id`; and
-- a second result for an already matched request is ambiguous.
+- after at least one request has existed in the epoch, a result with no open
+  request is a possible duplicate result and is also `AMBIGUOUS`.
 
 A correlated result closes its request. An ambiguous result marks every
 currently unmatched request for that head indeterminate but does not close or
@@ -763,6 +801,11 @@ Response body text, mentions, permalinks, and all other free-form content never
 supply request linkage. Version 1 has no `EXPLICIT_LINK`; adding a future
 structural GitHub link requires a schema change that names and validates the
 exact response field.
+
+An automatic Codex result that predates the workflow's first exact request is
+therefore harmless `UNSOLICITED` evidence. It cannot correlate to a later
+request and does not force routine human acknowledgement in repositories with
+automatic review enabled.
 
 The evaluator independently replays this algorithm, validates each
 association, and then selects the latest request; it never reconstructs a
@@ -844,6 +887,10 @@ can operate from stale reads.
   acknowledgement names the exact indeterminate IDs. An acknowledgement
   revokes any gate and creates an auditable risk-acceptance boundary; it does
   not prove that old requests have stopped.
+- A pre-request automatic result is `UNSOLICITED`, remains audit evidence, and
+  cannot poison or satisfy a later exact request.
+- Stale evidence cannot back an ambiguity acknowledgement; the operator must
+  record a fresh snapshot first.
 - A merged pull request may be recorded only when a live observation supplies
   its merge commit SHA. A squash merge commit is allowed to differ from the
   reviewed head.
@@ -918,6 +965,10 @@ architecture.
 - Ambiguity remains blocking until a human acknowledges the exact indeterminate
   IDs and asserts that no old request will reply. The acknowledgement is
   revisioned, revokes any gate, and starts a new correlation epoch.
+- Automatic results before the epoch's first exact request are `UNSOLICITED`
+  and never trigger the acknowledgement path.
+- The packaged workflow skill carries the six-tool ordering and direct-human
+  approval rule, and build verification asserts both properties.
 - A publication gate is valid only for the current ledger revision. Every
   later ledger mutation revokes it before writing, including same-head changes.
 - Lock acquisition waits ten seconds; a lock is only eligible for reclamation
@@ -946,10 +997,14 @@ The implementation must test:
 - overlapping requests where the older delayed result arrives after the newer
   request and derives `GITHUB_REVIEW_UNKNOWN`, plus a body-only request
   permalink that remains ambiguous;
+- an automatic pre-request result recorded as `UNSOLICITED`, followed by a
+  normal explicit request and result reaching `MERGE_READY` without
+  acknowledgement, with the unsolicited result never correlating later;
 - a recovery request posted before acknowledgement, with every subsequent
-  result remaining ambiguous; exact-set acknowledgement followed by a new
-  request; a delayed old result after acknowledgement as an explicitly
-  accepted risk; and a later ambiguity requiring another acknowledgement;
+  result remaining ambiguous and the early recovery request reported as
+  closed; exact-set acknowledgement followed by a post-acknowledgement request;
+  a delayed old result after acknowledgement as an explicitly accepted risk;
+  and a later ambiguity requiring another acknowledgement;
 - zero and multiple candidate results after the latest request;
 - a reaction without a Codex result;
 - a result created before its request;
@@ -975,7 +1030,11 @@ The implementation must test:
   merge to document the residual point-in-time limitation;
 - ambiguity acknowledgement with wrong head, stale revision, missing or extra
   request/result IDs, missing rationale, or the wrong acknowledgement enum,
-  plus gate revocation and the revisioned audit record on success;
+  plus a stale or future-dated backing observation, gate revocation, closed-ID
+  reporting, the backing observation timestamp/hash, and the revisioned audit
+  record on success;
+- packaged-skill assertions for the complete six-tool ordering, direct-human
+  ambiguity approval, and immediate pre-merge gate verification;
 - lock timeout errors, PID reuse, heartbeat expiry, owner-token mismatch, and
   inconclusive owner-liveness checks;
 - malformed and oversized inputs;
@@ -994,7 +1053,10 @@ Implement this design in two changes:
    `REVIEW_BUSY`, and verify existing successful tool inputs, outputs, and
    state transitions remain unchanged; and
 2. add publication storage, state derivation, author tools, the Codex adapter,
-   publication-state lock, and packaged-client verification.
+   publication-state lock, and packaged-client verification; update the
+   packaged Codex workflow skill with the six-tool ordering, immediate
+   pre-merge gate verification, and direct-human ambiguity approval rule; and
+   make `scripts/verify-build.mjs` assert those skill requirements.
 
 Each implementation change requires its own local Claude review and GitHub
 Codex review.
