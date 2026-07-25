@@ -1,4 +1,4 @@
-# Review Bridge v0.1
+# Review Bridge v0.1.1
 
 Review Bridge is a local, manually triggered code-review handoff between Codex
 and Claude Desktop.
@@ -7,17 +7,25 @@ It creates an immutable Git snapshot, gives Claude read-only review tools, lets
 Codex answer every finding, and stops after two model-review rounds when the
 models still disagree.
 
+Review Bridge is an independent community project. It is not affiliated with,
+endorsed by, or sponsored by OpenAI or Anthropic.
+
+## Platform support
+
+Review Bridge v0.1.1 supports macOS. The Claude Desktop extension manifest is
+Darwin-only; Linux and Windows are not currently supported or tested.
+
 ## What is included
 
 - `codex-marketplace/`: local Codex marketplace containing the Review Bridge
   plugin and author-role MCP server.
-- `review-bridge-reviewer-v0.1.0.mcpb`: current MCP Bundle for Claude Desktop.
-- `review-bridge-reviewer-v0.1.0.dxt`: compatibility copy for Claude Desktop
+- `review-bridge-reviewer-v0.1.1.mcpb`: current MCP Bundle for Claude Desktop.
+- `review-bridge-reviewer-v0.1.1.dxt`: compatibility copy for Claude Desktop
   versions that still use the DXT file extension.
 - `claude-extension-source/`: inspectable source of the Claude extension.
 
 Run `npm run build` to create these files under
-`dist/review-bridge-v0.1.0/`.
+`dist/review-bridge-v0.1.1/`.
 
 Both MCP processes use this default shared data directory:
 
@@ -48,7 +56,7 @@ In Claude Desktop:
 
 1. Open **Settings → Extensions → Advanced settings**.
 2. Choose **Install Extension**.
-3. Select `review-bridge-reviewer-v0.1.0.mcpb`. If the picker only accepts
+3. Select `review-bridge-reviewer-v0.1.1.mcpb`. If the picker only accepts
    `.dxt`, select the compatibility copy.
 4. Keep the default Review Bridge data directory, or select the same directory
    configured through `REVIEW_BRIDGE_HOME` for Codex.
@@ -145,6 +153,24 @@ PR head.
 Claude Desktop is a local application, but that does not imply local model
 inference. Apply your Anthropic account and organization data policy before
 reviewing confidential code.
+
+## Data handling and cleanup
+
+The review store contains repository paths, requirements, patches, manifests,
+review findings, and copies of changed working-tree files. Review Bridge creates
+store directories with mode `0700` and files with mode `0600`.
+
+The Review Bridge MCP servers do not contain a network client or telemetry
+integration. However, Claude Desktop can send source returned by reviewer tools
+to Anthropic according to the account and organization configuration in use.
+
+Review data is retained until it is deleted. To remove one task, stop active
+Review Bridge operations and delete `reviews/<review_id>` inside the configured
+store. To remove all tasks, quit Codex and Claude Desktop and delete the
+configured Review Bridge directory.
+
+See [SECURITY.md](SECURITY.md) for vulnerability reporting and the supported
+release policy.
 
 ## Develop
 

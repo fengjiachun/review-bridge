@@ -15,7 +15,7 @@ async function listToolNames(role, store) {
     env: { ...process.env, REVIEW_BRIDGE_HOME: store },
     stderr: "pipe",
   });
-  const client = new Client({ name: "review-bridge-test", version: "0.1.0" });
+  const client = new Client({ name: "review-bridge-test", version: "0.1.1" });
   await client.connect(transport);
   try {
     const tools = await client.listTools();

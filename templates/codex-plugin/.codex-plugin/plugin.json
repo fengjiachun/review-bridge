@@ -1,6 +1,6 @@
 {
   "name": "review-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Coordinate a two-round local code review between Codex and Claude Desktop.",
   "author": {
     "name": "Review Bridge contributors"

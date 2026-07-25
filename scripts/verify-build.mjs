@@ -11,15 +11,15 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = process.env.REVIEW_BRIDGE_OUTPUT_ROOT
   ? path.resolve(process.env.REVIEW_BRIDGE_OUTPUT_ROOT)
-  : path.join(projectRoot, "dist", "review-bridge-v0.1.0");
+  : path.join(projectRoot, "dist", "review-bridge-v0.1.1");
 const marketplaceRoot = path.join(outputRoot, "codex-marketplace");
 const pluginRoot = path.join(marketplaceRoot, "plugins", "review-bridge");
 const authorServer = path.join(pluginRoot, "server", "server.mjs");
 const reviewerRoot = path.join(outputRoot, "claude-extension-source");
 const reviewerServer = path.join(reviewerRoot, "server", "server.mjs");
-const mcpb = path.join(outputRoot, "review-bridge-reviewer-v0.1.0.mcpb");
-const dxt = path.join(outputRoot, "review-bridge-reviewer-v0.1.0.dxt");
-const sourceArchive = path.join(outputRoot, "review-bridge-source-v0.1.0.zip");
+const mcpb = path.join(outputRoot, "review-bridge-reviewer-v0.1.1.mcpb");
+const dxt = path.join(outputRoot, "review-bridge-reviewer-v0.1.1.dxt");
+const sourceArchive = path.join(outputRoot, "review-bridge-source-v0.1.1.zip");
 
 function run(command, args, cwd) {
   const result = spawnSync(command, args, {
@@ -42,7 +42,7 @@ async function connect(serverPath, role, store) {
     env: { ...process.env, REVIEW_BRIDGE_HOME: store },
     stderr: "pipe",
   });
-  const client = new Client({ name: "review-bridge-verifier", version: "0.1.0" });
+  const client = new Client({ name: "review-bridge-verifier", version: "0.1.1" });
   await client.connect(transport);
   return client;
 }
@@ -69,6 +69,7 @@ assert.equal(marketplace.plugins[0].source.path, "./plugins/review-bridge");
 
 const plugin = await readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
 assert.equal(plugin.name, "review-bridge");
+assert.equal(plugin.version, "0.1.1");
 assert.equal(plugin.mcpServers, "./.mcp.json");
 const workflowSkillPath = path.join(
   pluginRoot,
@@ -99,6 +100,7 @@ assert.equal(
 
 const extension = await readJson(path.join(reviewerRoot, "manifest.json"));
 assert.equal(extension.manifest_version, "0.3");
+assert.equal(extension.version, "0.1.1");
 assert.equal(extension.server.entry_point, "server/server.mjs");
 
 const [mcpbBytes, dxtBytes] = await Promise.all([fsp.readFile(mcpb), fsp.readFile(dxt)]);

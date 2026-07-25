@@ -38,7 +38,7 @@ const storeRoot = defaultStoreRoot();
 const server = new McpServer(
   {
     name: `review-bridge-${role}`,
-    version: "0.1.0",
+    version: "0.1.1",
   },
   {
     instructions:
