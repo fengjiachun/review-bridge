@@ -237,6 +237,7 @@ The initial schema is:
       "requests": [
         {
           "comment_id": 100,
+          "resource_kind": "ISSUE_COMMENT",
           "url": "https://github.com/...",
           "created_at": "2026-07-25T08:03:00.000Z",
           "body": "@codex review",
@@ -245,13 +246,18 @@ The initial schema is:
       ],
       "results": [
         {
-          "comment_id": 101,
+          "result_id": 101,
+          "resource_kind": "PULL_REQUEST_REVIEW",
           "url": "https://github.com/...",
           "created_at": "2026-07-25T08:04:00.000Z",
           "author": "chatgpt-codex-connector",
           "request_comment_id": 100,
           "association": "SINGLE_OPEN_REQUEST",
           "reviewed_head_sha": "0123456789abcdef...",
+          "commit_binding": {
+            "source": "PULL_REQUEST_REVIEW_COMMIT_ID",
+            "field": "commit_id"
+          },
           "verdict": "CLEAN",
           "body_sha256": "sha256..."
         }
@@ -512,8 +518,10 @@ The evaluator applies these checks in order:
     request or more than one correlated result derives
     `GITHUB_REVIEW_UNKNOWN`. Timestamps widen ambiguity but never establish a
     request/result pairing.
-14. The single correlated result names the current head SHA and its parser
-    returns `CLEAN`; a stale SHA or unknown format fails closed.
+14. The single correlated result carries an accepted GitHub-native commit
+    binding, names the current head SHA, and its parser returns `CLEAN`. A
+    missing binding, a SHA copied from the pull request at collection time, a
+    stale SHA, or an unknown format fails closed.
 15. Thread collection is complete, its counts are internally consistent, and
     `unresolved_count` is zero.
 
@@ -569,12 +577,13 @@ Inputs:
   class
 
 The tool validates sizes, enums, timestamps, SHA formats, URLs, unique
-requirement keys, unique run and GitHub object IDs, binding-field provenance,
-required-app identity, run ordering and status/conclusion pairs, evidence
-provenance and collection metadata, thread counts, latest-run selection, exact
-request bodies, request/result correlation, latest-request selection, merge
-fields, and cross-field ordering. An incomplete but well-formed collection is
-recorded and derives `EVIDENCE_INCOMPLETE`.
+requirement keys, unique run IDs, GitHub object IDs unique within each resource
+kind, binding-field provenance, required-app identity, run ordering and
+status/conclusion pairs, evidence provenance and collection metadata, thread
+counts, latest-run selection, exact request bodies, resource-kind-scoped event
+ordering, result commit-binding provenance, request/result correlation,
+latest-request selection, merge fields, and cross-field ordering. An incomplete
+but well-formed collection is recorded and derives `EVIDENCE_INCOMPLETE`.
 
 It applies the five-minute age and 30-second future limits to `observed_at` and
 every collection's `collected_at`, rejects any timestamp earlier than the
@@ -768,16 +777,38 @@ The adapter collects every page of conversation comments and formal reviews
 and returns:
 
 - all exact request comments, with GitHub object ID, URL, timestamp, and the
-  head SHA recorded when the request was made;
-- all candidate Codex results, with GitHub object ID, URL, author, timestamp,
-  reviewed commit SHA, `request_comment_id`, and association method;
+  `ISSUE_COMMENT` resource kind and head SHA recorded when the request was
+  made;
+- all candidate Codex results, with GitHub object ID, resource kind, URL,
+  author, timestamp, reviewed commit SHA, GitHub-native commit-binding source
+  and field, `request_comment_id`, and association method;
 - `CLEAN`, `FINDINGS`, or `UNKNOWN` for each candidate result; and
 - a SHA-256 digest of each original response body.
 
 Any unrecognized response format returns `UNKNOWN`. A reaction without a
-response is still pending. The adapter processes requests and results in
-`(created_at, GitHub object ID)` order and maintains the unmatched exact
-requests for each head. Version 1 accepts only these association values:
+response is still pending.
+
+A formal pull request review binds to its reviewed commit through the review
+object's GitHub-native `commit_id`; a review comment may bind only through its
+structurally linked pull request review and that review's `commit_id`.
+The accepted source/field pairs are
+`PULL_REQUEST_REVIEW_COMMIT_ID`/`commit_id` for a formal review and
+`REVIEW_COMMENT_PARENT_REVIEW_COMMIT_ID`/`commit_id` for a review comment
+linked to that formal review.
+Conversation issue comments have no GitHub-native reviewed-commit field.
+Comment body text, a SHA mentioned by Codex, or the pull request head observed
+when the comment is fetched is never a commit binding. A comment-only result
+therefore has null `reviewed_head_sha` and `commit_binding` and returns
+`UNKNOWN`.
+
+The adapter processes requests and results by `created_at` and maintains the
+unmatched exact requests for each head. GitHub object IDs break timestamp ties
+only when both events have the same `resource_kind` and therefore share an ID
+namespace. An equal-timestamp tie across issue comments, pull request reviews,
+or review comments has no total order; if it can affect request/result
+association, the result is `AMBIGUOUS` and derivation returns
+`GITHUB_REVIEW_UNKNOWN` unless a future structural ordering signal exists.
+Version 1 accepts only these association values:
 
 - a result created before any exact request in the current correlation epoch
   uses `association: "UNSOLICITED"` with a null `request_comment_id`; it is
@@ -889,6 +920,11 @@ can operate from stale reads.
   not prove that old requests have stopped.
 - A pre-request automatic result is `UNSOLICITED`, remains audit evidence, and
   cannot poison or satisfy a later exact request.
+- A comment-only result without a GitHub-native reviewed-commit binding is
+  `UNKNOWN`; copying the pull request head or parsing body text is forbidden.
+- Equal timestamps across different GitHub resource kinds never use object IDs
+  as a cross-namespace tie-breaker and derive `GITHUB_REVIEW_UNKNOWN` when
+  ordering affects association.
 - Stale evidence cannot back an ambiguity acknowledgement; the operator must
   record a fresh snapshot first.
 - A merged pull request may be recorded only when a live observation supplies
@@ -967,6 +1003,11 @@ architecture.
   revisioned, revokes any gate, and starts a new correlation epoch.
 - Automatic results before the epoch's first exact request are `UNSOLICITED`
   and never trigger the acknowledgement path.
+- Only a GitHub-native formal-review commit binding, including one reached
+  structurally from a review comment, can establish `reviewed_head_sha`;
+  conversation comments without it are `UNKNOWN`.
+- Object IDs order equal-time events only within one resource kind. A
+  cross-resource timestamp tie that affects association is ambiguous.
 - The packaged workflow skill carries the six-tool ordering and direct-human
   approval rule, and build verification asserts both properties.
 - A publication gate is valid only for the current ledger revision. Every
@@ -1008,7 +1049,13 @@ The implementation must test:
 - zero and multiple candidate results after the latest request;
 - a reaction without a Codex result;
 - a result created before its request;
-- a missing, malformed, unknown, or stale reviewed commit;
+- a formal review with a GitHub-native `commit_id`, a review comment bound
+  through its formal review, a conversation-comment result with no commit
+  binding, an attempted PR-head copy/body-SHA binding, and a missing,
+  malformed, unknown, or stale reviewed commit;
+- request/result timestamp ties within one resource kind, where object ID may
+  order them, and across issue-comment/review resource kinds, where association
+  derives `GITHUB_REVIEW_UNKNOWN`;
 - findings and unresolved, resolved, and outdated threads;
 - a pull request retargeted to another base branch;
 - a force-push after `MERGE_READY`, including restoring the original head
