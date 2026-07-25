@@ -102,9 +102,10 @@ Under that lock, any later ledger mutation must durably remove the canonical
 `publication-gate.json` before replacing `publication.json`. If gate removal or
 the parent-directory sync fails, the mutation aborts. A crash after removal can
 leave a conservative missing gate, never a stale authoritative gate. Gate
-consumers must read and cross-check the canonical gate and current ledger under
-the publication lock immediately before merge; a previously returned or cached
-gate never authorizes a later merge.
+consumers must call `verify_publication_gate`, which cross-checks the canonical
+gate and current ledger under the publication lock, immediately before merge.
+Direct file reads and previously returned or cached verification results never
+authorize a later merge.
 
 ## Backward compatibility
 
@@ -498,11 +499,13 @@ The evaluator applies these checks in order:
 12. From the complete request collection, select the latest exact
     `@codex review` request for the current head by `(created_at, comment_id)`.
     If none exists, derive `GITHUB_REVIEW_NOT_REQUESTED`.
-13. Validate every result's explicit `request_comment_id` using the association
-    algorithm below. For the latest request, zero correlated results derives
-    `GITHUB_REVIEW_PENDING` unless an ambiguous candidate could refer to that
-    request; an ambiguous candidate or more than one correlated result derives
-    `GITHUB_REVIEW_UNKNOWN`.
+13. Validate every result's `request_comment_id` using the association
+    algorithm below. For the latest request, an `AMBIGUOUS` candidate created
+    after that request derives `GITHUB_REVIEW_UNKNOWN`. Ambiguous candidates
+    that predate the latest request do not associate with it; zero correlated
+    results then derives `GITHUB_REVIEW_PENDING`. Timestamps widen ambiguity
+    but never establish a request/result pairing. More than one correlated
+    result also derives `GITHUB_REVIEW_UNKNOWN`.
 14. The single correlated result names the current head SHA and its parser
     returns `CLEAN`; a stale SHA or unknown format fails closed.
 15. Thread collection is complete, its counts are internally consistent, and
@@ -517,14 +520,14 @@ are harmless.
 A later exact request always supersedes an earlier request for the same head,
 but timestamp order alone never associates a result with that request. An
 earlier `CLEAN` result cannot satisfy a later request. If a new exact request
-arrives while an earlier request has no correlated result, a later result
-without an explicit GitHub linkage is ambiguous rather than being assigned to
-the newest request. Duplicate and overlapping requests are therefore
-represented and evaluated rather than rejected or silently paired.
+arrives while an earlier request has no correlated result, the next result is
+ambiguous rather than being assigned to the newest request. Duplicate and
+overlapping requests are therefore represented and evaluated rather than
+rejected or silently paired.
 
 ## Author tools
 
-The author role adds four tools.
+The author role adds five tools.
 
 ### `start_publication`
 
@@ -577,6 +580,32 @@ derives `MERGE_READY`.
 
 Returns the ledger without accessing GitHub.
 
+### `verify_publication_gate`
+
+Inputs:
+
+- `review_id`
+
+Under the publication lock, the tool reads the canonical
+`publication-gate.json` and `publication.json` together, rejects unsupported
+formats, recomputes the current ledger status, and verifies that the gate's
+`review_id`, `publication_revision`, `head_sha`, and status match a current
+`MERGE_READY` ledger. It returns:
+
+```json
+{
+  "valid": true,
+  "status": "MERGE_READY",
+  "head_sha": "0123456789abcdef...",
+  "publication_revision": 4,
+  "verified_at": "2026-07-25T08:05:02.000Z"
+}
+```
+
+A missing, mismatched, revoked, or non-`MERGE_READY` gate returns
+`valid: false` with a normalized reason and no merge-authorizing head SHA.
+Callers never read the private store directly to make this decision.
+
 ### `finalize_publication_gate`
 
 Inputs:
@@ -618,12 +647,18 @@ It then writes:
 }
 ```
 
+Finalization does not modify `publication.json`: it does not change
+`revision`, `updated_at`, status, or history. `publication-gate.json` is the
+sole record of issuance and names the unchanged ledger revision that was
+validated. This write is not a later ledger mutation and therefore does not
+revoke itself.
+
 Codex must perform a fresh GitHub read immediately before this call. It then
-cross-checks the canonical gate against the current ledger under the
-publication lock immediately before merging, and merges with an operation that
-rejects a changed PR head, such as
-`gh pr merge --match-head-commit <head_sha>`. The finalize response or an
-earlier file read is not a reusable merge credential.
+calls `verify_publication_gate` immediately before merging and passes the
+returned `head_sha` to an operation that rejects a changed PR head, such as
+`gh pr merge --match-head-commit <head_sha>`. The finalize response, a direct
+file read, or an earlier verification result is not a reusable merge
+credential.
 
 The five-minute bound is an upper limit, not a target delay. A stale or
 future-dated top-level observation or nested collection cannot produce
@@ -651,20 +686,25 @@ and returns:
 Any unrecognized response format returns `UNKNOWN`. A reaction without a
 response is still pending. The adapter processes requests and results in
 `(created_at, GitHub object ID)` order and maintains the unmatched exact
-requests for each head:
+requests for each head. Version 1 accepts only these association values:
 
-- a result with a GitHub-supplied direct request link uses
-  `association: "EXPLICIT_LINK"` only when the linked request exists, predates
-  the result, and names the same head;
-- without such a link, a result uses
-  `association: "SINGLE_OPEN_REQUEST"` only when exactly one unmatched prior
-  exact request exists for that head, and records that request's comment ID;
+- a result uses `association: "SINGLE_OPEN_REQUEST"` only when exactly one
+  unmatched prior exact request exists for that head, and records that
+  request's comment ID;
 - when zero or multiple requests could own the result, the adapter returns
   `association: "AMBIGUOUS"` and a null `request_comment_id`; and
 - a second result for an already matched request is ambiguous.
 
-A correlated result closes its request. The evaluator validates these
-associations and then selects the latest request; it never reconstructs a
+A correlated result closes its request. An ambiguous result marks every
+currently unmatched request for that head indeterminate and closes that open
+set, so an operator can recover by posting a new exact request after the
+ambiguous event. Response body text, mentions, permalinks, and all other
+free-form content never supply request linkage. Version 1 has no
+`EXPLICIT_LINK`; adding a future structural GitHub link requires a schema
+change that names and validates the exact response field.
+
+The evaluator independently replays this algorithm, validates each
+association, and then selects the latest request; it never reconstructs a
 pairing from "created after latest request" alone. The adapter must not discard
 older, duplicate, or ambiguous events because doing so could let a delayed old
 `CLEAN` result mask a pending newer review.
@@ -743,6 +783,11 @@ can operate from stale reads.
 - GitHub response-format changes can move a previously understood Codex result
   to `GITHUB_REVIEW_UNKNOWN` until the adapter is updated.
 - Per-review locking adds complexity to the otherwise simple atomic-file store.
+- `verify_publication_gate` is a point-in-time local verdict. The local lock
+  cannot span GitHub's merge execution: `--match-head-commit` closes a head
+  change, but a same-head request or thread mutation can still land after
+  verification and before merge. Closing that residual window requires
+  repository-side enforcement such as the deferred GitHub Check Run.
 - A new commit intentionally requires a new local review rather than resuming
   the existing publication ledger.
 
@@ -792,9 +837,8 @@ architecture.
   freshness and atomic-observation window as checks, reviews, and threads.
 - Every unresolved review thread blocks publication, regardless of author.
 - Codex result evidence stores a digest and GitHub URL, not the response body.
-- Every Codex result is correlated to one request by an explicit GitHub link or
-  the single-open-request rule; overlapping requests without explicit linkage
-  are ambiguous.
+- Every Codex result is correlated by the single-open-request rule; overlapping
+  requests are ambiguous, and free-form text never supplies linkage.
 - A publication gate is valid only for the current ledger revision. Every
   later ledger mutation revokes it before writing, including same-head changes.
 - Lock acquisition waits ten seconds; a lock is only eligible for reclamation
@@ -821,7 +865,9 @@ The implementation must test:
 - a missing request, a non-exact request, duplicate requests, and a newer
   request that supersedes an older `CLEAN` result;
 - overlapping requests where the older delayed result arrives after the newer
-  request, with and without an explicit request link;
+  request and derives `GITHUB_REVIEW_UNKNOWN`, a body-only request permalink
+  that remains ambiguous, and recovery via a new exact request after the
+  ambiguous result;
 - zero and multiple candidate results after the latest request;
 - a reaction without a Codex result;
 - a result created before its request;
@@ -842,6 +888,9 @@ The implementation must test:
 - a same-head request or unresolved thread recorded after finalization, gate
   revocation before the new ledger revision, a crash after revocation, and
   rejection of a cached or revision-mismatched gate;
+- a freshly finalized gate that validates against its unchanged ledger
+  revision, plus a same-head mutation landing after verification but before
+  merge to document the residual point-in-time limitation;
 - lock timeout errors, PID reuse, heartbeat expiry, owner-token mismatch, and
   inconclusive owner-liveness checks;
 - malformed and oversized inputs;
