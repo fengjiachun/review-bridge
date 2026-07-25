@@ -83,7 +83,10 @@ assert.match(
   workflowSkill,
   /Resolve it to an\n   immutable commit SHA before creating or committing publication changes/,
 );
-assert.match(workflowSkill, /Post a PR comment containing exactly `@codex review`/);
+assert.match(
+  workflowSkill,
+  /post one PR comment containing exactly\n   `@codex review`/,
+);
 assert.match(
   workflowSkill,
   /Require the PR head commit to equal that same local-gate `head_sha`/,
