@@ -142,6 +142,11 @@ The initial schema is:
     "observed_at": "2026-07-25T08:05:00.000Z",
     "recorded_at": "2026-07-25T08:05:01.000Z",
     "pull_request": {
+      "collection": {
+        "status": "COMPLETE",
+        "collected_at": "2026-07-25T08:05:00.000Z",
+        "source": "REST_PULL_REQUEST"
+      },
       "repository_id": 123456,
       "number": 5,
       "url": "https://github.com/owner/repository/pull/5",
@@ -164,6 +169,7 @@ The initial schema is:
             "kind": "APPLICABLE_RULES",
             "endpoint": "GET /repos/{owner}/{repo}/rules/branches/{branch}",
             "result": "SUCCESS",
+            "binding_field": "rules[].parameters.required_status_checks[].integration_id",
             "pagination_complete": true
           },
           {
@@ -175,7 +181,8 @@ The initial schema is:
           {
             "kind": "CLASSIC_BRANCH_PROTECTION",
             "endpoint": "GET /repos/{owner}/{repo}/branches/{branch}/protection",
-            "result": "SUCCESS"
+            "result": "SUCCESS",
+            "binding_field": "required_status_checks.checks[].app_id"
           }
         ]
       },
@@ -183,7 +190,14 @@ The initial schema is:
       "requirements": [
         {
           "context": "test",
-          "required_app_id": 12345
+          "app_binding": "PINNED",
+          "required_app_id": 12345,
+          "binding_sources": [
+            {
+              "kind": "CLASSIC_BRANCH_PROTECTION",
+              "field": "required_status_checks.checks[].app_id"
+            }
+          ]
         }
       ],
       "runs": [
@@ -192,6 +206,8 @@ The initial schema is:
           "context": "test",
           "app_id": 12345,
           "head_sha": "0123456789abcdef...",
+          "started_at": "2026-07-25T08:04:00.000Z",
+          "completed_at": "2026-07-25T08:04:30.000Z",
           "status": "COMPLETED",
           "conclusion": "SUCCESS",
           "details_url": "https://github.com/..."
@@ -273,18 +289,30 @@ Required-check policy discovery reads both:
   `GET /repos/{owner}/{repo}/branches/{branch}` and
   `GET /repos/{owner}/{repo}/branches/{branch}/protection`.
 
-The required-check keys are the union of both successful policy reads. Each key
-is `(context, required_app_id)`. The adapter normalizes a ruleset
-`integration_id` and a classic branch-protection `app_id` into
-`required_app_id`. A non-null value requires a run with the same `context` and
-the exact producing GitHub App ID. A null value is allowed only when GitHub
-explicitly leaves the requirement unbound; it means a matching check run or
-commit status from any producer may satisfy the requirement, not that app
-identity collection failed.
+The required-check keys are the union of both successful policy reads. Each
+requirement records:
 
-Each run records the actual producing `app_id`, or null for a legacy commit
-status without a GitHub App. A pinned requirement never matches a null producer
-identity.
+- `app_binding`: `PINNED` or `EXPLICITLY_UNBOUND`;
+- `required_app_id`, which is a positive integer exactly when the binding is
+  `PINNED` and null exactly when it is `EXPLICITLY_UNBOUND`; and
+- every identity-capable response field that supplied the binding.
+
+The adapter normalizes a ruleset `integration_id` and a classic
+branch-protection `checks[].app_id` into `required_app_id`. `PINNED` requires a
+run with the same `context` and exact producing GitHub App ID.
+`EXPLICITLY_UNBOUND` means GitHub returned an explicit null from an
+identity-capable field and permits a matching check run or commit status from
+any producer.
+
+Reading the legacy classic `contexts[]` field, omitting
+`rules[].parameters.required_status_checks[].integration_id`, or otherwise
+using a response shape that cannot expose app identity is `UNKNOWN`, never
+`SUCCESS` or `EXPLICITLY_UNBOUND`. Each policy source and requirement records
+the exact binding field used, so the server can enforce this distinction.
+
+Each run records the actual producing `app_id`, or null only when the
+identity-capable run/status response explicitly has no GitHub App. A pinned
+requirement never matches a null producer identity.
 
 An authorization error or ambiguous `404` is `UNKNOWN`, not evidence that no
 checks are configured. A classic-protection `404` may be classified as
@@ -299,6 +327,30 @@ required checks or conclusively `NOT_CONFIGURED`. It must accompany
 `requirements: []` and `runs: []`; otherwise the observation is invalid. A
 caller that cannot establish the policy or a required app binding derives
 `EVIDENCE_INCOMPLETE`.
+
+Multiple runs may share one requirement key. Every run records `started_at` and
+`completed_at`; the latter is null until completion. For each
+`(context, app_id)` producer key, the evaluator selects the latest attempt by
+`(started_at, run_id)`. A `PINNED` requirement evaluates that exact producer
+key. An `EXPLICITLY_UNBOUND` requirement selects the latest attempt across all
+producer keys with the same context, again by `(started_at, run_id)`. A missing
+ordering field or duplicate ordering key is incomplete evidence. Older attempts
+remain in the ledger for audit but never satisfy a requirement or override the
+latest attempt.
+
+Normalized run status is one of `QUEUED`, `IN_PROGRESS`, `WAITING`,
+`REQUESTED`, `PENDING`, or `COMPLETED`. A non-completed latest run derives
+`CHECKS_PENDING`. A completed run must have exactly one of these conclusions:
+
+- `SUCCESS`, `SKIPPED`, or `NEUTRAL` satisfies the requirement;
+- `FAILURE`, `CANCELLED`, `TIMED_OUT`, `ACTION_REQUIRED`, or
+  `STARTUP_FAILURE` derives `CHECKS_FAILED`;
+- `STALE` derives `CHECKS_PENDING` and requires a rerun; and
+- a missing or unrecognized value derives `EVIDENCE_INCOMPLETE`.
+
+For a commit status, the adapter uses its creation time as `started_at`, its
+update time as `completed_at`, and normalizes `ERROR` to `FAILURE`. These
+passing conclusions match GitHub's required-status-check semantics.
 
 For an open pull request, `state` is `OPEN`, `is_merged` is false,
 `merged_at` is null, and `merge_commit_sha` is normalized to null because
@@ -367,8 +419,8 @@ every mutation and finalization unless `terminal` is set.
 | `PR_DRAFT` | No | The pull request is still a draft. |
 | `PR_STATE_PENDING` | No | GitHub has not finished computing mergeability. |
 | `PR_CONFLICTING` | No | GitHub reports that the pull request conflicts. |
-| `CHECKS_PENDING` | No | At least one required check has not completed. |
-| `CHECKS_FAILED` | No | At least one required check failed or was cancelled. |
+| `CHECKS_PENDING` | No | A latest required-check attempt is incomplete or stale. |
+| `CHECKS_FAILED` | No | A latest required-check attempt has a blocking conclusion. |
 | `GITHUB_REVIEW_NOT_REQUESTED` | No | No valid exact request exists for the head. |
 | `GITHUB_REVIEW_PENDING` | No | The latest request has no corresponding result. |
 | `GITHUB_REVIEW_UNKNOWN` | No | The result format, association, or verdict is ambiguous. |
@@ -401,35 +453,39 @@ The evaluator applies these checks in order:
 1. If `terminal` is set, return its status without inspecting later evidence.
 2. The ledger references an existing `LOCAL_GATE_PASSED` gate.
 3. If no observation exists, derive `PR_PENDING`.
-4. The repository identity, pull request number, base branch, head branch, and
+4. The pull-request collection reports `COMPLETE` and has valid provenance.
+   A well-formed `INCOMPLETE` or `UNKNOWN` collection derives
+   `EVIDENCE_INCOMPLETE` without evaluating identity or writing a terminal
+   state; malformed or stale collection metadata is rejected before derivation.
+5. The repository identity, pull request number, base branch, head branch, and
    pull request head match the bound target and local gate. Any mismatch
    persists terminal `INVALIDATED`.
-5. A merged pull request has `is_merged: true`, `state: "CLOSED"`, a valid
+6. A merged pull request has `is_merged: true`, `state: "CLOSED"`, a valid
    `merged_at`, and a full `merge_commit_sha`. If so, persist terminal `MERGED`;
    the merge commit may differ from the reviewed head after squash merge.
-6. A pull request with `state: "CLOSED"` and `is_merged: false` persists
+7. A pull request with `state: "CLOSED"` and `is_merged: false` persists
    terminal `CLOSED`.
-7. Every required evidence collection reports `COMPLETE`, has complete
-   pagination, and satisfies its internal counts and provenance rules.
-8. An open pull request is no longer a draft.
-9. The adapter normalizes GitHub's mergeability result to `MERGEABLE`,
+8. Every remaining evidence collection reports `COMPLETE`, is fresh, has
+   complete pagination, and satisfies its internal counts and provenance rules.
+9. An open pull request is no longer a draft.
+10. The adapter normalizes GitHub's mergeability result to `MERGEABLE`,
    `CONFLICTING`, or `UNKNOWN`.
    `UNKNOWN` derives `PR_STATE_PENDING`; `CONFLICTING` derives
    `PR_CONFLICTING`; only `MERGEABLE` may continue.
-10. Required-check policy discovery is complete. For `REQUIRED`, every
-    `(context, required_app_id)` has a run bound to the pull request head and
-    completed successfully. A non-null `required_app_id` must equal the run's
-    `app_id`; a run with the same context from another app does not satisfy it.
-    For `NONE_CONFIGURED`, the explicit-empty invariants hold.
-11. From the complete request collection, select the latest exact
+11. Required-check policy discovery is complete. For `REQUIRED`, select the
+    latest attempt per producer key and evaluate only it. Every requirement has
+    a latest run bound to the pull request head, with the required app identity
+    when pinned, and a passing conclusion. For `NONE_CONFIGURED`, the
+    explicit-empty invariants hold.
+12. From the complete request collection, select the latest exact
     `@codex review` request for the current head by `(created_at, comment_id)`.
     If none exists, derive `GITHUB_REVIEW_NOT_REQUESTED`.
-12. Consider only candidate results created after that latest request. Zero
+13. Consider only candidate results created after that latest request. Zero
     results derives `GITHUB_REVIEW_PENDING`; more than one result or an
     ambiguous association derives `GITHUB_REVIEW_UNKNOWN`.
-13. The single result names the current head SHA and its parser returns
+14. The single result names the current head SHA and its parser returns
     `CLEAN`; a stale SHA or unknown format fails closed.
-14. Thread collection is complete, its counts are internally consistent, and
+15. Thread collection is complete, its counts are internally consistent, and
     `unresolved_count` is zero.
 
 Only an observation that passes every check derives `MERGE_READY`.
@@ -472,10 +528,11 @@ Inputs:
   class
 
 The tool validates sizes, enums, timestamps, SHA formats, URLs, unique
-requirement keys, unique run and GitHub object IDs, required-app identity,
-evidence provenance and collection metadata, thread counts, exact request
-bodies, latest-request selection, merge fields, and cross-field ordering. An
-incomplete but well-formed collection is recorded and derives
+requirement keys, unique run and GitHub object IDs, binding-field provenance,
+required-app identity, run ordering and status/conclusion pairs, evidence
+provenance and collection metadata, thread counts, latest-run selection, exact
+request bodies, latest-request selection, merge fields, and cross-field
+ordering. An incomplete but well-formed collection is recorded and derives
 `EVIDENCE_INCOMPLETE`.
 
 It applies the five-minute age and 30-second future limits to `observed_at` and
@@ -537,8 +594,11 @@ merges with an operation that rejects a changed PR head, such as
 `gh pr merge --match-head-commit <head_sha>`.
 
 The five-minute bound is an upper limit, not a target delay. A stale or
-future-dated observation cannot produce `publication-gate.json`, even if its
-cached status is `MERGE_READY`.
+future-dated top-level observation or nested collection cannot produce
+`publication-gate.json`, even if its cached status is `MERGE_READY`.
+
+`github_oldest_collection_at` is the minimum across the pull-request,
+required-check, Codex-review, and review-thread collection timestamps.
 
 ## Codex result adapter
 
@@ -614,6 +674,8 @@ can operate from stale reads.
 - A revision conflict requires a new `get_publication` call.
 - A changed head records `INVALIDATED` and requires a new local review.
 - A later observation cannot clear `INVALIDATED`, `CLOSED`, or `MERGED`.
+- An incomplete pull-request collection derives `EVIDENCE_INCOMPLETE` before
+  identity comparison and cannot write a sticky terminal state.
 - An incomplete check, request, result, or thread collection derives
   `EVIDENCE_INCOMPLETE`; an empty list alone never proves absence.
 - A stale or future-dated top-level observation or nested evidence collection
@@ -670,6 +732,14 @@ architecture.
 - Required-check keys, including any GitHub App binding, are the union of active
   applicable rules and classic branch protection. Ambiguous access, discovery,
   or producer identity results fail closed.
+- App bindings are explicitly `PINNED` or `EXPLICITLY_UNBOUND` and must cite an
+  identity-capable response field; legacy context-only policy reads are
+  incomplete evidence.
+- Only the latest check attempt can satisfy a requirement. `SUCCESS`,
+  `SKIPPED`, and `NEUTRAL` pass to match GitHub; blocking, stale, pending, and
+  unknown outcomes fail closed as specified above.
+- Pull-request identity and head evidence participates in the same collection
+  freshness and atomic-observation window as checks, reviews, and threads.
 - Every unresolved review thread blocks publication, regardless of author.
 - Codex result evidence stores a digest and GitHub URL, not the response body.
 - Lock acquisition waits ten seconds; a lock is only eligible for reclamation
@@ -688,7 +758,11 @@ The implementation must test:
 - required checks from a different head or with pending, failed, cancelled, or
   missing results;
 - a required check produced by the wrong GitHub App, an explicitly unbound
-  requirement, and a missing app identity;
+  requirement, a missing app identity, and a legacy `contexts[]` policy read;
+- a failed rerun after success, a successful rerun after failure, a pending
+  rerun after success, and runs with missing or ambiguous ordering;
+- `SKIPPED`, `NEUTRAL`, `TIMED_OUT`, `ACTION_REQUIRED`, `STALE`, and an
+  unrecognized future check conclusion;
 - a missing request, a non-exact request, duplicate requests, and a newer
   request that supersedes an older `CLEAN` result;
 - zero and multiple candidate results after the latest request;
@@ -704,7 +778,8 @@ The implementation must test:
   merged state, timestamp, and merge commit SHA;
 - stale, future-dated, pre-publication, and stale-at-finalization observations,
   including a fresh `observed_at` with stale nested collections and collections
-  spanning more than two minutes;
+  spanning more than two minutes, plus fresh nested collections paired with a
+  stale pull-request read;
 - concurrent mutations, stale expected revisions, and independent review and
   publication lock domains;
 - lock timeout errors, PID reuse, heartbeat expiry, owner-token mismatch, and
@@ -736,3 +811,5 @@ Codex review.
 - [GitHub REST API: Get a branch](https://docs.github.com/en/rest/branches/branches#get-a-branch)
 - [GitHub REST API: Get branch protection](https://docs.github.com/en/rest/branches/branch-protection#get-branch-protection)
 - [GitHub REST API: Pull requests](https://docs.github.com/en/rest/pulls/pulls)
+- [GitHub REST API: Check runs](https://docs.github.com/en/rest/checks/runs)
+- [GitHub Docs: Troubleshooting required status checks](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks)
