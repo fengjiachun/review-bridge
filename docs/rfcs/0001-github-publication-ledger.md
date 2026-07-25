@@ -322,6 +322,7 @@ The initial schema is:
           "resource_kind": "CHECK_RUN",
           "context": "test",
           "app_id": 12345,
+          "app_id_source": "CHECK_RUN_APP_ID",
           "head_sha": "0123456789abcdef...",
           "started_at": "2026-07-25T08:04:00.000Z",
           "completed_at": "2026-07-25T08:04:30.000Z",
@@ -532,7 +533,7 @@ requirement records:
 
 The adapter normalizes a ruleset `integration_id` and a classic
 branch-protection `checks[].app_id` into `required_app_id`. `PINNED` requires a
-run with the same `context` and exact producing GitHub App ID.
+check run with the same `context` and exact producing GitHub App ID.
 `EXPLICITLY_UNBOUND` means GitHub returned an explicit null from an
 identity-capable field and permits a matching check run or commit status from
 any producer.
@@ -543,9 +544,14 @@ using a response shape that cannot expose app identity is `UNKNOWN`, never
 `SUCCESS` or `EXPLICITLY_UNBOUND`. Each policy source and requirement records
 the exact binding field used, so the server can enforce this distinction.
 
-Each run records the actual producing `app_id`, or null only when the
-identity-capable run/status response explicitly has no GitHub App. A pinned
-requirement never matches a null producer identity.
+Each check run records its positive `app.id` as `app_id` and
+`app_id_source: "CHECK_RUN_APP_ID"`. Check runs are the only version 1
+resource kind that can prove a producing GitHub App ID; a missing or malformed
+`app.id` is incomplete evidence. Each commit status records `app_id: null` and
+`app_id_source: "COMMIT_STATUS_UNAVAILABLE"` because GitHub's commit-status
+response exposes `creator`, not the producing App's numeric ID. The adapter
+must not infer an App ID from the creator login, user ID, target URL, token
+used to read the status, or any external mapping.
 
 An authorization error or ambiguous `404` is `UNKNOWN`, not evidence that no
 checks are configured. Successful branch-metadata or applicable-rules reads do
@@ -606,18 +612,25 @@ Multiple runs may share one requirement key. Every run records `started_at` and
 `completed_at`; the latter is null until completion. `resource_kind` is exactly
 `CHECK_RUN` or `COMMIT_STATUS`, and each kind has its own numeric ID namespace.
 The evaluator partitions matching attempts by `resource_kind` before selecting
-latest runs. For a `PINNED` requirement, each present kind selects the latest
-attempt for the exact `(context, app_id, resource_kind)` producer key. For an
+latest runs. For a `PINNED` requirement, a matching `CHECK_RUN` kind is
+mandatory and selects the latest attempt for the exact
+`(context, required_app_id, CHECK_RUN)` producer key. A commit status can never
+satisfy that producer-identity predicate. If any commit status reports the same
+context, however, `COMMIT_STATUS` also participates and selects its latest
+attempt by context without an App binding; it must pass independently. For an
 `EXPLICITLY_UNBOUND` requirement, each present kind selects the latest attempt
-across producer keys with that context inside the kind. Selection uses
-`(started_at, run_id)`, so `run_id` breaks a timestamp tie only within its own
-ID namespace. At least one matching kind must be present. If both a check run
-and a commit status report the required context, both independently selected
-latest attempts must pass; neither can supersede or hide the other. Their
-timestamps and numeric IDs are never compared across kinds. A missing ordering
-field, duplicate within-kind ordering key, or unrecognized kind is incomplete
-evidence. Older attempts within a kind remain in the ledger for audit but never
-satisfy a requirement or override that kind's latest attempt.
+across producer keys with that context inside the kind, and at least one
+matching kind must be present. Selection uses `(started_at, run_id)`, so
+`run_id` breaks a timestamp tie only within its own ID namespace. If both a
+check run and a commit status report the required context, both independently
+selected latest attempts must pass; neither can supersede or hide the other.
+Their timestamps and numeric IDs are never compared across kinds. A missing
+ordering field, duplicate within-kind ordering key, invalid
+`app_id`/`app_id_source` pairing, or unrecognized kind is incomplete evidence.
+Older attempts within a kind remain in the ledger for audit but never satisfy
+a requirement or override that kind's latest attempt. A pinned requirement
+with no matching check run from the required App derives `CHECKS_PENDING`,
+even if a same-context commit status passed.
 
 Normalized run status is one of `QUEUED`, `IN_PROGRESS`, `WAITING`,
 `REQUESTED`, `PENDING`, or `COMPLETED`. A non-completed latest run derives
@@ -794,11 +807,13 @@ The evaluator applies these checks in order:
     check run and commit status with the same required context both participate;
     neither supersedes the other. If any source requires strict updates, require
     `base_head_comparison` to prove the head contains the current base; `BEHIND`
-    or `DIVERGED` derives `PR_UPDATE_REQUIRED`. Every requirement has at least
-    one latest run bound to the pull request head, with the required app identity
-    when pinned, and every present kind has a passing conclusion. For
-    `NONE_CONFIGURED`, the explicit-empty invariants hold, including
-    `strict_policy.required: false`.
+    or `DIVERGED` derives `PR_UPDATE_REQUIRED`. Every pinned requirement has a
+    latest check run bound to the pull request head and exact required App ID;
+    a commit status cannot establish that identity, but any same-context commit
+    status kind must independently pass. Every explicitly unbound requirement
+    has at least one latest run bound to the head, and every participating kind
+    has a passing conclusion. For `NONE_CONFIGURED`, the explicit-empty
+    invariants hold, including `strict_policy.required: false`.
 12. Replay event identity and association from `codex_request_history`,
     `codex_result_history`, the current collection's validated parsed verdicts,
     and every stored ambiguity acknowledgement for the current head rather than
@@ -1521,6 +1536,10 @@ can operate from stale reads.
 - A check run and commit status with the same required context are evaluated
   independently. A pass in one kind never hides a pending or failing latest
   attempt in the other, regardless of timestamps.
+- Commit-status responses never supply or prove a producing GitHub App ID.
+  `creator` is audit metadata, not an App mapping. A pinned requirement needs a
+  matching check run from the required App; a same-context commit status still
+  participates independently but cannot satisfy the pinned producer predicate.
 - When any policy source requires strict updates, a head that does not contain
   the current base derives `PR_UPDATE_REQUIRED`.
 - Ambiguity acknowledgement fails unless direct human approval and tool input
@@ -1538,6 +1557,10 @@ can operate from stale reads.
   independently authenticate GitHub without expanding the credential boundary.
 - GitHub response-format changes can move a previously understood Codex result
   to `GITHUB_REVIEW_UNKNOWN` until the adapter is updated.
+- Version 1 cannot satisfy an App-pinned required check using only a legacy
+  commit status because GitHub's status response does not expose the producing
+  App ID. Such repositories must emit a check run from the pinned App or remain
+  `CHECKS_PENDING`.
 - Version 1 cannot publish through a Codex integration that emits only
   conversation comments or review comments. An adopter must verify that the
   connector produces formal pull request reviews before enabling publication.
@@ -1615,6 +1638,9 @@ architecture.
 - App bindings are explicitly `PINNED` or `EXPLICITLY_UNBOUND` and must cite an
   identity-capable response field; legacy context-only policy reads are
   incomplete evidence.
+- Only `CHECK_RUN.app.id` proves run producer identity in version 1. Commit
+  statuses record unavailable App identity, are never enriched from `creator`,
+  and cannot satisfy a pinned producer predicate.
 - Only the latest attempt within each present resource kind can satisfy that
   kind's side of a requirement. `SUCCESS`, `SKIPPED`, and `NEUTRAL` pass to
   match GitHub; blocking, stale, pending, and unknown outcomes fail closed as
@@ -1716,7 +1742,12 @@ The implementation must test:
 - required checks from a different head or with pending, failed, cancelled, or
   missing results;
 - a required check produced by the wrong GitHub App, an explicitly unbound
-  requirement, a missing app identity, and a legacy `contexts[]` policy read;
+  requirement, a check run with missing app identity, a commit status with an
+  invented App mapping, and a legacy `contexts[]` policy read;
+- a pinned requirement with only a passing commit status remaining
+  `CHECKS_PENDING`, plus a pinned matching check run accompanied by passing,
+  pending, and failing same-context commit statuses, and an explicitly unbound
+  requirement satisfied by a commit status with unavailable App identity;
 - a failed rerun after success, a successful rerun after failure, a pending
   rerun after success, and runs with missing or ambiguous ordering;
 - same-name check runs and commit statuses in every pass/fail/pending
