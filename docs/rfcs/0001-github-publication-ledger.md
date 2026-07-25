@@ -896,6 +896,8 @@ unbound request and every recovery request posted after the ambiguity but
 before acknowledgement must already be present in the directly approved
 `request_comment_ids`. The server copies that exact set to
 `closed_request_comment_ids`; the boundary cannot close an unapproved request.
+It likewise copies the exact supplied `ambiguous_results` set to
+`closed_results`; the boundary cannot close an unapproved result.
 The server-generated record is:
 
 ```json
@@ -914,10 +916,6 @@ The server-generated record is:
     {
       "resource_kind": "PULL_REQUEST_REVIEW",
       "result_id": 101
-    },
-    {
-      "resource_kind": "ISSUE_COMMENT",
-      "result_id": 103
     }
   ],
   "acknowledgement": "NO_FURTHER_RESULTS_EXPECTED",
@@ -958,7 +956,11 @@ Under the publication lock, the tool reads the canonical
 `publication-gate.json` and `publication.json` together, rejects unsupported
 formats, recomputes the current ledger status, and verifies that the gate's
 `review_id`, `publication_revision`, `head_sha`, and status match a current
-`MERGE_READY` ledger. It returns:
+`MERGE_READY` ledger. It recomputes `expires_at` from the stored observation
+timestamps, requires it to match the gate, and requires the server clock to be
+no later than that instant. This reapplies every five-minute freshness bound at
+verification time rather than treating successful finalization as timeless.
+It returns:
 
 ```json
 {
@@ -966,13 +968,16 @@ formats, recomputes the current ledger status, and verifies that the gate's
   "status": "MERGE_READY",
   "head_sha": "0123456789abcdef...",
   "publication_revision": 4,
+  "expires_at": "2026-07-25T08:10:00.000Z",
   "verified_at": "2026-07-25T08:05:02.000Z"
 }
 ```
 
-A missing, mismatched, revoked, or non-`MERGE_READY` gate returns
-`valid: false` with a normalized reason and no merge-authorizing head SHA.
-Callers never read the private store directly to make this decision.
+A missing, mismatched, revoked, expired, or non-`MERGE_READY` gate returns
+`valid: false` with a normalized reason and no merge-authorizing head SHA. An
+expired gate uses reason `EVIDENCE_STALE`; the caller must record fresh GitHub
+evidence and finalize a new gate. Callers never read the private store directly
+to make this decision.
 Verification invokes the pure evaluator against the already-reconciled stored
 ledger. It never advances request history, writes a terminal record, changes a
 revision, or otherwise modifies `publication.json`; the file remains
@@ -1015,6 +1020,7 @@ It then writes:
   "github_observed_at": "2026-07-25T08:05:00.000Z",
   "github_oldest_collection_at": "2026-07-25T08:05:00.000Z",
   "github_recorded_at": "2026-07-25T08:05:01.000Z",
+  "expires_at": "2026-07-25T08:10:00.000Z",
   "status": "MERGE_READY"
 }
 ```
@@ -1038,6 +1044,10 @@ future-dated top-level observation or nested collection cannot produce
 
 `github_oldest_collection_at` is the minimum across the pull-request,
 required-check, Codex-review, and review-thread collection timestamps.
+`expires_at` is exactly five minutes after the minimum of
+`github_recorded_at`, `github_observed_at`, and every collection
+`collected_at`. Finalization and verification both recompute it from
+`publication.json`; caller input cannot choose or extend it.
 
 ## Codex result adapter
 
@@ -1223,6 +1233,9 @@ can operate from stale reads.
   `EVIDENCE_INCOMPLETE`; an empty list alone never proves absence.
 - A stale or future-dated top-level observation or nested evidence collection
   cannot be finalized.
+- A finalized gate expires at the earliest underlying five-minute evidence
+  deadline. `verify_publication_gate` returns `EVIDENCE_STALE` after that
+  instant even when the ledger revision and head are unchanged.
 - A previously observed exact request that is changed or deleted persists
   terminal `INVALIDATED`; an older `CLEAN` can never become latest again.
 - A manually posted exact issue-comment request has no
@@ -1280,8 +1293,9 @@ can operate from stale reads.
 - `verify_publication_gate` is a point-in-time local verdict. The local lock
   cannot span GitHub's merge execution: `--match-head-commit` closes a head
   change, but a same-head request or thread mutation can still land after
-  verification and before merge. Closing that residual window requires
-  repository-side enforcement such as the deferred GitHub Check Run.
+  verification and before merge. The gate expires with its oldest evidence,
+  which bounds reuse but does not close this residual window; doing that
+  requires repository-side enforcement such as the deferred GitHub Check Run.
 - GitHub does not structurally correlate a Codex result with its request.
   Explicitly acknowledging ambiguity restores progress but accepts the risk
   that an old delayed result may later be attributed to the new request. The
@@ -1383,6 +1397,9 @@ architecture.
   direct-human approval rule; build verification asserts all four properties.
 - A publication gate is valid only for the current ledger revision. Every
   later ledger mutation revokes it before writing, including same-head changes.
+- A publication gate also expires at the earliest five-minute deadline among
+  its stored observation timestamps; verification reapplies that deadline
+  against the server clock and never treats finalization as timeless.
 - Lock acquisition waits ten seconds; a lock is only eligible for reclamation
   after a 30-second heartbeat timeout and a conclusive owner-identity check.
 - A closed, unmerged pull request terminates the ledger and requires a new local
@@ -1480,11 +1497,14 @@ The implementation must test:
 - `record_codex_review_request` after finalization revoking and
   directory-syncing the existing gate before writing its new revision;
 - a freshly finalized gate that validates against its unchanged ledger
-  revision, plus a same-head mutation landing after verification but before
-  merge to document the residual point-in-time limitation;
+  revision before `expires_at`, expiry at the oldest underlying five-minute
+  deadline with an otherwise unchanged revision/head, and a same-head mutation
+  landing after verification but before merge to document the residual
+  point-in-time limitation;
 - valid and invalid `verify_publication_gate` calls that leave
   `publication.json` byte-identical, including request history, terminal,
-  revision, and cached status;
+  revision, and cached status, with exact boundary tests immediately before,
+  at, and after `expires_at`;
 - ambiguity acknowledgement with wrong head, stale revision, missing or extra
   request IDs (including unbound IDs) or resource-scoped result references,
   missing rationale, or the wrong acknowledgement enum, plus a stale or
