@@ -26,19 +26,34 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
     (match) => JSON.parse(match[1]),
   );
 
-  assert.equal(examples.length, 7);
+  assert.equal(examples.length, 10);
   const [
     ledger,
+    clearedObservationEvent,
     unsupportedExample,
+    baselineReplayExample,
     permissionProof,
     terminalExample,
     acknowledgement,
     verification,
     gate,
+    gateAudit,
   ] = examples;
   const observation = ledger.latest_observation;
   const baselineCollection = ledger.codex_review_baseline.collection;
   const codexCollection = observation.codex_review.collection;
+  const statusTable = markdown.slice(
+    markdown.indexOf("| Status | Sticky | Meaning |"),
+    markdown.indexOf("In a separate invalidation scenario"),
+  );
+  assert.ok(
+    statusTable.indexOf("`PR_UPDATE_REQUIRED`") <
+      statusTable.indexOf("`CHECKS_PENDING`"),
+  );
+  assert.ok(
+    statusTable.indexOf("`GITHUB_REVIEW_UNKNOWN`") <
+      statusTable.indexOf("`GITHUB_REVIEW_NOT_REQUESTED`"),
+  );
 
   assert.equal(ledger.updated_at, observation.recorded_at);
   assert.deepEqual(
@@ -47,6 +62,17 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
   );
   assert.equal(ledger.history.at(-1).revision, ledger.revision);
   assert.equal(ledger.history.at(-1).at, observation.recorded_at);
+  assert.equal(
+    ledger.history.find(
+      (entry) => entry.event === "CODEX_REVIEW_REQUEST_RECORDED",
+    ).cleared_observation_sha256,
+    null,
+  );
+  assert.equal(clearedObservationEvent.event, "CODEX_REVIEW_REQUEST_RECORDED");
+  assert.match(
+    clearedObservationEvent.cleared_observation_sha256,
+    /^[0-9a-f]{64}$/,
+  );
   assert.equal(ledger.target.codex_actor.type, "Bot");
   assert.deepEqual(ledger.target.codex_trigger_policy, {
     mode: "EXPLICIT_ONLY",
@@ -71,7 +97,6 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
   assert.equal(codexCollection.adapter_version, 1);
   assert.equal(ledger.codex_review_baseline.requests.length, 0);
   assert.equal(ledger.codex_review_baseline.candidate_results.length, 0);
-  assert.equal("excluded_request_pairs" in ledger.codex_review_baseline, false);
   assert.deepEqual(
     observation.codex_review.preexisting_requests,
     ledger.codex_review_baseline.requests,
@@ -81,6 +106,31 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
     ledger.codex_review_baseline.candidate_results,
   );
   assert.equal(observation.codex_review.requests[0].body, "@codex review");
+  assert.match(baselineReplayExample.schema_valid_head_sha, /^[0-9a-f]{40}$/);
+  const { classification, reason, ...storedBaselineFacts } =
+    baselineReplayExample.stored_baseline_request;
+  assert.equal(classification, "BASELINE_EXACT");
+  assert.equal(reason, null);
+  assert.deepEqual(
+    baselineReplayExample.adapter_preexisting_request,
+    storedBaselineFacts,
+  );
+
+  const request = observation.codex_review.requests[0];
+  const requestHistory = ledger.codex_request_history[0];
+  assert.equal(requestHistory.resource_id, request.comment_id);
+  for (const key of [
+    "resource_kind",
+    "url",
+    "event_at",
+    "timestamp_field",
+    "body_sha256",
+    "requested_head_sha",
+  ]) {
+    assert.deepEqual(requestHistory[key], request[key], key);
+  }
+  assert.equal(requestHistory.classification, "RECOGNIZED");
+  assert.equal(requestHistory.binding_source, "RECORDED_AT_POST");
 
   const result = observation.codex_review.results[0];
   const resultHistory = ledger.codex_result_history[0];
@@ -124,11 +174,11 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
 
   const runCounts = new Map();
   for (const run of observation.required_checks.runs) {
-    runCounts.set(run.resource_kind, (runCounts.get(run.resource_kind) ?? 0) + 1);
+    runCounts.set(run.run_kind, (runCounts.get(run.run_kind) ?? 0) + 1);
   }
   for (const source of observation.required_checks.collection.run_sources) {
-    assert.equal(source.item_count, runCounts.get(source.resource_kind) ?? 0);
-    if (source.resource_kind === "CHECK_RUN") {
+    assert.equal(source.item_count, runCounts.get(source.kind) ?? 0);
+    if (source.kind === "CHECK_RUN") {
       assert.equal(source.reported_total_count, source.item_count);
     } else {
       assert.equal(source.reported_total_count, null);
@@ -138,6 +188,34 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
     observation.required_checks.requirements[0].binding_sources[0]
       .raw_representation,
     "POSITIVE_INTEGER",
+  );
+  const pullRequestBranchSource =
+    observation.pull_request.collection.sources.find(
+      (source) => source.kind === "BASE_BRANCH_METADATA",
+    );
+  const policyBranchSource =
+    observation.required_checks.collection.policy_sources.find(
+      (source) => source.kind === "BRANCH_METADATA",
+    );
+  assert.equal(
+    observation.pull_request.base_sha,
+    observation.pull_request.pr_reported_base_sha,
+  );
+  assert.equal(
+    observation.pull_request.base_sha,
+    pullRequestBranchSource.branch_tip_sha,
+  );
+  assert.equal(
+    observation.pull_request.base_sha,
+    policyBranchSource.branch_tip_sha,
+  );
+  assert.equal(
+    observation.pull_request.base_head_comparison.base_sha,
+    observation.pull_request.base_sha,
+  );
+  assert.equal(
+    observation.pull_request.reviewed_base_current_base_comparison.head_sha,
+    observation.pull_request.base_sha,
   );
 
   const collections = [
@@ -154,6 +232,10 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
       ...(collection.run_sources ?? []),
     ];
     assert.equal(collection.collected_at, maxTimestamp(sources));
+    for (const source of sources) {
+      assert.equal(typeof source.kind, "string");
+      assert.equal("resource_kind" in source, false);
+    }
   }
 
   const latestCollections = collections.slice(1);
@@ -186,6 +268,32 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
   assert.ok(Date.parse(gate.passed_at) <= Date.parse(gate.expires_at));
   assert.equal(gate.status, "MERGE_READY");
   assert.equal(ledger.status, gate.status);
+  assert.equal(gate.issuance_committed, true);
   assert.equal(gate.publication_revision, ledger.revision);
   assert.equal(verification.publication_revision, ledger.revision);
+  assert.equal(verification.valid, true);
+  assert.equal(verification.status, gate.status);
+  assert.equal(verification.head_sha, gate.head_sha);
+  assert.equal(gate.head_sha, ledger.local_gate.head_sha);
+  assert.equal(gate.head_sha, observation.pull_request.head_sha);
+  assert.equal(gate.repository_id, ledger.target.repository_id);
+  assert.equal(gate.pr_number, ledger.target.pr_number);
+  assert.equal(gateAudit.review_id, ledger.review_id);
+  assert.equal(gateAudit.next_sequence, gateAudit.events.length + 1);
+  assert.deepEqual(
+    gateAudit.events.map((event) => [event.sequence, event.event]),
+    [
+      [1, "GATE_FINALIZATION_PASSED"],
+      [2, "GATE_VERIFIED"],
+    ],
+  );
+  for (const event of gateAudit.events) {
+    assert.equal(event.outcome, "SUCCESS");
+    assert.equal(event.normalized_reason, null);
+    assert.equal(event.publication_revision, ledger.revision);
+    assert.equal(event.head_sha, gate.head_sha);
+    assert.equal(event.expires_at, gate.expires_at);
+  }
+  assert.equal(gateAudit.events[0].at, gate.passed_at);
+  assert.equal(gateAudit.events[1].at, verification.verified_at);
 });

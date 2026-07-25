@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Accepted |
+| Status | Draft |
 | Authors | Review Bridge contributors |
 | Created | 2026-07-25 |
 | Target release | v0.2.0 |
@@ -105,7 +105,8 @@ reviews/<review_id>/
 ├── review.json
 ├── gate.json
 ├── publication.json
-└── publication-gate.json
+├── publication-gate.json
+└── publication-gate-audit.json
 ```
 
 Separating the files keeps the Claude review lifecycle unchanged and prevents
@@ -117,6 +118,10 @@ revocable view of one ledger revision, not an independent durable verdict. It
 is valid only while its `publication_revision` equals the current ledger
 revision, that revision still derives `MERGE_READY`, and the server clock has
 not passed the `expires_at` recomputed from the stored observation timestamps.
+`publication-gate-audit.json` is a server-maintained, append-only logical event
+log stored by atomic file replacement. It records accepted finalization
+attempts and every gate-verification outcome for post-publication audit, but is
+never read to authorize a merge.
 
 All files use the existing private directory and file modes. Publication
 mutations must use the same atomic replacement mechanism as review mutations,
@@ -195,15 +200,15 @@ The initial schema is:
       "adapter_version": 1,
       "sources": [
         {
-          "resource_kind": "ISSUE_COMMENT",
-          "endpoint": "GET /repos/{owner}/{repo}/issues/{pull_number}/comments",
+          "kind": "ISSUE_COMMENTS",
+          "endpoint": "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
           "collected_at": "2026-07-25T07:59:58.000Z",
           "status": "COMPLETE",
           "pagination_complete": true,
           "page_count": 1
         },
         {
-          "resource_kind": "PULL_REQUEST_REVIEW",
+          "kind": "PULL_REQUEST_REVIEWS",
           "endpoint": "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
           "collected_at": "2026-07-25T07:59:58.000Z",
           "status": "COMPLETE",
@@ -211,7 +216,7 @@ The initial schema is:
           "page_count": 1
         },
         {
-          "resource_kind": "PULL_REQUEST_REVIEW_COMMENT",
+          "kind": "PULL_REQUEST_REVIEW_COMMENTS",
           "endpoint": "GET /repos/{owner}/{repo}/pulls/{pull_number}/comments",
           "collected_at": "2026-07-25T07:59:58.000Z",
           "status": "COMPLETE",
@@ -232,6 +237,7 @@ The initial schema is:
       "binding_source": "RECORDED_AT_POST",
       "url": "https://github.com/...",
       "event_at": "2026-07-25T08:03:00.000Z",
+      "timestamp_field": "created_at",
       "recorded_at": "2026-07-25T08:03:01.000Z",
       "recorded_revision": 2,
       "body_sha256": "sha256...",
@@ -276,6 +282,13 @@ The initial schema is:
             "status": "COMPLETE"
           },
           {
+            "kind": "BASE_BRANCH_METADATA",
+            "endpoint": "GET /repos/{owner}/{repo}/branches/{branch}",
+            "collected_at": "2026-07-25T08:05:00.000Z",
+            "status": "COMPLETE",
+            "branch_tip_sha": "abcdef0123456789..."
+          },
+          {
             "kind": "BASE_HEAD_COMPARISON",
             "endpoint": "GET /repos/{owner}/{repo}/compare/{base}...{head}",
             "collected_at": "2026-07-25T08:05:00.000Z",
@@ -300,6 +313,7 @@ The initial schema is:
       "head_sha": "0123456789abcdef...",
       "head_branch": "agent/change",
       "base_branch": "main",
+      "pr_reported_base_sha": "abcdef0123456789...",
       "base_sha": "abcdef0123456789...",
       "mergeable": "MERGEABLE",
       "base_head_comparison": {
@@ -321,8 +335,8 @@ The initial schema is:
         "collected_at": "2026-07-25T08:05:00.000Z",
         "run_sources": [
           {
-            "resource_kind": "CHECK_RUN",
-            "endpoint": "GET /repos/{owner}/{repo}/commits/{ref}/check-runs?filter=all",
+            "kind": "CHECK_RUN",
+            "endpoint": "GET /repos/{owner}/{repo}/commits/{head}/check-runs?filter=all",
             "status": "COMPLETE",
             "collected_at": "2026-07-25T08:04:58.000Z",
             "pagination_complete": true,
@@ -331,8 +345,8 @@ The initial schema is:
             "reported_total_count": 1
           },
           {
-            "resource_kind": "COMMIT_STATUS",
-            "endpoint": "GET /repos/{owner}/{repo}/commits/{ref}/statuses",
+            "kind": "COMMIT_STATUS",
+            "endpoint": "GET /repos/{owner}/{repo}/commits/{head}/statuses",
             "status": "COMPLETE",
             "collected_at": "2026-07-25T08:04:59.000Z",
             "pagination_complete": true,
@@ -356,7 +370,8 @@ The initial schema is:
             "endpoint": "GET /repos/{owner}/{repo}/branches/{branch}",
             "collected_at": "2026-07-25T08:05:00.000Z",
             "result": "SUCCESS",
-            "protected": true
+            "protected": true,
+            "branch_tip_sha": "abcdef0123456789..."
           },
           {
             "kind": "CLASSIC_BRANCH_PROTECTION",
@@ -395,7 +410,7 @@ The initial schema is:
       "runs": [
         {
           "run_id": 9001,
-          "resource_kind": "CHECK_RUN",
+          "run_kind": "CHECK_RUN",
           "context": "test",
           "app_id": 12345,
           "app_id_source": "CHECK_RUN_APP_ID",
@@ -415,15 +430,15 @@ The initial schema is:
         "adapter_version": 1,
         "sources": [
           {
-            "resource_kind": "ISSUE_COMMENT",
-            "endpoint": "GET /repos/{owner}/{repo}/issues/{pull_number}/comments",
+            "kind": "ISSUE_COMMENTS",
+            "endpoint": "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
             "collected_at": "2026-07-25T08:05:00.000Z",
             "status": "COMPLETE",
             "pagination_complete": true,
             "page_count": 1
           },
           {
-            "resource_kind": "PULL_REQUEST_REVIEW",
+            "kind": "PULL_REQUEST_REVIEWS",
             "endpoint": "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
             "collected_at": "2026-07-25T08:05:00.000Z",
             "status": "COMPLETE",
@@ -431,7 +446,7 @@ The initial schema is:
             "page_count": 1
           },
           {
-            "resource_kind": "PULL_REQUEST_REVIEW_COMMENT",
+            "kind": "PULL_REQUEST_REVIEW_COMMENTS",
             "endpoint": "GET /repos/{owner}/{repo}/pulls/{pull_number}/comments",
             "collected_at": "2026-07-25T08:05:00.000Z",
             "status": "COMPLETE",
@@ -450,6 +465,7 @@ The initial schema is:
           "event_at": "2026-07-25T08:03:00.000Z",
           "timestamp_field": "created_at",
           "body": "@codex review",
+          "body_sha256": "sha256...",
           "requested_head_sha": "0123456789abcdef..."
         }
       ],
@@ -521,7 +537,8 @@ The initial schema is:
       "event": "CODEX_REVIEW_REQUEST_RECORDED",
       "revision": 2,
       "status": "PR_PENDING",
-      "head_sha": "0123456789abcdef..."
+      "head_sha": "0123456789abcdef...",
+      "cleared_observation_sha256": null
     },
     {
       "at": "2026-07-25T08:05:01.000Z",
@@ -534,21 +551,41 @@ The initial schema is:
 }
 ```
 
+Every history event records `at`, `event`, `revision`, `status`, and
+`head_sha`. A `CODEX_REVIEW_REQUEST_RECORDED` event additionally records
+`cleared_observation_sha256`: null when no observation existed, otherwise the
+64-hex RFC 8785 digest of the exact normalized `latest_observation` discarded
+by that mutation. No other event may carry that field. A populated event is:
+
+```json
+{
+  "at": "2026-07-25T08:07:00.000Z",
+  "event": "CODEX_REVIEW_REQUEST_RECORDED",
+  "revision": 4,
+  "status": "PR_PENDING",
+  "head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "cleared_observation_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+}
+```
+
 GitHub object IDs and URLs are evidence locators. The ledger stores normalized
 facts and a hash of the Codex response body instead of depending on mutable
 free-form chat text as its source of truth.
 
-`resource_kind` is exactly one of `ISSUE_COMMENT`, `PULL_REQUEST_REVIEW`, or
+For request and result object identities, `resource_kind` is exactly one of
+`ISSUE_COMMENT`, `PULL_REQUEST_REVIEW`, or
 `PULL_REQUEST_REVIEW_COMMENT`. Each value names a separate GitHub object-ID
 namespace; an unrecognized value is rejected rather than treated as a new
 namespace. Recognized review requests are always `ISSUE_COMMENT` objects, so
-their native API field remains `comment_id`.
+their native API field remains `comment_id`. Collection-source entries instead
+use `kind`; source kinds identify fetched feeds or derived comparison evidence
+and never participate in object identity.
 
 Every numeric GitHub identifier accepted by schema version 1 must be a positive
 JavaScript safe integer. The server rejects larger JSON numbers rather than
 risk precision loss; a future schema may encode REST identifiers as decimal
-strings. Identity comparisons remain scoped by resource kind even when two
-objects have the same numeric value.
+strings. Object-identity comparisons remain scoped by review `resource_kind`
+even when two objects have the same numeric value.
 
 Version 1 accepts full Git object IDs only as 40 lowercase hexadecimal
 characters and SHA-256 digests only as 64 lowercase hexadecimal characters.
@@ -642,6 +679,51 @@ trigger-shaped non-exact text use `BASELINE_UNSUPPORTED` plus
 `WRONG_RESOURCE_KIND` or `NON_EXACT_TRIGGER_SHAPE`. These classifications are
 immutable audit facts, not active-history bindings.
 
+The adapter does not echo server-assigned `classification` or `reason` fields.
+For `preexisting_requests`, it returns exactly the immutable GitHub facts
+`resource_id`, `resource_kind`, URL, `event_at`, `timestamp_field`,
+`body_sha256`, and stable actor ID/type. For
+`preexisting_candidate_results`, it returns those applicable result facts plus
+`result_id`, resource-kind-appropriate native review state, reviewed-head and
+commit-binding provenance, and immutable attached review-comment evidence.
+The server projects each stored baseline object onto the corresponding
+type-specific immutable-fact shape and requires exact set equality with the
+adapter array. It separately verifies that the stored server-assigned
+classification and reason have not changed. The caller cannot supply or
+reclassify them. A non-empty request example is:
+
+```json
+{
+  "schema_valid_head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "stored_baseline_request": {
+    "resource_id": 77,
+    "resource_kind": "ISSUE_COMMENT",
+    "url": "https://github.com/owner/repository/issues/5#issuecomment-77",
+    "event_at": "2026-07-25T07:55:00.000Z",
+    "timestamp_field": "created_at",
+    "body_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "actor": {
+      "id": 88,
+      "type": "User"
+    },
+    "classification": "BASELINE_EXACT",
+    "reason": null
+  },
+  "adapter_preexisting_request": {
+    "resource_id": 77,
+    "resource_kind": "ISSUE_COMMENT",
+    "url": "https://github.com/owner/repository/issues/5#issuecomment-77",
+    "event_at": "2026-07-25T07:55:00.000Z",
+    "timestamp_field": "created_at",
+    "body_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "actor": {
+      "id": 88,
+      "type": "User"
+    }
+  }
+}
+```
+
 The server later requires every baseline object still returned by the three
 feeds to match its stored immutable identity, body digest, actor, timestamp,
 native state, and commit provenance. Deletion or mutation persists terminal
@@ -663,11 +745,12 @@ requests with `binding_source: "OBSERVED_UNSUPPORTED"`.
 
 Each history entry records `resource_id`, `resource_kind`, `classification`
 (`RECOGNIZED`, `UNBOUND`, or `UNSUPPORTED`), binding source, URL, `event_at`,
-server `recorded_at`, server `recorded_revision`, `body_sha256`, and nullable
-`requested_head_sha`; the SHA is required for recognized requests and null for
-unbound or unsupported requests. `recorded_revision` is the ledger revision
-whose mutation first admitted the request and is the authoritative ordering
-signal across acknowledgement boundaries. On every later complete collection,
+`timestamp_field`, server `recorded_at`, server `recorded_revision`,
+`body_sha256`, and nullable `requested_head_sha`; the SHA is required for
+recognized requests and null for unbound or unsupported requests.
+`recorded_revision` is the ledger revision whose mutation first admitted the
+request and is the authoritative ordering signal across acknowledgement
+boundaries. On every later complete collection,
 every historical request must still appear in the union of `requests`,
 `unbound_requests`, and `unsupported_requests` with the same immutable facts. A
 missing request, changed body, reclassification, reused
@@ -724,7 +807,7 @@ Run discovery independently collects every page from:
 - `GET /repos/{owner}/{repo}/commits/{head}/statuses`.
 
 The check-run request must use `filter=all`; GitHub's default latest-only view
-cannot prove complete attempt ordering. Each resource kind has a separate
+cannot prove complete attempt ordering. Each `run_kind` has a separate
 `run_sources` entry with its endpoint, status, collection time, pagination
 flag, page count, item count, and endpoint-provided total count when available.
 `COMPLETE` requires
@@ -751,22 +834,23 @@ checks. Each requirement records:
 
 The adapter normalizes a ruleset `integration_id` and a classic
 branch-protection `checks[].app_id` into `required_app_id`. A positive integer
-produces `PINNED`. Classic branch protection's documented `-1` sentinel
-produces `EXPLICITLY_UNBOUND`; ruleset `integration_id` being null or absent
-inside an otherwise valid required-status-check object also produces
-`EXPLICITLY_UNBOUND`, because that field is optional in GitHub's schema.
-Zero or a negative ruleset `integration_id` is `UNKNOWN`; the `-1` sentinel is
-accepted only from classic branch protection.
+produces `PINNED`. A classic GET response with `app_id: null` produces
+`EXPLICITLY_UNBOUND`; the documented write-side `-1` sentinel produces the same
+result if a response ever contains it. Ruleset `integration_id` being null or
+absent inside an otherwise valid required-status-check object also produces
+`EXPLICITLY_UNBOUND`, because that field is optional in GitHub's schema. Zero
+or another negative ruleset or classic value is `UNKNOWN`; `-1` is accepted
+only from classic branch protection.
 `EXPLICITLY_UNBOUND` permits a matching check run or commit status from any
 producer. Each binding source records the raw representation
 (`POSITIVE_INTEGER`, `NEGATIVE_ONE`, `NULL`, or `ABSENT`) as well as the field
 path, so the normalization is replayable.
 
 Reading only the legacy classic `contexts[]` field, a classic `checks[]` entry
-with missing, null, zero, or another negative `app_id`, or otherwise using a
-response shape that cannot expose app identity is `UNKNOWN`, never `SUCCESS`
-or `EXPLICITLY_UNBOUND`. A ruleset's documented absent
-`integration_id` remains distinguishable from a response shape that omitted
+with a missing `app_id` key, zero, or a negative value other than `-1`, or
+otherwise using a response shape that cannot distinguish an explicit nullable
+binding is `UNKNOWN`, never `SUCCESS` or `EXPLICITLY_UNBOUND`. A ruleset's
+documented absent `integration_id` remains distinguishable from a response shape that omitted
 the containing required-status-check object. Each policy source and requirement
 records the exact binding field and raw representation, so the server can
 enforce this distinction.
@@ -828,14 +912,32 @@ run-source counts, schema, and head-binding validation, but do not participate
 in required-check satisfaction. A caller that cannot establish the policy or
 a required app binding derives `EVIDENCE_INCOMPLETE`.
 
+The authoritative current base is the live `commit.sha` returned by
+`GET /repos/{owner}/{repo}/branches/{branch}`. The normalized pull-request
+evidence stores it as `base_sha` and separately stores the pull request
+object's `base.sha` as `pr_reported_base_sha`. The pull-request
+`BASE_BRANCH_METADATA` source and required-check `BRANCH_METADATA` policy
+source both retain the fetched live tip as `branch_tip_sha`. A complete
+observation requires all four normalized values to be the same full SHA. A
+mismatch, missing field, or independently fetched branch response that differs
+inside the atomic window derives `EVIDENCE_INCOMPLETE` and requires a fresh
+snapshot; neither ancestry nor strict-update evaluation may use the pull
+request object's potentially stale base SHA.
+
 `strict_policy.required` is the logical OR of every successful applicable
 source's strict-update flag. The adapter records
 `required_status_checks.strict` from classic protection and
 `strict_required_status_checks_policy` from each applicable required-status-
 checks ruleset rule, including false values and exact field provenance. A
-missing strict field on a source that defines required checks is `UNKNOWN`, not
-false. When strict mode is required, the pull-request collection also records
-the current base SHA and a complete compare response for `base...head`.
+missing or malformed strict field on a source that defines required checks
+forces that owning `policy_sources[]` entry to `result: "UNKNOWN"` and the
+required-check collection to `status: "UNKNOWN"`; the adapter must not emit a
+successful source or `strict_policy.required: false` for it. Such an observation
+derives `EVIDENCE_INCOMPLETE` before `strict_policy` is consumed. Consequently,
+`strict_policy.required` remains a boolean only on a complete collection and
+needs no implicit third value. When strict mode is required, the pull-request
+collection also records the current base SHA and a complete compare response
+for `base...head`.
 The comparison's base and head SHAs must exactly match the pull-request
 collection.
 `AHEAD` or `IDENTICAL` proves that the head contains the current base;
@@ -846,7 +948,7 @@ changes the reviewed head and therefore requires a new local review.
 Independently of strict-update policy, every pull-request collection records a
 complete compare response for `local_gate.base_sha...pull_request.base_sha`.
 The comparison's base SHA must exactly match the local gate and its head SHA
-must exactly match the current pull-request base. `AHEAD` or `IDENTICAL` proves
+must exactly match the live base-branch tip. `AHEAD` or `IDENTICAL` proves
 that the current target base preserves the locally reviewed base ancestry.
 `BEHIND` or `DIVERGED` persists terminal `INVALIDATED`; an unknown or
 incomplete comparison derives `EVIDENCE_INCOMPLETE`. This ancestry check is
@@ -854,9 +956,9 @@ always required, including when no status checks are configured or strict
 updates are disabled.
 
 Multiple runs may share one requirement key. Every run records `started_at` and
-`completed_at`; the latter is null until completion. `resource_kind` is exactly
+`completed_at`; the latter is null until completion. `run_kind` is exactly
 `CHECK_RUN` or `COMMIT_STATUS`, and each kind has its own numeric ID namespace.
-The evaluator partitions matching attempts by `resource_kind` before selecting
+The evaluator partitions matching attempts by `run_kind` before selecting
 latest runs. For a `PINNED` requirement, a matching `CHECK_RUN` kind is
 mandatory and selects the latest attempt for the exact
 `(context, required_app_id, CHECK_RUN)` producer key. A commit status can never
@@ -987,9 +1089,10 @@ replaceable observation evidence, so its pure no-observation derivation is
 `PR_PENDING` rather than a comparison between new history and a pre-post
 snapshot.
 
-Non-terminal statuses report the first applicable blocking condition in the
-ordered derivation below. A later condition may also be false; its table
-description does not override that priority.
+The numbered derivation below is the single normative priority order.
+Non-terminal statuses report its first applicable blocking condition. The
+table mirrors that order for reference and is descriptive; if future editing
+ever makes the two disagree, the numbered derivation controls.
 
 | Status | Sticky | Meaning |
 | --- | --- | --- |
@@ -1001,9 +1104,9 @@ description does not override that priority.
 | `PR_UPDATE_REQUIRED` | No | Strict status-check policy requires the head to contain the current base. |
 | `CHECKS_PENDING` | No | A latest required-check attempt is incomplete or stale. |
 | `CHECKS_FAILED` | No | A latest required-check attempt has a blocking conclusion. |
+| `GITHUB_REVIEW_UNKNOWN` | No | A baseline, unbound, or unsupported request is open, or the result format, association, or verdict is ambiguous. |
 | `GITHUB_REVIEW_NOT_REQUESTED` | No | No valid exact request exists for the head. |
 | `GITHUB_REVIEW_PENDING` | No | The latest request has no corresponding result. |
-| `GITHUB_REVIEW_UNKNOWN` | No | A baseline, unbound, or unsupported request is open, or the result format, association, or verdict is ambiguous. |
 | `CHANGES_REQUIRED` | No | Codex reported findings or any review thread is unresolved. |
 | `MERGE_READY` | No | Every required invariant passes for the current head. |
 | `INVALIDATED` | Yes | The pull request identity/head no longer matches the local gate, the current base no longer preserves the reviewed base ancestry, or an observed request or Codex result disappeared or changed. |
@@ -1027,6 +1130,14 @@ mutation may clear or replace it. Restoring a force-pushed branch to the
 reviewed SHA does not revive the ledger. `INVALIDATED` and `CLOSED` require a
 new local Review Bridge task; `MERGED` completes the lifecycle.
 
+Once `terminal` is non-null, `record_codex_review_request`,
+`record_github_snapshot`, `acknowledge_codex_review_ambiguity`, and
+`finalize_publication_gate` fail with non-retryable
+`PUBLICATION_TERMINAL` before revoking a gate or changing any file; the ledger
+and audit files remain byte-identical. `get_publication` remains readable and
+`verify_publication_gate` remains callable, but verification necessarily
+returns invalid because a terminal ledger cannot derive `MERGE_READY`.
+
 ## State derivation
 
 The evaluator applies these checks in order:
@@ -1039,7 +1150,10 @@ The evaluator applies these checks in order:
    `EVIDENCE_INCOMPLETE` without evaluating identity or writing a terminal
    state; malformed or stale collection metadata is rejected before derivation.
 5. The repository identity, pull request number, base branch, head branch, and
-   pull request head match the bound target and local gate. The complete
+   pull request head match the bound target and local gate. The PR object's
+   `pr_reported_base_sha`, the normalized `base_sha`, and both retained
+   `branch_tip_sha` values match exactly. Any mismatch or missing live-tip
+   proof derives `EVIDENCE_INCOMPLETE` before comparisons. The complete
    `reviewed_base_current_base_comparison` must compare the local gate's
    `base_sha` with the current pull-request `base_sha`; `AHEAD` or `IDENTICAL`
    may continue, while `BEHIND` or `DIVERGED` persists terminal `INVALIDATED`.
@@ -1066,15 +1180,16 @@ The evaluator applies these checks in order:
    `CONFLICTING`, or `UNKNOWN`.
    `UNKNOWN` derives `PR_STATE_PENDING`; `CONFLICTING` derives
    `PR_CONFLICTING`; only `MERGEABLE` may continue.
-11. Required-check policy discovery is complete, both run sources report
-    complete pagination, and their per-kind item counts exactly match `runs`.
-    For `REQUIRED`, partition matching runs by
-    `resource_kind`, select the latest attempt independently inside every
-    present kind, and require every selected attempt to pass. A check run and
-    commit status with the same required context both participate; neither
-    supersedes the other. If any source requires strict updates, require
+11. Required-check policy discovery is complete. If any source requires strict
+    updates, require
     `base_head_comparison` to prove the head contains the current base; `BEHIND`
-    or `DIVERGED` derives `PR_UPDATE_REQUIRED`. Every pinned requirement has a
+    or `DIVERGED` derives `PR_UPDATE_REQUIRED` before any run conclusion is
+    evaluated. Then require both run sources to report complete pagination and
+    per-kind item counts that exactly match `runs`. For `REQUIRED`, partition
+    matching runs by `run_kind`, select the latest attempt independently inside
+    every present kind, and require every selected attempt to pass. A check run
+    and commit status with the same required context both participate; neither
+    supersedes the other. Every pinned requirement has a
     latest check run bound to the pull request head and exact required App ID;
     a commit status cannot establish that identity, but any same-context commit
     status kind must independently pass. Every explicitly unbound requirement
@@ -1209,7 +1324,8 @@ Inputs:
 The tool requires `LOCAL_GATE_PASSED`, reloads `gate.json`, verifies the local
 working tree is clean, and verifies local `HEAD` equals the gate `head_sha`.
 It rejects an existing `publication.json` or orphaned
-`publication-gate.json`; publication is never reset or rebound in place.
+`publication-gate.json` or `publication-gate-audit.json`; publication is never
+reset or rebound in place.
 It validates the baseline's identity, completeness, pagination, freshness, and
 event provenance, stores every exact or trigger-shaped request and
 expected-actor candidate result without pairing them, and rejects a baseline
@@ -1252,8 +1368,10 @@ null before state derivation, preserves the immutable baseline and both
 monotonic histories, and therefore caches `PR_PENDING`. A pre-post observation
 cannot be reconciled against the newly appended request or materialize a
 terminal state. The history event records the cleared observation's digest when
-one existed; the next `record_github_snapshot` call supplies replacement
-evidence and performs normal reconciliation. Only a replacement request
+one existed, using `cleared_observation_sha256` and the RFC 8785 digest rule
+defined above, or records null when none existed; the next
+`record_github_snapshot` call supplies replacement evidence and performs
+normal reconciliation. Only a replacement request
 listing collected after the post can use the 30-second visibility grace.
 
 Under the publication lock, this revision-advancing tool follows the universal
@@ -1288,7 +1406,7 @@ Inputs:
   class
 
 The tool validates sizes, enums, timestamps, SHA formats, URLs, unique
-requirement keys, run IDs unique within each run resource kind, GitHub object
+requirement keys, run IDs unique within each `run_kind`, GitHub object
 IDs unique within each review resource kind, binding-field and timestamp-field
 provenance, exact source coverage for every independently fetched endpoint,
 per-source collection times and pagination proof, per-kind run-source item
@@ -1511,8 +1629,9 @@ Inputs:
 Under the publication lock, the tool reads the canonical
 `publication-gate.json` and `publication.json` together, rejects unsupported
 formats, recomputes the current ledger status, and verifies that the gate's
-`review_id`, `publication_revision`, `head_sha`, and status match a current
-`MERGE_READY` ledger. It recomputes `expires_at` from the stored observation
+`issuance_committed` is true and that its `review_id`,
+`publication_revision`, `head_sha`, and status match a current `MERGE_READY`
+ledger. It recomputes `expires_at` from the stored observation
 timestamps, requires it to match the gate, and requires the server clock to be
 no later than that instant. This reapplies every five-minute freshness bound at
 verification time rather than treating successful finalization as timeless.
@@ -1536,8 +1655,11 @@ evidence and finalize a new gate. Callers never read the private store directly
 to make this decision.
 Verification invokes the pure evaluator against the already-reconciled stored
 ledger. It never advances request or result history, writes a terminal record,
-changes a revision, or otherwise modifies `publication.json`; the file remains
-byte-identical on both valid and invalid returns.
+changes a revision, or otherwise modifies `publication.json`; that file remains
+byte-identical on both valid and invalid returns. Before returning either
+outcome, the tool atomically appends a `GATE_VERIFIED` audit event under the
+same lock. A valid response and head SHA are returned only after the audit
+replacement and directory sync succeed.
 
 ### `finalize_publication_gate`
 
@@ -1546,7 +1668,8 @@ Inputs:
 - `review_id`
 - `expected_revision`
 
-The tool requires the latest purely derived status to be `MERGE_READY`,
+Under the publication lock, the tool requires the latest purely derived status
+to be `MERGE_READY`,
 rechecks the local gate file and local repository head, and enforces all of
 these freshness rules:
 
@@ -1566,6 +1689,7 @@ It then writes:
 {
   "version": 1,
   "review_id": "rb-...",
+  "issuance_committed": true,
   "passed_at": "2026-07-25T08:05:01.500Z",
   "repository_id": 123456,
   "pr_number": 5,
@@ -1585,10 +1709,17 @@ It then writes:
 from the observation's `recorded_at`.
 
 Finalization does not modify `publication.json`: it does not change
-`revision`, `updated_at`, status, or history. `publication-gate.json` is the
-sole record of issuance and names the unchanged ledger revision that was
-validated. This write is not a later ledger mutation and therefore does not
-revoke itself.
+`revision`, `updated_at`, status, or history. It first atomically writes the
+candidate gate with `issuance_committed: false`, then atomically appends and
+directory-syncs a `GATE_FINALIZATION_PASSED` audit event containing that
+candidate's digest, then atomically replaces the gate with the identical payload except
+`issuance_committed: true`. It returns success only after the final replacement
+and directory sync. Verification rejects an uncommitted candidate. Therefore a
+crash can leave an audit-only issuance attempt or an unusable candidate gate,
+but every usable gate has a preceding durable audit record without consulting
+the audit file during authorization. The committed gate names the unchanged
+ledger revision that was validated. These audit and gate writes are not later
+ledger mutations and do not revoke themselves.
 
 Codex must perform a fresh GitHub read immediately before this call. It then
 calls `verify_publication_gate` immediately before merging and passes the
@@ -1611,6 +1742,67 @@ feeds, the three Codex feeds, and review threads.
 refuses issuance when the server's `passed_at` would be later than that
 deadline.
 
+## Gate audit
+
+`start_publication` creates `publication-gate-audit.json` with version 1,
+the review ID, `next_sequence: 1`, and an empty `events` array in the same
+locked creation as the ledger. Existing or orphaned publication, gate, or audit
+files make start fail rather than overwrite evidence. Every append is a
+server-authored atomic replacement under the publication lock followed by a
+directory sync; callers cannot supply sequence numbers or timestamps. Events
+are never deleted or reordered, and audit failure prevents a valid gate or
+merge-authorizing verification response from being returned.
+After publication starts, a missing, malformed, truncated, or non-monotonic
+audit file is an unrecoverable local store error for finalization and
+verification; the server never reconstructs it from the current gate.
+
+The audit file is not an authorization input. It records what the server
+evaluated so a completed or invalidated publication retains gate history after
+`publication-gate.json` is revoked:
+
+```json
+{
+  "version": 1,
+  "review_id": "rb-...",
+  "next_sequence": 3,
+  "events": [
+    {
+      "sequence": 1,
+      "event": "GATE_FINALIZATION_PASSED",
+      "outcome": "SUCCESS",
+      "normalized_reason": null,
+      "at": "2026-07-25T08:05:01.500Z",
+      "publication_revision": 3,
+      "head_sha": "0123456789abcdef...",
+      "github_observation_sha256": "sha256...",
+      "gate_sha256": "sha256...",
+      "expires_at": "2026-07-25T08:09:58.000Z"
+    },
+    {
+      "sequence": 2,
+      "event": "GATE_VERIFIED",
+      "outcome": "SUCCESS",
+      "normalized_reason": null,
+      "at": "2026-07-25T08:05:02.000Z",
+      "publication_revision": 3,
+      "head_sha": "0123456789abcdef...",
+      "github_observation_sha256": "sha256...",
+      "gate_sha256": "sha256...",
+      "expires_at": "2026-07-25T08:09:58.000Z"
+    }
+  ]
+}
+```
+
+An invalid verification records `outcome: "FAILURE"`, a normalized non-null
+reason, the available identity fields, and null for facts that could not be
+validated. `GATE_FINALIZATION_PASSED` is appended between the uncommitted and
+committed gate writes described above; its `gate_sha256` hashes the final committed
+RFC 8785-normalized gate payload. A crash before the final gate replacement
+therefore leaves an honest record of an accepted issuance attempt but no usable
+gate. The audit log proves workflow history, not GitHub authenticity, and never
+revives, extends, or substitutes for a gate.
+
 ## Codex result adapter
 
 Observed GitHub Codex behavior has two result shapes: a clean review is an
@@ -1628,10 +1820,13 @@ flag, and page count. The adapter returns:
 
 - every immutable publication-baseline request still present under
   `preexisting_requests` and every baseline candidate result still present
-  under `preexisting_candidate_results`; these objects are matched only by
-  their stored `(resource_kind, resource_id)` identities and never enter the
-  active arrays, while each unacknowledged baseline request remains a
-  source-only association candidate for every later result;
+  under `preexisting_candidate_results`; these arrays contain only the exact
+  type-specific immutable GitHub fact fields defined in the baseline section,
+  never server-assigned classification or reason. Objects are located by their
+  stored `(resource_kind, resource_id)` identities, then every immutable fact
+  is compared exactly before they are excluded from active arrays. Each
+  unacknowledged baseline request remains a source-only association candidate
+  for every later result;
 - every exact `@codex review` issue comment whose object ID already has a
   `RECORDED_AT_POST` history entry as a recognized request, with GitHub object
   ID, URL, timestamp, the `ISSUE_COMMENT` resource kind, and the head SHA from
@@ -1663,8 +1858,10 @@ Codex collection malformed instead of allowing caller-chosen precedence.
 
 An object absent from the immutable baseline cannot be reported under either
 preexisting array, even when its GitHub timestamp predates publication
-creation. Both arrays must exactly reproduce the stored baseline objects on
-every complete collection. A missing, edited, reclassified, or
+creation. On every complete collection, both arrays must exactly reproduce the
+server's type-specific projection of the stored baseline's immutable GitHub
+facts; caller-supplied classification or reason fields are rejected. A missing,
+edited, reclassified, or
 provenance-changed baseline object terminally invalidates the ledger; a new
 object enters an active array and cannot be grandfathered by timestamp. This
 prevents old identities from being reclassified on every snapshot without
@@ -1862,8 +2059,9 @@ reviews/<review_id>/.publication-state.lock
 ```
 
 Existing `review.json` and `gate.json` mutations use the review-state lock.
-`publication.json` and `publication-gate.json` mutations use the publication
-lock. Publication never starts before the local review becomes terminal, so
+`publication.json`, `publication-gate.json`, and
+`publication-gate-audit.json` mutations use the publication lock. Publication
+never starts before the local review becomes terminal, so
 there is no need to serialize both domains behind one lock.
 
 Atomic rename prevents corrupt JSON but does not prevent lost updates. Each
@@ -1912,7 +2110,13 @@ can operate from stale reads.
   reviewed base records `INVALIDATED`, even when strict updates are disabled or
   no status checks are configured. Restoring the target base later does not
   revive that ledger.
+- A mismatch among the PR object's base SHA, normalized current base, and
+  either retained live branch-tip source derives `EVIDENCE_INCOMPLETE`; no
+  comparison may fall back to the PR object's value.
 - A later observation cannot clear `INVALIDATED`, `CLOSED`, or `MERGED`.
+- Once any terminal record exists, every state-changing publication call fails
+  with `PUBLICATION_TERMINAL` before revoking or writing anything; only reads
+  and a necessarily invalid gate verification remain available.
 - An incomplete or stale publication-start Codex baseline prevents revision 1
   from being created. All preexisting requests and candidate results remain
   outside active history and cannot satisfy the new ledger. Every baseline
@@ -1932,6 +2136,11 @@ can operate from stale reads.
 - A finalized gate expires at the earliest underlying five-minute evidence
   deadline. `verify_publication_gate` returns `EVIDENCE_STALE` after that
   instant even when the ledger revision and head are unchanged.
+- A crash before committed issuance can leave an uncommitted candidate gate or
+  an audit-only `GATE_FINALIZATION_PASSED` event; verification rejects the candidate. Audit
+  replacement or sync failure prevents a committed gate or valid verification
+  response, while prior audit events remain durable and authorization never
+  depends on replaying them.
 - A previously observed exact request that is changed or deleted persists
   terminal `INVALIDATED`; an older `CLEAN` can never become latest again.
 - A previously observed actor-admitted Codex result that disappears or changes
@@ -2011,6 +2220,13 @@ can operate from stale reads.
 - A connector that cannot expose authenticated GitHub App installation
   permissions cannot classify a classic-protection `404` on a protected branch
   as not configured; it remains fail-closed as `UNKNOWN`.
+- The reviewed-base ancestry rule accepts a live target base that moved
+  forward from the locally reviewed base. When strict required-check updates
+  are disabled, the eventual base-to-head diff and merged tree may therefore
+  include base commits that Claude did not review. This matches GitHub's
+  non-strict update policy; repositories requiring an exact reviewed-base diff
+  must enable strict required-status-check updates or start a new local review
+  after every base movement.
 - Version 1 depends on two provider-specific response shapes: a recognized
   clean issue comment and a findings review with attached inline comments. A
   connector that changes either body shape moves that result to
@@ -2101,13 +2317,14 @@ architecture.
   successful `protected: false` branch read plus empty applicable rules is the
   only no-query shortcut.
 - App bindings are explicitly `PINNED` or `EXPLICITLY_UNBOUND` and must cite an
-  identity-capable response field and raw representation. Classic `app_id: -1`
-  and ruleset null or absent `integration_id` normalize to unbound; legacy
-  context-only policy reads are incomplete evidence.
+  identity-capable response field and raw representation. Classic
+  `app_id: null` or `-1` and ruleset null or absent `integration_id` normalize
+  to unbound; missing keys, zero, other negatives, and legacy context-only
+  policy reads are incomplete evidence.
 - Only `CHECK_RUN.app.id` proves run producer identity in version 1. Commit
   statuses record unavailable App identity, are never enriched from `creator`,
   and cannot satisfy a pinned producer predicate.
-- Only the latest attempt within each present resource kind can satisfy that
+- Only the latest attempt within each present `run_kind` can satisfy that
   kind's side of a requirement. `SUCCESS`, `SKIPPED`, and `NEUTRAL` pass to
   match GitHub; blocking, stale, pending, and unknown outcomes fail closed as
   specified above.
@@ -2122,7 +2339,12 @@ architecture.
   applicable. Parent collection times cannot refresh stale pull-request,
   comparison, policy, run, Codex, or thread sources.
 - Strict-update policy is the union of every applicable policy source. A strict
-  head must contain the current base or derive `PR_UPDATE_REQUIRED`.
+  head must contain the current base or derive `PR_UPDATE_REQUIRED`; a missing
+  strict field makes its policy source and collection unknown rather than
+  defaulting to false.
+- The authoritative current base SHA comes from the live branch read. The PR
+  object's reported base SHA and both retained branch-source values must match
+  it before either comparison is evaluated.
 - The current target base must independently descend from or equal the local
   gate's reviewed base. This identity invariant applies regardless of
   strict-update policy; a behind or diverged target base is terminal
@@ -2194,10 +2416,16 @@ architecture.
 - A publication gate also expires at the earliest five-minute deadline among
   its stored observation timestamps; verification reapplies that deadline
   against the server clock and never treats finalization as timeless.
+- Gate issuance and every verification outcome append to the durable
+  server-owned gate-audit file. An audit append failure cannot yield a usable
+  gate or merge-authorizing verification response, and the audit file is never
+  used as authorization evidence.
 - Lock acquisition waits ten seconds; a lock is only eligible for reclamation
   after a 30-second heartbeat timeout and a conclusive owner-identity check.
 - A closed, unmerged pull request terminates the ledger and requires a new local
   review before publication can restart.
+- Every state-changing publication tool rejects a terminal ledger before
+  touching any publication file.
 - Revision 1 has status `PR_PENDING`, the evaluator's single no-observation
   result; `PUBLICATION_STARTED` is only its audit event name.
 - A fresh, complete publication-start baseline keeps all preexisting requests
@@ -2217,22 +2445,26 @@ The implementation must test:
 - the successful path from local gate to `MERGE_READY`;
 - `start_publication` creating revision 1 with status `PR_PENDING` and a
   `PUBLICATION_STARTED` audit event, including rejection of stale, incomplete,
-  or partially paginated baselines and existing or orphaned publication files;
+  or partially paginated baselines and existing or orphaned publication, gate,
+  or gate-audit files;
 - explicit-only and automatic-quiescence trigger policies, including rejection
   of an unknown mode, missing direct-human label or rationale, a changed head,
   and a baseline more than 30 seconds older than the server acknowledgement;
 - a new local task on an existing pull request whose prior requests and
   expected-actor candidate results all remain audit-only baseline objects,
   with every baseline request blocking until its complete resource-scoped set is
-  directly acknowledged;
+  directly acknowledged, plus non-empty adapter replay that exactly matches the
+  server's type-specific immutable-fact projection while rejecting caller
+  classification fields;
 - one delayed result arriving while exactly one baseline request remains open
   becoming `BASELINE_LATE_RESULT` without closing that request, followed by
   acknowledgement, a new workflow request, and an old delayed duplicate that
   demonstrates the explicitly accepted residual misattribution risk;
 - `record_codex_review_request` after an existing snapshot and after ambiguity
   acknowledgement, each revoking any gate, clearing only
-  `latest_observation`, preserving baseline and both histories, and returning
-  `PR_PENDING` until a replacement snapshot is recorded;
+  `latest_observation`, preserving baseline and both histories, recording the
+  RFC 8785 cleared-observation digest or explicit null on its history event,
+  and returning `PR_PENDING` until a replacement snapshot is recorded;
 - a pull request head changed before and after Codex review;
 - an incomplete policy query, ambiguous `404`, explicit no-check policy with
   both zero and nonzero optional runs, empty incomplete collections, incomplete
@@ -2256,8 +2488,10 @@ The implementation must test:
 - a required check produced by the wrong GitHub App, an explicitly unbound
   requirement, a check run with missing app identity, a commit status with an
   invented App mapping, classic `app_id` values of positive, `-1`, null, zero,
-  and another negative value, ruleset `integration_id` values of positive,
-  null, absent, zero, and negative, and a legacy `contexts[]` policy read;
+  another negative value, and a missing key, proving null and `-1` are
+  explicitly unbound while the latter three are unknown; ruleset
+  `integration_id` values of positive, null, absent, zero, and negative, and a
+  legacy `contexts[]` policy read;
 - identical required-check tuples from multiple sources coalescing all
   provenance, plus same-context tuples with different bindings or App IDs
   remaining independently required;
@@ -2274,13 +2508,16 @@ The implementation must test:
   cross-kind timestamps never suppress one side, plus same-kind timestamp ties
   ordered by `run_id`;
 - classic and ruleset strict-update flags in every true/false combination, a
-  missing strict field, and strict heads that are `AHEAD`, `IDENTICAL`,
+  missing strict field making the owning policy source and collection unknown
+  rather than false, and strict heads that are `AHEAD`, `IDENTICAL`,
   `BEHIND`, `DIVERGED`, or have incomplete comparison evidence;
 - reviewed-base ancestry with a current base that is `AHEAD` or `IDENTICAL`,
   plus `BEHIND`, `DIVERGED`, and incomplete comparisons when strict updates
   are false and when no checks are configured, proving only the first two can
   reach `MERGE_READY` and that restoring an invalidated base cannot revive the
-  ledger;
+  ledger; a mismatch between the PR-reported base SHA, either retained live
+  branch-tip source, or the normalized base SHA must derive
+  `EVIDENCE_INCOMPLETE` before comparison;
 - `SKIPPED`, `NEUTRAL`, `TIMED_OUT`, `ACTION_REQUIRED`, `STALE`, and an
   unrecognized future check conclusion;
 - a missing request, trigger-shaped non-exact requests with whitespace,
@@ -2353,9 +2590,11 @@ The implementation must test:
 - request/result timestamp ties within one resource kind, where object ID may
   order them, and across issue-comment/review resource kinds, where association
   derives `GITHUB_REVIEW_UNKNOWN`;
-- every accepted `resource_kind`, an unrecognized kind, and object-ID
-  uniqueness scoped separately to each kind, including acknowledgement records
-  that distinguish equal numeric result IDs from different kinds, plus
+- every accepted review-object `resource_kind`, an unrecognized review kind,
+  every accepted `run_kind`, an unrecognized run kind, and object-ID
+  uniqueness scoped separately to each respective kind, including
+  acknowledgement records that distinguish equal numeric result IDs from
+  different kinds, plus
   rejection of one resource-scoped object appearing in multiple adapter
   partitions;
 - findings and unresolved, resolved, and outdated threads;
@@ -2392,10 +2631,14 @@ The implementation must test:
   otherwise unchanged revision/head, and a same-head mutation landing after
   verification but before merge to document the residual point-in-time
   limitation;
+- committed issuance requiring an uncommitted candidate gate, a durable
+  `GATE_FINALIZATION_PASSED` audit event, and the final committed gate in that
+  order, including crashes at both boundaries leaving no usable unaudited gate;
 - valid and invalid `verify_publication_gate` calls that leave
   `publication.json` byte-identical, including request and result histories,
   terminal, revision, and cached status, with exact boundary tests immediately
-  before, at, and after `expires_at`;
+  before, at, and after `expires_at`, while appending the exact durable
+  `GATE_VERIFIED` success or failure audit event before returning;
 - ambiguity acknowledgement with wrong head, stale revision, missing or extra
   resource-scoped request references (including unbound and unsupported
   requests) or resource-scoped result references, equal numeric request IDs in
@@ -2413,6 +2656,9 @@ The implementation must test:
   resolution, and immediate pre-merge gate verification;
 - lock timeout errors, PID reuse, heartbeat expiry, owner-token mismatch, and
   inconclusive owner-liveness checks;
+- every state-changing publication tool returning
+  `PUBLICATION_TERMINAL` against each terminal status without changing the
+  ledger, gate, or audit file;
 - malformed and oversized inputs, including numeric GitHub IDs outside the
   positive safe-integer range;
 - rejection of a non-`Bot` `codex_actor_type`, plus persistence of the exact
