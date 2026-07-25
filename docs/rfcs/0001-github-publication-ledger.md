@@ -691,11 +691,14 @@ never changes the ledger, request or result history, gate, or filesystem. Only
 `record_codex_review_request` and `record_github_snapshot` advance request
 history after `start_publication` seeds any unsettled baseline requests at
 revision 1; only `record_github_snapshot` advances result history or persists
-a newly proposed terminal state.
+a newly proposed terminal state. `record_codex_review_request` first clears
+replaceable observation evidence, so its pure no-observation derivation is
+`PR_PENDING` rather than a comparison between new history and a pre-post
+snapshot.
 
 | Status | Sticky | Meaning |
 | --- | --- | --- |
-| `PR_PENDING` | No | No pull request observation exists yet. |
+| `PR_PENDING` | No | No current pull request observation is stored. |
 | `EVIDENCE_INCOMPLETE` | No | A required evidence collection is absent, ambiguous, or incomplete. |
 | `PR_DRAFT` | No | The pull request is still a draft. |
 | `PR_STATE_PENDING` | No | GitHub has not finished computing mergeability. |
@@ -889,6 +892,15 @@ is fresh, and appends a `RECORDED_AT_POST` recognized request to
 `recorded_at` and assigns `recorded_revision` to the new ledger revision;
 callers cannot choose them. A duplicate comment ID, conflicting binding, stale
 response, or changed local head fails without writing.
+
+In the same atomic ledger replacement, the tool sets `latest_observation` to
+null before state derivation, preserves the immutable baseline and both
+monotonic histories, and therefore caches `PR_PENDING`. A pre-post observation
+cannot be reconciled against the newly appended request or materialize a
+terminal state. The history event records the cleared observation's digest when
+one existed; the next `record_github_snapshot` call supplies replacement
+evidence and performs normal reconciliation. Only a replacement request
+listing collected after the post can use the 30-second visibility grace.
 
 Under the publication lock, this revision-advancing tool follows the universal
 revoke-before-write rule: if `publication-gate.json` exists, it removes and
@@ -1417,6 +1429,10 @@ can operate from stale reads.
 - A GitHub read failure leaves the previous revision unchanged.
 - An interrupted atomic write leaves the previous complete JSON file.
 - A revision conflict requires a new `get_publication` call.
+- Recording a workflow-managed request clears the pre-post
+  `latest_observation`, preserves baseline and monotonic histories, and derives
+  `PR_PENDING`; the next complete snapshot replaces the observation. It never
+  evaluates the newly appended request against stale evidence.
 - Any accepted ledger mutation after finalization removes and directory-syncs
   `publication-gate.json` before replacing the ledger. Failure after removal
   requires finalization again; it cannot preserve a stale gate.
@@ -1617,6 +1633,9 @@ architecture.
   direct-human approval rule; build verification asserts all four properties.
 - A publication gate is valid only for the current ledger revision. Every
   later ledger mutation revokes it before writing, including same-head changes.
+- Recording a new workflow-managed request atomically clears the replaceable
+  pre-post observation and derives `PR_PENDING`, while retaining the baseline
+  and both monotonic histories for the next snapshot's reconciliation.
 - A publication gate also expires at the earliest five-minute deadline among
   its stored observation timestamps; verification reapplies that deadline
   against the server clock and never treats finalization as timeless.
@@ -1646,6 +1665,10 @@ The implementation must test:
   unambiguous results, proving those stored baseline pairs stay outside active
   history, plus an unmatched, overlapping, unbound, or unsupported
   preexisting request seeded at revision 1 and blocking normally;
+- `record_codex_review_request` after an existing snapshot and after ambiguity
+  acknowledgement, each revoking any gate, clearing only
+  `latest_observation`, preserving baseline and both histories, and returning
+  `PR_PENDING` until a replacement snapshot is recorded;
 - a pull request head changed before and after Codex review;
 - an incomplete policy query, ambiguous `404`, explicit no-check policy, empty
   incomplete collections, incomplete pagination, and count mismatches;
