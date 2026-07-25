@@ -103,6 +103,14 @@ assert.match(workflowSkill, /reviewed-commit binding/);
 assert.match(workflowSkill, /get_review_summary/);
 assert.match(workflowSkill, /wait_for_review_state/);
 assert.match(workflowSkill, /A `timed_out` result is expected/);
+assert.match(
+  workflowSkill,
+  /call it again with the same\s+`state_version` until `changed` is true/,
+);
+assert.match(
+  workflowSkill,
+  /Treat `timed_out` as an expected in-progress\s+result and continue with the same `state_version`/,
+);
 assert.match(workflowSkill, /a\s+standalone review comment is unsupported/);
 assert.match(workflowSkill, /Never learn that identity from the\s+candidate result/);
 

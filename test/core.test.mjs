@@ -255,6 +255,12 @@ test("compact review summaries support bounded state-change waits", async (t) =>
     waitForReviewState(store, prepared.id, changed.summary.state_version, 30_001),
     /timeout_ms must be between 1 and 30000/,
   );
+  for (const invalidStateVersion of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(
+      waitForReviewState(store, prepared.id, invalidStateVersion, 10),
+      /known_state_version must be a non-negative safe integer/,
+    );
+  }
 });
 
 test("compact finding histograms distinguish active and all-time severity", async (t) => {
