@@ -150,6 +150,7 @@ The initial schema is:
     "head_branch": "agent/change"
   },
   "terminal": null,
+  "codex_review_ambiguity_acknowledgements": [],
   "latest_observation": {
     "observed_at": "2026-07-25T08:05:00.000Z",
     "recorded_at": "2026-07-25T08:05:01.000Z",
@@ -496,16 +497,19 @@ The evaluator applies these checks in order:
     a latest run bound to the pull request head, with the required app identity
     when pinned, and a passing conclusion. For `NONE_CONFIGURED`, the
     explicit-empty invariants hold.
-12. From the complete request collection, select the latest exact
-    `@codex review` request for the current head by `(created_at, comment_id)`.
-    If none exists, derive `GITHUB_REVIEW_NOT_REQUESTED`.
-13. Validate every result's `request_comment_id` using the association
-    algorithm below. For the latest request, an `AMBIGUOUS` candidate created
-    after that request derives `GITHUB_REVIEW_UNKNOWN`. Ambiguous candidates
-    that predate the latest request do not associate with it; zero correlated
-    results then derives `GITHUB_REVIEW_PENDING`. Timestamps widen ambiguity
-    but never establish a request/result pairing. More than one correlated
-    result also derives `GITHUB_REVIEW_UNKNOWN`.
+12. Replay request/result association and every stored ambiguity
+    acknowledgement for the current head. An unacknowledged ambiguous result
+    preserves its indeterminate request set and derives
+    `GITHUB_REVIEW_UNKNOWN`. A valid acknowledgement closes exactly its named
+    indeterminate requests and ambiguous results without correlating a result
+    retroactively.
+13. From the remaining requests, select the latest exact `@codex review`
+    request by `(created_at, comment_id)`. If none exists, derive
+    `GITHUB_REVIEW_NOT_REQUESTED`. Zero correlated results derives
+    `GITHUB_REVIEW_PENDING`; an ambiguous result created after the latest
+    request or more than one correlated result derives
+    `GITHUB_REVIEW_UNKNOWN`. Timestamps widen ambiguity but never establish a
+    request/result pairing.
 14. The single correlated result names the current head SHA and its parser
     returns `CLEAN`; a stale SHA or unknown format fails closed.
 15. Thread collection is complete, its counts are internally consistent, and
@@ -525,9 +529,15 @@ ambiguous rather than being assigned to the newest request. Duplicate and
 overlapping requests are therefore represented and evaluated rather than
 rejected or silently paired.
 
+Ambiguity never clears automatically. Publication can recover on the same head
+only after the operator explicitly acknowledges the exact indeterminate
+request and result IDs, asserting that those old requests will produce no
+further results and accepting the risk if that assertion is wrong. The next
+exact request starts a new correlation epoch.
+
 ## Author tools
 
-The author role adds five tools.
+The author role adds six tools.
 
 ### `start_publication`
 
@@ -579,6 +589,53 @@ derives `MERGE_READY`.
 ### `get_publication`
 
 Returns the ledger without accessing GitHub.
+
+### `acknowledge_codex_review_ambiguity`
+
+Inputs:
+
+- `review_id`
+- `expected_revision`
+- `head_sha`
+- the exact non-empty `request_comment_ids` and `ambiguous_result_ids` being
+  acknowledged
+- `acknowledgement: "NO_FURTHER_RESULTS_EXPECTED"`
+- a non-empty `operator_label` and `rationale`
+
+This is an explicit human risk decision, not a normal automated recovery step.
+The skill must invoke it only after a human directly approves the named
+acknowledgement; silence, a retry request, or a previous general instruction to
+finish the workflow is not approval.
+
+Under the publication lock, the server reloads the current fresh observation,
+requires `head_sha` to match the local gate and pull request, independently
+replays association, and requires set equality between the supplied IDs and
+the current indeterminate request/result sets. The server-generated record is:
+
+```json
+{
+  "acknowledgement_id": "ack-...",
+  "head_sha": "0123456789abcdef...",
+  "request_comment_ids": [100, 102],
+  "ambiguous_result_ids": [101],
+  "acknowledgement": "NO_FURTHER_RESULTS_EXPECTED",
+  "operator_label": "local maintainer",
+  "rationale": "Old requests are no longer expected to answer.",
+  "acknowledged_at": "2026-07-25T08:06:00.000Z",
+  "publication_revision": 5
+}
+```
+
+`operator_label` is a self-declared audit label, not authenticated identity.
+The acknowledgement asserts that the named requests will produce no later
+results; the server cannot prove that claim. It closes only the exact named
+indeterminate set. It never changes a result to `CLEAN`, and any later
+unacknowledged ambiguity requires a new human decision.
+
+Like every later ledger mutation, the tool first revokes and directory-syncs
+an existing publication gate, then appends the acknowledgement and history
+event and advances the revision. After acknowledgement, no active request
+exists until the operator posts a new exact `@codex review` comment.
 
 ### `verify_publication_gate`
 
@@ -696,18 +753,29 @@ requests for each head. Version 1 accepts only these association values:
 - a second result for an already matched request is ambiguous.
 
 A correlated result closes its request. An ambiguous result marks every
-currently unmatched request for that head indeterminate and closes that open
-set, so an operator can recover by posting a new exact request after the
-ambiguous event. Response body text, mentions, permalinks, and all other
-free-form content never supply request linkage. Version 1 has no
-`EXPLICIT_LINK`; adding a future structural GitHub link requires a schema
-change that names and validates the exact response field.
+currently unmatched request for that head indeterminate but does not close or
+discard the set. Every later result for that head therefore remains ambiguous
+until `acknowledge_codex_review_ambiguity` closes the exact indeterminate set.
+The acknowledgement is a server-recorded correlation-epoch boundary, not a
+result association. A request posted after it starts the next open set.
+
+Response body text, mentions, permalinks, and all other free-form content never
+supply request linkage. Version 1 has no `EXPLICIT_LINK`; adding a future
+structural GitHub link requires a schema change that names and validates the
+exact response field.
 
 The evaluator independently replays this algorithm, validates each
 association, and then selects the latest request; it never reconstructs a
 pairing from "created after latest request" alone. The adapter must not discard
 older, duplicate, or ambiguous events because doing so could let a delayed old
 `CLEAN` result mask a pending newer review.
+
+If an old request produces a delayed result after an acknowledgement and a new
+request, the protocol cannot distinguish it from the new request's result. The
+operator accepted that specific residual risk by asserting that the
+acknowledged requests would produce no further results. The acknowledgement
+record keeps that decision visible in the ledger instead of presenting the
+association as mechanically proven.
 
 Thread collection remains separate from result parsing, follows every GraphQL
 page, and includes every thread's stable ID, resolution state, outdated state,
@@ -772,6 +840,10 @@ can operate from stale reads.
   cannot be finalized.
 - A changed or deleted GitHub comment makes the next fresh observation pending
   or unknown; it does not retain a stale pass.
+- Ambiguous Codex results remain `GITHUB_REVIEW_UNKNOWN` until an explicit
+  acknowledgement names the exact indeterminate IDs. An acknowledgement
+  revokes any gate and creates an auditable risk-acceptance boundary; it does
+  not prove that old requests have stopped.
 - A merged pull request may be recorded only when a live observation supplies
   its merge commit SHA. A squash merge commit is allowed to differ from the
   reviewed head.
@@ -788,6 +860,10 @@ can operate from stale reads.
   change, but a same-head request or thread mutation can still land after
   verification and before merge. Closing that residual window requires
   repository-side enforcement such as the deferred GitHub Check Run.
+- GitHub does not structurally correlate a Codex result with its request.
+  Explicitly acknowledging ambiguity restores progress but accepts the risk
+  that an old delayed result may later be attributed to the new request. The
+  ledger records that human decision; it cannot eliminate the uncertainty.
 - A new commit intentionally requires a new local review rather than resuming
   the existing publication ledger.
 
@@ -839,6 +915,9 @@ architecture.
 - Codex result evidence stores a digest and GitHub URL, not the response body.
 - Every Codex result is correlated by the single-open-request rule; overlapping
   requests are ambiguous, and free-form text never supplies linkage.
+- Ambiguity remains blocking until a human acknowledges the exact indeterminate
+  IDs and asserts that no old request will reply. The acknowledgement is
+  revisioned, revokes any gate, and starts a new correlation epoch.
 - A publication gate is valid only for the current ledger revision. Every
   later ledger mutation revokes it before writing, including same-head changes.
 - Lock acquisition waits ten seconds; a lock is only eligible for reclamation
@@ -865,9 +944,12 @@ The implementation must test:
 - a missing request, a non-exact request, duplicate requests, and a newer
   request that supersedes an older `CLEAN` result;
 - overlapping requests where the older delayed result arrives after the newer
-  request and derives `GITHUB_REVIEW_UNKNOWN`, a body-only request permalink
-  that remains ambiguous, and recovery via a new exact request after the
-  ambiguous result;
+  request and derives `GITHUB_REVIEW_UNKNOWN`, plus a body-only request
+  permalink that remains ambiguous;
+- a recovery request posted before acknowledgement, with every subsequent
+  result remaining ambiguous; exact-set acknowledgement followed by a new
+  request; a delayed old result after acknowledgement as an explicitly
+  accepted risk; and a later ambiguity requiring another acknowledgement;
 - zero and multiple candidate results after the latest request;
 - a reaction without a Codex result;
 - a result created before its request;
@@ -891,6 +973,9 @@ The implementation must test:
 - a freshly finalized gate that validates against its unchanged ledger
   revision, plus a same-head mutation landing after verification but before
   merge to document the residual point-in-time limitation;
+- ambiguity acknowledgement with wrong head, stale revision, missing or extra
+  request/result IDs, missing rationale, or the wrong acknowledgement enum,
+  plus gate revocation and the revisioned audit record on success;
 - lock timeout errors, PID reuse, heartbeat expiry, owner-token mismatch, and
   inconclusive owner-liveness checks;
 - malformed and oversized inputs;
