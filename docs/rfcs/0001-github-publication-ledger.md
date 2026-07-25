@@ -284,7 +284,7 @@ The initial schema is:
           {
             "kind": "BASE_BRANCH_METADATA",
             "endpoint": "GET /repos/{owner}/{repo}/branches/{branch}",
-            "collected_at": "2026-07-25T08:05:00.000Z",
+            "collected_at": "2026-07-25T08:04:59.000Z",
             "status": "COMPLETE",
             "branch_tip_sha": "abcdef0123456789..."
           },
@@ -313,7 +313,7 @@ The initial schema is:
       "head_sha": "0123456789abcdef...",
       "head_branch": "agent/change",
       "base_branch": "main",
-      "pr_reported_base_sha": "abcdef0123456789...",
+      "pr_reported_base_sha": "fedcba9876543210...",
       "base_sha": "abcdef0123456789...",
       "mergeable": "MERGEABLE",
       "base_head_comparison": {
@@ -915,14 +915,20 @@ a required app binding derives `EVIDENCE_INCOMPLETE`.
 The authoritative current base is the live `commit.sha` returned by
 `GET /repos/{owner}/{repo}/branches/{branch}`. The normalized pull-request
 evidence stores it as `base_sha` and separately stores the pull request
-object's `base.sha` as `pr_reported_base_sha`. The pull-request
+object's potentially stale `base.sha` as audit-only
+`pr_reported_base_sha`; that value is never an equality, comparison, or state
+derivation input and may differ from the live tip. The pull-request
 `BASE_BRANCH_METADATA` source and required-check `BRANCH_METADATA` policy
-source both retain the fetched live tip as `branch_tip_sha`. A complete
-observation requires all four normalized values to be the same full SHA. A
-mismatch, missing field, or independently fetched branch response that differs
-inside the atomic window derives `EVIDENCE_INCOMPLETE` and requires a fresh
-snapshot; neither ancestry nor strict-update evaluation may use the pull
-request object's potentially stale base SHA.
+source are two mandatory independent fetches and both retain the fetched live
+tip as `branch_tip_sha`. `BASE_BRANCH_METADATA.collected_at` must be strictly
+earlier than `BRANCH_METADATA.collected_at`; a reused cached response retains
+its original collection time and cannot back both entries. A complete
+observation requires `base_sha` and both `branch_tip_sha` values to be the same
+full SHA. A mismatch or missing field means the branch moved or one read was
+incomplete inside the atomic window, derives `EVIDENCE_INCOMPLETE`, and is
+retryable with two fresh reads. Exact source coverage counts these as two fetch
+instances even though their endpoint templates are identical. Neither ancestry
+nor strict-update evaluation may use `pr_reported_base_sha`.
 
 `strict_policy.required` is the logical OR of every successful applicable
 source's strict-update flag. The adapter records
@@ -1150,9 +1156,11 @@ The evaluator applies these checks in order:
    `EVIDENCE_INCOMPLETE` without evaluating identity or writing a terminal
    state; malformed or stale collection metadata is rejected before derivation.
 5. The repository identity, pull request number, base branch, head branch, and
-   pull request head match the bound target and local gate. The PR object's
-   `pr_reported_base_sha`, the normalized `base_sha`, and both retained
-   `branch_tip_sha` values match exactly. Any mismatch or missing live-tip
+   pull request head match the bound target and local gate.
+   `pr_reported_base_sha` is retained for audit but ignored. The normalized
+   `base_sha` and both independently fetched `branch_tip_sha` values match
+   exactly, and the first branch-source time is strictly earlier than the
+   second. Any mismatch or missing live-tip
    proof derives `EVIDENCE_INCOMPLETE` before comparisons. The complete
    `reviewed_base_current_base_comparison` must compare the local gate's
    `base_sha` with the current pull-request `base_sha`; `AHEAD` or `IDENTICAL`
@@ -1324,8 +1332,11 @@ Inputs:
 The tool requires `LOCAL_GATE_PASSED`, reloads `gate.json`, verifies the local
 working tree is clean, and verifies local `HEAD` equals the gate `head_sha`.
 It rejects an existing `publication.json` or orphaned
-`publication-gate.json` or `publication-gate-audit.json`; publication is never
-reset or rebound in place.
+`publication-gate.json`; publication is never reset or rebound in place. An
+existing gate-audit file is accepted only as the exact canonical pre-start
+remnant for this review ID: version 1, `next_sequence: 1`, and an empty
+`events` array with no ledger or gate. Any populated, malformed, mismatched, or
+otherwise orphaned audit file is rejected.
 It validates the baseline's identity, completeness, pagination, freshness, and
 event provenance, stores every exact or trigger-shaped request and
 expected-actor candidate result without pairing them, and rejects a baseline
@@ -1711,15 +1722,16 @@ from the observation's `recorded_at`.
 Finalization does not modify `publication.json`: it does not change
 `revision`, `updated_at`, status, or history. It first atomically writes the
 candidate gate with `issuance_committed: false`, then atomically appends and
-directory-syncs a `GATE_FINALIZATION_PASSED` audit event containing that
-candidate's digest, then atomically replaces the gate with the identical payload except
-`issuance_committed: true`. It returns success only after the final replacement
-and directory sync. Verification rejects an uncommitted candidate. Therefore a
-crash can leave an audit-only issuance attempt or an unusable candidate gate,
-but every usable gate has a preceding durable audit record without consulting
-the audit file during authorization. The committed gate names the unchanged
-ledger revision that was validated. These audit and gate writes are not later
-ledger mutations and do not revoke themselves.
+directory-syncs a `GATE_FINALIZATION_PASSED` audit event containing the
+prospectively computed `gate_sha256` of the final committed payload, then
+atomically replaces the gate with that final payload, which is
+identical except `issuance_committed: true`. It returns success only after the
+final replacement and directory sync. Verification rejects an uncommitted
+candidate. Therefore a crash can leave an audit-only issuance attempt or an
+unusable candidate gate, but every usable gate has a preceding durable audit
+record without consulting the audit file during authorization. The committed
+gate names the unchanged ledger revision that was validated. These audit and
+gate writes are not later ledger mutations and do not revoke themselves.
 
 Codex must perform a fresh GitHub read immediately before this call. It then
 calls `verify_publication_gate` immediately before merging and passes the
@@ -1745,9 +1757,15 @@ deadline.
 ## Gate audit
 
 `start_publication` creates `publication-gate-audit.json` with version 1,
-the review ID, `next_sequence: 1`, and an empty `events` array in the same
-locked creation as the ledger. Existing or orphaned publication, gate, or audit
-files make start fail rather than overwrite evidence. Every append is a
+the review ID, `next_sequence: 1`, and an empty `events` array first, atomically
+replaces and directory-syncs it, and only then atomically creates
+`publication.json`, all during one publication-lock hold. A crash between the
+two writes leaves only the exact empty pre-start audit remnant; retrying
+`start_publication` for the same review validates and reuses that remnant before
+creating the ledger. Because every audit append requires an existing ledger,
+an empty remnant cannot contain publication evidence and is the only audit file
+that start may reuse. An existing ledger, gate, populated audit, or malformed
+audit still fails rather than overwriting evidence. Every append is a
 server-authored atomic replacement under the publication lock followed by a
 directory sync; callers cannot supply sequence numbers or timestamps. Events
 are never deleted or reordered, and audit failure prevents a valid gate or
@@ -2092,6 +2110,10 @@ can operate from stale reads.
 ## Failure and recovery
 
 - Missing or malformed evidence never advances the state.
+- `start_publication` durably creates the empty gate-audit file before the
+  ledger. A crash between those writes leaves an exact empty pre-start remnant
+  that a retry for the same review validates and reuses; no populated or
+  malformed audit is ever overwritten.
 - A GitHub read failure leaves the previous revision unchanged when the
   workflow does not submit a snapshot; a deliberately submitted well-formed
   incomplete collection advances the revision and derives
@@ -2110,9 +2132,10 @@ can operate from stale reads.
   reviewed base records `INVALIDATED`, even when strict updates are disabled or
   no status checks are configured. Restoring the target base later does not
   revive that ledger.
-- A mismatch among the PR object's base SHA, normalized current base, and
-  either retained live branch-tip source derives `EVIDENCE_INCOMPLETE`; no
-  comparison may fall back to the PR object's value.
+- A mismatch among the normalized current base and either independently fetched
+  live branch-tip source, or a non-increasing pair of branch-source collection
+  times, derives `EVIDENCE_INCOMPLETE`; no comparison may use or fall back to
+  the audit-only PR-reported value.
 - A later observation cannot clear `INVALIDATED`, `CLOSED`, or `MERGED`.
 - Once any terminal record exists, every state-changing publication call fails
   with `PUBLICATION_TERMINAL` before revoking or writing anything; only reads
@@ -2343,8 +2366,10 @@ architecture.
   strict field makes its policy source and collection unknown rather than
   defaulting to false.
 - The authoritative current base SHA comes from the live branch read. The PR
-  object's reported base SHA and both retained branch-source values must match
-  it before either comparison is evaluated.
+  object's reported base SHA is audit-only. The normalized base and both
+  retained values from mandatory independent branch fetches must match before
+  either comparison is evaluated; the pull-request source time must be strictly
+  earlier than the policy source time so a cached response cannot back both.
 - The current target base must independently descend from or equal the local
   gate's reviewed base. This identity invariant applies regardless of
   strict-update policy; a behind or diverged target base is terminal
@@ -2445,8 +2470,9 @@ The implementation must test:
 - the successful path from local gate to `MERGE_READY`;
 - `start_publication` creating revision 1 with status `PR_PENDING` and a
   `PUBLICATION_STARTED` audit event, including rejection of stale, incomplete,
-  or partially paginated baselines and existing or orphaned publication, gate,
-  or gate-audit files;
+  or partially paginated baselines; recovery from an exact empty pre-start
+  gate-audit remnant; and rejection of existing publication or gate files and
+  populated, malformed, or mismatched audit files;
 - explicit-only and automatic-quiescence trigger policies, including rejection
   of an unknown mode, missing direct-human label or rationale, a changed head,
   and a baseline more than 30 seconds older than the server acknowledgement;
@@ -2515,9 +2541,10 @@ The implementation must test:
   plus `BEHIND`, `DIVERGED`, and incomplete comparisons when strict updates
   are false and when no checks are configured, proving only the first two can
   reach `MERGE_READY` and that restoring an invalidated base cannot revive the
-  ledger; a mismatch between the PR-reported base SHA, either retained live
-  branch-tip source, or the normalized base SHA must derive
-  `EVIDENCE_INCOMPLETE` before comparison;
+  ledger; a mismatch between either retained live branch-tip source and the
+  normalized base SHA, or non-increasing collection times proving response
+  reuse or invalid ordering, must derive `EVIDENCE_INCOMPLETE` before
+  comparison, while a differing audit-only PR-reported base SHA has no effect;
 - `SKIPPED`, `NEUTRAL`, `TIMED_OUT`, `ACTION_REQUIRED`, `STALE`, and an
   unrecognized future check conclusion;
 - a missing request, trigger-shaped non-exact requests with whitespace,

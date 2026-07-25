@@ -197,7 +197,7 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
     observation.required_checks.collection.policy_sources.find(
       (source) => source.kind === "BRANCH_METADATA",
     );
-  assert.equal(
+  assert.notEqual(
     observation.pull_request.base_sha,
     observation.pull_request.pr_reported_base_sha,
   );
@@ -208,6 +208,10 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
   assert.equal(
     observation.pull_request.base_sha,
     policyBranchSource.branch_tip_sha,
+  );
+  assert.ok(
+    Date.parse(pullRequestBranchSource.collected_at) <
+      Date.parse(policyBranchSource.collected_at),
   );
   assert.equal(
     observation.pull_request.base_head_comparison.base_sha,
