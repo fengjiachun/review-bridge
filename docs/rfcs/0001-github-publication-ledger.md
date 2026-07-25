@@ -634,9 +634,12 @@ the `404` as `UNKNOWN`.
 produces an explicit empty result: the applicable-rules response contains no
 required status-check rule, and classic protection is either present with no
 required checks or conclusively `NOT_CONFIGURED`. It must accompany
-`strict_policy.required: false`, `requirements: []`, and `runs: []`; otherwise
-the observation is invalid. A caller that cannot establish the policy or a
-required app binding derives `EVIDENCE_INCOMPLETE`.
+`strict_policy.required: false` and `requirements: []`; otherwise the
+observation is invalid. Fully collected runs may be present because GitHub
+still reports optional checks and commit statuses. They remain subject to
+run-source counts, schema, and head-binding validation, but do not participate
+in required-check satisfaction. A caller that cannot establish the policy or
+a required app binding derives `EVIDENCE_INCOMPLETE`.
 
 `strict_policy.required` is the logical OR of every successful applicable
 source's strict-update flag. The adapter records
@@ -697,9 +700,12 @@ Normalized run status is one of `QUEUED`, `IN_PROGRESS`, `WAITING`,
 - `STALE` derives `CHECKS_PENDING` and requires a rerun; and
 - a missing or unrecognized value derives `EVIDENCE_INCOMPLETE`.
 
-For a commit status, the adapter uses its creation time as `started_at`, its
-update time as `completed_at`, and normalizes `ERROR` to `FAILURE`. These
-passing conclusions match GitHub's required-status-check semantics.
+For a commit status, the adapter uses its creation time as `started_at`. A
+`PENDING` status has normalized status `PENDING`, null `completed_at`, and null
+conclusion even though GitHub supplies `updated_at`. A terminal status uses
+`updated_at` as `completed_at`; `SUCCESS` maps to `SUCCESS`, `FAILURE` maps to
+`FAILURE`, and `ERROR` maps to `FAILURE`. These passing conclusions match
+GitHub's required-status-check semantics.
 
 For an open pull request, `state` is `OPEN`, `is_merged` is false,
 `merged_at` is null, and `merge_commit_sha` is normalized to null because
@@ -874,8 +880,10 @@ The evaluator applies these checks in order:
     a commit status cannot establish that identity, but any same-context commit
     status kind must independently pass. Every explicitly unbound requirement
     has at least one latest run bound to the head, and every participating kind
-    has a passing conclusion. For `NONE_CONFIGURED`, the explicit-empty
-    invariants hold, including `strict_policy.required: false`.
+    has a passing conclusion. For `NONE_CONFIGURED`, policy discovery is
+    explicitly empty, `requirements` is empty, and
+    `strict_policy.required` is false. Optional fully collected runs may be
+    present but do not participate in satisfaction.
 12. Replay event identity and association from `codex_request_history`,
     `codex_result_history`, the current collection's validated parsed verdicts,
     and every stored ambiguity acknowledgement for the current head rather than
@@ -1282,7 +1290,7 @@ It returns:
   "status": "MERGE_READY",
   "head_sha": "0123456789abcdef...",
   "publication_revision": 4,
-  "expires_at": "2026-07-25T08:10:00.000Z",
+  "expires_at": "2026-07-25T08:09:58.000Z",
   "verified_at": "2026-07-25T08:05:02.000Z"
 }
 ```
@@ -1332,9 +1340,9 @@ It then writes:
   "publication_revision": 4,
   "github_observation_sha256": "sha256...",
   "github_observed_at": "2026-07-25T08:05:00.000Z",
-  "github_oldest_collection_at": "2026-07-25T08:05:00.000Z",
+  "github_oldest_collection_at": "2026-07-25T08:04:58.000Z",
   "github_recorded_at": "2026-07-25T08:05:01.000Z",
-  "expires_at": "2026-07-25T08:10:00.000Z",
+  "expires_at": "2026-07-25T08:09:58.000Z",
   "status": "MERGE_READY"
 }
 ```
@@ -1883,8 +1891,9 @@ The implementation must test:
   `latest_observation`, preserving baseline and both histories, and returning
   `PR_PENDING` until a replacement snapshot is recorded;
 - a pull request head changed before and after Codex review;
-- an incomplete policy query, ambiguous `404`, explicit no-check policy, empty
-  incomplete collections, incomplete pagination, and count mismatches;
+- an incomplete policy query, ambiguous `404`, explicit no-check policy with
+  both zero and nonzero optional runs, empty incomplete collections, incomplete
+  pagination, and count mismatches;
 - independently missing, partial, stale, and empty-complete check-run and
   commit-status feeds, per-kind item-count and reported-total mismatches, and a
   check-run query using the default latest-only filter instead of `filter=all`;
@@ -1901,7 +1910,9 @@ The implementation must test:
   pending, and failing same-context commit statuses, and an explicitly unbound
   requirement satisfied by a commit status with unavailable App identity;
 - a failed rerun after success, a successful rerun after failure, a pending
-  rerun after success, and runs with missing or ambiguous ordering;
+  rerun after success, a pending commit status with null `completed_at`,
+  terminal commit statuses using `updated_at`, and runs with missing or
+  ambiguous ordering;
 - same-name check runs and commit statuses in every pass/fail/pending
   combination, proving each present kind is evaluated independently and
   cross-kind timestamps never suppress one side, plus same-kind timestamp ties
@@ -2007,9 +2018,10 @@ The implementation must test:
   directory-syncing the existing gate before writing its new revision;
 - a freshly finalized gate that validates against its unchanged ledger
   revision before `expires_at`, expiry at the oldest underlying five-minute
-  deadline with an otherwise unchanged revision/head, and a same-head mutation
-  landing after verification but before merge to document the residual
-  point-in-time limitation;
+  deadline including when a run-source timestamp is the minimum, with an
+  otherwise unchanged revision/head, and a same-head mutation landing after
+  verification but before merge to document the residual point-in-time
+  limitation;
 - valid and invalid `verify_publication_gate` calls that leave
   `publication.json` byte-identical, including request and result histories,
   terminal, revision, and cached status, with exact boundary tests immediately
