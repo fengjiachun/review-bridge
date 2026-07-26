@@ -343,7 +343,8 @@ export function adaptCodexEvidence({
   mode = "SNAPSHOT",
   collection,
   expected_actor: expectedActor,
-  local_gate_head_sha: headSha,
+  authorization_head_sha: authorizationHeadSha,
+  local_gate_head_sha: localGateHeadSha,
   baseline = { requests: [], candidate_results: [] },
   request_history: requestHistory = [],
   ambiguity_acknowledgements: acknowledgements = [],
@@ -352,6 +353,16 @@ export function adaptCodexEvidence({
   pull_request_review_comments: reviewComments,
 }) {
   if (
+    authorizationHeadSha != null &&
+    localGateHeadSha != null &&
+    authorizationHeadSha !== localGateHeadSha
+  ) {
+    throw new Error(
+      "authorization_head_sha and local_gate_head_sha must match when both are supplied",
+    );
+  }
+  const headSha = authorizationHeadSha ?? localGateHeadSha;
+  if (
     !expectedActor ||
     !Number.isSafeInteger(expectedActor.id) ||
     expectedActor.type !== "Bot"
@@ -359,7 +370,7 @@ export function adaptCodexEvidence({
     throw new Error("expected_actor must contain a positive ID and type Bot");
   }
   if (!/^[0-9a-f]{40}$/.test(headSha)) {
-    throw new Error("local_gate_head_sha must be a full lowercase Git SHA");
+    throw new Error("authorization_head_sha must be a full lowercase Git SHA");
   }
   for (const value of [issueComments, reviews, reviewComments]) {
     if (!Array.isArray(value)) {

@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "review-bridge-reviewer",
   "display_name": "Review Bridge Reviewer",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Review immutable Codex code snapshots and return structured findings.",
   "long_description": "Lists review tasks prepared by Codex, lets Claude inspect a verified successor delta or full patch plus the immutable source snapshot, and submits a structured initial review or round-two verdict.",
   "author": {
@@ -16,7 +16,9 @@
       "args": [
         "${__dirname}/server/server.mjs",
         "--role",
-        "reviewer"
+        "reviewer",
+        "--reviewer-provider",
+        "CLAUDE_DESKTOP"
       ],
       "env": {
         "REVIEW_BRIDGE_HOME": "${user_config.review_store}"
@@ -26,7 +28,7 @@
   "tools": [
     {
       "name": "list_pending_reviews",
-      "description": "List Codex review tasks waiting for Claude."
+      "description": "List Codex review tasks bound to Claude Desktop."
     },
     {
       "name": "open_review",

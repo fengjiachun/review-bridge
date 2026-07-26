@@ -1,7 +1,7 @@
 {
   "name": "review-bridge",
-  "version": "0.3.0",
-  "description": "Coordinate a two-round local code review between Codex and Claude Desktop.",
+  "version": "0.4.0",
+  "description": "Coordinate isolated local review and audited GitHub publication.",
   "author": {
     "name": "Review Bridge contributors"
   },
@@ -16,8 +16,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Review Bridge",
-    "shortDescription": "Hand code snapshots to Claude for local review",
-    "longDescription": "Create immutable review snapshots, receive structured Claude findings, respond with fixes or evidence, and stop after two rounds when human arbitration is required.",
+    "shortDescription": "Gate local and GitHub code review",
+    "longDescription": "Create immutable Claude or Codex review snapshots or explicit remote-only publication authorizations, then bind GitHub Codex, checks, threads, and merge verification to one head.",
     "developerName": "Review Bridge contributors",
     "category": "Developer Tools",
     "capabilities": [
@@ -26,8 +26,8 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Prepare the current changes for a Claude Desktop review.",
-      "Check whether Claude has returned findings for this review."
+      "Prepare the current changes for an isolated local review.",
+      "Check whether the reviewer has returned findings for this review."
     ],
     "brandColor": "#6D5BD0",
     "screenshots": []

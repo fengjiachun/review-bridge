@@ -30,6 +30,19 @@ test("version 1 adapter recognizes the observed clean issue-comment shape", asyn
   );
 });
 
+test("adapter accepts the authorization head and rejects conflicting legacy input", async () => {
+  const input = await fixture("codex-clean");
+  input.authorization_head_sha = input.local_gate_head_sha;
+  delete input.local_gate_head_sha;
+  assert.equal(adaptCodexEvidence(input).results.length, 1);
+
+  input.local_gate_head_sha = "f".repeat(40);
+  assert.throws(
+    () => adaptCodexEvidence(input),
+    /authorization_head_sha and local_gate_head_sha must match/,
+  );
+});
+
 test("version 1 adapter recognizes findings only with native commit and attachments", async () => {
   const input = await fixture("codex-findings");
   const result = adaptCodexEvidence(input);

@@ -9,6 +9,18 @@
       ],
       "cwd": ".",
       "tool_timeout_sec": 120
+    },
+    "review-bridge-reviewer": {
+      "command": "node",
+      "args": [
+        "./server/server.mjs",
+        "--role",
+        "reviewer",
+        "--reviewer-provider",
+        "CODEX_TASK"
+      ],
+      "cwd": ".",
+      "tool_timeout_sec": 120
     }
   }
 }
