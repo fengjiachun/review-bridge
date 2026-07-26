@@ -1863,6 +1863,7 @@ test("automatic quiescence requires fresh direct-human acknowledgement", async (
   for (const [operatorLabel, rationale, age, pattern] of [
     [null, "reason", 0, /operator_label/],
     ["maintainer", null, 0, /rationale/],
+    ["maintainer", "reason", -1, /completed baseline from the last 30 seconds/],
     ["maintainer", "reason", 30_001, /last 30 seconds/],
   ]) {
     const rejected = await fixture();

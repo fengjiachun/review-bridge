@@ -2832,13 +2832,15 @@ export async function startPublication(
       id: codexActorId,
       type: "Bot",
     });
+    const baselineAge =
+      currentMs - Date.parse(validatedBaseline.observed_at);
     if (
       codexTriggerMode === "AUTOMATIC_QUIESCENCE_ACKNOWLEDGED" &&
-      currentMs - Date.parse(validatedBaseline.observed_at) > MAX_FUTURE_MS
+      (baselineAge < 0 || baselineAge > MAX_FUTURE_MS)
     ) {
       fail(
         "INVALID_INPUT",
-        "automatic-quiescence acknowledgement requires a baseline from the last 30 seconds",
+        "automatic-quiescence acknowledgement requires a completed baseline from the last 30 seconds",
       );
     }
     const normalizedBaseline = normalizeBaseline(validatedBaseline, timestamp);
