@@ -198,6 +198,24 @@ function sameCanonical(left, right) {
   return canonicalJson(left) === canonicalJson(right);
 }
 
+function assertStoredCanonicalJson(value, expected, code, message) {
+  try {
+    if (canonicalJson(value) === expected) {
+      return;
+    }
+  } catch {}
+  fail(code, message);
+}
+
+function assertStoredCanonicalJsonBytes(value, expected, code, message) {
+  try {
+    if (expected.equals(canonicalJsonBytes(value))) {
+      return;
+    }
+  } catch {}
+  fail(code, message);
+}
+
 function assertExactKeys(value, allowedKeys, name) {
   const allowed = new Set(allowedKeys);
   const unexpected = Object.keys(value).filter((key) => !allowed.has(key));
@@ -1407,9 +1425,12 @@ async function openAuthorizationFiles(
         "only publication schema version 1 is supported",
       );
     }
-    if (!publicationFile.bytes.equals(canonicalJsonBytes(ledger))) {
-      fail("PUBLICATION_STORE_INVALID", "publication.json is not canonical JSON");
-    }
+    assertStoredCanonicalJsonBytes(
+      ledger,
+      publicationFile.bytes,
+      "PUBLICATION_STORE_INVALID",
+      "publication.json is not canonical JSON",
+    );
     validateStoredLedger(ledger);
     let publicationGate = null;
     let gateParseError = false;
@@ -1468,9 +1489,12 @@ async function loadPublicationFile(paths, { allowMissing = false } = {}) {
         "only publication schema version 1 is supported",
       );
     }
-    if (!opened.bytes.equals(canonicalJsonBytes(ledger))) {
-      fail("PUBLICATION_STORE_INVALID", "publication.json is not canonical JSON");
-    }
+    assertStoredCanonicalJsonBytes(
+      ledger,
+      opened.bytes,
+      "PUBLICATION_STORE_INVALID",
+      "publication.json is not canonical JSON",
+    );
     validateStoredLedger(ledger);
     return ledger;
   } finally {
@@ -2456,9 +2480,12 @@ async function initializeAudit(paths, reviewId) {
     requiredMode: 0o600,
     maxBytes: 16 * 1024,
   });
-  if (!sameCanonical(head, emptyAuditHead(reviewId))) {
-    fail("AUDIT_STATE_INVALID", "pre-start audit head is not the empty version 1 cursor");
-  }
+  assertStoredCanonicalJson(
+    head,
+    canonicalJson(emptyAuditHead(reviewId)),
+    "AUDIT_STATE_INVALID",
+    "pre-start audit head is not the empty version 1 cursor",
+  );
   await cleanupAuditHeadTemporaries(paths);
 }
 
@@ -2556,8 +2583,13 @@ async function validateLastCommittedAuditRecord(handle, head, reviewId) {
     "AUDIT_CORRUPT",
     "last committed audit record is malformed",
   );
+  assertStoredCanonicalJson(
+    event,
+    eventBytes.toString("utf8"),
+    "AUDIT_CORRUPT",
+    "last committed audit record is not canonical",
+  );
   if (
-    canonicalJson(event) !== eventBytes.toString("utf8") ||
     event.review_id !== reviewId ||
     event.sequence !== head.next_sequence - 1
   ) {
@@ -2605,9 +2637,12 @@ async function planAuditRecovery(reviewId, opened, head) {
     "AUDIT_CORRUPT",
     "complete audit crash tail is malformed",
   );
-  if (canonicalJson(event) !== eventBytes.toString("utf8")) {
-    fail("AUDIT_CORRUPT", "complete audit crash tail is not canonical");
-  }
+  assertStoredCanonicalJson(
+    event,
+    eventBytes.toString("utf8"),
+    "AUDIT_CORRUPT",
+    "complete audit crash tail is not canonical",
+  );
   validateAuditEvent(event, reviewId, head);
   return {
     action: "ADOPT",
@@ -2644,9 +2679,12 @@ async function openAuditSession(paths, reviewId) {
         "AUDIT_CORRUPT",
         "audit head is malformed",
       );
-      if (!openedHead.bytes.equals(canonicalJsonBytes(head))) {
-        fail("AUDIT_CORRUPT", "audit head is not canonical JSON");
-      }
+      assertStoredCanonicalJsonBytes(
+        head,
+        openedHead.bytes,
+        "AUDIT_CORRUPT",
+        "audit head is not canonical JSON",
+      );
       const recovery = await planAuditRecovery(reviewId, opened, head);
       await cleanupAuditHeadTemporaries(paths);
       head = await applyAuditRecovery(paths, opened, recovery);
@@ -2700,9 +2738,12 @@ async function inspectCommittedAudit(handle, committedBytes, reviewId) {
         "AUDIT_CORRUPT",
         `audit event ${eventCount} is malformed`,
       );
-      if (canonicalJson(event) !== line) {
-        fail("AUDIT_CORRUPT", `audit event ${eventCount} is not canonical`);
-      }
+      assertStoredCanonicalJson(
+        event,
+        line,
+        "AUDIT_CORRUPT",
+        `audit event ${eventCount} is not canonical`,
+      );
       validateAuditEvent(event, reviewId, {
         next_sequence: eventCount,
         last_event_sha256: previous,
@@ -2737,9 +2778,12 @@ export async function inspectPublicationAudit(storeRoot, reviewId) {
         "AUDIT_CORRUPT",
         "audit head is malformed",
       );
-      if (!openedHead.bytes.equals(canonicalJsonBytes(head))) {
-        fail("AUDIT_CORRUPT", "audit head is not canonical JSON");
-      }
+      assertStoredCanonicalJsonBytes(
+        head,
+        openedHead.bytes,
+        "AUDIT_CORRUPT",
+        "audit head is not canonical JSON",
+      );
       if (
         head.version !== 1 ||
         head.review_id !== reviewId ||

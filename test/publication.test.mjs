@@ -1524,6 +1524,111 @@ test("parseable non-object store JSON reports structured corruption errors", asy
   });
 });
 
+test("persisted lone surrogates report structured corruption errors", async (t) => {
+  await t.test("publication ledger", async (t) => {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    await start(state, Date.now());
+    const publicationPath = path.join(
+      state.store,
+      "reviews",
+      state.reviewId,
+      "publication.json",
+    );
+    const ledger = JSON.parse(await fsp.readFile(publicationPath, "utf8"));
+    await fsp.writeFile(
+      publicationPath,
+      `${JSON.stringify({ ...ledger, malformed: "\ud800" })}\n`,
+      { mode: 0o600 },
+    );
+
+    for (const operation of [
+      () => getPublication(state.store, state.reviewId),
+      () => verifyPublicationGate(state.store, state.reviewId),
+    ]) {
+      await assert.rejects(
+        operation(),
+        (error) => error?.code === "PUBLICATION_STORE_INVALID",
+      );
+    }
+  });
+
+  await t.test("audit head", async (t) => {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    const { ready, observedAt } = await reachReady(state);
+    await finalizePublicationGate(
+      state.store,
+      state.reviewId,
+      { expectedRevision: ready.revision },
+      { clock: () => observedAt + 20 },
+    );
+    const headPath = path.join(
+      state.store,
+      "reviews",
+      state.reviewId,
+      "publication-gate-audit-head.json",
+    );
+    const head = JSON.parse(await fsp.readFile(headPath, "utf8"));
+    await fsp.writeFile(
+      headPath,
+      `${JSON.stringify({ ...head, malformed: "\ud800" })}\n`,
+      { mode: 0o600 },
+    );
+
+    for (const operation of [
+      () => inspectPublicationAudit(state.store, state.reviewId),
+      () =>
+        verifyPublicationGate(state.store, state.reviewId, {
+          clock: () => observedAt + 30,
+        }),
+    ]) {
+      await assert.rejects(
+        operation(),
+        (error) => error?.code === "AUDIT_CORRUPT",
+      );
+    }
+  });
+
+  await t.test("committed audit event", async (t) => {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    const { ready, observedAt } = await reachReady(state);
+    await finalizePublicationGate(
+      state.store,
+      state.reviewId,
+      { expectedRevision: ready.revision },
+      { clock: () => observedAt + 20 },
+    );
+    const directory = path.join(state.store, "reviews", state.reviewId);
+    const auditPath = path.join(directory, "publication-gate-audit.jsonl");
+    const headPath = path.join(
+      directory,
+      "publication-gate-audit-head.json",
+    );
+    const event = JSON.parse((await fsp.readFile(auditPath, "utf8")).trim());
+    const malformedLine = JSON.stringify({ ...event, malformed: "\ud800" });
+    const head = JSON.parse(await fsp.readFile(headPath, "utf8"));
+    head.committed_bytes = Buffer.byteLength(malformedLine) + 1;
+    head.last_event_sha256 = digest(malformedLine);
+    await fsp.writeFile(auditPath, `${malformedLine}\n`, { mode: 0o600 });
+    await atomicWriteCanonicalJson(headPath, head);
+
+    for (const operation of [
+      () => inspectPublicationAudit(state.store, state.reviewId),
+      () =>
+        verifyPublicationGate(state.store, state.reviewId, {
+          clock: () => observedAt + 30,
+        }),
+    ]) {
+      await assert.rejects(
+        operation(),
+        (error) => error?.code === "AUDIT_CORRUPT",
+      );
+    }
+  });
+});
+
 test("pre-start audit and stored-history invariants report their contract errors", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
