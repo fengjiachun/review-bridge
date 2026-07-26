@@ -402,6 +402,10 @@ assert.match(
   /read all of `successor\.json` and `successor\.diff`/,
 );
 assert.match(reviewInstructions, /Read `patch\.diff` too whenever/);
+assert.match(
+  reviewInstructions,
+  /For every review strategy, inspect relevant source beyond the patch with\s+`read_snapshot_file` and `search_snapshot`/,
+);
 
 const [mcpbBytes, dxtBytes] = await Promise.all([fsp.readFile(mcpb), fsp.readFile(dxt)]);
 assert.equal(

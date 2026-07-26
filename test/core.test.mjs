@@ -543,6 +543,167 @@ test("linked worktrees from the same repository can use successor mode", async (
   assert.equal(child.review_strategy.mode, "SUCCESSOR");
 });
 
+test("dirty current worktrees fall back to full review", async (t) => {
+  for (const scenario of [
+    {
+      name: "modified file",
+      async makeDirty(repository) {
+        await fsp.writeFile(path.join(repository, "app.js"), "dirty child\n");
+      },
+      expectedOverlays: 1,
+    },
+    {
+      name: "deleted file",
+      async makeDirty(repository) {
+        await fsp.unlink(path.join(repository, "child.txt"));
+      },
+      expectedOverlays: 0,
+    },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const { root, repository, store } = await fixture();
+      t.after(() => fsp.rm(root, { recursive: true, force: true }));
+      const baseSha = git(repository, "rev-parse", "HEAD");
+      const parent = await createGatedParent({ repository, store, baseSha });
+      await fsp.writeFile(path.join(repository, "child.txt"), "child\n");
+      git(repository, "add", ".");
+      git(repository, "commit", "-m", "child");
+      await scenario.makeDirty(repository);
+
+      const child = await prepareReview(store, {
+        repositoryPath: repository,
+        baseRef: baseSha,
+        requirement: "Review the fixture.",
+        implementationScope: "Reject a dirty successor worktree.",
+        parentReviewId: parent.id,
+      });
+      assert.equal(child.rounds[0].worktree_clean, false);
+      assert.equal(child.rounds[0].overlays.length, scenario.expectedOverlays);
+      assert.equal(child.review_strategy.mode, "FULL");
+      assert.match(
+        child.review_strategy.fallback_reason,
+        /committed clean worktrees/,
+      );
+    });
+  }
+});
+
+test("a parent without a worktree cleanliness commitment falls back to full review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const parent = await createGatedParent({ repository, store, baseSha });
+  const reviewPath = path.join(store, "reviews", parent.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  delete ledger.rounds[0].worktree_clean;
+  await fsp.writeFile(reviewPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  await fsp.writeFile(path.join(repository, "child.txt"), "child\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "child");
+
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Reject an old parent ledger.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.match(child.review_strategy.fallback_reason, /snapshot commitment/);
+});
+
+test("a tampered worktree cleanliness commitment cannot qualify a successor review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "dirty parent\n");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Review a dirty parent.",
+  });
+  assert.equal(parent.rounds[0].worktree_clean, false);
+  await submitInitialReview(store, parent.id, []);
+  await finalizeLocalGate(store, parent.id);
+
+  const reviewPath = path.join(store, "reviews", parent.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  ledger.rounds[0].worktree_clean = true;
+  await fsp.writeFile(reviewPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  await fsp.writeFile(path.join(repository, "child.txt"), "child\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "commit parent and child");
+
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Reject a tampered parent commitment.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.match(child.review_strategy.fallback_reason, /snapshot commitment/);
+});
+
+test("a divergent parent head falls back to full review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const parent = await createGatedParent({ repository, store, baseSha });
+  git(repository, "switch", "-c", "divergent", baseSha);
+  await fsp.writeFile(path.join(repository, "child.txt"), "child\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "divergent child");
+
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Reject a divergent parent.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.match(child.review_strategy.fallback_reason, /not an ancestor/);
+});
+
+test("a parent from another repository falls back to full review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const parent = await createGatedParent({ repository, store, baseSha });
+  const otherRepository = path.join(root, "other-repo");
+  await fsp.mkdir(otherRepository);
+  git(otherRepository, "init", "-b", "main");
+  git(otherRepository, "config", "user.name", "Review Bridge Test");
+  git(
+    otherRepository,
+    "config",
+    "user.email",
+    "review-bridge@example.invalid",
+  );
+  await fsp.writeFile(path.join(otherRepository, "app.js"), "other\n");
+  git(otherRepository, "add", ".");
+  git(otherRepository, "commit", "-m", "other base");
+  const otherBaseSha = git(otherRepository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(otherRepository, "child.txt"), "child\n");
+  git(otherRepository, "add", ".");
+  git(otherRepository, "commit", "-m", "other child");
+
+  const child = await prepareReview(store, {
+    repositoryPath: otherRepository,
+    baseRef: otherBaseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Reject a parent from another repository.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.match(
+    child.review_strategy.fallback_reason,
+    /different repository/,
+  );
+});
+
 test("oversized successor proof generation falls back to full review", async (t) => {
   const { root, repository, store } = await fixture();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));

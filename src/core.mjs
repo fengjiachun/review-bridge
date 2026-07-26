@@ -258,6 +258,8 @@ async function buildSnapshot({
   const untracked = splitNul(
     runGit(repository, ["ls-files", "--others", "--exclude-standard", "-z"]),
   );
+  const worktreeClean =
+    workingTreeChanges.length === 0 && untracked.length === 0;
 
   const patchParts = [trackedPatch];
   for (const relativePath of untracked) {
@@ -319,6 +321,7 @@ async function buildSnapshot({
       changedFiles,
       deletedFiles,
       overlays,
+      worktreeClean,
     }),
   );
   hash.update(patch);
@@ -335,6 +338,7 @@ async function buildSnapshot({
     changed_files: changedFiles,
     deleted_files: deletedFiles,
     overlays,
+    worktree_clean: worktreeClean,
     patch_bytes: patch.length,
   };
 
@@ -360,6 +364,7 @@ async function snapshotHashFromReviewRound(
     !Array.isArray(round.changed_files) ||
     !Array.isArray(round.deleted_files) ||
     !Array.isArray(round.overlays) ||
+    typeof round.worktree_clean !== "boolean" ||
     typeof review.requirement !== "string" ||
     typeof review.implementation_scope !== "string"
   ) {
@@ -384,6 +389,7 @@ async function snapshotHashFromReviewRound(
       changedFiles: round.changed_files,
       deletedFiles: round.deleted_files,
       overlays: round.overlays,
+      worktreeClean: round.worktree_clean,
     }),
   );
   hash.update(patch);
@@ -548,9 +554,8 @@ async function buildSuccessorArtifacts({
     return fullStrategy("parent and successor must use the same requirement");
   }
   if (
-    !Array.isArray(parentRound.overlays) ||
-    parentRound.overlays.length > 0 ||
-    manifest.overlays.length > 0
+    parentRound.worktree_clean !== true ||
+    manifest.worktree_clean !== true
   ) {
     return fullStrategy("successor reviews require committed clean worktrees");
   }
