@@ -11,15 +11,15 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = process.env.REVIEW_BRIDGE_OUTPUT_ROOT
   ? path.resolve(process.env.REVIEW_BRIDGE_OUTPUT_ROOT)
-  : path.join(projectRoot, "dist", "review-bridge-v0.2.0");
+  : path.join(projectRoot, "dist", "review-bridge-v0.3.0");
 const marketplaceRoot = path.join(outputRoot, "codex-marketplace");
 const pluginRoot = path.join(marketplaceRoot, "plugins", "review-bridge");
 const authorServer = path.join(pluginRoot, "server", "server.mjs");
 const reviewerRoot = path.join(outputRoot, "claude-extension-source");
 const reviewerServer = path.join(reviewerRoot, "server", "server.mjs");
-const mcpb = path.join(outputRoot, "review-bridge-reviewer-v0.2.0.mcpb");
-const dxt = path.join(outputRoot, "review-bridge-reviewer-v0.2.0.dxt");
-const sourceArchive = path.join(outputRoot, "review-bridge-source-v0.2.0.zip");
+const mcpb = path.join(outputRoot, "review-bridge-reviewer-v0.3.0.mcpb");
+const dxt = path.join(outputRoot, "review-bridge-reviewer-v0.3.0.dxt");
+const sourceArchive = path.join(outputRoot, "review-bridge-source-v0.3.0.zip");
 
 function run(command, args, cwd) {
   const result = spawnSync(command, args, {
@@ -42,7 +42,7 @@ async function connect(serverPath, role, store) {
     env: { ...process.env, REVIEW_BRIDGE_HOME: store },
     stderr: "pipe",
   });
-  const client = new Client({ name: "review-bridge-verifier", version: "0.2.0" });
+  const client = new Client({ name: "review-bridge-verifier", version: "0.3.0" });
   await client.connect(transport);
   return client;
 }
@@ -289,7 +289,7 @@ assert.equal(marketplace.plugins[0].source.path, "./plugins/review-bridge");
 
 const plugin = await readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
 assert.equal(plugin.name, "review-bridge");
-assert.equal(plugin.version, "0.2.0");
+assert.equal(plugin.version, "0.3.0");
 assert.equal(plugin.mcpServers, "./.mcp.json");
 const workflowSkillPath = path.join(
   pluginRoot,
@@ -322,6 +322,9 @@ assert.match(workflowSkill, /immediately call\s+`record_codex_review_request`/);
 assert.match(workflowSkill, /formal review bound by native\s+`commit_id`/);
 assert.match(workflowSkill, /get_review_summary/);
 assert.match(workflowSkill, /wait_for_review_state/);
+assert.match(workflowSkill, /pass that task as `parent_review_id`/);
+assert.match(workflowSkill, /Start a fresh Claude Desktop conversation/);
+assert.match(workflowSkill, /For `SUCCESSOR`, require Claude to read/);
 assert.match(workflowSkill, /A `timed_out` result is expected/);
 assert.match(
   workflowSkill,
@@ -387,8 +390,18 @@ assert.equal(
 
 const extension = await readJson(path.join(reviewerRoot, "manifest.json"));
 assert.equal(extension.manifest_version, "0.3");
-assert.equal(extension.version, "0.2.0");
+assert.equal(extension.version, "0.3.0");
 assert.equal(extension.server.entry_point, "server/server.mjs");
+const reviewInstructions = await fsp.readFile(
+  path.join(reviewerRoot, "REVIEW_INSTRUCTIONS.md"),
+  "utf8",
+);
+assert.match(reviewInstructions, /Follow the returned `review_strategy`/);
+assert.match(
+  reviewInstructions,
+  /read all of `successor\.json` and `successor\.diff`/,
+);
+assert.match(reviewInstructions, /Read `patch\.diff` too whenever/);
 
 const [mcpbBytes, dxtBytes] = await Promise.all([fsp.readFile(mcpb), fsp.readFile(dxt)]);
 assert.equal(
@@ -627,6 +640,55 @@ try {
     );
     assert.equal(auditInspection.status, 0, auditInspection.stderr);
     assert.equal(JSON.parse(auditInspection.stdout).valid, true);
+
+    await fsp.writeFile(
+      path.join(repository, "value.test.js"),
+      "import assert from 'node:assert/strict';\nimport { value } from './value.js';\nassert.equal(value, 2);\nassert.equal(typeof value, 'number');\n",
+    );
+    run("git", ["add", "."], repository);
+    run("git", ["commit", "-m", "strengthen focused test"], repository);
+    const successorHeadSha = run("git", ["rev-parse", "HEAD"], repository);
+    const successor = await call(author, "prepare_review", {
+      repository_path: repository,
+      base_ref: baseSha,
+      requirement: "Change the exported value to 2.",
+      implementation_scope: "Strengthen the focused test.",
+      parent_review_id: prepared.id,
+    });
+    assert.equal(successor.review_strategy.mode, "SUCCESSOR");
+    const successorOpened = await call(reviewer, "open_review", {
+      review_id: successor.id,
+    });
+    assert.deepEqual(
+      successorOpened.artifacts.map((artifact) => artifact.name),
+      ["successor.diff", "successor.json", "patch.diff", "manifest.json"],
+    );
+    const successorPatch = await call(reviewer, "read_review_artifact", {
+      review_id: successor.id,
+      round: 1,
+      artifact: "successor.diff",
+    });
+    assert.match(successorPatch.content, /typeof value/);
+    assert.doesNotMatch(successorPatch.content, /value = 2/);
+    const successorProof = JSON.parse(
+      (
+        await call(reviewer, "read_review_artifact", {
+          review_id: successor.id,
+          round: 1,
+          artifact: "successor.json",
+        })
+      ).content,
+    );
+    assert.equal(successorProof.parent_head_sha, headSha);
+    assert.equal(successorProof.current_head_sha, successorHeadSha);
+    await call(reviewer, "submit_review", {
+      review_id: successor.id,
+      findings: [],
+    });
+    const successorGate = await call(author, "finalize_local_gate", {
+      review_id: successor.id,
+    });
+    assert.equal(successorGate.gate.head_sha, successorHeadSha);
   } finally {
     await reviewer.close();
     await author.close();
@@ -636,5 +698,5 @@ try {
 }
 
 process.stdout.write(
-  "Packaged Codex and Claude clients completed the local and publication flows.\n",
+  "Packaged Codex and Claude clients completed full, successor, and publication flows.\n",
 );

@@ -49,13 +49,13 @@ const storeRoot = defaultStoreRoot();
 const server = new McpServer(
   {
     name: `review-bridge-${role}`,
-    version: "0.2.0",
+    version: "0.3.0",
   },
   {
     instructions:
       role === "author"
         ? "Create immutable local review tasks for Claude, answer every finding, and finalize only CLEAN snapshots."
-        : "Review immutable Codex snapshots. Read the requirement, scope, patch, and relevant source before submitting structured findings.",
+        : "Review immutable Codex snapshots. For SUCCESSOR tasks, completely read the successor proof and exact delta, inspect relevant source, callers, contracts, and tests, and expand to the full patch whenever risk or uncertainty warrants it. For FULL tasks, completely read the full patch. Submit structured findings only after sufficient context is inspected.",
   },
 );
 
@@ -117,6 +117,7 @@ if (role === "author") {
         base_ref: z.string(),
         requirement: z.string(),
         implementation_scope: z.string(),
+        parent_review_id: z.string().optional(),
       },
     },
     (input) =>
@@ -125,6 +126,7 @@ if (role === "author") {
         baseRef: input.base_ref,
         requirement: input.requirement,
         implementationScope: input.implementation_scope,
+        parentReviewId: input.parent_review_id ?? null,
       }),
   );
 
@@ -435,11 +437,17 @@ if (role === "author") {
     "read_review_artifact",
     {
       title: "Read review artifact",
-      description: "Read a chunk of the patch or snapshot manifest.",
+      description:
+        "Read a chunk of a successor delta/proof or the full patch/snapshot manifest.",
       inputSchema: {
         review_id: z.string(),
         round: z.number().int().min(1).max(2),
-        artifact: z.enum(["patch.diff", "manifest.json"]),
+        artifact: z.enum([
+          "successor.diff",
+          "successor.json",
+          "patch.diff",
+          "manifest.json",
+        ]),
         offset: z.number().int().nonnegative().optional(),
         limit: z.number().int().positive().max(200000).optional(),
       },

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 - 2026-07-26
+
+### Added
+
+- Successor reviews bind a prior local gate, parent/current Git trees, and the
+  exact intervening commit delta while retaining the full snapshot for
+  risk-driven expansion and final verification.
+- Explicit `FULL` fallback records why a requested successor proof was
+  ineligible instead of silently weakening review context.
+
+### Changed
+
+- The packaged workflow starts a fresh Claude conversation for every new review
+  task and uses focused successor context only after server-side proof checks.
+
 ## 0.2.0 - 2026-07-26
 
 ### Added
