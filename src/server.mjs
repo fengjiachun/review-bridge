@@ -61,14 +61,25 @@ function register(name, config, handler) {
     try {
       return response(await handler(input));
     } catch (error) {
+      const payload = {
+        error: error instanceof Error ? error.message : String(error),
+      };
+      if (typeof error?.code === "string") {
+        payload.code = error.code;
+      }
+      if (
+        error?.details != null &&
+        typeof error.details === "object" &&
+        !Array.isArray(error.details)
+      ) {
+        payload.details = error.details;
+      }
       return {
         isError: true,
         content: [
           {
             type: "text",
-            text: JSON.stringify({
-              error: error instanceof Error ? error.message : String(error),
-            }),
+            text: JSON.stringify(payload),
           },
         ],
       };

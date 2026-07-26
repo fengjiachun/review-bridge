@@ -49,6 +49,14 @@ Do not push or open a pull request while the task is waiting for Claude.
 
 Keep fixes surgical. Do not mark a finding fixed without verification evidence.
 
+## Lock contention
+
+State-changing author and reviewer tools can return a structured `REVIEW_BUSY`
+error with `details.retryable: true` after a bounded lock wait. Reread the
+review summary and retry the same transition only if it is still required.
+Treat `details.retryable: false` as fail-closed and resolve the reported cause
+before retrying.
+
 ## Finish
 
 - If Claude returns `CLEAN`, call `finalize_local_gate`.

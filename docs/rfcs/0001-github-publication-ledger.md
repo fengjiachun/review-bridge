@@ -2332,10 +2332,12 @@ coordinated operation rather than a check-then-unlink race between contenders,
 without starting a new process for every transition.
 
 Each `lockf` wrapper and its Node helper run in a dedicated process group. A
-command that does not answer within five seconds causes the parent to terminate
-that entire group before performing token-checked cleanup under a new guard
-holder. The `/bin/ps` probes used for process identity have their own two-second
-limit, so neither a helper command nor its liveness probe can wait forever.
+command that does not answer within five seconds gets one event-loop poll phase
+to deliver a response that became ready while synchronous repository work
+blocked the parent. If it is still unanswered, the parent terminates that entire
+process group before performing token-checked cleanup under a new guard holder.
+The `/bin/ps` probes used for process identity have their own two-second limit,
+so neither a helper command nor its liveness probe can wait forever.
 
 The holder refreshes a heartbeat every five seconds with atomic replacement and
 releases in a `finally` block only after rereading the lock under the guard and
@@ -2358,6 +2360,12 @@ parent reacquires the guard for token-checked cleanup; if the parent itself
 exits, stale-owner recovery becomes possible only after the same conclusive
 identity check. Helper loss can reduce availability, but cannot silently create
 concurrent cooperating owners.
+
+A missing or foreign owner record is different from helper loss: it proves that
+the logical owner changed. The release path surfaces that condition to the MCP
+caller as `LOCK_OWNERSHIP_LOST` after token-safe cleanup instead of returning a
+successful mutation result. Lock errors retain their structured code and
+`details.retryable` value at the tool boundary.
 
 An acquisition timeout returns a documented retryable `REVIEW_BUSY` or
 `PUBLICATION_BUSY` error without changing state. Adding `REVIEW_BUSY` to
@@ -3019,9 +3027,12 @@ The implementation must test:
   through full-closure direct-human ambiguity approval, direct
   automatic-quiescence approval when applicable, stable Bot actor-ID
   resolution, and immediate pre-merge gate verification;
-- lock timeout errors, `lockf` contention versus non-contention exits, stable
-  guard inodes, PID reuse, heartbeat expiry, helper loss, owner-token mismatch,
-  token absence from process arguments, and inconclusive owner-liveness checks;
+- retryable acquisition deadlines versus non-retryable helper timeouts,
+  structured MCP error fields, `lockf` contention versus non-contention exits,
+  stable guard inodes, PID reuse, heartbeat expiry, event-loop stalls,
+  idempotent process-group termination, helper loss, owner-token mismatch and
+  propagation, token absence from process arguments, and inconclusive
+  owner-liveness checks;
 - every state-changing publication tool returning
   `PUBLICATION_TERMINAL` against each terminal status without changing the
   ledger, gate, or audit entries;

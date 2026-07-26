@@ -38,8 +38,8 @@ Set `REVIEW_BRIDGE_HOME` to override it. When installing the Claude extension,
 select the same directory in its configuration.
 
 Install the author plugin and reviewer extension from the same Review Bridge
-release. Pre-v0.2 processes do not participate in the v0.2 inter-process
-locking protocol.
+build. Do not mix a locking-enabled build with artifacts from an earlier
+release; earlier processes do not participate in the locking protocol.
 
 ## Install the Codex plugin
 
@@ -82,6 +82,12 @@ to 30 seconds, and returns the same compact summary without repeated full-ledger
 polling. A timed-out wait is expected while a human-paced review is still in
 progress; call it again with the same `state_version`, or resume when the user
 confirms the review is complete.
+
+State-changing tools can return a structured `REVIEW_BUSY` error with
+`details.retryable: true` after a bounded lock wait. Reread the review summary
+and retry the same transition only if it is still required. Treat errors with
+`details.retryable: false` as fail-closed and resolve their stated cause before
+retrying.
 
 In Claude Desktop:
 
@@ -162,8 +168,8 @@ PR head.
   files are read from the captured Git object ID.
 - Files larger than 10 MiB are recorded but not copied into the snapshot.
 - Review state changes are serialized per review across author and reviewer
-  processes from the same v0.2-or-newer release. Pre-v0.2 processes do not
-  participate in that locking protocol.
+  processes from the same locking-enabled build. Earlier processes do not
+  participate in that protocol.
 - The local gate and publication gate are workflow attestations, not Git or
   GitHub security boundaries. v0.1 does not install a `pre-push` hook.
 - The Review Bridge MCP server receives no GitHub credentials. The packaged

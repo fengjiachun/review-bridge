@@ -88,11 +88,6 @@ async function atomicWriteJson(filePath, value) {
   await atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-async function writePrivateFile(filePath, data) {
-  await fsp.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  await fsp.writeFile(filePath, data, { mode: 0o600 });
-}
-
 function reviewDirectory(storeRoot, reviewId) {
   assertReviewId(reviewId);
   return path.join(storeRoot, "reviews", reviewId);
@@ -340,7 +335,7 @@ async function buildSnapshot({
   };
 
   if (writeFiles) {
-    await writePrivateFile(path.join(roundRoot, "patch.diff"), patch);
+    await atomicWriteFile(path.join(roundRoot, "patch.diff"), patch);
     await atomicWriteJson(path.join(roundRoot, "manifest.json"), manifest);
   }
   return { manifest, patch };

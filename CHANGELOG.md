@@ -7,6 +7,16 @@
 - Compact author-side review summaries and bounded state-change waits.
 - Integer state versions keep wait cursors independent from wall-clock
   formatting and clock skew.
+- Per-review cross-process locking serializes author and reviewer state
+  mutations.
+
+### Changed
+
+- Locking-enabled builds require the macOS system tools `/usr/bin/lockf` and
+  `/bin/ps`, and the author and reviewer artifacts must come from the same
+  build.
+- Contended state-changing tools return structured, retryable `REVIEW_BUSY`
+  errors after a bounded wait.
 
 ### Fixed
 

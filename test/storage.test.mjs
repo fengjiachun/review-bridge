@@ -4,6 +4,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   acquireStateLock,
   atomicWriteFile,
@@ -12,6 +13,9 @@ import {
 } from "../src/storage.mjs";
 
 const PROCESS_START_FORMAT = "darwin-ps-lstart-c-utc-v1";
+const STORAGE_MODULE_PATH = fileURLToPath(
+  new URL("../src/storage.mjs", import.meta.url),
+);
 
 async function temporaryDirectory(t, prefix) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -83,7 +87,7 @@ function stateLockProcesses(coordinatorPath) {
       row.command.includes(` ${coordinatorPath} `),
   );
   assert.equal(lockfRows.length, 1);
-  const marker = `${path.resolve("src/storage.mjs")} --state-lock-helper`;
+  const marker = `${STORAGE_MODULE_PATH} --state-lock-helper`;
   const helperRows = rows.filter(
     (row) =>
       row.parentPid === lockfRows[0].pid &&
@@ -369,6 +373,22 @@ test("lock timing configuration rejects an unsafe heartbeat interval", async (t)
   );
 });
 
+test("an expired acquisition budget returns retryable REVIEW_BUSY", async (t) => {
+  const root = await temporaryDirectory(t, "review-bridge-lock-deadline-");
+  await assert.rejects(
+    acquireStateLock({
+      directory: root,
+      reviewId: "rb-test",
+      domain: "review",
+      waitMs: 1,
+    }),
+    (error) =>
+      error instanceof StoreError &&
+      error.code === "REVIEW_BUSY" &&
+      error.details.retryable === true,
+  );
+});
+
 test("withStateLock releases after an operation throws", async (t) => {
   const root = await temporaryDirectory(t, "review-bridge-lock-throw-");
   const sentinel = new Error("sentinel");
@@ -418,24 +438,68 @@ test("a transient heartbeat failure does not poison release", async (t) => {
   assert.equal(await exists(lockPath), false);
 });
 
-test("lock release never removes a replacement owner inode", async (t) => {
+test("lock release reports a replacement owner without removing it", async (t) => {
   const root = await temporaryDirectory(t, "review-bridge-lock-token-");
   const lockPath = path.join(root, ".review-state.lock");
-  const release = await acquireStateLock({
-    directory: root,
-    reviewId: "rb-test",
-    domain: "review",
+  const warnings = await captureWarnings(async () => {
+    await assert.rejects(
+      withStateLock(
+        {
+          directory: root,
+          reviewId: "rb-test",
+          domain: "review",
+        },
+        async () => {
+          const replacement = JSON.parse(
+            await fsp.readFile(lockPath, "utf8"),
+          );
+          replacement.owner_token = "f".repeat(32);
+          await fsp.unlink(lockPath);
+          await writeLockRecord(lockPath, replacement);
+        },
+      ),
+      (error) =>
+        error instanceof StoreError &&
+        error.code === "LOCK_OWNERSHIP_LOST" &&
+        error.details.status === "FOREIGN_OWNER",
+    );
   });
-  const replacement = JSON.parse(await fsp.readFile(lockPath, "utf8"));
-  replacement.owner_token = "f".repeat(32);
-  await fsp.unlink(lockPath);
-  await writeLockRecord(lockPath, replacement);
-  const warnings = await captureWarnings(release);
-  assert.deepEqual(
-    warnings.map(({ options }) => options?.code),
-    ["REVIEW_BRIDGE_LOCK_CLEANUP"],
+  assert.deepEqual(warnings, []);
+  assert.equal(
+    JSON.parse(await fsp.readFile(lockPath, "utf8")).owner_token,
+    "f".repeat(32),
   );
-  assert.match(warnings[0].warning, /found FOREIGN_OWNER/);
+});
+
+test("operation and ownership-loss errors retain a structured lock code", async (t) => {
+  const root = await temporaryDirectory(t, "review-bridge-lock-combined-");
+  const lockPath = path.join(root, ".review-state.lock");
+  const operationError = new StoreError("OPERATION_FAILED", "operation failed");
+  await assert.rejects(
+    withStateLock(
+      {
+        directory: root,
+        reviewId: "rb-test",
+        domain: "review",
+      },
+      async () => {
+        const replacement = JSON.parse(
+          await fsp.readFile(lockPath, "utf8"),
+        );
+        replacement.owner_token = "f".repeat(32);
+        await fsp.unlink(lockPath);
+        await writeLockRecord(lockPath, replacement);
+        throw operationError;
+      },
+    ),
+    (error) =>
+      error instanceof AggregateError &&
+      error.errors[0] === operationError &&
+      error.code === "LOCK_OWNERSHIP_LOST" &&
+      error.details.retryable === false &&
+      error.details.operation_code === "OPERATION_FAILED" &&
+      error.details.release_code === "LOCK_OWNERSHIP_LOST",
+  );
   assert.equal(
     JSON.parse(await fsp.readFile(lockPath, "utf8")).owner_token,
     "f".repeat(32),
@@ -529,8 +593,34 @@ test("a hung helper is killed as one process group before cleanup", async (t) =>
     warnings.map(({ options }) => options?.code),
     ["REVIEW_BRIDGE_LOCK_CLEANUP"],
   );
-  assert.match(warnings[0].warning, /did not respond within 5000ms/);
+  assert.match(
+    warnings[0].warning,
+    /LOCK_HELPER_TIMEOUT: state-lock helper did not respond within 5000ms/,
+  );
+  assert.doesNotMatch(warnings[0].warning, /LOCK_HELPER_KILL_FAILED/);
   await waitForProcessExit(helperPid);
   await waitForProcessExit(lockfPid);
   assert.equal(await exists(lockPath), false);
+});
+
+test("a blocked event loop does not time out a completed heartbeat", async (t) => {
+  const root = await temporaryDirectory(t, "review-bridge-lock-blocked-loop-");
+  const release = await acquireStateLock({
+    directory: root,
+    reviewId: "rb-test",
+    domain: "review",
+    heartbeatMs: 20,
+  });
+  const warnings = await captureWarnings(async () => {
+    await new Promise((resolve) => {
+      setTimeout(() => {
+        const blocked = spawnSync("/bin/sleep", ["6"]);
+        assert.equal(blocked.status, 0, blocked.stderr?.toString("utf8"));
+        resolve();
+      }, 20);
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await release();
+  });
+  assert.deepEqual(warnings, []);
 });
