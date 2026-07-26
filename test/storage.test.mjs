@@ -415,6 +415,29 @@ test("withStateLock releases after an operation throws", async (t) => {
   await release();
 });
 
+test("withStateLock preserves null and undefined rejections", async (t) => {
+  const root = await temporaryDirectory(t, "review-bridge-lock-falsy-");
+  for (const thrown of [null, undefined]) {
+    let caught = false;
+    try {
+      await withStateLock(
+        {
+          directory: root,
+          reviewId: "rb-test",
+          domain: "review",
+        },
+        async () => {
+          throw thrown;
+        },
+      );
+    } catch (error) {
+      caught = true;
+      assert.equal(error, thrown);
+    }
+    assert.equal(caught, true);
+  }
+});
+
 test("a transient heartbeat failure does not poison release", async (t) => {
   const root = await temporaryDirectory(t, "review-bridge-lock-heartbeat-");
   const lockPath = path.join(root, ".review-state.lock");
@@ -498,6 +521,7 @@ test("operation and ownership-loss errors retain a structured lock code", async 
       error.code === "LOCK_OWNERSHIP_LOST" &&
       error.details.retryable === false &&
       error.details.operation_code === "OPERATION_FAILED" &&
+      error.details.operation_message === "operation failed" &&
       error.details.release_code === "LOCK_OWNERSHIP_LOST",
   );
   assert.equal(
@@ -612,11 +636,16 @@ test("a blocked event loop does not time out a completed heartbeat", async (t) =
     heartbeatMs: 20,
   });
   const warnings = await captureWarnings(async () => {
-    await new Promise((resolve) => {
-      setTimeout(() => {
-        const blocked = spawnSync("/bin/sleep", ["6"]);
-        assert.equal(blocked.status, 0, blocked.stderr?.toString("utf8"));
-        resolve();
+    await new Promise((resolve, reject) => {
+      setTimeout(async () => {
+        try {
+          await fsp.readFile(path.join(root, ".review-state.lock"));
+          const blocked = spawnSync("/bin/sleep", ["6"]);
+          assert.equal(blocked.status, 0, blocked.stderr?.toString("utf8"));
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
       }, 20);
     });
     await new Promise((resolve) => setImmediate(resolve));

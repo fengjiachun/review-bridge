@@ -1020,16 +1020,18 @@ export async function acquireStateLock({
 export async function withStateLock(options, operation) {
   const release = await acquireStateLock(options);
   let result;
+  let operationFailed = false;
   let operationError;
   try {
     result = await operation();
   } catch (error) {
+    operationFailed = true;
     operationError = error;
   }
   try {
     await release();
   } catch (releaseError) {
-    if (operationError != null) {
+    if (operationFailed) {
       const combined = new AggregateError(
         [operationError, releaseError],
         "state operation and lock release both failed",
@@ -1039,13 +1041,17 @@ export async function withStateLock(options, operation) {
         ...(releaseError?.details ?? {}),
         retryable: false,
         operation_code: operationError?.code ?? null,
+        operation_message:
+          operationError instanceof Error
+            ? operationError.message
+            : String(operationError),
         release_code: releaseError?.code ?? null,
       };
       throw combined;
     }
     throw releaseError;
   }
-  if (operationError != null) {
+  if (operationFailed) {
     throw operationError;
   }
   return result;
