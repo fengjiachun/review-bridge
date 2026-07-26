@@ -3,7 +3,12 @@ import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { atomicWriteFile, withStateLock } from "./storage.mjs";
+import {
+  atomicWriteFile,
+  canonicalJson,
+  removeAndSync,
+  withStateLock,
+} from "./storage.mjs";
 
 export const MAX_ROUNDS = 2;
 const MAX_GIT_OUTPUT = 64 * 1024 * 1024;
@@ -344,6 +349,93 @@ function sha256(content) {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
+async function snapshotHashFromReviewRound(
+  storeRoot,
+  reviewId,
+  review,
+  round,
+) {
+  if (
+    !Number.isInteger(round?.round) ||
+    !Array.isArray(round.changed_files) ||
+    !Array.isArray(round.deleted_files) ||
+    !Array.isArray(round.overlays) ||
+    typeof review.requirement !== "string" ||
+    typeof review.implementation_scope !== "string"
+  ) {
+    throw new Error("review round is malformed");
+  }
+  const patch = await fsp.readFile(
+    path.join(
+      roundDirectory(storeRoot, reviewId, round.round),
+      "patch.diff",
+    ),
+  );
+  if (patch.length !== round.patch_bytes) {
+    throw new Error("review patch length does not match its ledger");
+  }
+  const hash = crypto.createHash("sha256");
+  hash.update(
+    JSON.stringify({
+      baseSha: round.base_sha,
+      headSha: round.head_sha,
+      requirement: review.requirement,
+      implementationScope: review.implementation_scope,
+      changedFiles: round.changed_files,
+      deletedFiles: round.deleted_files,
+      overlays: round.overlays,
+    }),
+  );
+  hash.update(patch);
+  return hash.digest("hex");
+}
+
+async function repositoryIdentity(repositoryPath) {
+  const commonDirectory = runGit(
+    repositoryPath,
+    ["rev-parse", "--git-common-dir"],
+    { encoding: "utf8" },
+  ).trim();
+  return fsp.realpath(
+    path.isAbsolute(commonDirectory)
+      ? commonDirectory
+      : path.resolve(repositoryPath, commonDirectory),
+  );
+}
+
+async function verifySuccessorArtifacts(
+  storeRoot,
+  reviewId,
+  selectedRound,
+) {
+  if (selectedRound.successor == null) {
+    return null;
+  }
+  try {
+    const root = roundDirectory(storeRoot, reviewId, selectedRound.round);
+    const [delta, proofBytes] = await Promise.all([
+      fsp.readFile(path.join(root, "successor.diff")),
+      fsp.readFile(path.join(root, "successor.json")),
+    ]);
+    if (
+      delta.length !== selectedRound.successor.delta_bytes ||
+      sha256(delta) !== selectedRound.successor.delta_sha256
+    ) {
+      throw new Error("successor delta does not match its ledger");
+    }
+    const proof = JSON.parse(proofBytes.toString("utf8"));
+    if (canonicalJson(proof) !== canonicalJson(selectedRound.successor)) {
+      throw new Error("successor proof does not match its ledger");
+    }
+    return {
+      "successor.diff": delta,
+      "successor.json": proofBytes,
+    };
+  } catch {
+    throw new Error("successor artifact integrity check failed");
+  }
+}
+
 async function buildSuccessorArtifacts({
   storeRoot,
   parentReviewId,
@@ -372,6 +464,9 @@ async function buildSuccessorArtifacts({
     parent = await loadReview(storeRoot, parentReviewId);
   } catch {
     return fullStrategy("parent review is unavailable");
+  }
+  if (parent.id !== parentReviewId) {
+    return fullStrategy("parent review id does not match the requested review");
   }
   if (parent.status !== "LOCAL_GATE_PASSED") {
     return fullStrategy("parent review must be LOCAL_GATE_PASSED");
@@ -406,6 +501,23 @@ async function buildSuccessorArtifacts({
   ) {
     return fullStrategy("parent review ledger is malformed");
   }
+  try {
+    const snapshotHash = await snapshotHashFromReviewRound(
+      storeRoot,
+      parentReviewId,
+      parent,
+      parentRound,
+    );
+    if (snapshotHash !== parent.clean_snapshot_hash) {
+      return fullStrategy(
+        "parent review ledger does not match its clean snapshot commitment",
+      );
+    }
+  } catch {
+    return fullStrategy(
+      "parent review ledger does not match its clean snapshot commitment",
+    );
+  }
   if (
     gate?.version !== 1 ||
     gate.review_id !== parent.id ||
@@ -416,7 +528,17 @@ async function buildSuccessorArtifacts({
   ) {
     return fullStrategy("parent gate does not match the clean parent snapshot");
   }
-  if (parent.repository_path !== repositoryPath) {
+  let parentRepositoryIdentity;
+  let currentRepositoryIdentity;
+  try {
+    [parentRepositoryIdentity, currentRepositoryIdentity] = await Promise.all([
+      repositoryIdentity(parent.repository_path),
+      repositoryIdentity(repositoryPath),
+    ]);
+  } catch {
+    return fullStrategy("cannot verify the parent repository identity");
+  }
+  if (parentRepositoryIdentity !== currentRepositoryIdentity) {
     return fullStrategy("parent review belongs to a different repository");
   }
   if (parentRound.base_sha !== manifest.base_sha) {
@@ -450,73 +572,79 @@ async function buildSuccessorArtifacts({
     return fullStrategy("parent head is not an ancestor of the successor head");
   }
 
-  const delta = Buffer.from(
-    runGit(repositoryPath, [
-      "diff",
-      "--binary",
-      "--full-index",
-      "--no-ext-diff",
-      parentRound.head_sha,
-      manifest.head_sha,
-      "--",
-    ]),
-  );
-  const changedFiles = splitNul(
-    runGit(repositoryPath, [
-      "diff",
-      "--name-only",
-      "-z",
-      parentRound.head_sha,
-      manifest.head_sha,
-      "--",
-    ]),
-  ).sort();
-  const deletedFiles = splitNul(
-    runGit(repositoryPath, [
-      "diff",
-      "--name-only",
-      "--diff-filter=D",
-      "-z",
-      parentRound.head_sha,
-      manifest.head_sha,
-      "--",
-    ]),
-  ).sort();
-  const parentTreeSha = runGit(
-    repositoryPath,
-    ["rev-parse", `${parentRound.head_sha}^{tree}`],
-    { encoding: "utf8" },
-  ).trim();
-  const currentTreeSha = runGit(
-    repositoryPath,
-    ["rev-parse", `${manifest.head_sha}^{tree}`],
-    { encoding: "utf8" },
-  ).trim();
-  const successor = {
-    version: 1,
-    parent_review_id: parent.id,
-    parent_snapshot_hash: parent.clean_snapshot_hash,
-    parent_gate_sha256: sha256(gateBytes),
-    base_sha: manifest.base_sha,
-    parent_head_sha: parentRound.head_sha,
-    current_head_sha: manifest.head_sha,
-    parent_tree_sha: parentTreeSha,
-    current_tree_sha: currentTreeSha,
-    changed_files: changedFiles,
-    deleted_files: deletedFiles,
-    delta_bytes: delta.length,
-    delta_sha256: sha256(delta),
-  };
-  await atomicWriteFile(path.join(roundRoot, "successor.diff"), delta);
-  await atomicWriteJson(path.join(roundRoot, "successor.json"), successor);
-  return {
-    strategy: {
-      mode: "SUCCESSOR",
+  try {
+    const delta = Buffer.from(
+      runGit(repositoryPath, [
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        parentRound.head_sha,
+        manifest.head_sha,
+        "--",
+      ]),
+    );
+    const changedFiles = splitNul(
+      runGit(repositoryPath, [
+        "diff",
+        "--name-only",
+        "-z",
+        parentRound.head_sha,
+        manifest.head_sha,
+        "--",
+      ]),
+    ).sort();
+    const deletedFiles = splitNul(
+      runGit(repositoryPath, [
+        "diff",
+        "--name-only",
+        "--diff-filter=D",
+        "-z",
+        parentRound.head_sha,
+        manifest.head_sha,
+        "--",
+      ]),
+    ).sort();
+    const parentTreeSha = runGit(
+      repositoryPath,
+      ["rev-parse", `${parentRound.head_sha}^{tree}`],
+      { encoding: "utf8" },
+    ).trim();
+    const currentTreeSha = runGit(
+      repositoryPath,
+      ["rev-parse", `${manifest.head_sha}^{tree}`],
+      { encoding: "utf8" },
+    ).trim();
+    const successor = {
+      version: 1,
       parent_review_id: parent.id,
-      fallback_reason: null,
-    },
-    successor,
-  };
+      parent_snapshot_hash: parent.clean_snapshot_hash,
+      parent_gate_sha256: sha256(gateBytes),
+      base_sha: manifest.base_sha,
+      parent_head_sha: parentRound.head_sha,
+      current_head_sha: manifest.head_sha,
+      parent_tree_sha: parentTreeSha,
+      current_tree_sha: currentTreeSha,
+      changed_files: changedFiles,
+      deleted_files: deletedFiles,
+      delta_bytes: delta.length,
+      delta_sha256: sha256(delta),
+    };
+    await atomicWriteFile(path.join(roundRoot, "successor.diff"), delta);
+    await atomicWriteJson(path.join(roundRoot, "successor.json"), successor);
+    return {
+      strategy: {
+        mode: "SUCCESSOR",
+        parent_review_id: parent.id,
+        fallback_reason: null,
+      },
+      successor,
+    };
+  } catch (error) {
+    await removeAndSync(path.join(roundRoot, "successor.diff")).catch(() => {});
+    await removeAndSync(path.join(roundRoot, "successor.json")).catch(() => {});
+    return fullStrategy(`cannot build successor artifacts: ${error.message}`);
+  }
 }
 
 function publicReview(review) {
@@ -832,6 +960,7 @@ async function submitInitialReviewWhileLocked(
   );
   review.findings = findings;
   if (findings.length === 0) {
+    await verifySuccessorArtifacts(storeRoot, reviewId, review.rounds[0]);
     review.status = "CLEAN";
     review.clean_snapshot_hash = review.rounds[0].snapshot_hash;
     review.history.push({ at: now(), event: "INITIAL_REVIEW_CLEAN", round: 1 });
@@ -1078,6 +1207,11 @@ async function submitRereviewWhileLocked(
       new_findings: newFindings.length,
     });
   } else {
+    await verifySuccessorArtifacts(
+      storeRoot,
+      reviewId,
+      review.rounds[review.rounds.length - 1],
+    );
     review.status = "CLEAN";
     review.clean_snapshot_hash =
       review.rounds[review.rounds.length - 1].snapshot_hash;
@@ -1102,6 +1236,13 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
   if (review.status !== "CLEAN") {
     throw new Error(`only a CLEAN review can be finalized (status=${review.status})`);
   }
+  const cleanRound = review.rounds.find(
+    (round) => round.snapshot_hash === review.clean_snapshot_hash,
+  );
+  if (!cleanRound) {
+    throw new Error("clean snapshot is not present in the review ledger");
+  }
+  await verifySuccessorArtifacts(storeRoot, reviewId, cleanRound);
   const { manifest } = await buildSnapshot({
     repositoryPath: review.repository_path,
     baseRef: review.base_ref,
@@ -1163,8 +1304,12 @@ export async function readReviewArtifact(
   if (artifact.startsWith("successor.") && selectedRound.successor == null) {
     throw new Error("successor artifact is not available for this review round");
   }
+  const verifiedSuccessorArtifacts = artifact.startsWith("successor.")
+    ? await verifySuccessorArtifacts(storeRoot, reviewId, selectedRound)
+    : null;
   const filePath = path.join(roundDirectory(storeRoot, reviewId, round), artifact);
-  const content = await fsp.readFile(filePath);
+  const content =
+    verifiedSuccessorArtifacts?.[artifact] ?? (await fsp.readFile(filePath));
   return {
     artifact,
     round,
