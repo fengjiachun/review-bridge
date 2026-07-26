@@ -54,25 +54,35 @@ function timestampFor(kind, object) {
       };
 }
 
-function hasCompleteUntrustedMetadata(kind, object) {
+function hasCompleteEventMetadata(kind, object) {
   const timestamp =
     kind === "PULL_REQUEST_REVIEW"
       ? object.submitted_at
       : object.created_at;
+  return Number.isFinite(Date.parse(timestamp));
+}
+
+function hasCompleteUntrustedMetadata(kind, object) {
   return (
     Number.isSafeInteger(object.user?.id) &&
     object.user.id > 0 &&
-    Number.isFinite(Date.parse(timestamp))
+    hasCompleteEventMetadata(kind, object)
   );
 }
 
-function baseFacts(kind, object) {
+function requestFacts(kind, object) {
   return {
     resource_id: resourceId(object),
     resource_kind: kind,
     url: String(object.html_url ?? ""),
     ...timestampFor(kind, object),
     body_sha256: digest(String(object.body ?? "")),
+  };
+}
+
+function baseFacts(kind, object) {
+  return {
+    ...requestFacts(kind, object),
     actor: actor(object),
   };
 }
@@ -380,8 +390,14 @@ export function adaptCodexEvidence({
   if (mode === "BASELINE") {
     const requests = [];
     const candidateResults = [];
+    let incompleteRequest = false;
     for (const [kind, objects] of feeds) {
       for (const object of objects) {
+        const body = String(object.body ?? "");
+        const looksLikeResult = resultLooksCodex(kind, object);
+        const looksLikeRequest =
+          !looksLikeResult &&
+          (body === EXACT_REQUEST || TRIGGER_SHAPE.test(body));
         const isExpectedActor =
           object.user?.id === expectedActor.id &&
           object.user?.type === expectedActor.type;
@@ -393,14 +409,20 @@ export function adaptCodexEvidence({
           continue;
         }
         if (
+          looksLikeRequest &&
+          !hasCompleteUntrustedMetadata(kind, object)
+        ) {
+          incompleteRequest = true;
+          continue;
+        }
+        if (
           !isExpectedActor &&
           !hasCompleteUntrustedMetadata(kind, object)
         ) {
           continue;
         }
-        const body = String(object.body ?? "");
         const facts = baseFacts(kind, object);
-        if (resultLooksCodex(kind, object)) {
+        if (looksLikeResult) {
           if (
             object.user?.id === expectedActor.id &&
             object.user?.type === expectedActor.type
@@ -421,7 +443,7 @@ export function adaptCodexEvidence({
           }
           continue;
         }
-        if (body === EXACT_REQUEST || TRIGGER_SHAPE.test(body)) {
+        if (looksLikeRequest) {
           facts.actor = { id: facts.actor.id, type: facts.actor.type };
           requests.push(facts);
           continue;
@@ -459,7 +481,10 @@ export function adaptCodexEvidence({
       observed_at: collection.collected_at,
       collection: {
         ...collection,
-        status: pendingExpectedReview ? "INCOMPLETE" : collection.status,
+        status:
+          pendingExpectedReview || incompleteRequest
+            ? "INCOMPLETE"
+            : collection.status,
         adapter_version: 1,
       },
       requests,
@@ -521,6 +546,7 @@ export function adaptCodexEvidence({
   const unsupportedRequests = [];
   const foreignActorObjects = [];
   const results = [];
+  let incompleteRequest = false;
   const attachedExpectedCommentIds = new Set(
     reviewComments
       .filter((comment) =>
@@ -539,6 +565,11 @@ export function adaptCodexEvidence({
       if (baselineIdentities.has(objectIdentity)) {
         continue;
       }
+      const body = String(object.body ?? "");
+      const looksLikeResult = resultLooksCodex(kind, object);
+      const looksLikeRequest =
+        !looksLikeResult &&
+        (body === EXACT_REQUEST || TRIGGER_SHAPE.test(body));
       const isExpectedActor =
         object.user?.id === expectedActor.id &&
         object.user?.type === expectedActor.type;
@@ -549,27 +580,12 @@ export function adaptCodexEvidence({
       ) {
         continue;
       }
-      if (
-        !isExpectedActor &&
-        !hasCompleteUntrustedMetadata(kind, object)
-      ) {
-        continue;
-      }
-      const body = String(object.body ?? "");
-      const facts = baseFacts(kind, object);
-      if (resultLooksCodex(kind, object)) {
-        const objectActor = actor(object);
-        if (
-          objectActor.id !== expectedActor.id ||
-          objectActor.type !== expectedActor.type
-        ) {
-          foreignActorObjects.push(facts);
-        } else {
-          results.push(makeResult(kind, object, reviewComments, expectedActor));
+      if (looksLikeRequest) {
+        if (!hasCompleteEventMetadata(kind, object)) {
+          incompleteRequest = true;
+          continue;
         }
-        continue;
-      }
-      if (body === EXACT_REQUEST || TRIGGER_SHAPE.test(body)) {
+        const facts = requestFacts(kind, object);
         const bound = history.get(objectIdentity);
         if (body === EXACT_REQUEST && kind === "ISSUE_COMMENT" && bound) {
           requests.push({
@@ -583,20 +599,37 @@ export function adaptCodexEvidence({
             requested_head_sha: bound.requested_head_sha,
           });
         } else if (body === EXACT_REQUEST && kind === "ISSUE_COMMENT") {
-          const { actor: _actor, ...requestFacts } = facts;
           unboundRequests.push({
-            ...requestFacts,
+            ...facts,
             reason: "MISSING_POST_BINDING",
           });
         } else {
-          const { actor: _actor, ...requestFacts } = facts;
           unsupportedRequests.push({
-            ...requestFacts,
+            ...facts,
             reason:
               body === EXACT_REQUEST
                 ? "WRONG_RESOURCE_KIND"
                 : "NON_EXACT_TRIGGER_SHAPE",
           });
+        }
+        continue;
+      }
+      if (
+        !isExpectedActor &&
+        !hasCompleteUntrustedMetadata(kind, object)
+      ) {
+        continue;
+      }
+      const facts = baseFacts(kind, object);
+      if (looksLikeResult) {
+        const objectActor = actor(object);
+        if (
+          objectActor.id !== expectedActor.id ||
+          objectActor.type !== expectedActor.type
+        ) {
+          foreignActorObjects.push(facts);
+        } else {
+          results.push(makeResult(kind, object, reviewComments, expectedActor));
         }
         continue;
       }
@@ -627,7 +660,10 @@ export function adaptCodexEvidence({
   return {
     collection: {
       ...collection,
-      status: pendingExpectedReview ? "INCOMPLETE" : collection.status,
+      status:
+        pendingExpectedReview || incompleteRequest
+          ? "INCOMPLETE"
+          : collection.status,
       adapter_version: 1,
     },
     preexisting_requests: preexistingRequests,

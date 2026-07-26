@@ -96,6 +96,37 @@ test("incomplete foreign objects do not block normalization", async () => {
   assert.equal(baseline.candidate_results.length, 1);
 });
 
+test("deleted-user requests remain visible and make the baseline incomplete", async () => {
+  const input = await fixture("codex-clean");
+  input.issue_comments[0].user = null;
+
+  const recognized = adaptCodexEvidence(input);
+  assert.equal(recognized.requests.length, 1);
+
+  input.request_history = [];
+  const triggerShaped = structuredClone(input.issue_comments[0]);
+  triggerShaped.id += 1;
+  triggerShaped.body = "@CODEX   REVIEW please";
+  input.issue_comments.push(triggerShaped);
+  const snapshot = adaptCodexEvidence(input);
+  assert.equal(snapshot.collection.status, "COMPLETE");
+  assert.equal(snapshot.unbound_requests.length, 1);
+  assert.equal(snapshot.unsupported_requests.length, 1);
+  assert.equal("actor" in snapshot.unbound_requests[0], false);
+  assert.equal("actor" in snapshot.unsupported_requests[0], false);
+
+  const missingTimestamp = structuredClone(input);
+  missingTimestamp.issue_comments[0].created_at = null;
+  const incomplete = adaptCodexEvidence(missingTimestamp);
+  assert.equal(incomplete.collection.status, "INCOMPLETE");
+
+  input.mode = "BASELINE";
+  const baseline = adaptCodexEvidence(input);
+  assert.equal(baseline.collection.status, "INCOMPLETE");
+  assert.deepEqual(baseline.requests, []);
+  assert.equal(baseline.candidate_results.length, 1);
+});
+
 test("incomplete expected-actor results remain invalid", async () => {
   const input = await fixture("codex-findings");
   input.pull_request_reviews[0].submitted_at = null;
