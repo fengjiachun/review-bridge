@@ -127,3 +127,14 @@ test("request and result ordering is resource-kind scoped", async () => {
   const ambiguous = adaptCodexEvidence(tied);
   assert.equal(ambiguous.results[0].association, "AMBIGUOUS");
 });
+
+test("a head-incompatible result remains ambiguous while a request is open", async () => {
+  const input = await fixture("codex-clean");
+  input.issue_comments[1].body = input.issue_comments[1].body.replace(
+    "e059e4f846",
+    "fffffffffff",
+  );
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].request_ref, null);
+});

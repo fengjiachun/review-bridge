@@ -1539,7 +1539,7 @@ function reconcileHistories(ledger, observation, nextRevision, currentMs) {
     if (!current) {
       if (
         stored.binding_source === "RECORDED_AT_POST" &&
-        collectionMs >= Date.parse(stored.recorded_at) &&
+        collectionMs >= Date.parse(stored.event_at) &&
         collectionMs - Date.parse(stored.recorded_at) <=
           POST_VISIBILITY_GRACE_MS
       ) {
@@ -1678,9 +1678,7 @@ function replayResultAssociations(ledger) {
   const closedRequests = closedRequestIdentities(ledger);
   const closedResults = closedResultIdentities(ledger);
   const recognized = ledger.codex_request_history.filter(
-    (item) =>
-      item.classification === "RECOGNIZED" &&
-      !closedRequests.has(`${item.resource_kind}:${item.resource_id}`),
+    (item) => item.classification === "RECOGNIZED",
   );
   const unbound = ledger.codex_request_history.filter(
     (item) =>
@@ -1701,22 +1699,35 @@ function replayResultAssociations(ledger) {
     .sort(
       (left, right) =>
         Date.parse(left.event_at) - Date.parse(right.event_at) ||
-        left.resource_kind.localeCompare(right.resource_kind) ||
-        left.result_id - right.result_id,
+        (left.resource_kind === right.resource_kind
+          ? left.result_id - right.result_id
+          : 0),
     );
   for (const result of results) {
     const tiedAcrossKinds = [...recognized, ...unbound, ...baseline].some(
       (request) =>
+        !closedRequests.has(
+          `${request.resource_kind}:${request.resource_id}`,
+        ) &&
         request.event_at === result.event_at &&
         request.resource_kind !== result.resource_kind &&
         correlationRequestCompatible(request, result),
     );
     const priorRecognized = recognized.filter(
       (request) =>
+        !closedRequests.has(
+          `${request.resource_kind}:${request.resource_id}`,
+        ) &&
         correlationRequestBeforeResult(request, result) &&
         correlationRequestCompatible(request, result),
     );
-    activeWasOpened ||= priorRecognized.length > 0;
+    activeWasOpened ||= recognized.some(
+      (request) =>
+        !closedRequests.has(
+          `${request.resource_kind}:${request.resource_id}`,
+        ) &&
+        correlationRequestBeforeResult(request, result),
+    );
     if (tiedAcrossKinds) {
       replayed.set(`${result.resource_kind}:${result.result_id}`, {
         association: "AMBIGUOUS",

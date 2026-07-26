@@ -264,7 +264,11 @@ function associateResults({
         !closed.requests.has(identity(request.resource_kind, request.resource_id)) &&
         isStrictlyBefore(request, result),
     );
-    activeWasOpened ||= recognized.some((request) => isStrictlyBefore(request, result));
+    activeWasOpened ||= recognized.some(
+      (request) =>
+        !closed.requests.has(identity(request.resource_kind, request.resource_id)) &&
+        isStrictlyBefore(request, result),
+    );
     const candidates = [...openRecognized, ...openUnbound, ...openBaseline];
     if (candidates.length === 0) {
       result.association = activeWasOpened ? "AMBIGUOUS" : "UNSOLICITED";
