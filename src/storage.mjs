@@ -31,6 +31,62 @@ export class StoreError extends Error {
   }
 }
 
+function assertUnicodeScalarString(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        throw new TypeError("canonical JSON rejects lone Unicode surrogates");
+      }
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      throw new TypeError("canonical JSON rejects lone Unicode surrogates");
+    }
+  }
+  return value;
+}
+
+function canonicalJsonValue(value) {
+  if (value === null || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "string") {
+    return JSON.stringify(assertUnicodeScalarString(value));
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new TypeError("canonical JSON does not support non-finite numbers");
+    }
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJsonValue).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(assertUnicodeScalarString(key))}:${canonicalJsonValue(value[key])}`,
+      )
+      .join(",")}}`;
+  }
+  throw new TypeError(`canonical JSON does not support ${typeof value}`);
+}
+
+export function canonicalJson(value) {
+  return canonicalJsonValue(value);
+}
+
+export function canonicalJsonBytes(value) {
+  return Buffer.from(`${canonicalJson(value)}\n`, "utf8");
+}
+
+export function sha256(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
 async function syncDirectory(directory) {
   const handle = await fsp.open(directory, fs.constants.O_RDONLY);
   try {
@@ -82,7 +138,11 @@ async function atomicWriteJson(filePath, value) {
   await atomicWriteFile(filePath, `${JSON.stringify(value)}\n`);
 }
 
-async function removeAndSync(filePath) {
+export async function atomicWriteCanonicalJson(filePath, value) {
+  await atomicWriteFile(filePath, canonicalJsonBytes(value));
+}
+
+export async function removeAndSync(filePath) {
   try {
     await fsp.unlink(filePath);
   } catch (error) {
@@ -160,7 +220,7 @@ async function openSecureFile(
   }
 }
 
-async function readSecureFile(filePath, options = {}) {
+async function readSecureFileBytes(filePath, options = {}) {
   const opened = await openSecureFile(filePath, options);
   if (opened == null) {
     return null;
@@ -170,6 +230,34 @@ async function readSecureFile(filePath, options = {}) {
       stat: opened.stat,
       bytes: await opened.handle.readFile(),
     };
+  } finally {
+    await opened.handle.close();
+  }
+}
+
+export async function readSecureFile(filePath, options = {}) {
+  const opened = await openSecureFile(filePath, options);
+  if (opened == null) {
+    return null;
+  }
+  try {
+    return {
+      ...opened,
+      bytes: await opened.handle.readFile(),
+    };
+  } catch (error) {
+    await opened.handle.close().catch(() => {});
+    throw error;
+  }
+}
+
+export async function readSecureJson(filePath, options = {}) {
+  const opened = await readSecureFile(filePath, options);
+  if (opened == null) {
+    return null;
+  }
+  try {
+    return JSON.parse(opened.bytes.toString("utf8"));
   } finally {
     await opened.handle.close();
   }
@@ -344,7 +432,7 @@ async function readLock(
 ) {
   let opened;
   try {
-    opened = await readSecureFile(lockPath, {
+    opened = await readSecureFileBytes(lockPath, {
       allowMissing,
       maxBytes: 16 * 1024,
       requiredMode: ignoreMode ? null : 0o600,
