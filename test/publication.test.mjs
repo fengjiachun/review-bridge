@@ -737,7 +737,7 @@ test("verification adopts one complete valid audit crash tail", async (t) => {
     previous_event_sha256: head.last_event_sha256,
     event: "GATE_VERIFIED",
     outcome: "FAILURE",
-    normalized_reason: "SIMULATED_CRASH",
+    normalized_reason: "GATE_MISMATCH",
     at: iso(observedAt + 25),
     publication_revision: ready.revision,
     head_sha: state.headSha,
@@ -755,6 +755,126 @@ test("verification adopts one complete valid audit crash tail", async (t) => {
   assert.equal(lines.length, 3);
   const headAfter = JSON.parse(await fsp.readFile(headPath, "utf8"));
   assert.equal(headAfter.next_sequence, head.next_sequence + 2);
+});
+
+test("complete audit events require valid fields and semantics", async (t) => {
+  const invalidTails = [
+    {
+      name: "missing required field",
+      mutate(event) {
+        delete event.at;
+      },
+    },
+    {
+      name: "failed gate finalization",
+      mutate(event) {
+        event.event = "GATE_FINALIZATION_PASSED";
+      },
+    },
+    {
+      name: "successful verification with failure reason",
+      mutate(event) {
+        event.outcome = "SUCCESS";
+      },
+    },
+  ];
+  for (const { name, mutate } of invalidTails) {
+    await t.test(name, async (t) => {
+      const state = await fixture();
+      t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+      const { ready, observedAt } = await reachReady(state);
+      const gate = await finalizePublicationGate(
+        state.store,
+        state.reviewId,
+        { expectedRevision: ready.revision },
+        { clock: () => observedAt + 20 },
+      );
+      const directory = path.join(state.store, "reviews", state.reviewId);
+      const auditPath = path.join(directory, "publication-gate-audit.jsonl");
+      const headPath = path.join(
+        directory,
+        "publication-gate-audit-head.json",
+      );
+      const head = JSON.parse(await fsp.readFile(headPath, "utf8"));
+      const event = {
+        version: 1,
+        review_id: state.reviewId,
+        sequence: head.next_sequence,
+        event_id: "1".repeat(32),
+        previous_event_sha256: head.last_event_sha256,
+        event: "GATE_VERIFIED",
+        outcome: "FAILURE",
+        normalized_reason: "GATE_MISMATCH",
+        at: iso(observedAt + 25),
+        publication_revision: ready.revision,
+        head_sha: state.headSha,
+        github_observation_sha256: gate.github_observation_sha256,
+        gate_sha256: digest(canonicalJson(gate)),
+        expires_at: gate.expires_at,
+      };
+      mutate(event);
+      await fsp.appendFile(auditPath, `${canonicalJson(event)}\n`);
+      const before = {
+        audit: await fsp.readFile(auditPath),
+        head: await fsp.readFile(headPath),
+      };
+
+      await assert.rejects(
+        verifyPublicationGate(state.store, state.reviewId, {
+          clock: () => observedAt + 30,
+        }),
+        (error) => error?.code === "AUDIT_CORRUPT",
+      );
+      assert.deepEqual(await fsp.readFile(auditPath), before.audit);
+      assert.deepEqual(await fsp.readFile(headPath), before.head);
+    });
+  }
+
+  await t.test("committed semantic corruption", async (t) => {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    const { ready, observedAt } = await reachReady(state);
+    await finalizePublicationGate(
+      state.store,
+      state.reviewId,
+      { expectedRevision: ready.revision },
+      { clock: () => observedAt + 20 },
+    );
+    const directory = path.join(state.store, "reviews", state.reviewId);
+    const auditPath = path.join(directory, "publication-gate-audit.jsonl");
+    const headPath = path.join(
+      directory,
+      "publication-gate-audit-head.json",
+    );
+    const event = JSON.parse((await fsp.readFile(auditPath, "utf8")).trim());
+    event.outcome = "FAILURE";
+    event.normalized_reason = "GATE_MISMATCH";
+    const line = canonicalJson(event);
+    const head = JSON.parse(await fsp.readFile(headPath, "utf8"));
+    head.committed_bytes = Buffer.byteLength(line) + 1;
+    head.last_event_sha256 = digest(line);
+    await fsp.writeFile(auditPath, `${line}\n`, { mode: 0o600 });
+    await atomicWriteCanonicalJson(headPath, head);
+    const before = {
+      audit: await fsp.readFile(auditPath),
+      head: await fsp.readFile(headPath),
+    };
+
+    for (const operation of [
+      () => inspectPublicationAudit(state.store, state.reviewId),
+      () =>
+        verifyPublicationGate(state.store, state.reviewId, {
+          clock: () => observedAt + 30,
+        }),
+    ]) {
+      await assert.rejects(
+        operation(),
+        (error) => error?.code === "AUDIT_CORRUPT",
+      );
+    }
+    assert.deepEqual(await fsp.readFile(auditPath), before.audit);
+    assert.deepEqual(await fsp.readFile(headPath), before.head);
+  });
 });
 
 test("audit temporary preflight fails before crash-tail recovery mutates state", async (t) => {
@@ -1376,7 +1496,7 @@ test("offline audit inspection does not read an unbounded audit file into memory
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const startedAt = Date.now();
   const reached = await reachReady(state, startedAt);
-  await finalizePublicationGate(
+  const gate = await finalizePublicationGate(
     state.store,
     state.reviewId,
     { expectedRevision: reached.ready.revision },
@@ -1399,6 +1519,13 @@ test("offline audit inspection does not read an unbounded audit file into memory
       previous_event_sha256: previous,
       event: "GATE_VERIFIED",
       outcome: "SUCCESS",
+      normalized_reason: null,
+      at: iso(reached.observedAt + 30),
+      publication_revision: reached.ready.revision,
+      head_sha: state.headSha,
+      github_observation_sha256: gate.github_observation_sha256,
+      gate_sha256: digest(canonicalJson(gate)),
+      expires_at: gate.expires_at,
     });
     lines.push(line);
     previous = digest(line);

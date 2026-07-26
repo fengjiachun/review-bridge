@@ -44,6 +44,27 @@ const FAILING_CONCLUSIONS = new Set([
   "ACTION_REQUIRED",
   "STARTUP_FAILURE",
 ]);
+const AUDIT_EVENT_KEYS = new Set([
+  "version",
+  "review_id",
+  "sequence",
+  "event_id",
+  "previous_event_sha256",
+  "event",
+  "outcome",
+  "normalized_reason",
+  "at",
+  "publication_revision",
+  "head_sha",
+  "github_observation_sha256",
+  "gate_sha256",
+  "expires_at",
+]);
+const VERIFICATION_FAILURE_REASONS = new Set([
+  "GATE_MISSING_OR_MALFORMED",
+  "GATE_MISMATCH",
+  "EVIDENCE_STALE",
+]);
 
 class PublicationError extends Error {
   constructor(code, message, details = {}) {
@@ -170,6 +191,17 @@ function timestampMs(value, name) {
     fail("INVALID_INPUT", `${name} is not a valid canonical timestamp`);
   }
   return milliseconds;
+}
+
+function isCanonicalTimestamp(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const milliseconds = Date.parse(value);
+  return (
+    Number.isFinite(milliseconds) &&
+    new Date(milliseconds).toISOString() === value
+  );
 }
 
 function assertUrl(value, name) {
@@ -2522,8 +2554,11 @@ async function openAuditLog(filePath, { readOnly = false } = {}) {
 }
 
 function validateAuditEvent(event, reviewId, head) {
+  const keys = isJsonObject(event) ? Object.keys(event) : [];
   if (
     !isJsonObject(event) ||
+    keys.length !== AUDIT_EVENT_KEYS.size ||
+    keys.some((key) => !AUDIT_EVENT_KEYS.has(key)) ||
     event.version !== 1 ||
     event.review_id !== reviewId ||
     event.sequence !== head.next_sequence ||
@@ -2532,8 +2567,68 @@ function validateAuditEvent(event, reviewId, head) {
   ) {
     fail("AUDIT_CORRUPT", "audit event does not match the committed cursor");
   }
-  assertEnum(event.event, ["GATE_FINALIZATION_PASSED", "GATE_VERIFIED"], "audit event");
-  assertEnum(event.outcome, ["SUCCESS", "FAILURE"], "audit outcome");
+  const validAt = isCanonicalTimestamp(event.at);
+  const validExpiresAt =
+    event.expires_at === null || isCanonicalTimestamp(event.expires_at);
+  const validRevision =
+    event.publication_revision === null ||
+    (Number.isSafeInteger(event.publication_revision) &&
+      event.publication_revision > 0);
+  const validHead =
+    event.head_sha === null ||
+    (typeof event.head_sha === "string" && SHA_RE.test(event.head_sha));
+  const validObservationDigest =
+    event.github_observation_sha256 === null ||
+    (typeof event.github_observation_sha256 === "string" &&
+      DIGEST_RE.test(event.github_observation_sha256));
+  const validGateDigest =
+    event.gate_sha256 === null ||
+    (typeof event.gate_sha256 === "string" &&
+      DIGEST_RE.test(event.gate_sha256));
+  const validReason =
+    event.normalized_reason === null ||
+    VERIFICATION_FAILURE_REASONS.has(event.normalized_reason);
+  const validPreviousDigest =
+    event.sequence === 1
+      ? event.previous_event_sha256 === null
+      : typeof event.previous_event_sha256 === "string" &&
+        DIGEST_RE.test(event.previous_event_sha256);
+  if (
+    !["GATE_FINALIZATION_PASSED", "GATE_VERIFIED"].includes(event.event) ||
+    !["SUCCESS", "FAILURE"].includes(event.outcome) ||
+    !validAt ||
+    !validExpiresAt ||
+    !validRevision ||
+    !validHead ||
+    !validObservationDigest ||
+    !validGateDigest ||
+    !validReason ||
+    !validPreviousDigest
+  ) {
+    fail("AUDIT_CORRUPT", "audit event fields are invalid");
+  }
+  const hasCompleteIdentity =
+    event.publication_revision !== null &&
+    event.head_sha !== null &&
+    event.github_observation_sha256 !== null &&
+    event.gate_sha256 !== null &&
+    event.expires_at !== null;
+  const invalidSuccess =
+    event.normalized_reason !== null ||
+    !hasCompleteIdentity ||
+    Date.parse(event.at) > Date.parse(event.expires_at);
+  if (event.event === "GATE_FINALIZATION_PASSED") {
+    if (event.outcome !== "SUCCESS" || invalidSuccess) {
+      fail("AUDIT_CORRUPT", "audit event semantics are invalid");
+    }
+    return;
+  }
+  if (
+    (event.outcome === "SUCCESS" && invalidSuccess) ||
+    (event.outcome === "FAILURE" && event.normalized_reason === null)
+  ) {
+    fail("AUDIT_CORRUPT", "audit event semantics are invalid");
+  }
 }
 
 async function readRange(handle, length, position) {
@@ -2589,12 +2684,10 @@ async function validateLastCommittedAuditRecord(handle, head, reviewId) {
     "AUDIT_CORRUPT",
     "last committed audit record is not canonical",
   );
-  if (
-    event.review_id !== reviewId ||
-    event.sequence !== head.next_sequence - 1
-  ) {
-    fail("AUDIT_CORRUPT", "last committed audit record is not canonical");
-  }
+  validateAuditEvent(event, reviewId, {
+    next_sequence: head.next_sequence - 1,
+    last_event_sha256: event.previous_event_sha256,
+  });
 }
 
 async function planAuditRecovery(reviewId, opened, head) {
@@ -3510,7 +3603,8 @@ export async function verifyPublicationGate(
             at: verifiedAt,
             publication_revision: response.valid
               ? response.publication_revision
-              : Number.isSafeInteger(gate?.publication_revision)
+              : Number.isSafeInteger(gate?.publication_revision) &&
+                  gate.publication_revision > 0
                 ? gate.publication_revision
                 : null,
             head_sha: response.valid
@@ -3524,7 +3618,9 @@ export async function verifyPublicationGate(
                 : null,
             gate_sha256: gateDigest,
             expires_at:
-              typeof gate?.expires_at === "string" ? gate.expires_at : null,
+              isCanonicalTimestamp(gate?.expires_at)
+                ? gate.expires_at
+                : null,
           },
           auditSession,
         );
