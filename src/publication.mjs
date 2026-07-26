@@ -255,17 +255,30 @@ function requireSourceKinds(collection, expected, name) {
     }
   }
   for (const source of sources) {
-    const outcome = assertEnum(source.status ?? source.result, [
-      "COMPLETE",
-      "INCOMPLETE",
-      "UNKNOWN",
-      "SUCCESS",
-      "NOT_CONFIGURED",
-      "ERROR",
-    ], `${name}.${source.kind} outcome`);
+    const outcomes = ["status", "result"]
+      .filter((field) => field in source)
+      .map((field) =>
+        assertEnum(
+          source[field],
+          [
+            "COMPLETE",
+            "INCOMPLETE",
+            "UNKNOWN",
+            "SUCCESS",
+            "NOT_CONFIGURED",
+            "ERROR",
+          ],
+          `${name}.${source.kind}.${field}`,
+        ),
+      );
+    if (outcomes.length === 0) {
+      fail("INVALID_INPUT", `${name}.${source.kind} has no outcome`);
+    }
     if (
       collection.status === "COMPLETE" &&
-      !["COMPLETE", "SUCCESS", "NOT_CONFIGURED"].includes(outcome)
+      outcomes.some(
+        (outcome) => !["COMPLETE", "SUCCESS", "NOT_CONFIGURED"].includes(outcome),
+      )
     ) {
       fail("INVALID_INPUT", `${name}.${source.kind} is not complete`);
     }
@@ -818,10 +831,10 @@ function validateChecks(requiredChecks, pullRequest) {
     }
   }
   if (
-    requiredChecks.strict_policy.required &&
-    requiredChecks.strict_policy.sources.length === 0
+    requiredChecks.strict_policy.required !==
+    (requiredChecks.strict_policy.sources.length > 0)
   ) {
-    fail("INVALID_INPUT", "strict policy requires at least one true provenance source");
+    fail("INVALID_INPUT", "strict policy provenance contradicts required flag");
   }
   for (const run of runs) {
     if (run.head_sha !== pullRequest.head_sha) {
@@ -997,6 +1010,15 @@ function validateCodexPartitions(codexReview, ledger) {
     assertObject(foreign.actor, "foreign_actor_object.actor");
     assertId(foreign.actor.id, "foreign_actor_object.actor.id");
     assertString(foreign.actor.type, "foreign_actor_object.actor.type", 100);
+    if (
+      foreign.actor.id === ledger.target.codex_actor.id &&
+      foreign.actor.type === ledger.target.codex_actor.type
+    ) {
+      fail(
+        "INVALID_INPUT",
+        "pinned Codex actor cannot appear in the foreign partition",
+      );
+    }
     assertDigest(foreign.body_sha256, "foreign_actor_object.body_sha256");
   }
   return baselineConflict

@@ -1721,6 +1721,42 @@ test("observation validation rejects incomplete provenance and unsafe check bind
       },
     },
     {
+      pattern: /APPLICABLE_RULES is not complete/,
+      mutate(value) {
+        const source = value.required_checks.collection.policy_sources.find(
+          (item) => item.kind === "APPLICABLE_RULES",
+        );
+        source.status = "COMPLETE";
+        source.result = "ERROR";
+      },
+    },
+    {
+      pattern: /strict policy provenance contradicts required flag/,
+      mutate(value) {
+        value.required_checks.strict_policy.sources = [
+          {
+            kind: "CLASSIC_BRANCH_PROTECTION",
+            field: "required_status_checks.strict",
+            value: true,
+          },
+        ];
+      },
+    },
+    {
+      pattern: /pinned Codex actor cannot appear in the foreign partition/,
+      mutate(value) {
+        value.codex_review.foreign_actor_objects.push({
+          resource_id: 999,
+          resource_kind: "ISSUE_COMMENT",
+          url: "https://github.com/owner/repo/issues/7#issuecomment-999",
+          event_at: value.observed_at,
+          timestamp_field: "created_at",
+          actor: { id: 99, type: "Bot" },
+          body_sha256: "0".repeat(64),
+        });
+      },
+    },
+    {
       pattern: /commit status cannot claim an App ID/,
       mutate(value) {
         const source = value.required_checks.collection.run_sources.find(
