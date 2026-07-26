@@ -13,7 +13,8 @@ endorsed by, or sponsored by OpenAI or Anthropic.
 ## Platform support
 
 Review Bridge v0.1.1 supports macOS. The Claude Desktop extension manifest is
-Darwin-only; Linux and Windows are not currently supported or tested.
+Darwin-only; Linux and Windows are not currently supported or tested. State
+locking uses the macOS system tools `/usr/bin/lockf` and `/bin/ps`.
 
 ## What is included
 
@@ -35,6 +36,10 @@ Both MCP processes use this default shared data directory:
 
 Set `REVIEW_BRIDGE_HOME` to override it. When installing the Claude extension,
 select the same directory in its configuration.
+
+Install the author plugin and reviewer extension from the same Review Bridge
+release. A pre-v0.2 reviewer can still be observed through `known_status`, but
+it does not participate in the v0.2 inter-process locking protocol.
 
 ## Install the Codex plugin
 
@@ -71,12 +76,14 @@ In Codex:
 
 Codex returns a `review_id` and waits in `WAITING_FOR_REVIEW`.
 Use `get_review_summary` for the compact state, next action, current snapshot,
-and active versus all-time finding counts. Pass its `state_version` to
-`wait_for_review_state`; the tool waits 25 seconds by default, configurable up
-to 30 seconds, and returns the same compact summary without repeated full-ledger
-polling. A timed-out wait is expected while a human-paced review is still in
-progress; call it again with the same `state_version`, or resume when the user
-confirms the review is complete.
+and active versus all-time finding counts. Pass its `state_version` and `status`
+as `known_state_version` and `known_status` to `wait_for_review_state`; the tool
+waits 25 seconds by default, configurable up to 30 seconds, and returns the same
+compact summary without repeated full-ledger polling. `known_status` also makes
+state changes from a pre-v0.2 reviewer observable when that older process does
+not increment `state_version`. A timed-out wait is expected while a human-paced
+review is still in progress; call it again with the same known values, or resume
+when the user confirms the review is complete.
 
 In Claude Desktop:
 
@@ -188,7 +195,8 @@ release policy.
 
 ## Develop
 
-Requirements: Node.js 18 or newer, npm, Git, and `unzip`.
+Requirements: macOS with `/usr/bin/lockf` and `/bin/ps`, Node.js 18 or newer,
+npm, Git, and `unzip`.
 
 ```bash
 npm ci

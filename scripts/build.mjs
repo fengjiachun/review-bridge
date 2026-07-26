@@ -72,6 +72,10 @@ async function copyServer(target) {
     path.join(projectRoot, "src", "core.mjs"),
     path.join(serverTarget, "core.mjs"),
   );
+  await fsp.copyFile(
+    path.join(projectRoot, "src", "storage.mjs"),
+    path.join(serverTarget, "storage.mjs"),
+  );
 }
 
 const workingTreeStatus = run(

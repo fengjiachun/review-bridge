@@ -2322,13 +2322,25 @@ lock record therefore contains:
 - acquisition and heartbeat timestamps; and
 - the lock domain and review ID.
 
-The holder refreshes a heartbeat every five seconds and releases in a `finally`
-block only after rereading the lock and matching its owner token. Acquisition
-waits at most ten seconds. A contender may reclaim a lock only when its
-heartbeat is older than 30 seconds and the operating-system probe confirms that
-no process with both the recorded PID and process start time is alive. PID
-liveness alone is insufficient because PIDs can be reused. An inconclusive
-identity probe fails closed with an actionable error and never steals the lock.
+Every lock-record transition is serialized by a persistent sibling
+`.<domain>-state.lock.guard` file held briefly through macOS `lockf`. The guard
+is never renamed or removed, so the operating system releases it automatically
+if a transition helper exits. This makes stale-record replacement a single
+coordinated operation rather than a check-then-unlink race between contenders.
+
+The holder refreshes a heartbeat every five seconds with atomic replacement and
+releases in a `finally` block only after rereading the lock under the guard and
+matching its owner token. Acquisition waits at most ten seconds. A contender
+may reclaim a lock only when its heartbeat is older than 30 seconds and the
+operating-system probe confirms that no process with both the recorded PID and
+process start time is alive. PID liveness alone is insufficient because PIDs
+can be reused. The process start rendering uses `/bin/ps` with `LC_ALL=C` and
+`TZ=UTC` and carries a format version in the record, so independently launched
+desktop and terminal processes compare the same identity. An inconclusive
+identity probe fails closed with an actionable, non-retryable error and never
+steals the lock. A malformed or wrong-mode lock also fails immediately with its
+path; normal acquisition and heartbeat writes cannot create a partial record
+because they use durable atomic replacement.
 
 An acquisition timeout returns a documented retryable `REVIEW_BUSY` or
 `PUBLICATION_BUSY` error without changing state. Adding `REVIEW_BUSY` to

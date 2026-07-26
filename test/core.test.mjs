@@ -18,6 +18,7 @@ import {
   submitResolutions,
   waitForReviewState,
 } from "../src/core.mjs";
+import { acquireStateLock } from "../src/storage.mjs";
 
 function git(cwd, ...args) {
   const result = spawnSync("git", args, {
@@ -231,6 +232,7 @@ test("compact review summaries support bounded state-change waits", async (t) =>
     prepared.id,
     summary.state_version,
     1_000,
+    summary.status,
   );
   await new Promise((resolve) => setTimeout(resolve, 20));
   await submitInitialReview(store, prepared.id, []);
@@ -261,6 +263,83 @@ test("compact review summaries support bounded state-change waits", async (t) =>
       /known_state_version must be a non-negative safe integer/,
     );
   }
+});
+
+test("state waits observe an older reviewer that does not increment state_version", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Update the exported value.",
+    implementationScope: "Change app.js.",
+  });
+  const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  ledger.status = "REVIEW_SUBMITTED";
+  await fsp.writeFile(reviewPath, `${JSON.stringify(ledger, null, 2)}\n`, {
+    mode: 0o600,
+  });
+
+  const result = await waitForReviewState(
+    store,
+    prepared.id,
+    prepared.state_version,
+    100,
+    "WAITING_FOR_REVIEW",
+  );
+  assert.equal(result.changed, true);
+  assert.equal(result.timed_out, false);
+  assert.equal(result.summary.status, "REVIEW_SUBMITTED");
+  assert.equal(result.summary.state_version, prepared.state_version);
+});
+
+test("core review mutations wait behind the review-state lock without changing state", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Update the exported value.",
+    implementationScope: "Change app.js.",
+  });
+  const reviewRoot = path.join(store, "reviews", prepared.id);
+  const release = await acquireStateLock({
+    directory: reviewRoot,
+    reviewId: prepared.id,
+    domain: "review",
+  });
+  let settled = false;
+  const mutation = submitInitialReview(store, prepared.id, []).finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(settled, false);
+  const unchanged = await getReview(store, prepared.id);
+  assert.equal(unchanged.status, "WAITING_FOR_REVIEW");
+  assert.equal(unchanged.state_version, prepared.state_version);
+  await release();
+  const updated = await mutation;
+  assert.equal(updated.status, "CLEAN");
+  assert.equal(updated.state_version, prepared.state_version + 1);
+});
+
+test("a missing review mutation does not create an empty review directory", async (t) => {
+  const { root, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const reviewId = "rb-2026-07-26T000000-000Z-deadbeef";
+  await assert.rejects(
+    submitInitialReview(store, reviewId, []),
+    new RegExp(`review ${reviewId} not found`),
+  );
+  assert.equal(
+    await fsp
+      .access(path.join(store, "reviews", reviewId))
+      .then(() => true, () => false),
+    false,
+  );
 });
 
 test("compact finding histograms distinguish active and all-time severity", async (t) => {

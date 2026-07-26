@@ -109,7 +109,16 @@ function reviewFile(storeRoot, reviewId) {
   return path.join(reviewDirectory(storeRoot, reviewId), "review.json");
 }
 
-function withReviewMutationLock(storeRoot, reviewId, operation) {
+async function withReviewMutationLock(
+  storeRoot,
+  reviewId,
+  operation,
+  { allowMissing = false } = {},
+) {
+  assertReviewId(reviewId);
+  if (!allowMissing) {
+    await loadReview(storeRoot, reviewId);
+  }
   return withStateLock(
     {
       directory: reviewDirectory(storeRoot, reviewId),
@@ -137,8 +146,6 @@ export async function loadReview(storeRoot, reviewId) {
 }
 
 async function saveReview(storeRoot, review) {
-  // v0.1 assumes one state transition at a time. Atomic replacement prevents
-  // corruption, but concurrent author and reviewer writes can still lose updates.
   review.state_version = (review.state_version ?? 0) + 1;
   review.updated_at = now();
   await atomicWriteJson(reviewFile(storeRoot, review.id), review);
@@ -475,7 +482,7 @@ export async function prepareReview(
     };
     await atomicWriteJson(reviewFile(storeRoot, review.id), review);
     return publicReview(review);
-  });
+  }, { allowMissing: true });
 }
 
 export async function listReviews(storeRoot, statuses = null) {
@@ -521,6 +528,7 @@ export async function waitForReviewState(
   reviewId,
   knownStateVersion,
   timeoutMs = 25_000,
+  knownStatus = null,
 ) {
   if (
     !Number.isSafeInteger(knownStateVersion) ||
@@ -531,10 +539,16 @@ export async function waitForReviewState(
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
     throw new Error("timeout_ms must be between 1 and 30000");
   }
+  if (knownStatus != null && typeof knownStatus !== "string") {
+    throw new Error("known_status must be a string");
+  }
 
   const deadline = Date.now() + timeoutMs;
   let review = await loadReview(storeRoot, reviewId);
-  while ((review.state_version ?? 0) === knownStateVersion) {
+  while (
+    (review.state_version ?? 0) === knownStateVersion &&
+    (knownStatus == null || review.status === knownStatus)
+  ) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       return {
@@ -591,7 +605,17 @@ function normalizeFinding(input, id, round) {
 }
 
 export async function submitInitialReview(storeRoot, reviewId, findingsInput) {
-  return withReviewMutationLock(storeRoot, reviewId, async () => {
+  return withReviewMutationLock(storeRoot, reviewId, () =>
+    submitInitialReviewWhileLocked(storeRoot, reviewId, findingsInput),
+  );
+}
+
+// These helpers are called only while withReviewMutationLock holds the lock.
+async function submitInitialReviewWhileLocked(
+  storeRoot,
+  reviewId,
+  findingsInput,
+) {
     const review = await loadReview(storeRoot, reviewId);
     if (review.status !== "WAITING_FOR_REVIEW" || review.current_round !== 1) {
       throw new Error(`review is not waiting for its initial review (status=${review.status})`);
@@ -618,11 +642,15 @@ export async function submitInitialReview(storeRoot, reviewId, findingsInput) {
     }
     await saveReview(storeRoot, review);
     return publicReview(review);
-  });
 }
 
 export async function submitResolutions(storeRoot, reviewId, inputs) {
-  return withReviewMutationLock(storeRoot, reviewId, async () => {
+  return withReviewMutationLock(storeRoot, reviewId, () =>
+    submitResolutionsWhileLocked(storeRoot, reviewId, inputs),
+  );
+}
+
+async function submitResolutionsWhileLocked(storeRoot, reviewId, inputs) {
     const review = await loadReview(storeRoot, reviewId);
     if (review.status !== "REVIEW_SUBMITTED") {
       throw new Error(`review is not waiting for author resolutions (status=${review.status})`);
@@ -680,16 +708,15 @@ export async function submitResolutions(storeRoot, reviewId, inputs) {
     });
     await saveReview(storeRoot, review);
     return publicReview(review);
-  });
 }
 
 export async function prepareRereview(storeRoot, reviewId) {
   return withReviewMutationLock(storeRoot, reviewId, () =>
-    prepareRereviewUnlocked(storeRoot, reviewId),
+    prepareRereviewWhileLocked(storeRoot, reviewId),
   );
 }
 
-async function prepareRereviewUnlocked(storeRoot, reviewId) {
+async function prepareRereviewWhileLocked(storeRoot, reviewId) {
   const review = await loadReview(storeRoot, reviewId);
   if (review.status !== "AUTHOR_RESPONDED") {
     throw new Error(`review is not ready for rereview (status=${review.status})`);
@@ -724,7 +751,7 @@ export async function submitRereview(
   newFindingInputs,
 ) {
   return withReviewMutationLock(storeRoot, reviewId, () =>
-    submitRereviewUnlocked(
+    submitRereviewWhileLocked(
       storeRoot,
       reviewId,
       decisionInputs,
@@ -733,7 +760,7 @@ export async function submitRereview(
   );
 }
 
-async function submitRereviewUnlocked(
+async function submitRereviewWhileLocked(
   storeRoot,
   reviewId,
   decisionInputs,
@@ -824,11 +851,11 @@ async function submitRereviewUnlocked(
 
 export async function finalizeLocalGate(storeRoot, reviewId) {
   return withReviewMutationLock(storeRoot, reviewId, () =>
-    finalizeLocalGateUnlocked(storeRoot, reviewId),
+    finalizeLocalGateWhileLocked(storeRoot, reviewId),
   );
 }
 
-async function finalizeLocalGateUnlocked(storeRoot, reviewId) {
+async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
   const review = await loadReview(storeRoot, reviewId);
   if (review.status !== "CLEAN") {
     throw new Error(`only a CLEAN review can be finalized (status=${review.status})`);
