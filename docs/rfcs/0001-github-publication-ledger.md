@@ -2361,11 +2361,19 @@ exits, stale-owner recovery becomes possible only after the same conclusive
 identity check. Helper loss can reduce availability, but cannot silently create
 concurrent cooperating owners.
 
-A missing or foreign owner record is different from helper loss: it proves that
-the logical owner changed. The release path surfaces that condition to the MCP
-caller as `LOCK_OWNERSHIP_LOST` after token-safe cleanup instead of returning a
-successful mutation result. Lock errors retain their structured code and
+A missing, foreign, malformed, or otherwise untrustworthy owner record is
+different from helper loss: it proves that the parent can no longer verify the
+record it wrote. The release path surfaces that condition to the MCP caller as
+`LOCK_OWNERSHIP_LOST` after token-safe cleanup instead of returning a successful
+mutation result. It sets `details.state_may_have_changed` because the protected
+write may already be on disk and instructs the caller to reread state before
+deciding whether to retry. Lock errors retain their structured code and
 `details.retryable` value at the tool boundary.
+
+An unexpected acquisition failure also attempts token-checked cleanup unless
+its error conclusively occurred before this owner could write a record. This
+covers post-rename durability failures without removing a foreign owner's
+record.
 
 An acquisition timeout returns a documented retryable `REVIEW_BUSY` or
 `PUBLICATION_BUSY` error without changing state. Adding `REVIEW_BUSY` to
@@ -3031,8 +3039,9 @@ The implementation must test:
   structured MCP error fields, `lockf` contention versus non-contention exits,
   stable guard inodes, PID reuse, heartbeat expiry, event-loop stalls,
   idempotent process-group termination, helper loss, owner-token mismatch and
-  propagation, token absence from process arguments, and inconclusive
-  owner-liveness checks;
+  propagation, malformed replacement records, conservative failed-acquire
+  cleanup, lost-ownership reread guidance, token absence from process arguments,
+  and inconclusive owner-liveness checks;
 - every state-changing publication tool returning
   `PUBLICATION_TERMINAL` against each terminal status without changing the
   ledger, gate, or audit entries;

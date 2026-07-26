@@ -89,6 +89,10 @@ and retry the same transition only if it is still required. Treat errors with
 `details.retryable: false` as fail-closed and resolve their stated cause before
 retrying.
 
+`LOCK_OWNERSHIP_LOST` is a special non-retryable result with
+`details.state_may_have_changed: true`: the transition may already be on disk.
+Reread the review before deciding whether any retry is still required.
+
 In Claude Desktop:
 
 > List pending Review Bridge tasks and deeply review `<review_id>`. Read the

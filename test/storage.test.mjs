@@ -484,7 +484,9 @@ test("lock release reports a replacement owner without removing it", async (t) =
       (error) =>
         error instanceof StoreError &&
         error.code === "LOCK_OWNERSHIP_LOST" &&
-        error.details.status === "FOREIGN_OWNER",
+        error.details.status === "FOREIGN_OWNER" &&
+        error.details.state_may_have_changed === true &&
+        /may already have been applied; reread the review/.test(error.message),
     );
   });
   assert.deepEqual(warnings, []);
@@ -492,6 +494,35 @@ test("lock release reports a replacement owner without removing it", async (t) =
     JSON.parse(await fsp.readFile(lockPath, "utf8")).owner_token,
     "f".repeat(32),
   );
+});
+
+test("lock release reports an untrustworthy replacement record", async (t) => {
+  const root = await temporaryDirectory(t, "review-bridge-lock-invalid-release-");
+  const lockPath = path.join(root, ".review-state.lock");
+  const warnings = await captureWarnings(async () => {
+    await assert.rejects(
+      withStateLock(
+        {
+          directory: root,
+          reviewId: "rb-test",
+          domain: "review",
+        },
+        async () => {
+          await fsp.writeFile(lockPath, "not json\n", { mode: 0o600 });
+          return "MUTATION_APPLIED";
+        },
+      ),
+      (error) =>
+        error instanceof StoreError &&
+        error.code === "LOCK_OWNERSHIP_LOST" &&
+        error.details.status === "RECORD_UNTRUSTWORTHY" &&
+        error.details.cause_code === "LOCK_RECORD_INVALID" &&
+        error.details.state_may_have_changed === true &&
+        /may already have been applied; reread the review/.test(error.message),
+    );
+  });
+  assert.deepEqual(warnings, []);
+  assert.equal(await fsp.readFile(lockPath, "utf8"), "not json\n");
 });
 
 test("operation and ownership-loss errors retain a structured lock code", async (t) => {

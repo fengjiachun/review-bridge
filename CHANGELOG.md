@@ -17,6 +17,8 @@
   build.
 - Contended state-changing tools return structured, retryable `REVIEW_BUSY`
   errors after a bounded wait.
+- Lost-ownership errors state that the mutation may already be on disk and
+  require callers to reread state before deciding whether to retry.
 
 ### Fixed
 

@@ -57,6 +57,10 @@ review summary and retry the same transition only if it is still required.
 Treat `details.retryable: false` as fail-closed and resolve the reported cause
 before retrying.
 
+`LOCK_OWNERSHIP_LOST` instead carries
+`details.state_may_have_changed: true`. The transition may already be on disk,
+so reread the review before deciding whether any retry is still required.
+
 ## Finish
 
 - If Claude returns `CLEAN`, call `finalize_local_gate`.

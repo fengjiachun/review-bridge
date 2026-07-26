@@ -255,6 +255,49 @@ function lockErrorCode(domain) {
   return domain === "review" ? "REVIEW_BUSY" : "PUBLICATION_BUSY";
 }
 
+function lockRecordOwnershipIsUntrusted(error) {
+  return [
+    "LOCK_RECORD_INVALID",
+    "STORE_FILE_TYPE_INVALID",
+    "STORE_FILE_TOO_LARGE",
+  ].includes(error?.code);
+}
+
+function failedAcquireMayHaveWrittenRecord(error, domain) {
+  return ![
+    lockErrorCode(domain),
+    "LOCK_COORDINATOR_BUSY",
+    "LOCK_COORDINATOR_INVALID",
+    "LOCK_OWNER_UNKNOWN",
+    "LOCK_RECORD_INVALID",
+    "LOCK_RUNTIME_UNAVAILABLE",
+    "STORE_FILE_TYPE_INVALID",
+    "STORE_FILE_TOO_LARGE",
+    "STORE_MODE_MISMATCH",
+    "STORE_NOFOLLOW_UNAVAILABLE",
+  ].includes(error?.code);
+}
+
+function lockOwnershipLostError(
+  reviewId,
+  domain,
+  status,
+  { causeCode } = {},
+) {
+  const stateName = domain === "review" ? "review" : "publication ledger";
+  return new StoreError(
+    "LOCK_OWNERSHIP_LOST",
+    `state-lock ownership for ${reviewId} was lost (${status}); the ${stateName} state change may already have been applied; reread the ${stateName} before deciding whether to retry`,
+    {
+      review_id: reviewId,
+      domain,
+      status,
+      state_may_have_changed: true,
+      ...(causeCode == null ? {} : { cause_code: causeCode }),
+    },
+  );
+}
+
 async function delay(milliseconds) {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -888,13 +931,7 @@ export async function acquireStateLock({
         );
         continue;
       }
-      if (
-        [
-          "LOCK_HELPER_FAILED",
-          "LOCK_HELPER_KILL_FAILED",
-          "LOCK_HELPER_TIMEOUT",
-        ].includes(error?.code)
-      ) {
+      if (failedAcquireMayHaveWrittenRecord(error, domain)) {
         await cleanupFailedAcquire(
           coordinatorPath,
           lockPath,
@@ -912,6 +949,7 @@ export async function acquireStateLock({
   let stopped = false;
   let heartbeatPromise = Promise.resolve();
   let heartbeatError = null;
+  let heartbeatTerminationError = null;
   let holderUsable = true;
   const heartbeat = () => {
     heartbeatPromise = heartbeatPromise.then(async () => {
@@ -931,15 +969,28 @@ export async function acquireStateLock({
           throwHelperError(result);
         }
         if (result.status !== "UPDATED") {
-          throw new StoreError(
-            "LOCK_OWNERSHIP_LOST",
-            `state-lock heartbeat for ${reviewId} found ${result.status}`,
-            { review_id: reviewId, domain, status: result.status },
+          throw lockOwnershipLostError(
+            reviewId,
+            domain,
+            result.status,
           );
         }
       } catch (error) {
         holderUsable = false;
-        heartbeatError = holder.kill(error);
+        const terminatedError = holder.kill(error);
+        if (lockRecordOwnershipIsUntrusted(error)) {
+          heartbeatError = lockOwnershipLostError(
+            reviewId,
+            domain,
+            "RECORD_UNTRUSTWORTHY",
+            { causeCode: error.code },
+          );
+          if (terminatedError !== error) {
+            heartbeatTerminationError = terminatedError;
+          }
+        } else {
+          heartbeatError = terminatedError;
+        }
       }
     });
   };
@@ -954,6 +1005,9 @@ export async function acquireStateLock({
     clearInterval(timer);
     await heartbeatPromise;
     const cleanupErrors = [];
+    if (heartbeatTerminationError != null) {
+      cleanupErrors.push(heartbeatTerminationError);
+    }
     let ownershipError =
       heartbeatError?.code === "LOCK_OWNERSHIP_LOST"
         ? heartbeatError
@@ -977,10 +1031,10 @@ export async function acquireStateLock({
           throwHelperError(result);
         }
         if (["MISSING", "FOREIGN_OWNER"].includes(result.status)) {
-          ownershipError ??= new StoreError(
-            "LOCK_OWNERSHIP_LOST",
-            `state-lock release for ${reviewId} found ${result.status}`,
-            { review_id: reviewId, domain, status: result.status },
+          ownershipError ??= lockOwnershipLostError(
+            reviewId,
+            domain,
+            result.status,
           );
         }
         released = ["RELEASED", "MISSING", "FOREIGN_OWNER"].includes(
@@ -988,7 +1042,20 @@ export async function acquireStateLock({
         );
       } catch (error) {
         holderUsable = false;
-        cleanupErrors.push(holder.kill(error));
+        const terminatedError = holder.kill(error);
+        if (lockRecordOwnershipIsUntrusted(error)) {
+          ownershipError ??= lockOwnershipLostError(
+            reviewId,
+            domain,
+            "RECORD_UNTRUSTWORTHY",
+            { causeCode: error.code },
+          );
+          if (terminatedError !== error) {
+            cleanupErrors.push(terminatedError);
+          }
+        } else {
+          cleanupErrors.push(terminatedError);
+        }
       }
     }
     if (!released) {
@@ -1000,14 +1067,23 @@ export async function acquireStateLock({
           LOCK_HELPER_COMMAND_TIMEOUT_MS,
         );
         if (["MISSING", "FOREIGN_OWNER"].includes(result.status)) {
-          ownershipError ??= new StoreError(
-            "LOCK_OWNERSHIP_LOST",
-            `state-lock cleanup for ${reviewId} found ${result.status}`,
-            { review_id: reviewId, domain, status: result.status },
+          ownershipError ??= lockOwnershipLostError(
+            reviewId,
+            domain,
+            result.status,
           );
         }
       } catch (error) {
-        cleanupErrors.push(error);
+        if (lockRecordOwnershipIsUntrusted(error)) {
+          ownershipError ??= lockOwnershipLostError(
+            reviewId,
+            domain,
+            "RECORD_UNTRUSTWORTHY",
+            { causeCode: error.code },
+          );
+        } else {
+          cleanupErrors.push(error);
+        }
       }
     }
     emitCleanupWarning(reviewId, cleanupErrors);
