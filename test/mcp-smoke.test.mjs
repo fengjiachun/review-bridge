@@ -15,7 +15,7 @@ async function connectClient(role, store) {
     env: { ...process.env, REVIEW_BRIDGE_HOME: store },
     stderr: "pipe",
   });
-  const client = new Client({ name: "review-bridge-test", version: "0.1.1" });
+  const client = new Client({ name: "review-bridge-test", version: "0.2.0" });
   await client.connect(transport);
   return client;
 }
@@ -37,13 +37,20 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
   const reviewer = await listToolNames("reviewer", store);
 
   assert.deepEqual(author, [
+    "acknowledge_codex_review_ambiguity",
     "finalize_local_gate",
+    "finalize_publication_gate",
+    "get_publication",
     "get_review",
     "get_review_summary",
     "list_reviews",
     "prepare_rereview",
     "prepare_review",
+    "record_codex_review_request",
+    "record_github_snapshot",
+    "start_publication",
     "submit_resolutions",
+    "verify_publication_gate",
     "wait_for_review_state",
   ]);
   assert.deepEqual(reviewer, [

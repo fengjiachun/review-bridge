@@ -20,6 +20,15 @@ import {
   submitResolutions,
   waitForReviewState,
 } from "./core.mjs";
+import {
+  acknowledgeCodexReviewAmbiguity,
+  finalizePublicationGate,
+  getPublication,
+  recordCodexReviewRequest,
+  recordGithubSnapshot,
+  startPublication,
+  verifyPublicationGate,
+} from "./publication.mjs";
 
 function parseRole(argv) {
   const equals = argv.find((arg) => arg.startsWith("--role="));
@@ -40,7 +49,7 @@ const storeRoot = defaultStoreRoot();
 const server = new McpServer(
   {
     name: `review-bridge-${role}`,
-    version: "0.1.1",
+    version: "0.2.0",
   },
   {
     instructions:
@@ -219,6 +228,181 @@ if (role === "author") {
       inputSchema: { review_id: z.string() },
     },
     (input) => finalizeLocalGate(storeRoot, input.review_id),
+  );
+
+  register(
+    "start_publication",
+    {
+      title: "Start GitHub publication ledger",
+      description:
+        "Bind a LOCAL_GATE_PASSED review to one pull request, pinned Codex Bot actor, trigger policy, and fresh complete preexisting Codex baseline.",
+      inputSchema: {
+        review_id: z.string(),
+        repository_id: z.number().int().positive(),
+        owner: z.string(),
+        repo: z.string(),
+        pr_number: z.number().int().positive(),
+        base_branch: z.string(),
+        head_branch: z.string(),
+        codex_actor_id: z.number().int().positive(),
+        codex_actor_type: z.literal("Bot"),
+        codex_actor_login: z.string(),
+        codex_trigger_mode: z.enum([
+          "EXPLICIT_ONLY",
+          "AUTOMATIC_QUIESCENCE_ACKNOWLEDGED",
+        ]),
+        operator_label: z.string().optional(),
+        rationale: z.string().optional(),
+        codex_review_baseline: z.record(z.unknown()),
+      },
+    },
+    (input) =>
+      startPublication(storeRoot, {
+        reviewId: input.review_id,
+        repositoryId: input.repository_id,
+        owner: input.owner,
+        repo: input.repo,
+        prNumber: input.pr_number,
+        baseBranch: input.base_branch,
+        headBranch: input.head_branch,
+        codexActorId: input.codex_actor_id,
+        codexActorType: input.codex_actor_type,
+        codexActorLogin: input.codex_actor_login,
+        codexTriggerMode: input.codex_trigger_mode,
+        operatorLabel: input.operator_label ?? null,
+        rationale: input.rationale ?? null,
+        baseline: input.codex_review_baseline,
+      }),
+  );
+
+  register(
+    "get_publication",
+    {
+      title: "Get GitHub publication ledger",
+      description:
+        "Read the current publication revision, derived state, immutable target, and recorded evidence without accessing GitHub.",
+      inputSchema: { review_id: z.string() },
+    },
+    (input) => getPublication(storeRoot, input.review_id),
+  );
+
+  register(
+    "record_codex_review_request",
+    {
+      title: "Bind posted Codex review request",
+      description:
+        "Immediately bind the exact posted @codex review issue-comment response to the freshly verified pull-request head and clear any pre-post snapshot.",
+      inputSchema: {
+        review_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        comment_id: z.number().int().positive(),
+        url: z.string(),
+        created_at: z.string(),
+        requested_head_sha: z.string(),
+      },
+    },
+    (input) =>
+      recordCodexReviewRequest(storeRoot, input.review_id, {
+        expectedRevision: input.expected_revision,
+        commentId: input.comment_id,
+        url: input.url,
+        createdAt: input.created_at,
+        requestedHeadSha: input.requested_head_sha,
+      }),
+  );
+
+  register(
+    "record_github_snapshot",
+    {
+      title: "Record atomic GitHub publication snapshot",
+      description:
+        "Validate and persist one normalized GitHub observation covering pull-request identity, policy and checks, Codex evidence, and review threads.",
+      inputSchema: {
+        review_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        observation: z.record(z.unknown()),
+      },
+    },
+    (input) =>
+      recordGithubSnapshot(storeRoot, input.review_id, {
+        expectedRevision: input.expected_revision,
+        observation: input.observation,
+      }),
+  );
+
+  register(
+    "acknowledge_codex_review_ambiguity",
+    {
+      title: "Acknowledge complete Codex ambiguity set",
+      description:
+        "Record a direct human NO_FURTHER_RESULTS_EXPECTED decision for the exact complete request and ambiguous-result closure sets.",
+      inputSchema: {
+        review_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        head_sha: z.string(),
+        request_refs: z.array(
+          z.object({
+            resource_kind: z.enum([
+              "ISSUE_COMMENT",
+              "PULL_REQUEST_REVIEW",
+              "PULL_REQUEST_REVIEW_COMMENT",
+            ]),
+            resource_id: z.number().int().positive(),
+          }),
+        ),
+        ambiguous_results: z.array(
+          z.object({
+            resource_kind: z.enum([
+              "ISSUE_COMMENT",
+              "PULL_REQUEST_REVIEW",
+              "PULL_REQUEST_REVIEW_COMMENT",
+            ]),
+            result_id: z.number().int().positive(),
+          }),
+        ),
+        acknowledgement: z.literal("NO_FURTHER_RESULTS_EXPECTED"),
+        operator_label: z.string(),
+        rationale: z.string(),
+      },
+    },
+    (input) =>
+      acknowledgeCodexReviewAmbiguity(storeRoot, input.review_id, {
+        expectedRevision: input.expected_revision,
+        headSha: input.head_sha,
+        requestRefs: input.request_refs,
+        ambiguousResults: input.ambiguous_results,
+        acknowledgement: input.acknowledgement,
+        operatorLabel: input.operator_label,
+        rationale: input.rationale,
+      }),
+  );
+
+  register(
+    "finalize_publication_gate",
+    {
+      title: "Finalize GitHub publication gate",
+      description:
+        "Recompute a fresh MERGE_READY ledger and issue an audited, expiring publication gate without changing the ledger revision.",
+      inputSchema: {
+        review_id: z.string(),
+        expected_revision: z.number().int().positive(),
+      },
+    },
+    (input) =>
+      finalizePublicationGate(storeRoot, input.review_id, {
+        expectedRevision: input.expected_revision,
+      }),
+  );
+
+  register(
+    "verify_publication_gate",
+    {
+      title: "Verify GitHub publication gate",
+      description:
+        "Immediately before merge, cross-check the committed gate, current ledger revision and freshness, then durably audit the verdict.",
+      inputSchema: { review_id: z.string() },
+    },
+    (input) => verifyPublicationGate(storeRoot, input.review_id),
   );
 } else {
   register(

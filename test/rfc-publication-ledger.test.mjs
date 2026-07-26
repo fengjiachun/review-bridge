@@ -38,6 +38,20 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function reverseObjectKeys(value) {
+  if (Array.isArray(value)) {
+    return value.map(reverseObjectKeys);
+  }
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value)
+      .reverse()
+      .map(([key, item]) => [key, reverseObjectKeys(item)]),
+  );
+}
+
 test("publication ledger RFC JSON examples are internally consistent", async () => {
   const markdown = await readFile(RFC_URL, "utf8");
   const examples = [...markdown.matchAll(/```json\n([\s\S]*?)\n```/g)].map(
@@ -59,6 +73,10 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
     gateAuditHead,
   ] = examples;
   const observation = ledger.latest_observation;
+  assert.equal(
+    sha256(canonicalizeJson(observation)),
+    sha256(canonicalizeJson(reverseObjectKeys(observation))),
+  );
   const baselineCollection = ledger.codex_review_baseline.collection;
   const codexCollection = observation.codex_review.collection;
   const statusTable = markdown.slice(

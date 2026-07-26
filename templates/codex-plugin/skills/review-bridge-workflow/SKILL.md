@@ -91,37 +91,72 @@ After `LOCAL_GATE_PASSED`:
    is invalid; start a new local Review Bridge task. Otherwise push the reviewed
    topic branch and open a draft pull request.
 2. Require the PR head commit to equal that same local-gate `head_sha`. If it
-   differs, stop and start a new local Review Bridge task. Record the matching
-   PR head, wait for required checks to pass, and mark the PR ready for review.
-3. Read the PR head again, post one PR comment containing exactly
-   `@codex review`, and record the exact request comment ID, URL, creation time,
-   and requested head. Do not rely on automatic review being enabled and do not
-   post another exact request for that head while this one is pending.
-4. Before evaluating a result, obtain the expected Codex GitHub App's stable
-   numeric actor ID and `Bot` type from a maintainer-approved repository setting
-   or previously pinned trusted record. Never learn that identity from the
-   candidate result; if no trusted source exists, stop for human confirmation.
-   Inspect issue comments and pull-request reviews after the request. A completed
-   result may be an issue comment or pull-request review. Inline review comments
-   are evidence only when structurally attached to that formal review; a
-   standalone review comment is unsupported.
-5. A result must explicitly report either actionable findings or the known
-   clean outcome, carry a reviewed-commit binding that uniquely matches the
-   requested full head, and be attributable to the recorded request. The
-   standard clean issue-comment form includes
-   `Codex Review: Didn't find any major issues.` and `Reviewed commit:`.
-   An eyes reaction is pending, never a pass. A removed reaction, silence, an
-   unbound result, or an ambiguous result also remains pending and must not
-   authorize merge.
-6. After a completed result, read all unresolved review threads, required
-   checks, and the PR head again. The completed result, local gate, and checks
-   must apply to the same current head, and no unresolved actionable thread may
-   remain.
-7. If Codex reports an actionable finding, make and commit the fix, run the
-   relevant checks, and start a new local Review Bridge task. After its local
-   gate passes, push the new commit and request `@codex review` again.
-8. Merge only when the local gate, required checks, and completed GitHub Codex
-   review all apply to the current PR head and no actionable finding remains.
+   differs, stop and start a new local Review Bridge task.
+3. Resolve the expected Codex GitHub App from a maintainer-approved pinned
+   source. Record its stable numeric actor ID and exact `Bot` type; the login is
+   audit display only. Never learn or replace this identity from a candidate
+   result.
+4. Immediately before `start_publication`, collect every page of the three
+   preexisting Codex feeds: issue comments, formal pull-request reviews, and
+   pull-request review comments. Supply their independent completion times and
+   pagination proof as the complete version-1 baseline. Use `EXPLICIT_ONLY`
+   only when automatic Codex review is disabled and this workflow is the sole
+   trigger actor. `AUTOMATIC_QUIESCENCE_ACKNOWLEDGED` requires direct human
+   approval, an operator label, and a rationale immediately before this fresh
+   baseline; never infer quiescence from elapsed time, silence, reactions, or a
+   general instruction to continue. Normalize the raw three-feed payload with
+   the packaged `scripts/normalize-codex-evidence.mjs` adapter in `BASELINE`
+   mode; do not reproduce provider body parsing ad hoc.
+5. Call `start_publication`. If its immutable baseline contains any request,
+   collect and call `record_github_snapshot`, present every open baseline
+   request's exact `(resource_kind, resource_id)` closure set to the human, and
+   call `acknowledge_codex_review_ambiguity` only after direct approval of the
+   complete set and the `NO_FURTHER_RESULTS_EXPECTED` risk statement. If the
+   baseline contains no request, continue without an acknowledgement.
+6. Refresh the PR head and require it to equal the local-gate head. Post exactly
+   one issue comment whose entire body is `@codex review`, then immediately call
+   `record_codex_review_request` with the post response's comment ID, URL,
+   `created_at`, and the freshly read full head. Never post an exact or
+   trigger-shaped Codex review request manually or outside this sequence. A
+   crash between post and binding leaves an unbound request and must fail
+   closed.
+7. Collect one atomic GitHub observation and call `record_github_snapshot`. It
+   must independently cover the PR and both base comparisons, applicable rules,
+   branch metadata, classic protection when applicable, every check-run page
+   using `filter=all`, every commit-status page, all three Codex feeds, and all
+   review-thread pages. Preserve each source's collection time and pagination
+   proof. Normalize the three Codex feeds with the same packaged adapter in
+   `SNAPSHOT` mode, supplying the ledger's immutable baseline, request history,
+   ambiguity acknowledgements, pinned actor, and local-gate head. Use
+   `get_publication` to inspect the resulting revision and status.
+8. Treat an eyes reaction, silence, missing pagination, an unsupported
+   standalone review comment, an unbound request, an ambiguous result, or an
+   unknown response shape as non-passing. A clean issue comment must use the
+   recognized clean format and commit prefix bound through exactly one
+   workflow-recorded request. Findings must be a formal review bound by native
+   `commit_id` with its complete structurally attached Codex review comments.
+9. If the ledger reports `GITHUB_REVIEW_UNKNOWN` because of ambiguity or an
+   unbound or unsupported request, present the entire current resource-scoped
+   request closure set and ambiguous-result set to the human. Invoke
+   `acknowledge_codex_review_ambiguity` only after direct approval of that exact
+   full set; partial approval, silence, retry intent, or earlier permission to
+   finish is insufficient. Then refresh the head, post and immediately bind one
+   new exact request, and record a new complete snapshot.
+10. If Codex reports an actionable finding, commit the fix, verify it, and
+    start a new local Review Bridge task. A new commit invalidates this ledger.
+11. After `MERGE_READY`, perform one final fresh GitHub collection and
+    `record_github_snapshot`, then call `finalize_publication_gate`. Immediately
+    before merge call `verify_publication_gate`; only `valid: true` authorizes
+    the next operation. Merge with the returned full `head_sha` using a
+    head-matching operation such as
+    `gh pr merge --match-head-commit <head_sha>`. Never reuse a finalize result,
+    direct file read, cached verification, or older revision.
+
+The seven publication tools are `start_publication`, `get_publication`,
+`record_codex_review_request`, `record_github_snapshot`,
+`acknowledge_codex_review_ambiguity`, `finalize_publication_gate`, and
+`verify_publication_gate`. Keep their revision ordering explicit and retry
+`PUBLICATION_BUSY` or `REVIEW_BUSY` only after rereading current state.
 
 Any new commit invalidates the GitHub review gate. Compare the reviewed PR head
 before merge; a squash merge naturally creates a different merge commit.
@@ -129,3 +164,8 @@ before merge; a squash merge naturally creates a different merge commit.
 The Review Bridge MCP server does not receive GitHub credentials. The Codex
 skill orchestrates the repository's configured GitHub tools after the local
 gate passes.
+
+For offline reporting, run
+`node scripts/inspect-publication-audit.mjs <review_id>` from the installed
+plugin directory. It validates every committed audit event and the complete
+digest chain without changing the publication ledger or gate.

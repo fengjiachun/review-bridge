@@ -1,4 +1,4 @@
-# Review Bridge v0.1.1
+# Review Bridge v0.2.0
 
 Review Bridge is a local, manually triggered code-review handoff between Codex
 and Claude Desktop.
@@ -12,7 +12,7 @@ endorsed by, or sponsored by OpenAI or Anthropic.
 
 ## Platform support
 
-Review Bridge v0.1.1 supports macOS 13 Ventura or newer. The Claude Desktop
+Review Bridge v0.2.0 supports macOS 13 Ventura or newer. The Claude Desktop
 extension manifest is Darwin-only; Linux and Windows are not currently
 supported or tested. State locking uses the macOS system tools
 `/usr/bin/lockf` and `/bin/ps`.
@@ -21,13 +21,13 @@ supported or tested. State locking uses the macOS system tools
 
 - `codex-marketplace/`: local Codex marketplace containing the Review Bridge
   plugin and author-role MCP server.
-- `review-bridge-reviewer-v0.1.1.mcpb`: current MCP Bundle for Claude Desktop.
-- `review-bridge-reviewer-v0.1.1.dxt`: compatibility copy for Claude Desktop
+- `review-bridge-reviewer-v0.2.0.mcpb`: current MCP Bundle for Claude Desktop.
+- `review-bridge-reviewer-v0.2.0.dxt`: compatibility copy for Claude Desktop
   versions that still use the DXT file extension.
 - `claude-extension-source/`: inspectable source of the Claude extension.
 
 Run `npm run build` to create these files under
-`dist/review-bridge-v0.1.1/`.
+`dist/review-bridge-v0.2.0/`.
 
 Both MCP processes use this default shared data directory:
 
@@ -62,7 +62,7 @@ In Claude Desktop:
 
 1. Open **Settings → Extensions → Advanced settings**.
 2. Choose **Install Extension**.
-3. Select `review-bridge-reviewer-v0.1.1.mcpb`. If the picker only accepts
+3. Select `review-bridge-reviewer-v0.2.0.mcpb`. If the picker only accepts
    `.dxt`, select the compatibility copy.
 4. Keep the default Review Bridge data directory, or select the same directory
    configured through `REVIEW_BRIDGE_HOME` for Codex.
@@ -140,24 +140,30 @@ The installed Codex skill adds a second gate after the local review:
 
 ```text
 LOCAL_GATE_PASSED
-  -> PR_OPEN
-  -> CHECKS_PASSED
-  -> CODEX_REVIEW_REQUESTED
-  -> CODEX_REVIEW_PASSED
+  -> publication baseline
+  -> bound @codex review request
+  -> atomic GitHub snapshot
   -> MERGE_READY
+  -> finalize + immediate verification
 ```
 
-Codex must post one pull-request comment containing exactly `@codex review`,
-record that request's identity and head, and wait for a bound result. GitHub
-Codex may return that result as an issue comment or pull-request review. Inline
-review comments are evidence only when structurally attached to that formal
-review; a standalone review comment is not a trusted result. A trusted result
-must come from the expected Codex GitHub App's pinned numeric actor ID with type
-`Bot`, obtained from a maintainer-approved source and never learned from the
-candidate result. It must explicitly report findings or the known clean outcome
-and bind its reviewed commit to the current PR head. An eyes reaction is only
-receipt acknowledgement; silence, a removed reaction, or an unbound result is
-not a pass. Any new commit invalidates the GitHub review gate.
+Version 0.2 stores this workflow in `publication.json`. The author tools bind
+the local gate, pull request, required checks, exact request, pinned Codex Bot
+actor, result, and review threads to one head SHA. Every mutation carries an
+expected revision and revokes an older `publication-gate.json`. Finalization
+creates an expiring gate and appends a chained audit event; Codex must call
+`verify_publication_gate` immediately before a head-matching merge.
+
+The packaged Codex plugin also includes
+`scripts/inspect-publication-audit.mjs <review_id>` for read-only, full-chain
+offline audit validation.
+
+The packaged version-1 adapter recognizes the observed clean issue-comment
+shape and findings formal-review shape. Inline comments count only when
+structurally attached to that formal review. A standalone review comment,
+reaction, silence, unbound request, unsupported request, incomplete pagination,
+or ambiguous result fails closed. Closing ambiguity requires direct human
+approval of the complete resource-scoped request/result set.
 
 Before requesting GitHub review, both the local branch head and PR head must
 equal the `head_sha` returned by `finalize_local_gate`. A mismatch invalidates
@@ -182,11 +188,13 @@ PR head.
 - Working-tree overlays are copied into the private review store. Unchanged
   files are read from the captured Git object ID.
 - Files larger than 10 MiB are recorded but not copied into the snapshot.
-- Review state changes are serialized per review across author and reviewer
-  processes from the same locking-enabled build. Earlier processes do not
-  participate in that protocol.
+- Per-review author/reviewer mutations and publication mutations use separate
+  inter-process locks across processes from the same locking-enabled build.
+  Earlier processes do not participate in that protocol. A retryable
+  `REVIEW_BUSY` or `PUBLICATION_BUSY` response means another process owns that
+  state; reread the relevant state before retrying.
 - The local gate and publication gate are workflow attestations, not Git or
-  GitHub security boundaries. v0.1 does not install a `pre-push` hook.
+  GitHub security boundaries. v0.2 does not install a `pre-push` hook.
 - The Review Bridge MCP server receives no GitHub credentials. The packaged
   Codex skill uses the user's separately configured GitHub tools after the
   local gate passes.
