@@ -298,6 +298,21 @@ function lockOwnershipLostError(
   );
 }
 
+function lockCleanupFailedError(reviewId, domain, lockPath, cause) {
+  const stateName = domain === "review" ? "review" : "publication ledger";
+  return new StoreError(
+    "LOCK_CLEANUP_FAILED",
+    `state-lock cleanup for ${reviewId} failed; the lock record at ${lockPath} may remain and the ${stateName} state change may already have been applied; stop the owning Review Bridge process before inspecting or removing the lock record`,
+    {
+      review_id: reviewId,
+      domain,
+      path: lockPath,
+      cause_code: cause?.code ?? null,
+      state_may_have_changed: true,
+    },
+  );
+}
+
 async function delay(milliseconds) {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -325,7 +340,7 @@ async function readLock(
     if (error instanceof StoreError || error?.code === "ENOENT") {
       throw error;
     }
-    throw invalidLockRecord(lockPath, error.message);
+    throw invalidLockRecord(lockPath, "content could not be read safely");
   }
   if (opened == null) {
     return null;
@@ -333,8 +348,8 @@ async function readLock(
   let record;
   try {
     record = JSON.parse(opened.bytes.toString("utf8"));
-  } catch (error) {
-    throw invalidLockRecord(lockPath, error.message);
+  } catch {
+    throw invalidLockRecord(lockPath, "content is not valid JSON");
   }
   if (
     record == null ||
@@ -1012,6 +1027,7 @@ export async function acquireStateLock({
       heartbeatError?.code === "LOCK_OWNERSHIP_LOST"
         ? heartbeatError
         : null;
+    let finalCleanupError = null;
     if (heartbeatError != null && ownershipError == null) {
       cleanupErrors.push(heartbeatError);
     }
@@ -1082,6 +1098,7 @@ export async function acquireStateLock({
             { causeCode: error.code },
           );
         } else {
+          finalCleanupError = error;
           cleanupErrors.push(error);
         }
       }
@@ -1089,6 +1106,14 @@ export async function acquireStateLock({
     emitCleanupWarning(reviewId, cleanupErrors);
     if (ownershipError != null) {
       throw ownershipError;
+    }
+    if (finalCleanupError != null) {
+      throw lockCleanupFailedError(
+        reviewId,
+        domain,
+        lockPath,
+        finalCleanupError,
+      );
     }
   };
 }

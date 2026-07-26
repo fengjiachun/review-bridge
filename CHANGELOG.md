@@ -12,9 +12,9 @@
 
 ### Changed
 
-- Locking-enabled builds require the macOS system tools `/usr/bin/lockf` and
-  `/bin/ps`, and the author and reviewer artifacts must come from the same
-  build.
+- Locking-enabled builds require macOS 13 Ventura or newer with the system tools
+  `/usr/bin/lockf` and `/bin/ps`, and the author and reviewer artifacts must
+  come from the same build.
 - Contended state-changing tools return structured, retryable `REVIEW_BUSY`
   errors after a bounded wait.
 - Lost-ownership errors state that the mutation may already be on disk and
@@ -22,6 +22,10 @@
 
 ### Fixed
 
+- Final lock cleanup failures now return a non-retryable structured error
+  instead of reporting a successful mutation with only a warning.
+- Malformed lock errors no longer echo lock-file bytes, and tests cover
+  inconclusive owner probes without changing the record.
 - The packaged GitHub workflow now recognizes Codex results delivered as issue
   comments or pull-request reviews while treating attached review comments as
   supporting evidence and requiring trusted actor, exact request, and

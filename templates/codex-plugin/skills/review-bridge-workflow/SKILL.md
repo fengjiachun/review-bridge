@@ -61,6 +61,11 @@ before retrying.
 `details.state_may_have_changed: true`. The transition may already be on disk,
 so reread the review before deciding whether any retry is still required.
 
+`LOCK_CLEANUP_FAILED` is non-retryable and also carries
+`details.state_may_have_changed: true`. Stop the owning Review Bridge process
+before inspecting or removing the lock record named in `details.path`; do not
+loop on the same mutation.
+
 ## Finish
 
 - If Claude returns `CLEAN`, call `finalize_local_gate`.

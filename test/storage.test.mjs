@@ -230,6 +230,84 @@ test("a stale heartbeat never steals a matching live process identity", async (t
   await fsp.unlink(lockPath);
 });
 
+test("an inconclusive owner probe fails closed without changing the record", async (t) => {
+  const root = await temporaryDirectory(t, "review-bridge-lock-owner-unknown-");
+  const lockPath = path.join(root, ".review-state.lock");
+  const hookPath = path.join(root, "fail-owner-probe.cjs");
+  const release = await acquireStateLock({
+    directory: root,
+    reviewId: "rb-test",
+    domain: "review",
+  });
+  const stale = JSON.parse(await fsp.readFile(lockPath, "utf8"));
+  await release();
+  stale.heartbeat_at = "2000-01-01T00:00:00.000Z";
+  await writeLockRecord(lockPath, stale);
+  await fsp.writeFile(
+    hookPath,
+    [
+      '"use strict";',
+      'const childProcess = require("node:child_process");',
+      'const { syncBuiltinESMExports } = require("node:module");',
+      "const originalSpawnSync = childProcess.spawnSync;",
+      "childProcess.spawnSync = function (file, args, ...rest) {",
+      "  if (",
+      '    file === "/bin/ps" &&',
+      "    args.includes(process.env.REVIEW_BRIDGE_TEST_UNKNOWN_PID)",
+      "  ) {",
+      "    return { status: 1, stdout: '', stderr: 'injected probe failure' };",
+      "  }",
+      "  return originalSpawnSync.call(this, file, args, ...rest);",
+      "};",
+      "syncBuiltinESMExports();",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+
+  const previousNodeOptions = process.env.NODE_OPTIONS;
+  const previousUnknownPid =
+    process.env.REVIEW_BRIDGE_TEST_UNKNOWN_PID;
+  process.env.NODE_OPTIONS = [previousNodeOptions, `--require=${hookPath}`]
+    .filter(Boolean)
+    .join(" ");
+  process.env.REVIEW_BRIDGE_TEST_UNKNOWN_PID = String(stale.pid);
+  try {
+    await assert.rejects(
+      acquireStateLock({
+        directory: root,
+        reviewId: "rb-test",
+        domain: "review",
+        waitMs: 500,
+        staleMs: 1_000,
+        heartbeatMs: 100,
+      }),
+      (error) =>
+        error instanceof StoreError &&
+        error.code === "LOCK_OWNER_UNKNOWN" &&
+        error.details.retryable === false &&
+        error.details.path === lockPath &&
+        error.details.pid === stale.pid,
+    );
+  } finally {
+    if (previousNodeOptions == null) {
+      delete process.env.NODE_OPTIONS;
+    } else {
+      process.env.NODE_OPTIONS = previousNodeOptions;
+    }
+    if (previousUnknownPid == null) {
+      delete process.env.REVIEW_BRIDGE_TEST_UNKNOWN_PID;
+    } else {
+      process.env.REVIEW_BRIDGE_TEST_UNKNOWN_PID = previousUnknownPid;
+    }
+  }
+  assert.deepEqual(
+    JSON.parse(await fsp.readFile(lockPath, "utf8")),
+    stale,
+  );
+  await fsp.unlink(lockPath);
+});
+
 test("a reused PID identity and a dead PID are reclaimable", async (t) => {
   const root = await temporaryDirectory(t, "review-bridge-lock-stale-");
   const lockPath = path.join(root, ".review-state.lock");
@@ -318,7 +396,12 @@ test("concurrent stale reclaim admits exactly one owner", async (t) => {
 test("a malformed lock fails immediately with an actionable error", async (t) => {
   const root = await temporaryDirectory(t, "review-bridge-lock-invalid-");
   const lockPath = path.join(root, ".review-state.lock");
-  await fsp.writeFile(lockPath, "", { mode: 0o600 });
+  const privatePrefix = "deadbeef";
+  await fsp.writeFile(
+    lockPath,
+    `${privatePrefix}${"1".repeat(32)}`,
+    { mode: 0o600 },
+  );
   const started = Date.now();
   await assert.rejects(
     acquireStateLock({
@@ -333,7 +416,9 @@ test("a malformed lock fails immediately with an actionable error", async (t) =>
       error instanceof StoreError &&
       error.code === "LOCK_RECORD_INVALID" &&
       error.details.path === lockPath &&
-      error.details.retryable === false,
+      error.details.retryable === false &&
+      error.message.includes("content is not valid JSON") &&
+      !error.message.includes(privatePrefix),
   );
   assert.ok(Date.now() - started < 900);
 });
@@ -737,6 +822,54 @@ test("helper exit preserves live-owner exclusion and token-safe cleanup", async 
     domain: "review",
   });
   await releaseNext();
+});
+
+test("a failed final cleanup is non-retryable and caller-visible", async (t) => {
+  const root = await temporaryDirectory(t, "review-bridge-lock-cleanup-failed-");
+  const lockPath = path.join(root, ".review-state.lock");
+  const coordinatorPath = `${lockPath}.guard`;
+  const mutationPath = path.join(root, "mutation-applied");
+
+  try {
+    const warnings = await captureWarnings(async () => {
+      await assert.rejects(
+        withStateLock(
+          {
+            directory: root,
+            reviewId: "rb-test",
+            domain: "review",
+          },
+          async () => {
+            await fsp.writeFile(mutationPath, "applied\n");
+            const { helperPid, lockfPid } =
+              stateLockProcesses(coordinatorPath);
+            process.kill(helperPid, "SIGKILL");
+            await waitForProcessExit(helperPid);
+            await waitForProcessExit(lockfPid);
+            await fsp.chmod(coordinatorPath, 0o000);
+          },
+        ),
+        (error) => {
+          assert.ok(error instanceof StoreError);
+          assert.equal(error.code, "LOCK_CLEANUP_FAILED");
+          assert.equal(error.details.retryable, false);
+          assert.equal(error.details.path, lockPath);
+          assert.equal(error.details.cause_code, "LOCK_COORDINATOR_INVALID");
+          assert.equal(error.details.state_may_have_changed, true);
+          return true;
+        },
+      );
+    });
+    assert.deepEqual(
+      warnings.map(({ options }) => options?.code),
+      ["REVIEW_BRIDGE_LOCK_CLEANUP"],
+    );
+    assert.equal(await fsp.readFile(mutationPath, "utf8"), "applied\n");
+    assert.equal(await exists(lockPath), true);
+  } finally {
+    await fsp.chmod(coordinatorPath, 0o600).catch(() => {});
+    await fsp.unlink(lockPath).catch(() => {});
+  }
 });
 
 test("a hung helper is killed as one process group before cleanup", async (t) => {

@@ -2353,6 +2353,11 @@ steals the lock. A malformed or wrong-mode lock also fails immediately with its
 path; normal acquisition and heartbeat writes cannot create a partial record
 because they use durable atomic replacement.
 
+If the final token-checked release attempt fails, the mutation returns
+non-retryable `LOCK_CLEANUP_FAILED` instead of reporting success. The error
+names the lock path, sets `state_may_have_changed`, and requires the operator to
+stop the owning Review Bridge process before inspecting or removing the record.
+
 If the helper exits while its parent is still operating, the canonical record
 continues to identify that live parent. Even after the heartbeat becomes stale,
 contenders therefore remain busy rather than admitting a second owner. The

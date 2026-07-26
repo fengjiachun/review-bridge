@@ -12,9 +12,10 @@ endorsed by, or sponsored by OpenAI or Anthropic.
 
 ## Platform support
 
-Review Bridge v0.1.1 supports macOS. The Claude Desktop extension manifest is
-Darwin-only; Linux and Windows are not currently supported or tested. State
-locking uses the macOS system tools `/usr/bin/lockf` and `/bin/ps`.
+Review Bridge v0.1.1 supports macOS 13 Ventura or newer. The Claude Desktop
+extension manifest is Darwin-only; Linux and Windows are not currently
+supported or tested. State locking uses the macOS system tools
+`/usr/bin/lockf` and `/bin/ps`.
 
 ## What is included
 
@@ -92,6 +93,11 @@ retrying.
 `LOCK_OWNERSHIP_LOST` is a special non-retryable result with
 `details.state_may_have_changed: true`: the transition may already be on disk.
 Reread the review before deciding whether any retry is still required.
+
+`LOCK_CLEANUP_FAILED` is also non-retryable and sets
+`details.state_may_have_changed: true`. The protected write may already be on
+disk while the named lock record remains. Stop the owning Review Bridge process
+before inspecting or removing that record; do not loop on the same mutation.
 
 In Claude Desktop:
 
@@ -204,8 +210,8 @@ release policy.
 
 ## Develop
 
-Requirements: macOS with `/usr/bin/lockf` and `/bin/ps`, Node.js 18 or newer,
-npm, Git, and `unzip`.
+Requirements: macOS 13 Ventura or newer with `/usr/bin/lockf` and `/bin/ps`,
+Node.js 18 or newer, npm, Git, and `unzip`.
 
 ```bash
 npm ci

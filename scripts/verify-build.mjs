@@ -115,6 +115,8 @@ assert.match(workflowSkill, /structured `REVIEW_BUSY`/);
 assert.match(workflowSkill, /`details\.retryable: true`/);
 assert.match(workflowSkill, /`LOCK_OWNERSHIP_LOST`/);
 assert.match(workflowSkill, /`details\.state_may_have_changed: true`/);
+assert.match(workflowSkill, /`LOCK_CLEANUP_FAILED`/);
+assert.match(workflowSkill, /do not\s+loop on the same mutation/);
 assert.match(workflowSkill, /a\s+standalone review comment is unsupported/);
 assert.match(workflowSkill, /Never learn that identity from the\s+candidate result/);
 
