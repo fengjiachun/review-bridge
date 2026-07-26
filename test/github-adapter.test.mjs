@@ -67,6 +67,44 @@ test("an expected-actor pending formal review makes the collection incomplete", 
   assert.deepEqual(result.results, []);
 });
 
+test("incomplete foreign objects do not block normalization", async () => {
+  const input = await fixture("codex-clean");
+  const deletedActorComment = structuredClone(input.issue_comments[1]);
+  deletedActorComment.id += 1;
+  deletedActorComment.user = null;
+  input.issue_comments.push(deletedActorComment);
+
+  const findings = await fixture("codex-findings");
+  const pendingForeignReview = structuredClone(
+    findings.pull_request_reviews[0],
+  );
+  pendingForeignReview.id += 1;
+  pendingForeignReview.state = "PENDING";
+  pendingForeignReview.submitted_at = null;
+  pendingForeignReview.user.id += 1;
+  input.pull_request_reviews.push(pendingForeignReview);
+
+  const snapshot = adaptCodexEvidence(input);
+  assert.equal(snapshot.collection.status, "COMPLETE");
+  assert.equal(snapshot.results.length, 1);
+  assert.deepEqual(snapshot.foreign_actor_objects, []);
+
+  input.mode = "BASELINE";
+  const baseline = adaptCodexEvidence(input);
+  assert.equal(baseline.collection.status, "COMPLETE");
+  assert.equal(baseline.requests.length, 1);
+  assert.equal(baseline.candidate_results.length, 1);
+});
+
+test("incomplete expected-actor results remain invalid", async () => {
+  const input = await fixture("codex-findings");
+  input.pull_request_reviews[0].submitted_at = null;
+  assert.throws(
+    () => adaptCodexEvidence(input),
+    /submitted_at is not a valid timestamp/,
+  );
+});
+
 test("baseline mode keeps preexisting triggers and candidate results unpaired", async () => {
   const input = await fixture("codex-clean");
   input.mode = "BASELINE";

@@ -54,6 +54,18 @@ function timestampFor(kind, object) {
       };
 }
 
+function hasCompleteUntrustedMetadata(kind, object) {
+  const timestamp =
+    kind === "PULL_REQUEST_REVIEW"
+      ? object.submitted_at
+      : object.created_at;
+  return (
+    Number.isSafeInteger(object.user?.id) &&
+    object.user.id > 0 &&
+    Number.isFinite(Date.parse(timestamp))
+  );
+}
+
 function baseFacts(kind, object) {
   return {
     resource_id: resourceId(object),
@@ -370,11 +382,19 @@ export function adaptCodexEvidence({
     const candidateResults = [];
     for (const [kind, objects] of feeds) {
       for (const object of objects) {
+        const isExpectedActor =
+          object.user?.id === expectedActor.id &&
+          object.user?.type === expectedActor.type;
         if (
           kind === "PULL_REQUEST_REVIEW" &&
-          object.user?.id === expectedActor.id &&
-          object.user?.type === expectedActor.type &&
+          isExpectedActor &&
           object.state === "PENDING"
+        ) {
+          continue;
+        }
+        if (
+          !isExpectedActor &&
+          !hasCompleteUntrustedMetadata(kind, object)
         ) {
           continue;
         }
@@ -519,11 +539,19 @@ export function adaptCodexEvidence({
       if (baselineIdentities.has(objectIdentity)) {
         continue;
       }
+      const isExpectedActor =
+        object.user?.id === expectedActor.id &&
+        object.user?.type === expectedActor.type;
       if (
         kind === "PULL_REQUEST_REVIEW" &&
-        object.user?.id === expectedActor.id &&
-        object.user?.type === expectedActor.type &&
+        isExpectedActor &&
         object.state === "PENDING"
+      ) {
+        continue;
+      }
+      if (
+        !isExpectedActor &&
+        !hasCompleteUntrustedMetadata(kind, object)
       ) {
         continue;
       }
