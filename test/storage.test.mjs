@@ -389,6 +389,86 @@ test("an expired acquisition budget returns retryable REVIEW_BUSY", async (t) =>
   );
 });
 
+test("an unexpected post-write acquire failure cleans up its record", async (t) => {
+  const root = await temporaryDirectory(t, "review-bridge-lock-acquire-cleanup-");
+  const lockPath = path.join(root, ".review-state.lock");
+  const hookPath = path.join(root, "fail-directory-sync.cjs");
+  const markerPath = path.join(root, "directory-sync-failed");
+  await fsp.writeFile(
+    hookPath,
+    [
+      '"use strict";',
+      'const fs = require("node:fs");',
+      'const fsp = require("node:fs/promises");',
+      "const originalOpen = fsp.open;",
+      "fsp.open = async function (filePath, flags, ...rest) {",
+      "  if (",
+      "    filePath === process.env.REVIEW_BRIDGE_TEST_SYNC_DIRECTORY &&",
+      "    flags === fs.constants.O_RDONLY",
+      "  ) {",
+      "    try {",
+      "      const marker = fs.openSync(",
+      '        process.env.REVIEW_BRIDGE_TEST_SYNC_MARKER, "wx", 0o600',
+      "      );",
+      "      fs.closeSync(marker);",
+      "    } catch (error) {",
+      '      if (error.code !== "EEXIST") throw error;',
+      "      return originalOpen.call(this, filePath, flags, ...rest);",
+      "    }",
+      '    const error = new Error("injected post-rename directory sync failure");',
+      '    error.code = "EIO";',
+      "    throw error;",
+      "  }",
+      "  return originalOpen.call(this, filePath, flags, ...rest);",
+      "};",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+
+  const previousNodeOptions = process.env.NODE_OPTIONS;
+  const previousSyncDirectory =
+    process.env.REVIEW_BRIDGE_TEST_SYNC_DIRECTORY;
+  const previousSyncMarker = process.env.REVIEW_BRIDGE_TEST_SYNC_MARKER;
+  process.env.NODE_OPTIONS = [previousNodeOptions, `--require=${hookPath}`]
+    .filter(Boolean)
+    .join(" ");
+  process.env.REVIEW_BRIDGE_TEST_SYNC_DIRECTORY = root;
+  process.env.REVIEW_BRIDGE_TEST_SYNC_MARKER = markerPath;
+  try {
+    const warnings = await captureWarnings(async () => {
+      await assert.rejects(
+        acquireStateLock({
+          directory: root,
+          reviewId: "rb-test",
+          domain: "review",
+        }),
+        (error) => error instanceof StoreError && error.code === "EIO",
+      );
+    });
+    assert.deepEqual(warnings, []);
+  } finally {
+    if (previousNodeOptions == null) {
+      delete process.env.NODE_OPTIONS;
+    } else {
+      process.env.NODE_OPTIONS = previousNodeOptions;
+    }
+    if (previousSyncDirectory == null) {
+      delete process.env.REVIEW_BRIDGE_TEST_SYNC_DIRECTORY;
+    } else {
+      process.env.REVIEW_BRIDGE_TEST_SYNC_DIRECTORY =
+        previousSyncDirectory;
+    }
+    if (previousSyncMarker == null) {
+      delete process.env.REVIEW_BRIDGE_TEST_SYNC_MARKER;
+    } else {
+      process.env.REVIEW_BRIDGE_TEST_SYNC_MARKER = previousSyncMarker;
+    }
+  }
+  assert.equal(await exists(markerPath), true);
+  assert.equal(await exists(lockPath), false);
+});
+
 test("withStateLock releases after an operation throws", async (t) => {
   const root = await temporaryDirectory(t, "review-bridge-lock-throw-");
   const sentinel = new Error("sentinel");
@@ -458,6 +538,37 @@ test("a transient heartbeat failure does not poison release", async (t) => {
     warnings.map(({ options }) => options?.code),
     ["REVIEW_BRIDGE_LOCK_CLEANUP"],
   );
+  assert.equal(await exists(lockPath), false);
+});
+
+test("an untrustworthy heartbeat remains caller-visible after repair", async (t) => {
+  const root = await temporaryDirectory(t, "review-bridge-lock-heartbeat-invalid-");
+  const lockPath = path.join(root, ".review-state.lock");
+  const coordinatorPath = `${lockPath}.guard`;
+  const release = await acquireStateLock({
+    directory: root,
+    reviewId: "rb-test",
+    domain: "review",
+    heartbeatMs: 20,
+  });
+  const original = JSON.parse(await fsp.readFile(lockPath, "utf8"));
+  const { helperPid } = stateLockProcesses(coordinatorPath);
+  await fsp.writeFile(lockPath, "not json\n", { mode: 0o600 });
+  await waitForProcessExit(helperPid);
+  await writeLockRecord(lockPath, original);
+
+  const warnings = await captureWarnings(async () => {
+    await assert.rejects(
+      release(),
+      (error) =>
+        error instanceof StoreError &&
+        error.code === "LOCK_OWNERSHIP_LOST" &&
+        error.details.status === "RECORD_UNTRUSTWORTHY" &&
+        error.details.cause_code === "LOCK_RECORD_INVALID" &&
+        error.details.state_may_have_changed === true,
+    );
+  });
+  assert.deepEqual(warnings, []);
   assert.equal(await exists(lockPath), false);
 });
 
