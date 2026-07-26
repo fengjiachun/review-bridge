@@ -179,6 +179,27 @@ function sameCanonical(left, right) {
   return canonicalJson(left) === canonicalJson(right);
 }
 
+function assertExactKeys(value, allowedKeys, name) {
+  const allowed = new Set(allowedKeys);
+  const unexpected = Object.keys(value).filter((key) => !allowed.has(key));
+  if (unexpected.length > 0) {
+    fail("INVALID_INPUT", `${name} contains unexpected field ${unexpected[0]}`);
+  }
+}
+
+function sameIdentitySet(left, right, idField = "resource_id") {
+  if (left.length !== right.length) {
+    return false;
+  }
+  const rightByIdentity = new Map(
+    right.map((item) => [resourceIdentity(item, idField), item]),
+  );
+  return left.every((item) => {
+    const expected = rightByIdentity.get(resourceIdentity(item, idField));
+    return expected != null && sameCanonical(item, expected);
+  });
+}
+
 function uniqueBy(items, key, name) {
   const seen = new Set();
   for (const item of items) {
@@ -320,11 +341,15 @@ function validateBaseline(input, currentMs, createdAt = null, expectedActor = nu
   if (observedMs < Math.max(...times.slice(1))) {
     fail("INVALID_INPUT", "baseline.observed_at must not precede a source collection");
   }
-  const requests = assertArray(baseline.requests, "baseline.requests", 5_000);
+  const requests = assertArray(
+    baseline.requests,
+    "baseline.requests",
+    Number.MAX_SAFE_INTEGER,
+  );
   const results = assertArray(
     baseline.candidate_results,
     "baseline.candidate_results",
-    5_000,
+    Number.MAX_SAFE_INTEGER,
   );
   if (requests.length + results.length > 5_000) {
     fail("PUBLICATION_LIMIT_EXCEEDED", "baseline exceeds 5,000 evidence entries");
@@ -547,7 +572,11 @@ function validateObservation(input, ledger, currentMs) {
     codexReview.results ?? [],
   ];
   for (const [index, value] of arrays.entries()) {
-    assertArray(value, `observation evidence array ${index}`);
+    assertArray(
+      value,
+      `observation evidence array ${index}`,
+      Number.MAX_SAFE_INTEGER,
+    );
   }
   const nestedAttachments = (codexReview.results ?? []).reduce(
     (sum, result) => sum + (result.attached_review_comments?.length ?? 0),
@@ -680,11 +709,7 @@ function validateChecks(requiredChecks, pullRequest) {
     assertString(run.context, "run.context", 255);
     assertSha(run.head_sha, "run.head_sha");
     timestampMs(run.started_at, "run.started_at");
-    assertEnum(
-      run.status,
-      ["QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "PENDING", "COMPLETED"],
-      "run.status",
-    );
+    assertString(run.status, "run.status", 100);
     if (run.run_kind === "CHECK_RUN") {
       assertId(run.app_id, "run.app_id");
       if (run.app_id_source !== "CHECK_RUN_APP_ID") {
@@ -695,12 +720,19 @@ function validateChecks(requiredChecks, pullRequest) {
     }
     if (run.status === "COMPLETED") {
       timestampMs(run.completed_at, "run.completed_at");
-      assertEnum(
-        run.conclusion,
-        [...PASSING_CONCLUSIONS, ...FAILING_CONCLUSIONS, "STALE"],
-        "run.conclusion",
-      );
-    } else if (run.completed_at !== null || run.conclusion !== null) {
+      if (run.conclusion !== null) {
+        assertString(run.conclusion, "run.conclusion", 100);
+      }
+    } else if (
+      [
+        "QUEUED",
+        "IN_PROGRESS",
+        "WAITING",
+        "REQUESTED",
+        "PENDING",
+      ].includes(run.status) &&
+      (run.completed_at !== null || run.conclusion !== null)
+    ) {
       fail("INVALID_INPUT", "non-completed run must have null completion fields");
     }
   }
@@ -829,14 +861,72 @@ function validateCodexPartitions(codexReview, ledger) {
     "codex_review.preexisting_candidate_results",
     5_000,
   );
+  validateRequestFacts(
+    baselineRequests,
+    "codex_review.preexisting_requests",
+    { baseline: true },
+  );
+  validateResultFacts(
+    baselineResults,
+    "codex_review.preexisting_candidate_results",
+    {
+      baseline: true,
+      expectedActor: ledger.target.codex_actor,
+    },
+  );
+  for (const [index, item] of baselineRequests.entries()) {
+    assertExactKeys(
+      item,
+      [
+        "resource_id",
+        "resource_kind",
+        "url",
+        "event_at",
+        "timestamp_field",
+        "body_sha256",
+        "actor",
+      ],
+      `codex_review.preexisting_requests[${index}]`,
+    );
+    assertExactKeys(
+      item.actor,
+      ["id", "type"],
+      `codex_review.preexisting_requests[${index}].actor`,
+    );
+  }
+  for (const [index, item] of baselineResults.entries()) {
+    assertExactKeys(
+      item,
+      [
+        "result_id",
+        "resource_kind",
+        "native_review_state",
+        "url",
+        "event_at",
+        "timestamp_field",
+        "actor",
+        "reviewed_head_sha",
+        "commit_binding",
+        "attached_review_comments",
+        "body_sha256",
+      ],
+      `codex_review.preexisting_candidate_results[${index}]`,
+    );
+    assertExactKeys(
+      item.actor,
+      ["id", "type"],
+      `codex_review.preexisting_candidate_results[${index}].actor`,
+    );
+  }
   const baselineConflict =
-    !sameCanonical(
+    !sameIdentitySet(
       baselineRequests,
       ledger.codex_review_baseline.requests.map(projectBaselineRequest),
     ) ||
-    !sameCanonical(
+    !sameIdentitySet(
       baselineResults,
       ledger.codex_review_baseline.candidate_results.map(projectBaselineResult),
+      "result_id",
     );
   const requests = assertArray(codexReview.requests ?? [], "codex_review.requests");
   const unbound = assertArray(
@@ -1122,6 +1212,19 @@ function validateStoredLedger(ledger) {
     if (event.head_sha !== ledger.local_gate.head_sha) {
       fail("PUBLICATION_STORE_INVALID", "publication history head changed");
     }
+    if (event.event === "CODEX_REVIEW_REQUEST_RECORDED") {
+      if (event.cleared_observation_sha256 !== null) {
+        assertDigest(
+          event.cleared_observation_sha256,
+          "request history cleared_observation_sha256",
+        );
+      }
+    } else if ("cleared_observation_sha256" in event) {
+      fail(
+        "PUBLICATION_STORE_INVALID",
+        "only request-recorded history may carry cleared_observation_sha256",
+      );
+    }
   }
   if (
     history.at(-1).revision !== ledger.revision ||
@@ -1266,7 +1369,6 @@ async function openAuthorizationFiles(
         publicationGate = JSON.parse(publicationGateFile.bytes.toString("utf8"));
         if (!publicationGateFile.bytes.equals(canonicalJsonBytes(publicationGate))) {
           gateParseError = true;
-          publicationGate = null;
         }
       } catch {
         gateParseError = true;
@@ -1429,6 +1531,7 @@ function reconcileHistories(ledger, observation, nextRevision, currentMs) {
   ];
   uniqueBy(currentRequests, (entry) => entry.identity, "active request partitions");
   const requestMap = new Map(currentRequests.map((entry) => [entry.identity, entry]));
+  const collectionMs = Date.parse(collection.collected_at);
   let visibilityGrace = false;
   for (const stored of ledger.codex_request_history) {
     const identity = `${stored.resource_kind}:${stored.resource_id}`;
@@ -1436,7 +1539,9 @@ function reconcileHistories(ledger, observation, nextRevision, currentMs) {
     if (!current) {
       if (
         stored.binding_source === "RECORDED_AT_POST" &&
-        currentMs - Date.parse(stored.recorded_at) <= POST_VISIBILITY_GRACE_MS
+        collectionMs >= Date.parse(stored.recorded_at) &&
+        collectionMs - Date.parse(stored.recorded_at) <=
+          POST_VISIBILITY_GRACE_MS
       ) {
         visibilityGrace = true;
         continue;
@@ -1544,6 +1649,134 @@ function closedResultIdentities(ledger) {
   );
 }
 
+function correlationRequestBeforeResult(request, result) {
+  const difference = Date.parse(request.event_at) - Date.parse(result.event_at);
+  if (difference !== 0) {
+    return difference < 0;
+  }
+  if (request.resource_kind !== result.resource_kind) {
+    return false;
+  }
+  return request.resource_id < result.result_id;
+}
+
+function correlationRequestCompatible(request, result) {
+  if (request.requested_head_sha == null) {
+    return true;
+  }
+  if (result.resource_kind === "PULL_REQUEST_REVIEW") {
+    return result.reviewed_head_sha === request.requested_head_sha;
+  }
+  const prefix = result.commit_binding?.prefix;
+  return (
+    typeof prefix === "string" &&
+    request.requested_head_sha.startsWith(prefix)
+  );
+}
+
+function replayResultAssociations(ledger) {
+  const closedRequests = closedRequestIdentities(ledger);
+  const closedResults = closedResultIdentities(ledger);
+  const recognized = ledger.codex_request_history.filter(
+    (item) =>
+      item.classification === "RECOGNIZED" &&
+      !closedRequests.has(`${item.resource_kind}:${item.resource_id}`),
+  );
+  const unbound = ledger.codex_request_history.filter(
+    (item) =>
+      item.classification === "UNBOUND" &&
+      !closedRequests.has(`${item.resource_kind}:${item.resource_id}`),
+  );
+  const baseline = ledger.codex_review_baseline.requests.filter(
+    (item) => !closedRequests.has(`${item.resource_kind}:${item.resource_id}`),
+  );
+  const matched = new Set();
+  const replayed = new Map();
+  let activeWasOpened = false;
+  const results = [...ledger.latest_observation.codex_review.results]
+    .filter(
+      (result) =>
+        !closedResults.has(`${result.resource_kind}:${result.result_id}`),
+    )
+    .sort(
+      (left, right) =>
+        Date.parse(left.event_at) - Date.parse(right.event_at) ||
+        left.resource_kind.localeCompare(right.resource_kind) ||
+        left.result_id - right.result_id,
+    );
+  for (const result of results) {
+    const tiedAcrossKinds = [...recognized, ...unbound, ...baseline].some(
+      (request) =>
+        request.event_at === result.event_at &&
+        request.resource_kind !== result.resource_kind &&
+        correlationRequestCompatible(request, result),
+    );
+    const priorRecognized = recognized.filter(
+      (request) =>
+        correlationRequestBeforeResult(request, result) &&
+        correlationRequestCompatible(request, result),
+    );
+    activeWasOpened ||= priorRecognized.length > 0;
+    if (tiedAcrossKinds) {
+      replayed.set(`${result.resource_kind}:${result.result_id}`, {
+        association: "AMBIGUOUS",
+        request_ref: null,
+      });
+      continue;
+    }
+    const openRecognized = priorRecognized.filter(
+      (request) =>
+        !matched.has(`${request.resource_kind}:${request.resource_id}`),
+    );
+    const openUnbound = unbound.filter((request) =>
+      correlationRequestBeforeResult(request, result),
+    );
+    const openBaseline = baseline.filter((request) =>
+      correlationRequestBeforeResult(request, result),
+    );
+    const candidates = [...openRecognized, ...openUnbound, ...openBaseline];
+    let replay;
+    if (candidates.length === 0) {
+      replay = {
+        association: activeWasOpened ? "AMBIGUOUS" : "UNSOLICITED",
+        request_ref: null,
+      };
+    } else if (
+      candidates.length === 1 &&
+      openRecognized.length === 1 &&
+      openUnbound.length === 0 &&
+      openBaseline.length === 0
+    ) {
+      const request = openRecognized[0];
+      replay = {
+        association: "SINGLE_OPEN_REQUEST",
+        request_ref: {
+          resource_kind: request.resource_kind,
+          resource_id: request.resource_id,
+        },
+      };
+      matched.add(`${request.resource_kind}:${request.resource_id}`);
+    } else if (
+      candidates.length === 1 &&
+      openBaseline.length === 1 &&
+      openRecognized.length === 0 &&
+      openUnbound.length === 0
+    ) {
+      replay = {
+        association: "BASELINE_LATE_RESULT",
+        request_ref: {
+          resource_kind: openBaseline[0].resource_kind,
+          resource_id: openBaseline[0].resource_id,
+        },
+      };
+    } else {
+      replay = { association: "AMBIGUOUS", request_ref: null };
+    }
+    replayed.set(`${result.resource_kind}:${result.result_id}`, replay);
+  }
+  return replayed;
+}
+
 function checkRequiredRuns(requiredChecks) {
   if (requiredChecks.collection.status !== "COMPLETE") {
     return "EVIDENCE_INCOMPLETE";
@@ -1597,6 +1830,18 @@ function checkRequiredRuns(requiredChecks) {
       continue;
     }
     for (const run of byKind.values()) {
+      if (
+        ![
+          "QUEUED",
+          "IN_PROGRESS",
+          "WAITING",
+          "REQUESTED",
+          "PENDING",
+          "COMPLETED",
+        ].includes(run.status)
+      ) {
+        return "EVIDENCE_INCOMPLETE";
+      }
       if (run.status !== "COMPLETED" || run.conclusion === "STALE") {
         pending = true;
       } else if (FAILING_CONCLUSIONS.has(run.conclusion)) {
@@ -1635,16 +1880,36 @@ function activeCorrelation(ledger) {
       item.classification === "RECOGNIZED" &&
       !closedRequests.has(`${item.resource_kind}:${item.resource_id}`),
   );
+  const replayed = replayResultAssociations(ledger);
   const ambiguousResults = ledger.latest_observation.codex_review.results
     .filter(
-      (item) =>
-        (item.association === "AMBIGUOUS" ||
+      (item) => {
+        const identity = `${item.resource_kind}:${item.result_id}`;
+        if (closedResults.has(identity)) {
+          return false;
+        }
+        const replay = replayed.get(identity);
+        if (
+          replay?.association === "UNSOLICITED" ||
+          replay?.association === "BASELINE_LATE_RESULT"
+        ) {
+          return (
+            item.association !== replay.association ||
+            !sameCanonical(item.request_ref, replay.request_ref)
+          );
+        }
+        return (
+          replay == null ||
+          replay.association === "AMBIGUOUS" ||
+          item.association !== replay.association ||
+          !sameCanonical(item.request_ref, replay.request_ref) ||
           item.verdict === "UNKNOWN" ||
           item.native_review_state === "DISMISSED" ||
           !["CODEX_CLEAN_COMMENT_V1", "CODEX_FINDINGS_REVIEW_V1"].includes(
             item.format,
-          )) &&
-        !closedResults.has(`${item.resource_kind}:${item.result_id}`),
+          )
+        );
+      },
     )
     .map((item) => ({
       resource_kind: item.resource_kind,
@@ -1655,6 +1920,7 @@ function activeCorrelation(ledger) {
     openUnbound,
     recognized,
     ambiguousResults,
+    replayed,
   };
 }
 
@@ -1677,10 +1943,16 @@ function codexStatus(ledger) {
       left.resource_id - right.resource_id,
   ).at(-1);
   const results = observation.codex_review.results.filter(
-    (result) =>
-      result.association === "SINGLE_OPEN_REQUEST" &&
-      result.request_ref?.resource_kind === latest.resource_kind &&
-      result.request_ref?.resource_id === latest.resource_id,
+    (result) => {
+      const replay = correlation.replayed.get(
+        `${result.resource_kind}:${result.result_id}`,
+      );
+      return (
+        replay?.association === "SINGLE_OPEN_REQUEST" &&
+        replay.request_ref?.resource_kind === latest.resource_kind &&
+        replay.request_ref?.resource_id === latest.resource_id
+      );
+    },
   );
   if (results.length === 0) {
     return "GITHUB_REVIEW_PENDING";
@@ -1693,11 +1965,17 @@ function codexStatus(ledger) {
     .some(
       (request) =>
         !observation.codex_review.results.some(
-          (result) =>
-            result.association === "SINGLE_OPEN_REQUEST" &&
-            result.request_ref?.resource_kind === request.resource_kind &&
-            result.request_ref?.resource_id === request.resource_id &&
-            Date.parse(result.event_at) <= Date.parse(latest.event_at),
+          (result) => {
+            const replay = correlation.replayed.get(
+              `${result.resource_kind}:${result.result_id}`,
+            );
+            return (
+              replay?.association === "SINGLE_OPEN_REQUEST" &&
+              replay.request_ref?.resource_kind === request.resource_kind &&
+              replay.request_ref?.resource_id === request.resource_id &&
+              Date.parse(result.event_at) <= Date.parse(latest.event_at)
+            );
+          },
         ),
     );
   if (earlierUnanswered) {
@@ -2086,10 +2364,7 @@ async function initializeAudit(paths, reviewId) {
   if (!logExists) {
     await createEmptyPrivateFile(paths.auditLog);
   }
-  const openedLog = await readSecureFile(paths.auditLog, {
-    requiredMode: 0o600,
-    maxBytes: 1,
-  });
+  const openedLog = await openAuditLog(paths.auditLog);
   try {
     if (openedLog.stat.size !== 0) {
       fail("AUDIT_STATE_INVALID", "pre-start audit log must be empty");
@@ -2288,6 +2563,95 @@ async function closeAuditSession(session) {
     session.opened.handle.close(),
     session.openedHead.handle.close(),
   ]);
+}
+
+export async function inspectPublicationAudit(storeRoot, reviewId) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    const [openedLog, openedHead] = await Promise.all([
+      readSecureFile(paths.auditLog, { requiredMode: 0o600 }),
+      readSecureFile(paths.auditHead, {
+        requiredMode: 0o600,
+        maxBytes: 16 * 1024,
+      }),
+    ]);
+    try {
+      let head;
+      try {
+        head = JSON.parse(openedHead.bytes.toString("utf8"));
+      } catch {
+        fail("AUDIT_CORRUPT", "audit head is malformed");
+      }
+      if (!openedHead.bytes.equals(canonicalJsonBytes(head))) {
+        fail("AUDIT_CORRUPT", "audit head is not canonical JSON");
+      }
+      if (
+        head.version !== 1 ||
+        head.review_id !== reviewId ||
+        !Number.isSafeInteger(head.committed_bytes) ||
+        head.committed_bytes < 0 ||
+        head.committed_bytes > openedLog.bytes.length ||
+        !Number.isSafeInteger(head.next_sequence) ||
+        head.next_sequence < 1 ||
+        (head.last_event_sha256 !== null &&
+          !DIGEST_RE.test(head.last_event_sha256))
+      ) {
+        fail("AUDIT_CORRUPT", "audit head is inconsistent");
+      }
+      const committed = openedLog.bytes.subarray(0, head.committed_bytes);
+      if (committed.length > 0 && committed.at(-1) !== 0x0a) {
+        fail("AUDIT_CORRUPT", "committed audit prefix is not newline terminated");
+      }
+      const lines =
+        committed.length === 0
+          ? []
+          : committed.subarray(0, -1).toString("utf8").split("\n");
+      let previous = null;
+      let consumedBytes = 0;
+      for (const [index, line] of lines.entries()) {
+        const bytes = Buffer.from(line, "utf8");
+        if (bytes.length === 0 || bytes.length > MAX_AUDIT_EVENT_BYTES) {
+          fail("AUDIT_CORRUPT", `audit event ${index + 1} has invalid size`);
+        }
+        let event;
+        try {
+          event = JSON.parse(line);
+        } catch {
+          fail("AUDIT_CORRUPT", `audit event ${index + 1} is malformed`);
+        }
+        if (canonicalJson(event) !== line) {
+          fail("AUDIT_CORRUPT", `audit event ${index + 1} is not canonical`);
+        }
+        validateAuditEvent(event, reviewId, {
+          next_sequence: index + 1,
+          last_event_sha256: previous,
+        });
+        previous = sha256(bytes);
+        consumedBytes += bytes.length + 1;
+      }
+      if (
+        consumedBytes !== head.committed_bytes ||
+        head.next_sequence !== lines.length + 1 ||
+        head.last_event_sha256 !== previous
+      ) {
+        fail("AUDIT_CORRUPT", "audit chain does not match its committed cursor");
+      }
+      return {
+        valid: true,
+        review_id: reviewId,
+        event_count: lines.length,
+        committed_bytes: head.committed_bytes,
+        last_event_sha256: previous,
+        uncommitted_tail_bytes:
+          openedLog.bytes.length - head.committed_bytes,
+      };
+    } finally {
+      await Promise.all([
+        openedLog.handle.close(),
+        openedHead.handle.close(),
+      ]);
+    }
+  });
 }
 
 async function appendAuditEvent(paths, reviewId, fields, existingSession = null) {
@@ -2817,7 +3181,9 @@ export async function finalizePublicationGate(
       reviewId,
       { verifyRepository: true },
     );
+    let auditSession;
     try {
+      auditSession = await openAuditSession(paths, reviewId);
       const ledger = authorization.ledger;
       requireRevision(ledger, expectedRevision);
       requireMutable(ledger);
@@ -2865,31 +3231,29 @@ export async function finalizePublicationGate(
       };
       const candidateGate = { ...finalGate, issuance_committed: false };
       const gateDigest = canonicalDigest(finalGate);
-      const auditSession = await openAuditSession(paths, reviewId);
-      try {
-        await atomicWriteCanonicalJson(paths.gate, candidateGate);
-        await appendAuditEvent(
-          paths,
-          reviewId,
-          {
-            event: "GATE_FINALIZATION_PASSED",
-            outcome: "SUCCESS",
-            normalized_reason: null,
-            at: passedAt,
-            publication_revision: ledger.revision,
-            head_sha: ledger.local_gate.head_sha,
-            github_observation_sha256: observationDigest,
-            gate_sha256: gateDigest,
-            expires_at: expiresAt,
-          },
-          auditSession,
-        );
-        await atomicWriteCanonicalJson(paths.gate, finalGate);
-        return finalGate;
-      } finally {
+      await atomicWriteCanonicalJson(paths.gate, candidateGate);
+      await appendAuditEvent(
+        paths,
+        reviewId,
+        {
+          event: "GATE_FINALIZATION_PASSED",
+          outcome: "SUCCESS",
+          normalized_reason: null,
+          at: passedAt,
+          publication_revision: ledger.revision,
+          head_sha: ledger.local_gate.head_sha,
+          github_observation_sha256: observationDigest,
+          gate_sha256: gateDigest,
+          expires_at: expiresAt,
+        },
+        auditSession,
+      );
+      await atomicWriteCanonicalJson(paths.gate, finalGate);
+      return finalGate;
+    } finally {
+      if (auditSession != null) {
         await closeAuditSession(auditSession);
       }
-    } finally {
       await closeAuthorizationFiles(authorization);
     }
   });
@@ -2920,10 +3284,7 @@ export async function verifyPublicationGate(
     try {
       const ledger = authorization.ledger;
       const gate = authorization.publicationGate;
-      const gateDigest =
-        gate == null || authorization.gateParseError
-          ? null
-          : canonicalDigest(gate);
+      const gateDigest = gate == null ? null : canonicalDigest(gate);
       const auditSession = await openAuditSession(paths, reviewId);
       try {
         let response;
@@ -3009,4 +3370,5 @@ export const publicationConstants = Object.freeze({
   max_publication_bytes: MAX_PUBLICATION_BYTES,
   max_observation_bytes: MAX_OBSERVATION_BYTES,
   max_baseline_bytes: MAX_BASELINE_BYTES,
+  terminal_reserve_bytes: TERMINAL_RESERVE_BYTES,
 });

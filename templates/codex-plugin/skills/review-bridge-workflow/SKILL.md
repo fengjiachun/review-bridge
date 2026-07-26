@@ -164,3 +164,8 @@ before merge; a squash merge naturally creates a different merge commit.
 The Review Bridge MCP server does not receive GitHub credentials. The Codex
 skill orchestrates the repository's configured GitHub tools after the local
 gate passes.
+
+For offline reporting, run
+`node scripts/inspect-publication-audit.mjs <review_id>` from the installed
+plugin directory. It validates every committed audit event and the complete
+digest chain without changing the publication ledger or gate.

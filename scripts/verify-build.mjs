@@ -372,6 +372,11 @@ assert.ok(
     path.join(pluginRoot, "scripts", "normalize-codex-evidence.mjs"),
   ),
 );
+assert.ok(
+  await fsp.stat(
+    path.join(pluginRoot, "scripts", "inspect-publication-audit.mjs"),
+  ),
+);
 
 const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
 assert.equal(mcpConfig.mcpServers["review-bridge-author"].cwd, ".");
@@ -408,6 +413,45 @@ const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-build-
 try {
   const repository = path.join(temporary, "repo");
   const store = path.join(temporary, "store");
+  const normalizer = path.join(
+    pluginRoot,
+    "scripts",
+    "normalize-codex-evidence.mjs",
+  );
+  for (const fixtureName of ["codex-clean.json", "codex-findings.json"]) {
+    const fixturePath = path.join(
+      projectRoot,
+      "test",
+      "fixtures",
+      "github",
+      fixtureName,
+    );
+    const normalized = JSON.parse(
+      run(process.execPath, [normalizer, fixturePath], pluginRoot),
+    );
+    assert.equal(normalized.collection.adapter_version, 1);
+    assert.equal(normalized.results.length, 1);
+  }
+  const baselineInput = await readJson(
+    path.join(
+      projectRoot,
+      "test",
+      "fixtures",
+      "github",
+      "codex-clean.json",
+    ),
+  );
+  baselineInput.mode = "BASELINE";
+  const baselineInputPath = path.join(temporary, "codex-baseline-input.json");
+  await fsp.writeFile(
+    baselineInputPath,
+    `${JSON.stringify(baselineInput)}\n`,
+  );
+  const normalizedBaseline = JSON.parse(
+    run(process.execPath, [normalizer, baselineInputPath], pluginRoot),
+  );
+  assert.equal(normalizedBaseline.requests.length, 1);
+  assert.equal(normalizedBaseline.candidate_results.length, 1);
   await fsp.mkdir(repository);
   run("git", ["init", "-b", "main"], repository);
   run("git", ["config", "user.name", "Review Bridge Verifier"], repository);
@@ -569,6 +613,20 @@ try {
     });
     assert.equal(verified.valid, true);
     assert.equal(verified.head_sha, headSha);
+    const auditInspection = spawnSync(
+      process.execPath,
+      [
+        path.join(pluginRoot, "scripts", "inspect-publication-audit.mjs"),
+        prepared.id,
+      ],
+      {
+        cwd: pluginRoot,
+        encoding: "utf8",
+        env: { ...process.env, REVIEW_BRIDGE_HOME: store },
+      },
+    );
+    assert.equal(auditInspection.status, 0, auditInspection.stderr);
+    assert.equal(JSON.parse(auditInspection.stdout).valid, true);
   } finally {
     await reviewer.close();
     await author.close();

@@ -15,13 +15,16 @@ import {
   derivePublicationStatus,
   finalizePublicationGate,
   getPublication,
+  inspectPublicationAudit,
   publicationConstants,
   recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
   verifyPublicationGate,
 } from "../src/publication.mjs";
+import { adaptCodexEvidence } from "../src/github-adapter.mjs";
 import {
+  acquireStateLock,
   atomicWriteCanonicalJson,
   canonicalJson,
   StoreError,
@@ -799,19 +802,24 @@ test("post-to-list omission is retryable for 30 seconds, then terminal", async (
     { clock: () => requestAt + 10 },
   );
   const omittedAt = requestAt + 100;
+  const omittedObservation = observation({
+    at: omittedAt,
+    baseSha: first.baseSha,
+    headSha: first.headSha,
+    requestId: null,
+    requestAt,
+    withResult: false,
+  });
+  omittedObservation.codex_review.collection.collected_at = iso(requestAt + 50);
+  omittedObservation.codex_review.collection.sources.forEach((source) => {
+    source.collected_at = iso(requestAt + 50);
+  });
   const omitted = await recordGithubSnapshot(
     first.store,
     first.reviewId,
     {
       expectedRevision: 2,
-      observation: observation({
-        at: omittedAt,
-        baseSha: first.baseSha,
-        headSha: first.headSha,
-        requestId: null,
-        requestAt,
-        withResult: false,
-      }),
+      observation: omittedObservation,
     },
     { clock: () => omittedAt + 10 },
   );
@@ -851,19 +859,24 @@ test("post-to-list omission is retryable for 30 seconds, then terminal", async (
     { clock: () => requestAt + 10 },
   );
   const lateAt = requestAt + 31_100;
+  const lateObservation = observation({
+    at: lateAt,
+    baseSha: second.baseSha,
+    headSha: second.headSha,
+    requestId: null,
+    requestAt,
+    withResult: false,
+  });
+  lateObservation.codex_review.collection.collected_at = iso(requestAt + 31_000);
+  lateObservation.codex_review.collection.sources.forEach((source) => {
+    source.collected_at = iso(requestAt + 31_000);
+  });
   const invalidated = await recordGithubSnapshot(
     second.store,
     second.reviewId,
     {
       expectedRevision: 2,
-      observation: observation({
-        at: lateAt,
-        baseSha: second.baseSha,
-        headSha: second.headSha,
-        requestId: null,
-        requestAt,
-        withResult: false,
-      }),
+      observation: lateObservation,
     },
     { clock: () => lateAt + 10 },
   );
@@ -967,4 +980,776 @@ test("pure publication derivation preserves the normative blocking priority", as
     derivePublicationStatus(baseInvalidated).status,
     "INVALIDATED",
   );
+});
+
+test("adapter baseline round-trips through the server without actor-login drift", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const collectedAt = iso(startedAt - 100);
+  const raw = {
+    mode: "BASELINE",
+    collection: {
+      status: "COMPLETE",
+      collected_at: collectedAt,
+      sources: [
+        completeSource("ISSUE_COMMENTS", collectedAt, {
+          pagination_complete: true,
+          page_count: 1,
+        }),
+        completeSource("PULL_REQUEST_REVIEWS", collectedAt, {
+          pagination_complete: true,
+          page_count: 1,
+        }),
+        completeSource("PULL_REQUEST_REVIEW_COMMENTS", collectedAt, {
+          pagination_complete: true,
+          page_count: 1,
+        }),
+      ],
+    },
+    expected_actor: { id: 99, type: "Bot" },
+    local_gate_head_sha: state.headSha,
+    issue_comments: [
+      {
+        id: 77,
+        html_url: "https://github.com/owner/repo/issues/7#issuecomment-77",
+        created_at: iso(startedAt - 1_000),
+        body: "@codex review",
+        user: { id: 42, type: "User", login: "maintainer" },
+      },
+      {
+        id: 78,
+        html_url: "https://github.com/owner/repo/issues/7#issuecomment-78",
+        created_at: iso(startedAt - 900),
+        body: `Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** \`${state.headSha.slice(0, 10)}\``,
+        user: { id: 99, type: "Bot", login: "codex[bot]" },
+      },
+    ],
+    pull_request_reviews: [],
+    pull_request_review_comments: [],
+  };
+  const adaptedBaseline = adaptCodexEvidence(raw);
+  await start(state, startedAt, adaptedBaseline);
+  const observedAt = startedAt + 1_000;
+  const snapshotCollectedAt = iso(observedAt - 100);
+  const snapshotCodex = adaptCodexEvidence({
+    ...raw,
+    mode: "SNAPSHOT",
+    collection: {
+      ...raw.collection,
+      collected_at: snapshotCollectedAt,
+      sources: raw.collection.sources.map((source) => ({
+        ...source,
+        collected_at: snapshotCollectedAt,
+      })),
+    },
+    baseline: adaptedBaseline,
+    request_history: [],
+    ambiguity_acknowledgements: [],
+  });
+  const current = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: observedAt,
+    withResult: false,
+  });
+  current.codex_review = snapshotCodex;
+  const ledger = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: current },
+    { clock: () => observedAt + 10 },
+  );
+  assert.equal(ledger.status, "GITHUB_REVIEW_UNKNOWN");
+  assert.equal(ledger.terminal, null);
+  assert.deepEqual(snapshotCodex.preexisting_requests[0].actor, {
+    id: 42,
+    type: "User",
+  });
+  assert.deepEqual(snapshotCodex.preexisting_candidate_results[0].actor, {
+    id: 99,
+    type: "Bot",
+  });
+});
+
+test("server replay rejects a caller-forged pre-request result association", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const requestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(requestAt),
+      requestedHeadSha: state.headSha,
+    },
+    { clock: () => requestAt + 10 },
+  );
+  const current = observation({
+    at: startedAt + 2_000,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: 100,
+    requestAt,
+  });
+  current.codex_review.results[0].event_at = iso(requestAt - 1);
+  const ledger = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 2, observation: current },
+    { clock: () => startedAt + 2_010 },
+  );
+  assert.equal(ledger.status, "GITHUB_REVIEW_UNKNOWN");
+});
+
+test("a correctly classified unsolicited result does not poison a later clean request", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const requestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(requestAt),
+      requestedHeadSha: state.headSha,
+    },
+    { clock: () => requestAt + 10 },
+  );
+  const current = observation({
+    at: startedAt + 2_000,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: 100,
+    requestAt,
+  });
+  current.codex_review.results.unshift({
+    ...structuredClone(current.codex_review.results[0]),
+    result_id: 90,
+    event_at: iso(requestAt - 100),
+    request_ref: null,
+    association: "UNSOLICITED",
+    reviewed_head_sha: null,
+    commit_binding: null,
+    format: "UNKNOWN",
+    verdict: "UNKNOWN",
+    body_sha256: digest("unsolicited"),
+  });
+  const ledger = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 2, observation: current },
+    { clock: () => startedAt + 2_010 },
+  );
+  assert.equal(ledger.status, "MERGE_READY");
+});
+
+test("request visibility grace uses collection time rather than submission time", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const requestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(requestAt),
+      requestedHeadSha: state.headSha,
+    },
+    { clock: () => requestAt + 10 },
+  );
+  const collectedAt = requestAt + 20_000;
+  const current = observation({
+    at: collectedAt + 500,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt,
+    withResult: false,
+  });
+  current.codex_review.collection.collected_at = iso(collectedAt);
+  current.codex_review.collection.sources.forEach((source) => {
+    source.collected_at = iso(collectedAt);
+  });
+  const ledger = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 2, observation: current },
+    { clock: () => requestAt + 40_000 },
+  );
+  assert.equal(ledger.status, "EVIDENCE_INCOMPLETE");
+  assert.equal(ledger.terminal, null);
+});
+
+test("future check values are recorded and derive incomplete evidence", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready } = await reachReady(state);
+  for (const [field, value] of [
+    ["status", "FUTURE_STATUS"],
+    ["conclusion", "FUTURE_CONCLUSION"],
+  ]) {
+    const ledger = structuredClone(ready);
+    ledger.latest_observation.required_checks.policy = "REQUIRED";
+    ledger.latest_observation.required_checks.requirements = [
+      {
+        context: "ci",
+        app_binding: "EXPLICITLY_UNBOUND",
+        required_app_id: null,
+        binding_sources: [
+          {
+            kind: "APPLICABLE_RULES",
+            field: "required_status_checks",
+            raw_representation: "ABSENT",
+          },
+        ],
+      },
+    ];
+    ledger.latest_observation.required_checks.runs = [
+      {
+        run_id: 1,
+        run_kind: "COMMIT_STATUS",
+        context: "ci",
+        head_sha: state.headSha,
+        started_at: ledger.latest_observation.observed_at,
+        status: "COMPLETED",
+        completed_at: ledger.latest_observation.observed_at,
+        conclusion: "SUCCESS",
+        app_id: null,
+        app_id_source: "COMMIT_STATUS_UNAVAILABLE",
+        [field]: value,
+      },
+    ];
+    assert.equal(
+      derivePublicationStatus(ledger).status,
+      "EVIDENCE_INCOMPLETE",
+    );
+  }
+});
+
+test("audit preflight and offline inspection fail closed without changing gate validity", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const directory = path.join(state.store, "reviews", state.reviewId);
+  const auditPath = path.join(directory, "publication-gate-audit.jsonl");
+  await fsp.chmod(auditPath, 0o644);
+  await assert.rejects(
+    finalizePublicationGate(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 1 },
+      { clock: () => startedAt + 10 },
+    ),
+    (error) => error instanceof StoreError && error.code === "STORE_MODE_MISMATCH",
+  );
+  await fsp.chmod(auditPath, 0o600);
+
+  const second = await fixture();
+  t.after(() => fsp.rm(second.root, { recursive: true, force: true }));
+  const reached = await reachReady(second, startedAt);
+  await finalizePublicationGate(
+    second.store,
+    second.reviewId,
+    { expectedRevision: reached.ready.revision },
+    { clock: () => reached.observedAt + 20 },
+  );
+  await verifyPublicationGate(second.store, second.reviewId, {
+    clock: () => reached.observedAt + 30,
+  });
+  const secondDirectory = path.join(second.store, "reviews", second.reviewId);
+  const secondAudit = path.join(
+    secondDirectory,
+    "publication-gate-audit.jsonl",
+  );
+  const original = await fsp.readFile(secondAudit, "utf8");
+  const lines = original.trimEnd().split("\n");
+  const firstEvent = JSON.parse(lines[0]);
+  firstEvent.event_id =
+    `${firstEvent.event_id[0] === "0" ? "1" : "0"}${firstEvent.event_id.slice(1)}`;
+  lines[0] = canonicalJson(firstEvent);
+  await fsp.writeFile(secondAudit, `${lines.join("\n")}\n`, { mode: 0o600 });
+  await assert.rejects(
+    inspectPublicationAudit(second.store, second.reviewId),
+    /AUDIT_CORRUPT/,
+  );
+  const stillValid = await verifyPublicationGate(
+    second.store,
+    second.reviewId,
+    { clock: () => reached.observedAt + 40 },
+  );
+  assert.equal(stillValid.valid, true);
+});
+
+test("pre-start audit and stored-history invariants report their contract errors", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const directory = path.join(state.store, "reviews", state.reviewId);
+  await fsp.writeFile(
+    path.join(directory, "publication-gate-audit.jsonl"),
+    "{}\n",
+    { mode: 0o600 },
+  );
+  await assert.rejects(
+    start(state, Date.now()),
+    /AUDIT_STATE_INVALID/,
+  );
+
+  const second = await fixture();
+  t.after(() => fsp.rm(second.root, { recursive: true, force: true }));
+  const ledger = await start(second, Date.now());
+  ledger.history[0].cleared_observation_sha256 = "0".repeat(64);
+  await atomicWriteCanonicalJson(
+    path.join(second.store, "reviews", second.reviewId, "publication.json"),
+    ledger,
+  );
+  await assert.rejects(
+    getPublication(second.store, second.reviewId),
+    /only request-recorded history/,
+  );
+});
+
+test("verification audits the canonical digest of parseable non-canonical gate JSON", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, observedAt } = await reachReady(state);
+  const gate = await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  const directory = path.join(state.store, "reviews", state.reviewId);
+  await fsp.writeFile(
+    path.join(directory, "publication-gate.json"),
+    `${JSON.stringify(gate, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  const result = await verifyPublicationGate(state.store, state.reviewId, {
+    clock: () => observedAt + 30,
+  });
+  assert.equal(result.valid, false);
+  const events = (await fsp.readFile(
+    path.join(directory, "publication-gate-audit.jsonl"),
+    "utf8",
+  )).trim().split("\n").map(JSON.parse);
+  assert.equal(events.at(-1).gate_sha256, digest(canonicalJson(gate)));
+});
+
+test("required-check evaluation covers binding, reruns, and independent run kinds", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready } = await reachReady(state);
+  const checked = (requirements, runs) => {
+    const ledger = structuredClone(ready);
+    ledger.latest_observation.required_checks.policy = "REQUIRED";
+    ledger.latest_observation.required_checks.requirements = requirements;
+    ledger.latest_observation.required_checks.runs = runs;
+    return derivePublicationStatus(ledger).status;
+  };
+  const source = {
+    kind: "APPLICABLE_RULES",
+    field: "required_status_checks",
+    raw_representation: "POSITIVE_INTEGER",
+  };
+  const pinned = {
+    context: "ci",
+    app_binding: "PINNED",
+    required_app_id: 7,
+    binding_sources: [source],
+  };
+  const unbound = {
+    context: "ci",
+    app_binding: "EXPLICITLY_UNBOUND",
+    required_app_id: null,
+    binding_sources: [{ ...source, raw_representation: "NULL" }],
+  };
+  const run = (overrides) => ({
+    run_id: 1,
+    run_kind: "CHECK_RUN",
+    context: "ci",
+    head_sha: state.headSha,
+    started_at: ready.latest_observation.observed_at,
+    status: "COMPLETED",
+    completed_at: ready.latest_observation.observed_at,
+    conclusion: "SUCCESS",
+    app_id: 7,
+    app_id_source: "CHECK_RUN_APP_ID",
+    ...overrides,
+  });
+  const status = (overrides = {}) =>
+    run({
+      run_kind: "COMMIT_STATUS",
+      app_id: null,
+      app_id_source: "COMMIT_STATUS_UNAVAILABLE",
+      ...overrides,
+    });
+
+  assert.equal(checked([pinned], [status()]), "CHECKS_PENDING");
+  assert.equal(checked([pinned], [run({}), status()]), "MERGE_READY");
+  assert.equal(
+    checked([pinned], [run({}), status({ conclusion: "FAILURE" })]),
+    "CHECKS_FAILED",
+  );
+  assert.equal(checked([unbound], [status()]), "MERGE_READY");
+  assert.equal(
+    checked(
+      [pinned],
+      [
+        run({ run_id: 1 }),
+        run({
+          run_id: 2,
+          started_at: iso(
+            Date.parse(ready.latest_observation.observed_at) + 1,
+          ),
+          status: "IN_PROGRESS",
+          completed_at: null,
+          conclusion: null,
+        }),
+      ],
+    ),
+    "CHECKS_PENDING",
+  );
+  assert.equal(
+    checked(
+      [pinned],
+      [
+        run({ run_id: 1, conclusion: "FAILURE" }),
+        run({
+          run_id: 2,
+          started_at: iso(
+            Date.parse(ready.latest_observation.observed_at) + 1,
+          ),
+        }),
+      ],
+    ),
+    "MERGE_READY",
+  );
+  assert.equal(
+    checked([pinned], [run({ conclusion: "FUTURE_VALUE" })]),
+    "EVIDENCE_INCOMPLETE",
+  );
+});
+
+test("caller-controlled evidence limits are rejected without advancing state", async (t) => {
+  const first = await fixture();
+  t.after(() => fsp.rm(first.root, { recursive: true, force: true }));
+  const oversizedBaseline = baseline(Date.now() - 100);
+  oversizedBaseline.padding = "x".repeat(
+    publicationConstants.max_baseline_bytes,
+  );
+  await assert.rejects(
+    start(first, Date.now(), oversizedBaseline),
+    /baseline exceeds 2 MiB/,
+  );
+  const tooManyBaselineEntries = baseline(Date.now() - 100);
+  tooManyBaselineEntries.requests = Array.from({ length: 5_001 }, () => ({}));
+  await assert.rejects(
+    start(first, Date.now(), tooManyBaselineEntries),
+    /baseline exceeds 5,000 evidence entries/,
+  );
+
+  const second = await fixture();
+  t.after(() => fsp.rm(second.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(second, startedAt);
+  const oversizedObservation = observation({
+    at: startedAt + 1_000,
+    baseSha: second.baseSha,
+    headSha: second.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  oversizedObservation.padding = "x".repeat(
+    publicationConstants.max_observation_bytes,
+  );
+  await assert.rejects(
+    recordGithubSnapshot(
+      second.store,
+      second.reviewId,
+      { expectedRevision: 1, observation: oversizedObservation },
+      { clock: () => startedAt + 1_010 },
+    ),
+    /observation exceeds 6 MiB/,
+  );
+  const tooManyRequirements = observation({
+    at: startedAt + 1_000,
+    baseSha: second.baseSha,
+    headSha: second.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  tooManyRequirements.required_checks.requirements = Array.from(
+    { length: 1_001 },
+    (_, index) => ({ context: `ci-${index}` }),
+  );
+  await assert.rejects(
+    recordGithubSnapshot(
+      second.store,
+      second.reviewId,
+      { expectedRevision: 1, observation: tooManyRequirements },
+      { clock: () => startedAt + 1_010 },
+    ),
+    /requirements exceeds 1,000 entries/,
+  );
+  const tooManyEvidenceEntries = observation({
+    at: startedAt + 1_000,
+    baseSha: second.baseSha,
+    headSha: second.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  tooManyEvidenceEntries.review_threads.threads = Array.from(
+    { length: 10_001 },
+    (_, index) => ({ id: `thread-${index}` }),
+  );
+  await assert.rejects(
+    recordGithubSnapshot(
+      second.store,
+      second.reviewId,
+      { expectedRevision: 1, observation: tooManyEvidenceEntries },
+      { clock: () => startedAt + 1_010 },
+    ),
+    /observation exceeds 10,000 evidence entries/,
+  );
+  assert.equal((await getPublication(second.store, second.reviewId)).revision, 1);
+});
+
+test("the 64 KiB terminal reserve boundary is exact", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const ledger = await start(state, Date.now());
+  const entry = {
+    resource_id: 1,
+    resource_kind: "ISSUE_COMMENT",
+    classification: "UNBOUND",
+    binding_source: "OBSERVED_UNBOUND",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-1",
+    event_at: ledger.created_at,
+    timestamp_field: "created_at",
+    recorded_at: ledger.created_at,
+    recorded_revision: 1,
+    body_sha256: "0".repeat(64),
+    requested_head_sha: null,
+    reason: "MISSING_POST_BINDING",
+    padding: "",
+  };
+  ledger.codex_request_history.push(entry);
+  const limit =
+    publicationConstants.max_publication_bytes -
+    publicationConstants.terminal_reserve_bytes;
+  entry.padding = "x".repeat(limit - Buffer.byteLength(canonicalJson(ledger)) - 1);
+  const publicationPath = path.join(
+    state.store,
+    "reviews",
+    state.reviewId,
+    "publication.json",
+  );
+  assert.equal(Buffer.byteLength(`${canonicalJson(ledger)}\n`), limit);
+  await atomicWriteCanonicalJson(publicationPath, ledger);
+  assert.equal((await getPublication(state.store, state.reviewId)).revision, 1);
+  entry.padding += "x";
+  await atomicWriteCanonicalJson(publicationPath, ledger);
+  await assert.rejects(
+    getPublication(state.store, state.reviewId),
+    /would exceed/,
+  );
+});
+
+test("baseline snapshots use identity-set equality and reject caller classifications", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const requests = [77, 78].map((id) => ({
+    resource_id: id,
+    resource_kind: "ISSUE_COMMENT",
+    url: `https://github.com/owner/repo/issues/7#issuecomment-${id}`,
+    event_at: iso(startedAt - 1_000 + id),
+    timestamp_field: "created_at",
+    body_sha256: publicationConstants.request_body_sha256,
+    actor: { id: 42, type: "User" },
+  }));
+  await start(state, startedAt, baseline(startedAt - 100, requests));
+  const observedAt = startedAt + 1_000;
+  const reordered = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: observedAt,
+    withResult: false,
+    baselineRequests: [...requests].reverse(),
+  });
+  const accepted = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: reordered },
+    { clock: () => observedAt + 10 },
+  );
+  assert.equal(accepted.status, "GITHUB_REVIEW_UNKNOWN");
+  const withClassification = structuredClone(reordered);
+  withClassification.codex_review.preexisting_requests[0].classification =
+    "BASELINE_EXACT";
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 2, observation: withClassification },
+      { clock: () => observedAt + 20 },
+    ),
+    /unexpected field classification/,
+  );
+  assert.equal((await getPublication(state.store, state.reviewId)).revision, 2);
+});
+
+test("observation validation rejects incomplete provenance and unsafe check bindings", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const fresh = () =>
+    observation({
+      at: startedAt + 1_000,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: null,
+      requestAt: startedAt,
+      withResult: false,
+    });
+  const cases = [
+    {
+      pattern: /must prove complete pagination/,
+      mutate(value) {
+        value.codex_review.collection.sources[0].pagination_complete = false;
+      },
+    },
+    {
+      pattern: /CHECK_RUN collection counts are inconsistent/,
+      mutate(value) {
+        value.required_checks.collection.run_sources[0].item_count = 1;
+      },
+    },
+    {
+      pattern: /filter=all/,
+      mutate(value) {
+        value.required_checks.collection.run_sources[0].endpoint =
+          "GET /repos/owner/repo/commits/head/check-runs";
+      },
+    },
+    {
+      pattern: /protected branches require an explicit classic-protection source/,
+      mutate(value) {
+        const branch = value.required_checks.collection.policy_sources.find(
+          (source) => source.kind === "BRANCH_METADATA",
+        );
+        branch.protected = true;
+      },
+    },
+    {
+      pattern: /classic-protection NOT_CONFIGURED requires GitHub App administration proof/,
+      mutate(value) {
+        const branch = value.required_checks.collection.policy_sources.find(
+          (source) => source.kind === "BRANCH_METADATA",
+        );
+        branch.protected = true;
+        value.required_checks.collection.policy_sources.push({
+          kind: "CLASSIC_BRANCH_PROTECTION",
+          endpoint: "GET /fixture/classic",
+          collected_at:
+            value.required_checks.collection.policy_sources[0].collected_at,
+          status: "COMPLETE",
+          result: "NOT_CONFIGURED",
+        });
+      },
+    },
+    {
+      pattern: /commit status cannot claim an App ID/,
+      mutate(value) {
+        const source = value.required_checks.collection.run_sources.find(
+          (item) => item.kind === "COMMIT_STATUS",
+        );
+        source.item_count = 1;
+        value.required_checks.runs.push({
+          run_id: 1,
+          run_kind: "COMMIT_STATUS",
+          context: "ci",
+          head_sha: state.headSha,
+          started_at: value.observed_at,
+          status: "COMPLETED",
+          completed_at: value.observed_at,
+          conclusion: "SUCCESS",
+          app_id: 7,
+          app_id_source: "CHECK_RUN_APP_ID",
+        });
+      },
+    },
+  ];
+  for (const { mutate, pattern } of cases) {
+    const value = fresh();
+    mutate(value);
+    await assert.rejects(
+      recordGithubSnapshot(
+        state.store,
+        state.reviewId,
+        { expectedRevision: 1, observation: value },
+        { clock: () => startedAt + 1_010 },
+      ),
+      pattern,
+    );
+  }
+  assert.equal((await getPublication(state.store, state.reviewId)).revision, 1);
+});
+
+test("publication mutations serialize independently from review mutations", async (t) => {
+  const first = await fixture();
+  t.after(() => fsp.rm(first.root, { recursive: true, force: true }));
+  const directory = path.join(first.store, "reviews", first.reviewId);
+  const releasePublication = await acquireStateLock({
+    directory,
+    reviewId: first.reviewId,
+    domain: "publication",
+  });
+  const startedAt = Date.now();
+  const pendingStart = start(first, startedAt);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  let settled = false;
+  pendingStart.finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(settled, false);
+  await releasePublication();
+  assert.equal((await pendingStart).revision, 1);
+
+  const second = await fixture();
+  t.after(() => fsp.rm(second.root, { recursive: true, force: true }));
+  const releaseReview = await acquireStateLock({
+    directory: path.join(second.store, "reviews", second.reviewId),
+    reviewId: second.reviewId,
+    domain: "review",
+  });
+  try {
+    assert.equal((await start(second, Date.now())).revision, 1);
+  } finally {
+    await releaseReview();
+  }
 });

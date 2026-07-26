@@ -154,6 +154,10 @@ expected revision and revokes an older `publication-gate.json`. Finalization
 creates an expiring gate and appends a chained audit event; Codex must call
 `verify_publication_gate` immediately before a head-matching merge.
 
+The packaged Codex plugin also includes
+`scripts/inspect-publication-audit.mjs <review_id>` for read-only, full-chain
+offline audit validation.
+
 The packaged version-1 adapter recognizes the observed clean issue-comment
 shape and findings formal-review shape. Inline comments count only when
 structurally attached to that formal review. A standalone review comment,

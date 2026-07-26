@@ -102,11 +102,13 @@ function isStrictlyBefore(left, right) {
 
 function projectBaselineRequest(item) {
   const { classification: _classification, reason: _reason, ...facts } = item;
+  facts.actor = { id: facts.actor.id, type: facts.actor.type };
   return facts;
 }
 
 function projectBaselineResult(item) {
   const { classification: _classification, reason: _reason, ...facts } = item;
+  facts.actor = { id: facts.actor.id, type: facts.actor.type };
   return facts;
 }
 
@@ -339,9 +341,9 @@ export function adaptCodexEvidence({
     }
   }
   const feeds = [
-    ["ISSUE_COMMENT", issueComments],
-    ["PULL_REQUEST_REVIEW", reviews],
-    ["PULL_REQUEST_REVIEW_COMMENT", reviewComments],
+    [RESOURCE_KINDS.issue_comments, issueComments],
+    [RESOURCE_KINDS.pull_request_reviews, reviews],
+    [RESOURCE_KINDS.pull_request_review_comments, reviewComments],
   ];
   const rawByIdentity = new Map();
   for (const [kind, objects] of feeds) {
@@ -463,14 +465,20 @@ export function adaptCodexEvidence({
     if (!current) {
       return null;
     }
-    return projectBaselineResult({
-      ...resultFacts(current.kind, current.object),
-      reviewed_head_sha: stored.reviewed_head_sha,
-      commit_binding: stored.commit_binding,
-      attached_review_comments: stored.attached_review_comments ?? [],
-      classification: stored.classification,
-      reason: stored.reason,
-    });
+    const adapted = makeResult(
+      current.kind,
+      current.object,
+      reviewComments,
+      expectedActor,
+    );
+    const {
+      association: _association,
+      request_ref: _requestRef,
+      format: _format,
+      verdict: _verdict,
+      ...facts
+    } = adapted;
+    return projectBaselineResult(facts);
   }).filter(Boolean);
   const baselineIdentities = new Set([
     ...baseline.requests.map((item) => identity(item.resource_kind, item.resource_id)),
