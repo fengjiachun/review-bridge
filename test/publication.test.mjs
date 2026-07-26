@@ -757,6 +757,41 @@ test("verification adopts one complete valid audit crash tail", async (t) => {
   assert.equal(headAfter.next_sequence, head.next_sequence + 2);
 });
 
+test("audit temporary preflight fails before crash-tail recovery mutates state", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, observedAt } = await reachReady(state);
+  await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  const directory = path.join(state.store, "reviews", state.reviewId);
+  const auditPath = path.join(directory, "publication-gate-audit.jsonl");
+  const headPath = path.join(directory, "publication-gate-audit-head.json");
+  const gatePath = path.join(directory, "publication-gate.json");
+  await fsp.appendFile(auditPath, '{"incomplete":');
+  const temporary = `${headPath}.${"a".repeat(32)}.tmp`;
+  await fsp.symlink("untrusted-target", temporary);
+  const before = {
+    audit: await fsp.readFile(auditPath),
+    head: await fsp.readFile(headPath),
+    gate: await fsp.readFile(gatePath),
+  };
+
+  await assert.rejects(
+    verifyPublicationGate(state.store, state.reviewId, {
+      clock: () => observedAt + 30,
+    }),
+    (error) => error?.code === "AUDIT_STATE_INVALID",
+  );
+  assert.deepEqual(await fsp.readFile(auditPath), before.audit);
+  assert.deepEqual(await fsp.readFile(headPath), before.head);
+  assert.deepEqual(await fsp.readFile(gatePath), before.gate);
+  assert.equal((await fsp.lstat(temporary)).isSymbolicLink(), true);
+});
+
 test("a disappeared recorded Codex result persists terminal invalidation", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -1414,6 +1449,81 @@ test("offline audit inspection does not read an unbounded audit file into memory
   );
 });
 
+test("parseable non-object store JSON reports structured corruption errors", async (t) => {
+  await t.test("local gate", async (t) => {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    await fsp.writeFile(
+      path.join(state.store, "reviews", state.reviewId, "gate.json"),
+      "null\n",
+      { mode: 0o600 },
+    );
+    await assert.rejects(
+      start(state, Date.now()),
+      (error) => error?.code === "LOCAL_GATE_INVALID",
+    );
+  });
+
+  await t.test("publication ledger", async (t) => {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    await start(state, Date.now());
+    await atomicWriteCanonicalJson(
+      path.join(state.store, "reviews", state.reviewId, "publication.json"),
+      null,
+    );
+    await assert.rejects(
+      getPublication(state.store, state.reviewId),
+      (error) => error?.code === "PUBLICATION_STORE_INVALID",
+    );
+  });
+
+  await t.test("audit head", async (t) => {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    await start(state, Date.now());
+    await atomicWriteCanonicalJson(
+      path.join(
+        state.store,
+        "reviews",
+        state.reviewId,
+        "publication-gate-audit-head.json",
+      ),
+      null,
+    );
+    await assert.rejects(
+      inspectPublicationAudit(state.store, state.reviewId),
+      (error) => error?.code === "AUDIT_CORRUPT",
+    );
+  });
+
+  await t.test("audit event", async (t) => {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    await start(state, Date.now());
+    const directory = path.join(state.store, "reviews", state.reviewId);
+    await fsp.writeFile(
+      path.join(directory, "publication-gate-audit.jsonl"),
+      "null\n",
+      { mode: 0o600 },
+    );
+    await atomicWriteCanonicalJson(
+      path.join(directory, "publication-gate-audit-head.json"),
+      {
+        version: 1,
+        review_id: state.reviewId,
+        committed_bytes: 5,
+        next_sequence: 2,
+        last_event_sha256: digest("null"),
+      },
+    );
+    await assert.rejects(
+      inspectPublicationAudit(state.store, state.reviewId),
+      (error) => error?.code === "AUDIT_CORRUPT",
+    );
+  });
+});
+
 test("pre-start audit and stored-history invariants report their contract errors", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -1467,6 +1577,48 @@ test("verification audits the canonical digest of parseable non-canonical gate J
     "utf8",
   )).trim().split("\n").map(JSON.parse);
   assert.equal(events.at(-1).gate_sha256, digest(canonicalJson(gate)));
+});
+
+test("strict policy retains false source provenance", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 1_000;
+  const value = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  value.required_checks.collection.policy_sources.push({
+    kind: "CLASSIC_BRANCH_PROTECTION",
+    endpoint: "GET /fixture/classic",
+    collected_at:
+      value.required_checks.collection.policy_sources[0].collected_at,
+    status: "COMPLETE",
+    result: "SUCCESS",
+  });
+  value.required_checks.strict_policy.sources = [
+    {
+      kind: "CLASSIC_BRANCH_PROTECTION",
+      field: "required_status_checks.strict",
+      value: false,
+    },
+  ];
+
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: value },
+    { clock: () => observedAt + 10 },
+  );
+  assert.deepEqual(
+    recorded.latest_observation.required_checks.strict_policy,
+    value.required_checks.strict_policy,
+  );
 });
 
 test("required-check evaluation covers binding, reruns, and independent run kinds", async (t) => {

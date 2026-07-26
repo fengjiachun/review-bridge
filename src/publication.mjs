@@ -60,6 +60,25 @@ function fail(code, message, details) {
   throw new PublicationError(code, message, details);
 }
 
+function isJsonObject(value) {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseJsonObject(content, code, message) {
+  let value;
+  try {
+    value = JSON.parse(
+      typeof content === "string" ? content : content.toString("utf8"),
+    );
+  } catch {
+    fail(code, message);
+  }
+  if (!isJsonObject(value)) {
+    fail(code, message);
+  }
+  return value;
+}
+
 function nowIso(clock) {
   return new Date(clock()).toISOString();
 }
@@ -826,13 +845,13 @@ function validateChecks(requiredChecks, pullRequest) {
       "strict policy source kind",
     );
     assertString(source.field, "strict policy source field", 500);
-    if (source.value !== true) {
-      fail("INVALID_INPUT", "strict policy sources must identify true flags");
+    if (typeof source.value !== "boolean") {
+      fail("INVALID_INPUT", "strict policy sources must identify boolean flags");
     }
   }
   if (
     requiredChecks.strict_policy.required !==
-    (requiredChecks.strict_policy.sources.length > 0)
+    requiredChecks.strict_policy.sources.some((source) => source.value)
   ) {
     fail("INVALID_INPUT", "strict policy provenance contradicts required flag");
   }
@@ -1306,7 +1325,11 @@ async function validateOpenedLocalGate(
   opened,
   { verifyRepository = false } = {},
 ) {
-  const gate = JSON.parse(opened.bytes.toString("utf8"));
+  const gate = parseJsonObject(
+    opened.bytes,
+    "LOCAL_GATE_INVALID",
+    "local gate is not a JSON object",
+  );
   if (
     gate.version !== 1 ||
     gate.review_id !== reviewId ||
@@ -1373,7 +1396,11 @@ async function openAuthorizationFiles(
       localGateFile,
       { verifyRepository },
     );
-    const ledger = JSON.parse(publicationFile.bytes.toString("utf8"));
+    const ledger = parseJsonObject(
+      publicationFile.bytes,
+      "PUBLICATION_STORE_INVALID",
+      "publication.json is not a JSON object",
+    );
     if (ledger.version !== 1) {
       fail(
         "UNSUPPORTED_PUBLICATION_VERSION",
@@ -1389,7 +1416,10 @@ async function openAuthorizationFiles(
     if (publicationGateFile != null) {
       try {
         publicationGate = JSON.parse(publicationGateFile.bytes.toString("utf8"));
-        if (!publicationGateFile.bytes.equals(canonicalJsonBytes(publicationGate))) {
+        if (
+          !isJsonObject(publicationGate) ||
+          !publicationGateFile.bytes.equals(canonicalJsonBytes(publicationGate))
+        ) {
           gateParseError = true;
         }
       } catch {
@@ -1426,7 +1456,11 @@ async function loadPublicationFile(paths, { allowMissing = false } = {}) {
     return null;
   }
   try {
-    const ledger = JSON.parse(opened.bytes.toString("utf8"));
+    const ledger = parseJsonObject(
+      opened.bytes,
+      "PUBLICATION_STORE_INVALID",
+      "publication.json is not a JSON object",
+    );
     if (ledger.version !== 1) {
       fail(
         "UNSUPPORTED_PUBLICATION_VERSION",
@@ -2357,13 +2391,13 @@ function emptyAuditHead(reviewId) {
   };
 }
 
-async function cleanupAuditHeadTemporaries(paths) {
+async function validatedAuditHeadTemporaries(paths) {
   const prefix = `${path.basename(paths.auditHead)}.`;
   const pattern = new RegExp(
     `^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[0-9a-f]{32}\\.tmp$`,
   );
   const entries = await fsp.readdir(paths.directory, { withFileTypes: true });
-  let changed = false;
+  const temporaries = [];
   for (const entry of entries) {
     if (!pattern.test(entry.name)) {
       continue;
@@ -2373,10 +2407,17 @@ async function cleanupAuditHeadTemporaries(paths) {
     if (stat.isSymbolicLink() || !stat.isFile()) {
       fail("AUDIT_STATE_INVALID", `${temporary} must be a regular non-symlink temporary`);
     }
-    await fsp.unlink(temporary);
-    changed = true;
+    temporaries.push(temporary);
   }
-  if (changed) {
+  return temporaries;
+}
+
+async function cleanupAuditHeadTemporaries(paths) {
+  const temporaries = await validatedAuditHeadTemporaries(paths);
+  for (const temporary of temporaries) {
+    await fsp.unlink(temporary);
+  }
+  if (temporaries.length > 0) {
     const directory = await fsp.open(paths.directory, fs.constants.O_RDONLY);
     try {
       await directory.sync();
@@ -2454,6 +2495,7 @@ async function openAuditLog(filePath, { readOnly = false } = {}) {
 
 function validateAuditEvent(event, reviewId, head) {
   if (
+    !isJsonObject(event) ||
     event.version !== 1 ||
     event.review_id !== reviewId ||
     event.sequence !== head.next_sequence ||
@@ -2508,12 +2550,11 @@ async function validateLastCommittedAuditRecord(handle, head, reviewId) {
   ) {
     fail("AUDIT_CORRUPT", "last committed audit record disagrees with the cursor");
   }
-  let event;
-  try {
-    event = JSON.parse(eventBytes.toString("utf8"));
-  } catch {
-    fail("AUDIT_CORRUPT", "last committed audit record is malformed");
-  }
+  const event = parseJsonObject(
+    eventBytes,
+    "AUDIT_CORRUPT",
+    "last committed audit record is malformed",
+  );
   if (
     canonicalJson(event) !== eventBytes.toString("utf8") ||
     event.review_id !== reviewId ||
@@ -2523,7 +2564,7 @@ async function validateLastCommittedAuditRecord(handle, head, reviewId) {
   }
 }
 
-async function recoverAuditTail(paths, reviewId, opened, head) {
+async function planAuditRecovery(reviewId, opened, head) {
   if (
     head.version !== 1 ||
     head.review_id !== reviewId ||
@@ -2541,41 +2582,52 @@ async function recoverAuditTail(paths, reviewId, opened, head) {
   await validateLastCommittedAuditRecord(opened.handle, head, reviewId);
   const tailLength = opened.stat.size - head.committed_bytes;
   if (tailLength === 0) {
-    return head;
+    return { action: "NONE", head };
   }
   if (tailLength > MAX_AUDIT_EVENT_BYTES + 1) {
     fail("AUDIT_CORRUPT", "audit crash tail exceeds one event");
   }
   const tail = await readRange(opened.handle, tailLength, head.committed_bytes);
+  if (tail.length !== tailLength) {
+    fail("AUDIT_CORRUPT", "audit log changed during recovery preflight");
+  }
   const newlines = [...tail].filter((byte) => byte === 0x0a).length;
   if (newlines === 0) {
-    await opened.handle.truncate(head.committed_bytes);
-    await opened.handle.sync();
-    return head;
+    return { action: "TRUNCATE", head };
   }
   if (newlines !== 1 || tail.at(-1) !== 0x0a) {
     fail("AUDIT_CORRUPT", "audit crash tail contains multiple or trailing records");
   }
   const eventBytes = tail.subarray(0, -1);
-  let event;
-  try {
-    event = JSON.parse(eventBytes.toString("utf8"));
-  } catch {
-    fail("AUDIT_CORRUPT", "complete audit crash tail is malformed");
-  }
+  const event = parseJsonObject(
+    eventBytes,
+    "AUDIT_CORRUPT",
+    "complete audit crash tail is malformed",
+  );
   if (canonicalJson(event) !== eventBytes.toString("utf8")) {
     fail("AUDIT_CORRUPT", "complete audit crash tail is not canonical");
   }
   validateAuditEvent(event, reviewId, head);
-  const adopted = {
-    version: 1,
-    review_id: reviewId,
-    committed_bytes: opened.stat.size,
-    next_sequence: head.next_sequence + 1,
-    last_event_sha256: sha256(eventBytes),
+  return {
+    action: "ADOPT",
+    head: {
+      version: 1,
+      review_id: reviewId,
+      committed_bytes: opened.stat.size,
+      next_sequence: head.next_sequence + 1,
+      last_event_sha256: sha256(eventBytes),
+    },
   };
-  await atomicWriteCanonicalJson(paths.auditHead, adopted);
-  return adopted;
+}
+
+async function applyAuditRecovery(paths, opened, recovery) {
+  if (recovery.action === "TRUNCATE") {
+    await opened.handle.truncate(recovery.head.committed_bytes);
+    await opened.handle.sync();
+  } else if (recovery.action === "ADOPT") {
+    await atomicWriteCanonicalJson(paths.auditHead, recovery.head);
+  }
+  return recovery.head;
 }
 
 async function openAuditSession(paths, reviewId) {
@@ -2585,14 +2637,18 @@ async function openAuditSession(paths, reviewId) {
       requiredMode: 0o600,
       maxBytes: 16 * 1024,
     });
-    let head;
     try {
-      head = JSON.parse(openedHead.bytes.toString("utf8"));
+      let head = parseJsonObject(
+        openedHead.bytes,
+        "AUDIT_CORRUPT",
+        "audit head is malformed",
+      );
       if (!openedHead.bytes.equals(canonicalJsonBytes(head))) {
         fail("AUDIT_CORRUPT", "audit head is not canonical JSON");
       }
-      head = await recoverAuditTail(paths, reviewId, opened, head);
+      const recovery = await planAuditRecovery(reviewId, opened, head);
       await cleanupAuditHeadTemporaries(paths);
+      head = await applyAuditRecovery(paths, opened, recovery);
       return { opened, openedHead, head };
     } catch (error) {
       await openedHead.handle.close();
@@ -2638,12 +2694,11 @@ async function inspectCommittedAudit(handle, committedBytes, reviewId) {
         fail("AUDIT_CORRUPT", `audit event ${eventCount} has invalid size`);
       }
       const line = eventBytes.toString("utf8");
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        fail("AUDIT_CORRUPT", `audit event ${eventCount} is malformed`);
-      }
+      const event = parseJsonObject(
+        line,
+        "AUDIT_CORRUPT",
+        `audit event ${eventCount} is malformed`,
+      );
       if (canonicalJson(event) !== line) {
         fail("AUDIT_CORRUPT", `audit event ${eventCount} is not canonical`);
       }
@@ -2676,12 +2731,11 @@ export async function inspectPublicationAudit(storeRoot, reviewId) {
         requiredMode: 0o600,
         maxBytes: 16 * 1024,
       });
-      let head;
-      try {
-        head = JSON.parse(openedHead.bytes.toString("utf8"));
-      } catch {
-        fail("AUDIT_CORRUPT", "audit head is malformed");
-      }
+      const head = parseJsonObject(
+        openedHead.bytes,
+        "AUDIT_CORRUPT",
+        "audit head is malformed",
+      );
       if (!openedHead.bytes.equals(canonicalJsonBytes(head))) {
         fail("AUDIT_CORRUPT", "audit head is not canonical JSON");
       }
