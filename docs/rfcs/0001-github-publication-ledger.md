@@ -2322,11 +2322,20 @@ lock record therefore contains:
 - acquisition and heartbeat timestamps; and
 - the lock domain and review ID.
 
-Every lock-record transition is serialized by a persistent sibling
-`.<domain>-state.lock.guard` file held briefly through macOS `lockf`. The guard
-is never renamed or removed, so the operating system releases it automatically
-if a transition helper exits. This makes stale-record replacement a single
-coordinated operation rather than a check-then-unlink race between contenders.
+One helper process holds a persistent sibling `.<domain>-state.lock.guard` file
+through macOS `lockf -k` for the full lifetime of each state lock. Acquisition,
+heartbeat, and release commands travel over that helper's standard input and
+output; owner tokens never travel in process arguments. `-k` preserves one guard
+inode across holders, and the operating system releases its advisory lock
+automatically if the helper exits. This makes stale-record replacement a single
+coordinated operation rather than a check-then-unlink race between contenders,
+without starting a new process for every transition.
+
+Each `lockf` wrapper and its Node helper run in a dedicated process group. A
+command that does not answer within five seconds causes the parent to terminate
+that entire group before performing token-checked cleanup under a new guard
+holder. The `/bin/ps` probes used for process identity have their own two-second
+limit, so neither a helper command nor its liveness probe can wait forever.
 
 The holder refreshes a heartbeat every five seconds with atomic replacement and
 releases in a `finally` block only after rereading the lock under the guard and
@@ -2341,6 +2350,14 @@ identity probe fails closed with an actionable, non-retryable error and never
 steals the lock. A malformed or wrong-mode lock also fails immediately with its
 path; normal acquisition and heartbeat writes cannot create a partial record
 because they use durable atomic replacement.
+
+If the helper exits while its parent is still operating, the canonical record
+continues to identify that live parent. Even after the heartbeat becomes stale,
+contenders therefore remain busy rather than admitting a second owner. The
+parent reacquires the guard for token-checked cleanup; if the parent itself
+exits, stale-owner recovery becomes possible only after the same conclusive
+identity check. Helper loss can reduce availability, but cannot silently create
+concurrent cooperating owners.
 
 An acquisition timeout returns a documented retryable `REVIEW_BUSY` or
 `PUBLICATION_BUSY` error without changing state. Adding `REVIEW_BUSY` to
@@ -3002,8 +3019,9 @@ The implementation must test:
   through full-closure direct-human ambiguity approval, direct
   automatic-quiescence approval when applicable, stable Bot actor-ID
   resolution, and immediate pre-merge gate verification;
-- lock timeout errors, PID reuse, heartbeat expiry, owner-token mismatch, and
-  inconclusive owner-liveness checks;
+- lock timeout errors, `lockf` contention versus non-contention exits, stable
+  guard inodes, PID reuse, heartbeat expiry, helper loss, owner-token mismatch,
+  token absence from process arguments, and inconclusive owner-liveness checks;
 - every state-changing publication tool returning
   `PUBLICATION_TERMINAL` against each terminal status without changing the
   ledger, gate, or audit entries;

@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -10,8 +11,11 @@ const LOCK_HEARTBEAT_MS = 5_000;
 const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 10_000;
 const LOCK_POLL_MS = 100;
+const LOCK_HELPER_COMMAND_TIMEOUT_MS = 5_000;
+const PROCESS_PROBE_TIMEOUT_MS = 2_000;
 const LOCK_HELPER_ARGUMENT = "--state-lock-helper";
 const LOCKF_PATH = "/usr/bin/lockf";
+const LOCKF_BUSY_EXIT = 75;
 const PS_PATH = "/bin/ps";
 const PROCESS_START_FORMAT = "darwin-ps-lstart-c-utc-v1";
 const execFileAsync = promisify(execFile);
@@ -24,77 +28,6 @@ export class StoreError extends Error {
     this.code = code;
     this.details = details;
   }
-}
-
-function assertUnicodeScalarString(value) {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) {
-        throw new TypeError("canonical JSON rejects lone Unicode surrogates");
-      }
-      index += 1;
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      throw new TypeError("canonical JSON rejects lone Unicode surrogates");
-    }
-  }
-  return value;
-}
-
-function canonicalJsonValue(value) {
-  if (value === null || typeof value === "boolean") {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "string") {
-    return JSON.stringify(assertUnicodeScalarString(value));
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new TypeError("canonical JSON does not support non-finite numbers");
-    }
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    for (let index = 0; index < value.length; index += 1) {
-      if (!Object.hasOwn(value, index)) {
-        throw new TypeError(
-          `canonical JSON does not support a sparse array at index ${index}`,
-        );
-      }
-    }
-    return `[${value.map(canonicalJsonValue).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw new TypeError("canonical JSON only supports plain objects");
-    }
-    const keys = Object.keys(value);
-    for (const key of keys) {
-      if (value[key] === undefined) {
-        throw new TypeError(
-          `canonical JSON does not support undefined at key ${JSON.stringify(key)}`,
-        );
-      }
-    }
-    return `{${keys
-      .sort()
-      .map(
-        (key) =>
-          `${JSON.stringify(assertUnicodeScalarString(key))}:${canonicalJsonValue(value[key])}`,
-      )
-      .join(",")}}`;
-  }
-  throw new TypeError(`canonical JSON does not support ${typeof value}`);
-}
-
-export function canonicalJson(value) {
-  return canonicalJsonValue(value);
-}
-
-export function canonicalJsonBytes(value) {
-  return Buffer.from(`${canonicalJson(value)}\n`, "utf8");
 }
 
 async function syncDirectory(directory) {
@@ -131,8 +64,8 @@ export async function atomicWriteFile(filePath, data, { mode = 0o600 } = {}) {
   }
 }
 
-export async function atomicWriteCanonicalJson(filePath, value) {
-  await atomicWriteFile(filePath, canonicalJsonBytes(value));
+async function atomicWriteJson(filePath, value) {
+  await atomicWriteFile(filePath, `${JSON.stringify(value)}\n`);
 }
 
 async function removeAndSync(filePath) {
@@ -150,9 +83,14 @@ async function removeAndSync(filePath) {
 
 // O_NOFOLLOW protects the final component. Callers must supply a trusted private
 // parent directory, as Review Bridge does for its 0700 per-review store.
-export async function openSecureFile(
+async function openSecureFile(
   filePath,
-  { maxBytes, requiredMode = 0o600, allowMissing = false, flags = fs.constants.O_RDONLY } = {},
+  {
+    maxBytes,
+    requiredMode = 0o600,
+    allowMissing = false,
+    flags = fs.constants.O_RDONLY,
+  } = {},
 ) {
   if (!Number.isInteger(fs.constants.O_NOFOLLOW)) {
     throw new StoreError(
@@ -208,7 +146,7 @@ export async function openSecureFile(
   }
 }
 
-export async function readSecureFile(filePath, options = {}) {
+async function readSecureFile(filePath, options = {}) {
   const opened = await openSecureFile(filePath, options);
   if (opened == null) {
     return null;
@@ -221,14 +159,6 @@ export async function readSecureFile(filePath, options = {}) {
   } finally {
     await opened.handle.close();
   }
-}
-
-export async function readSecureJson(filePath, options = {}) {
-  const opened = await readSecureFile(filePath, options);
-  if (opened == null) {
-    return null;
-  }
-  return JSON.parse(opened.bytes.toString("utf8"));
 }
 
 function stableProcessEnvironment() {
@@ -244,8 +174,14 @@ function processStartTimeSync(pid) {
   const result = spawnSync(PS_PATH, ["-o", "lstart=", "-p", String(pid)], {
     encoding: "utf8",
     env: stableProcessEnvironment(),
+    timeout: PROCESS_PROBE_TIMEOUT_MS,
+    killSignal: "SIGKILL",
   });
-  if (result.status === 0 && result.stdout.trim() !== "") {
+  if (
+    result.status === 0 &&
+    typeof result.stdout === "string" &&
+    result.stdout.trim() !== ""
+  ) {
     return result.stdout.trim();
   }
   return null;
@@ -258,6 +194,8 @@ async function ownProcessStartTime() {
     {
       encoding: "utf8",
       env: stableProcessEnvironment(),
+      timeout: PROCESS_PROBE_TIMEOUT_MS,
+      killSignal: "SIGKILL",
     },
   ).then(({ stdout }) => {
     const value = stdout.trim();
@@ -321,7 +259,10 @@ function invalidLockRecord(lockPath, message) {
   );
 }
 
-async function readLock(lockPath, { allowMissing = false, ignoreMode = false } = {}) {
+async function readLock(
+  lockPath,
+  { allowMissing = false, ignoreMode = false } = {},
+) {
   let opened;
   try {
     opened = await readSecureFile(lockPath, {
@@ -355,12 +296,18 @@ async function readLock(lockPath, { allowMissing = false, ignoreMode = false } =
     record.pid <= 0 ||
     record.process_start_time_format !== PROCESS_START_FORMAT ||
     typeof record.process_start_time !== "string" ||
+    record.process_start_time === "" ||
+    typeof record.acquired_at !== "string" ||
     !Number.isFinite(Date.parse(record.acquired_at)) ||
+    typeof record.heartbeat_at !== "string" ||
     !Number.isFinite(Date.parse(record.heartbeat_at)) ||
     !["review", "publication"].includes(record.domain) ||
     typeof record.review_id !== "string"
   ) {
-    throw invalidLockRecord(lockPath, "required fields are missing or malformed");
+    throw invalidLockRecord(
+      lockPath,
+      "required fields are missing or malformed",
+    );
   }
   return record;
 }
@@ -381,55 +328,60 @@ function throwHelperError(result) {
   );
 }
 
-async function runLockedHelper(payload) {
-  const lockPath = payload.lock_path;
-  const action = payload.action;
-  if (!["ACQUIRE", "HEARTBEAT", "RELEASE"].includes(action)) {
-    throw new TypeError("invalid state-lock helper action");
+async function acquireRecordUnderGuard(payload) {
+  if (Date.now() > payload.deadline_ms) {
+    return { status: "DEADLINE" };
   }
-  if (action === "ACQUIRE") {
-    if (Date.now() > payload.deadline_ms) {
-      return { status: "DEADLINE" };
-    }
-    const current = await readLock(lockPath, { allowMissing: true });
-    if (current != null) {
-      if (
-        current.domain !== payload.record.domain ||
-        current.review_id !== payload.record.review_id
-      ) {
-        throw invalidLockRecord(lockPath, "domain or review ID does not match");
-      }
-      const heartbeat = Date.parse(current.heartbeat_at);
-      if (Date.now() - heartbeat <= payload.stale_ms) {
-        return { status: "BUSY" };
-      }
-      const identity = processIdentityStatus(
-        current.pid,
-        current.process_start_time,
+  const current = await readLock(payload.lock_path, { allowMissing: true });
+  if (current != null) {
+    if (
+      current.domain !== payload.record.domain ||
+      current.review_id !== payload.record.review_id
+    ) {
+      throw invalidLockRecord(
+        payload.lock_path,
+        "domain or review ID does not match",
       );
-      if (identity === "ALIVE") {
-        return { status: "BUSY" };
-      }
-      if (identity === "UNKNOWN") {
-        throw new StoreError(
-          "LOCK_OWNER_UNKNOWN",
-          `could not conclusively identify stale lock owner pid ${current.pid}; inspect ${lockPath} and retry only after confirming that owner is inactive`,
-          {
-            path: lockPath,
-            pid: current.pid,
-            process_start_time: current.process_start_time,
-            retryable: false,
-          },
-        );
-      }
     }
-    await atomicWriteCanonicalJson(lockPath, payload.record);
-    return { status: current == null ? "ACQUIRED" : "RECLAIMED" };
+    if (Date.now() - Date.parse(current.heartbeat_at) <= payload.stale_ms) {
+      return { status: "BUSY" };
+    }
+    const identity = processIdentityStatus(
+      current.pid,
+      current.process_start_time,
+    );
+    if (identity === "ALIVE") {
+      return { status: "BUSY" };
+    }
+    if (identity === "UNKNOWN") {
+      throw new StoreError(
+        "LOCK_OWNER_UNKNOWN",
+        `could not conclusively identify stale lock owner pid ${current.pid}; inspect ${payload.lock_path} and retry only after confirming that owner is inactive`,
+        {
+          path: payload.lock_path,
+          pid: current.pid,
+          process_start_time: current.process_start_time,
+          retryable: false,
+        },
+      );
+    }
   }
+  const timestamp = new Date().toISOString();
+  const record = {
+    ...payload.record,
+    acquired_at: timestamp,
+    heartbeat_at: timestamp,
+  };
+  await atomicWriteJson(payload.lock_path, record);
+  return {
+    status: current == null ? "ACQUIRED" : "RECLAIMED",
+  };
+}
 
-  const current = await readLock(lockPath, {
+async function updateRecordUnderGuard(payload) {
+  const current = await readLock(payload.lock_path, {
     allowMissing: true,
-    ignoreMode: action === "RELEASE",
+    ignoreMode: payload.action === "RELEASE",
   });
   if (current == null) {
     return { status: "MISSING" };
@@ -437,116 +389,365 @@ async function runLockedHelper(payload) {
   if (current.owner_token !== payload.owner_token) {
     return { status: "FOREIGN_OWNER" };
   }
-  if (action === "HEARTBEAT") {
+  if (payload.action === "HEARTBEAT") {
     current.heartbeat_at = new Date().toISOString();
-    await atomicWriteCanonicalJson(lockPath, current);
+    await atomicWriteJson(payload.lock_path, current);
     return { status: "UPDATED" };
   }
-  await removeAndSync(lockPath);
+  if (payload.action !== "RELEASE") {
+    throw new TypeError("invalid state-lock holder command");
+  }
+  await removeAndSync(payload.lock_path);
   return { status: "RELEASED" };
 }
 
-async function stateLockHelperMain(encodedPayload) {
-  try {
-    const payload = JSON.parse(
-      Buffer.from(encodedPayload, "base64url").toString("utf8"),
-    );
-    return await runLockedHelper(payload);
-  } catch (error) {
-    return { status: "ERROR", error: helperError(error) };
+function writeHelperMessage(message) {
+  process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+async function runHelperAction(payload, acquired) {
+  if (!acquired && payload.action === "ACQUIRE") {
+    return acquireRecordUnderGuard(payload);
   }
+  if (!acquired && payload.action === "RELEASE_ONCE") {
+    return updateRecordUnderGuard({ ...payload, action: "RELEASE" });
+  }
+  if (
+    acquired &&
+    ["HEARTBEAT", "RELEASE"].includes(payload.action)
+  ) {
+    return updateRecordUnderGuard(payload);
+  }
+  throw new TypeError("invalid state-lock holder action sequence");
+}
+
+async function stateLockHelperMain() {
+  const lines = readline.createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+  });
+  let acquired = false;
+  for await (const line of lines) {
+    let payload;
+    try {
+      payload = JSON.parse(line);
+      const result = await runHelperAction(payload, acquired);
+      writeHelperMessage(result);
+      if (["ACQUIRED", "RECLAIMED"].includes(result.status)) {
+        acquired = true;
+        continue;
+      }
+      if (!acquired || payload.action === "RELEASE") {
+        return;
+      }
+    } catch (error) {
+      writeHelperMessage({ status: "ERROR", error: helperError(error) });
+      return;
+    }
+  }
+  // EOF means the parent disappeared. Keep the record for stale-owner recovery;
+  // lockf releases the advisory guard automatically when this helper exits.
+}
+
+function coordinatorError(coordinatorPath, error) {
+  if (error instanceof StoreError) {
+    return error;
+  }
+  return new StoreError(
+    "LOCK_COORDINATOR_INVALID",
+    `cannot use state-lock coordinator ${coordinatorPath}: ${error.message}`,
+    { path: coordinatorPath, cause_code: error?.code ?? null },
+  );
 }
 
 async function ensureCoordinatorFile(coordinatorPath) {
-  const handle = await fsp.open(
-    coordinatorPath,
-    fs.constants.O_RDWR | fs.constants.O_CREAT,
-    0o600,
-  );
+  if (!Number.isInteger(fs.constants.O_NOFOLLOW)) {
+    throw new StoreError(
+      "STORE_NOFOLLOW_UNAVAILABLE",
+      "this runtime does not provide O_NOFOLLOW for lock coordination",
+      { path: coordinatorPath },
+    );
+  }
+  let handle;
   try {
+    handle = await fsp.open(
+      coordinatorPath,
+      fs.constants.O_RDWR |
+        fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        fs.constants.O_NOFOLLOW,
+      0o600,
+    );
     await handle.chmod(0o600);
     await handle.sync();
-  } finally {
     await handle.close();
+    handle = null;
+    await syncDirectory(path.dirname(coordinatorPath));
+    return;
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if (error?.code !== "EEXIST") {
+      throw coordinatorError(coordinatorPath, error);
+    }
+  }
+
+  try {
+    const opened = await openSecureFile(coordinatorPath, {
+      flags: fs.constants.O_RDWR,
+      maxBytes: 0,
+      requiredMode: 0o600,
+    });
+    await opened.handle.close();
+  } catch (error) {
+    throw coordinatorError(coordinatorPath, error);
   }
 }
 
-async function invokeStateLockHelper(
-  coordinatorPath,
-  payload,
-) {
-  await ensureCoordinatorFile(coordinatorPath);
-  const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString(
-    "base64url",
+function lockfExitError(code, signal, stderr) {
+  if (code === LOCKF_BUSY_EXIT) {
+    return new StoreError(
+      "LOCK_COORDINATOR_BUSY",
+      "state-lock coordinator is held by another process",
+      { retryable: true },
+    );
+  }
+  return new StoreError(
+    "LOCK_HELPER_FAILED",
+    signal == null
+      ? `${LOCKF_PATH} exited with status ${code}: ${stderr}`
+      : `${LOCKF_PATH} was terminated by ${signal}: ${stderr}`,
+    {
+      retryable: false,
+      exit_status: code,
+      signal,
+      stderr,
+    },
   );
-  const args = [
-    "-s",
-    "-t",
-    "0",
-    coordinatorPath,
-    process.execPath,
-    fileURLToPath(import.meta.url),
-    LOCK_HELPER_ARGUMENT,
-    encodedPayload,
-  ];
-  return new Promise((resolve, reject) => {
-    const child = spawn(LOCKF_PATH, args, {
+}
+
+function spawnHolderProcess(coordinatorPath) {
+  const child = spawn(
+    LOCKF_PATH,
+    [
+      "-s",
+      "-k",
+      "-t",
+      "0",
+      coordinatorPath,
+      process.execPath,
+      fileURLToPath(import.meta.url),
+      LOCK_HELPER_ARGUMENT,
+    ],
+    {
+      detached: true,
       env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const stdout = [];
-    const stderr = [];
-    let outputBytes = 0;
-    child.stdout.on("data", (chunk) => {
-      outputBytes += chunk.length;
-      if (outputBytes <= 64 * 1024) {
-        stdout.push(chunk);
-      }
-    });
-    child.stderr.on("data", (chunk) => {
-      if (stderr.reduce((total, item) => total + item.length, 0) < 16 * 1024) {
-        stderr.push(chunk);
-      }
-    });
-    child.on("error", (error) => {
-      reject(
-        new StoreError(
-          "LOCK_RUNTIME_UNAVAILABLE",
-          `could not execute ${LOCKF_PATH}: ${error.message}`,
-          { path: LOCKF_PATH },
-        ),
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  child.stdin.on("error", () => {});
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+
+  let stdoutBuffer = "";
+  let stderrText = "";
+  let closedError = null;
+  const messages = [];
+  const waiters = [];
+
+  function rejectWaiters(error) {
+    while (waiters.length > 0) {
+      const waiter = waiters.shift();
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+  }
+
+  child.stdout.on("data", (chunk) => {
+    stdoutBuffer += chunk;
+    if (Buffer.byteLength(stdoutBuffer, "utf8") > 64 * 1024) {
+      const error = new StoreError(
+        "LOCK_HELPER_FAILED",
+        "state-lock helper output is too large",
       );
-    });
-    child.on("close", (code) => {
-      if (outputBytes > 64 * 1024) {
-        reject(new StoreError("LOCK_HELPER_FAILED", "state-lock helper output is too large"));
-        return;
-      }
-      const text = Buffer.concat(stdout).toString("utf8");
-      if (code !== 0) {
-        reject(
-          new StoreError(
-            "LOCK_COORDINATOR_BUSY",
-            `${LOCKF_PATH} exited with status ${code}: ${Buffer.concat(stderr)
-              .toString("utf8")
-              .trim()}`,
-            { retryable: true },
-          ),
-        );
-        return;
-      }
+      closedError = killProcessGroup(error);
+      rejectWaiters(closedError);
+      return;
+    }
+    while (stdoutBuffer.includes("\n")) {
+      const newline = stdoutBuffer.indexOf("\n");
+      const line = stdoutBuffer.slice(0, newline);
+      stdoutBuffer = stdoutBuffer.slice(newline + 1);
+      let message;
       try {
-        resolve(JSON.parse(text));
+        message = JSON.parse(line);
       } catch (error) {
-        reject(
-          new StoreError(
-            "LOCK_HELPER_FAILED",
-            `state-lock helper returned invalid JSON: ${error.message}`,
-          ),
+        const failure = new StoreError(
+          "LOCK_HELPER_FAILED",
+          `state-lock helper returned invalid JSON: ${error.message}`,
         );
+        closedError = killProcessGroup(failure);
+        rejectWaiters(closedError);
+        return;
       }
-    });
+      const waiter = waiters.shift();
+      if (waiter == null) {
+        messages.push(message);
+      } else {
+        clearTimeout(waiter.timer);
+        waiter.resolve(message);
+      }
+    }
   });
+  child.stderr.on("data", (chunk) => {
+    if (Buffer.byteLength(stderrText, "utf8") < 16 * 1024) {
+      stderrText += chunk;
+    }
+  });
+  child.on("error", (error) => {
+    closedError = new StoreError(
+      "LOCK_RUNTIME_UNAVAILABLE",
+      `could not execute ${LOCKF_PATH}: ${error.message}`,
+      { path: LOCKF_PATH },
+    );
+    rejectWaiters(closedError);
+  });
+  child.on("close", (code, signal) => {
+    closedError ??= lockfExitError(code, signal, stderrText.trim());
+    rejectWaiters(closedError);
+  });
+
+  function nextMessage(timeoutMs) {
+    if (messages.length > 0) {
+      return Promise.resolve(messages.shift());
+    }
+    if (closedError != null) {
+      return Promise.reject(closedError);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        const index = waiters.indexOf(waiter);
+        if (index >= 0) {
+          waiters.splice(index, 1);
+        }
+        const error = new StoreError(
+          "LOCK_HELPER_TIMEOUT",
+          `state-lock helper did not respond within ${timeoutMs}ms`,
+          { retryable: false, timeout_ms: timeoutMs },
+        );
+        closedError = killProcessGroup(error);
+        reject(closedError);
+      }, timeoutMs);
+      waiter.timer.unref();
+      waiters.push(waiter);
+    });
+  }
+
+  async function send(payload, timeoutMs) {
+    const response = nextMessage(timeoutMs);
+    child.stdin.write(`${JSON.stringify(payload)}\n`);
+    return response;
+  }
+
+  function killProcessGroup(cause) {
+    if (!Number.isSafeInteger(child.pid)) {
+      return cause;
+    }
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch (error) {
+      if (error?.code === "ESRCH") {
+        return cause;
+      }
+      return new StoreError(
+        "LOCK_HELPER_KILL_FAILED",
+        `state-lock helper could not be terminated after ${cause.message}: ${error.message}`,
+        {
+          retryable: false,
+          cause_code: cause.code ?? null,
+          kill_code: error?.code ?? null,
+        },
+      );
+    }
+    return cause;
+  }
+
+  return {
+    send,
+    end: () => child.stdin.end(),
+    kill: (cause) => killProcessGroup(cause),
+  };
+}
+
+async function startHolder(coordinatorPath, payload, timeoutMs) {
+  await ensureCoordinatorFile(coordinatorPath);
+  const holder = spawnHolderProcess(coordinatorPath);
+  try {
+    return {
+      holder,
+      response: await holder.send(payload, timeoutMs),
+    };
+  } catch (error) {
+    throw holder.kill(error);
+  }
+}
+
+async function releaseRecordOnce(
+  coordinatorPath,
+  lockPath,
+  ownerToken,
+  timeoutMs,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new StoreError(
+        "LOCK_HELPER_TIMEOUT",
+        "timed out while cleaning up the state-lock record",
+        { retryable: false, timeout_ms: timeoutMs },
+      );
+    }
+    try {
+      const { holder, response } = await startHolder(
+        coordinatorPath,
+        {
+          action: "RELEASE_ONCE",
+          lock_path: lockPath,
+          owner_token: ownerToken,
+        },
+        Math.min(remaining, LOCK_HELPER_COMMAND_TIMEOUT_MS),
+      );
+      holder.end();
+      if (response.status === "ERROR") {
+        throwHelperError(response);
+      }
+      return response;
+    } catch (error) {
+      if (error?.code !== "LOCK_COORDINATOR_BUSY") {
+        throw error;
+      }
+      await delay(Math.min(LOCK_POLL_MS, remaining));
+    }
+  }
+}
+
+async function cleanupFailedAcquire(
+  coordinatorPath,
+  lockPath,
+  ownerToken,
+  reviewId,
+) {
+  try {
+    await releaseRecordOnce(
+      coordinatorPath,
+      lockPath,
+      ownerToken,
+      LOCK_HELPER_COMMAND_TIMEOUT_MS,
+    );
+  } catch (error) {
+    emitCleanupWarning(reviewId, [error]);
+  }
 }
 
 function emitCleanupWarning(reviewId, errors) {
@@ -581,6 +782,9 @@ export async function acquireStateLock({
       throw new TypeError(`${name} must be a positive safe integer`);
     }
   }
+  if (heartbeatMs >= staleMs) {
+    throw new TypeError("heartbeatMs must be less than staleMs");
+  }
   const directoryStat = await fsp.stat(directory);
   if (!directoryStat.isDirectory()) {
     throw new TypeError("lock directory must be an existing directory");
@@ -589,34 +793,38 @@ export async function acquireStateLock({
   const coordinatorPath = `${lockPath}.guard`;
   const ownerToken = crypto.randomBytes(16).toString("hex");
   const processStart = await ownProcessStartTime();
-  const acquiredAt = new Date().toISOString();
   const record = {
     version: 1,
     owner_token: ownerToken,
     pid: process.pid,
     process_start_time: processStart,
     process_start_time_format: PROCESS_START_FORMAT,
-    acquired_at: acquiredAt,
-    heartbeat_at: acquiredAt,
     domain,
     review_id: reviewId,
   };
   const deadline = Date.now() + waitMs;
   let firstAttempt = true;
+  let holder;
   while (true) {
     const remaining = deadline - Date.now();
-    if (!firstAttempt && remaining <= 0) {
+    if (!firstAttempt && remaining <= LOCK_POLL_MS) {
+      if (remaining > 0) {
+        await delay(remaining);
+      }
       const code = lockErrorCode(domain);
-      throw new StoreError(code, `${code}: ${reviewId} is busy; reread and retry`, {
-        retryable: true,
-        review_id: reviewId,
-        domain,
-      });
+      throw new StoreError(
+        code,
+        `${code}: ${reviewId} is busy; reread and retry`,
+        {
+          retryable: true,
+          review_id: reviewId,
+          domain,
+        },
+      );
     }
     firstAttempt = false;
-    let result;
     try {
-      result = await invokeStateLockHelper(
+      const started = await startHolder(
         coordinatorPath,
         {
           action: "ACQUIRE",
@@ -625,17 +833,42 @@ export async function acquireStateLock({
           stale_ms: staleMs,
           deadline_ms: deadline,
         },
+        Math.min(
+          Math.max(1, remaining),
+          LOCK_HELPER_COMMAND_TIMEOUT_MS,
+        ),
       );
-    } catch (error) {
-      if (error?.code !== "LOCK_COORDINATOR_BUSY") {
-        throw error;
+      if (started.response.status === "ERROR") {
+        started.holder.end();
+        throwHelperError(started.response);
       }
-    }
-    if (result?.status === "ERROR") {
-      throwHelperError(result);
-    }
-    if (["ACQUIRED", "RECLAIMED"].includes(result?.status)) {
-      break;
+      if (["ACQUIRED", "RECLAIMED"].includes(started.response.status)) {
+        holder = started.holder;
+        break;
+      }
+      started.holder.end();
+    } catch (error) {
+      if (error?.code === "LOCK_COORDINATOR_BUSY") {
+        await delay(
+          Math.min(LOCK_POLL_MS, Math.max(1, deadline - Date.now())),
+        );
+        continue;
+      }
+      if (
+        [
+          "LOCK_HELPER_FAILED",
+          "LOCK_HELPER_KILL_FAILED",
+          "LOCK_HELPER_TIMEOUT",
+        ].includes(error?.code)
+      ) {
+        await cleanupFailedAcquire(
+          coordinatorPath,
+          lockPath,
+          ownerToken,
+          reviewId,
+        );
+      }
+      throw error;
     }
     await delay(
       Math.min(LOCK_POLL_MS, Math.max(1, deadline - Date.now())),
@@ -645,19 +878,20 @@ export async function acquireStateLock({
   let stopped = false;
   let heartbeatPromise = Promise.resolve();
   let heartbeatError = null;
+  let holderUsable = true;
   const heartbeat = () => {
     heartbeatPromise = heartbeatPromise.then(async () => {
-      if (stopped) {
+      if (stopped || !holderUsable) {
         return;
       }
       try {
-        const result = await invokeStateLockHelper(
-          coordinatorPath,
+        const result = await holder.send(
           {
             action: "HEARTBEAT",
             lock_path: lockPath,
             owner_token: ownerToken,
           },
+          LOCK_HELPER_COMMAND_TIMEOUT_MS,
         );
         if (result.status === "ERROR") {
           throwHelperError(result);
@@ -669,9 +903,9 @@ export async function acquireStateLock({
             { review_id: reviewId, domain, status: result.status },
           );
         }
-        heartbeatError = null;
       } catch (error) {
-        heartbeatError = error;
+        holderUsable = false;
+        heartbeatError = holder.kill(error);
       }
     });
   };
@@ -689,20 +923,49 @@ export async function acquireStateLock({
     if (heartbeatError != null) {
       cleanupErrors.push(heartbeatError);
     }
-    try {
-      const result = await invokeStateLockHelper(
-        coordinatorPath,
-        {
-          action: "RELEASE",
-          lock_path: lockPath,
-          owner_token: ownerToken,
-        },
-      );
-      if (result.status === "ERROR") {
-        throwHelperError(result);
+    let released = false;
+    if (holderUsable) {
+      try {
+        const result = await holder.send(
+          {
+            action: "RELEASE",
+            lock_path: lockPath,
+            owner_token: ownerToken,
+          },
+          LOCK_HELPER_COMMAND_TIMEOUT_MS,
+        );
+        holder.end();
+        if (result.status === "ERROR") {
+          throwHelperError(result);
+        }
+        if (["MISSING", "FOREIGN_OWNER"].includes(result.status)) {
+          cleanupErrors.push(
+            new StoreError(
+              "LOCK_OWNERSHIP_LOST",
+              `state-lock release for ${reviewId} found ${result.status}`,
+              { review_id: reviewId, domain, status: result.status },
+            ),
+          );
+        }
+        released = ["RELEASED", "MISSING", "FOREIGN_OWNER"].includes(
+          result.status,
+        );
+      } catch (error) {
+        holderUsable = false;
+        cleanupErrors.push(holder.kill(error));
       }
-    } catch (error) {
-      cleanupErrors.push(error);
+    }
+    if (!released) {
+      try {
+        await releaseRecordOnce(
+          coordinatorPath,
+          lockPath,
+          ownerToken,
+          LOCK_HELPER_COMMAND_TIMEOUT_MS,
+        );
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
     }
     emitCleanupWarning(reviewId, cleanupErrors);
   };
@@ -718,6 +981,5 @@ export async function withStateLock(options, operation) {
 }
 
 if (process.argv[2] === LOCK_HELPER_ARGUMENT) {
-  const result = await stateLockHelperMain(process.argv[3] ?? "");
-  process.stdout.write(JSON.stringify(result));
+  await stateLockHelperMain();
 }

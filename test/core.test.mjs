@@ -232,7 +232,6 @@ test("compact review summaries support bounded state-change waits", async (t) =>
     prepared.id,
     summary.state_version,
     1_000,
-    summary.status,
   );
   await new Promise((resolve) => setTimeout(resolve, 20));
   await submitInitialReview(store, prepared.id, []);
@@ -263,36 +262,6 @@ test("compact review summaries support bounded state-change waits", async (t) =>
       /known_state_version must be a non-negative safe integer/,
     );
   }
-});
-
-test("state waits observe an older reviewer that does not increment state_version", async (t) => {
-  const { root, repository, store } = await fixture();
-  t.after(() => fsp.rm(root, { recursive: true, force: true }));
-  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
-  const prepared = await prepareReview(store, {
-    repositoryPath: repository,
-    baseRef: "HEAD",
-    requirement: "Update the exported value.",
-    implementationScope: "Change app.js.",
-  });
-  const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
-  const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
-  ledger.status = "REVIEW_SUBMITTED";
-  await fsp.writeFile(reviewPath, `${JSON.stringify(ledger, null, 2)}\n`, {
-    mode: 0o600,
-  });
-
-  const result = await waitForReviewState(
-    store,
-    prepared.id,
-    prepared.state_version,
-    100,
-    "WAITING_FOR_REVIEW",
-  );
-  assert.equal(result.changed, true);
-  assert.equal(result.timed_out, false);
-  assert.equal(result.summary.status, "REVIEW_SUBMITTED");
-  assert.equal(result.summary.state_version, prepared.state_version);
 });
 
 test("core review mutations wait behind the review-state lock without changing state", async (t) => {

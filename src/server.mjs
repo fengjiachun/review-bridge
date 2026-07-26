@@ -146,7 +146,7 @@ if (role === "author") {
     {
       title: "Wait for local review state change",
       description:
-        "Wait 25 seconds by default, configurable up to 30 seconds, for review.json to advance beyond a known state_version or optional known_status. Pass both fields from get_review_summary so an older reviewer that does not increment state_version is still observed. A timeout is expected while a human-paced review is in progress and returns the unchanged compact summary; call this tool again with the same known values until changed is true, or resume when the user confirms the review is complete.",
+        "Wait 25 seconds by default, configurable up to 30 seconds, for review.json to advance beyond a known state_version. A timeout is expected while a human-paced review is in progress and returns the unchanged compact summary; call this tool again with the same known_state_version until changed is true, or resume when the user confirms the review is complete.",
       inputSchema: {
         review_id: z.string(),
         known_state_version: z
@@ -154,7 +154,6 @@ if (role === "author") {
           .int()
           .min(0)
           .max(Number.MAX_SAFE_INTEGER),
-        known_status: z.string().optional(),
         timeout_ms: z.number().int().min(1).max(30_000).optional(),
       },
     },
@@ -164,7 +163,6 @@ if (role === "author") {
         input.review_id,
         input.known_state_version,
         input.timeout_ms ?? 25_000,
-        input.known_status ?? null,
       ),
   );
 

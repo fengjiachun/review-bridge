@@ -38,8 +38,8 @@ Set `REVIEW_BRIDGE_HOME` to override it. When installing the Claude extension,
 select the same directory in its configuration.
 
 Install the author plugin and reviewer extension from the same Review Bridge
-release. A pre-v0.2 reviewer can still be observed through `known_status`, but
-it does not participate in the v0.2 inter-process locking protocol.
+release. Pre-v0.2 processes do not participate in the v0.2 inter-process
+locking protocol.
 
 ## Install the Codex plugin
 
@@ -76,14 +76,12 @@ In Codex:
 
 Codex returns a `review_id` and waits in `WAITING_FOR_REVIEW`.
 Use `get_review_summary` for the compact state, next action, current snapshot,
-and active versus all-time finding counts. Pass its `state_version` and `status`
-as `known_state_version` and `known_status` to `wait_for_review_state`; the tool
-waits 25 seconds by default, configurable up to 30 seconds, and returns the same
-compact summary without repeated full-ledger polling. `known_status` also makes
-state changes from a pre-v0.2 reviewer observable when that older process does
-not increment `state_version`. A timed-out wait is expected while a human-paced
-review is still in progress; call it again with the same known values, or resume
-when the user confirms the review is complete.
+and active versus all-time finding counts. Pass its `state_version` to
+`wait_for_review_state`; the tool waits 25 seconds by default, configurable up
+to 30 seconds, and returns the same compact summary without repeated full-ledger
+polling. A timed-out wait is expected while a human-paced review is still in
+progress; call it again with the same `state_version`, or resume when the user
+confirms the review is complete.
 
 In Claude Desktop:
 
@@ -163,8 +161,9 @@ PR head.
 - Working-tree overlays are copied into the private review store. Unchanged
   files are read from the captured Git object ID.
 - Files larger than 10 MiB are recorded but not copied into the snapshot.
-- v0.1 does not serialize state changes across the author and reviewer
-  processes. Do not invoke state-changing tools concurrently for one review.
+- Review state changes are serialized per review across author and reviewer
+  processes from the same v0.2-or-newer release. Pre-v0.2 processes do not
+  participate in that locking protocol.
 - The local gate and publication gate are workflow attestations, not Git or
   GitHub security boundaries. v0.1 does not install a `pre-push` hook.
 - The Review Bridge MCP server receives no GitHub credentials. The packaged

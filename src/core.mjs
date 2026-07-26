@@ -109,6 +109,7 @@ function reviewFile(storeRoot, reviewId) {
   return path.join(reviewDirectory(storeRoot, reviewId), "review.json");
 }
 
+// Functions suffixed *WhileLocked are called only through this wrapper.
 async function withReviewMutationLock(
   storeRoot,
   reviewId,
@@ -528,7 +529,6 @@ export async function waitForReviewState(
   reviewId,
   knownStateVersion,
   timeoutMs = 25_000,
-  knownStatus = null,
 ) {
   if (
     !Number.isSafeInteger(knownStateVersion) ||
@@ -539,16 +539,9 @@ export async function waitForReviewState(
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
     throw new Error("timeout_ms must be between 1 and 30000");
   }
-  if (knownStatus != null && typeof knownStatus !== "string") {
-    throw new Error("known_status must be a string");
-  }
-
   const deadline = Date.now() + timeoutMs;
   let review = await loadReview(storeRoot, reviewId);
-  while (
-    (review.state_version ?? 0) === knownStateVersion &&
-    (knownStatus == null || review.status === knownStatus)
-  ) {
+  while ((review.state_version ?? 0) === knownStateVersion) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       return {
@@ -610,38 +603,41 @@ export async function submitInitialReview(storeRoot, reviewId, findingsInput) {
   );
 }
 
-// These helpers are called only while withReviewMutationLock holds the lock.
 async function submitInitialReviewWhileLocked(
   storeRoot,
   reviewId,
   findingsInput,
 ) {
-    const review = await loadReview(storeRoot, reviewId);
-    if (review.status !== "WAITING_FOR_REVIEW" || review.current_round !== 1) {
-      throw new Error(`review is not waiting for its initial review (status=${review.status})`);
-    }
-    if (!Array.isArray(findingsInput) || findingsInput.length > MAX_FINDINGS) {
-      throw new Error(`findings must be an array with at most ${MAX_FINDINGS} items`);
-    }
-    const findings = findingsInput.map((finding, index) =>
-      normalizeFinding(finding, `F-${String(index + 1).padStart(3, "0")}`, 1),
+  const review = await loadReview(storeRoot, reviewId);
+  if (review.status !== "WAITING_FOR_REVIEW" || review.current_round !== 1) {
+    throw new Error(
+      `review is not waiting for its initial review (status=${review.status})`,
     );
-    review.findings = findings;
-    if (findings.length === 0) {
-      review.status = "CLEAN";
-      review.clean_snapshot_hash = review.rounds[0].snapshot_hash;
-      review.history.push({ at: now(), event: "INITIAL_REVIEW_CLEAN", round: 1 });
-    } else {
-      review.status = "REVIEW_SUBMITTED";
-      review.history.push({
-        at: now(),
-        event: "FINDINGS_SUBMITTED",
-        round: 1,
-        count: findings.length,
-      });
-    }
-    await saveReview(storeRoot, review);
-    return publicReview(review);
+  }
+  if (!Array.isArray(findingsInput) || findingsInput.length > MAX_FINDINGS) {
+    throw new Error(
+      `findings must be an array with at most ${MAX_FINDINGS} items`,
+    );
+  }
+  const findings = findingsInput.map((finding, index) =>
+    normalizeFinding(finding, `F-${String(index + 1).padStart(3, "0")}`, 1),
+  );
+  review.findings = findings;
+  if (findings.length === 0) {
+    review.status = "CLEAN";
+    review.clean_snapshot_hash = review.rounds[0].snapshot_hash;
+    review.history.push({ at: now(), event: "INITIAL_REVIEW_CLEAN", round: 1 });
+  } else {
+    review.status = "REVIEW_SUBMITTED";
+    review.history.push({
+      at: now(),
+      event: "FINDINGS_SUBMITTED",
+      round: 1,
+      count: findings.length,
+    });
+  }
+  await saveReview(storeRoot, review);
+  return publicReview(review);
 }
 
 export async function submitResolutions(storeRoot, reviewId, inputs) {
@@ -651,63 +647,72 @@ export async function submitResolutions(storeRoot, reviewId, inputs) {
 }
 
 async function submitResolutionsWhileLocked(storeRoot, reviewId, inputs) {
-    const review = await loadReview(storeRoot, reviewId);
-    if (review.status !== "REVIEW_SUBMITTED") {
-      throw new Error(`review is not waiting for author resolutions (status=${review.status})`);
+  const review = await loadReview(storeRoot, reviewId);
+  if (review.status !== "REVIEW_SUBMITTED") {
+    throw new Error(
+      `review is not waiting for author resolutions (status=${review.status})`,
+    );
+  }
+  if (!Array.isArray(inputs)) {
+    throw new Error("resolutions must be an array");
+  }
+  const openFindings = review.findings.filter(
+    (finding) => finding.status === "OPEN",
+  );
+  const byId = new Map(inputs.map((item) => [item?.finding_id, item]));
+  if (
+    byId.size !== openFindings.length ||
+    inputs.length !== openFindings.length
+  ) {
+    throw new Error("provide exactly one resolution for every open finding");
+  }
+  const resolutions = [];
+  let humanRequired = false;
+  for (const finding of openFindings) {
+    const input = byId.get(finding.id);
+    if (!input) {
+      throw new Error(`missing resolution for ${finding.id}`);
     }
-    if (!Array.isArray(inputs)) {
-      throw new Error("resolutions must be an array");
+    const disposition = String(input.disposition ?? "");
+    if (!["fixed", "rejected", "human_required"].includes(disposition)) {
+      throw new Error(
+        "resolution disposition must be fixed, rejected, or human_required",
+      );
     }
-    const openFindings = review.findings.filter((finding) => finding.status === "OPEN");
-    const byId = new Map(inputs.map((item) => [item?.finding_id, item]));
-    if (byId.size !== openFindings.length || inputs.length !== openFindings.length) {
-      throw new Error("provide exactly one resolution for every open finding");
+    const resolution = {
+      finding_id: finding.id,
+      disposition,
+      rationale: assertString(input.rationale, "resolution.rationale", {
+        max: 20_000,
+      }),
+      evidence:
+        typeof input.evidence === "string"
+          ? assertString(input.evidence, "resolution.evidence", {
+              allowEmpty: true,
+              max: 20_000,
+            })
+          : "",
+      submitted_at: now(),
+    };
+    resolutions.push(resolution);
+    if (disposition === "fixed") {
+      finding.status = "AUTHOR_FIXED";
+    } else if (disposition === "rejected") {
+      finding.status = "AUTHOR_REJECTED";
+    } else {
+      finding.status = "HUMAN_REQUIRED";
+      humanRequired = true;
     }
-    const resolutions = [];
-    let humanRequired = false;
-    for (const finding of openFindings) {
-      const input = byId.get(finding.id);
-      if (!input) {
-        throw new Error(`missing resolution for ${finding.id}`);
-      }
-      const disposition = String(input.disposition ?? "");
-      if (!["fixed", "rejected", "human_required"].includes(disposition)) {
-        throw new Error("resolution disposition must be fixed, rejected, or human_required");
-      }
-      const resolution = {
-        finding_id: finding.id,
-        disposition,
-        rationale: assertString(input.rationale, "resolution.rationale", {
-          max: 20_000,
-        }),
-        evidence:
-          typeof input.evidence === "string"
-            ? assertString(input.evidence, "resolution.evidence", {
-                allowEmpty: true,
-                max: 20_000,
-              })
-            : "",
-        submitted_at: now(),
-      };
-      resolutions.push(resolution);
-      if (disposition === "fixed") {
-        finding.status = "AUTHOR_FIXED";
-      } else if (disposition === "rejected") {
-        finding.status = "AUTHOR_REJECTED";
-      } else {
-        finding.status = "HUMAN_REQUIRED";
-        humanRequired = true;
-      }
-    }
-    review.resolutions.push(...resolutions);
-    review.status = humanRequired ? "HUMAN_REQUIRED" : "AUTHOR_RESPONDED";
-    review.history.push({
-      at: now(),
-      event: humanRequired ? "AUTHOR_ESCALATED" : "AUTHOR_RESPONDED",
-      round: review.current_round,
-    });
-    await saveReview(storeRoot, review);
-    return publicReview(review);
+  }
+  review.resolutions.push(...resolutions);
+  review.status = humanRequired ? "HUMAN_REQUIRED" : "AUTHOR_RESPONDED";
+  review.history.push({
+    at: now(),
+    event: humanRequired ? "AUTHOR_ESCALATED" : "AUTHOR_RESPONDED",
+    round: review.current_round,
+  });
+  await saveReview(storeRoot, review);
+  return publicReview(review);
 }
 
 export async function prepareRereview(storeRoot, reviewId) {

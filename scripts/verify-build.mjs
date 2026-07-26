@@ -105,13 +105,12 @@ assert.match(workflowSkill, /wait_for_review_state/);
 assert.match(workflowSkill, /A\s+`timed_out` result is expected/);
 assert.match(
   workflowSkill,
-  /call it again with the same known values until `changed` is true/,
+  /call it again with the same\s+`state_version` until `changed` is true/,
 );
 assert.match(
   workflowSkill,
-  /Treat `timed_out` as\s+an expected in-progress result and continue with the same known values/,
+  /Treat `timed_out` as an expected in-progress\s+result and continue with the same `state_version`/,
 );
-assert.match(workflowSkill, /`known_state_version` and `known_status`/);
 assert.match(workflowSkill, /a\s+standalone review comment is unsupported/);
 assert.match(workflowSkill, /Never learn that identity from the\s+candidate result/);
 
@@ -186,7 +185,6 @@ try {
     const timedOut = await call(author, "wait_for_review_state", {
       review_id: prepared.id,
       known_state_version: summary.state_version,
-      known_status: summary.status,
       timeout_ms: 10,
     });
     assert.equal(timedOut.changed, false);
@@ -208,7 +206,6 @@ try {
     const observedPromise = call(author, "wait_for_review_state", {
       review_id: prepared.id,
       known_state_version: summary.state_version,
-      known_status: summary.status,
       timeout_ms: 30_000,
     });
     await call(reviewer, "submit_review", {
