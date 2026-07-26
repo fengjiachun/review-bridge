@@ -1579,6 +1579,42 @@ test("verification audits the canonical digest of parseable non-canonical gate J
   assert.equal(events.at(-1).gate_sha256, digest(canonicalJson(gate)));
 });
 
+test("verification audits parseable gates that cannot be canonicalized", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, observedAt } = await reachReady(state);
+  const gate = await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  const directory = path.join(state.store, "reviews", state.reviewId);
+  await fsp.writeFile(
+    path.join(directory, "publication-gate.json"),
+    `${JSON.stringify({ ...gate, malformed: "\ud800" })}\n`,
+    { mode: 0o600 },
+  );
+
+  const result = await verifyPublicationGate(state.store, state.reviewId, {
+    clock: () => observedAt + 30,
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.reason, "GATE_MISSING_OR_MALFORMED");
+  const events = (await fsp.readFile(
+    path.join(directory, "publication-gate-audit.jsonl"),
+    "utf8",
+  )).trim().split("\n").map(JSON.parse);
+  assert.equal(events.at(-1).event, "GATE_VERIFIED");
+  assert.equal(events.at(-1).outcome, "FAILURE");
+  assert.equal(
+    events.at(-1).normalized_reason,
+    "GATE_MISSING_OR_MALFORMED",
+  );
+  assert.equal(events.at(-1).gate_sha256, null);
+});
+
 test("strict policy retains false source provenance", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

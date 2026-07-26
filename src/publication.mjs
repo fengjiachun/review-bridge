@@ -1423,6 +1423,7 @@ async function openAuthorizationFiles(
           gateParseError = true;
         }
       } catch {
+        publicationGate = null;
         gateParseError = true;
       }
     }
