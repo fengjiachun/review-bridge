@@ -23,7 +23,10 @@ jobs:
       - run: npm audit --omit=dev
       - run: npm run build
       - run: npm run verify:build
+      - id: package
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
-          name: review-bridge-v0.1.1
-          path: dist/review-bridge-v0.1.1
+          name: review-bridge-v${{ steps.package.outputs.version }}
+          path: dist/review-bridge-v${{ steps.package.outputs.version }}
+          if-no-files-found: error
