@@ -22,6 +22,8 @@
 
 ### Fixed
 
+- Post-rename directory-sync failures now return a non-retryable structured
+  error that tells callers to reread state before retrying.
 - Final lock cleanup failures now return a non-retryable structured error
   instead of reporting a successful mutation with only a warning.
 - Malformed lock errors no longer echo lock-file bytes, and tests cover

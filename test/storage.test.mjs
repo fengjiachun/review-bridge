@@ -13,9 +13,8 @@ import {
 } from "../src/storage.mjs";
 
 const PROCESS_START_FORMAT = "darwin-ps-lstart-c-utc-v1";
-const STORAGE_MODULE_PATH = fileURLToPath(
-  new URL("../src/storage.mjs", import.meta.url),
-);
+const STORAGE_MODULE_URL = new URL("../src/storage.mjs", import.meta.url).href;
+const STORAGE_MODULE_PATH = fileURLToPath(STORAGE_MODULE_URL);
 
 async function temporaryDirectory(t, prefix) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -43,6 +42,40 @@ async function captureWarnings(operation) {
     process.emitWarning = originalEmitWarning;
   }
   return warnings;
+}
+
+async function writeDirectorySyncFailureHook(hookPath) {
+  await fsp.writeFile(
+    hookPath,
+    [
+      '"use strict";',
+      'const fs = require("node:fs");',
+      'const fsp = require("node:fs/promises");',
+      "const originalOpen = fsp.open;",
+      "fsp.open = async function (filePath, flags, ...rest) {",
+      "  if (",
+      "    filePath === process.env.REVIEW_BRIDGE_TEST_SYNC_DIRECTORY &&",
+      "    flags === fs.constants.O_RDONLY",
+      "  ) {",
+      "    try {",
+      "      const marker = fs.openSync(",
+      '        process.env.REVIEW_BRIDGE_TEST_SYNC_MARKER, "wx", 0o600',
+      "      );",
+      "      fs.closeSync(marker);",
+      "    } catch (error) {",
+      '      if (error.code !== "EEXIST") throw error;',
+      "      return originalOpen.call(this, filePath, flags, ...rest);",
+      "    }",
+      '    const error = new Error("injected post-rename directory sync failure");',
+      '    error.code = "EIO";',
+      "    throw error;",
+      "  }",
+      "  return originalOpen.call(this, filePath, flags, ...rest);",
+      "};",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
 }
 
 async function waitForProcessExit(pid, timeoutMs = 1_000) {
@@ -107,6 +140,64 @@ test("atomic writes are durable private replacements", async (t) => {
   await atomicWriteFile(file, '{"version":1}\n');
   assert.equal(await fsp.readFile(file, "utf8"), '{"version":1}\n');
   assert.equal((await fsp.stat(file)).mode & 0o777, 0o600);
+});
+
+test("post-rename sync failures report an indeterminate write", async (t) => {
+  const root = await temporaryDirectory(t, "review-bridge-store-sync-failure-");
+  const file = path.join(root, "review.json");
+  const hookPath = path.join(root, "fail-directory-sync.cjs");
+  const markerPath = path.join(root, "directory-sync-failed");
+  await writeDirectorySyncFailureHook(hookPath);
+
+  const child = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      [
+        "const { atomicWriteFile } = await import(",
+        "  process.env.REVIEW_BRIDGE_TEST_STORAGE_MODULE",
+        ");",
+        "try {",
+        "  await atomicWriteFile(",
+        "    process.env.REVIEW_BRIDGE_TEST_WRITE_PATH,",
+        '    "{\\"version\\":2}\\n",',
+        "  );",
+        "} catch (error) {",
+        "  console.log(JSON.stringify({",
+        "    code: error.code,",
+        "    message: error.message,",
+        "    details: error.details,",
+        "  }));",
+        "  process.exit(17);",
+        "}",
+      ].join("\n"),
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${hookPath}`]
+          .filter(Boolean)
+          .join(" "),
+        REVIEW_BRIDGE_TEST_STORAGE_MODULE: STORAGE_MODULE_URL,
+        REVIEW_BRIDGE_TEST_SYNC_DIRECTORY: root,
+        REVIEW_BRIDGE_TEST_SYNC_MARKER: markerPath,
+        REVIEW_BRIDGE_TEST_WRITE_PATH: file,
+      },
+    },
+  );
+  assert.equal(child.status, 17, child.stderr);
+  const payload = JSON.parse(child.stdout.trim());
+  assert.equal(payload.code, "STORE_WRITE_INDETERMINATE");
+  assert.match(payload.message, /reread state before retrying/i);
+  assert.deepEqual(payload.details, {
+    retryable: false,
+    path: file,
+    cause_code: "EIO",
+    state_may_have_changed: true,
+  });
+  assert.equal(await fsp.readFile(file, "utf8"), '{"version":2}\n');
 });
 
 test("lock record reads reject mode drift without changing it", async (t) => {
@@ -479,37 +570,7 @@ test("an unexpected post-write acquire failure cleans up its record", async (t) 
   const lockPath = path.join(root, ".review-state.lock");
   const hookPath = path.join(root, "fail-directory-sync.cjs");
   const markerPath = path.join(root, "directory-sync-failed");
-  await fsp.writeFile(
-    hookPath,
-    [
-      '"use strict";',
-      'const fs = require("node:fs");',
-      'const fsp = require("node:fs/promises");',
-      "const originalOpen = fsp.open;",
-      "fsp.open = async function (filePath, flags, ...rest) {",
-      "  if (",
-      "    filePath === process.env.REVIEW_BRIDGE_TEST_SYNC_DIRECTORY &&",
-      "    flags === fs.constants.O_RDONLY",
-      "  ) {",
-      "    try {",
-      "      const marker = fs.openSync(",
-      '        process.env.REVIEW_BRIDGE_TEST_SYNC_MARKER, "wx", 0o600',
-      "      );",
-      "      fs.closeSync(marker);",
-      "    } catch (error) {",
-      '      if (error.code !== "EEXIST") throw error;',
-      "      return originalOpen.call(this, filePath, flags, ...rest);",
-      "    }",
-      '    const error = new Error("injected post-rename directory sync failure");',
-      '    error.code = "EIO";',
-      "    throw error;",
-      "  }",
-      "  return originalOpen.call(this, filePath, flags, ...rest);",
-      "};",
-      "",
-    ].join("\n"),
-    { mode: 0o600 },
-  );
+  await writeDirectorySyncFailureHook(hookPath);
 
   const previousNodeOptions = process.env.NODE_OPTIONS;
   const previousSyncDirectory =
@@ -528,7 +589,11 @@ test("an unexpected post-write acquire failure cleans up its record", async (t) 
           reviewId: "rb-test",
           domain: "review",
         }),
-        (error) => error instanceof StoreError && error.code === "EIO",
+        (error) =>
+          error instanceof StoreError &&
+          error.code === "STORE_WRITE_INDETERMINATE" &&
+          error.details.cause_code === "EIO" &&
+          error.details.state_may_have_changed === true,
       );
     });
     assert.deepEqual(warnings, []);

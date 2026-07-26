@@ -99,6 +99,11 @@ Reread the review before deciding whether any retry is still required.
 disk while the named lock record remains. Stop the owning Review Bridge process
 before inspecting or removing that record; do not loop on the same mutation.
 
+`STORE_WRITE_INDETERMINATE` is non-retryable and also sets
+`details.state_may_have_changed: true`. The canonical file was replaced, but
+syncing its parent directory failed, so reread the relevant review state before
+deciding whether a retry is still required.
+
 In Claude Desktop:
 
 > List pending Review Bridge tasks and deeply review `<review_id>`. Read the

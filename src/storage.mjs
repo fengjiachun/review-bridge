@@ -45,6 +45,7 @@ export async function atomicWriteFile(filePath, data, { mode = 0o600 } = {}) {
   await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
   const temporary = `${filePath}.${crypto.randomBytes(16).toString("hex")}.tmp`;
   let handle;
+  let renamed = false;
   try {
     handle = await fsp.open(
       temporary,
@@ -57,10 +58,22 @@ export async function atomicWriteFile(filePath, data, { mode = 0o600 } = {}) {
     await handle.close();
     handle = null;
     await fsp.rename(temporary, filePath);
+    renamed = true;
     await syncDirectory(directory);
   } catch (error) {
     await handle?.close().catch(() => {});
     await fsp.unlink(temporary).catch(() => {});
+    if (renamed) {
+      throw new StoreError(
+        "STORE_WRITE_INDETERMINATE",
+        `${filePath} may already contain the new state; reread state before retrying`,
+        {
+          path: filePath,
+          cause_code: error?.code ?? null,
+          state_may_have_changed: true,
+        },
+      );
+    }
     throw error;
   }
 }

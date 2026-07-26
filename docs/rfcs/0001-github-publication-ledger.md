@@ -2380,6 +2380,12 @@ its error conclusively occurred before this owner could write a record. This
 covers post-rename durability failures without removing a foreign owner's
 record.
 
+If atomic replacement renames the new canonical file but the following parent
+directory sync fails, the mutation returns non-retryable
+`STORE_WRITE_INDETERMINATE` with `state_may_have_changed`. The caller must
+reread the relevant state before deciding whether to retry; in particular,
+`prepare_review` must not blindly create a second review task.
+
 An acquisition timeout returns a documented retryable `REVIEW_BUSY` or
 `PUBLICATION_BUSY` error without changing state. Adding `REVIEW_BUSY` to
 existing reviewer mutations is an intentional client-visible behavior change,
