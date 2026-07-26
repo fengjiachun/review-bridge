@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import {
   finalizeLocalGate,
   getReview,
   getReviewSummary,
+  openReview,
   prepareRereview,
   prepareReview,
   readReviewArtifact,
@@ -59,6 +61,689 @@ async function readAll(readChunk) {
   }
   return content;
 }
+
+async function createGatedParent({
+  repository,
+  store,
+  baseSha,
+  requirement = "Review the fixture.",
+}) {
+  await fsp.writeFile(path.join(repository, "parent.txt"), "parent\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "parent");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement,
+    implementationScope: "Create the reviewed parent.",
+  });
+  await submitInitialReview(store, parent.id, []);
+  await finalizeLocalGate(store, parent.id);
+  return parent;
+}
+
+test("successor review binds a clean parent gate and exposes only the exact delta", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  await fsp.writeFile(
+    path.join(repository, "parent-only.js"),
+    "export const parentValue = 1;\n",
+  );
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "parent change");
+  const parentHead = git(repository, "rev-parse", "HEAD");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Harden the fixture in reviewed increments.",
+    implementationScope: "Add the parent behavior.",
+  });
+  await submitInitialReview(store, parent.id, []);
+  const parentGate = await finalizeLocalGate(store, parent.id);
+
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "export function divide(a, b) {\n  if (b === 0) return null;\n  return a / b;\n}\n",
+  );
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "successor change");
+  const childHead = git(repository, "rev-parse", "HEAD");
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Harden the fixture in reviewed increments.",
+    implementationScope: "Add the successor behavior.",
+    parentReviewId: parent.id,
+  });
+
+  assert.equal(child.review_strategy.mode, "SUCCESSOR");
+  assert.equal(child.review_strategy.parent_review_id, parent.id);
+  assert.equal(child.review_strategy.fallback_reason, null);
+  assert.equal(child.rounds[0].successor.parent_head_sha, parentHead);
+  assert.equal(child.rounds[0].successor.current_head_sha, childHead);
+  assert.equal(
+    child.rounds[0].successor.parent_snapshot_hash,
+    parentGate.gate.snapshot_hash,
+  );
+  assert.deepEqual(child.rounds[0].successor.changed_files, ["app.js"]);
+  assert.equal(
+    child.rounds[0].successor.parent_tree_sha,
+    git(repository, "rev-parse", `${parentHead}^{tree}`),
+  );
+  assert.equal(
+    child.rounds[0].successor.current_tree_sha,
+    git(repository, "rev-parse", `${childHead}^{tree}`),
+  );
+
+  const successorPatch = await readAll((offset) =>
+    readReviewArtifact(
+      store,
+      child.id,
+      1,
+      "successor.diff",
+      offset,
+      17,
+    ),
+  );
+  assert.match(successorPatch, /b === 0/);
+  assert.doesNotMatch(successorPatch, /parentValue/);
+  const fullPatch = await readAll((offset) =>
+    readReviewArtifact(store, child.id, 1, "patch.diff", offset, 17),
+  );
+  assert.match(fullPatch, /parentValue/);
+
+  const successorManifest = JSON.parse(
+    await readAll((offset) =>
+      readReviewArtifact(
+        store,
+        child.id,
+        1,
+        "successor.json",
+        offset,
+        17,
+      ),
+    ),
+  );
+  assert.equal(successorManifest.parent_review_id, parent.id);
+  assert.equal(successorManifest.parent_gate_sha256.length, 64);
+  assert.equal(successorManifest.delta_sha256.length, 64);
+
+  const opened = await openReview(store, child.id);
+  assert.deepEqual(
+    opened.artifacts.map((artifact) => artifact.name),
+    ["successor.diff", "successor.json", "patch.diff", "manifest.json"],
+  );
+
+  await submitInitialReview(store, child.id, [
+    {
+      severity: "minor",
+      title: "Confirm null behavior",
+      explanation: "Confirm that returning null is the intended contract.",
+      path: "app.js",
+      line: 2,
+    },
+  ]);
+  await submitResolutions(store, child.id, [
+    {
+      finding_id: "F-001",
+      disposition: "rejected",
+      rationale: "Returning null is the stated successor contract.",
+    },
+  ]);
+  const rereview = await prepareRereview(store, child.id);
+  assert.equal(rereview.review_strategy.mode, "SUCCESSOR");
+  assert.equal(
+    rereview.rounds[1].successor.delta_sha256,
+    child.rounds[0].successor.delta_sha256,
+  );
+  await submitRereview(
+    store,
+    child.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "rebuttal_accepted",
+        rationale: "The requirement confirms the null contract.",
+      },
+    ],
+    [],
+  );
+  const childGate = await finalizeLocalGate(store, child.id);
+  assert.equal(childGate.gate.head_sha, childHead);
+  assert.equal(
+    childGate.gate.snapshot_hash,
+    rereview.rounds[1].snapshot_hash,
+  );
+  const summary = await getReviewSummary(store, child.id);
+  assert.deepEqual(summary.review_strategy, child.review_strategy);
+});
+
+test("ineligible successor parent falls back to an explicit full review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "parent pending\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "pending parent");
+  const parentHead = git(repository, "rev-parse", "HEAD");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Prepare a parent that remains pending.",
+  });
+
+  await fsp.writeFile(path.join(repository, "app.js"), "child committed\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "child");
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Fall back when the parent is not gated.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.equal(child.review_strategy.parent_review_id, parent.id);
+  assert.match(child.review_strategy.fallback_reason, /LOCAL_GATE_PASSED/);
+  assert.equal(child.rounds[0].successor, null);
+
+  const opened = await openReview(store, child.id);
+  assert.deepEqual(
+    opened.artifacts.map((artifact) => artifact.name),
+    ["patch.diff", "manifest.json"],
+  );
+  await assert.rejects(
+    readReviewArtifact(store, child.id, 1, "successor.diff"),
+    /not available for this review round/,
+  );
+
+  git(repository, "switch", "--detach", parentHead);
+  await submitInitialReview(store, parent.id, []);
+  await finalizeLocalGate(store, parent.id);
+  git(repository, "switch", "main");
+  await submitInitialReview(store, child.id, [
+    {
+      severity: "minor",
+      title: "Needs explanation",
+      explanation: "Confirm the intentionally minimal fixture.",
+    },
+  ]);
+  await submitResolutions(store, child.id, [
+    {
+      finding_id: "F-001",
+      disposition: "rejected",
+      rationale: "The minimal fixture is intentional.",
+    },
+  ]);
+  const rereview = await prepareRereview(store, child.id);
+  assert.equal(rereview.review_strategy.mode, "FULL");
+  assert.equal(rereview.rounds[1].successor, null);
+});
+
+test("a tampered parent gate forces a full review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "reviewed parent\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "reviewed parent");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Create the parent.",
+  });
+  await submitInitialReview(store, parent.id, []);
+  await finalizeLocalGate(store, parent.id);
+
+  const gatePath = path.join(store, "reviews", parent.id, "gate.json");
+  const gate = JSON.parse(await fsp.readFile(gatePath, "utf8"));
+  gate.head_sha = "0".repeat(40);
+  await fsp.writeFile(gatePath, `${JSON.stringify(gate, null, 2)}\n`);
+
+  await fsp.writeFile(path.join(repository, "app.js"), "successor\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "successor");
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Reject the tampered parent proof.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.match(child.review_strategy.fallback_reason, /gate does not match/);
+  assert.equal(child.rounds[0].successor, null);
+});
+
+test("a malformed parent ledger forces a full review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "reviewed parent\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "reviewed parent");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Create the parent.",
+  });
+  await submitInitialReview(store, parent.id, []);
+  await finalizeLocalGate(store, parent.id);
+
+  const reviewPath = path.join(store, "reviews", parent.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  ledger.rounds = null;
+  await fsp.writeFile(reviewPath, `${JSON.stringify(ledger, null, 2)}\n`);
+
+  await fsp.writeFile(path.join(repository, "app.js"), "successor\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "successor");
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Reject the malformed parent proof.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.match(child.review_strategy.fallback_reason, /ledger/);
+});
+
+test("tampered parent metadata cannot qualify a successor review", async (t) => {
+  for (const scenario of [
+    {
+      name: "requirement",
+      mutate({ ledger }) {
+        ledger.requirement = "Tampered requirement.";
+        return "Tampered requirement.";
+      },
+    },
+    {
+      name: "review id",
+      mutate({ ledger, gate }) {
+        const otherId = ledger.id.replace(/[a-f0-9]{8}$/, "deadbeef");
+        ledger.id = otherId;
+        gate.review_id = otherId;
+        return ledger.requirement;
+      },
+    },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const { root, repository, store } = await fixture();
+      t.after(() => fsp.rm(root, { recursive: true, force: true }));
+      const baseSha = git(repository, "rev-parse", "HEAD");
+      const parent = await createGatedParent({
+        repository,
+        store,
+        baseSha,
+      });
+      const reviewPath = path.join(
+        store,
+        "reviews",
+        parent.id,
+        "review.json",
+      );
+      const gatePath = path.join(store, "reviews", parent.id, "gate.json");
+      const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+      const gate = JSON.parse(await fsp.readFile(gatePath, "utf8"));
+      const requirement = scenario.mutate({ ledger, gate });
+      await fsp.writeFile(reviewPath, `${JSON.stringify(ledger, null, 2)}\n`);
+      await fsp.writeFile(gatePath, `${JSON.stringify(gate, null, 2)}\n`);
+
+      await fsp.writeFile(path.join(repository, "child.txt"), "child\n");
+      git(repository, "add", ".");
+      git(repository, "commit", "-m", "child");
+      const child = await prepareReview(store, {
+        repositoryPath: repository,
+        baseRef: baseSha,
+        requirement,
+        implementationScope: "Create the successor.",
+        parentReviewId: parent.id,
+      });
+      assert.equal(child.review_strategy.mode, "FULL");
+      assert.equal(child.rounds[0].successor, null);
+    });
+  }
+});
+
+test("tampered parent overlay metadata cannot qualify a successor review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "dirty parent\n");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Review the dirty parent.",
+  });
+  assert.equal(parent.rounds[0].overlays.length, 1);
+  await submitInitialReview(store, parent.id, []);
+  await finalizeLocalGate(store, parent.id);
+
+  const reviewPath = path.join(store, "reviews", parent.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  ledger.rounds[0].overlays = [];
+  await fsp.writeFile(reviewPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "commit reviewed overlay");
+
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Create the successor.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.equal(child.rounds[0].successor, null);
+});
+
+test("tampered successor artifacts fail closed on read and clean submission", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const parent = await createGatedParent({ repository, store, baseSha });
+  await fsp.writeFile(path.join(repository, "child.txt"), "child\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "child");
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Create the successor.",
+    parentReviewId: parent.id,
+  });
+  const roundRoot = path.join(
+    store,
+    "reviews",
+    child.id,
+    "rounds",
+    "1",
+  );
+  const deltaPath = path.join(roundRoot, "successor.diff");
+  const proofPath = path.join(roundRoot, "successor.json");
+  const originalDelta = await fsp.readFile(deltaPath);
+  await fsp.writeFile(deltaPath, "tampered delta\n");
+  await assert.rejects(
+    readReviewArtifact(store, child.id, 1, "successor.diff"),
+    /successor artifact integrity check failed/,
+  );
+  await assert.rejects(
+    submitInitialReview(store, child.id, []),
+    /successor artifact integrity check failed/,
+  );
+
+  await fsp.writeFile(deltaPath, originalDelta);
+  const proof = JSON.parse(await fsp.readFile(proofPath, "utf8"));
+  proof.changed_files = [];
+  await fsp.writeFile(proofPath, `${JSON.stringify(proof, null, 2)}\n`);
+  await assert.rejects(
+    readReviewArtifact(store, child.id, 1, "successor.json"),
+    /successor artifact integrity check failed/,
+  );
+});
+
+test("tampered successor artifacts prevent local gate finalization", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const parent = await createGatedParent({ repository, store, baseSha });
+  await fsp.writeFile(path.join(repository, "child.txt"), "child\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "child");
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Create the successor.",
+    parentReviewId: parent.id,
+  });
+  await submitInitialReview(store, child.id, []);
+  await fsp.writeFile(
+    path.join(
+      store,
+      "reviews",
+      child.id,
+      "rounds",
+      "1",
+      "successor.diff",
+    ),
+    "tampered delta\n",
+  );
+  await assert.rejects(
+    finalizeLocalGate(store, child.id),
+    /successor artifact integrity check failed/,
+  );
+});
+
+test("linked worktrees from the same repository can use successor mode", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const parent = await createGatedParent({ repository, store, baseSha });
+  const linked = path.join(root, "linked");
+  git(repository, "worktree", "add", "-b", "successor", linked);
+  await fsp.writeFile(path.join(linked, "child.txt"), "child\n");
+  git(linked, "add", ".");
+  git(linked, "commit", "-m", "child");
+
+  const child = await prepareReview(store, {
+    repositoryPath: linked,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Create the successor in a linked worktree.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "SUCCESSOR");
+});
+
+test("dirty current worktrees fall back to full review", async (t) => {
+  for (const scenario of [
+    {
+      name: "modified file",
+      async makeDirty(repository) {
+        await fsp.writeFile(path.join(repository, "app.js"), "dirty child\n");
+      },
+      expectedOverlays: 1,
+    },
+    {
+      name: "deleted file",
+      async makeDirty(repository) {
+        await fsp.unlink(path.join(repository, "child.txt"));
+      },
+      expectedOverlays: 0,
+    },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const { root, repository, store } = await fixture();
+      t.after(() => fsp.rm(root, { recursive: true, force: true }));
+      const baseSha = git(repository, "rev-parse", "HEAD");
+      const parent = await createGatedParent({ repository, store, baseSha });
+      await fsp.writeFile(path.join(repository, "child.txt"), "child\n");
+      git(repository, "add", ".");
+      git(repository, "commit", "-m", "child");
+      await scenario.makeDirty(repository);
+
+      const child = await prepareReview(store, {
+        repositoryPath: repository,
+        baseRef: baseSha,
+        requirement: "Review the fixture.",
+        implementationScope: "Reject a dirty successor worktree.",
+        parentReviewId: parent.id,
+      });
+      assert.equal(child.rounds[0].worktree_clean, false);
+      assert.equal(child.rounds[0].overlays.length, scenario.expectedOverlays);
+      assert.equal(child.review_strategy.mode, "FULL");
+      assert.match(
+        child.review_strategy.fallback_reason,
+        /committed clean worktrees/,
+      );
+    });
+  }
+});
+
+test("a parent without a worktree cleanliness commitment falls back to full review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const parent = await createGatedParent({ repository, store, baseSha });
+  const reviewPath = path.join(store, "reviews", parent.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  delete ledger.rounds[0].worktree_clean;
+  await fsp.writeFile(reviewPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  await fsp.writeFile(path.join(repository, "child.txt"), "child\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "child");
+
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Reject an old parent ledger.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.match(child.review_strategy.fallback_reason, /snapshot commitment/);
+});
+
+test("a tampered worktree cleanliness commitment cannot qualify a successor review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "dirty parent\n");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Review a dirty parent.",
+  });
+  assert.equal(parent.rounds[0].worktree_clean, false);
+  await submitInitialReview(store, parent.id, []);
+  await finalizeLocalGate(store, parent.id);
+
+  const reviewPath = path.join(store, "reviews", parent.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  ledger.rounds[0].worktree_clean = true;
+  await fsp.writeFile(reviewPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  await fsp.writeFile(path.join(repository, "child.txt"), "child\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "commit parent and child");
+
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Reject a tampered parent commitment.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.match(child.review_strategy.fallback_reason, /snapshot commitment/);
+});
+
+test("a divergent parent head falls back to full review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const parent = await createGatedParent({ repository, store, baseSha });
+  git(repository, "switch", "-c", "divergent", baseSha);
+  await fsp.writeFile(path.join(repository, "child.txt"), "child\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "divergent child");
+
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Reject a divergent parent.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.match(child.review_strategy.fallback_reason, /not an ancestor/);
+});
+
+test("a parent from another repository falls back to full review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const parent = await createGatedParent({ repository, store, baseSha });
+  const otherRepository = path.join(root, "other-repo");
+  await fsp.mkdir(otherRepository);
+  git(otherRepository, "init", "-b", "main");
+  git(otherRepository, "config", "user.name", "Review Bridge Test");
+  git(
+    otherRepository,
+    "config",
+    "user.email",
+    "review-bridge@example.invalid",
+  );
+  await fsp.writeFile(path.join(otherRepository, "app.js"), "other\n");
+  git(otherRepository, "add", ".");
+  git(otherRepository, "commit", "-m", "other base");
+  const otherBaseSha = git(otherRepository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(otherRepository, "child.txt"), "child\n");
+  git(otherRepository, "add", ".");
+  git(otherRepository, "commit", "-m", "other child");
+
+  const child = await prepareReview(store, {
+    repositoryPath: otherRepository,
+    baseRef: otherBaseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Reject a parent from another repository.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.match(
+    child.review_strategy.fallback_reason,
+    /different repository/,
+  );
+});
+
+test("oversized successor proof generation falls back to full review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(
+    path.join(repository, "large-parent.bin"),
+    randomBytes(28 * 1024 * 1024),
+  );
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "large parent");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Create the large parent.",
+  });
+  await submitInitialReview(store, parent.id, []);
+  await finalizeLocalGate(store, parent.id);
+
+  await fsp.unlink(path.join(repository, "large-parent.bin"));
+  await fsp.writeFile(
+    path.join(repository, "large-child.bin"),
+    randomBytes(28 * 1024 * 1024),
+  );
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "large child");
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Fall back when the successor proof is too large.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.match(
+    child.review_strategy.fallback_reason,
+    /cannot build successor artifacts/,
+  );
+  assert.equal(child.rounds[0].successor, null);
+});
 
 test("two-round fixed finding reaches a local gate", async (t) => {
   const { root, repository, store } = await fixture();

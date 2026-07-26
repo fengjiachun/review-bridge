@@ -19,11 +19,25 @@ Claude Desktop.
 4. If the user intends to publish the change, create a topic branch and commit
    the intended diff before review. Commit later fixes before rereview. This
    lets the local gate attest the exact commit that will become the PR head.
-5. Call `prepare_review` with the base SHA captured in step 1.
-6. Call `get_review_summary`, record its `state_version`, report the returned
-   `review_id` and state `WAITING_FOR_REVIEW`, and ask the user to open Claude
-   Desktop and review that ID.
-7. Use `wait_for_review_state` with the recorded `state_version` to observe the
+5. If this task is a committed continuation of a prior
+   `LOCAL_GATE_PASSED` task for the same repository, immutable base SHA, and
+   requirement, pass that task as `parent_review_id`. The server uses
+   `SUCCESSOR` only when the parent gate, commit ancestry, and clean worktrees
+   verify; otherwise it records an explicit `FULL` fallback. Never choose a
+   parent merely because it is recent.
+6. Call `prepare_review` with the base SHA captured in step 1 and the optional
+   verified parent from step 5.
+7. Call `get_review_summary`, record its `state_version`, and report the
+   returned `review_id`, `review_strategy`, and state `WAITING_FOR_REVIEW`.
+   Start a fresh Claude Desktop conversation for every new `review_id`; do not
+   carry an earlier task's accumulated chat context into it. A round-two
+   rereview of the same ID may stay in that ID's conversation.
+8. Ask Claude to review that ID. For `SUCCESSOR`, require Claude to read
+   `successor.json` and all of `successor.diff`, inspect the changed files plus
+   relevant callers, contracts, and tests, and expand to `patch.diff` whenever
+   risk or uncertainty warrants it. For `FULL`, require the entire
+   `patch.diff`.
+9. Use `wait_for_review_state` with the recorded `state_version` to observe the
    transition without repeatedly loading the full ledger. It waits 25 seconds
    by default and accepts at most 30 seconds. A `timed_out` result is expected
    while a human-paced review remains in progress; call it again with the same

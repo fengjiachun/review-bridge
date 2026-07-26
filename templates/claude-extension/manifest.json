@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "review-bridge-reviewer",
   "display_name": "Review Bridge Reviewer",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Review immutable Codex code snapshots and return structured findings.",
-  "long_description": "Lists review tasks prepared by Codex, lets Claude inspect the exact requirement, implementation scope, patch, and immutable source snapshot, and submits a structured initial review or round-two verdict.",
+  "long_description": "Lists review tasks prepared by Codex, lets Claude inspect a verified successor delta or full patch plus the immutable source snapshot, and submits a structured initial review or round-two verdict.",
   "author": {
     "name": "Review Bridge contributors"
   },
@@ -34,7 +34,7 @@
     },
     {
       "name": "read_review_artifact",
-      "description": "Read the patch or snapshot manifest in chunks."
+      "description": "Read a successor delta/proof or full patch/snapshot manifest in chunks."
     },
     {
       "name": "read_snapshot_file",

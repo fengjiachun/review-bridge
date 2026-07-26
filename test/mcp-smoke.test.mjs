@@ -15,7 +15,7 @@ async function connectClient(role, store) {
     env: { ...process.env, REVIEW_BRIDGE_HOME: store },
     stderr: "pipe",
   });
-  const client = new Client({ name: "review-bridge-test", version: "0.2.0" });
+  const client = new Client({ name: "review-bridge-test", version: "0.3.0" });
   await client.connect(transport);
   return client;
 }
@@ -64,6 +64,33 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
   ]);
   assert.equal(author.includes("submit_review"), false);
   assert.equal(reviewer.includes("finalize_local_gate"), false);
+});
+
+test("MCP schemas expose successor preparation and review artifacts", async (t) => {
+  const store = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-mcp-"));
+  t.after(() => fsp.rm(store, { recursive: true, force: true }));
+  const author = await connectClient("author", store);
+  const reviewer = await connectClient("reviewer", store);
+  try {
+    const authorTools = await author.listTools();
+    const prepare = authorTools.tools.find(
+      (tool) => tool.name === "prepare_review",
+    );
+    assert.ok(prepare.inputSchema.properties.parent_review_id);
+
+    const reviewerTools = await reviewer.listTools();
+    const readArtifact = reviewerTools.tools.find(
+      (tool) => tool.name === "read_review_artifact",
+    );
+    assert.deepEqual(readArtifact.inputSchema.properties.artifact.enum, [
+      "successor.diff",
+      "successor.json",
+      "patch.diff",
+      "manifest.json",
+    ]);
+  } finally {
+    await Promise.all([author.close(), reviewer.close()]);
+  }
 });
 
 test("MCP errors preserve StoreError code and retryability details", async (t) => {

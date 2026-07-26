@@ -1,4 +1,4 @@
-# Review Bridge v0.2.0
+# Review Bridge v0.3.0
 
 Review Bridge is a local, manually triggered code-review handoff between Codex
 and Claude Desktop.
@@ -12,7 +12,7 @@ endorsed by, or sponsored by OpenAI or Anthropic.
 
 ## Platform support
 
-Review Bridge v0.2.0 supports macOS 13 Ventura or newer. The Claude Desktop
+Review Bridge v0.3.0 supports macOS 13 Ventura or newer. The Claude Desktop
 extension manifest is Darwin-only; Linux and Windows are not currently
 supported or tested. State locking uses the macOS system tools
 `/usr/bin/lockf` and `/bin/ps`.
@@ -21,13 +21,13 @@ supported or tested. State locking uses the macOS system tools
 
 - `codex-marketplace/`: local Codex marketplace containing the Review Bridge
   plugin and author-role MCP server.
-- `review-bridge-reviewer-v0.2.0.mcpb`: current MCP Bundle for Claude Desktop.
-- `review-bridge-reviewer-v0.2.0.dxt`: compatibility copy for Claude Desktop
+- `review-bridge-reviewer-v0.3.0.mcpb`: current MCP Bundle for Claude Desktop.
+- `review-bridge-reviewer-v0.3.0.dxt`: compatibility copy for Claude Desktop
   versions that still use the DXT file extension.
 - `claude-extension-source/`: inspectable source of the Claude extension.
 
 Run `npm run build` to create these files under
-`dist/review-bridge-v0.2.0/`.
+`dist/review-bridge-v0.3.0/`.
 
 Both MCP processes use this default shared data directory:
 
@@ -62,7 +62,7 @@ In Claude Desktop:
 
 1. Open **Settings → Extensions → Advanced settings**.
 2. Choose **Install Extension**.
-3. Select `review-bridge-reviewer-v0.2.0.mcpb`. If the picker only accepts
+3. Select `review-bridge-reviewer-v0.3.0.mcpb`. If the picker only accepts
    `.dxt`, select the compatibility copy.
 4. Keep the default Review Bridge data directory, or select the same directory
    configured through `REVIEW_BRIDGE_HOME` for Codex.
@@ -106,8 +106,9 @@ deciding whether a retry is still required.
 
 In Claude Desktop:
 
-> List pending Review Bridge tasks and deeply review `<review_id>`. Read the
-> entire patch and relevant snapshot files, then submit structured findings.
+> List pending Review Bridge tasks and deeply review `<review_id>`. Follow its
+> review strategy, inspect the required artifacts and relevant snapshot files,
+> then submit structured findings.
 
 Back in Codex:
 
@@ -118,6 +119,29 @@ Invoke Claude once more for round two. The final state is one of:
 - `LOCAL_GATE_PASSED`: Claude found no remaining issue and the working tree
   still matches the reviewed snapshot.
 - `HUMAN_REQUIRED`: a finding remains or a new finding appears after round two.
+
+### Successor reviews
+
+Start a fresh Claude Desktop conversation for each new `review_id`; a round-two
+rereview may stay in the same conversation. This prevents unrelated review
+history from consuming the new task's context window.
+
+When a committed change continues a prior `LOCAL_GATE_PASSED` task for the same
+repository, base SHA, and requirement, pass its ID as `parent_review_id`.
+Review Bridge verifies the parent gate, clean committed snapshots, and commit
+ancestry. A valid `SUCCESSOR` task includes:
+
+- `successor.json`, which binds the parent gate and snapshot, parent/current Git
+  tree IDs, and delta hash;
+- `successor.diff`, the exact parent-head-to-current-head delta;
+- the normal full `patch.diff` and `manifest.json`, retained for expansion and
+  final fail-closed snapshot verification.
+
+Claude must read the complete successor proof and delta, inspect the changed
+files plus relevant callers, contracts, and tests, and expand to the full patch
+whenever risk or uncertainty warrants it. If any successor precondition fails,
+the task records an explicit `FULL` fallback and Claude reviews the complete
+patch. The optimization changes context selection, not the final local gate.
 
 ## State machine
 
