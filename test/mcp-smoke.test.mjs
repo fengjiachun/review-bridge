@@ -8,7 +8,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const serverPath = path.resolve("src/server.mjs");
 
-async function listToolNames(role, store) {
+async function connectClient(role, store) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverPath, "--role", role],
@@ -17,6 +17,11 @@ async function listToolNames(role, store) {
   });
   const client = new Client({ name: "review-bridge-test", version: "0.1.1" });
   await client.connect(transport);
+  return client;
+}
+
+async function listToolNames(role, store) {
+  const client = await connectClient(role, store);
   try {
     const tools = await client.listTools();
     return tools.tools.map((tool) => tool.name).sort();
@@ -52,4 +57,40 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
   ]);
   assert.equal(author.includes("submit_review"), false);
   assert.equal(reviewer.includes("finalize_local_gate"), false);
+});
+
+test("MCP errors preserve StoreError code and retryability details", async (t) => {
+  const store = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-mcp-"));
+  t.after(() => fsp.rm(store, { recursive: true, force: true }));
+  const reviewId = "rb-2026-07-26T000000-000Z-deadbeef";
+  const reviewRoot = path.join(store, "reviews", reviewId);
+  await fsp.mkdir(reviewRoot, { recursive: true, mode: 0o700 });
+  await fsp.writeFile(
+    path.join(reviewRoot, "review.json"),
+    `${JSON.stringify({
+      id: reviewId,
+      status: "WAITING_FOR_REVIEW",
+      current_round: 1,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  await fsp.writeFile(path.join(reviewRoot, ".review-state.lock"), "{}\n", {
+    mode: 0o644,
+  });
+
+  const reviewer = await connectClient("reviewer", store);
+  try {
+    const result = await reviewer.callTool({
+      name: "submit_review",
+      arguments: { review_id: reviewId, findings: [] },
+    });
+    assert.equal(result.isError, true);
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.code, "STORE_MODE_MISMATCH");
+    assert.equal(payload.details.actual_mode, "0644");
+    assert.equal(payload.details.required_mode, "0600");
+    assert.equal(payload.details.retryable, false);
+  } finally {
+    await reviewer.close();
+  }
 });

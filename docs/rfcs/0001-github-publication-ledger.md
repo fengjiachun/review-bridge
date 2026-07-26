@@ -2322,13 +2322,69 @@ lock record therefore contains:
 - acquisition and heartbeat timestamps; and
 - the lock domain and review ID.
 
-The holder refreshes a heartbeat every five seconds and releases in a `finally`
-block only after rereading the lock and matching its owner token. Acquisition
-waits at most ten seconds. A contender may reclaim a lock only when its
-heartbeat is older than 30 seconds and the operating-system probe confirms that
-no process with both the recorded PID and process start time is alive. PID
-liveness alone is insufficient because PIDs can be reused. An inconclusive
-identity probe fails closed with an actionable error and never steals the lock.
+One helper process holds a persistent sibling `.<domain>-state.lock.guard` file
+through macOS `lockf -k` for the full lifetime of each state lock. Acquisition,
+heartbeat, and release commands travel over that helper's standard input and
+output; owner tokens never travel in process arguments. `-k` preserves one guard
+inode across holders, and the operating system releases its advisory lock
+automatically if the helper exits. This makes stale-record replacement a single
+coordinated operation rather than a check-then-unlink race between contenders,
+without starting a new process for every transition.
+
+Each `lockf` wrapper and its Node helper run in a dedicated process group. A
+command that does not answer within five seconds gets one event-loop poll phase
+to deliver a response that became ready while synchronous repository work
+blocked the parent. If it is still unanswered, the parent terminates that entire
+process group before performing token-checked cleanup under a new guard holder.
+The `/bin/ps` probes used for process identity have their own two-second limit,
+so neither a helper command nor its liveness probe can wait forever.
+
+The holder refreshes a heartbeat every five seconds with atomic replacement and
+releases in a `finally` block only after rereading the lock under the guard and
+matching its owner token. Acquisition waits at most ten seconds. A contender
+may reclaim a lock only when its heartbeat is older than 30 seconds and the
+operating-system probe confirms that no process with both the recorded PID and
+process start time is alive. PID liveness alone is insufficient because PIDs
+can be reused. The process start rendering uses `/bin/ps` with `LC_ALL=C` and
+`TZ=UTC` and carries a format version in the record, so independently launched
+desktop and terminal processes compare the same identity. An inconclusive
+identity probe fails closed with an actionable, non-retryable error and never
+steals the lock. A malformed or wrong-mode lock also fails immediately with its
+path; normal acquisition and heartbeat writes cannot create a partial record
+because they use durable atomic replacement.
+
+If the final token-checked release attempt fails, the mutation returns
+non-retryable `LOCK_CLEANUP_FAILED` instead of reporting success. The error
+names the lock path, sets `state_may_have_changed`, and requires the operator to
+stop the owning Review Bridge process before inspecting or removing the record.
+
+If the helper exits while its parent is still operating, the canonical record
+continues to identify that live parent. Even after the heartbeat becomes stale,
+contenders therefore remain busy rather than admitting a second owner. The
+parent reacquires the guard for token-checked cleanup; if the parent itself
+exits, stale-owner recovery becomes possible only after the same conclusive
+identity check. Helper loss can reduce availability, but cannot silently create
+concurrent cooperating owners.
+
+A missing, foreign, malformed, or otherwise untrustworthy owner record is
+different from helper loss: it proves that the parent can no longer verify the
+record it wrote. The release path surfaces that condition to the MCP caller as
+`LOCK_OWNERSHIP_LOST` after token-safe cleanup instead of returning a successful
+mutation result. It sets `details.state_may_have_changed` because the protected
+write may already be on disk and instructs the caller to reread state before
+deciding whether to retry. Lock errors retain their structured code and
+`details.retryable` value at the tool boundary.
+
+An unexpected acquisition failure also attempts token-checked cleanup unless
+its error conclusively occurred before this owner could write a record. This
+covers post-rename durability failures without removing a foreign owner's
+record.
+
+If atomic replacement renames the new canonical file but the following parent
+directory sync fails, the mutation returns non-retryable
+`STORE_WRITE_INDETERMINATE` with `state_may_have_changed`. The caller must
+reread the relevant state before deciding whether to retry; in particular,
+`prepare_review` must not blindly create a second review task.
 
 An acquisition timeout returns a documented retryable `REVIEW_BUSY` or
 `PUBLICATION_BUSY` error without changing state. Adding `REVIEW_BUSY` to
@@ -2990,8 +3046,13 @@ The implementation must test:
   through full-closure direct-human ambiguity approval, direct
   automatic-quiescence approval when applicable, stable Bot actor-ID
   resolution, and immediate pre-merge gate verification;
-- lock timeout errors, PID reuse, heartbeat expiry, owner-token mismatch, and
-  inconclusive owner-liveness checks;
+- retryable acquisition deadlines versus non-retryable helper timeouts,
+  structured MCP error fields, `lockf` contention versus non-contention exits,
+  stable guard inodes, PID reuse, heartbeat expiry, event-loop stalls,
+  idempotent process-group termination, helper loss, owner-token mismatch and
+  propagation, malformed replacement records, conservative failed-acquire
+  cleanup, lost-ownership reread guidance, token absence from process arguments,
+  and inconclusive owner-liveness checks;
 - every state-changing publication tool returning
   `PUBLICATION_TERMINAL` against each terminal status without changing the
   ledger, gate, or audit entries;

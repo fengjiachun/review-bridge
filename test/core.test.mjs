@@ -18,6 +18,7 @@ import {
   submitResolutions,
   waitForReviewState,
 } from "../src/core.mjs";
+import { acquireStateLock } from "../src/storage.mjs";
 
 function git(cwd, ...args) {
   const result = spawnSync("git", args, {
@@ -261,6 +262,53 @@ test("compact review summaries support bounded state-change waits", async (t) =>
       /known_state_version must be a non-negative safe integer/,
     );
   }
+});
+
+test("core review mutations wait behind the review-state lock without changing state", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Update the exported value.",
+    implementationScope: "Change app.js.",
+  });
+  const reviewRoot = path.join(store, "reviews", prepared.id);
+  const release = await acquireStateLock({
+    directory: reviewRoot,
+    reviewId: prepared.id,
+    domain: "review",
+  });
+  let settled = false;
+  const mutation = submitInitialReview(store, prepared.id, []).finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(settled, false);
+  const unchanged = await getReview(store, prepared.id);
+  assert.equal(unchanged.status, "WAITING_FOR_REVIEW");
+  assert.equal(unchanged.state_version, prepared.state_version);
+  await release();
+  const updated = await mutation;
+  assert.equal(updated.status, "CLEAN");
+  assert.equal(updated.state_version, prepared.state_version + 1);
+});
+
+test("a missing review mutation does not create an empty review directory", async (t) => {
+  const { root, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const reviewId = "rb-2026-07-26T000000-000Z-deadbeef";
+  await assert.rejects(
+    submitInitialReview(store, reviewId, []),
+    new RegExp(`review ${reviewId} not found`),
+  );
+  assert.equal(
+    await fsp
+      .access(path.join(store, "reviews", reviewId))
+      .then(() => true, () => false),
+    false,
+  );
 });
 
 test("compact finding histograms distinguish active and all-time severity", async (t) => {

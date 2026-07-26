@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
-import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { atomicWriteFile, withStateLock } from "./storage.mjs";
 
 export const MAX_ROUNDS = 2;
 const MAX_GIT_OUTPUT = 64 * 1024 * 1024;
@@ -84,15 +84,7 @@ function runGit(repositoryPath, args, options = {}) {
 }
 
 async function atomicWriteJson(filePath, value) {
-  await fsp.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const temporary = `${filePath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
-  await fsp.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  await fsp.rename(temporary, filePath);
-}
-
-async function writePrivateFile(filePath, data) {
-  await fsp.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  await fsp.writeFile(filePath, data, { mode: 0o600 });
+  await atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 function reviewDirectory(storeRoot, reviewId) {
@@ -109,6 +101,27 @@ function roundDirectory(storeRoot, reviewId, round) {
 
 function reviewFile(storeRoot, reviewId) {
   return path.join(reviewDirectory(storeRoot, reviewId), "review.json");
+}
+
+// Functions suffixed *WhileLocked are called only through this wrapper.
+async function withReviewMutationLock(
+  storeRoot,
+  reviewId,
+  operation,
+  { allowMissing = false } = {},
+) {
+  assertReviewId(reviewId);
+  if (!allowMissing) {
+    await loadReview(storeRoot, reviewId);
+  }
+  return withStateLock(
+    {
+      directory: reviewDirectory(storeRoot, reviewId),
+      reviewId,
+      domain: "review",
+    },
+    operation,
+  );
 }
 
 async function loadJson(filePath) {
@@ -128,8 +141,6 @@ export async function loadReview(storeRoot, reviewId) {
 }
 
 async function saveReview(storeRoot, review) {
-  // v0.1 assumes one state transition at a time. Atomic replacement prevents
-  // corruption, but concurrent author and reviewer writes can still lose updates.
   review.state_version = (review.state_version ?? 0) + 1;
   review.updated_at = now();
   await atomicWriteJson(reviewFile(storeRoot, review.id), review);
@@ -323,7 +334,7 @@ async function buildSnapshot({
   };
 
   if (writeFiles) {
-    await writePrivateFile(path.join(roundRoot, "patch.diff"), patch);
+    await atomicWriteFile(path.join(roundRoot, "patch.diff"), patch);
     await atomicWriteJson(path.join(roundRoot, "manifest.json"), manifest);
   }
   return { manifest, patch };
@@ -434,37 +445,39 @@ export async function prepareReview(
   const id = createReviewId();
   const root = reviewDirectory(storeRoot, id);
   await fsp.mkdir(root, { recursive: true, mode: 0o700 });
-  const roundRoot = roundDirectory(storeRoot, id, 1);
-  const { manifest } = await buildSnapshot({
-    repositoryPath,
-    baseRef,
-    requirement,
-    implementationScope,
-    roundRoot,
-    writeFiles: true,
-  });
-  const timestamp = now();
-  const review = {
-    version: 1,
-    id,
-    created_at: timestamp,
-    updated_at: timestamp,
-    state_version: 1,
-    repository_path: manifest.repository_path,
-    base_ref: baseRef,
-    requirement,
-    implementation_scope: implementationScope,
-    status: "WAITING_FOR_REVIEW",
-    current_round: 1,
-    max_rounds: MAX_ROUNDS,
-    rounds: [{ round: 1, ...manifest }],
-    findings: [],
-    resolutions: [],
-    rereview_decisions: [],
-    history: [{ at: timestamp, event: "REVIEW_PREPARED", round: 1 }],
-  };
-  await atomicWriteJson(reviewFile(storeRoot, review.id), review);
-  return publicReview(review);
+  return withReviewMutationLock(storeRoot, id, async () => {
+    const roundRoot = roundDirectory(storeRoot, id, 1);
+    const { manifest } = await buildSnapshot({
+      repositoryPath,
+      baseRef,
+      requirement,
+      implementationScope,
+      roundRoot,
+      writeFiles: true,
+    });
+    const timestamp = now();
+    const review = {
+      version: 1,
+      id,
+      created_at: timestamp,
+      updated_at: timestamp,
+      state_version: 1,
+      repository_path: manifest.repository_path,
+      base_ref: baseRef,
+      requirement,
+      implementation_scope: implementationScope,
+      status: "WAITING_FOR_REVIEW",
+      current_round: 1,
+      max_rounds: MAX_ROUNDS,
+      rounds: [{ round: 1, ...manifest }],
+      findings: [],
+      resolutions: [],
+      rereview_decisions: [],
+      history: [{ at: timestamp, event: "REVIEW_PREPARED", round: 1 }],
+    };
+    await atomicWriteJson(reviewFile(storeRoot, review.id), review);
+    return publicReview(review);
+  }, { allowMissing: true });
 }
 
 export async function listReviews(storeRoot, statuses = null) {
@@ -520,7 +533,6 @@ export async function waitForReviewState(
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
     throw new Error("timeout_ms must be between 1 and 30000");
   }
-
   const deadline = Date.now() + timeoutMs;
   let review = await loadReview(storeRoot, reviewId);
   while ((review.state_version ?? 0) === knownStateVersion) {
@@ -580,12 +592,26 @@ function normalizeFinding(input, id, round) {
 }
 
 export async function submitInitialReview(storeRoot, reviewId, findingsInput) {
+  return withReviewMutationLock(storeRoot, reviewId, () =>
+    submitInitialReviewWhileLocked(storeRoot, reviewId, findingsInput),
+  );
+}
+
+async function submitInitialReviewWhileLocked(
+  storeRoot,
+  reviewId,
+  findingsInput,
+) {
   const review = await loadReview(storeRoot, reviewId);
   if (review.status !== "WAITING_FOR_REVIEW" || review.current_round !== 1) {
-    throw new Error(`review is not waiting for its initial review (status=${review.status})`);
+    throw new Error(
+      `review is not waiting for its initial review (status=${review.status})`,
+    );
   }
   if (!Array.isArray(findingsInput) || findingsInput.length > MAX_FINDINGS) {
-    throw new Error(`findings must be an array with at most ${MAX_FINDINGS} items`);
+    throw new Error(
+      `findings must be an array with at most ${MAX_FINDINGS} items`,
+    );
   }
   const findings = findingsInput.map((finding, index) =>
     normalizeFinding(finding, `F-${String(index + 1).padStart(3, "0")}`, 1),
@@ -609,16 +635,29 @@ export async function submitInitialReview(storeRoot, reviewId, findingsInput) {
 }
 
 export async function submitResolutions(storeRoot, reviewId, inputs) {
+  return withReviewMutationLock(storeRoot, reviewId, () =>
+    submitResolutionsWhileLocked(storeRoot, reviewId, inputs),
+  );
+}
+
+async function submitResolutionsWhileLocked(storeRoot, reviewId, inputs) {
   const review = await loadReview(storeRoot, reviewId);
   if (review.status !== "REVIEW_SUBMITTED") {
-    throw new Error(`review is not waiting for author resolutions (status=${review.status})`);
+    throw new Error(
+      `review is not waiting for author resolutions (status=${review.status})`,
+    );
   }
   if (!Array.isArray(inputs)) {
     throw new Error("resolutions must be an array");
   }
-  const openFindings = review.findings.filter((finding) => finding.status === "OPEN");
+  const openFindings = review.findings.filter(
+    (finding) => finding.status === "OPEN",
+  );
   const byId = new Map(inputs.map((item) => [item?.finding_id, item]));
-  if (byId.size !== openFindings.length || inputs.length !== openFindings.length) {
+  if (
+    byId.size !== openFindings.length ||
+    inputs.length !== openFindings.length
+  ) {
     throw new Error("provide exactly one resolution for every open finding");
   }
   const resolutions = [];
@@ -630,7 +669,9 @@ export async function submitResolutions(storeRoot, reviewId, inputs) {
     }
     const disposition = String(input.disposition ?? "");
     if (!["fixed", "rejected", "human_required"].includes(disposition)) {
-      throw new Error("resolution disposition must be fixed, rejected, or human_required");
+      throw new Error(
+        "resolution disposition must be fixed, rejected, or human_required",
+      );
     }
     const resolution = {
       finding_id: finding.id,
@@ -669,6 +710,12 @@ export async function submitResolutions(storeRoot, reviewId, inputs) {
 }
 
 export async function prepareRereview(storeRoot, reviewId) {
+  return withReviewMutationLock(storeRoot, reviewId, () =>
+    prepareRereviewWhileLocked(storeRoot, reviewId),
+  );
+}
+
+async function prepareRereviewWhileLocked(storeRoot, reviewId) {
   const review = await loadReview(storeRoot, reviewId);
   if (review.status !== "AUTHOR_RESPONDED") {
     throw new Error(`review is not ready for rereview (status=${review.status})`);
@@ -697,6 +744,22 @@ export async function prepareRereview(storeRoot, reviewId) {
 }
 
 export async function submitRereview(
+  storeRoot,
+  reviewId,
+  decisionInputs,
+  newFindingInputs,
+) {
+  return withReviewMutationLock(storeRoot, reviewId, () =>
+    submitRereviewWhileLocked(
+      storeRoot,
+      reviewId,
+      decisionInputs,
+      newFindingInputs,
+    ),
+  );
+}
+
+async function submitRereviewWhileLocked(
   storeRoot,
   reviewId,
   decisionInputs,
@@ -786,6 +849,12 @@ export async function submitRereview(
 }
 
 export async function finalizeLocalGate(storeRoot, reviewId) {
+  return withReviewMutationLock(storeRoot, reviewId, () =>
+    finalizeLocalGateWhileLocked(storeRoot, reviewId),
+  );
+}
+
+async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
   const review = await loadReview(storeRoot, reviewId);
   if (review.status !== "CLEAN") {
     throw new Error(`only a CLEAN review can be finalized (status=${review.status})`);

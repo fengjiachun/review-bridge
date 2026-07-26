@@ -12,8 +12,10 @@ endorsed by, or sponsored by OpenAI or Anthropic.
 
 ## Platform support
 
-Review Bridge v0.1.1 supports macOS. The Claude Desktop extension manifest is
-Darwin-only; Linux and Windows are not currently supported or tested.
+Review Bridge v0.1.1 supports macOS 13 Ventura or newer. The Claude Desktop
+extension manifest is Darwin-only; Linux and Windows are not currently
+supported or tested. State locking uses the macOS system tools
+`/usr/bin/lockf` and `/bin/ps`.
 
 ## What is included
 
@@ -35,6 +37,10 @@ Both MCP processes use this default shared data directory:
 
 Set `REVIEW_BRIDGE_HOME` to override it. When installing the Claude extension,
 select the same directory in its configuration.
+
+Install the author plugin and reviewer extension from the same Review Bridge
+build. Do not mix a locking-enabled build with artifacts from an earlier
+release; earlier processes do not participate in the locking protocol.
 
 ## Install the Codex plugin
 
@@ -77,6 +83,26 @@ to 30 seconds, and returns the same compact summary without repeated full-ledger
 polling. A timed-out wait is expected while a human-paced review is still in
 progress; call it again with the same `state_version`, or resume when the user
 confirms the review is complete.
+
+State-changing tools can return a structured `REVIEW_BUSY` error with
+`details.retryable: true` after a bounded lock wait. Reread the review summary
+and retry the same transition only if it is still required. Treat errors with
+`details.retryable: false` as fail-closed and resolve their stated cause before
+retrying.
+
+`LOCK_OWNERSHIP_LOST` is a special non-retryable result with
+`details.state_may_have_changed: true`: the transition may already be on disk.
+Reread the review before deciding whether any retry is still required.
+
+`LOCK_CLEANUP_FAILED` is also non-retryable and sets
+`details.state_may_have_changed: true`. The protected write may already be on
+disk while the named lock record remains. Stop the owning Review Bridge process
+before inspecting or removing that record; do not loop on the same mutation.
+
+`STORE_WRITE_INDETERMINATE` is non-retryable and also sets
+`details.state_may_have_changed: true`. The canonical file was replaced, but
+syncing its parent directory failed, so reread the relevant review state before
+deciding whether a retry is still required.
 
 In Claude Desktop:
 
@@ -156,8 +182,9 @@ PR head.
 - Working-tree overlays are copied into the private review store. Unchanged
   files are read from the captured Git object ID.
 - Files larger than 10 MiB are recorded but not copied into the snapshot.
-- v0.1 does not serialize state changes across the author and reviewer
-  processes. Do not invoke state-changing tools concurrently for one review.
+- Review state changes are serialized per review across author and reviewer
+  processes from the same locking-enabled build. Earlier processes do not
+  participate in that protocol.
 - The local gate and publication gate are workflow attestations, not Git or
   GitHub security boundaries. v0.1 does not install a `pre-push` hook.
 - The Review Bridge MCP server receives no GitHub credentials. The packaged
@@ -188,7 +215,8 @@ release policy.
 
 ## Develop
 
-Requirements: Node.js 18 or newer, npm, Git, and `unzip`.
+Requirements: macOS 13 Ventura or newer with `/usr/bin/lockf` and `/bin/ps`,
+Node.js 18 or newer, npm, Git, and `unzip`.
 
 ```bash
 npm ci
