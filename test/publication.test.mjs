@@ -1336,6 +1336,84 @@ test("audit preflight and offline inspection fail closed without changing gate v
   assert.equal(stillValid.valid, true);
 });
 
+test("offline audit inspection does not read an unbounded audit file into memory", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const reached = await reachReady(state, startedAt);
+  await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: reached.ready.revision },
+    { clock: () => reached.observedAt + 20 },
+  );
+  const directory = path.join(state.store, "reviews", state.reviewId);
+  const auditPath = path.join(directory, "publication-gate-audit.jsonl");
+  const auditHeadPath = path.join(
+    directory,
+    "publication-gate-audit-head.json",
+  );
+  const lines = [];
+  let previous = null;
+  for (let sequence = 1; sequence <= 400; sequence += 1) {
+    const line = canonicalJson({
+      version: 1,
+      review_id: state.reviewId,
+      sequence,
+      event_id: sequence.toString(16).padStart(32, "0"),
+      previous_event_sha256: previous,
+      event: "GATE_VERIFIED",
+      outcome: "SUCCESS",
+    });
+    lines.push(line);
+    previous = digest(line);
+  }
+  const committed = `${lines.join("\n")}\n`;
+  await fsp.writeFile(auditPath, committed, { mode: 0o600 });
+  const committedBytes = Buffer.byteLength(committed);
+  await atomicWriteCanonicalJson(auditHeadPath, {
+    version: 1,
+    review_id: state.reviewId,
+    committed_bytes: committedBytes,
+    next_sequence: lines.length + 1,
+    last_event_sha256: previous,
+  });
+  const sparseSize = 3 * 1024 * 1024 * 1024;
+  await fsp.truncate(auditPath, sparseSize);
+
+  const probe = await fsp.open(auditPath, "r");
+  const fileHandlePrototype = Object.getPrototypeOf(probe);
+  await probe.close();
+  const originalRead = fileHandlePrototype.read;
+  fileHandlePrototype.read = function shortRead(
+    buffer,
+    offset,
+    length,
+    position,
+  ) {
+    return originalRead.call(
+      this,
+      buffer,
+      offset,
+      Math.min(length, 4096),
+      position,
+    );
+  };
+  let inspected;
+  try {
+    inspected = await inspectPublicationAudit(state.store, state.reviewId);
+  } finally {
+    fileHandlePrototype.read = originalRead;
+  }
+  assert.equal(inspected.valid, true);
+  assert.equal(inspected.event_count, lines.length);
+  assert.equal(inspected.committed_bytes, committedBytes);
+  assert.equal(
+    inspected.uncommitted_tail_bytes,
+    sparseSize - committedBytes,
+  );
+});
+
 test("pre-start audit and stored-history invariants report their contract errors", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

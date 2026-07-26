@@ -2420,11 +2420,12 @@ async function initializeAudit(paths, reviewId) {
   await cleanupAuditHeadTemporaries(paths);
 }
 
-async function openAuditLog(filePath) {
+async function openAuditLog(filePath, { readOnly = false } = {}) {
   const handle = await fsp.open(
     filePath,
-    fs.constants.O_RDWR |
-      fs.constants.O_APPEND |
+    (readOnly
+      ? fs.constants.O_RDONLY
+      : fs.constants.O_RDWR | fs.constants.O_APPEND) |
       (fs.constants.O_NOFOLLOW ?? 0),
   );
   try {
@@ -2467,8 +2468,20 @@ function validateAuditEvent(event, reviewId, head) {
 
 async function readRange(handle, length, position) {
   const buffer = Buffer.alloc(length);
-  const { bytesRead } = await handle.read(buffer, 0, length, position);
-  return buffer.subarray(0, bytesRead);
+  let total = 0;
+  while (total < length) {
+    const { bytesRead } = await handle.read(
+      buffer,
+      total,
+      length - total,
+      position + total,
+    );
+    if (bytesRead === 0) {
+      break;
+    }
+    total += bytesRead;
+  }
+  return buffer.subarray(0, total);
 }
 
 async function validateLastCommittedAuditRecord(handle, head, reviewId) {
@@ -2598,17 +2611,71 @@ async function closeAuditSession(session) {
   ]);
 }
 
+async function inspectCommittedAudit(handle, committedBytes, reviewId) {
+  const chunkBytes = 64 * 1024;
+  let position = 0;
+  let pending = Buffer.alloc(0);
+  let eventCount = 0;
+  let previous = null;
+  while (position < committedBytes) {
+    const requested = Math.min(chunkBytes, committedBytes - position);
+    const chunk = await readRange(handle, requested, position);
+    if (chunk.length !== requested) {
+      fail("AUDIT_CORRUPT", "audit log changed during inspection");
+    }
+    position += chunk.length;
+    const buffered =
+      pending.length === 0 ? chunk : Buffer.concat([pending, chunk]);
+    let lineStart = 0;
+    let newline = buffered.indexOf(0x0a, lineStart);
+    while (newline !== -1) {
+      const eventBytes = buffered.subarray(lineStart, newline);
+      eventCount += 1;
+      if (
+        eventBytes.length === 0 ||
+        eventBytes.length > MAX_AUDIT_EVENT_BYTES
+      ) {
+        fail("AUDIT_CORRUPT", `audit event ${eventCount} has invalid size`);
+      }
+      const line = eventBytes.toString("utf8");
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        fail("AUDIT_CORRUPT", `audit event ${eventCount} is malformed`);
+      }
+      if (canonicalJson(event) !== line) {
+        fail("AUDIT_CORRUPT", `audit event ${eventCount} is not canonical`);
+      }
+      validateAuditEvent(event, reviewId, {
+        next_sequence: eventCount,
+        last_event_sha256: previous,
+      });
+      previous = sha256(eventBytes);
+      lineStart = newline + 1;
+      newline = buffered.indexOf(0x0a, lineStart);
+    }
+    pending = Buffer.from(buffered.subarray(lineStart));
+    if (pending.length > MAX_AUDIT_EVENT_BYTES) {
+      fail("AUDIT_CORRUPT", `audit event ${eventCount + 1} has invalid size`);
+    }
+  }
+  if (pending.length !== 0) {
+    fail("AUDIT_CORRUPT", "committed audit prefix is not newline terminated");
+  }
+  return { eventCount, lastEventSha256: previous };
+}
+
 export async function inspectPublicationAudit(storeRoot, reviewId) {
   const paths = pathsFor(storeRoot, reviewId);
   return publicationLock(paths, reviewId, async () => {
-    const [openedLog, openedHead] = await Promise.all([
-      readSecureFile(paths.auditLog, { requiredMode: 0o600 }),
-      readSecureFile(paths.auditHead, {
+    const openedLog = await openAuditLog(paths.auditLog, { readOnly: true });
+    let openedHead;
+    try {
+      openedHead = await readSecureFile(paths.auditHead, {
         requiredMode: 0o600,
         maxBytes: 16 * 1024,
-      }),
-    ]);
-    try {
+      });
       let head;
       try {
         head = JSON.parse(openedHead.bytes.toString("utf8"));
@@ -2623,7 +2690,7 @@ export async function inspectPublicationAudit(storeRoot, reviewId) {
         head.review_id !== reviewId ||
         !Number.isSafeInteger(head.committed_bytes) ||
         head.committed_bytes < 0 ||
-        head.committed_bytes > openedLog.bytes.length ||
+        head.committed_bytes > openedLog.stat.size ||
         !Number.isSafeInteger(head.next_sequence) ||
         head.next_sequence < 1 ||
         (head.last_event_sha256 !== null &&
@@ -2631,57 +2698,30 @@ export async function inspectPublicationAudit(storeRoot, reviewId) {
       ) {
         fail("AUDIT_CORRUPT", "audit head is inconsistent");
       }
-      const committed = openedLog.bytes.subarray(0, head.committed_bytes);
-      if (committed.length > 0 && committed.at(-1) !== 0x0a) {
-        fail("AUDIT_CORRUPT", "committed audit prefix is not newline terminated");
-      }
-      const lines =
-        committed.length === 0
-          ? []
-          : committed.subarray(0, -1).toString("utf8").split("\n");
-      let previous = null;
-      let consumedBytes = 0;
-      for (const [index, line] of lines.entries()) {
-        const bytes = Buffer.from(line, "utf8");
-        if (bytes.length === 0 || bytes.length > MAX_AUDIT_EVENT_BYTES) {
-          fail("AUDIT_CORRUPT", `audit event ${index + 1} has invalid size`);
-        }
-        let event;
-        try {
-          event = JSON.parse(line);
-        } catch {
-          fail("AUDIT_CORRUPT", `audit event ${index + 1} is malformed`);
-        }
-        if (canonicalJson(event) !== line) {
-          fail("AUDIT_CORRUPT", `audit event ${index + 1} is not canonical`);
-        }
-        validateAuditEvent(event, reviewId, {
-          next_sequence: index + 1,
-          last_event_sha256: previous,
-        });
-        previous = sha256(bytes);
-        consumedBytes += bytes.length + 1;
-      }
+      const { eventCount, lastEventSha256 } = await inspectCommittedAudit(
+        openedLog.handle,
+        head.committed_bytes,
+        reviewId,
+      );
       if (
-        consumedBytes !== head.committed_bytes ||
-        head.next_sequence !== lines.length + 1 ||
-        head.last_event_sha256 !== previous
+        head.next_sequence !== eventCount + 1 ||
+        head.last_event_sha256 !== lastEventSha256
       ) {
         fail("AUDIT_CORRUPT", "audit chain does not match its committed cursor");
       }
       return {
         valid: true,
         review_id: reviewId,
-        event_count: lines.length,
+        event_count: eventCount,
         committed_bytes: head.committed_bytes,
-        last_event_sha256: previous,
+        last_event_sha256: lastEventSha256,
         uncommitted_tail_bytes:
-          openedLog.bytes.length - head.committed_bytes,
+          openedLog.stat.size - head.committed_bytes,
       };
     } finally {
       await Promise.all([
         openedLog.handle.close(),
-        openedHead.handle.close(),
+        openedHead?.handle.close(),
       ]);
     }
   });
