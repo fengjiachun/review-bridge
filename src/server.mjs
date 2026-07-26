@@ -14,6 +14,7 @@ import {
   prepareReview,
   readReviewArtifact,
   readSnapshotFile,
+  REVIEWER_PROVIDERS,
   searchSnapshot,
   submitInitialReview,
   submitRereview,
@@ -22,6 +23,7 @@ import {
 } from "./core.mjs";
 import {
   acknowledgeCodexReviewAmbiguity,
+  authorizeRemotePublication,
   finalizePublicationGate,
   getPublication,
   recordCodexReviewRequest,
@@ -30,18 +32,29 @@ import {
   verifyPublicationGate,
 } from "./publication.mjs";
 
-function parseRole(argv) {
-  const equals = argv.find((arg) => arg.startsWith("--role="));
+function parseOption(argv, name) {
+  const equals = argv.find((arg) => arg.startsWith(`--${name}=`));
   if (equals) {
-    return equals.slice("--role=".length);
+    return equals.slice(`--${name}=`.length);
   }
-  const index = argv.indexOf("--role");
+  const index = argv.indexOf(`--${name}`);
   return index >= 0 ? argv[index + 1] : null;
 }
 
-const role = parseRole(process.argv.slice(2));
+const argv = process.argv.slice(2);
+const role = parseOption(argv, "role");
 if (!["author", "reviewer"].includes(role)) {
-  console.error("usage: node server.mjs --role author|reviewer");
+  console.error(
+    "usage: node server.mjs --role author|reviewer [--reviewer-provider CLAUDE_DESKTOP|CODEX_TASK]",
+  );
+  process.exit(2);
+}
+const reviewerProvider =
+  role === "reviewer" ? parseOption(argv, "reviewer-provider") : null;
+if (role === "reviewer" && !REVIEWER_PROVIDERS.includes(reviewerProvider)) {
+  console.error(
+    "reviewer role requires --reviewer-provider CLAUDE_DESKTOP|CODEX_TASK",
+  );
   process.exit(2);
 }
 
@@ -49,13 +62,13 @@ const storeRoot = defaultStoreRoot();
 const server = new McpServer(
   {
     name: `review-bridge-${role}`,
-    version: "0.3.0",
+    version: "0.4.0",
   },
   {
     instructions:
       role === "author"
-        ? "Create immutable local review tasks for Claude, answer every finding, and finalize only CLEAN snapshots."
-        : "Review immutable Codex snapshots. For SUCCESSOR tasks, completely read the successor proof and exact delta, inspect relevant source, callers, contracts, and tests, and expand to the full patch whenever risk or uncertainty warrants it. For FULL tasks, completely read the full patch. Submit structured findings only after sufficient context is inspected.",
+        ? "Create immutable local review tasks for an explicitly selected reviewer provider and finalize only CLEAN snapshots, or create an explicit remote-only publication authorization after direct operator approval."
+        : `Review immutable Codex snapshots bound to ${reviewerProvider}. For SUCCESSOR tasks, completely read the successor proof and exact delta, inspect relevant source, callers, contracts, and tests, and expand to the full patch whenever risk or uncertainty warrants it. For FULL tasks, completely read the full patch. Submit structured findings only after sufficient context is inspected.`,
   },
 );
 
@@ -109,14 +122,15 @@ if (role === "author") {
   register(
     "prepare_review",
     {
-      title: "Prepare Claude review",
+      title: "Prepare local review",
       description:
-        "Capture an immutable Git snapshot, requirement, implementation scope, patch, and test context for manual Claude Desktop review.",
+        "Capture an immutable Git snapshot, requirement, implementation scope, patch, test context, and explicit reviewer provider.",
       inputSchema: {
         repository_path: z.string(),
         base_ref: z.string(),
         requirement: z.string(),
         implementation_scope: z.string(),
+        reviewer_provider: z.enum(REVIEWER_PROVIDERS),
         parent_review_id: z.string().optional(),
       },
     },
@@ -126,6 +140,7 @@ if (role === "author") {
         baseRef: input.base_ref,
         requirement: input.requirement,
         implementationScope: input.implementation_scope,
+        reviewerProvider: input.reviewer_provider,
         parentReviewId: input.parent_review_id ?? null,
       }),
   );
@@ -213,7 +228,7 @@ if (role === "author") {
   register(
     "prepare_rereview",
     {
-      title: "Prepare Claude rereview",
+      title: "Prepare local rereview",
       description:
         "Capture the updated code as round two after all findings have author responses.",
       inputSchema: { review_id: z.string() },
@@ -233,11 +248,37 @@ if (role === "author") {
   );
 
   register(
+    "authorize_remote_publication",
+    {
+      title: "Authorize remote-only publication",
+      description:
+        "Create an immutable review ID that explicitly skips local review and binds a clean local repository, base, head, operator, and rationale before GitHub-only publication review.",
+      inputSchema: {
+        repository_path: z.string(),
+        base_sha: z.string(),
+        head_sha: z.string(),
+        acknowledgement: z.literal("LOCAL_REVIEW_SKIPPED"),
+        operator_label: z.string(),
+        rationale: z.string(),
+      },
+    },
+    (input) =>
+      authorizeRemotePublication(storeRoot, {
+        repositoryPath: input.repository_path,
+        baseSha: input.base_sha,
+        headSha: input.head_sha,
+        acknowledgement: input.acknowledgement,
+        operatorLabel: input.operator_label,
+        rationale: input.rationale,
+      }),
+  );
+
+  register(
     "start_publication",
     {
       title: "Start GitHub publication ledger",
       description:
-        "Bind a LOCAL_GATE_PASSED review to one pull request, pinned Codex Bot actor, trigger policy, and fresh complete preexisting Codex baseline.",
+        "Bind a local review gate or explicit remote-only authorization to one pull request, pinned Codex Bot actor, trigger policy, and fresh complete preexisting Codex baseline.",
       inputSchema: {
         review_id: z.string(),
         repository_id: z.number().int().positive(),
@@ -419,7 +460,7 @@ if (role === "author") {
       listReviews(storeRoot, [
         "WAITING_FOR_REVIEW",
         "WAITING_FOR_REREVIEW",
-      ]),
+      ], reviewerProvider),
   );
 
   register(
@@ -430,7 +471,7 @@ if (role === "author") {
         "Read the requirement, implementation scope, changed files, prior findings, and author responses.",
       inputSchema: { review_id: z.string() },
     },
-    (input) => openReview(storeRoot, input.review_id),
+    (input) => openReview(storeRoot, input.review_id, reviewerProvider),
   );
 
   register(
@@ -460,6 +501,7 @@ if (role === "author") {
         input.artifact,
         input.offset ?? 0,
         input.limit ?? 65536,
+        reviewerProvider,
       ),
   );
 
@@ -485,6 +527,7 @@ if (role === "author") {
         input.path,
         input.offset ?? 0,
         input.limit ?? 65536,
+        reviewerProvider,
       ),
   );
 
@@ -510,6 +553,7 @@ if (role === "author") {
         input.pattern,
         input.path_prefix ?? null,
         input.max_results ?? 100,
+        reviewerProvider,
       ),
   );
 
@@ -525,7 +569,12 @@ if (role === "author") {
       },
     },
     (input) =>
-      submitInitialReview(storeRoot, input.review_id, input.findings),
+      submitInitialReview(
+        storeRoot,
+        input.review_id,
+        input.findings,
+        reviewerProvider,
+      ),
   );
 
   register(
@@ -556,6 +605,7 @@ if (role === "author") {
         input.review_id,
         input.decisions,
         input.new_findings,
+        reviewerProvider,
       ),
   );
 }

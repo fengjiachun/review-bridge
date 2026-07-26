@@ -62,6 +62,133 @@ async function readAll(readChunk) {
   return content;
 }
 
+test("review tasks bind one reviewer provider through the local gate", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "export function divide(a, b) {\n  if (b === 0) return null;\n  return a / b;\n}\n",
+  );
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "handle zero divisor");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Return null when dividing by zero.",
+    implementationScope: "Guard the zero-divisor case.",
+    reviewerProvider: "CODEX_TASK",
+  });
+
+  assert.equal(prepared.reviewer_provider, "CODEX_TASK");
+  assert.equal(
+    (await getReviewSummary(store, prepared.id)).action_required,
+    "REVIEWER_INITIAL_REVIEW",
+  );
+  await assert.rejects(
+    openReview(store, prepared.id, "CLAUDE_DESKTOP"),
+    /reviewer provider mismatch/,
+  );
+  await assert.rejects(
+    readReviewArtifact(
+      store,
+      prepared.id,
+      1,
+      "patch.diff",
+      0,
+      65_536,
+      "CLAUDE_DESKTOP",
+    ),
+    /reviewer provider mismatch/,
+  );
+  await assert.rejects(
+    readSnapshotFile(
+      store,
+      prepared.id,
+      1,
+      "app.js",
+      0,
+      65_536,
+      "CLAUDE_DESKTOP",
+    ),
+    /reviewer provider mismatch/,
+  );
+  await assert.rejects(
+    searchSnapshot(
+      store,
+      prepared.id,
+      1,
+      "divide",
+      null,
+      100,
+      "CLAUDE_DESKTOP",
+    ),
+    /reviewer provider mismatch/,
+  );
+  assert.equal(
+    (await openReview(store, prepared.id, "CODEX_TASK")).id,
+    prepared.id,
+  );
+  await assert.rejects(
+    submitInitialReview(store, prepared.id, [], "CLAUDE_DESKTOP"),
+    /reviewer provider mismatch/,
+  );
+  await submitInitialReview(store, prepared.id, [], "CODEX_TASK");
+  const finalized = await finalizeLocalGate(store, prepared.id);
+  assert.equal(finalized.gate.reviewer_provider, "CODEX_TASK");
+});
+
+test("review preparation rejects unknown reviewer providers", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    prepareReview(store, {
+      repositoryPath: repository,
+      baseRef: git(repository, "rev-parse", "HEAD"),
+      requirement: "Keep reviewer provenance explicit.",
+      implementationScope: "Reject unsupported providers.",
+      reviewerProvider: "OTHER",
+    }),
+    /reviewer_provider must be CLAUDE_DESKTOP or CODEX_TASK/,
+  );
+});
+
+test("legacy review records default their reviewer provider to Claude", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: git(repository, "rev-parse", "HEAD"),
+    requirement: "Preserve legacy reviewer compatibility.",
+    implementationScope: "Interpret a missing provider as Claude Desktop.",
+  });
+  const reviewPath = path.join(
+    store,
+    "reviews",
+    prepared.id,
+    "review.json",
+  );
+  const review = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  delete review.reviewer_provider;
+  await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`);
+
+  assert.equal(
+    (await openReview(store, prepared.id, "CLAUDE_DESKTOP"))
+      .reviewer_provider,
+    "CLAUDE_DESKTOP",
+  );
+  await assert.rejects(
+    openReview(store, prepared.id, "CODEX_TASK"),
+    /reviewer provider mismatch/,
+  );
+  await submitInitialReview(store, prepared.id, []);
+  const finalized = await finalizeLocalGate(store, prepared.id);
+  assert.equal(finalized.gate.reviewer_provider, "CLAUDE_DESKTOP");
+});
+
 async function createGatedParent({
   repository,
   store,
@@ -167,6 +294,10 @@ test("successor review binds a clean parent gate and exposes only the exact delt
     ),
   );
   assert.equal(successorManifest.parent_review_id, parent.id);
+  assert.equal(
+    successorManifest.parent_reviewer_provider,
+    "CLAUDE_DESKTOP",
+  );
   assert.equal(successorManifest.parent_gate_sha256.length, 64);
   assert.equal(successorManifest.delta_sha256.length, 64);
 
@@ -316,6 +447,42 @@ test("a tampered parent gate forces a full review", async (t) => {
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(child.review_strategy.fallback_reason, /gate does not match/);
+  assert.equal(child.rounds[0].successor, null);
+});
+
+test("parent reviewer provider drift forces a full review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "reviewed parent\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "reviewed parent");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Create the parent.",
+  });
+  await submitInitialReview(store, parent.id, []);
+  await finalizeLocalGate(store, parent.id);
+
+  const gatePath = path.join(store, "reviews", parent.id, "gate.json");
+  const gate = JSON.parse(await fsp.readFile(gatePath, "utf8"));
+  gate.reviewer_provider = "CODEX_TASK";
+  await fsp.writeFile(gatePath, `${JSON.stringify(gate, null, 2)}\n`);
+
+  await fsp.writeFile(path.join(repository, "app.js"), "successor\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "successor");
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Reject parent reviewer provider drift.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "FULL");
+  assert.match(child.review_strategy.fallback_reason, /reviewer provider/);
   assert.equal(child.rounds[0].successor, null);
 });
 
@@ -896,7 +1063,7 @@ test("compact review summaries support bounded state-change waits", async (t) =>
 
   const summary = await getReviewSummary(store, prepared.id);
   assert.equal(summary.status, "WAITING_FOR_REVIEW");
-  assert.equal(summary.action_required, "CLAUDE_INITIAL_REVIEW");
+  assert.equal(summary.action_required, "REVIEWER_INITIAL_REVIEW");
   assert.deepEqual(summary.findings, {
     total: 0,
     active: 0,

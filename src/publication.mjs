@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { loadReview } from "./core.mjs";
+import { loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
 import {
   atomicWriteCanonicalJson,
   canonicalJson,
@@ -111,12 +111,18 @@ function publicationDirectory(storeRoot, reviewId) {
   return path.join(storeRoot, "reviews", reviewId);
 }
 
+function createPublicationId() {
+  const stamp = new Date().toISOString().replaceAll(":", "").replaceAll(".", "-");
+  return `rb-${stamp}-${crypto.randomBytes(4).toString("hex")}`;
+}
+
 function pathsFor(storeRoot, reviewId) {
   const directory = publicationDirectory(storeRoot, reviewId);
   return {
     directory,
     review: path.join(directory, "review.json"),
     localGate: path.join(directory, "gate.json"),
+    remoteAuthorization: path.join(directory, "remote-authorization.json"),
     publication: path.join(directory, "publication.json"),
     gate: path.join(directory, "publication-gate.json"),
     auditLog: path.join(directory, "publication-gate-audit.jsonl"),
@@ -201,6 +207,25 @@ function isCanonicalTimestamp(value) {
   return (
     Number.isFinite(milliseconds) &&
     new Date(milliseconds).toISOString() === value
+  );
+}
+
+function canonicalRequestTimestamp(value) {
+  if (isCanonicalTimestamp(value)) {
+    return value;
+  }
+  if (
+    typeof value === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value)
+  ) {
+    const normalized = new Date(value).toISOString();
+    if (normalized.replace(".000Z", "Z") === value) {
+      return normalized;
+    }
+  }
+  fail(
+    "INVALID_INPUT",
+    "created_at must be a canonical UTC RFC 3339 timestamp",
   );
 }
 
@@ -1154,29 +1179,136 @@ const PUBLICATION_STATUSES = [
   "MERGED",
 ];
 
+function authorizationForLedger(ledger) {
+  if (ledger.version === 1) {
+    return {
+      mode: "LOCAL_GATE",
+      head_sha: ledger.local_gate.head_sha,
+      base_sha: ledger.local_gate.base_sha,
+      snapshot_hash: ledger.local_gate.snapshot_hash,
+      source_sha256: ledger.local_gate.gate_sha256,
+      reviewer_provider:
+        ledger.local_gate.reviewer_provider ?? "CLAUDE_DESKTOP",
+      acknowledgement: null,
+      operator_label: null,
+      rationale: null,
+      authorized_at: null,
+    };
+  }
+  return {
+    ...ledger.authorization,
+    reviewer_provider:
+      ledger.authorization.mode === "LOCAL_GATE"
+        ? ledger.authorization.reviewer_provider ?? "CLAUDE_DESKTOP"
+        : null,
+  };
+}
+
 function validateStoredLedger(ledger) {
   assertObject(ledger, "publication");
-  if (ledger.version !== 1) {
+  if (![1, 2].includes(ledger.version)) {
     fail(
       "UNSUPPORTED_PUBLICATION_VERSION",
-      "only publication schema version 1 is supported",
+      "only publication schema versions 1 and 2 are supported",
     );
   }
   assertRevision(ledger.revision);
   publicationDirectory("/store", ledger.review_id);
   timestampMs(ledger.created_at, "publication.created_at");
   timestampMs(ledger.updated_at, "publication.updated_at");
-  assertObject(ledger.local_gate, "publication.local_gate");
-  assertSha(ledger.local_gate.head_sha, "publication.local_gate.head_sha");
-  assertSha(ledger.local_gate.base_sha, "publication.local_gate.base_sha");
-  assertDigest(
-    ledger.local_gate.snapshot_hash,
-    "publication.local_gate.snapshot_hash",
-  );
-  assertDigest(
-    ledger.local_gate.gate_sha256,
-    "publication.local_gate.gate_sha256",
-  );
+  if (ledger.version === 1) {
+    assertObject(ledger.local_gate, "publication.local_gate");
+    assertSha(ledger.local_gate.head_sha, "publication.local_gate.head_sha");
+    assertSha(ledger.local_gate.base_sha, "publication.local_gate.base_sha");
+    assertDigest(
+      ledger.local_gate.snapshot_hash,
+      "publication.local_gate.snapshot_hash",
+    );
+    assertDigest(
+      ledger.local_gate.gate_sha256,
+      "publication.local_gate.gate_sha256",
+    );
+    assertEnum(
+      ledger.local_gate.reviewer_provider ?? "CLAUDE_DESKTOP",
+      REVIEWER_PROVIDERS,
+      "publication.local_gate.reviewer_provider",
+    );
+  } else {
+    if ("local_gate" in ledger) {
+      fail("PUBLICATION_STORE_INVALID", "version 2 publication cannot contain local_gate");
+    }
+    const authorization = assertObject(
+      ledger.authorization,
+      "publication.authorization",
+    );
+    assertEnum(
+      authorization.mode,
+      ["LOCAL_GATE", "REMOTE_ONLY"],
+      "publication.authorization.mode",
+    );
+    assertSha(authorization.head_sha, "publication.authorization.head_sha");
+    assertSha(authorization.base_sha, "publication.authorization.base_sha");
+    assertDigest(
+      authorization.source_sha256,
+      "publication.authorization.source_sha256",
+    );
+    if (authorization.mode === "LOCAL_GATE") {
+      assertEnum(
+        authorization.reviewer_provider ?? "CLAUDE_DESKTOP",
+        REVIEWER_PROVIDERS,
+        "publication.authorization.reviewer_provider",
+      );
+      assertDigest(
+        authorization.snapshot_hash,
+        "publication.authorization.snapshot_hash",
+      );
+      if (
+        authorization.acknowledgement !== null ||
+        authorization.operator_label !== null ||
+        authorization.rationale !== null ||
+        authorization.authorized_at !== null
+      ) {
+        fail(
+          "PUBLICATION_STORE_INVALID",
+          "local-gate authorization cannot contain a remote-only acknowledgement",
+        );
+      }
+    } else {
+      if ((authorization.reviewer_provider ?? null) !== null) {
+        fail(
+          "PUBLICATION_STORE_INVALID",
+          "remote-only authorization cannot contain a reviewer provider",
+        );
+      }
+      if (authorization.snapshot_hash !== null) {
+        fail(
+          "PUBLICATION_STORE_INVALID",
+          "remote-only authorization cannot contain a snapshot hash",
+        );
+      }
+      if (authorization.acknowledgement !== "LOCAL_REVIEW_SKIPPED") {
+        fail(
+          "PUBLICATION_STORE_INVALID",
+          "remote-only authorization acknowledgement changed",
+        );
+      }
+      assertString(
+        authorization.operator_label,
+        "publication.authorization.operator_label",
+        500,
+      );
+      assertString(
+        authorization.rationale,
+        "publication.authorization.rationale",
+        20_000,
+      );
+      timestampMs(
+        authorization.authorized_at,
+        "publication.authorization.authorized_at",
+      );
+    }
+  }
+  const publicationAuthorization = authorizationForLedger(ledger);
   const target = assertObject(ledger.target, "publication.target");
   assertId(target.repository_id, "publication.target.repository_id");
   assertId(target.pr_number, "publication.target.pr_number");
@@ -1300,7 +1432,7 @@ function validateStoredLedger(ledger) {
     }
     timestampMs(event.at, "publication history at");
     assertEnum(event.status, PUBLICATION_STATUSES, "publication history status");
-    if (event.head_sha !== ledger.local_gate.head_sha) {
+    if (event.head_sha !== publicationAuthorization.head_sha) {
       fail("PUBLICATION_STORE_INVALID", "publication history head changed");
     }
     if (event.event === "CODEX_REVIEW_REQUEST_RECORDED") {
@@ -1394,6 +1526,15 @@ async function validateOpenedLocalGate(
   if (review.status !== "LOCAL_GATE_PASSED") {
     fail("LOCAL_GATE_INVALID", `review status is ${review.status}`);
   }
+  const reviewProvider = review.reviewer_provider ?? "CLAUDE_DESKTOP";
+  const gateProvider = gate.reviewer_provider ?? "CLAUDE_DESKTOP";
+  if (
+    !REVIEWER_PROVIDERS.includes(reviewProvider) ||
+    !REVIEWER_PROVIDERS.includes(gateProvider) ||
+    gateProvider !== reviewProvider
+  ) {
+    fail("LOCAL_GATE_INVALID", "local gate reviewer provider does not match review");
+  }
   if (verifyRepository) {
     const head = runGit(review.repository_path, ["rev-parse", "HEAD^{commit}"]);
     const dirty = runGit(review.repository_path, [
@@ -1409,10 +1550,231 @@ async function validateOpenedLocalGate(
     }
   }
   return {
-    gate,
+    gate: { ...gate, reviewer_provider: gateProvider },
     gate_sha256: sha256(opened.bytes),
     review,
   };
+}
+
+function normalizedLocalGate(localGate) {
+  return {
+    mode: "LOCAL_GATE",
+    head_sha: localGate.gate.head_sha,
+    base_sha: localGate.gate.base_sha,
+    snapshot_hash: localGate.gate.snapshot_hash,
+    source_sha256: localGate.gate_sha256,
+    reviewer_provider: localGate.gate.reviewer_provider,
+    acknowledgement: null,
+    operator_label: null,
+    rationale: null,
+    authorized_at: null,
+    repository_path: localGate.review.repository_path,
+  };
+}
+
+function verifyRemoteRepository(authorization) {
+  let base;
+  try {
+    base = runGit(authorization.repository_path, [
+      "rev-parse",
+      `${authorization.base_sha}^{commit}`,
+    ]);
+  } catch {
+    fail(
+      "REMOTE_AUTHORIZATION_INVALID",
+      "base_sha is not an available commit in the local repository",
+    );
+  }
+  if (base !== authorization.base_sha) {
+    fail(
+      "REMOTE_AUTHORIZATION_INVALID",
+      "base_sha does not resolve to the authorized commit",
+    );
+  }
+  const head = runGit(authorization.repository_path, [
+    "rev-parse",
+    "HEAD^{commit}",
+  ]);
+  if (head !== authorization.head_sha) {
+    fail(
+      "REMOTE_AUTHORIZATION_INVALID",
+      "local HEAD differs from the remote authorization",
+    );
+  }
+  try {
+    runGit(authorization.repository_path, [
+      "merge-base",
+      "--is-ancestor",
+      authorization.base_sha,
+      authorization.head_sha,
+    ]);
+  } catch {
+    fail(
+      "REMOTE_AUTHORIZATION_INVALID",
+      "base_sha must be an ancestor of head_sha",
+    );
+  }
+  const dirty = runGit(authorization.repository_path, [
+    "status",
+    "--porcelain",
+    "--untracked-files=all",
+  ]);
+  if (dirty !== "") {
+    fail(
+      "REMOTE_AUTHORIZATION_INVALID",
+      "local working tree must be clean",
+    );
+  }
+}
+
+function validateOpenedRemoteAuthorization(
+  reviewId,
+  opened,
+  { verifyRepository = false } = {},
+) {
+  const authorization = parseJsonObject(
+    opened.bytes,
+    "REMOTE_AUTHORIZATION_INVALID",
+    "remote authorization is not a JSON object",
+  );
+  assertStoredCanonicalJsonBytes(
+    authorization,
+    opened.bytes,
+    "REMOTE_AUTHORIZATION_INVALID",
+    "remote authorization is not canonical JSON",
+  );
+  if (
+    authorization.version !== 1 ||
+    authorization.review_id !== reviewId ||
+    authorization.mode !== "REMOTE_ONLY"
+  ) {
+    fail(
+      "REMOTE_AUTHORIZATION_INVALID",
+      "remote authorization identity or version changed",
+    );
+  }
+  if (
+    typeof authorization.repository_path !== "string" ||
+    authorization.repository_path.trim() === "" ||
+    authorization.repository_path.length > 4096 ||
+    !path.isAbsolute(authorization.repository_path)
+  ) {
+    fail(
+      "REMOTE_AUTHORIZATION_INVALID",
+      "remote authorization repository_path must be a non-empty absolute path",
+    );
+  }
+  if (!SHA_RE.test(authorization.base_sha ?? "")) {
+    fail("REMOTE_AUTHORIZATION_INVALID", "remote authorization base_sha is invalid");
+  }
+  if (!SHA_RE.test(authorization.head_sha ?? "")) {
+    fail("REMOTE_AUTHORIZATION_INVALID", "remote authorization head_sha is invalid");
+  }
+  if ((authorization.reviewer_provider ?? null) !== null) {
+    fail(
+      "REMOTE_AUTHORIZATION_INVALID",
+      "remote authorization cannot contain a reviewer provider",
+    );
+  }
+  if (authorization.acknowledgement !== "LOCAL_REVIEW_SKIPPED") {
+    fail(
+      "REMOTE_AUTHORIZATION_INVALID",
+      "remote authorization must acknowledge LOCAL_REVIEW_SKIPPED",
+    );
+  }
+  if (
+    typeof authorization.operator_label !== "string" ||
+    authorization.operator_label.trim() === "" ||
+    authorization.operator_label.length > 500
+  ) {
+    fail("REMOTE_AUTHORIZATION_INVALID", "remote authorization operator_label is invalid");
+  }
+  if (
+    typeof authorization.rationale !== "string" ||
+    authorization.rationale.trim() === "" ||
+    authorization.rationale.length > 20_000
+  ) {
+    fail("REMOTE_AUTHORIZATION_INVALID", "remote authorization rationale is invalid");
+  }
+  if (!isCanonicalTimestamp(authorization.authorized_at)) {
+    fail("REMOTE_AUTHORIZATION_INVALID", "remote authorization authorized_at is invalid");
+  }
+  if (verifyRepository) {
+    verifyRemoteRepository(authorization);
+  }
+  return {
+    ...authorization,
+    snapshot_hash: null,
+    source_sha256: sha256(opened.bytes),
+    reviewer_provider: null,
+  };
+}
+
+async function readRemoteAuthorization(
+  paths,
+  reviewId,
+  { verifyRepository = false } = {},
+) {
+  const opened = await readSecureFile(paths.remoteAuthorization, {
+    maxBytes: 1024 * 1024,
+    requiredMode: 0o600,
+  });
+  try {
+    return validateOpenedRemoteAuthorization(reviewId, opened, {
+      verifyRepository,
+    });
+  } finally {
+    await opened.handle.close();
+  }
+}
+
+async function readStartAuthorization(
+  paths,
+  reviewId,
+  { verifyRepository = false } = {},
+) {
+  const hasLocalGate = await pathExists(paths.localGate);
+  const hasRemoteAuthorization = await pathExists(paths.remoteAuthorization);
+  if (hasLocalGate === hasRemoteAuthorization) {
+    fail(
+      "PUBLICATION_AUTHORIZATION_INVALID",
+      hasLocalGate
+        ? "local and remote publication authorizations both exist"
+        : "no local or remote publication authorization exists",
+    );
+  }
+  if (hasLocalGate) {
+    return normalizedLocalGate(
+      await readLocalGate(paths, reviewId, { verifyRepository }),
+    );
+  }
+  return readRemoteAuthorization(paths, reviewId, { verifyRepository });
+}
+
+async function readBoundAuthorization(
+  paths,
+  reviewId,
+  ledger,
+  { verifyRepository = false } = {},
+) {
+  const expected = authorizationForLedger(ledger);
+  const actual = await readStartAuthorization(paths, reviewId, {
+    verifyRepository,
+  });
+  const errorCode =
+    expected.mode === "LOCAL_GATE"
+      ? "LOCAL_GATE_INVALID"
+      : "REMOTE_AUTHORIZATION_INVALID";
+  if (
+    actual.mode !== expected.mode ||
+    actual.head_sha !== expected.head_sha ||
+    actual.base_sha !== expected.base_sha ||
+    actual.source_sha256 !== expected.source_sha256 ||
+    actual.reviewer_provider !== expected.reviewer_provider
+  ) {
+    fail(errorCode, "publication authorization changed");
+  }
+  return actual;
 }
 
 async function openAuthorizationFiles(
@@ -1422,39 +1784,20 @@ async function openAuthorizationFiles(
 ) {
   const opened = [];
   try {
-    const localGateFile = await readSecureFile(paths.localGate, {
-      maxBytes: 1024 * 1024,
-      requiredMode: 0o600,
-    });
-    opened.push(localGateFile);
     const publicationFile = await readSecureFile(paths.publication, {
       maxBytes: MAX_PUBLICATION_BYTES,
       requiredMode: 0o600,
     });
     opened.push(publicationFile);
-    const publicationGateFile = await readSecureFile(paths.gate, {
-      maxBytes: MAX_PUBLICATION_BYTES,
-      requiredMode: 0o600,
-      allowMissing: true,
-    });
-    if (publicationGateFile != null) {
-      opened.push(publicationGateFile);
-    }
-    const localGate = await validateOpenedLocalGate(
-      paths,
-      reviewId,
-      localGateFile,
-      { verifyRepository },
-    );
     const ledger = parseJsonObject(
       publicationFile.bytes,
       "PUBLICATION_STORE_INVALID",
       "publication.json is not a JSON object",
     );
-    if (ledger.version !== 1) {
+    if (![1, 2].includes(ledger.version)) {
       fail(
         "UNSUPPORTED_PUBLICATION_VERSION",
-        "only publication schema version 1 is supported",
+        "only publication schema versions 1 and 2 are supported",
       );
     }
     assertStoredCanonicalJsonBytes(
@@ -1464,6 +1807,57 @@ async function openAuthorizationFiles(
       "publication.json is not canonical JSON",
     );
     validateStoredLedger(ledger);
+    const expectedAuthorization = authorizationForLedger(ledger);
+    const usesLocalGate = expectedAuthorization.mode === "LOCAL_GATE";
+    const unexpectedPath = usesLocalGate
+      ? paths.remoteAuthorization
+      : paths.localGate;
+    if (await pathExists(unexpectedPath)) {
+      fail(
+        usesLocalGate ? "LOCAL_GATE_INVALID" : "REMOTE_AUTHORIZATION_INVALID",
+        "a conflicting publication authorization exists",
+      );
+    }
+    const authorizationFile = await readSecureFile(
+      usesLocalGate ? paths.localGate : paths.remoteAuthorization,
+      {
+        maxBytes: 1024 * 1024,
+        requiredMode: 0o600,
+      },
+    );
+    opened.push(authorizationFile);
+    const sourceAuthorization = usesLocalGate
+      ? normalizedLocalGate(
+          await validateOpenedLocalGate(
+            paths,
+            reviewId,
+            authorizationFile,
+            { verifyRepository },
+          ),
+        )
+      : validateOpenedRemoteAuthorization(reviewId, authorizationFile, {
+          verifyRepository,
+        });
+    if (
+      sourceAuthorization.head_sha !== expectedAuthorization.head_sha ||
+      sourceAuthorization.base_sha !== expectedAuthorization.base_sha ||
+      sourceAuthorization.source_sha256 !== expectedAuthorization.source_sha256 ||
+      sourceAuthorization.reviewer_provider !==
+        expectedAuthorization.reviewer_provider
+    ) {
+      fail(
+        usesLocalGate ? "LOCAL_GATE_INVALID" : "REMOTE_AUTHORIZATION_INVALID",
+        "publication authorization changed",
+      );
+    }
+    const publicationGateFile = await readSecureFile(paths.gate, {
+      maxBytes: MAX_PUBLICATION_BYTES,
+      requiredMode: 0o600,
+      allowMissing: true,
+    });
+    if (publicationGateFile != null) {
+      opened.push(publicationGateFile);
+    }
     let publicationGate = null;
     let gateParseError = false;
     if (publicationGateFile != null) {
@@ -1482,7 +1876,7 @@ async function openAuthorizationFiles(
     }
     return {
       opened,
-      localGate,
+      sourceAuthorization,
       ledger,
       publicationGate,
       publicationGateBytes: publicationGateFile?.bytes ?? null,
@@ -1515,10 +1909,10 @@ async function loadPublicationFile(paths, { allowMissing = false } = {}) {
       "PUBLICATION_STORE_INVALID",
       "publication.json is not a JSON object",
     );
-    if (ledger.version !== 1) {
+    if (![1, 2].includes(ledger.version)) {
       fail(
         "UNSUPPORTED_PUBLICATION_VERSION",
-        "only publication schema version 1 is supported",
+        "only publication schema versions 1 and 2 are supported",
       );
     }
     assertStoredCanonicalJsonBytes(
@@ -2050,6 +2444,7 @@ function activeCorrelation(ledger) {
 
 function codexStatus(ledger) {
   const observation = ledger.latest_observation;
+  const authorization = authorizationForLedger(ledger);
   const correlation = activeCorrelation(ledger);
   if (
     correlation.openBaseline.length > 0 ||
@@ -2112,7 +2507,7 @@ function codexStatus(ledger) {
   if (
     result.resource_kind === "PULL_REQUEST_REVIEW" &&
     result.native_review_state === "CHANGES_REQUESTED" &&
-    result.reviewed_head_sha === ledger.local_gate.head_sha
+    result.reviewed_head_sha === authorization.head_sha
   ) {
     return "CHANGES_REQUIRED";
   }
@@ -2124,12 +2519,12 @@ function codexStatus(ledger) {
       result.resource_kind !== "ISSUE_COMMENT" ||
       result.native_review_state !== null ||
       result.verdict !== "CLEAN" ||
-      result.reviewed_head_sha !== ledger.local_gate.head_sha ||
+      result.reviewed_head_sha !== authorization.head_sha ||
       result.commit_binding?.source !==
         "CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD" ||
       result.commit_binding?.field !== "body.reviewed_commit" ||
       !/^[0-9a-f]{10,40}$/.test(result.commit_binding?.prefix ?? "") ||
-      !ledger.local_gate.head_sha.startsWith(result.commit_binding.prefix)
+      !authorization.head_sha.startsWith(result.commit_binding.prefix)
     ) {
       return "GITHUB_REVIEW_UNKNOWN";
     }
@@ -2142,7 +2537,7 @@ function codexStatus(ledger) {
         result.native_review_state,
       ) ||
       result.verdict !== "FINDINGS" ||
-      result.reviewed_head_sha !== ledger.local_gate.head_sha ||
+      result.reviewed_head_sha !== authorization.head_sha ||
       result.commit_binding?.source !== "PULL_REQUEST_REVIEW_COMMIT_ID" ||
       result.commit_binding?.field !== "commit_id" ||
       (result.attached_review_comments?.length ?? 0) === 0 ||
@@ -2173,14 +2568,15 @@ function derivePublication(ledger, { historyConflict = null, visibilityGrace = f
   }
   const pullRequest = observation.pull_request;
   const target = ledger.target;
+  const authorization = authorizationForLedger(ledger);
   if (
     pullRequest.repository_id !== target.repository_id ||
     pullRequest.number !== target.pr_number ||
     pullRequest.base_branch !== target.base_branch ||
     pullRequest.head_branch !== target.head_branch ||
-    pullRequest.head_sha !== ledger.local_gate.head_sha
+    pullRequest.head_sha !== authorization.head_sha
   ) {
-    return { status: "INVALIDATED", terminalReason: "pull request identity or head differs from local gate" };
+    return { status: "INVALIDATED", terminalReason: "pull request identity or head differs from the publication authorization" };
   }
   const pullBaseSource = pullRequest.collection.sources.find(
     (source) => source.kind === "BASE_BRANCH_METADATA",
@@ -2199,7 +2595,7 @@ function derivePublication(ledger, { historyConflict = null, visibilityGrace = f
   }
   const ancestry = pullRequest.reviewed_base_current_base_comparison;
   if (
-    ancestry.base_sha !== ledger.local_gate.base_sha ||
+    ancestry.base_sha !== authorization.base_sha ||
     ancestry.head_sha !== pullRequest.base_sha ||
     ancestry.status === "UNKNOWN"
   ) {
@@ -3003,6 +3399,75 @@ function validateStoredObservationFresh(ledger, currentMs) {
   return times;
 }
 
+export async function authorizeRemotePublication(
+  storeRoot,
+  {
+    repositoryPath,
+    baseSha,
+    headSha,
+    acknowledgement,
+    operatorLabel,
+    rationale,
+  },
+  { clock = Date.now } = {},
+) {
+  assertString(repositoryPath, "repository_path", 4096);
+  assertSha(baseSha, "base_sha");
+  assertSha(headSha, "head_sha");
+  if (acknowledgement !== "LOCAL_REVIEW_SKIPPED") {
+    fail(
+      "INVALID_INPUT",
+      "acknowledgement must be LOCAL_REVIEW_SKIPPED",
+    );
+  }
+  assertString(operatorLabel, "operator_label", 500);
+  assertString(rationale, "rationale", 20_000);
+  const requestedPath = path.resolve(repositoryPath);
+  let repositoryRoot;
+  try {
+    repositoryRoot = await fsp.realpath(
+      runGit(requestedPath, ["rev-parse", "--show-toplevel"]),
+    );
+  } catch (error) {
+    if (error instanceof PublicationError) {
+      throw error;
+    }
+    fail("LOCAL_REPOSITORY_ERROR", "repository_path is not an accessible Git repository");
+  }
+  const authorizedAt = new Date(clock()).toISOString();
+  const repositoryBinding = {
+    repository_path: repositoryRoot,
+    base_sha: baseSha,
+    head_sha: headSha,
+  };
+  verifyRemoteRepository(repositoryBinding);
+  const reviewId = createPublicationId();
+  const paths = pathsFor(storeRoot, reviewId);
+  await fsp.mkdir(path.dirname(paths.directory), {
+    recursive: true,
+    mode: 0o700,
+  });
+  await fsp.mkdir(paths.directory, { mode: 0o700 });
+  return publicationLock(paths, reviewId, async () => {
+    const authorization = {
+      version: 1,
+      review_id: reviewId,
+      mode: "REMOTE_ONLY",
+      authorized_at: authorizedAt,
+      repository_path: repositoryRoot,
+      base_sha: baseSha,
+      head_sha: headSha,
+      reviewer_provider: null,
+      acknowledgement,
+      operator_label: operatorLabel,
+      rationale,
+    };
+    verifyRemoteRepository(authorization);
+    await atomicWriteCanonicalJson(paths.remoteAuthorization, authorization);
+    return authorization;
+  });
+}
+
 export async function startPublication(
   storeRoot,
   {
@@ -3050,7 +3515,7 @@ export async function startPublication(
       assertString(operatorLabel, "operator_label", 500);
       assertString(rationale, "rationale", 20_000);
     }
-    const { gate, gate_sha256: gateSha256 } = await readLocalGate(
+    const sourceAuthorization = await readStartAuthorization(
       paths,
       reviewId,
       { verifyRepository: true },
@@ -3077,16 +3542,22 @@ export async function startPublication(
     }
     const normalizedBaseline = normalizeBaseline(validatedBaseline, timestamp);
     const ledger = {
-      version: 1,
+      version: 2,
       revision: 1,
       review_id: reviewId,
       created_at: timestamp,
       updated_at: timestamp,
-      local_gate: {
-        head_sha: gate.head_sha,
-        base_sha: gate.base_sha,
-        snapshot_hash: gate.snapshot_hash,
-        gate_sha256: gateSha256,
+      authorization: {
+        mode: sourceAuthorization.mode,
+        head_sha: sourceAuthorization.head_sha,
+        base_sha: sourceAuthorization.base_sha,
+        snapshot_hash: sourceAuthorization.snapshot_hash,
+        source_sha256: sourceAuthorization.source_sha256,
+        reviewer_provider: sourceAuthorization.reviewer_provider,
+        acknowledgement: sourceAuthorization.acknowledgement,
+        operator_label: sourceAuthorization.operator_label,
+        rationale: sourceAuthorization.rationale,
+        authorized_at: sourceAuthorization.authorized_at,
       },
       target: {
         repository_id: repositoryId,
@@ -3122,7 +3593,7 @@ export async function startPublication(
           event: "PUBLICATION_STARTED",
           revision: 1,
           status: "PR_PENDING",
-          head_sha: gate.head_sha,
+          head_sha: sourceAuthorization.head_sha,
         },
       ],
     };
@@ -3160,7 +3631,8 @@ export async function recordCodexReviewRequest(
     assertRevision(expectedRevision);
     assertId(commentId, "comment_id");
     assertUrl(url, "url");
-    const createdMs = timestampMs(createdAt, "created_at");
+    const canonicalCreatedAt = canonicalRequestTimestamp(createdAt);
+    const createdMs = timestampMs(canonicalCreatedAt, "created_at");
     assertSha(requestedHeadSha, "requested_head_sha");
     if (
       currentMs - createdMs > MAX_AGE_MS ||
@@ -3172,16 +3644,19 @@ export async function recordCodexReviewRequest(
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
     const originalLedger = clone(ledger);
-    const { gate, gate_sha256: gateSha256 } = await readLocalGate(
+    const sourceAuthorization = await readBoundAuthorization(
       paths,
       reviewId,
+      ledger,
       { verifyRepository: true },
     );
-    if (
-      gateSha256 !== ledger.local_gate.gate_sha256 ||
-      requestedHeadSha !== ledger.local_gate.head_sha
-    ) {
-      fail("LOCAL_GATE_INVALID", "request head or local gate changed");
+    if (requestedHeadSha !== sourceAuthorization.head_sha) {
+      fail(
+        sourceAuthorization.mode === "LOCAL_GATE"
+          ? "LOCAL_GATE_INVALID"
+          : "REMOTE_AUTHORIZATION_INVALID",
+        "request head differs from the publication authorization",
+      );
     }
     if (createdMs < Date.parse(ledger.created_at)) {
       fail("INVALID_INPUT", "request predates publication creation");
@@ -3207,7 +3682,7 @@ export async function recordCodexReviewRequest(
       classification: "RECOGNIZED",
       binding_source: "RECORDED_AT_POST",
       url,
-      event_at: createdAt,
+      event_at: canonicalCreatedAt,
       timestamp_field: "created_at",
       recorded_at: recordedAt,
       recorded_revision: nextRevision,
@@ -3223,7 +3698,7 @@ export async function recordCodexReviewRequest(
       event: "CODEX_REVIEW_REQUEST_RECORDED",
       revision: nextRevision,
       status: "PR_PENDING",
-      head_sha: ledger.local_gate.head_sha,
+      head_sha: sourceAuthorization.head_sha,
       cleared_observation_sha256: clearedObservationSha256,
     });
     const storedLedger = capacityTerminal(originalLedger, ledger);
@@ -3248,10 +3723,11 @@ export async function recordGithubSnapshot(
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
     const originalLedger = clone(ledger);
-    const { gate_sha256: gateSha256 } = await readLocalGate(paths, reviewId);
-    if (gateSha256 !== ledger.local_gate.gate_sha256) {
-      fail("LOCAL_GATE_INVALID", "local gate bytes changed");
-    }
+    const sourceAuthorization = await readBoundAuthorization(
+      paths,
+      reviewId,
+      ledger,
+    );
     const validated = validateObservation(
       observation,
       ledger,
@@ -3298,7 +3774,7 @@ export async function recordGithubSnapshot(
       event: "GITHUB_SNAPSHOT_RECORDED",
       revision: nextRevision,
       status: derived.status,
-      head_sha: ledger.local_gate.head_sha,
+      head_sha: sourceAuthorization.head_sha,
     });
     const storedLedger = capacityTerminal(originalLedger, ledger);
     assertLedgerSize(storedLedger);
@@ -3376,12 +3852,16 @@ export async function acknowledgeCodexReviewAmbiguity(
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
     const originalLedger = clone(ledger);
-    const { gate_sha256: localGateSha256 } = await readLocalGate(paths, reviewId);
-    if (localGateSha256 !== ledger.local_gate.gate_sha256) {
-      fail("LOCAL_GATE_INVALID", "local gate bytes changed");
-    }
-    if (headSha !== ledger.local_gate.head_sha) {
-      fail("INVALID_INPUT", "acknowledgement head differs from local gate");
+    const sourceAuthorization = await readBoundAuthorization(
+      paths,
+      reviewId,
+      ledger,
+    );
+    if (headSha !== sourceAuthorization.head_sha) {
+      fail(
+        "INVALID_INPUT",
+        "acknowledgement head differs from the publication authorization",
+      );
     }
     validateStoredObservationFresh(ledger, currentMs);
     if (ledger.latest_observation.pull_request.head_sha !== headSha) {
@@ -3423,7 +3903,7 @@ export async function acknowledgeCodexReviewAmbiguity(
       event: "CODEX_REVIEW_AMBIGUITY_ACKNOWLEDGED",
       revision: nextRevision,
       status: derived.status,
-      head_sha: ledger.local_gate.head_sha,
+      head_sha: sourceAuthorization.head_sha,
     });
     const storedLedger = capacityTerminal(originalLedger, ledger);
     assertLedgerSize(storedLedger);
@@ -3452,15 +3932,11 @@ export async function finalizePublicationGate(
     try {
       auditSession = await openAuditSession(paths, reviewId);
       const ledger = authorization.ledger;
+      const publicationAuthorization = authorizationForLedger(ledger);
       requireRevision(ledger, expectedRevision);
       requireMutable(ledger);
       if (authorization.gateParseError) {
         fail("PUBLICATION_GATE_INVALID", "existing publication gate is malformed");
-      }
-      if (
-        authorization.localGate.gate_sha256 !== ledger.local_gate.gate_sha256
-      ) {
-        fail("LOCAL_GATE_INVALID", "local gate bytes changed");
       }
       validateStoredObservationFresh(ledger, currentMs);
       const derived = derivePublication(ledger);
@@ -3480,14 +3956,22 @@ export async function finalizePublicationGate(
         Math.min(...observationTimes(ledger.latest_observation)),
       ).toISOString();
       const finalGate = {
-        version: 1,
+        version: ledger.version,
         review_id: reviewId,
         issuance_committed: true,
         passed_at: passedAt,
         repository_id: ledger.target.repository_id,
         pr_number: ledger.target.pr_number,
-        head_sha: ledger.local_gate.head_sha,
-        local_gate_sha256: ledger.local_gate.gate_sha256,
+        head_sha: publicationAuthorization.head_sha,
+        reviewer_provider: publicationAuthorization.reviewer_provider,
+        ...(ledger.version === 1
+          ? {
+              local_gate_sha256: publicationAuthorization.source_sha256,
+            }
+          : {
+              authorization_mode: publicationAuthorization.mode,
+              authorization_sha256: publicationAuthorization.source_sha256,
+            }),
         publication_revision: ledger.revision,
         github_observation_sha256: observationDigest,
         github_observed_at: ledger.latest_observation.observed_at,
@@ -3508,7 +3992,7 @@ export async function finalizePublicationGate(
           normalized_reason: null,
           at: passedAt,
           publication_revision: ledger.revision,
-          head_sha: ledger.local_gate.head_sha,
+          head_sha: publicationAuthorization.head_sha,
           github_observation_sha256: observationDigest,
           gate_sha256: gateDigest,
           expires_at: expiresAt,
@@ -3531,6 +4015,7 @@ function verificationFailure(reason, verifiedAt) {
     valid: false,
     status: null,
     head_sha: null,
+    reviewer_provider: null,
     publication_revision: null,
     expires_at: null,
     verified_at: verifiedAt,
@@ -3550,6 +4035,7 @@ export async function verifyPublicationGate(
     const authorization = await openAuthorizationFiles(paths, reviewId);
     try {
       const ledger = authorization.ledger;
+      const publicationAuthorization = authorizationForLedger(ledger);
       const gate = authorization.publicationGate;
       const gateDigest = gate == null ? null : canonicalDigest(gate);
       const auditSession = await openAuditSession(paths, reviewId);
@@ -3564,16 +4050,31 @@ export async function verifyPublicationGate(
           const derived = derivePublication(ledger);
           const expectedExpiresAt =
             ledger.latest_observation == null ? null : expiresAtFor(ledger);
+          const gateReviewerProvider =
+            gate.reviewer_provider ??
+            (publicationAuthorization.mode === "LOCAL_GATE"
+              ? "CLAUDE_DESKTOP"
+              : null);
+          const authorizationBindingMatches =
+            ledger.version === 1
+              ? gate.version === 1 &&
+                gate.local_gate_sha256 ===
+                  publicationAuthorization.source_sha256
+              : gate.version === 2 &&
+                gate.authorization_mode === publicationAuthorization.mode &&
+                gate.authorization_sha256 ===
+                  publicationAuthorization.source_sha256;
           if (
-            gate.version !== 1 ||
+            !authorizationBindingMatches ||
             gate.review_id !== reviewId ||
             gate.issuance_committed !== true ||
             gate.status !== "MERGE_READY" ||
             gate.publication_revision !== ledger.revision ||
-            gate.head_sha !== ledger.local_gate.head_sha ||
-            gate.local_gate_sha256 !== ledger.local_gate.gate_sha256 ||
-            authorization.localGate.gate_sha256 !==
-              ledger.local_gate.gate_sha256 ||
+            gate.head_sha !== publicationAuthorization.head_sha ||
+            gateReviewerProvider !==
+              publicationAuthorization.reviewer_provider ||
+            authorization.sourceAuthorization.source_sha256 !==
+              publicationAuthorization.source_sha256 ||
             gate.github_observation_sha256 !==
               canonicalDigest(ledger.latest_observation) ||
             gate.expires_at !== expectedExpiresAt ||
@@ -3587,6 +4088,7 @@ export async function verifyPublicationGate(
               valid: true,
               status: "MERGE_READY",
               head_sha: gate.head_sha,
+              reviewer_provider: gateReviewerProvider,
               publication_revision: gate.publication_revision,
               expires_at: gate.expires_at,
               verified_at: verifiedAt,

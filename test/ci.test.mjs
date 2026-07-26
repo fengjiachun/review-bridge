@@ -10,7 +10,7 @@ const projectRoot = path.resolve(
 );
 
 test("release metadata stays aligned with package.json", async () => {
-  const [workflow, security, packageJson] = await Promise.all([
+  const [workflow, security, packageJson, plugin, extension] = await Promise.all([
     fsp.readFile(
       path.join(projectRoot, ".github", "workflows", "ci.yml"),
       "utf8",
@@ -18,6 +18,29 @@ test("release metadata stays aligned with package.json", async () => {
     fsp.readFile(path.join(projectRoot, "SECURITY.md"), "utf8"),
     fsp
       .readFile(path.join(projectRoot, "package.json"), "utf8")
+      .then(JSON.parse),
+    fsp
+      .readFile(
+        path.join(
+          projectRoot,
+          "templates",
+          "codex-plugin",
+          ".codex-plugin",
+          "plugin.json",
+        ),
+        "utf8",
+      )
+      .then(JSON.parse),
+    fsp
+      .readFile(
+        path.join(
+          projectRoot,
+          "templates",
+          "claude-extension",
+          "manifest.json",
+        ),
+        "utf8",
+      )
       .then(JSON.parse),
   ]);
   assert.match(
@@ -33,4 +56,6 @@ test("release metadata stays aligned with package.json", async () => {
   assert.ok(
     security.includes(`Only the latest \`${supportedSeries}.x\` release`),
   );
+  assert.equal(plugin.version, packageJson.version);
+  assert.equal(extension.version, packageJson.version);
 });

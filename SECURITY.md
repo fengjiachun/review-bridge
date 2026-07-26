@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the latest `0.3.x` release receives security fixes.
+Only the latest `0.4.x` release receives security fixes.
 
 ## Reporting a vulnerability
 
@@ -25,6 +25,6 @@ boundary. Its sensitive surfaces include snapshot integrity, repository path
 validation, author/reviewer capability separation, private store permissions,
 and release archive contents.
 
-Claude Desktop may send source returned by Review Bridge tools to Anthropic.
-Apply the relevant account and organization data policy before reviewing
-confidential code.
+The selected reviewer client may send source returned by Review Bridge tools
+to its model provider. Apply the relevant account and organization data policy
+before reviewing confidential code.

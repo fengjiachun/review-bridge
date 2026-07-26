@@ -11,6 +11,10 @@ import {
 } from "./storage.mjs";
 
 export const MAX_ROUNDS = 2;
+export const REVIEWER_PROVIDERS = Object.freeze([
+  "CLAUDE_DESKTOP",
+  "CODEX_TASK",
+]);
 const MAX_GIT_OUTPUT = 64 * 1024 * 1024;
 const MAX_OVERLAY_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT_FIELD = 200_000;
@@ -41,6 +45,31 @@ function assertString(value, name, { allowEmpty = false, max = MAX_TEXT_FIELD } 
 function assertReviewId(reviewId) {
   if (typeof reviewId !== "string" || !/^rb-[0-9TZ-]+-[a-f0-9]{8}$/.test(reviewId)) {
     throw new Error("invalid review_id");
+  }
+}
+
+function assertReviewerProvider(value) {
+  if (!REVIEWER_PROVIDERS.includes(value)) {
+    throw new Error(
+      "reviewer_provider must be CLAUDE_DESKTOP or CODEX_TASK",
+    );
+  }
+  return value;
+}
+
+function reviewerProviderFor(review) {
+  return assertReviewerProvider(
+    review.reviewer_provider ?? "CLAUDE_DESKTOP",
+  );
+}
+
+function requireReviewerProvider(review, expectedProvider) {
+  const provider = assertReviewerProvider(expectedProvider);
+  const boundProvider = reviewerProviderFor(review);
+  if (boundProvider !== provider) {
+    throw new Error(
+      `reviewer provider mismatch (expected=${boundProvider}, actual=${provider})`,
+    );
   }
 }
 
@@ -534,6 +563,21 @@ async function buildSuccessorArtifacts({
   ) {
     return fullStrategy("parent gate does not match the clean parent snapshot");
   }
+  let parentReviewerProvider;
+  let gateReviewerProvider;
+  try {
+    parentReviewerProvider = reviewerProviderFor(parent);
+    gateReviewerProvider = assertReviewerProvider(
+      gate.reviewer_provider ?? "CLAUDE_DESKTOP",
+    );
+  } catch {
+    return fullStrategy("parent reviewer provider is invalid");
+  }
+  if (gateReviewerProvider !== parentReviewerProvider) {
+    return fullStrategy(
+      "parent gate reviewer provider does not match the parent review",
+    );
+  }
   let parentRepositoryIdentity;
   let currentRepositoryIdentity;
   try {
@@ -623,6 +667,7 @@ async function buildSuccessorArtifacts({
     const successor = {
       version: 1,
       parent_review_id: parent.id,
+      parent_reviewer_provider: parentReviewerProvider,
       parent_snapshot_hash: parent.clean_snapshot_hash,
       parent_gate_sha256: sha256(gateBytes),
       base_sha: manifest.base_sha,
@@ -663,6 +708,7 @@ function publicReview(review) {
     base_ref: review.base_ref,
     requirement: review.requirement,
     implementation_scope: review.implementation_scope,
+    reviewer_provider: reviewerProviderFor(review),
     review_strategy: review.review_strategy ?? {
       mode: "FULL",
       parent_review_id: null,
@@ -681,10 +727,10 @@ function publicReview(review) {
 
 function actionRequired(status) {
   const actions = {
-    WAITING_FOR_REVIEW: "CLAUDE_INITIAL_REVIEW",
+    WAITING_FOR_REVIEW: "REVIEWER_INITIAL_REVIEW",
     REVIEW_SUBMITTED: "AUTHOR_RESOLUTIONS",
     AUTHOR_RESPONDED: "PREPARE_REREVIEW",
-    WAITING_FOR_REREVIEW: "CLAUDE_REREVIEW",
+    WAITING_FOR_REREVIEW: "REVIEWER_REREVIEW",
     CLEAN: "FINALIZE_LOCAL_GATE",
     LOCAL_GATE_PASSED: "PUBLISH",
     HUMAN_REQUIRED: "HUMAN_ARBITRATION",
@@ -715,6 +761,7 @@ function reviewSummary(review) {
     current_round: review.current_round,
     max_rounds: review.max_rounds,
     action_required: actionRequired(review.status),
+    reviewer_provider: reviewerProviderFor(review),
     review_strategy: review.review_strategy ?? {
       mode: "FULL",
       parent_review_id: null,
@@ -765,6 +812,7 @@ export async function prepareReview(
     requirement,
     implementationScope,
     parentReviewId = null,
+    reviewerProvider = "CLAUDE_DESKTOP",
   },
 ) {
   assertString(baseRef, "base_ref", { max: 1024 });
@@ -773,6 +821,7 @@ export async function prepareReview(
   if (parentReviewId != null) {
     assertReviewId(parentReviewId);
   }
+  assertReviewerProvider(reviewerProvider);
   const id = createReviewId();
   const root = reviewDirectory(storeRoot, id);
   await fsp.mkdir(root, { recursive: true, mode: 0o700 });
@@ -805,6 +854,7 @@ export async function prepareReview(
       base_ref: baseRef,
       requirement,
       implementation_scope: implementationScope,
+      reviewer_provider: reviewerProvider,
       review_strategy: successorResult.strategy,
       status: "WAITING_FOR_REVIEW",
       current_round: 1,
@@ -827,7 +877,11 @@ export async function prepareReview(
   }, { allowMissing: true });
 }
 
-export async function listReviews(storeRoot, statuses = null) {
+export async function listReviews(
+  storeRoot,
+  statuses = null,
+  reviewerProvider = null,
+) {
   const reviewsRoot = path.join(storeRoot, "reviews");
   let entries;
   try {
@@ -840,6 +894,8 @@ export async function listReviews(storeRoot, statuses = null) {
   }
   const statusSet =
     statuses && statuses.length > 0 ? new Set(statuses.map(String)) : null;
+  const providerFilter =
+    reviewerProvider == null ? null : assertReviewerProvider(reviewerProvider);
   const result = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) {
@@ -847,7 +903,11 @@ export async function listReviews(storeRoot, statuses = null) {
     }
     try {
       const review = await loadReview(storeRoot, entry.name);
-      if (!statusSet || statusSet.has(review.status)) {
+      if (
+        (!statusSet || statusSet.has(review.status)) &&
+        (providerFilter == null ||
+          reviewerProviderFor(review) === providerFilter)
+      ) {
         result.push(publicReview(review));
       }
     } catch {
@@ -938,9 +998,19 @@ function normalizeFinding(input, id, round) {
   return finding;
 }
 
-export async function submitInitialReview(storeRoot, reviewId, findingsInput) {
+export async function submitInitialReview(
+  storeRoot,
+  reviewId,
+  findingsInput,
+  reviewerProvider = "CLAUDE_DESKTOP",
+) {
   return withReviewMutationLock(storeRoot, reviewId, () =>
-    submitInitialReviewWhileLocked(storeRoot, reviewId, findingsInput),
+    submitInitialReviewWhileLocked(
+      storeRoot,
+      reviewId,
+      findingsInput,
+      reviewerProvider,
+    ),
   );
 }
 
@@ -948,8 +1018,10 @@ async function submitInitialReviewWhileLocked(
   storeRoot,
   reviewId,
   findingsInput,
+  reviewerProvider,
 ) {
   const review = await loadReview(storeRoot, reviewId);
+  requireReviewerProvider(review, reviewerProvider);
   if (review.status !== "WAITING_FOR_REVIEW" || review.current_round !== 1) {
     throw new Error(
       `review is not waiting for its initial review (status=${review.status})`,
@@ -1125,6 +1197,7 @@ export async function submitRereview(
   reviewId,
   decisionInputs,
   newFindingInputs,
+  reviewerProvider = "CLAUDE_DESKTOP",
 ) {
   return withReviewMutationLock(storeRoot, reviewId, () =>
     submitRereviewWhileLocked(
@@ -1132,6 +1205,7 @@ export async function submitRereview(
       reviewId,
       decisionInputs,
       newFindingInputs,
+      reviewerProvider,
     ),
   );
 }
@@ -1141,8 +1215,10 @@ async function submitRereviewWhileLocked(
   reviewId,
   decisionInputs,
   newFindingInputs,
+  reviewerProvider,
 ) {
   const review = await loadReview(storeRoot, reviewId);
+  requireReviewerProvider(review, reviewerProvider);
   if (review.status !== "WAITING_FOR_REREVIEW") {
     throw new Error(`review is not waiting for rereview (status=${review.status})`);
   }
@@ -1266,6 +1342,7 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
     review_id: review.id,
     passed_at: now(),
     snapshot_hash: review.clean_snapshot_hash,
+    reviewer_provider: reviewerProviderFor(review),
     base_sha: manifest.base_sha,
     head_sha: manifest.head_sha,
     status: "LOCAL_GATE_PASSED",
@@ -1284,6 +1361,7 @@ export async function readReviewArtifact(
   artifact,
   offset = 0,
   limit = 65_536,
+  reviewerProvider = "CLAUDE_DESKTOP",
 ) {
   assertReviewId(reviewId);
   if (
@@ -1305,6 +1383,7 @@ export async function readReviewArtifact(
     throw new Error(`limit must be between 1 and ${MAX_READ_BYTES}`);
   }
   const review = await loadReview(storeRoot, reviewId);
+  requireReviewerProvider(review, reviewerProvider);
   const selectedRound = findRound(review, round);
   if (artifact.startsWith("successor.") && selectedRound.successor == null) {
     throw new Error("successor artifact is not available for this review round");
@@ -1390,8 +1469,10 @@ export async function readSnapshotFile(
   relativePath,
   offset = 0,
   limit = 65_536,
+  reviewerProvider = "CLAUDE_DESKTOP",
 ) {
   const review = await loadReview(storeRoot, reviewId);
+  requireReviewerProvider(review, reviewerProvider);
   const selectedRound = findRound(review, round);
   const safePath = safeRelativePath(relativePath);
   if (selectedRound.deleted_files.includes(safePath)) {
@@ -1432,12 +1513,14 @@ export async function searchSnapshot(
   pattern,
   pathPrefix = null,
   maxResults = 100,
+  reviewerProvider = "CLAUDE_DESKTOP",
 ) {
   assertString(pattern, "pattern", { max: 1000 });
   if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 500) {
     throw new Error("max_results must be between 1 and 500");
   }
   const review = await loadReview(storeRoot, reviewId);
+  requireReviewerProvider(review, reviewerProvider);
   const selectedRound = findRound(review, round);
   const prefix =
     pathPrefix == null || pathPrefix === ""
@@ -1527,8 +1610,13 @@ export async function searchSnapshot(
   return results;
 }
 
-export async function openReview(storeRoot, reviewId) {
+export async function openReview(
+  storeRoot,
+  reviewId,
+  reviewerProvider = "CLAUDE_DESKTOP",
+) {
   const review = await loadReview(storeRoot, reviewId);
+  requireReviewerProvider(review, reviewerProvider);
   const current = findRound(review, review.current_round);
   return {
     ...publicReview(review),

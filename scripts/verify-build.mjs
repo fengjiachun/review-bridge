@@ -11,15 +11,15 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = process.env.REVIEW_BRIDGE_OUTPUT_ROOT
   ? path.resolve(process.env.REVIEW_BRIDGE_OUTPUT_ROOT)
-  : path.join(projectRoot, "dist", "review-bridge-v0.3.0");
+  : path.join(projectRoot, "dist", "review-bridge-v0.4.0");
 const marketplaceRoot = path.join(outputRoot, "codex-marketplace");
 const pluginRoot = path.join(marketplaceRoot, "plugins", "review-bridge");
 const authorServer = path.join(pluginRoot, "server", "server.mjs");
 const reviewerRoot = path.join(outputRoot, "claude-extension-source");
 const reviewerServer = path.join(reviewerRoot, "server", "server.mjs");
-const mcpb = path.join(outputRoot, "review-bridge-reviewer-v0.3.0.mcpb");
-const dxt = path.join(outputRoot, "review-bridge-reviewer-v0.3.0.dxt");
-const sourceArchive = path.join(outputRoot, "review-bridge-source-v0.3.0.zip");
+const mcpb = path.join(outputRoot, "review-bridge-reviewer-v0.4.0.mcpb");
+const dxt = path.join(outputRoot, "review-bridge-reviewer-v0.4.0.dxt");
+const sourceArchive = path.join(outputRoot, "review-bridge-source-v0.4.0.zip");
 
 function run(command, args, cwd) {
   const result = spawnSync(command, args, {
@@ -35,14 +35,18 @@ async function readJson(filePath) {
   return JSON.parse(await fsp.readFile(filePath, "utf8"));
 }
 
-async function connect(serverPath, role, store) {
+async function connect(serverPath, role, store, reviewerProvider = null) {
+  const args = [serverPath, "--role", role];
+  if (role === "reviewer") {
+    args.push("--reviewer-provider", reviewerProvider);
+  }
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [serverPath, "--role", role],
+    args,
     env: { ...process.env, REVIEW_BRIDGE_HOME: store },
     stderr: "pipe",
   });
-  const client = new Client({ name: "review-bridge-verifier", version: "0.3.0" });
+  const client = new Client({ name: "review-bridge-verifier", version: "0.4.0" });
   await client.connect(transport);
   return client;
 }
@@ -289,7 +293,7 @@ assert.equal(marketplace.plugins[0].source.path, "./plugins/review-bridge");
 
 const plugin = await readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
 assert.equal(plugin.name, "review-bridge");
-assert.equal(plugin.version, "0.3.0");
+assert.equal(plugin.version, "0.4.0");
 assert.equal(plugin.mcpServers, "./.mcp.json");
 const workflowSkillPath = path.join(
   pluginRoot,
@@ -309,10 +313,13 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /Require the PR head commit to equal that same local-gate `head_sha`/,
+  /Require the PR head commit to equal the immutable publication authorization\s+`head_sha`/,
 );
 assert.match(workflowSkill, /Any new commit invalidates the GitHub review gate/);
-assert.match(workflowSkill, /start a new local Review Bridge task/);
+assert.match(
+  workflowSkill,
+  /new local Review Bridge task in `LOCAL_GATE` mode or call\s+`authorize_remote_publication` again/,
+);
 assert.match(
   workflowSkill,
   /clean issue comment.*Findings must be a formal review/s,
@@ -323,8 +330,11 @@ assert.match(workflowSkill, /formal review bound by native\s+`commit_id`/);
 assert.match(workflowSkill, /get_review_summary/);
 assert.match(workflowSkill, /wait_for_review_state/);
 assert.match(workflowSkill, /pass that task as `parent_review_id`/);
-assert.match(workflowSkill, /Start a fresh Claude Desktop conversation/);
-assert.match(workflowSkill, /For `SUCCESSOR`, require Claude to read/);
+assert.match(workflowSkill, /Choose `reviewer_provider` explicitly/);
+assert.match(workflowSkill, /newly created Codex task/);
+assert.match(workflowSkill, /is not a fork of the\s+author task/);
+assert.match(workflowSkill, /Never call reviewer tools from the author task/);
+assert.match(workflowSkill, /For `SUCCESSOR`/);
 assert.match(workflowSkill, /A `timed_out` result is expected/);
 assert.match(
   workflowSkill,
@@ -332,7 +342,7 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /Treat `timed_out` as an expected in-progress\s+result and continue with the same `state_version`/,
+  /Treat `timed_out` as an expected in-progress\s+result and\s+continue with the same `state_version`/,
 );
 assert.match(workflowSkill, /structured `REVIEW_BUSY`/);
 assert.match(workflowSkill, /`details\.retryable: true`/);
@@ -350,6 +360,7 @@ assert.match(
   /Never learn or replace this identity from a candidate\s+result/,
 );
 for (const tool of [
+  "authorize_remote_publication",
   "start_publication",
   "get_publication",
   "record_codex_review_request",
@@ -361,6 +372,19 @@ for (const tool of [
   assert.match(workflowSkill, new RegExp(`\\b${tool}\\b`));
 }
 assert.match(workflowSkill, /Immediately before `start_publication`/);
+assert.match(
+  workflowSkill,
+  /`REMOTE_ONLY` is allowed only after the user directly instructs you to skip\s+local review/,
+);
+assert.match(workflowSkill, /`LOCAL_REVIEW_SKIPPED`/);
+assert.match(
+  workflowSkill,
+  /Resolve `base_sha` as the exact merge base of that\s+fresh base tip and head/,
+);
+assert.match(
+  workflowSkill,
+  /Do not infer it from urgency, a prior\s+exception, reviewer unavailability/,
+);
 assert.match(workflowSkill, /immediately call\s+`record_codex_review_request`/);
 assert.match(workflowSkill, /Never post an exact or\s+trigger-shaped Codex review request manually/);
 assert.match(workflowSkill, /direct approval of that exact\s+full set/);
@@ -387,11 +411,36 @@ assert.equal(
   mcpConfig.mcpServers["review-bridge-author"].args[0],
   "./server/server.mjs",
 );
+assert.deepEqual(
+  mcpConfig.mcpServers["review-bridge-reviewer"].args,
+  [
+    "./server/server.mjs",
+    "--role",
+    "reviewer",
+    "--reviewer-provider",
+    "CODEX_TASK",
+  ],
+);
+const reviewerSkillPath = path.join(
+  pluginRoot,
+  "skills",
+  "review-bridge-reviewer",
+  "SKILL.md",
+);
+const reviewerSkill = await fsp.readFile(reviewerSkillPath, "utf8");
+assert.match(reviewerSkill, /newly created Codex task/);
+assert.match(reviewerSkill, /must not be a fork of the author task/);
+assert.match(reviewerSkill, /Require `reviewer_provider: CODEX_TASK`/);
+assert.match(reviewerSkill, /Treat every actionable finding as blocking/);
 
 const extension = await readJson(path.join(reviewerRoot, "manifest.json"));
 assert.equal(extension.manifest_version, "0.3");
-assert.equal(extension.version, "0.3.0");
+assert.equal(extension.version, "0.4.0");
 assert.equal(extension.server.entry_point, "server/server.mjs");
+assert.deepEqual(extension.server.mcp_config.args.slice(-2), [
+  "--reviewer-provider",
+  "CLAUDE_DESKTOP",
+]);
 const reviewInstructions = await fsp.readFile(
   path.join(reviewerRoot, "REVIEW_INSTRUCTIONS.md"),
   "utf8",
@@ -459,6 +508,8 @@ try {
     ),
   );
   baselineInput.mode = "BASELINE";
+  baselineInput.authorization_head_sha = baselineInput.local_gate_head_sha;
+  delete baselineInput.local_gate_head_sha;
   const baselineInputPath = path.join(temporary, "codex-baseline-input.json");
   await fsp.writeFile(
     baselineInputPath,
@@ -493,19 +544,32 @@ try {
   run("git", ["commit", "-m", "change value"], repository);
 
   const author = await connect(authorServer, "author", store);
-  const reviewer = await connect(reviewerServer, "reviewer", store);
+  const reviewer = await connect(
+    reviewerServer,
+    "reviewer",
+    store,
+    "CLAUDE_DESKTOP",
+  );
+  const codexReviewer = await connect(
+    authorServer,
+    "reviewer",
+    store,
+    "CODEX_TASK",
+  );
   try {
     const prepared = await call(author, "prepare_review", {
       repository_path: repository,
       base_ref: baseSha,
       requirement: "Change the exported value to 2.",
       implementation_scope: "Update value.js and add a focused test.",
+      reviewer_provider: "CLAUDE_DESKTOP",
     });
     assert.equal(prepared.status, "WAITING_FOR_REVIEW");
     const summary = await call(author, "get_review_summary", {
       review_id: prepared.id,
     });
-    assert.equal(summary.action_required, "CLAUDE_INITIAL_REVIEW");
+    assert.equal(summary.action_required, "REVIEWER_INITIAL_REVIEW");
+    assert.equal(summary.reviewer_provider, "CLAUDE_DESKTOP");
     const timedOut = await call(author, "wait_for_review_state", {
       review_id: prepared.id,
       known_state_version: summary.state_version,
@@ -599,6 +663,10 @@ try {
       codex_review_baseline: publicationBaseline(startedAt - 10),
     });
     assert.equal(publication.status, "PR_PENDING");
+    assert.equal(
+      publication.authorization.reviewer_provider,
+      "CLAUDE_DESKTOP",
+    );
     const requestAt = Date.now();
     const requested = await call(author, "record_codex_review_request", {
       review_id: prepared.id,
@@ -625,11 +693,13 @@ try {
       expected_revision: ready.revision,
     });
     assert.equal(publicationGate.issuance_committed, true);
+    assert.equal(publicationGate.reviewer_provider, "CLAUDE_DESKTOP");
     const verified = await call(author, "verify_publication_gate", {
       review_id: prepared.id,
     });
     assert.equal(verified.valid, true);
     assert.equal(verified.head_sha, headSha);
+    assert.equal(verified.reviewer_provider, "CLAUDE_DESKTOP");
     const auditInspection = spawnSync(
       process.execPath,
       [
@@ -645,6 +715,70 @@ try {
     assert.equal(auditInspection.status, 0, auditInspection.stderr);
     assert.equal(JSON.parse(auditInspection.stdout).valid, true);
 
+    const remoteAuthorization = await call(
+      author,
+      "authorize_remote_publication",
+      {
+        repository_path: repository,
+        base_sha: baseSha,
+        head_sha: headSha,
+        acknowledgement: "LOCAL_REVIEW_SKIPPED",
+        operator_label: "maintainer",
+        rationale: "Verify the packaged remote-only publication workflow.",
+      },
+    );
+    assert.equal(remoteAuthorization.mode, "REMOTE_ONLY");
+    const remoteStartedAt = Date.now();
+    const remotePublication = await call(author, "start_publication", {
+      review_id: remoteAuthorization.review_id,
+      repository_id: 42,
+      owner: "owner",
+      repo: "repo",
+      pr_number: 7,
+      base_branch: "main",
+      head_branch: "agent/change",
+      codex_actor_id: 99,
+      codex_actor_type: "Bot",
+      codex_actor_login: "codex[bot]",
+      codex_trigger_mode: "EXPLICIT_ONLY",
+      codex_review_baseline: publicationBaseline(remoteStartedAt - 10),
+    });
+    assert.equal(remotePublication.authorization.mode, "REMOTE_ONLY");
+    assert.equal(remotePublication.authorization.reviewer_provider, null);
+    const remoteRequestAt = Date.now();
+    const remoteRequested = await call(author, "record_codex_review_request", {
+      review_id: remoteAuthorization.review_id,
+      expected_revision: remotePublication.revision,
+      comment_id: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      created_at: iso(remoteRequestAt),
+      requested_head_sha: headSha,
+    });
+    const remoteObservedAt = Date.now() + 1_000;
+    const remoteReady = await call(author, "record_github_snapshot", {
+      review_id: remoteAuthorization.review_id,
+      expected_revision: remoteRequested.revision,
+      observation: publicationObservation({
+        at: remoteObservedAt,
+        baseSha,
+        headSha,
+        requestAt: remoteRequestAt,
+      }),
+    });
+    assert.equal(remoteReady.status, "MERGE_READY");
+    const remoteGate = await call(author, "finalize_publication_gate", {
+      review_id: remoteAuthorization.review_id,
+      expected_revision: remoteReady.revision,
+    });
+    assert.equal(remoteGate.authorization_mode, "REMOTE_ONLY");
+    assert.equal(remoteGate.reviewer_provider, null);
+    const remoteVerified = await call(author, "verify_publication_gate", {
+      review_id: remoteAuthorization.review_id,
+    });
+    assert.equal(remoteVerified.valid, true);
+    assert.equal(remoteVerified.head_sha, headSha);
+    assert.equal(remoteVerified.reviewer_provider, null);
+
     await fsp.writeFile(
       path.join(repository, "value.test.js"),
       "import assert from 'node:assert/strict';\nimport { value } from './value.js';\nassert.equal(value, 2);\nassert.equal(typeof value, 'number');\n",
@@ -657,17 +791,23 @@ try {
       base_ref: baseSha,
       requirement: "Change the exported value to 2.",
       implementation_scope: "Strengthen the focused test.",
+      reviewer_provider: "CODEX_TASK",
       parent_review_id: prepared.id,
     });
     assert.equal(successor.review_strategy.mode, "SUCCESSOR");
-    const successorOpened = await call(reviewer, "open_review", {
+    assert.equal(successor.reviewer_provider, "CODEX_TASK");
+    await assert.rejects(
+      call(reviewer, "open_review", { review_id: successor.id }),
+      /reviewer provider mismatch/,
+    );
+    const successorOpened = await call(codexReviewer, "open_review", {
       review_id: successor.id,
     });
     assert.deepEqual(
       successorOpened.artifacts.map((artifact) => artifact.name),
       ["successor.diff", "successor.json", "patch.diff", "manifest.json"],
     );
-    const successorPatch = await call(reviewer, "read_review_artifact", {
+    const successorPatch = await call(codexReviewer, "read_review_artifact", {
       review_id: successor.id,
       round: 1,
       artifact: "successor.diff",
@@ -676,7 +816,7 @@ try {
     assert.doesNotMatch(successorPatch.content, /value = 2/);
     const successorProof = JSON.parse(
       (
-        await call(reviewer, "read_review_artifact", {
+        await call(codexReviewer, "read_review_artifact", {
           review_id: successor.id,
           round: 1,
           artifact: "successor.json",
@@ -685,7 +825,11 @@ try {
     );
     assert.equal(successorProof.parent_head_sha, headSha);
     assert.equal(successorProof.current_head_sha, successorHeadSha);
-    await call(reviewer, "submit_review", {
+    assert.equal(
+      successorProof.parent_reviewer_provider,
+      "CLAUDE_DESKTOP",
+    );
+    await call(codexReviewer, "submit_review", {
       review_id: successor.id,
       findings: [],
     });
@@ -693,14 +837,18 @@ try {
       review_id: successor.id,
     });
     assert.equal(successorGate.gate.head_sha, successorHeadSha);
+    assert.equal(successorGate.gate.reviewer_provider, "CODEX_TASK");
   } finally {
-    await reviewer.close();
-    await author.close();
+    await Promise.all([
+      codexReviewer.close(),
+      reviewer.close(),
+      author.close(),
+    ]);
   }
 } finally {
   await fsp.rm(temporary, { recursive: true, force: true });
 }
 
 process.stdout.write(
-  "Packaged Codex and Claude clients completed full, successor, and publication flows.\n",
+  "Packaged Codex author, Codex reviewer, and Claude clients completed full, successor, local publication, and remote-only publication flows.\n",
 );

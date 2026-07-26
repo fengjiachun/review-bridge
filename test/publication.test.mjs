@@ -12,6 +12,7 @@ import {
 } from "../src/core.mjs";
 import {
   acknowledgeCodexReviewAmbiguity,
+  authorizeRemotePublication,
   derivePublicationStatus,
   finalizePublicationGate,
   getPublication,
@@ -74,6 +75,27 @@ async function fixture() {
   await submitInitialReview(store, review.id, []);
   await finalizeLocalGate(store, review.id);
   return { root, repository, store, reviewId: review.id, baseSha, headSha };
+}
+
+async function remoteFixture(authorizedAt = Date.now()) {
+  const state = await fixture();
+  const authorization = await authorizeRemotePublication(
+    state.store,
+    {
+      repositoryPath: state.repository,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      acknowledgement: "LOCAL_REVIEW_SKIPPED",
+      operatorLabel: "maintainer",
+      rationale: "Use the GitHub Codex, CI, and review-thread gates only.",
+    },
+    { clock: () => authorizedAt },
+  );
+  return {
+    ...state,
+    reviewId: authorization.review_id,
+    authorization,
+  };
 }
 
 function completeSource(kind, collectedAt, extra = {}) {
@@ -363,6 +385,7 @@ test("publication ledger reaches a fresh audited merge gate", async (t) => {
   const created = await start(state, startedAt);
   assert.equal(created.status, "PR_PENDING");
   assert.equal(created.revision, 1);
+  assert.equal(created.authorization.reviewer_provider, "CLAUDE_DESKTOP");
 
   const requestAt = startedAt + 1_000;
   const requested = await recordCodexReviewRequest(
@@ -406,6 +429,7 @@ test("publication ledger reaches a fresh audited merge gate", async (t) => {
     { clock: () => observedAt + 20 },
   );
   assert.equal(gate.issuance_committed, true);
+  assert.equal(gate.reviewer_provider, "CLAUDE_DESKTOP");
   const publicationPath = path.join(
     state.store,
     "reviews",
@@ -418,6 +442,7 @@ test("publication ledger reaches a fresh audited merge gate", async (t) => {
   });
   assert.equal(verified.valid, true);
   assert.equal(verified.head_sha, state.headSha);
+  assert.equal(verified.reviewer_provider, "CLAUDE_DESKTOP");
   assert.deepEqual(await fsp.readFile(publicationPath), beforeVerification);
 
   const audit = await fsp.readFile(
@@ -435,6 +460,514 @@ test("publication ledger reaches a fresh audited merge gate", async (t) => {
     "GATE_VERIFIED",
   ]);
   assert.equal(events[1].previous_event_sha256, digest(audit.trim().split("\n")[0]));
+});
+
+test("request binding canonicalizes GitHub second-precision timestamps", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Math.floor(Date.now() / 1_000) * 1_000;
+  const publication = await start(state, startedAt);
+  const requestAt = startedAt + 1_000;
+  const githubCreatedAt = iso(requestAt).replace(".000Z", "Z");
+
+  const requested = await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: publication.revision,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: githubCreatedAt,
+      requestedHeadSha: state.headSha,
+    },
+    { clock: () => requestAt + 10 },
+  );
+
+  assert.equal(requested.codex_request_history[0].event_at, iso(requestAt));
+});
+
+test("remote-only authorization reaches the same audited merge gate", async (t) => {
+  const startedAt = Date.now();
+  const state = await remoteFixture(startedAt - 100);
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+
+  assert.equal(state.authorization.mode, "REMOTE_ONLY");
+  assert.equal(state.authorization.head_sha, state.headSha);
+  assert.equal(state.authorization.base_sha, state.baseSha);
+  assert.equal(state.authorization.reviewer_provider, null);
+  assert.equal(state.authorization.acknowledgement, "LOCAL_REVIEW_SKIPPED");
+  const authorizationPath = path.join(
+    state.store,
+    "reviews",
+    state.reviewId,
+    "remote-authorization.json",
+  );
+  assert.equal((await fsp.stat(authorizationPath)).mode & 0o777, 0o600);
+
+  const created = await start(state, startedAt);
+  assert.equal(created.version, 2);
+  assert.equal(created.authorization.mode, "REMOTE_ONLY");
+  assert.equal(created.authorization.head_sha, state.headSha);
+  assert.equal(created.authorization.reviewer_provider, null);
+  assert.equal("local_gate" in created, false);
+
+  const requestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(requestAt),
+      requestedHeadSha: state.headSha,
+    },
+    { clock: () => requestAt + 10 },
+  );
+  const observedAt = startedAt + 2_000;
+  const ready = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 2,
+      observation: observation({
+        at: observedAt,
+        baseSha: state.baseSha,
+        headSha: state.headSha,
+        requestId: 100,
+        requestAt,
+      }),
+    },
+    { clock: () => observedAt + 10 },
+  );
+  assert.equal(ready.status, "MERGE_READY");
+
+  const gate = await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  assert.equal(gate.version, 2);
+  assert.equal(gate.authorization_mode, "REMOTE_ONLY");
+  assert.equal(gate.authorization_sha256.length, 64);
+  assert.equal(gate.reviewer_provider, null);
+  assert.equal("local_gate_sha256" in gate, false);
+  const verified = await verifyPublicationGate(state.store, state.reviewId, {
+    clock: () => observedAt + 30,
+  });
+  assert.equal(verified.valid, true);
+  assert.equal(verified.reviewer_provider, null);
+});
+
+test("publication rejects local gate reviewer provider drift", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const gatePath = path.join(
+    state.store,
+    "reviews",
+    state.reviewId,
+    "gate.json",
+  );
+  const gate = JSON.parse(await fsp.readFile(gatePath, "utf8"));
+  gate.reviewer_provider = "CODEX_TASK";
+  await fsp.writeFile(gatePath, `${JSON.stringify(gate, null, 2)}\n`);
+
+  await assert.rejects(
+    start(state, Date.now()),
+    (error) => {
+      assert.equal(error.code, "LOCAL_GATE_INVALID");
+      assert.match(error.message, /reviewer provider/);
+      return true;
+    },
+  );
+});
+
+test("publication mutations reject authorization reviewer provider drift", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const publication = await start(state, startedAt);
+  publication.authorization.reviewer_provider = "CODEX_TASK";
+  const publicationPath = path.join(
+    state.store,
+    "reviews",
+    state.reviewId,
+    "publication.json",
+  );
+  await atomicWriteCanonicalJson(publicationPath, publication);
+  const before = await fsp.readFile(publicationPath);
+
+  await assert.rejects(
+    recordCodexReviewRequest(
+      state.store,
+      state.reviewId,
+      {
+        expectedRevision: publication.revision,
+        commentId: 100,
+        url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+        createdAt: iso(startedAt + 1_000),
+        requestedHeadSha: state.headSha,
+      },
+      { clock: () => startedAt + 1_010 },
+    ),
+    (error) => {
+      assert.equal(error.code, "LOCAL_GATE_INVALID");
+      assert.match(error.message, /authorization changed/);
+      return true;
+    },
+  );
+  assert.deepEqual(await fsp.readFile(publicationPath), before);
+});
+
+test("publication verification rejects final gate reviewer provider drift", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, observedAt } = await reachReady(state);
+  const gate = await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  gate.reviewer_provider = "CODEX_TASK";
+  await atomicWriteCanonicalJson(
+    path.join(
+      state.store,
+      "reviews",
+      state.reviewId,
+      "publication-gate.json",
+    ),
+    gate,
+  );
+
+  const verified = await verifyPublicationGate(state.store, state.reviewId, {
+    clock: () => observedAt + 30,
+  });
+  assert.equal(verified.valid, false);
+  assert.equal(verified.reason, "GATE_MISMATCH");
+});
+
+test("legacy local records default their reviewer provider to Claude", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const directory = path.join(state.store, "reviews", state.reviewId);
+  for (const name of ["review.json", "gate.json"]) {
+    const filePath = path.join(directory, name);
+    const value = JSON.parse(await fsp.readFile(filePath, "utf8"));
+    delete value.reviewer_provider;
+    await fsp.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
+  }
+
+  const publication = await start(state, Date.now());
+  assert.equal(
+    publication.authorization.reviewer_provider,
+    "CLAUDE_DESKTOP",
+  );
+});
+
+test("version 2 local ledgers without reviewer provenance default to Claude", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const publication = await start(state, startedAt);
+  delete publication.authorization.reviewer_provider;
+  const publicationPath = path.join(
+    state.store,
+    "reviews",
+    state.reviewId,
+    "publication.json",
+  );
+  await atomicWriteCanonicalJson(publicationPath, publication);
+
+  const requested = await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: publication.revision,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(startedAt + 1_000),
+      requestedHeadSha: state.headSha,
+    },
+    { clock: () => startedAt + 1_010 },
+  );
+  assert.equal(requested.revision, 2);
+});
+
+test("version 1 local ledgers remain readable and completable", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const created = await start(state, startedAt);
+  const ledgerPath = path.join(
+    state.store,
+    "reviews",
+    state.reviewId,
+    "publication.json",
+  );
+  const legacy = structuredClone(created);
+  legacy.version = 1;
+  legacy.local_gate = {
+    head_sha: created.authorization.head_sha,
+    base_sha: created.authorization.base_sha,
+    snapshot_hash: created.authorization.snapshot_hash,
+    gate_sha256: created.authorization.source_sha256,
+  };
+  delete legacy.authorization;
+  await atomicWriteCanonicalJson(ledgerPath, legacy);
+  assert.equal((await getPublication(state.store, state.reviewId)).version, 1);
+
+  const requestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(requestAt),
+      requestedHeadSha: state.headSha,
+    },
+    { clock: () => requestAt + 10 },
+  );
+  const observedAt = startedAt + 2_000;
+  const ready = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 2,
+      observation: observation({
+        at: observedAt,
+        baseSha: state.baseSha,
+        headSha: state.headSha,
+        requestId: 100,
+        requestAt,
+      }),
+    },
+    { clock: () => observedAt + 10 },
+  );
+  const gate = await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  assert.equal(gate.version, 1);
+  assert.equal(gate.local_gate_sha256, legacy.local_gate.gate_sha256);
+  assert.equal(gate.reviewer_provider, "CLAUDE_DESKTOP");
+  const verified = await verifyPublicationGate(state.store, state.reviewId, {
+    clock: () => observedAt + 30,
+  });
+  assert.equal(verified.valid, true);
+  assert.equal(verified.reviewer_provider, "CLAUDE_DESKTOP");
+});
+
+test("remote-only authorization is explicit and binds a clean local head", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const input = {
+    repositoryPath: state.repository,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    acknowledgement: "LOCAL_REVIEW_SKIPPED",
+    operatorLabel: "maintainer",
+    rationale: "Remote review is sufficient for this change.",
+  };
+
+  for (const [override, pattern] of [
+    [{ acknowledgement: "YES" }, /LOCAL_REVIEW_SKIPPED/],
+    [{ operatorLabel: "" }, /operator_label/],
+    [{ rationale: "" }, /rationale/],
+    [{ headSha: "f".repeat(40) }, /local HEAD/],
+    [{ baseSha: "f".repeat(40) }, /base_sha/],
+  ]) {
+    await assert.rejects(
+      authorizeRemotePublication(
+        state.store,
+        { ...input, ...override },
+        { clock: () => Date.now() },
+      ),
+      pattern,
+    );
+  }
+
+  await fsp.writeFile(path.join(state.repository, "untracked.txt"), "dirty\n");
+  await assert.rejects(
+    authorizeRemotePublication(state.store, input),
+    /working tree must be clean/,
+  );
+});
+
+test("remote-only publication rejects a new local commit and invalidates a new PR head", async (t) => {
+  const startedAt = Date.now();
+  const state = await remoteFixture(startedAt - 100);
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  await start(state, startedAt);
+
+  await fsp.writeFile(path.join(state.repository, "value.js"), "export const value = 3;\n");
+  git(state.repository, "add", ".");
+  git(state.repository, "commit", "-m", "later change");
+  const changedHead = git(state.repository, "rev-parse", "HEAD");
+  await assert.rejects(
+    recordCodexReviewRequest(
+      state.store,
+      state.reviewId,
+      {
+        expectedRevision: 1,
+        commentId: 100,
+        url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+        createdAt: iso(startedAt + 1_000),
+        requestedHeadSha: changedHead,
+      },
+      { clock: () => startedAt + 1_010 },
+    ),
+    /local HEAD differs from the remote authorization/,
+  );
+
+  const invalidated = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      observation: observation({
+        at: startedAt + 2_000,
+        baseSha: state.baseSha,
+        headSha: state.headSha,
+        requestId: null,
+        requestAt: startedAt,
+        withResult: false,
+        headOverride: changedHead,
+      }),
+    },
+    { clock: () => startedAt + 2_010 },
+  );
+  assert.equal(invalidated.status, "INVALIDATED");
+  assert.match(invalidated.terminal.reason, /authorization/);
+});
+
+test("remote-only publication allows the target base to advance from the reviewed merge base", async (t) => {
+  const startedAt = Date.now();
+  const state = await remoteFixture(startedAt - 100);
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  await start(state, startedAt);
+  const requestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(requestAt),
+      requestedHeadSha: state.headSha,
+    },
+    { clock: () => requestAt + 10 },
+  );
+  const observedAt = startedAt + 2_000;
+  const current = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: 100,
+    requestAt,
+  });
+  const advancedBaseSha = "e".repeat(40);
+  current.pull_request.base_sha = advancedBaseSha;
+  current.pull_request.pr_reported_base_sha = advancedBaseSha;
+  current.pull_request.base_head_comparison.base_sha = advancedBaseSha;
+  current.pull_request.reviewed_base_current_base_comparison.status = "AHEAD";
+  current.pull_request.reviewed_base_current_base_comparison.head_sha =
+    advancedBaseSha;
+  current.pull_request.collection.sources.find(
+    (source) => source.kind === "BASE_BRANCH_METADATA",
+  ).branch_tip_sha = advancedBaseSha;
+  current.required_checks.collection.policy_sources.find(
+    (source) => source.kind === "BRANCH_METADATA",
+  ).branch_tip_sha = advancedBaseSha;
+
+  const ready = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 2, observation: current },
+    { clock: () => observedAt + 10 },
+  );
+  assert.equal(ready.status, "MERGE_READY");
+});
+
+test("tampering with a remote-only authorization fails closed", async (t) => {
+  const startedAt = Date.now();
+  const state = await remoteFixture(startedAt - 100);
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, observedAt } = await reachReady(state, startedAt);
+  await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  const authorizationPath = path.join(
+    state.store,
+    "reviews",
+    state.reviewId,
+    "remote-authorization.json",
+  );
+  const authorization = JSON.parse(await fsp.readFile(authorizationPath, "utf8"));
+  authorization.rationale = "tampered";
+  await atomicWriteCanonicalJson(authorizationPath, authorization);
+
+  await assert.rejects(
+    verifyPublicationGate(state.store, state.reviewId, {
+      clock: () => observedAt + 30,
+    }),
+    (error) => error?.code === "REMOTE_AUTHORIZATION_INVALID",
+  );
+});
+
+test("remote-only authorization rejects local reviewer provenance", async (t) => {
+  const state = await remoteFixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const authorizationPath = path.join(
+    state.store,
+    "reviews",
+    state.reviewId,
+    "remote-authorization.json",
+  );
+  const authorization = JSON.parse(await fsp.readFile(authorizationPath, "utf8"));
+  authorization.reviewer_provider = "CODEX_TASK";
+  await atomicWriteCanonicalJson(authorizationPath, authorization);
+
+  await assert.rejects(
+    start(state, Date.now()),
+    (error) => {
+      assert.equal(error.code, "REMOTE_AUTHORIZATION_INVALID");
+      assert.match(error.message, /reviewer provider/);
+      return true;
+    },
+  );
+});
+
+test("conflicting local and remote authorization files fail closed", async (t) => {
+  const state = await remoteFixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const directory = path.join(state.store, "reviews", state.reviewId);
+  await atomicWriteCanonicalJson(path.join(directory, "gate.json"), {
+    version: 1,
+    review_id: state.reviewId,
+    status: "LOCAL_GATE_PASSED",
+    passed_at: new Date().toISOString(),
+    snapshot_hash: "a".repeat(64),
+    base_sha: state.baseSha,
+    head_sha: state.headSha,
+  });
+
+  await assert.rejects(
+    start(state, Date.now()),
+    (error) => error?.code === "PUBLICATION_AUTHORIZATION_INVALID",
+  );
+  await assert.rejects(
+    fsp.access(path.join(directory, "publication.json")),
+  );
 });
 
 test("a later ledger mutation revokes the publication gate before advancing", async (t) => {

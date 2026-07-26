@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0 - 2026-07-27
+
+### Added
+
+- Local review tasks bind an immutable `CLAUDE_DESKTOP` or `CODEX_TASK`
+  reviewer provider through the local and publication gates.
+- The Codex plugin includes a reviewer-only MCP process and a fresh-task review
+  skill for independent local Codex review.
+- Explicit `REMOTE_ONLY` publication authorization records the operator,
+  rationale, clean repository, base SHA, and head SHA without claiming a local
+  review gate.
+- The packaged workflow can run the existing GitHub Codex, required-check, and
+  review-thread gates from either a local gate or a remote-only authorization.
+
+### Changed
+
+- Reviewer processes can list, read, and submit only tasks bound to their
+  configured provider. Successor proofs preserve the parent provider.
+- New publication ledgers use authorization-union schema version 2; version-1
+  local-gate ledgers remain readable and completable.
+- Any new local or pull-request head requires a new authorization and GitHub
+  Codex result before merge.
+- Remote-only authorizations explicitly carry no local reviewer provenance.
+
 ## 0.3.0 - 2026-07-26
 
 ### Added

@@ -8,14 +8,22 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const serverPath = path.resolve("src/server.mjs");
 
-async function connectClient(role, store) {
+async function connectClient(
+  role,
+  store,
+  reviewerProvider = "CLAUDE_DESKTOP",
+) {
+  const args = [serverPath, "--role", role];
+  if (role === "reviewer") {
+    args.push("--reviewer-provider", reviewerProvider);
+  }
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [serverPath, "--role", role],
+    args,
     env: { ...process.env, REVIEW_BRIDGE_HOME: store },
     stderr: "pipe",
   });
-  const client = new Client({ name: "review-bridge-test", version: "0.3.0" });
+  const client = new Client({ name: "review-bridge-test", version: "0.4.0" });
   await client.connect(transport);
   return client;
 }
@@ -38,6 +46,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
 
   assert.deepEqual(author, [
     "acknowledge_codex_review_ambiguity",
+    "authorize_remote_publication",
     "finalize_local_gate",
     "finalize_publication_gate",
     "get_publication",
@@ -77,6 +86,11 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       (tool) => tool.name === "prepare_review",
     );
     assert.ok(prepare.inputSchema.properties.parent_review_id);
+    assert.deepEqual(
+      prepare.inputSchema.properties.reviewer_provider.enum,
+      ["CLAUDE_DESKTOP", "CODEX_TASK"],
+    );
+    assert.ok(prepare.inputSchema.required.includes("reviewer_provider"));
 
     const reviewerTools = await reviewer.listTools();
     const readArtifact = reviewerTools.tools.find(
@@ -90,6 +104,62 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
     ]);
   } finally {
     await Promise.all([author.close(), reviewer.close()]);
+  }
+});
+
+test("reviewer processes list only tasks bound to their provider", async (t) => {
+  const store = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-mcp-"));
+  t.after(() => fsp.rm(store, { recursive: true, force: true }));
+  const reviewsRoot = path.join(store, "reviews");
+  const tasks = [
+    {
+      id: "rb-2026-07-26T000000-000Z-c0dec0de",
+      reviewer_provider: "CODEX_TASK",
+    },
+    {
+      id: "rb-2026-07-26T000000-000Z-c1a0de01",
+      reviewer_provider: "CLAUDE_DESKTOP",
+    },
+  ];
+  for (const task of tasks) {
+    const reviewRoot = path.join(reviewsRoot, task.id);
+    await fsp.mkdir(reviewRoot, { recursive: true, mode: 0o700 });
+    await fsp.writeFile(
+      path.join(reviewRoot, "review.json"),
+      `${JSON.stringify({
+        ...task,
+        status: "WAITING_FOR_REVIEW",
+        current_round: 1,
+      })}\n`,
+      { mode: 0o600 },
+    );
+  }
+
+  const codex = await connectClient("reviewer", store, "CODEX_TASK");
+  const claude = await connectClient(
+    "reviewer",
+    store,
+    "CLAUDE_DESKTOP",
+  );
+  try {
+    const codexPending = await codex.callTool({
+      name: "list_pending_reviews",
+      arguments: {},
+    });
+    const claudePending = await claude.callTool({
+      name: "list_pending_reviews",
+      arguments: {},
+    });
+    assert.deepEqual(
+      JSON.parse(codexPending.content[0].text).map((review) => review.id),
+      [tasks[0].id],
+    );
+    assert.deepEqual(
+      JSON.parse(claudePending.content[0].text).map((review) => review.id),
+      [tasks[1].id],
+    );
+  } finally {
+    await Promise.all([codex.close(), claude.close()]);
   }
 });
 
