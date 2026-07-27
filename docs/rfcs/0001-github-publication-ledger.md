@@ -925,15 +925,32 @@ authorization proof:
 }
 ```
 
-Version 1 accepts only an authenticated GitHub App installation-permission map
-whose `administration` grant is `read` or `write`; the server normalizes those
-values to `READ` or `WRITE`. A missing permission map, another credential
-class, an inferred repository role, or successful lower-privilege calls leave
-the `404` as `UNKNOWN`. Whenever this proof is used, it is a conditionally
-mandatory `policy_sources` entry with its own endpoint, success status, and
-response-completion `collected_at`; it participates in source coverage,
-freshness, and the atomic-observation window exactly like the policy read it
-authorizes.
+Version 1 also accepts a local GitHub CLI OAuth proof when the exact
+`GET /repos/{owner}/{repo}` response reports `permissions.admin: true` and its
+`X-OAuth-Scopes` response header contains the full `repo` scope:
+
+```json
+{
+  "kind": "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
+  "endpoint": "GET /repos/{owner}/{repo}",
+  "collected_at": "2026-07-25T08:05:00.000Z",
+  "result": "SUCCESS",
+  "credential_type": "OAUTH_SCOPE_TOKEN",
+  "field": "x-oauth-scopes+permissions.admin",
+  "level": "ADMIN",
+  "scope": "repo"
+}
+```
+
+The server accepts either that exact repository-bound proof or an authenticated
+GitHub App installation-permission map whose `administration` grant is `read`
+or `write`. A missing permission map, a mismatched repository endpoint, another
+credential class, an inferred repository role without token scope, or
+successful lower-privilege calls leave the `404` as `UNKNOWN`. Whenever this
+proof is used, it is a conditionally mandatory `policy_sources` entry with its
+own endpoint, success status, and response-completion `collected_at`; it
+participates in source coverage, freshness, and the atomic-observation window
+exactly like the policy read it authorizes.
 
 `policy` is exactly `REQUIRED`, `STRICT_ONLY`, or `NONE_CONFIGURED`.
 `REQUIRED` is valid only with a non-empty `requirements` array and may have

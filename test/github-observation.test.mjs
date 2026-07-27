@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   normalizeClassicProtectionResponse,
   normalizeGithubObservation,
+  normalizeOauthAdminProofResponse,
 } from "../src/github-observation.mjs";
 
 const baseSha = "a".repeat(40);
@@ -346,6 +347,16 @@ test("GitHub observation normalization accepts an authenticated ruleset-only pol
   const raw = protectedPolicyRaw({
     rulesetChecks: [{ context: "ruleset-only", integration_id: 15368 }],
   });
+  const permissionSource = normalizeOauthAdminProofResponse(
+    {
+      status: 0,
+      stderr: "",
+      stdout:
+        'HTTP/2 200 OK\nX-OAuth-Scopes: gist, repo, workflow\n\n{"permissions":{"admin":true}}',
+    },
+    "/repos/owner/repo",
+    "2026-07-27T00:00:07.250Z",
+  );
   raw.classic_protection = normalizeClassicProtectionResponse(
     {
       status: 1,
@@ -353,11 +364,7 @@ test("GitHub observation normalization accepts an authenticated ruleset-only pol
       stdout: "",
     },
     "/repos/owner/repo/branches/main/protection",
-    {
-      value: { permissions: { admin: true } },
-      endpoint: "GET /repos/owner/repo",
-      collected_at: "2026-07-27T00:00:07.250Z",
-    },
+    permissionSource,
     "2026-07-27T00:00:07.500Z",
   );
 
@@ -374,23 +381,44 @@ test("GitHub observation normalization accepts an authenticated ruleset-only pol
     );
   assert.equal(classicSource.result, "NOT_CONFIGURED");
   assert.equal(classicSource.http_status, 404);
-  assert.equal(classicSource.permission, "ADMIN");
-  assert.equal(classicSource.permission_endpoint, "GET /repos/owner/repo");
+  const oauthSource =
+    observation.required_checks.collection.policy_sources.find(
+      (source) => source.kind === "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
+    );
+  assert.equal(oauthSource.scope, "repo");
+  assert.equal(oauthSource.endpoint, "GET /repos/owner/repo");
 
   assert.throws(
     () =>
-      normalizeClassicProtectionResponse(
+      normalizeOauthAdminProofResponse(
         {
-          status: 1,
-          stderr: "gh: Resource not accessible (HTTP 404)\n",
+          status: 0,
+          stderr: "",
           stdout: "",
         },
-        "/repos/owner/repo/branches/main/protection",
-        { value: { permissions: { admin: false } } },
+        "/repos/owner/repo",
         "2026-07-27T00:00:07.500Z",
-      ),
-    /HTTP 404/,
+    ),
+    /omitted response headers/,
   );
+  for (const repositoryResponse of [
+    'HTTP/2 200 OK\nX-OAuth-Scopes: gist, workflow\n\n{"permissions":{"admin":true}}',
+    'HTTP/2 200 OK\nX-OAuth-Scopes: repo\n\n{"permissions":{"admin":false}}',
+  ]) {
+    assert.throws(
+      () =>
+        normalizeOauthAdminProofResponse(
+          {
+            status: 0,
+            stderr: "",
+            stdout: repositoryResponse,
+          },
+          "/repos/owner/repo",
+          "2026-07-27T00:00:07.500Z",
+        ),
+      /repo-scoped admin gh credentials/,
+    );
+  }
 });
 
 test("GitHub observation normalization rejects legacy classic contexts", () => {

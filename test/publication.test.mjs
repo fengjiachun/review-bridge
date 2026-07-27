@@ -3008,7 +3008,7 @@ test("observation validation rejects incomplete provenance and unsafe check bind
       },
     },
     {
-      pattern: /classic-protection NOT_CONFIGURED requires GitHub App administration proof/,
+      pattern: /classic-protection NOT_CONFIGURED requires endpoint-specific administration proof/,
       mutate(value) {
         const branch = value.required_checks.collection.policy_sources.find(
           (source) => source.kind === "BRANCH_METADATA",
@@ -3022,6 +3022,35 @@ test("observation validation rejects incomplete provenance and unsafe check bind
           status: "COMPLETE",
           result: "NOT_CONFIGURED",
         });
+      },
+    },
+    {
+      pattern: /classic-protection NOT_CONFIGURED requires endpoint-specific administration proof/,
+      mutate(value) {
+        const policySources =
+          value.required_checks.collection.policy_sources;
+        const branch = policySources.find(
+          (source) => source.kind === "BRANCH_METADATA",
+        );
+        branch.protected = true;
+        policySources.push(
+          {
+            kind: "CLASSIC_BRANCH_PROTECTION",
+            endpoint: "GET /repos/owner/repo/branches/main/protection",
+            collected_at: policySources[0].collected_at,
+            result: "NOT_CONFIGURED",
+          },
+          {
+            kind: "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
+            endpoint: "GET /repos/other/repo",
+            collected_at: policySources[0].collected_at,
+            result: "SUCCESS",
+            credential_type: "OAUTH_SCOPE_TOKEN",
+            field: "x-oauth-scopes+permissions.admin",
+            level: "ADMIN",
+            scope: "repo",
+          },
+        );
       },
     },
     {
@@ -3096,6 +3125,68 @@ test("observation validation rejects incomplete provenance and unsafe check bind
     );
   }
   assert.equal((await getPublication(state.store, state.reviewId)).revision, 1);
+});
+
+test("ruleset-only OAuth administration proof passes observation validation", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const value = observation({
+    at: startedAt + 1_000,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  const policySources = value.required_checks.collection.policy_sources;
+  const branch = policySources.find(
+    (source) => source.kind === "BRANCH_METADATA",
+  );
+  branch.protected = true;
+  policySources.push(
+    {
+      kind: "CLASSIC_BRANCH_PROTECTION",
+      endpoint: "GET /repos/owner/repo/branches/main/protection",
+      collected_at: policySources[0].collected_at,
+      result: "NOT_CONFIGURED",
+    },
+    {
+      kind: "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
+      endpoint: "GET /repos/owner/repo",
+      collected_at: policySources[0].collected_at,
+      result: "SUCCESS",
+      credential_type: "OAUTH_SCOPE_TOKEN",
+      field: "x-oauth-scopes+permissions.admin",
+      level: "ADMIN",
+      scope: "repo",
+    },
+  );
+  value.required_checks.policy = "REQUIRED";
+  value.required_checks.requirements = [
+    {
+      context: "ruleset-only",
+      app_binding: "PINNED",
+      required_app_id: 15368,
+      binding_sources: [
+        {
+          kind: "APPLICABLE_RULES",
+          field:
+            "rules[].parameters.required_status_checks[].integration_id",
+          raw_representation: "POSITIVE_INTEGER",
+        },
+      ],
+    },
+  ];
+
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: value },
+    { clock: () => startedAt + 1_020 },
+  );
+  assert.equal(recorded.revision, 2);
 });
 
 test("publication mutations serialize independently from review mutations", async (t) => {

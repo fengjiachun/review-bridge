@@ -170,28 +170,43 @@ function normalizePolicy(publication, raw) {
   if (raw.classic_protection != null) {
     const classicEntry = object(raw.classic_protection, "classic_protection");
     const classicResult = classicEntry.result ?? "SUCCESS";
+    let permissionSource = null;
     if (classicResult === "NOT_CONFIGURED") {
+      const permission = object(
+        classicEntry.permission_source,
+        "classic_protection.permission_source",
+      );
       if (
         classicEntry.value !== null ||
         classicEntry.http_status !== 404 ||
-        classicEntry.permission !== "ADMIN"
+        permission.kind !== "GITHUB_OAUTH_REPOSITORY_PERMISSIONS" ||
+        permission.endpoint !==
+          `GET /repos/${target.owner}/${target.repo}` ||
+        permission.result !== "SUCCESS" ||
+        permission.credential_type !== "OAUTH_SCOPE_TOKEN" ||
+        permission.field !== "x-oauth-scopes+permissions.admin" ||
+        permission.level !== "ADMIN" ||
+        permission.scope !== "repo"
       ) {
         throw new Error(
-          "classic branch protection absence requires an admin-authorized HTTP 404",
+          "classic branch protection absence requires repo-scoped OAuth administration proof",
         );
       }
-      canonicalTime(
-        classicEntry.permission_collected_at,
-        "classic_protection.permission_collected_at",
+      permissionSource = completeSource(
+        permission.kind,
+        permission.endpoint,
+        canonicalTime(
+          permission.collected_at,
+          "classic_protection.permission_source.collected_at",
+        ),
+        {
+          result: permission.result,
+          credential_type: permission.credential_type,
+          field: permission.field,
+          level: permission.level,
+          scope: permission.scope,
+        },
       );
-      if (
-        typeof classicEntry.permission_endpoint !== "string" ||
-        classicEntry.permission_endpoint.length === 0
-      ) {
-        throw new Error(
-          "classic_protection.permission_endpoint must be a non-empty string",
-        );
-      }
     } else if (classicResult === "SUCCESS") {
       classic = object(classicEntry.value, "classic_protection.value");
     } else {
@@ -210,17 +225,14 @@ function normalizePolicy(publication, raw) {
           result: classicResult,
           binding_field: "required_status_checks.checks[].app_id",
           ...(classicResult === "NOT_CONFIGURED"
-            ? {
-                http_status: classicEntry.http_status,
-                permission: classicEntry.permission,
-                permission_endpoint: classicEntry.permission_endpoint,
-                permission_collected_at:
-                  classicEntry.permission_collected_at,
-              }
+            ? { http_status: classicEntry.http_status }
             : {}),
         },
       ),
     );
+    if (permissionSource != null) {
+      policySources.push(permissionSource);
+    }
   }
 
   const requirements = new Map();
@@ -731,7 +743,7 @@ function getPages(endpoint) {
 export function normalizeClassicProtectionResponse(
   result,
   endpoint,
-  permissionEntry,
+  permissionSource,
   collectedAt = new Date().toISOString(),
 ) {
   if (result.status === 0) {
@@ -743,32 +755,93 @@ export function normalizeClassicProtectionResponse(
     };
   }
   const message = result.stderr.trim() || result.stdout.trim();
-  if (
-    /\(HTTP 404\)\s*$/.test(message) &&
-    permissionEntry.value?.permissions?.admin === true
-  ) {
+  if (/\(HTTP 404\)\s*$/.test(message) && permissionSource != null) {
     return {
       value: null,
       endpoint: `GET ${endpoint}`,
       collected_at: collectedAt,
       result: "NOT_CONFIGURED",
       http_status: 404,
-      permission: "ADMIN",
-      permission_endpoint: permissionEntry.endpoint,
-      permission_collected_at: permissionEntry.collected_at,
+      permission_source: permissionSource,
     };
   }
   throw new Error(`gh api ${endpoint} failed: ${message}`);
 }
 
-function getClassicProtection(endpoint, permissionEntry) {
-  return normalizeClassicProtectionResponse(
-    spawnSync("gh", ["api", endpoint], {
+export function normalizeOauthAdminProofResponse(
+  result,
+  endpoint,
+  collectedAt = new Date().toISOString(),
+) {
+  if (result.status !== 0) {
+    throw new Error(
+      `gh api --include ${endpoint} failed: ${
+        result.stderr.trim() || result.stdout.trim()
+      }`,
+    );
+  }
+  const separator = result.stdout.match(/\r?\n\r?\n/);
+  if (separator?.index == null) {
+    throw new Error("GitHub OAuth administration proof omitted response headers");
+  }
+  const headers = result.stdout.slice(0, separator.index);
+  const body = result.stdout.slice(separator.index + separator[0].length);
+  const scopeHeader = headers
+    .split(/\r?\n/)
+    .find((line) => /^x-oauth-scopes:/i.test(line));
+  const scopes = String(scopeHeader ?? "")
+    .split(":")
+    .slice(1)
+    .join(":")
+    .split(",")
+    .map((scope) => scope.trim().toLowerCase());
+  const repository = JSON.parse(body);
+  if (
+    !/^HTTP\/\S+\s+200\b/m.test(headers) ||
+    !scopes.includes("repo") ||
+    repository.permissions?.admin !== true
+  ) {
+    throw new Error(
+      "classic branch protection 404 requires repo-scoped admin gh credentials",
+    );
+  }
+  return completeSource(
+    "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
+    `GET ${endpoint}`,
+    collectedAt,
+    {
+      result: "SUCCESS",
+      credential_type: "OAUTH_SCOPE_TOKEN",
+      field: "x-oauth-scopes+permissions.admin",
+      level: "ADMIN",
+      scope: "repo",
+    },
+  );
+}
+
+function getOauthAdminProof(endpoint) {
+  return normalizeOauthAdminProofResponse(
+    spawnSync("gh", ["api", "--include", endpoint], {
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
     }),
     endpoint,
-    permissionEntry,
+  );
+}
+
+function getClassicProtection(endpoint, repositoryEndpoint) {
+  const result = spawnSync("gh", ["api", endpoint], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const message = result.stderr.trim() || result.stdout.trim();
+  const permissionSource = /\(HTTP 404\)\s*$/.test(message)
+    ? getOauthAdminProof(repositoryEndpoint)
+    : null;
+  return normalizeClassicProtectionResponse(
+    result,
+    endpoint,
+    permissionSource,
   );
 }
 
@@ -812,7 +885,7 @@ export function collectGithubObservation(publicationInput) {
   const classicProtection = needsClassicProtection
     ? getClassicProtection(
         `${root}/branches/${branch}/protection`,
-        get(root),
+        root,
       )
     : null;
   const checkRuns = getPages(

@@ -697,7 +697,7 @@ function validateObservation(input, ledger, currentMs) {
   }
   const baselineConflict = validateCodexPartitions(codexReview, ledger);
   validatePullRequest(pullRequest);
-  validateChecks(requiredChecks, pullRequest);
+  validateChecks(requiredChecks, pullRequest, ledger.target);
   validateThreads(reviewThreads);
   observation.recorded_at = new Date(currentMs).toISOString();
   return { observation, baselineConflict };
@@ -758,7 +758,7 @@ function validatePullRequest(pullRequest) {
   }
 }
 
-function validateChecks(requiredChecks, pullRequest) {
+function validateChecks(requiredChecks, pullRequest, target) {
   assertEnum(
     requiredChecks.policy,
     ["REQUIRED", "STRICT_ONLY", "NONE_CONFIGURED"],
@@ -898,18 +898,34 @@ function validateChecks(requiredChecks, pullRequest) {
     );
   }
   if (classicSource?.result === "NOT_CONFIGURED" && branchSource.protected) {
-    const permission = policySources.find(
+    const appPermission = policySources.find(
       (source) => source.kind === "GITHUB_APP_INSTALLATION_PERMISSIONS",
     );
+    const oauthPermission = policySources.find(
+      (source) => source.kind === "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
+    );
+    const appPermissionValid =
+      appPermission?.result === "SUCCESS" &&
+      appPermission.endpoint ===
+        `GET /repos/${target.owner}/${target.repo}/installation` &&
+      appPermission.credential_type === "GITHUB_APP" &&
+      appPermission.field === "permissions.administration" &&
+      ["READ", "WRITE"].includes(appPermission.level);
+    const oauthPermissionValid =
+      oauthPermission?.result === "SUCCESS" &&
+      oauthPermission.endpoint ===
+        `GET /repos/${target.owner}/${target.repo}` &&
+      oauthPermission.credential_type === "OAUTH_SCOPE_TOKEN" &&
+      oauthPermission.field === "x-oauth-scopes+permissions.admin" &&
+      oauthPermission.level === "ADMIN" &&
+      oauthPermission.scope === "repo";
     if (
-      permission?.result !== "SUCCESS" ||
-      permission.credential_type !== "GITHUB_APP" ||
-      permission.field !== "permissions.administration" ||
-      !["READ", "WRITE"].includes(permission.level)
+      !appPermissionValid &&
+      !oauthPermissionValid
     ) {
       fail(
         "INVALID_INPUT",
-        "classic-protection NOT_CONFIGURED requires GitHub App administration proof",
+        "classic-protection NOT_CONFIGURED requires endpoint-specific administration proof",
       );
     }
   }

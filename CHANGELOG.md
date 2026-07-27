@@ -16,6 +16,9 @@
 - The packaged publication workflow uses the collector and compact summary
   instead of requiring an agent to hand-assemble observations or inspect the
   full ledger for routine state transitions.
+- Ruleset-only branches can prove an absent classic-protection endpoint with
+  repository-bound OAuth administration evidence from the authenticated
+  GitHub CLI session.
 
 ## 0.4.0 - 2026-07-27
 
