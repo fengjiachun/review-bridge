@@ -397,3 +397,60 @@ test("GitHub observation normalization distinguishes classic binding sentinels",
     /classic app_id must be positive, -1, or null/,
   );
 });
+
+test("GitHub observation normalization requires explicit check arrays", () => {
+  for (const [label, value, present] of [
+    ["omitted", undefined, false],
+    ["null", null, true],
+    ["non-array", {}, true],
+  ]) {
+    const ruleset = protectedPolicyRaw();
+    const parameters = {
+      strict_required_status_checks_policy: false,
+    };
+    if (present) {
+      parameters.required_status_checks = value;
+    }
+    ruleset.applicable_rules.pages = [
+      [{ type: "required_status_checks", parameters }],
+    ];
+    assert.throws(
+      () => normalizeGithubObservation(publication(), ruleset),
+      /rule required_status_checks must be an array/,
+      `ruleset ${label}`,
+    );
+
+    const classic = protectedPolicyRaw();
+    const requiredStatusChecks =
+      classic.classic_protection.value.required_status_checks;
+    if (present) {
+      requiredStatusChecks.checks = value;
+    } else {
+      delete requiredStatusChecks.checks;
+    }
+    assert.throws(
+      () => normalizeGithubObservation(publication(), classic),
+      /classic required status checks must be an array/,
+      `classic ${label}`,
+    );
+  }
+
+  const explicitEmpty = protectedPolicyRaw();
+  explicitEmpty.applicable_rules.pages = [
+    [
+      {
+        type: "required_status_checks",
+        parameters: {
+          strict_required_status_checks_policy: false,
+          required_status_checks: [],
+        },
+      },
+    ],
+  ];
+  const observation = normalizeGithubObservation(
+    publication(),
+    explicitEmpty,
+  );
+  assert.equal(observation.required_checks.policy, "NONE_CONFIGURED");
+  assert.deepEqual(observation.required_checks.requirements, []);
+});

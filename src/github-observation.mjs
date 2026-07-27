@@ -236,7 +236,7 @@ function normalizePolicy(publication, raw) {
       value: parameters.strict_required_status_checks_policy,
     });
     for (const check of array(
-      parameters.required_status_checks ?? [],
+      parameters.required_status_checks,
       "rule required_status_checks",
     )) {
       addRequirement(
@@ -268,8 +268,12 @@ function normalizePolicy(publication, raw) {
       field: "required_status_checks.strict",
       value: classicChecks.strict,
     });
-    if (Array.isArray(classicChecks.checks) && classicChecks.checks.length > 0) {
-      for (const check of classicChecks.checks) {
+    const checks = array(
+      classicChecks.checks,
+      "classic required status checks",
+    );
+    if (checks.length > 0) {
+      for (const check of checks) {
         addRequirement(
           check.context,
           check.app_id,
