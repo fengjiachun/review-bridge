@@ -5,7 +5,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import {
   codexRequestBody,
-  codexRequestIdPattern,
+  isCodexRequestId,
 } from "./codex-request.mjs";
 import { loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
 import {
@@ -547,7 +547,7 @@ function validateRequestFacts(items, name, { baseline = false } = {}) {
     if (
       "request_id" in item &&
       item.request_id !== null &&
-      !codexRequestIdPattern.test(item.request_id)
+      !isCodexRequestId(item.request_id)
     ) {
       fail("INVALID_INPUT", `${name}[${index}].request_id is invalid`);
     }
@@ -588,7 +588,7 @@ function validateResultFacts(
     if (
       "request_id" in item &&
       item.request_id !== null &&
-      !codexRequestIdPattern.test(item.request_id)
+      !isCodexRequestId(item.request_id)
     ) {
       fail("INVALID_INPUT", `${name}[${index}].request_id is invalid`);
     }
@@ -1180,7 +1180,7 @@ function validateCodexPartitions(codexReview, ledger) {
   for (const item of unbound) {
     if (
       adapterVersion === 2 &&
-      (!codexRequestIdPattern.test(item.request_id ?? "") ||
+      (!isCodexRequestId(item.request_id) ||
         item.body_sha256 !==
           sha256(
             Buffer.from(
@@ -1292,7 +1292,7 @@ function baselineRequestClassification(request, adapterVersion) {
   if (
     adapterVersion === 2 &&
     request.resource_kind === "ISSUE_COMMENT" &&
-    codexRequestIdPattern.test(request.request_id ?? "") &&
+    isCodexRequestId(request.request_id) &&
     request.body_sha256 ===
       sha256(Buffer.from(correlatedRequestBody(request.request_id), "utf8"))
   ) {
@@ -1598,7 +1598,7 @@ function validateStoredLedger(ledger) {
       assertSha(item.requested_head_sha, "request history requested_head_sha");
       if (
         baseline.collection.adapter_version === 2 &&
-        !codexRequestIdPattern.test(item.request_id ?? "")
+        !isCodexRequestId(item.request_id)
       ) {
         fail(
           "PUBLICATION_STORE_INVALID",
@@ -1608,7 +1608,7 @@ function validateStoredLedger(ledger) {
     } else if (
       baseline.collection.adapter_version === 2 &&
       item.classification === "UNBOUND" &&
-      (!codexRequestIdPattern.test(item.request_id ?? "") ||
+      (!isCodexRequestId(item.request_id) ||
         item.body_sha256 !==
           sha256(
             Buffer.from(
@@ -2579,7 +2579,7 @@ function replayCorrelatedResultAssociations(ledger) {
     if (closedResults.has(resultIdentity)) {
       continue;
     }
-    if (!codexRequestIdPattern.test(result.request_id ?? "")) {
+    if (!isCodexRequestId(result.request_id)) {
       replayed.set(resultIdentity, {
         association: [...recognized, ...unbound, ...baseline].some(
           (request) => correlationRequestBeforeResult(request, result),

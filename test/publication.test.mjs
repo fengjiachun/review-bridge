@@ -739,6 +739,16 @@ test("version 2 validates unbound request IDs and canonical bodies", async (t) =
       `rbreq-${"e".repeat(32)}`,
       digest("@codex review with changed guidance"),
     ],
+    [
+      "array-wrapped request ID",
+      [`rbreq-${"e".repeat(32)}`],
+      digest(correlatedRequestBody(`rbreq-${"e".repeat(32)}`)),
+    ],
+    [
+      "request ID with trailing newline",
+      `rbreq-${"e".repeat(32)}\n`,
+      digest(correlatedRequestBody(`rbreq-${"e".repeat(32)}\n`)),
+    ],
   ]) {
     await t.test(name, async (t) => {
       const state = await fixture();
@@ -773,7 +783,7 @@ test("version 2 validates unbound request IDs and canonical bodies", async (t) =
           { expectedRevision: 1, observation: current },
           { clock: () => startedAt + 1_010 },
         ),
-        /version 2 unbound request is not canonical/,
+        /request_id is invalid|version 2 unbound request is not canonical/,
       );
     });
   }

@@ -3,8 +3,16 @@ export const codexRequestIdPattern = /^rbreq-[0-9a-f]{32}$/;
 const markerPattern =
   /<!-- review-bridge-request-id: (rbreq-[0-9a-f]{32}) -->/g;
 
+export function isCodexRequestId(value) {
+  return (
+    typeof value === "string" &&
+    value.length === 38 &&
+    codexRequestIdPattern.test(value)
+  );
+}
+
 export function codexRequestBody(requestId) {
-  if (!codexRequestIdPattern.test(requestId)) {
+  if (!isCodexRequestId(requestId)) {
     throw new Error("request_id is invalid");
   }
   return [
