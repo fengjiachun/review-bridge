@@ -2,10 +2,16 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Draft |
+| Status | Implemented |
 | Authors | Review Bridge contributors |
 | Created | 2026-07-25 |
 | Target release | v0.2.0 |
+| Shipped in | v0.2.0 |
+
+This RFC describes the version-1 local-gate publication ledger as shipped in
+v0.2.0. Version 0.4 added authorization-union ledgers with schema version 2,
+which remain able to read and complete version-1 ledgers; that extension is not
+covered here.
 
 ## Summary
 
