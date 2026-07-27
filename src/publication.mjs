@@ -697,7 +697,7 @@ function validateObservation(input, ledger, currentMs) {
   }
   const baselineConflict = validateCodexPartitions(codexReview, ledger);
   validatePullRequest(pullRequest);
-  validateChecks(requiredChecks, pullRequest);
+  validateChecks(requiredChecks, pullRequest, ledger.target);
   validateThreads(reviewThreads);
   observation.recorded_at = new Date(currentMs).toISOString();
   return { observation, baselineConflict };
@@ -758,7 +758,7 @@ function validatePullRequest(pullRequest) {
   }
 }
 
-function validateChecks(requiredChecks, pullRequest) {
+function validateChecks(requiredChecks, pullRequest, target) {
   assertEnum(
     requiredChecks.policy,
     ["REQUIRED", "STRICT_ONLY", "NONE_CONFIGURED"],
@@ -897,19 +897,66 @@ function validateChecks(requiredChecks, pullRequest) {
       "classic protection may be omitted only for an unprotected branch with empty applicable rules",
     );
   }
-  if (classicSource?.result === "NOT_CONFIGURED" && branchSource.protected) {
-    const permission = policySources.find(
-      (source) => source.kind === "GITHUB_APP_INSTALLATION_PERMISSIONS",
-    );
+  if (classicSource?.result === "NOT_CONFIGURED") {
+    const encodedRepository =
+      `/repos/${encodeURIComponent(target.owner)}/` +
+      encodeURIComponent(target.repo);
+    const expectedClassicEndpoint =
+      `GET ${encodedRepository}/branches/` +
+      `${encodeURIComponent(target.base_branch)}/protection`;
     if (
-      permission?.result !== "SUCCESS" ||
-      permission.credential_type !== "GITHUB_APP" ||
-      permission.field !== "permissions.administration" ||
-      !["READ", "WRITE"].includes(permission.level)
+      classicSource.endpoint !== expectedClassicEndpoint ||
+      classicSource.http_status !== 404
     ) {
       fail(
         "INVALID_INPUT",
-        "classic-protection NOT_CONFIGURED requires GitHub App administration proof",
+        "classic-protection NOT_CONFIGURED must prove the exact target HTTP 404",
+      );
+    }
+    const appPermission = policySources.find(
+      (source) => source.kind === "GITHUB_APP_INSTALLATION_PERMISSIONS",
+    );
+    const oauthPermission = policySources.find(
+      (source) => source.kind === "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
+    );
+    const appPermissionValid =
+      appPermission?.result === "SUCCESS" &&
+      appPermission.endpoint === `GET ${encodedRepository}/installation` &&
+      appPermission.credential_type === "GITHUB_APP" &&
+      appPermission.field === "permissions.administration" &&
+      ["READ", "WRITE"].includes(appPermission.level);
+    const oauthPermissionValid =
+      oauthPermission?.result === "SUCCESS" &&
+      oauthPermission.endpoint === `GET ${encodedRepository}` &&
+      oauthPermission.credential_type === "OAUTH_SCOPE_TOKEN" &&
+      oauthPermission.field === "x-oauth-scopes+permissions.admin" &&
+      oauthPermission.level === "ADMIN" &&
+      oauthPermission.scope === "repo";
+    if (!appPermissionValid && !oauthPermissionValid) {
+      fail(
+        "INVALID_INPUT",
+        "classic-protection NOT_CONFIGURED requires endpoint-specific administration proof",
+      );
+    }
+    const classicCollectedAt = timestampMs(
+      classicSource.collected_at,
+      "CLASSIC_BRANCH_PROTECTION.collected_at",
+    );
+    const permissionFollowsClassic =
+      (appPermissionValid &&
+        timestampMs(
+          appPermission.collected_at,
+          "GITHUB_APP_INSTALLATION_PERMISSIONS.collected_at",
+        ) >= classicCollectedAt) ||
+      (oauthPermissionValid &&
+        timestampMs(
+          oauthPermission.collected_at,
+          "GITHUB_OAUTH_REPOSITORY_PERMISSIONS.collected_at",
+        ) >= classicCollectedAt);
+    if (!permissionFollowsClassic) {
+      fail(
+        "INVALID_INPUT",
+        "administration proof must not precede the classic-protection 404",
       );
     }
   }
@@ -1202,6 +1249,15 @@ function authorizationForLedger(ledger) {
         ? ledger.authorization.reviewer_provider ?? "CLAUDE_DESKTOP"
         : null,
   };
+}
+
+function requireStoredReviewId(ledger, reviewId) {
+  if (ledger.review_id !== reviewId) {
+    fail(
+      "PUBLICATION_STORE_INVALID",
+      "publication review_id does not match the requested review",
+    );
+  }
 }
 
 function validateStoredLedger(ledger) {
@@ -1807,6 +1863,7 @@ async function openAuthorizationFiles(
       "publication.json is not canonical JSON",
     );
     validateStoredLedger(ledger);
+    requireStoredReviewId(ledger, reviewId);
     const expectedAuthorization = authorizationForLedger(ledger);
     const usesLocalGate = expectedAuthorization.mode === "LOCAL_GATE";
     const unexpectedPath = usesLocalGate
@@ -1894,7 +1951,11 @@ async function closeAuthorizationFiles(authorization) {
   );
 }
 
-async function loadPublicationFile(paths, { allowMissing = false } = {}) {
+async function loadPublicationFile(
+  paths,
+  reviewId,
+  { allowMissing = false } = {},
+) {
   const opened = await readSecureFile(paths.publication, {
     maxBytes: MAX_PUBLICATION_BYTES,
     requiredMode: 0o600,
@@ -1922,6 +1983,7 @@ async function loadPublicationFile(paths, { allowMissing = false } = {}) {
       "publication.json is not canonical JSON",
     );
     validateStoredLedger(ledger);
+    requireStoredReviewId(ledger, reviewId);
     return ledger;
   } finally {
     await opened.handle.close();
@@ -2555,16 +2617,35 @@ function codexStatus(ledger) {
   return "GITHUB_REVIEW_UNKNOWN";
 }
 
+function publicationDecision(
+  status,
+  blockingReason = status === "MERGE_READY" ? null : status,
+  terminalReason = null,
+) {
+  return {
+    status,
+    blockingReason,
+    ...(terminalReason == null ? {} : { terminalReason }),
+  };
+}
+
 function derivePublication(ledger, { historyConflict = null, visibilityGrace = false } = {}) {
   if (ledger.terminal != null) {
-    return { status: ledger.terminal.status };
+    return publicationDecision(
+      ledger.terminal.status,
+      ledger.terminal.reason,
+      ledger.terminal.reason,
+    );
   }
   const observation = ledger.latest_observation;
   if (observation == null) {
-    return { status: "PR_PENDING" };
+    return publicationDecision("PR_PENDING", "NO_GITHUB_SNAPSHOT");
   }
   if (observation.pull_request.collection.status !== "COMPLETE") {
-    return { status: "EVIDENCE_INCOMPLETE" };
+    return publicationDecision(
+      "EVIDENCE_INCOMPLETE",
+      "PULL_REQUEST_COLLECTION_INCOMPLETE",
+    );
   }
   const pullRequest = observation.pull_request;
   const target = ledger.target;
@@ -2576,7 +2657,9 @@ function derivePublication(ledger, { historyConflict = null, visibilityGrace = f
     pullRequest.head_branch !== target.head_branch ||
     pullRequest.head_sha !== authorization.head_sha
   ) {
-    return { status: "INVALIDATED", terminalReason: "pull request identity or head differs from the publication authorization" };
+    const reason =
+      "pull request identity or head differs from the publication authorization";
+    return publicationDecision("INVALIDATED", reason, reason);
   }
   const pullBaseSource = pullRequest.collection.sources.find(
     (source) => source.kind === "BASE_BRANCH_METADATA",
@@ -2591,7 +2674,10 @@ function derivePublication(ledger, { historyConflict = null, visibilityGrace = f
     pullRequest.base_sha !== checksBaseSource.branch_tip_sha ||
     Date.parse(pullBaseSource.collected_at) >= Date.parse(checksBaseSource.collected_at)
   ) {
-    return { status: "EVIDENCE_INCOMPLETE" };
+    return publicationDecision(
+      "EVIDENCE_INCOMPLETE",
+      "BASE_BRANCH_EVIDENCE_INCOHERENT",
+    );
   }
   const ancestry = pullRequest.reviewed_base_current_base_comparison;
   if (
@@ -2599,16 +2685,22 @@ function derivePublication(ledger, { historyConflict = null, visibilityGrace = f
     ancestry.head_sha !== pullRequest.base_sha ||
     ancestry.status === "UNKNOWN"
   ) {
-    return { status: "EVIDENCE_INCOMPLETE" };
+    return publicationDecision(
+      "EVIDENCE_INCOMPLETE",
+      "REVIEWED_BASE_ANCESTRY_INCOMPLETE",
+    );
   }
   if (["BEHIND", "DIVERGED"].includes(ancestry.status)) {
-    return { status: "INVALIDATED", terminalReason: "target base no longer preserves the reviewed base" };
+    const reason = "target base no longer preserves the reviewed base";
+    return publicationDecision("INVALIDATED", reason, reason);
   }
   if (pullRequest.is_merged) {
-    return { status: "MERGED", terminalReason: "pull request merged" };
+    const reason = "pull request merged";
+    return publicationDecision("MERGED", reason, reason);
   }
   if (pullRequest.state === "CLOSED") {
-    return { status: "CLOSED", terminalReason: "pull request closed without merge" };
+    const reason = "pull request closed without merge";
+    return publicationDecision("CLOSED", reason, reason);
   }
   if (
     [
@@ -2623,19 +2715,22 @@ function derivePublication(ledger, { historyConflict = null, visibilityGrace = f
         result.native_review_state === "PENDING",
     )
   ) {
-    return { status: "EVIDENCE_INCOMPLETE" };
+    return publicationDecision(
+      "EVIDENCE_INCOMPLETE",
+      "GITHUB_COLLECTION_INCOMPLETE",
+    );
   }
   if (historyConflict) {
-    return { status: "INVALIDATED", terminalReason: historyConflict };
+    return publicationDecision("INVALIDATED", historyConflict, historyConflict);
   }
   if (pullRequest.is_draft) {
-    return { status: "PR_DRAFT" };
+    return publicationDecision("PR_DRAFT");
   }
   if (pullRequest.mergeable === "UNKNOWN") {
-    return { status: "PR_STATE_PENDING" };
+    return publicationDecision("PR_STATE_PENDING");
   }
   if (pullRequest.mergeable === "CONFLICTING") {
-    return { status: "PR_CONFLICTING" };
+    return publicationDecision("PR_CONFLICTING");
   }
   if (observation.required_checks.strict_policy?.required) {
     const comparison = pullRequest.base_head_comparison;
@@ -2644,24 +2739,30 @@ function derivePublication(ledger, { historyConflict = null, visibilityGrace = f
       comparison.head_sha !== pullRequest.head_sha ||
       comparison.status === "UNKNOWN"
     ) {
-      return { status: "EVIDENCE_INCOMPLETE" };
+      return publicationDecision(
+        "EVIDENCE_INCOMPLETE",
+        "STRICT_BASE_COMPARISON_INCOMPLETE",
+      );
     }
     if (["BEHIND", "DIVERGED"].includes(comparison.status)) {
-      return { status: "PR_UPDATE_REQUIRED" };
+      return publicationDecision("PR_UPDATE_REQUIRED");
     }
   }
   const checks = checkRequiredRuns(observation.required_checks);
   if (checks) {
-    return { status: checks };
+    return publicationDecision(checks);
   }
   const codex = codexStatus(ledger);
   if (codex) {
-    return { status: codex };
+    return publicationDecision(codex);
   }
   if (observation.review_threads.unresolved_count > 0) {
-    return { status: "CHANGES_REQUIRED" };
+    return publicationDecision(
+      "CHANGES_REQUIRED",
+      "UNRESOLVED_REVIEW_THREADS",
+    );
   }
-  return { status: "MERGE_READY" };
+  return publicationDecision("MERGE_READY");
 }
 
 export function derivePublicationStatus(ledger) {
@@ -3520,7 +3621,9 @@ export async function startPublication(
       reviewId,
       { verifyRepository: true },
     );
-    const existing = await loadPublicationFile(paths, { allowMissing: true });
+    const existing = await loadPublicationFile(paths, reviewId, {
+      allowMissing: true,
+    });
     if (existing != null || (await pathExists(paths.gate))) {
       fail("PUBLICATION_ALREADY_STARTED", "publication state already exists");
     }
@@ -3606,11 +3709,182 @@ export async function startPublication(
 
 export async function getPublication(storeRoot, reviewId) {
   const paths = pathsFor(storeRoot, reviewId);
-  const ledger = await loadPublicationFile(paths, { allowMissing: true });
+  const ledger = await loadPublicationFile(paths, reviewId, {
+    allowMissing: true,
+  });
   if (ledger == null) {
     fail("PUBLICATION_NOT_FOUND", `publication for ${reviewId} not found`);
   }
   return ledger;
+}
+
+function assessPublicationGate(
+  ledger,
+  publicationAuthorization,
+  sourceAuthorization,
+  gate,
+  gateParseError,
+  currentMs,
+) {
+  if (gateParseError) {
+    return { state: "MALFORMED", reviewerProvider: null, expiresAt: null };
+  }
+  if (gate == null) {
+    return { state: "ABSENT", reviewerProvider: null, expiresAt: null };
+  }
+  const derived = derivePublication(ledger);
+  const expectedExpiresAt =
+    ledger.latest_observation == null ? null : expiresAtFor(ledger);
+  const gateReviewerProvider =
+    gate.reviewer_provider ??
+    (publicationAuthorization.mode === "LOCAL_GATE"
+      ? "CLAUDE_DESKTOP"
+      : null);
+  const authorizationBindingMatches =
+    ledger.version === 1
+      ? gate.version === 1 &&
+        gate.local_gate_sha256 === publicationAuthorization.source_sha256
+      : gate.version === 2 &&
+        gate.authorization_mode === publicationAuthorization.mode &&
+        gate.authorization_sha256 === publicationAuthorization.source_sha256;
+  if (
+    !authorizationBindingMatches ||
+    gate.review_id !== ledger.review_id ||
+    gate.issuance_committed !== true ||
+    gate.status !== "MERGE_READY" ||
+    gate.publication_revision !== ledger.revision ||
+    gate.head_sha !== publicationAuthorization.head_sha ||
+    gateReviewerProvider !== publicationAuthorization.reviewer_provider ||
+    sourceAuthorization.source_sha256 !== publicationAuthorization.source_sha256 ||
+    gate.github_observation_sha256 !== canonicalDigest(ledger.latest_observation) ||
+    gate.expires_at !== expectedExpiresAt ||
+    derived.status !== "MERGE_READY"
+  ) {
+    return { state: "INVALID", reviewerProvider: null, expiresAt: null };
+  }
+  if (currentMs > Date.parse(expectedExpiresAt)) {
+    return {
+      state: "EXPIRED",
+      reviewerProvider: gateReviewerProvider,
+      expiresAt: expectedExpiresAt,
+    };
+  }
+  return {
+    state: "PRESENT",
+    reviewerProvider: gateReviewerProvider,
+    expiresAt: expectedExpiresAt,
+  };
+}
+
+function nextPublicationAction(ledger, derived, gateState, evidenceStale) {
+  if (ledger.terminal != null || ["CLOSED", "INVALIDATED", "MERGED"].includes(derived.status)) {
+    return "NONE";
+  }
+  if (evidenceStale) {
+    return "REFRESH_GITHUB_SNAPSHOT";
+  }
+  if (ledger.latest_observation == null) {
+    if (
+      ledger.codex_review_baseline.requests.length > 0 ||
+      ledger.codex_request_history.length > 0
+    ) {
+      return "RECORD_GITHUB_SNAPSHOT";
+    }
+    return "POST_AND_RECORD_CODEX_REVIEW_REQUEST";
+  }
+  switch (derived.status) {
+    case "MERGE_READY":
+      if (gateState === "PRESENT") {
+        return "VERIFY_PUBLICATION_GATE";
+      }
+      return gateState === "MALFORMED"
+        ? "REFRESH_GITHUB_SNAPSHOT"
+        : "FINALIZE_PUBLICATION_GATE";
+    case "GITHUB_REVIEW_UNKNOWN":
+      return "ACKNOWLEDGE_CODEX_REVIEW_AMBIGUITY";
+    case "GITHUB_REVIEW_NOT_REQUESTED":
+      return "POST_AND_RECORD_CODEX_REVIEW_REQUEST";
+    case "CHECKS_FAILED":
+      return "FIX_REQUIRED_CHECKS";
+    case "CHANGES_REQUIRED":
+      return "ADDRESS_GITHUB_REVIEW_FEEDBACK";
+    case "PR_DRAFT":
+      return "MARK_PULL_REQUEST_READY";
+    case "PR_CONFLICTING":
+      return "RESOLVE_PULL_REQUEST_CONFLICTS";
+    case "PR_UPDATE_REQUIRED":
+      return "START_NEW_PUBLICATION_AUTHORIZATION";
+    default:
+      return "REFRESH_GITHUB_SNAPSHOT";
+  }
+}
+
+export async function getPublicationSummary(
+  storeRoot,
+  reviewId,
+  { clock = Date.now } = {},
+) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    const currentMs = clock();
+    const authorization = await openAuthorizationFiles(paths, reviewId);
+    try {
+      const ledger = authorization.ledger;
+      const publicationAuthorization = authorizationForLedger(ledger);
+      const derived = derivePublication(ledger);
+      const gate = assessPublicationGate(
+        ledger,
+        publicationAuthorization,
+        authorization.sourceAuthorization,
+        authorization.publicationGate,
+        authorization.gateParseError,
+        currentMs,
+      );
+      const evidenceStale =
+        ledger.terminal == null &&
+        ledger.latest_observation != null &&
+        currentMs > Date.parse(expiresAtFor(ledger));
+      const blockingReason = evidenceStale
+        ? "EVIDENCE_STALE"
+        : derived.status === "MERGE_READY" && gate.state === "INVALID"
+          ? "PUBLICATION_GATE_INVALID"
+          : derived.status === "MERGE_READY" && gate.state === "MALFORMED"
+            ? "PUBLICATION_GATE_MALFORMED"
+            : derived.blockingReason;
+      const closure =
+        ledger.latest_observation == null
+          ? { requests: [], results: [] }
+          : ambiguityClosure(ledger);
+      return {
+        review_id: ledger.review_id,
+        revision: ledger.revision,
+        status: derived.status,
+        authorization_mode: publicationAuthorization.mode,
+        base_sha: publicationAuthorization.base_sha,
+        head_sha: publicationAuthorization.head_sha,
+        target: {
+          owner: ledger.target.owner,
+          repo: ledger.target.repo,
+          pr_number: ledger.target.pr_number,
+          base_branch: ledger.target.base_branch,
+          head_branch: ledger.target.head_branch,
+        },
+        latest_observed_at: ledger.latest_observation?.observed_at ?? null,
+        blocking_reason: blockingReason,
+        next_action: nextPublicationAction(
+          ledger,
+          derived,
+          gate.state,
+          evidenceStale,
+        ),
+        required_request_refs: clone(closure.requests),
+        required_ambiguous_results: clone(closure.results),
+        gate_state: gate.state,
+      };
+    } finally {
+      await closeAuthorizationFiles(authorization);
+    }
+  });
 }
 
 export async function recordCodexReviewRequest(
@@ -3640,7 +3914,7 @@ export async function recordCodexReviewRequest(
     ) {
       fail("EVIDENCE_STALE", "request comment response is not fresh");
     }
-    const ledger = await loadPublicationFile(paths);
+    const ledger = await loadPublicationFile(paths, reviewId);
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
     const originalLedger = clone(ledger);
@@ -3719,7 +3993,7 @@ export async function recordGithubSnapshot(
   return publicationLock(paths, reviewId, async () => {
     const currentMs = clock();
     assertRevision(expectedRevision);
-    const ledger = await loadPublicationFile(paths);
+    const ledger = await loadPublicationFile(paths, reviewId);
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
     const originalLedger = clone(ledger);
@@ -3848,7 +4122,7 @@ export async function acknowledgeCodexReviewAmbiguity(
     }
     assertString(operatorLabel, "operator_label", 500);
     assertString(rationale, "rationale", 20_000);
-    const ledger = await loadPublicationFile(paths);
+    const ledger = await loadPublicationFile(paths, reviewId);
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
     const originalLedger = clone(ledger);
@@ -4047,48 +4321,24 @@ export async function verifyPublicationGate(
             verifiedAt,
           );
         } else {
-          const derived = derivePublication(ledger);
-          const expectedExpiresAt =
-            ledger.latest_observation == null ? null : expiresAtFor(ledger);
-          const gateReviewerProvider =
-            gate.reviewer_provider ??
-            (publicationAuthorization.mode === "LOCAL_GATE"
-              ? "CLAUDE_DESKTOP"
-              : null);
-          const authorizationBindingMatches =
-            ledger.version === 1
-              ? gate.version === 1 &&
-                gate.local_gate_sha256 ===
-                  publicationAuthorization.source_sha256
-              : gate.version === 2 &&
-                gate.authorization_mode === publicationAuthorization.mode &&
-                gate.authorization_sha256 ===
-                  publicationAuthorization.source_sha256;
-          if (
-            !authorizationBindingMatches ||
-            gate.review_id !== reviewId ||
-            gate.issuance_committed !== true ||
-            gate.status !== "MERGE_READY" ||
-            gate.publication_revision !== ledger.revision ||
-            gate.head_sha !== publicationAuthorization.head_sha ||
-            gateReviewerProvider !==
-              publicationAuthorization.reviewer_provider ||
-            authorization.sourceAuthorization.source_sha256 !==
-              publicationAuthorization.source_sha256 ||
-            gate.github_observation_sha256 !==
-              canonicalDigest(ledger.latest_observation) ||
-            gate.expires_at !== expectedExpiresAt ||
-            derived.status !== "MERGE_READY"
-          ) {
+          const gateAssessment = assessPublicationGate(
+            ledger,
+            publicationAuthorization,
+            authorization.sourceAuthorization,
+            gate,
+            false,
+            currentMs,
+          );
+          if (gateAssessment.state === "INVALID") {
             response = verificationFailure("GATE_MISMATCH", verifiedAt);
-          } else if (currentMs > Date.parse(expectedExpiresAt)) {
+          } else if (gateAssessment.state === "EXPIRED") {
             response = verificationFailure("EVIDENCE_STALE", verifiedAt);
           } else {
             response = {
               valid: true,
               status: "MERGE_READY",
               head_sha: gate.head_sha,
-              reviewer_provider: gateReviewerProvider,
+              reviewer_provider: gateAssessment.reviewerProvider,
               publication_revision: gate.publication_revision,
               expires_at: gate.expires_at,
               verified_at: verifiedAt,

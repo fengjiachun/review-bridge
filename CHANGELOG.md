@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.1 - 2026-07-27
+
+### Added
+
+- A compact `get_publication_summary` author tool reports the current revision,
+  blocking reason, next action, gate state, and exact ambiguity
+  acknowledgement sets without returning the full ledger.
+- The packaged Codex plugin includes a read-only GitHub observation collector
+  that follows required REST and GraphQL pagination, retains policy
+  provenance, and canonicalizes GitHub timestamps before ledger submission.
+
+### Changed
+
+- The packaged publication workflow uses the collector and compact summary
+  instead of requiring an agent to hand-assemble observations or inspect the
+  full ledger for routine state transitions.
+- Ruleset-only branches can prove an absent classic-protection endpoint with
+  repository-bound OAuth administration evidence from the authenticated
+  GitHub CLI session.
+
 ## 0.4.0 - 2026-07-27
 
 ### Added

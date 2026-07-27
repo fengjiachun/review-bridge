@@ -16,6 +16,7 @@ import {
   derivePublicationStatus,
   finalizePublicationGate,
   getPublication,
+  getPublicationSummary,
   inspectPublicationAudit,
   publicationConstants,
   recordCodexReviewRequest,
@@ -377,6 +378,278 @@ async function reachReady(state, startedAt = Date.now()) {
   );
   return { ready, requestAt, observedAt };
 }
+
+test("publication summary reports compact next actions and gate state", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+
+  const created = await getPublicationSummary(state.store, state.reviewId);
+  assert.deepEqual(created, {
+    review_id: state.reviewId,
+    revision: 1,
+    status: "PR_PENDING",
+    authorization_mode: "LOCAL_GATE",
+    base_sha: state.baseSha,
+    head_sha: state.headSha,
+    target: {
+      owner: "owner",
+      repo: "repo",
+      pr_number: 7,
+      base_branch: "main",
+      head_branch: "agent/change",
+    },
+    latest_observed_at: null,
+    blocking_reason: "NO_GITHUB_SNAPSHOT",
+    next_action: "POST_AND_RECORD_CODEX_REVIEW_REQUEST",
+    required_request_refs: [],
+    required_ambiguous_results: [],
+    gate_state: "ABSENT",
+  });
+
+  const requestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(requestAt),
+      requestedHeadSha: state.headSha,
+    },
+    { clock: () => requestAt + 10 },
+  );
+  const requested = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(requested.blocking_reason, "NO_GITHUB_SNAPSHOT");
+  assert.equal(requested.next_action, "RECORD_GITHUB_SNAPSHOT");
+
+  const pendingAt = startedAt + 2_000;
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 2,
+      observation: observation({
+        at: pendingAt,
+        baseSha: state.baseSha,
+        headSha: state.headSha,
+        requestId: 100,
+        requestAt,
+        withResult: false,
+      }),
+    },
+    { clock: () => pendingAt + 10 },
+  );
+  const pending = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(pending.status, "GITHUB_REVIEW_PENDING");
+  assert.equal(pending.blocking_reason, "GITHUB_REVIEW_PENDING");
+  assert.equal(pending.next_action, "REFRESH_GITHUB_SNAPSHOT");
+
+  const readyAt = startedAt + 3_000;
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 3,
+      observation: observation({
+        at: readyAt,
+        baseSha: state.baseSha,
+        headSha: state.headSha,
+        requestId: 100,
+        requestAt,
+      }),
+    },
+    { clock: () => readyAt + 10 },
+  );
+  const ready = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(ready.status, "MERGE_READY");
+  assert.equal(ready.blocking_reason, null);
+  assert.equal(ready.next_action, "FINALIZE_PUBLICATION_GATE");
+  assert.equal(ready.gate_state, "ABSENT");
+
+  await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 4 },
+    { clock: () => readyAt + 20 },
+  );
+  const finalized = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(finalized.next_action, "VERIFY_PUBLICATION_GATE");
+  assert.equal(finalized.gate_state, "PRESENT");
+});
+
+test("publication summary refreshes expired evidence instead of prescribing gate verification", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, observedAt } = await reachReady(state);
+  const gate = await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+
+  const summary = await getPublicationSummary(
+    state.store,
+    state.reviewId,
+    { clock: () => Date.parse(gate.expires_at) + 1 },
+  );
+  assert.equal(summary.status, "MERGE_READY");
+  assert.equal(summary.blocking_reason, "EVIDENCE_STALE");
+  assert.equal(summary.next_action, "REFRESH_GITHUB_SNAPSHOT");
+  assert.equal(summary.gate_state, "EXPIRED");
+});
+
+test("publication summary refinalizes an uncommitted crash candidate", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, observedAt } = await reachReady(state);
+  const gate = await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  await atomicWriteCanonicalJson(
+    path.join(
+      state.store,
+      "reviews",
+      state.reviewId,
+      "publication-gate.json",
+    ),
+    { ...gate, issuance_committed: false },
+  );
+
+  const summary = await getPublicationSummary(
+    state.store,
+    state.reviewId,
+    { clock: () => observedAt + 30 },
+  );
+  assert.equal(summary.status, "MERGE_READY");
+  assert.equal(summary.blocking_reason, "PUBLICATION_GATE_INVALID");
+  assert.equal(summary.next_action, "FINALIZE_PUBLICATION_GATE");
+  assert.equal(summary.gate_state, "INVALID");
+});
+
+test("publication summary refreshes GitHub evidence to recover a malformed gate", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, observedAt } = await reachReady(state);
+  await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  await fsp.writeFile(
+    path.join(
+      state.store,
+      "reviews",
+      state.reviewId,
+      "publication-gate.json",
+    ),
+    "{malformed\n",
+    { mode: 0o600 },
+  );
+
+  const summary = await getPublicationSummary(
+    state.store,
+    state.reviewId,
+    { clock: () => observedAt + 30 },
+  );
+  assert.equal(summary.status, "MERGE_READY");
+  assert.equal(summary.blocking_reason, "PUBLICATION_GATE_MALFORMED");
+  assert.equal(summary.next_action, "REFRESH_GITHUB_SNAPSHOT");
+  assert.equal(summary.gate_state, "MALFORMED");
+});
+
+test("publication state rejects mutually consistent foreign review IDs", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, observedAt } = await reachReady(state);
+  await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  const directory = path.join(state.store, "reviews", state.reviewId);
+  const publicationPath = path.join(directory, "publication.json");
+  const gatePath = path.join(directory, "publication-gate.json");
+  const publication = JSON.parse(await fsp.readFile(publicationPath, "utf8"));
+  const gate = JSON.parse(await fsp.readFile(gatePath, "utf8"));
+  const foreignReviewId = `${state.reviewId.slice(0, -8)}deadbeef`;
+  await atomicWriteCanonicalJson(publicationPath, {
+    ...publication,
+    review_id: foreignReviewId,
+  });
+  await atomicWriteCanonicalJson(gatePath, {
+    ...gate,
+    review_id: foreignReviewId,
+  });
+
+  for (const operation of [
+    () => getPublication(state.store, state.reviewId),
+    () => getPublicationSummary(state.store, state.reviewId),
+    () => verifyPublicationGate(state.store, state.reviewId),
+  ]) {
+    await assert.rejects(
+      operation(),
+      (error) => error?.code === "PUBLICATION_STORE_INVALID",
+    );
+  }
+});
+
+test("publication summary exposes the exact ambiguity acknowledgement sets", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const baselineRequest = {
+    resource_id: 77,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-77",
+    event_at: iso(startedAt - 500),
+    timestamp_field: "created_at",
+    body_sha256: publicationConstants.request_body_sha256,
+    actor: { id: 123, type: "User" },
+  };
+  await start(
+    state,
+    startedAt,
+    baseline(startedAt - 100, [baselineRequest]),
+  );
+  const observedAt = startedAt + 1_000;
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      observation: observation({
+        at: observedAt,
+        baseSha: state.baseSha,
+        headSha: state.headSha,
+        requestId: null,
+        requestAt: observedAt,
+        withResult: false,
+        baselineRequests: [baselineRequest],
+      }),
+    },
+    { clock: () => observedAt + 10 },
+  );
+
+  const summary = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(summary.status, "GITHUB_REVIEW_UNKNOWN");
+  assert.equal(
+    summary.next_action,
+    "ACKNOWLEDGE_CODEX_REVIEW_AMBIGUITY",
+  );
+  assert.deepEqual(summary.required_request_refs, [
+    { resource_kind: "ISSUE_COMMENT", resource_id: 77 },
+  ]);
+  assert.deepEqual(summary.required_ambiguous_results, []);
+});
 
 test("publication ledger reaches a fresh audited merge gate", async (t) => {
   const state = await fixture();
@@ -2735,7 +3008,7 @@ test("observation validation rejects incomplete provenance and unsafe check bind
       },
     },
     {
-      pattern: /classic-protection NOT_CONFIGURED requires GitHub App administration proof/,
+      pattern: /classic-protection NOT_CONFIGURED must prove the exact target HTTP 404/,
       mutate(value) {
         const branch = value.required_checks.collection.policy_sources.find(
           (source) => source.kind === "BRANCH_METADATA",
@@ -2749,6 +3022,142 @@ test("observation validation rejects incomplete provenance and unsafe check bind
           status: "COMPLETE",
           result: "NOT_CONFIGURED",
         });
+      },
+    },
+    {
+      pattern: /classic-protection NOT_CONFIGURED requires endpoint-specific administration proof/,
+      mutate(value) {
+        const policySources =
+          value.required_checks.collection.policy_sources;
+        const branch = policySources.find(
+          (source) => source.kind === "BRANCH_METADATA",
+        );
+        branch.protected = true;
+        policySources.push(
+          {
+            kind: "CLASSIC_BRANCH_PROTECTION",
+            endpoint: "GET /repos/owner/repo/branches/main/protection",
+            collected_at: policySources[0].collected_at,
+            result: "NOT_CONFIGURED",
+            http_status: 404,
+          },
+          {
+            kind: "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
+            endpoint: "GET /repos/other/repo",
+            collected_at: policySources[0].collected_at,
+            result: "SUCCESS",
+            credential_type: "OAUTH_SCOPE_TOKEN",
+            field: "x-oauth-scopes+permissions.admin",
+            level: "ADMIN",
+            scope: "repo",
+          },
+        );
+      },
+    },
+    ...[
+      {
+        endpoint: "GET /repos/other/repo/branches/main/protection",
+        httpStatus: 404,
+      },
+      {
+        endpoint: "GET /repos/owner/repo/branches/main/protection",
+        httpStatus: 403,
+      },
+      {
+        endpoint: "GET /repos/owner/repo/branches/main/protection",
+        httpStatus: undefined,
+      },
+    ].map(({ endpoint, httpStatus }) => ({
+      pattern: /classic-protection NOT_CONFIGURED must prove the exact target HTTP 404/,
+      mutate(value) {
+        const policySources =
+          value.required_checks.collection.policy_sources;
+        policySources.find(
+          (source) => source.kind === "BRANCH_METADATA",
+        ).protected = true;
+        policySources.push(
+          {
+            kind: "CLASSIC_BRANCH_PROTECTION",
+            endpoint,
+            collected_at: policySources[0].collected_at,
+            result: "NOT_CONFIGURED",
+            ...(httpStatus === undefined
+              ? {}
+              : { http_status: httpStatus }),
+          },
+          {
+            kind: "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
+            endpoint: "GET /repos/owner/repo",
+            collected_at: policySources[0].collected_at,
+            result: "SUCCESS",
+            credential_type: "OAUTH_SCOPE_TOKEN",
+            field: "x-oauth-scopes+permissions.admin",
+            level: "ADMIN",
+            scope: "repo",
+          },
+        );
+      },
+    })),
+    {
+      pattern: /administration proof must not precede the classic-protection 404/,
+      mutate(value) {
+        const policySources =
+          value.required_checks.collection.policy_sources;
+        policySources.find(
+          (source) => source.kind === "BRANCH_METADATA",
+        ).protected = true;
+        const classicAt = policySources[0].collected_at;
+        policySources.push(
+          {
+            kind: "CLASSIC_BRANCH_PROTECTION",
+            endpoint: "GET /repos/owner/repo/branches/main/protection",
+            collected_at: classicAt,
+            result: "NOT_CONFIGURED",
+            http_status: 404,
+          },
+          {
+            kind: "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
+            endpoint: "GET /repos/owner/repo",
+            collected_at: new Date(
+              Date.parse(classicAt) - 1,
+            ).toISOString(),
+            result: "SUCCESS",
+            credential_type: "OAUTH_SCOPE_TOKEN",
+            field: "x-oauth-scopes+permissions.admin",
+            level: "ADMIN",
+            scope: "repo",
+          },
+        );
+      },
+    },
+    {
+      pattern: /classic-protection NOT_CONFIGURED requires endpoint-specific administration proof/,
+      mutate(value) {
+        const policySources =
+          value.required_checks.collection.policy_sources;
+        policySources.push({
+          kind: "CLASSIC_BRANCH_PROTECTION",
+          endpoint: "GET /repos/owner/repo/branches/main/protection",
+          collected_at: policySources[0].collected_at,
+          result: "NOT_CONFIGURED",
+          http_status: 404,
+        });
+        value.required_checks.policy = "REQUIRED";
+        value.required_checks.requirements = [
+          {
+            context: "ruleset-only",
+            app_binding: "PINNED",
+            required_app_id: 15368,
+            binding_sources: [
+              {
+                kind: "APPLICABLE_RULES",
+                field:
+                  "rules[].parameters.required_status_checks[].integration_id",
+                raw_representation: "POSITIVE_INTEGER",
+              },
+            ],
+          },
+        ];
       },
     },
     {
@@ -2823,6 +3232,148 @@ test("observation validation rejects incomplete provenance and unsafe check bind
     );
   }
   assert.equal((await getPublication(state.store, state.reviewId)).revision, 1);
+});
+
+test("ruleset-only OAuth administration proof passes observation validation", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const value = observation({
+    at: startedAt + 1_000,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  const policySources = value.required_checks.collection.policy_sources;
+  const branch = policySources.find(
+    (source) => source.kind === "BRANCH_METADATA",
+  );
+  branch.protected = true;
+  policySources.push(
+    {
+      kind: "CLASSIC_BRANCH_PROTECTION",
+      endpoint: "GET /repos/owner/repo/branches/main/protection",
+      collected_at: policySources[0].collected_at,
+      result: "NOT_CONFIGURED",
+      http_status: 404,
+    },
+    {
+      kind: "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
+      endpoint: "GET /repos/owner/repo",
+      collected_at: new Date(
+        Date.parse(policySources[0].collected_at) + 1,
+      ).toISOString(),
+      result: "SUCCESS",
+      credential_type: "OAUTH_SCOPE_TOKEN",
+      field: "x-oauth-scopes+permissions.admin",
+      level: "ADMIN",
+      scope: "repo",
+    },
+  );
+  value.required_checks.policy = "REQUIRED";
+  value.required_checks.requirements = [
+    {
+      context: "ruleset-only",
+      app_binding: "PINNED",
+      required_app_id: 15368,
+      binding_sources: [
+        {
+          kind: "APPLICABLE_RULES",
+          field:
+            "rules[].parameters.required_status_checks[].integration_id",
+          raw_representation: "POSITIVE_INTEGER",
+        },
+      ],
+    },
+  ];
+
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: value },
+    { clock: () => startedAt + 1_020 },
+  );
+  assert.equal(recorded.revision, 2);
+});
+
+test("ruleset-only GitHub App administration proof enforces response order", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const value = observation({
+    at: startedAt + 1_000,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  const policySources = value.required_checks.collection.policy_sources;
+  policySources.find(
+    (source) => source.kind === "BRANCH_METADATA",
+  ).protected = true;
+  const classicAt = policySources[0].collected_at;
+  const appPermission = {
+    kind: "GITHUB_APP_INSTALLATION_PERMISSIONS",
+    endpoint: "GET /repos/owner/repo/installation",
+    collected_at: new Date(Date.parse(classicAt) - 1).toISOString(),
+    result: "SUCCESS",
+    credential_type: "GITHUB_APP",
+    field: "permissions.administration",
+    level: "READ",
+  };
+  policySources.push(
+    {
+      kind: "CLASSIC_BRANCH_PROTECTION",
+      endpoint: "GET /repos/owner/repo/branches/main/protection",
+      collected_at: classicAt,
+      result: "NOT_CONFIGURED",
+      http_status: 404,
+    },
+    appPermission,
+  );
+  value.required_checks.policy = "REQUIRED";
+  value.required_checks.requirements = [
+    {
+      context: "ruleset-only",
+      app_binding: "PINNED",
+      required_app_id: 15368,
+      binding_sources: [
+        {
+          kind: "APPLICABLE_RULES",
+          field:
+            "rules[].parameters.required_status_checks[].integration_id",
+          raw_representation: "POSITIVE_INTEGER",
+        },
+      ],
+    },
+  ];
+
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 1, observation: value },
+      { clock: () => startedAt + 1_020 },
+    ),
+    /administration proof must not precede the classic-protection 404/,
+  );
+  assert.equal((await getPublication(state.store, state.reviewId)).revision, 1);
+
+  appPermission.collected_at = new Date(
+    Date.parse(classicAt) + 1,
+  ).toISOString();
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: value },
+    { clock: () => startedAt + 1_030 },
+  );
+  assert.equal(recorded.revision, 2);
 });
 
 test("publication mutations serialize independently from review mutations", async (t) => {
