@@ -436,6 +436,10 @@ test("publication summary reports compact next actions and gate state", async (t
     latest_observed_at: null,
     blocking_reason: "NO_GITHUB_SNAPSHOT",
     next_action: "POST_AND_RECORD_CODEX_REVIEW_REQUEST",
+    codex_review_request: {
+      body: "@codex review",
+      body_sha256: publicationConstants.request_body_sha256,
+    },
     required_request_refs: [],
     required_ambiguous_results: [],
     gate_state: "ABSENT",
@@ -724,6 +728,171 @@ test("version 2 rejects a forged correlated baseline classification", async (t) 
     getPublication(state.store, state.reviewId),
     /stored baseline request classification changed/,
   );
+});
+
+test("version 2 acknowledgements keep closed request IDs out of replay", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt, baselineV2(startedAt - 100));
+  const firstSummary = await getPublicationSummary(state.store, state.reviewId);
+  const firstRequestId = firstSummary.codex_review_request.request_id;
+  const firstRequestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(firstRequestAt),
+      requestedHeadSha: state.headSha,
+      requestId: firstRequestId,
+    },
+    { clock: () => firstRequestAt + 10 },
+  );
+  const unboundRequestId = `rbreq-${"e".repeat(32)}`;
+  const unboundRequest = {
+    resource_id: 150,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-150",
+    event_at: iso(firstRequestAt + 50),
+    timestamp_field: "created_at",
+    body_sha256: digest(correlatedRequestBody(unboundRequestId)),
+    request_id: unboundRequestId,
+    reason: "MISSING_POST_BINDING",
+  };
+  const ambiguous = observationV2(
+    {
+      at: startedAt + 2_000,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: 100,
+      requestAt: firstRequestAt,
+      withResult: false,
+    },
+    firstRequestId,
+  );
+  ambiguous.codex_review.unbound_requests.push(unboundRequest);
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 2,
+      observation: ambiguous,
+    },
+    { clock: () => startedAt + 2_010 },
+  );
+  const unknown = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(unknown.required_request_refs.length, 2);
+  await acknowledgeCodexReviewAmbiguity(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 3,
+      headSha: state.headSha,
+      requestRefs: unknown.required_request_refs,
+      ambiguousResults: [],
+      acknowledgement: "NO_FURTHER_RESULTS_EXPECTED",
+      operatorLabel: "maintainer",
+      rationale: "Close the legacy correlation epoch.",
+    },
+    { clock: () => startedAt + 2_020 },
+  );
+
+  const delayedResult = (resultId, eventAt) => ({
+    result_id: resultId,
+    resource_kind: "ISSUE_COMMENT",
+    native_review_state: null,
+    url: `https://github.com/owner/repo/issues/7#issuecomment-${resultId}`,
+    event_at: iso(eventAt),
+    timestamp_field: "created_at",
+    actor: {
+      id: 99,
+      type: "Bot",
+      login: "chatgpt-codex-connector[bot]",
+    },
+    request_ref: null,
+    association: "UNSOLICITED",
+    reviewed_head_sha: null,
+    commit_binding: {
+      source: "CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD",
+      field: "body.reviewed_commit",
+      prefix: state.headSha.slice(0, 10),
+    },
+    attached_review_comments: [],
+    format: "UNKNOWN",
+    verdict: "UNKNOWN",
+    body_sha256: digest(`delayed result ${resultId}`),
+    request_id: firstRequestId,
+  });
+  const delayedBeforeReplacement = observationV2(
+    {
+      at: startedAt + 3_000,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: 100,
+      requestAt: firstRequestAt,
+      withResult: false,
+    },
+    firstRequestId,
+  );
+  delayedBeforeReplacement.codex_review.unbound_requests.push(unboundRequest);
+  delayedBeforeReplacement.codex_review.results.push(
+    delayedResult(101, startedAt + 2_500),
+  );
+  const accepted = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 4, observation: delayedBeforeReplacement },
+    { clock: () => startedAt + 3_010 },
+  );
+  assert.equal(accepted.status, "GITHUB_REVIEW_NOT_REQUESTED");
+
+  const replacementSummary = await getPublicationSummary(
+    state.store,
+    state.reviewId,
+  );
+  const replacementId = replacementSummary.codex_review_request.request_id;
+  const replacementAt = startedAt + 4_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 5,
+      commentId: 200,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-200",
+      createdAt: iso(replacementAt),
+      requestedHeadSha: state.headSha,
+      requestId: replacementId,
+    },
+    { clock: () => replacementAt + 10 },
+  );
+  const replacement = observationV2(
+    {
+      at: startedAt + 5_000,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: 200,
+      requestAt: replacementAt,
+    },
+    replacementId,
+  );
+  replacement.codex_review.unbound_requests.push(unboundRequest);
+  replacement.codex_review.requests.unshift(
+    delayedBeforeReplacement.codex_review.requests[0],
+  );
+  replacement.codex_review.results.unshift(
+    delayedResult(101, startedAt + 2_500),
+    delayedResult(102, replacementAt + 50),
+  );
+  const ready = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 6, observation: replacement },
+    { clock: () => startedAt + 5_010 },
+  );
+  assert.equal(ready.status, "MERGE_READY");
 });
 
 test("publication summary refreshes expired evidence instead of prescribing gate verification", async (t) => {
@@ -1236,6 +1405,14 @@ test("version 1 local ledgers remain readable and completable", async (t) => {
   delete legacy.authorization;
   await atomicWriteCanonicalJson(ledgerPath, legacy);
   assert.equal((await getPublication(state.store, state.reviewId)).version, 1);
+  assert.deepEqual(
+    (await getPublicationSummary(state.store, state.reviewId))
+      .codex_review_request,
+    {
+      body: "@codex review",
+      body_sha256: publicationConstants.request_body_sha256,
+    },
+  );
 
   const requestAt = startedAt + 1_000;
   await recordCodexReviewRequest(

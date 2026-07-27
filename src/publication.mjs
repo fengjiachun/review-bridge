@@ -147,6 +147,15 @@ function correlatedRequest(ledger) {
   };
 }
 
+function publicationRequest(ledger) {
+  return ledger.codex_review_baseline.collection.adapter_version === 2
+    ? correlatedRequest(ledger)
+    : {
+        body: BODY_REQUEST,
+        body_sha256: REQUEST_BODY_SHA256,
+      };
+}
+
 function pathsFor(storeRoot, reviewId) {
   const directory = publicationDirectory(storeRoot, reviewId);
   return {
@@ -2398,7 +2407,9 @@ function replayResultAssociations(ledger) {
   const closedRequests = closedRequestIdentities(ledger);
   const closedResults = closedResultIdentities(ledger);
   const recognized = ledger.codex_request_history.filter(
-    (item) => item.classification === "RECOGNIZED",
+    (item) =>
+      item.classification === "RECOGNIZED" &&
+      !closedRequests.has(`${item.resource_kind}:${item.resource_id}`),
   );
   const unbound = ledger.codex_request_history.filter(
     (item) =>
@@ -2512,7 +2523,9 @@ function replayCorrelatedResultAssociations(ledger) {
   const closedRequests = closedRequestIdentities(ledger);
   const closedResults = closedResultIdentities(ledger);
   const recognized = ledger.codex_request_history.filter(
-    (item) => item.classification === "RECOGNIZED",
+    (item) =>
+      item.classification === "RECOGNIZED" &&
+      !closedRequests.has(`${item.resource_kind}:${item.resource_id}`),
   );
   const unbound = ledger.codex_request_history.filter(
     (item) =>
@@ -4141,9 +4154,8 @@ export async function getPublicationSummary(
         latest_observed_at: ledger.latest_observation?.observed_at ?? null,
         blocking_reason: blockingReason,
         next_action: nextAction,
-        ...(ledger.codex_review_baseline.collection.adapter_version === 2 &&
-        nextAction === "POST_AND_RECORD_CODEX_REVIEW_REQUEST"
-          ? { codex_review_request: correlatedRequest(ledger) }
+        ...(nextAction === "POST_AND_RECORD_CODEX_REVIEW_REQUEST"
+          ? { codex_review_request: publicationRequest(ledger) }
           : {}),
         required_request_refs: clone(closure.requests),
         required_ambiguous_results: clone(closure.results),

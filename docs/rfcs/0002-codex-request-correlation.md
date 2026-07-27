@@ -76,7 +76,8 @@ version-2 requests do not accumulate that cost.
 ## Compatibility
 
 The server and adapter continue to read and complete adapter-version-1
-publication ledgers. A snapshot must use the same adapter version as its
+publication ledgers. Their publication summary returns the legacy exact request
+body without a request ID. A snapshot must use the same adapter version as its
 publication baseline. New workflows start with adapter version 2.
 
 ## Security boundary

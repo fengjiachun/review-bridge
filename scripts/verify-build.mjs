@@ -311,7 +311,11 @@ assert.match(
   workflowSkill,
   /Post exactly one issue\s+comment whose entire body equals the returned `codex_review_request\.body`/,
 );
-assert.match(workflowSkill, /returned\s+`codex_review_request\.request_id`/);
+assert.match(
+  workflowSkill,
+  /when present, the returned\s+`codex_review_request\.request_id`/,
+);
+assert.match(workflowSkill, /legacy exact body without a request ID/);
 assert.match(workflowSkill, /Never infer correlation from timestamps/);
 assert.match(workflowSkill, /Set `adapter_version: 2` in the normalizer\s+input/);
 assert.match(

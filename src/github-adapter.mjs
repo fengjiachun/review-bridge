@@ -596,7 +596,13 @@ export function adaptCodexEvidence({
           object.user?.type === expectedActor.type &&
           !isAttachedExpectedComment
         ) {
-          const adapted = makeResult(kind, object, reviewComments, expectedActor);
+          const adapted = makeResult(
+            kind,
+            object,
+            reviewComments,
+            expectedActor,
+            adapterVersion,
+          );
           const {
             association: _association,
             request_ref: _requestRef,

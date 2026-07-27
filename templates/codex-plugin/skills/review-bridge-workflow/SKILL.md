@@ -172,8 +172,10 @@ For either mode:
    comment whose entire body equals the returned `codex_review_request.body`;
    do not edit, reconstruct, or shorten it. Then immediately call
    `record_codex_review_request` with the post response's comment ID, URL,
-   `created_at`, the freshly read full head, and the returned
-   `codex_review_request.request_id`. Never post an exact or
+   `created_at`, the freshly read full head, and, when present, the returned
+   `codex_review_request.request_id`. Adapter-version-1 ledgers return the
+   legacy exact body without a request ID; omit that field when resuming them.
+   Never post an exact or
    trigger-shaped Codex review request manually or outside this sequence. A
    crash between post and binding leaves an unbound request and must fail
    closed.
@@ -191,8 +193,10 @@ For either mode:
    acknowledgement sets, gate state, and `next_action`. Use the full
    `get_publication` result again only as the next collector input or for an
    audit that needs the complete ledger.
-7. Treat an eyes reaction, silence, missing pagination, a result that omits or
-   changes the exact Review Bridge request ID, an unsupported
+7. For adapter version 2, treat a result that omits or changes the exact Review
+   Bridge request ID as non-passing. Adapter-version-1 ledgers retain the
+   legacy exact-body and single-open-request rules. In either version, treat an
+   eyes reaction, silence, missing pagination, an unsupported
    standalone review comment, an unbound request, an ambiguous result, or an
    unknown response shape as non-passing. A clean issue comment must echo the
    current request ID, use the recognized clean format, and carry the commit

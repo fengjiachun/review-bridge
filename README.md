@@ -285,7 +285,8 @@ Use `get_publication_summary` for the compact current revision,
 not access GitHub or return the full ledger. When `next_action` is
 `POST_AND_RECORD_CODEX_REVIEW_REQUEST`, post the returned
 `codex_review_request.body` unchanged and bind the post with its
-`codex_review_request.request_id`. For a fresh snapshot, pass the
+`codex_review_request.request_id` when present. Adapter-version-1 ledgers
+return the legacy exact body without an ID. For a fresh snapshot, pass the
 full JSON returned by `get_publication` to the packaged read-only collector:
 
 ```bash

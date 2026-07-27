@@ -335,6 +335,17 @@ test("generic expected-actor responses remain UNKNOWN instead of disappearing", 
   assert.equal(result.results[0].verdict, "UNKNOWN");
 });
 
+test("version 2 baseline keeps request_id on generic expected-actor results", async () => {
+  const input = await fixture("codex-findings");
+  input.adapter_version = 2;
+  input.mode = "BASELINE";
+  input.pull_request_reviews[0].body = "Review completed without a recognized format.";
+  input.pull_request_review_comments = [];
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.candidate_results.length, 1);
+  assert.equal(result.candidate_results[0].request_id, null);
+});
+
 test("clean comment recognition rejects marker and actor lookalikes", async () => {
   const input = await fixture("codex-clean");
   const cleanBody = input.issue_comments[1].body;

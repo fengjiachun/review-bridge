@@ -346,7 +346,7 @@ if (role === "author") {
     {
       title: "Bind posted Codex review request",
       description:
-        "Immediately bind the exact summary-provided Codex review request ID and posted issue-comment response to the freshly verified pull-request head, then clear any pre-post snapshot.",
+        "Immediately bind the exact summary-provided Codex review body, its request ID when present, and the posted issue-comment response to the freshly verified pull-request head, then clear any pre-post snapshot.",
       inputSchema: {
         review_id: z.string(),
         expected_revision: z.number().int().positive(),
