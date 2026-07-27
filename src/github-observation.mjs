@@ -70,8 +70,16 @@ function compareStatus(value) {
     : "UNKNOWN";
 }
 
-function binding(value, present, source) {
+function binding(
+  value,
+  present,
+  source,
+  { allowAbsent, allowNegativeOne, label },
+) {
   if (!present) {
+    if (!allowAbsent) {
+      throw new Error(`${label} must be positive, -1, or null`);
+    }
     return {
       appBinding: "EXPLICITLY_UNBOUND",
       requiredAppId: null,
@@ -86,6 +94,9 @@ function binding(value, present, source) {
     };
   }
   if (value === -1) {
+    if (!allowNegativeOne) {
+      throw new Error(`${label} must be positive, null, or absent`);
+    }
     return {
       appBinding: "EXPLICITLY_UNBOUND",
       requiredAppId: null,
@@ -99,7 +110,11 @@ function binding(value, present, source) {
       source: { ...source, raw_representation: "POSITIVE_INTEGER" },
     };
   }
-  throw new Error("required-check App binding must be positive, -1, null, or absent");
+  throw new Error(
+    allowNegativeOne
+      ? `${label} must be positive, -1, or null`
+      : `${label} must be positive, null, or absent`,
+  );
 }
 
 function normalizePolicy(publication, raw) {
@@ -174,11 +189,22 @@ function normalizePolicy(publication, raw) {
 
   const requirements = new Map();
   const strictSources = [];
-  const addRequirement = (context, appValue, present, source) => {
+  const addRequirement = (
+    context,
+    appValue,
+    present,
+    source,
+    bindingPolicy,
+  ) => {
     if (typeof context !== "string" || context.length === 0) {
       throw new Error("required-check context must be a non-empty string");
     }
-    const normalized = binding(appValue, present, source);
+    const normalized = binding(
+      appValue,
+      present,
+      source,
+      bindingPolicy,
+    );
     const key = `${context}:${normalized.appBinding}:${normalized.requiredAppId}`;
     const existing = requirements.get(key);
     if (existing) {
@@ -222,6 +248,11 @@ function normalizePolicy(publication, raw) {
           field:
             "rules[].parameters.required_status_checks[].integration_id",
         },
+        {
+          allowAbsent: true,
+          allowNegativeOne: false,
+          label: "ruleset integration_id",
+        },
       );
     }
   }
@@ -247,17 +278,22 @@ function normalizePolicy(publication, raw) {
             kind: "CLASSIC_BRANCH_PROTECTION",
             field: "required_status_checks.checks[].app_id",
           },
+          {
+            allowAbsent: false,
+            allowNegativeOne: true,
+            label: "classic app_id",
+          },
         );
       }
     } else {
-      for (const context of array(
+      const contexts = array(
         classicChecks.contexts ?? [],
         "classic required status contexts",
-      )) {
-        addRequirement(context, null, false, {
-          kind: "CLASSIC_BRANCH_PROTECTION",
-          field: "required_status_checks.contexts[]",
-        });
+      );
+      if (contexts.length > 0) {
+        throw new Error(
+          "legacy classic required status contexts have unknown App bindings",
+        );
       }
     }
   }

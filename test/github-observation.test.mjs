@@ -175,6 +175,39 @@ function rawCollection() {
   };
 }
 
+function protectedPolicyRaw({
+  rulesetChecks = [],
+  classicChecks = [],
+  legacyContexts = [],
+} = {}) {
+  const raw = rawCollection();
+  raw.policy_base_branch.value.protected = true;
+  if (rulesetChecks.length > 0) {
+    raw.applicable_rules.pages = [
+      [
+        {
+          type: "required_status_checks",
+          parameters: {
+            strict_required_status_checks_policy: false,
+            required_status_checks: rulesetChecks,
+          },
+        },
+      ],
+    ];
+  }
+  raw.classic_protection = collected(
+    {
+      required_status_checks: {
+        strict: false,
+        checks: classicChecks,
+        contexts: legacyContexts,
+      },
+    },
+    "2026-07-27T00:00:07.500Z",
+  );
+  return raw;
+}
+
 test("GitHub observation normalization canonicalizes times and pagination", () => {
   const observation = normalizeGithubObservation(
     publication(),
@@ -265,33 +298,102 @@ test("GitHub observation normalization retains ruleset and classic check binding
   );
 });
 
-test("GitHub observation normalization retains legacy classic contexts", () => {
-  const raw = rawCollection();
-  raw.policy_base_branch.value.protected = true;
-  raw.classic_protection = collected(
-    {
-      required_status_checks: {
-        strict: false,
-        checks: [],
-        contexts: ["legacy-ci"],
+test("GitHub observation normalization rejects legacy classic contexts", () => {
+  assert.throws(
+    () =>
+      normalizeGithubObservation(
+        publication(),
+        protectedPolicyRaw({ legacyContexts: ["legacy-ci"] }),
+      ),
+    /legacy classic required status contexts have unknown App bindings/,
+  );
+});
+
+test("GitHub observation normalization distinguishes ruleset binding sentinels", () => {
+  for (const [label, integrationId, present, rawRepresentation] of [
+    ["absent", undefined, false, "ABSENT"],
+    ["null", null, true, "NULL"],
+  ]) {
+    const check = { context: `ruleset-${label}` };
+    if (present) {
+      check.integration_id = integrationId;
+    }
+
+    const [requirement] = normalizeGithubObservation(
+      publication(),
+      protectedPolicyRaw({ rulesetChecks: [check] }),
+    ).required_checks.requirements;
+    assert.equal(requirement.app_binding, "EXPLICITLY_UNBOUND");
+    assert.equal(requirement.required_app_id, null);
+    assert.equal(
+      requirement.binding_sources[0].raw_representation,
+      rawRepresentation,
+    );
+  }
+
+  assert.throws(
+    () =>
+      normalizeGithubObservation(
+        publication(),
+        protectedPolicyRaw({
+          rulesetChecks: [
+            { context: "ruleset-negative-one", integration_id: -1 },
+          ],
+        }),
+      ),
+    /ruleset integration_id must be positive, null, or absent/,
+  );
+});
+
+test("GitHub observation normalization distinguishes classic binding sentinels", () => {
+  const requirements = normalizeGithubObservation(
+    publication(),
+    protectedPolicyRaw({
+      classicChecks: [
+        { context: "classic-positive", app_id: 15368 },
+        { context: "classic-null", app_id: null },
+        { context: "classic-negative-one", app_id: -1 },
+      ],
+    }),
+  ).required_checks.requirements;
+  assert.deepEqual(
+    requirements.map((requirement) => ({
+      context: requirement.context,
+      app_binding: requirement.app_binding,
+      required_app_id: requirement.required_app_id,
+      raw_representation:
+        requirement.binding_sources[0].raw_representation,
+    })),
+    [
+      {
+        context: "classic-negative-one",
+        app_binding: "EXPLICITLY_UNBOUND",
+        required_app_id: null,
+        raw_representation: "NEGATIVE_ONE",
       },
-    },
-    "2026-07-27T00:00:07.500Z",
+      {
+        context: "classic-null",
+        app_binding: "EXPLICITLY_UNBOUND",
+        required_app_id: null,
+        raw_representation: "NULL",
+      },
+      {
+        context: "classic-positive",
+        app_binding: "PINNED",
+        required_app_id: 15368,
+        raw_representation: "POSITIVE_INTEGER",
+      },
+    ],
   );
 
-  const observation = normalizeGithubObservation(publication(), raw);
-  assert.deepEqual(observation.required_checks.requirements, [
-    {
-      context: "legacy-ci",
-      app_binding: "EXPLICITLY_UNBOUND",
-      required_app_id: null,
-      binding_sources: [
-        {
-          kind: "CLASSIC_BRANCH_PROTECTION",
-          field: "required_status_checks.contexts[]",
-          raw_representation: "ABSENT",
-        },
-      ],
-    },
-  ]);
+  assert.throws(
+    () =>
+      normalizeGithubObservation(
+        publication(),
+        protectedPolicyRaw({
+          classicChecks: [{ context: "classic-missing" }],
+        }),
+      ),
+    /classic app_id must be positive, -1, or null/,
+  );
 });
