@@ -346,7 +346,7 @@ if (role === "author") {
     {
       title: "Bind posted Codex review request",
       description:
-        "Immediately bind the exact posted @codex review issue-comment response to the freshly verified pull-request head and clear any pre-post snapshot.",
+        "Immediately bind the exact summary-provided Codex review request ID and posted issue-comment response to the freshly verified pull-request head, then clear any pre-post snapshot.",
       inputSchema: {
         review_id: z.string(),
         expected_revision: z.number().int().positive(),
@@ -354,6 +354,7 @@ if (role === "author") {
         url: z.string(),
         created_at: z.string(),
         requested_head_sha: z.string(),
+        request_id: z.string().optional(),
       },
     },
     (input) =>
@@ -363,6 +364,7 @@ if (role === "author") {
         url: input.url,
         createdAt: input.created_at,
         requestedHeadSha: input.requested_head_sha,
+        requestId: input.request_id ?? null,
       }),
   );
 

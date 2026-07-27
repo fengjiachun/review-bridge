@@ -139,7 +139,10 @@ For either mode:
 3. Immediately before `start_publication`, collect every page of the three
    preexisting Codex feeds: issue comments, formal pull-request reviews, and
    pull-request review comments. Supply their independent completion times and
-   pagination proof as the complete version-1 baseline. Use `EXPLICIT_ONLY`
+   pagination proof as the complete version-2 baseline. Version 2 recognizes
+   Review Bridge request IDs while preserving legacy request shapes as
+   fail-closed baseline evidence. Set `adapter_version: 2` in the normalizer
+   input. Use `EXPLICIT_ONLY`
    only when automatic Codex review is disabled and this workflow is the sole
    trigger actor. `AUTOMATIC_QUIESCENCE_ACKNOWLEDGED` requires direct human
    approval, an operator label, and a rationale immediately before this fresh
@@ -160,12 +163,17 @@ For either mode:
    `required_request_refs` and `required_ambiguous_results` sets to the human,
    and call `acknowledge_codex_review_ambiguity` only after direct approval of
    both exact sets and the `NO_FURTHER_RESULTS_EXPECTED` risk statement. If the
-   baseline contains no request, continue without an acknowledgement.
+   baseline contains no open legacy or unsupported request, continue without
+   an acknowledgement. A version-2 `BASELINE_CORRELATED` request is already
+   isolated by its request ID and does not require closure.
 5. Refresh the PR head and require it to equal the publication authorization
-   head. Post exactly one issue comment whose entire body is `@codex review`,
-   then immediately call
+   head. Call `get_publication_summary` and require
+   `next_action: POST_AND_RECORD_CODEX_REVIEW_REQUEST`. Post exactly one issue
+   comment whose entire body equals the returned `codex_review_request.body`;
+   do not edit, reconstruct, or shorten it. Then immediately call
    `record_codex_review_request` with the post response's comment ID, URL,
-   `created_at`, and the freshly read full head. Never post an exact or
+   `created_at`, the freshly read full head, and the returned
+   `codex_review_request.request_id`. Never post an exact or
    trigger-shaped Codex review request manually or outside this sequence. A
    crash between post and binding leaves an unbound request and must fail
    closed.
@@ -183,12 +191,14 @@ For either mode:
    acknowledgement sets, gate state, and `next_action`. Use the full
    `get_publication` result again only as the next collector input or for an
    audit that needs the complete ledger.
-7. Treat an eyes reaction, silence, missing pagination, an unsupported
+7. Treat an eyes reaction, silence, missing pagination, a result that omits or
+   changes the exact Review Bridge request ID, an unsupported
    standalone review comment, an unbound request, an ambiguous result, or an
-   unknown response shape as non-passing. A clean issue comment must use the
-   recognized clean format and commit prefix bound through exactly one
-   workflow-recorded request. Findings must be a formal review bound by native
-   `commit_id` with its complete structurally attached Codex review comments.
+   unknown response shape as non-passing. A clean issue comment must echo the
+   current request ID, use the recognized clean format, and carry the commit
+   prefix for the exact request head. Findings must echo the same request ID in
+   a formal review bound by native `commit_id` with its complete structurally
+   attached Codex review comments. Never infer correlation from timestamps.
 8. If the ledger reports `GITHUB_REVIEW_UNKNOWN` because of ambiguity or an
    unbound or unsupported request, call `get_publication_summary` and present
    its entire `required_request_refs` and `required_ambiguous_results` sets to
@@ -196,7 +206,7 @@ For either mode:
    `acknowledge_codex_review_ambiguity` only after direct approval of that exact
    full set; partial approval, silence, retry intent, or earlier permission to
    finish is insufficient. Then refresh the head, post and immediately bind one
-   new exact request, and record a new complete snapshot.
+   new summary-provided correlated request, and record a new complete snapshot.
 9. If Codex reports an actionable finding, commit and verify the fix. Start a
     new local Review Bridge task in `LOCAL_GATE` mode or call
     `authorize_remote_publication` again in `REMOTE_ONLY` mode. A new commit

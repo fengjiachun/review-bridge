@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
@@ -15,9 +16,26 @@ async function fixture(name) {
   );
 }
 
+function requestBody(requestId) {
+  return [
+    "@codex review",
+    "",
+    "When you finish, append exactly this marker to the review summary:",
+    `<!-- review-bridge-request-id: ${requestId} -->`,
+  ].join("\n");
+}
+
+function withRequestMarker(body, requestId) {
+  return `${body}\n\n<!-- review-bridge-request-id: ${requestId} -->`;
+}
+
+function digest(body) {
+  return createHash("sha256").update(body, "utf8").digest("hex");
+}
+
 test("version 1 adapter recognizes the observed clean issue-comment shape", async () => {
   const result = adaptCodexEvidence(await fixture("codex-clean"));
-  assert.equal(githubAdapterVersion, 1);
+  assert.equal(githubAdapterVersion, 2);
   assert.equal(result.collection.adapter_version, 1);
   assert.equal(result.requests.length, 1);
   assert.equal(result.results.length, 1);
@@ -28,6 +46,150 @@ test("version 1 adapter recognizes the observed clean issue-comment shape", asyn
     result.results[0].reviewed_head_sha,
     "e059e4f846e9e55890dc44e656ed653431d812d5",
   );
+});
+
+test("version 2 adapter binds a clean result by request ID and exact head", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.issue_comments[1].body = withRequestMarker(
+    input.issue_comments[1].body,
+    requestId,
+  );
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.collection.adapter_version, 2);
+  assert.equal(result.requests[0].request_id, requestId);
+  assert.equal(result.results[0].request_id, requestId);
+  assert.equal(result.results[0].association, "CORRELATED_REQUEST_ID");
+  assert.equal(result.results[0].format, "CODEX_CLEAN_COMMENT_V2");
+  assert.equal(result.results[0].verdict, "CLEAN");
+});
+
+test("version 2 keeps a delayed predecessor result out of the active request", async () => {
+  const input = await fixture("codex-clean");
+  const oldRequestId = `rbreq-${"1".repeat(32)}`;
+  const activeRequestId = `rbreq-${"2".repeat(32)}`;
+  const oldRequestBody = requestBody(oldRequestId);
+  const activeRequestBody = requestBody(activeRequestId);
+  const oldRequest = {
+    id: 90,
+    html_url: "https://github.com/fengjiachun/review-bridge/pull/6#issuecomment-90",
+    created_at: "2026-07-25T23:07:00Z",
+    body: oldRequestBody,
+    user: {
+      id: 3860496,
+      type: "User",
+      login: "fengjiachun",
+    },
+  };
+  const delayedResult = {
+    ...structuredClone(input.issue_comments[1]),
+    id: 91,
+    html_url: "https://github.com/fengjiachun/review-bridge/pull/6#issuecomment-91",
+    created_at: "2026-07-25T23:10:22Z",
+    body: withRequestMarker(input.issue_comments[1].body, oldRequestId),
+  };
+
+  input.adapter_version = 2;
+  input.baseline.requests = [
+    {
+      resource_id: oldRequest.id,
+      resource_kind: "ISSUE_COMMENT",
+      url: oldRequest.html_url,
+      event_at: "2026-07-25T23:07:00.000Z",
+      timestamp_field: "created_at",
+      body_sha256: digest(oldRequestBody),
+      request_id: oldRequestId,
+      actor: { id: 3860496, type: "User" },
+      classification: "BASELINE_CORRELATED",
+      reason: null,
+    },
+  ];
+  input.issue_comments[0].body = activeRequestBody;
+  input.issue_comments[1].body = withRequestMarker(
+    input.issue_comments[1].body,
+    activeRequestId,
+  );
+  input.issue_comments.unshift(oldRequest);
+  input.issue_comments.splice(2, 0, delayedResult);
+  input.request_history[0].request_id = activeRequestId;
+  input.request_history[0].body_sha256 = digest(activeRequestBody);
+
+  const result = adaptCodexEvidence(input);
+  const oldResult = result.results.find((item) => item.result_id === 91);
+  const activeResult = result.results.find(
+    (item) => item.result_id === 5080972188,
+  );
+  assert.equal(oldResult.request_id, oldRequestId);
+  assert.equal(oldResult.association, "BASELINE_LATE_RESULT");
+  assert.equal(oldResult.verdict, "UNKNOWN");
+  assert.equal(activeResult.request_id, activeRequestId);
+  assert.equal(activeResult.association, "CORRELATED_REQUEST_ID");
+  assert.equal(activeResult.verdict, "CLEAN");
+});
+
+test("version 2 rejects a clean result that omits the request ID", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
+});
+
+test("version 2 binds findings by request ID and native review commit", async () => {
+  const input = await fixture("codex-findings");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.pull_request_reviews[0].body = withRequestMarker(
+    input.pull_request_reviews[0].body,
+    requestId,
+  );
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, requestId);
+  assert.equal(result.results[0].association, "CORRELATED_REQUEST_ID");
+  assert.equal(result.results[0].format, "CODEX_FINDINGS_REVIEW_V2");
+  assert.equal(result.results[0].verdict, "FINDINGS");
+});
+
+test("version 2 rejects duplicate results for one request ID", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.issue_comments[1].body = withRequestMarker(
+    input.issue_comments[1].body,
+    requestId,
+  );
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+  input.issue_comments.push({
+    ...structuredClone(input.issue_comments[1]),
+    id: input.issue_comments[1].id + 1,
+    created_at: "2026-07-25T23:10:24Z",
+  });
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].association, "CORRELATED_REQUEST_ID");
+  assert.equal(result.results[1].association, "AMBIGUOUS");
 });
 
 test("adapter accepts the authorization head and rejects conflicting legacy input", async () => {

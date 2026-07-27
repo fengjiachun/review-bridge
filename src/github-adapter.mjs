@@ -1,4 +1,9 @@
 import { createHash } from "node:crypto";
+import {
+  codexRequestBody,
+  codexRequestIdFromBody,
+  codexResultRequestId,
+} from "./codex-request.mjs";
 
 const EXACT_REQUEST = "@codex review";
 const TRIGGER_SHAPE = /@codex\s+review\b/i;
@@ -10,6 +15,10 @@ const RESOURCE_KINDS = {
   pull_request_reviews: "PULL_REQUEST_REVIEW",
   pull_request_review_comments: "PULL_REQUEST_REVIEW_COMMENT",
 };
+
+function requestIdFromBody(body) {
+  return codexRequestIdFromBody(body);
+}
 
 function digest(body) {
   return createHash("sha256").update(body, "utf8").digest("hex");
@@ -173,7 +182,7 @@ function normalizedAttachments(review, comments, expectedActor) {
     .sort((left, right) => left.comment_id - right.comment_id);
 }
 
-function makeResult(kind, object, comments, expectedActor) {
+function makeResult(kind, object, comments, expectedActor, adapterVersion) {
   const body = String(object.body ?? "");
   const result = {
     ...resultFacts(kind, object),
@@ -185,6 +194,9 @@ function makeResult(kind, object, comments, expectedActor) {
     format: "UNKNOWN",
     verdict: "UNKNOWN",
   };
+  if (adapterVersion === 2) {
+    result.request_id = codexResultRequestId(body);
+  }
   if (kind === "ISSUE_COMMENT") {
     const markers = [...body.matchAll(CLEAN_MARKER)];
     if (body.startsWith(CLEAN_PREFIX) && markers.length === 1) {
@@ -214,7 +226,10 @@ function makeResult(kind, object, comments, expectedActor) {
         (comment) => comment.commit_id === object.commit_id,
       )
     ) {
-      result.format = "CODEX_FINDINGS_REVIEW_V1";
+      result.format =
+        adapterVersion === 2 && result.request_id != null
+          ? "CODEX_FINDINGS_REVIEW_V2"
+          : "CODEX_FINDINGS_REVIEW_V1";
       result.verdict = "FINDINGS";
     }
   }
@@ -339,7 +354,102 @@ function associateResults({
   }
 }
 
+function associateCorrelatedResults({
+  results,
+  recognized,
+  unbound,
+  baseline,
+  closed,
+  headSha,
+}) {
+  const matched = new Set();
+  for (const result of results) {
+    if (closed.results.has(identity(result.resource_kind, result.result_id))) {
+      continue;
+    }
+    if (result.request_id == null) {
+      result.association = [...recognized, ...unbound, ...baseline].some(
+        (request) =>
+          !closed.requests.has(
+            identity(request.resource_kind, request.resource_id),
+          ) && isStrictlyBefore(request, result),
+      )
+        ? "AMBIGUOUS"
+        : "UNSOLICITED";
+      result.format = "UNKNOWN";
+      result.verdict = "UNKNOWN";
+      continue;
+    }
+    const matches = (items) =>
+      items.filter(
+        (request) =>
+          request.request_id === result.request_id &&
+          !closed.requests.has(
+            identity(request.resource_kind, request.resource_id),
+          ) &&
+          isStrictlyBefore(request, result),
+      );
+    const recognizedCandidates = matches(recognized);
+    const recognizedMatches = recognizedCandidates.filter(
+      (request) =>
+        !matched.has(identity(request.resource_kind, request.resource_id)),
+    );
+    const unboundMatches = matches(unbound);
+    const baselineMatches = matches(baseline);
+    if (
+      recognizedMatches.length === 1 &&
+      unboundMatches.length === 0 &&
+      baselineMatches.length === 0 &&
+      requestCompatible(result, recognizedMatches[0])
+    ) {
+      const request = recognizedMatches[0];
+      result.association = "CORRELATED_REQUEST_ID";
+      result.request_ref = {
+        resource_kind: request.resource_kind,
+        resource_id: request.resource_id,
+      };
+      matched.add(identity(request.resource_kind, request.resource_id));
+      if (
+        result.resource_kind === "ISSUE_COMMENT" &&
+        result.commit_binding?.source ===
+          "CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD" &&
+        request.requested_head_sha === headSha &&
+        headSha.startsWith(result.commit_binding.prefix)
+      ) {
+        result.reviewed_head_sha = request.requested_head_sha;
+        result.format = "CODEX_CLEAN_COMMENT_V2";
+        result.verdict = "CLEAN";
+      }
+      continue;
+    }
+    if (
+      recognizedMatches.length === 0 &&
+      unboundMatches.length === 0 &&
+      baselineMatches.length === 1
+    ) {
+      result.association = "BASELINE_LATE_RESULT";
+      result.request_ref = {
+        resource_kind: baselineMatches[0].resource_kind,
+        resource_id: baselineMatches[0].resource_id,
+      };
+      result.format = "UNKNOWN";
+      result.verdict = "UNKNOWN";
+      continue;
+    }
+    result.association =
+      recognizedCandidates.length +
+        unboundMatches.length +
+        baselineMatches.length >
+      0
+        ? "AMBIGUOUS"
+        : "UNSOLICITED";
+    result.format = "UNKNOWN";
+    result.verdict = "UNKNOWN";
+  }
+}
+
 export function adaptCodexEvidence({
+  adapter_version: requestedAdapterVersion = null,
   mode = "SNAPSHOT",
   collection,
   expected_actor: expectedActor,
@@ -352,6 +462,11 @@ export function adaptCodexEvidence({
   pull_request_reviews: reviews,
   pull_request_review_comments: reviewComments,
 }) {
+  const adapterVersion =
+    requestedAdapterVersion ?? collection?.adapter_version ?? 2;
+  if (![1, 2].includes(adapterVersion)) {
+    throw new Error("adapter_version must be 1 or 2");
+  }
   if (
     authorizationHeadSha != null &&
     localGateHeadSha != null &&
@@ -438,7 +553,13 @@ export function adaptCodexEvidence({
             object.user?.id === expectedActor.id &&
             object.user?.type === expectedActor.type
           ) {
-            const adapted = makeResult(kind, object, reviewComments, expectedActor);
+            const adapted = makeResult(
+              kind,
+              object,
+              reviewComments,
+              expectedActor,
+              adapterVersion,
+            );
             const {
               association: _association,
               request_ref: _requestRef,
@@ -455,6 +576,9 @@ export function adaptCodexEvidence({
           continue;
         }
         if (looksLikeRequest) {
+          if (adapterVersion === 2) {
+            facts.request_id = requestIdFromBody(body);
+          }
           facts.actor = { id: facts.actor.id, type: facts.actor.type };
           requests.push(facts);
           continue;
@@ -496,7 +620,7 @@ export function adaptCodexEvidence({
           pendingExpectedReview || incompleteRequest
             ? "INCOMPLETE"
             : collection.status,
-        adapter_version: 1,
+        adapter_version: adapterVersion,
       },
       requests,
       candidate_results: candidateResults,
@@ -514,6 +638,9 @@ export function adaptCodexEvidence({
     }
     return projectBaselineRequest({
       ...baseFacts(current.kind, current.object),
+      ...(adapterVersion === 2
+        ? { request_id: requestIdFromBody(String(current.object.body ?? "")) }
+        : {}),
       classification: stored.classification,
       reason: stored.reason,
     });
@@ -530,6 +657,7 @@ export function adaptCodexEvidence({
       current.object,
       reviewComments,
       expectedActor,
+      adapterVersion,
     );
     const {
       association: _association,
@@ -577,6 +705,8 @@ export function adaptCodexEvidence({
         continue;
       }
       const body = String(object.body ?? "");
+      const requestId =
+        adapterVersion === 2 ? requestIdFromBody(body) : null;
       const looksLikeResult = resultLooksCodex(kind, object);
       const looksLikeRequest =
         !looksLikeResult &&
@@ -598,7 +728,13 @@ export function adaptCodexEvidence({
         }
         const facts = requestFacts(kind, object);
         const bound = history.get(objectIdentity);
-        if (body === EXACT_REQUEST && kind === "ISSUE_COMMENT" && bound) {
+        const recognizedBody =
+          adapterVersion === 1
+            ? body === EXACT_REQUEST
+            : requestId != null &&
+              bound?.request_id === requestId &&
+              bound?.body_sha256 === digest(body);
+        if (recognizedBody && kind === "ISSUE_COMMENT" && bound) {
           requests.push({
             comment_id: facts.resource_id,
             resource_kind: kind,
@@ -608,10 +744,15 @@ export function adaptCodexEvidence({
             body,
             body_sha256: facts.body_sha256,
             requested_head_sha: bound.requested_head_sha,
+            ...(adapterVersion === 2 ? { request_id: requestId } : {}),
           });
-        } else if (body === EXACT_REQUEST && kind === "ISSUE_COMMENT") {
+        } else if (
+          (adapterVersion === 1 ? body === EXACT_REQUEST : requestId != null) &&
+          kind === "ISSUE_COMMENT"
+        ) {
           unboundRequests.push({
             ...facts,
+            ...(adapterVersion === 2 ? { request_id: requestId } : {}),
             reason: "MISSING_POST_BINDING",
           });
         } else {
@@ -640,7 +781,15 @@ export function adaptCodexEvidence({
         ) {
           foreignActorObjects.push(facts);
         } else {
-          results.push(makeResult(kind, object, reviewComments, expectedActor));
+          results.push(
+            makeResult(
+              kind,
+              object,
+              reviewComments,
+              expectedActor,
+              adapterVersion,
+            ),
+          );
         }
         continue;
       }
@@ -652,12 +801,20 @@ export function adaptCodexEvidence({
           attachedExpectedCommentIds.has(object.id)
         )
       ) {
-        results.push(makeResult(kind, object, reviewComments, expectedActor));
+        results.push(
+          makeResult(
+            kind,
+            object,
+            reviewComments,
+            expectedActor,
+            adapterVersion,
+          ),
+        );
       }
     }
   }
   const closed = closedSets(acknowledgements);
-  associateResults({
+  const associationInput = {
     results,
     recognized: requests.map((item) => ({
       ...item,
@@ -667,7 +824,12 @@ export function adaptCodexEvidence({
     baseline: preexistingRequests,
     closed,
     headSha,
-  });
+  };
+  if (adapterVersion === 2) {
+    associateCorrelatedResults(associationInput);
+  } else {
+    associateResults(associationInput);
+  }
   return {
     collection: {
       ...collection,
@@ -675,7 +837,7 @@ export function adaptCodexEvidence({
         pendingExpectedReview || incompleteRequest
           ? "INCOMPLETE"
           : collection.status,
-      adapter_version: 1,
+      adapter_version: adapterVersion,
     },
     preexisting_requests: preexistingRequests,
     preexisting_candidate_results: preexistingResults,
@@ -687,4 +849,4 @@ export function adaptCodexEvidence({
   };
 }
 
-export const githubAdapterVersion = 1;
+export const githubAdapterVersion = 2;

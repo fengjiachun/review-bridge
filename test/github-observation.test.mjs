@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import {
   collectClassicProtection,
@@ -11,6 +12,10 @@ const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
 const requestDigest =
   "7750379659fbba413136c8bf4f500a59f1e03f0c36c0ab16b0a2475eb13ecb1a";
+
+function digest(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 function collected(value, at) {
   return { value, collected_at: at };
@@ -242,6 +247,26 @@ test("GitHub observation normalization canonicalizes times and pagination", () =
     observation.review_threads.collection.sources[0].page_count,
     1,
   );
+});
+
+test("GitHub observation keeps the publication adapter version and request ID", () => {
+  const publicationValue = publication();
+  const raw = rawCollection();
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = [
+    "@codex review",
+    "",
+    "When you finish, append exactly this marker to the review summary:",
+    `<!-- review-bridge-request-id: ${requestId} -->`,
+  ].join("\n");
+  publicationValue.codex_review_baseline.collection.adapter_version = 2;
+  publicationValue.codex_request_history[0].request_id = requestId;
+  publicationValue.codex_request_history[0].body_sha256 = digest(body);
+  raw.issue_comments.pages[0][0].body = body;
+
+  const observation = normalizeGithubObservation(publicationValue, raw);
+  assert.equal(observation.codex_review.collection.adapter_version, 2);
+  assert.equal(observation.codex_review.requests[0].request_id, requestId);
 });
 
 test("GitHub observation normalization requires boolean pull-request flags", () => {

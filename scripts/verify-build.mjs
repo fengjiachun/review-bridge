@@ -309,8 +309,11 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /Post exactly\s+one issue comment whose entire body is `@codex review`/,
+  /Post exactly one issue\s+comment whose entire body equals the returned `codex_review_request\.body`/,
 );
+assert.match(workflowSkill, /returned\s+`codex_review_request\.request_id`/);
+assert.match(workflowSkill, /Never infer correlation from timestamps/);
+assert.match(workflowSkill, /Set `adapter_version: 2` in the normalizer\s+input/);
 assert.match(
   workflowSkill,
   /Require the PR head commit to equal the immutable publication authorization\s+`head_sha`/,
@@ -322,7 +325,7 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /clean issue comment.*Findings must be a formal review/s,
+  /clean issue comment.*Findings must echo the same request ID in\s+   a formal review/s,
 );
 assert.match(workflowSkill, /Treat an eyes reaction.*as non-passing/s);
 assert.match(workflowSkill, /immediately call\s+`record_codex_review_request`/);

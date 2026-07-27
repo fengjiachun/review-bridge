@@ -3,6 +3,10 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import {
+  codexRequestBody,
+  codexRequestIdPattern,
+} from "./codex-request.mjs";
 import { loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
 import {
   atomicWriteCanonicalJson,
@@ -114,6 +118,33 @@ function publicationDirectory(storeRoot, reviewId) {
 function createPublicationId() {
   const stamp = new Date().toISOString().replaceAll(":", "").replaceAll(".", "-");
   return `rb-${stamp}-${crypto.randomBytes(4).toString("hex")}`;
+}
+
+function correlatedRequestId(ledger) {
+  return `rbreq-${sha256(
+    Buffer.from(
+      `${ledger.review_id}\0${ledger.revision}\0${authorizationForLedger(ledger).head_sha}`,
+      "utf8",
+    ),
+  ).slice(0, 32)}`;
+}
+
+function correlatedRequestBody(requestId) {
+  try {
+    return codexRequestBody(requestId);
+  } catch {
+    fail("INVALID_INPUT", "request_id is invalid");
+  }
+}
+
+function correlatedRequest(ledger) {
+  const requestId = correlatedRequestId(ledger);
+  const body = correlatedRequestBody(requestId);
+  return {
+    request_id: requestId,
+    body,
+    body_sha256: sha256(Buffer.from(body, "utf8")),
+  };
 }
 
 function pathsFor(storeRoot, reviewId) {
@@ -429,8 +460,14 @@ function validateBaseline(input, currentMs, createdAt = null, expectedActor = nu
   const baseline = clone(assertObject(input, "codex_review_baseline"));
   const observedMs = timestampMs(baseline.observed_at, "baseline.observed_at");
   const collection = assertObject(baseline.collection, "baseline.collection");
-  if (collection.status !== "COMPLETE" || collection.adapter_version !== 1) {
-    fail("INVALID_INPUT", "publication baseline must be complete and use adapter version 1");
+  if (
+    collection.status !== "COMPLETE" ||
+    ![1, 2].includes(collection.adapter_version)
+  ) {
+    fail(
+      "INVALID_INPUT",
+      "publication baseline must be complete and use adapter version 1 or 2",
+    );
   }
   requireSourceKinds(
     collection,
@@ -466,6 +503,16 @@ function validateBaseline(input, currentMs, createdAt = null, expectedActor = nu
     baseline: true,
     expectedActor,
   });
+  if (
+    collection.adapter_version === 2 &&
+    (requests.some((request) => !("request_id" in request)) ||
+      results.some((result) => !("request_id" in result)))
+  ) {
+    fail(
+      "INVALID_INPUT",
+      "adapter version 2 baseline objects must include request_id",
+    );
+  }
   if (results.some((result) => result.native_review_state === "PENDING")) {
     fail("INVALID_INPUT", "baseline cannot contain a pending Codex formal review");
   }
@@ -488,6 +535,13 @@ function validateRequestFacts(items, name, { baseline = false } = {}) {
       fail("INVALID_INPUT", `${name}[${index}] has wrong timestamp_field`);
     }
     assertDigest(item.body_sha256, `${name}[${index}].body_sha256`);
+    if (
+      "request_id" in item &&
+      item.request_id !== null &&
+      !codexRequestIdPattern.test(item.request_id)
+    ) {
+      fail("INVALID_INPUT", `${name}[${index}].request_id is invalid`);
+    }
     if (baseline) {
       assertObject(item.actor, `${name}[${index}].actor`);
       assertId(item.actor.id, `${name}[${index}].actor.id`);
@@ -522,6 +576,13 @@ function validateResultFacts(
       fail("INVALID_INPUT", `${name}[${index}] does not match the pinned Codex actor`);
     }
     assertDigest(item.body_sha256, `${name}[${index}].body_sha256`);
+    if (
+      "request_id" in item &&
+      item.request_id !== null &&
+      !codexRequestIdPattern.test(item.request_id)
+    ) {
+      fail("INVALID_INPUT", `${name}[${index}].request_id is invalid`);
+    }
     if (item.reviewed_head_sha != null) {
       assertSha(item.reviewed_head_sha, `${name}[${index}].reviewed_head_sha`);
     }
@@ -562,10 +623,15 @@ function validateResultFacts(
         "UNSOLICITED",
         "BASELINE_LATE_RESULT",
         "SINGLE_OPEN_REQUEST",
+        "CORRELATED_REQUEST_ID",
         "AMBIGUOUS",
       ], `${name}[${index}].association`);
       assertEnum(item.verdict, ["CLEAN", "FINDINGS", "UNKNOWN"], `${name}[${index}].verdict`);
-      if (item.association === "SINGLE_OPEN_REQUEST") {
+      if (
+        item.association === "SINGLE_OPEN_REQUEST" ||
+        item.association === "CORRELATED_REQUEST_ID" ||
+        item.association === "BASELINE_LATE_RESULT"
+      ) {
         assertObject(item.request_ref, `${name}[${index}].request_ref`);
         resourceIdentity(item.request_ref);
       } else if (
@@ -653,9 +719,13 @@ function validateObservation(input, ledger, currentMs) {
   );
   if (
     codexReview.collection.status === "COMPLETE" &&
-    codexReview.collection.adapter_version !== 1
+    codexReview.collection.adapter_version !==
+      ledger.codex_review_baseline.collection.adapter_version
   ) {
-    fail("INVALID_INPUT", "Codex collection must use adapter version 1");
+    fail(
+      "INVALID_INPUT",
+      "Codex collection adapter version must match the publication baseline",
+    );
   }
   const allTimes = [observedMs];
   for (const [name, collection] of collections) {
@@ -1005,6 +1075,8 @@ function validateThreads(reviewThreads) {
 }
 
 function validateCodexPartitions(codexReview, ledger) {
+  const adapterVersion =
+    ledger.codex_review_baseline.collection.adapter_version;
   const baselineRequests = assertArray(
     codexReview.preexisting_requests ?? [],
     "codex_review.preexisting_requests",
@@ -1038,6 +1110,7 @@ function validateCodexPartitions(codexReview, ledger) {
         "event_at",
         "timestamp_field",
         "body_sha256",
+        ...(adapterVersion === 2 ? ["request_id"] : []),
         "actor",
       ],
       `codex_review.preexisting_requests[${index}]`,
@@ -1063,6 +1136,7 @@ function validateCodexPartitions(codexReview, ledger) {
         "commit_binding",
         "attached_review_comments",
         "body_sha256",
+        ...(adapterVersion === 2 ? ["request_id"] : []),
       ],
       `codex_review.preexisting_candidate_results[${index}]`,
     );
@@ -1135,10 +1209,18 @@ function validateCodexPartitions(codexReview, ledger) {
   }
   for (const request of requests) {
     assertId(request.comment_id, "request.comment_id");
+    const expectedBody =
+      adapterVersion === 2
+        ? correlatedRequestBody(request.request_id)
+        : BODY_REQUEST;
+    const expectedBodySha256 =
+      adapterVersion === 2
+        ? sha256(Buffer.from(expectedBody, "utf8"))
+        : REQUEST_BODY_SHA256;
     if (
       request.resource_kind !== "ISSUE_COMMENT" ||
-      request.body !== BODY_REQUEST ||
-      request.body_sha256 !== REQUEST_BODY_SHA256 ||
+      request.body !== expectedBody ||
+      request.body_sha256 !== expectedBodySha256 ||
       request.timestamp_field !== "created_at"
     ) {
       fail("INVALID_INPUT", "recognized request is not the exact workflow issue comment");
@@ -1181,23 +1263,39 @@ function projectBaselineResult(item) {
   return facts;
 }
 
+function baselineRequestClassification(request, adapterVersion) {
+  if (
+    adapterVersion === 2 &&
+    request.resource_kind === "ISSUE_COMMENT" &&
+    codexRequestIdPattern.test(request.request_id ?? "") &&
+    request.body_sha256 ===
+      sha256(Buffer.from(correlatedRequestBody(request.request_id), "utf8"))
+  ) {
+    return { classification: "BASELINE_CORRELATED", reason: null };
+  }
+  if (
+    request.resource_kind === "ISSUE_COMMENT" &&
+    request.body_sha256 === REQUEST_BODY_SHA256
+  ) {
+    return { classification: "BASELINE_EXACT", reason: null };
+  }
+  return {
+    classification: "BASELINE_UNSUPPORTED",
+    reason:
+      request.resource_kind !== "ISSUE_COMMENT"
+        ? "WRONG_RESOURCE_KIND"
+        : "NON_EXACT_TRIGGER_SHAPE",
+  };
+}
+
 function normalizeBaseline(baseline, recordedAt) {
+  const adapterVersion = baseline.collection.adapter_version;
   return {
     ...baseline,
     recorded_at: recordedAt,
     requests: baseline.requests.map((request) => ({
       ...request,
-      classification:
-        request.resource_kind === "ISSUE_COMMENT" &&
-        request.body_sha256 === REQUEST_BODY_SHA256
-          ? "BASELINE_EXACT"
-          : "BASELINE_UNSUPPORTED",
-      reason:
-        request.body_sha256 !== REQUEST_BODY_SHA256
-          ? "NON_EXACT_TRIGGER_SHAPE"
-          : request.resource_kind !== "ISSUE_COMMENT"
-            ? "WRONG_RESOURCE_KIND"
-            : null,
+      ...baselineRequestClassification(request, adapterVersion),
     })),
     candidate_results: baseline.candidate_results.map((result) => ({
       ...result,
@@ -1395,7 +1493,7 @@ function validateStoredLedger(ledger) {
     ledger.codex_review_baseline,
     "publication.codex_review_baseline",
   );
-  if (baseline.collection?.adapter_version !== 1) {
+  if (![1, 2].includes(baseline.collection?.adapter_version)) {
     fail("PUBLICATION_STORE_INVALID", "stored baseline adapter version changed");
   }
   assertArray(baseline.requests, "publication baseline requests", 5_000);
@@ -1404,6 +1502,39 @@ function validateStoredLedger(ledger) {
     "publication baseline results",
     5_000,
   );
+  validateRequestFacts(baseline.requests, "publication baseline requests", {
+    baseline: true,
+  });
+  validateResultFacts(
+    baseline.candidate_results,
+    "publication baseline results",
+    { baseline: true, expectedActor: target.codex_actor },
+  );
+  if (
+    baseline.collection.adapter_version === 2 &&
+    (baseline.requests.some((request) => !("request_id" in request)) ||
+      baseline.candidate_results.some((result) => !("request_id" in result)))
+  ) {
+    fail(
+      "PUBLICATION_STORE_INVALID",
+      "stored adapter version 2 baseline is missing request_id",
+    );
+  }
+  for (const request of baseline.requests) {
+    const expected = baselineRequestClassification(
+      request,
+      baseline.collection.adapter_version,
+    );
+    if (
+      request.classification !== expected.classification ||
+      request.reason !== expected.reason
+    ) {
+      fail(
+        "PUBLICATION_STORE_INVALID",
+        "stored baseline request classification changed",
+      );
+    }
+  }
   const requestHistory = assertArray(
     ledger.codex_request_history,
     "publication request history",
@@ -1437,6 +1568,15 @@ function validateStoredLedger(ledger) {
     }
     if (item.classification === "RECOGNIZED") {
       assertSha(item.requested_head_sha, "request history requested_head_sha");
+      if (
+        baseline.collection.adapter_version === 2 &&
+        !codexRequestIdPattern.test(item.request_id ?? "")
+      ) {
+        fail(
+          "PUBLICATION_STORE_INVALID",
+          "version 2 recognized request_id is invalid",
+        );
+      }
     } else if (item.requested_head_sha !== null) {
       fail("PUBLICATION_STORE_INVALID", "unbound request history cannot carry a head");
     }
@@ -2015,6 +2155,7 @@ function requestHistoryFacts(entry) {
     event_at: entry.event_at,
     timestamp_field: entry.timestamp_field,
     body_sha256: entry.body_sha256,
+    ...("request_id" in entry ? { request_id: entry.request_id } : {}),
     ...(entry.classification === "RECOGNIZED"
       ? { requested_head_sha: entry.requested_head_sha }
       : { reason: entry.reason }),
@@ -2030,6 +2171,7 @@ function observationRequestFacts(item, classification) {
       event_at: item.event_at,
       timestamp_field: item.timestamp_field,
       body_sha256: item.body_sha256,
+      ...("request_id" in item ? { request_id: item.request_id } : {}),
       requested_head_sha: item.requested_head_sha,
     };
   }
@@ -2040,6 +2182,7 @@ function observationRequestFacts(item, classification) {
     event_at: item.event_at,
     timestamp_field: item.timestamp_field,
     body_sha256: item.body_sha256,
+    ...("request_id" in item ? { request_id: item.request_id } : {}),
     reason: item.reason,
   };
 }
@@ -2057,6 +2200,7 @@ function resultHistoryFacts(entry) {
     commit_binding: entry.commit_binding,
     attached_review_comments: entry.attached_review_comments,
     body_sha256: entry.body_sha256,
+    ...("request_id" in entry ? { request_id: entry.request_id } : {}),
   };
 }
 
@@ -2073,6 +2217,7 @@ function observationResultFacts(item) {
     commit_binding: item.commit_binding,
     attached_review_comments: item.attached_review_comments ?? [],
     body_sha256: item.body_sha256,
+    ...("request_id" in item ? { request_id: item.request_id } : {}),
   };
 }
 
@@ -2157,6 +2302,9 @@ function reconcileHistories(ledger, observation, nextRevision, currentMs) {
         recorded_at: observation.recorded_at,
         recorded_revision: nextRevision,
         body_sha256: current.item.body_sha256,
+        ...("request_id" in current.item
+          ? { request_id: current.item.request_id }
+          : {}),
         requested_head_sha: null,
         reason: current.item.reason,
       });
@@ -2244,6 +2392,9 @@ function correlationRequestCompatible(request, result) {
 }
 
 function replayResultAssociations(ledger) {
+  if (ledger.codex_review_baseline.collection.adapter_version === 2) {
+    return replayCorrelatedResultAssociations(ledger);
+  }
   const closedRequests = closedRequestIdentities(ledger);
   const closedResults = closedResultIdentities(ledger);
   const recognized = ledger.codex_request_history.filter(
@@ -2357,6 +2508,98 @@ function replayResultAssociations(ledger) {
   return replayed;
 }
 
+function replayCorrelatedResultAssociations(ledger) {
+  const closedRequests = closedRequestIdentities(ledger);
+  const closedResults = closedResultIdentities(ledger);
+  const recognized = ledger.codex_request_history.filter(
+    (item) => item.classification === "RECOGNIZED",
+  );
+  const unbound = ledger.codex_request_history.filter(
+    (item) =>
+      item.classification === "UNBOUND" &&
+      !closedRequests.has(`${item.resource_kind}:${item.resource_id}`),
+  );
+  const baseline = ledger.codex_review_baseline.requests.filter(
+    (item) =>
+      item.classification === "BASELINE_CORRELATED" &&
+      !closedRequests.has(`${item.resource_kind}:${item.resource_id}`),
+  );
+  const matched = new Set();
+  const replayed = new Map();
+  for (const result of ledger.latest_observation.codex_review.results) {
+    const resultIdentity = `${result.resource_kind}:${result.result_id}`;
+    if (closedResults.has(resultIdentity)) {
+      continue;
+    }
+    if (!codexRequestIdPattern.test(result.request_id ?? "")) {
+      replayed.set(resultIdentity, {
+        association: [...recognized, ...unbound, ...baseline].some(
+          (request) => correlationRequestBeforeResult(request, result),
+        )
+          ? "AMBIGUOUS"
+          : "UNSOLICITED",
+        request_ref: null,
+      });
+      continue;
+    }
+    const matches = (items) =>
+      items.filter(
+        (request) =>
+          request.request_id === result.request_id &&
+          correlationRequestBeforeResult(request, result),
+      );
+    const recognizedCandidates = matches(recognized);
+    const recognizedMatches = recognizedCandidates.filter(
+      (request) =>
+        !matched.has(`${request.resource_kind}:${request.resource_id}`),
+    );
+    const unboundMatches = matches(unbound);
+    const baselineMatches = matches(baseline);
+    let replay;
+    if (
+      recognizedMatches.length === 1 &&
+      unboundMatches.length === 0 &&
+      baselineMatches.length === 0 &&
+      correlationRequestCompatible(recognizedMatches[0], result)
+    ) {
+      const request = recognizedMatches[0];
+      replay = {
+        association: "CORRELATED_REQUEST_ID",
+        request_ref: {
+          resource_kind: request.resource_kind,
+          resource_id: request.resource_id,
+        },
+      };
+      matched.add(`${request.resource_kind}:${request.resource_id}`);
+    } else if (
+      recognizedMatches.length === 0 &&
+      unboundMatches.length === 0 &&
+      baselineMatches.length === 1
+    ) {
+      replay = {
+        association: "BASELINE_LATE_RESULT",
+        request_ref: {
+          resource_kind: baselineMatches[0].resource_kind,
+          resource_id: baselineMatches[0].resource_id,
+        },
+      };
+    } else {
+      replay = {
+        association:
+          recognizedCandidates.length +
+            unboundMatches.length +
+            baselineMatches.length >
+          0
+            ? "AMBIGUOUS"
+            : "UNSOLICITED",
+        request_ref: null,
+      };
+    }
+    replayed.set(resultIdentity, replay);
+  }
+  return replayed;
+}
+
 function checkRequiredRuns(requiredChecks) {
   if (requiredChecks.collection.status !== "COMPLETE") {
     return "EVIDENCE_INCOMPLETE";
@@ -2439,7 +2682,9 @@ function activeCorrelation(ledger) {
   const closedResults = closedResultIdentities(ledger);
   const openBaseline = ledger.codex_review_baseline.requests
     .filter(
-      (item) => !closedRequests.has(`${item.resource_kind}:${item.resource_id}`),
+      (item) =>
+        item.classification !== "BASELINE_CORRELATED" &&
+        !closedRequests.has(`${item.resource_kind}:${item.resource_id}`),
     )
     .map((item) => ({
       resource_kind: item.resource_kind,
@@ -2485,7 +2730,12 @@ function activeCorrelation(ledger) {
           !sameCanonical(item.request_ref, replay.request_ref) ||
           item.verdict === "UNKNOWN" ||
           item.native_review_state === "DISMISSED" ||
-          !["CODEX_CLEAN_COMMENT_V1", "CODEX_FINDINGS_REVIEW_V1"].includes(
+          ![
+            "CODEX_CLEAN_COMMENT_V1",
+            "CODEX_FINDINGS_REVIEW_V1",
+            "CODEX_CLEAN_COMMENT_V2",
+            "CODEX_FINDINGS_REVIEW_V2",
+          ].includes(
             item.format,
           )
         );
@@ -2523,13 +2773,16 @@ function codexStatus(ledger) {
       Date.parse(left.event_at) - Date.parse(right.event_at) ||
       left.resource_id - right.resource_id,
   ).at(-1);
+  const correlated =
+    ledger.codex_review_baseline.collection.adapter_version === 2;
   const results = observation.codex_review.results.filter(
     (result) => {
       const replay = correlation.replayed.get(
         `${result.resource_kind}:${result.result_id}`,
       );
       return (
-        replay?.association === "SINGLE_OPEN_REQUEST" &&
+        replay?.association ===
+          (correlated ? "CORRELATED_REQUEST_ID" : "SINGLE_OPEN_REQUEST") &&
         replay.request_ref?.resource_kind === latest.resource_kind &&
         replay.request_ref?.resource_id === latest.resource_id
       );
@@ -2541,7 +2794,7 @@ function codexStatus(ledger) {
   if (results.length !== 1) {
     return "GITHUB_REVIEW_UNKNOWN";
   }
-  const earlierUnanswered = correlation.recognized
+  const earlierUnanswered = !correlated && correlation.recognized
     .filter((request) => request.resource_id !== latest.resource_id)
     .some(
       (request) =>
@@ -2576,11 +2829,15 @@ function codexStatus(ledger) {
   if (result.native_review_state === "DISMISSED") {
     return "GITHUB_REVIEW_UNKNOWN";
   }
-  if (result.format === "CODEX_CLEAN_COMMENT_V1") {
+  if (
+    result.format ===
+    (correlated ? "CODEX_CLEAN_COMMENT_V2" : "CODEX_CLEAN_COMMENT_V1")
+  ) {
     if (
       result.resource_kind !== "ISSUE_COMMENT" ||
       result.native_review_state !== null ||
       result.verdict !== "CLEAN" ||
+      (correlated && result.request_id !== latest.request_id) ||
       result.reviewed_head_sha !== authorization.head_sha ||
       result.commit_binding?.source !==
         "CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD" ||
@@ -2592,13 +2849,17 @@ function codexStatus(ledger) {
     }
     return null;
   }
-  if (result.format === "CODEX_FINDINGS_REVIEW_V1") {
+  if (
+    result.format ===
+    (correlated ? "CODEX_FINDINGS_REVIEW_V2" : "CODEX_FINDINGS_REVIEW_V1")
+  ) {
     if (
       result.resource_kind !== "PULL_REQUEST_REVIEW" ||
       !["APPROVED", "COMMENTED", "CHANGES_REQUESTED"].includes(
         result.native_review_state,
       ) ||
       result.verdict !== "FINDINGS" ||
+      (correlated && result.request_id !== latest.request_id) ||
       result.reviewed_head_sha !== authorization.head_sha ||
       result.commit_binding?.source !== "PULL_REQUEST_REVIEW_COMMIT_ID" ||
       result.commit_binding?.field !== "commit_id" ||
@@ -3785,7 +4046,9 @@ function nextPublicationAction(ledger, derived, gateState, evidenceStale) {
   }
   if (ledger.latest_observation == null) {
     if (
-      ledger.codex_review_baseline.requests.length > 0 ||
+      ledger.codex_review_baseline.requests.some(
+        (request) => request.classification !== "BASELINE_CORRELATED",
+      ) ||
       ledger.codex_request_history.length > 0
     ) {
       return "RECORD_GITHUB_SNAPSHOT";
@@ -3855,6 +4118,12 @@ export async function getPublicationSummary(
         ledger.latest_observation == null
           ? { requests: [], results: [] }
           : ambiguityClosure(ledger);
+      const nextAction = nextPublicationAction(
+        ledger,
+        derived,
+        gate.state,
+        evidenceStale,
+      );
       return {
         review_id: ledger.review_id,
         revision: ledger.revision,
@@ -3871,12 +4140,11 @@ export async function getPublicationSummary(
         },
         latest_observed_at: ledger.latest_observation?.observed_at ?? null,
         blocking_reason: blockingReason,
-        next_action: nextPublicationAction(
-          ledger,
-          derived,
-          gate.state,
-          evidenceStale,
-        ),
+        next_action: nextAction,
+        ...(ledger.codex_review_baseline.collection.adapter_version === 2 &&
+        nextAction === "POST_AND_RECORD_CODEX_REVIEW_REQUEST"
+          ? { codex_review_request: correlatedRequest(ledger) }
+          : {}),
         required_request_refs: clone(closure.requests),
         required_ambiguous_results: clone(closure.results),
         gate_state: gate.state,
@@ -3896,6 +4164,7 @@ export async function recordCodexReviewRequest(
     url,
     createdAt,
     requestedHeadSha,
+    requestId = null,
   },
   { clock = Date.now } = {},
 ) {
@@ -3932,6 +4201,22 @@ export async function recordCodexReviewRequest(
         "request head differs from the publication authorization",
       );
     }
+    const adapterVersion =
+      ledger.codex_review_baseline.collection.adapter_version;
+    const expectedRequest =
+      adapterVersion === 2 ? correlatedRequest(ledger) : null;
+    if (
+      adapterVersion === 2 &&
+      requestId !== expectedRequest.request_id
+    ) {
+      fail(
+        "INVALID_INPUT",
+        "request_id does not match the current publication revision",
+      );
+    }
+    if (adapterVersion === 1 && requestId !== null) {
+      fail("INVALID_INPUT", "adapter version 1 cannot bind a request_id");
+    }
     if (createdMs < Date.parse(ledger.created_at)) {
       fail("INVALID_INPUT", "request predates publication creation");
     }
@@ -3960,7 +4245,11 @@ export async function recordCodexReviewRequest(
       timestamp_field: "created_at",
       recorded_at: recordedAt,
       recorded_revision: nextRevision,
-      body_sha256: REQUEST_BODY_SHA256,
+      body_sha256:
+        expectedRequest?.body_sha256 ?? REQUEST_BODY_SHA256,
+      ...(expectedRequest == null
+        ? {}
+        : { request_id: expectedRequest.request_id }),
       requested_head_sha: requestedHeadSha,
     });
     ledger.latest_observation = null;
