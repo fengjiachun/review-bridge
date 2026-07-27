@@ -316,7 +316,7 @@ assert.match(
   /when present, the returned\s+`codex_review_request\.request_id`/,
 );
 assert.match(workflowSkill, /legacy exact body without a request ID/);
-assert.match(workflowSkill, /Never infer\s+correlation from timestamps/);
+assert.match(workflowSkill, /Never infer\s+correlation from\s+timestamps/);
 assert.match(workflowSkill, /Set `adapter_version: 2` in the normalizer\s+input/);
 assert.match(
   workflowSkill,
@@ -329,16 +329,22 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /adapter version 2, require a clean issue comment or findings review to\s+   echo the exact current Review Bridge request ID/,
+  /adapter version 2, prefer a clean issue comment or findings review that\s+   echoes the exact current Review Bridge request ID/,
 );
-assert.match(workflowSkill, /version-1 ledgers.*do not require a request ID/s);
 assert.match(
   workflowSkill,
-  /clean issue comment.*recognized version-specific format.*Findings must be a formal review/s,
+  /server-replayed fallback of exactly one recorded\s+   open request, no preceding unbound request, and a compatible reviewed-commit\s+   prefix or native GitHub `commit_id`/,
+);
+assert.match(
+  workflowSkill,
+  /Adapter-version-1 ledgers retain the\s+   legacy exact-body and single-open-request rules/,
 );
 assert.match(workflowSkill, /eyes reaction.*as non-passing/s);
 assert.match(workflowSkill, /immediately call\s+`record_codex_review_request`/);
-assert.match(workflowSkill, /formal review bound by native\s+`commit_id`/);
+assert.match(
+  workflowSkill,
+  /Findings must be a formal review with its complete\s+   structurally attached Codex review comments/,
+);
 assert.match(workflowSkill, /get_review_summary/);
 assert.match(workflowSkill, /wait_for_review_state/);
 assert.match(workflowSkill, /pass that task as `parent_review_id`/);
@@ -365,7 +371,7 @@ assert.match(workflowSkill, /`STORE_WRITE_INDETERMINATE`/);
 assert.match(workflowSkill, /do not\s+loop on the same mutation/);
 assert.match(
   workflowSkill,
-  /an unsupported\s+standalone review comment/,
+  /an\s+unsupported\s+standalone\s+review\s+comment/,
 );
 assert.match(
   workflowSkill,

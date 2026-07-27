@@ -213,12 +213,16 @@ function makeResult(kind, object, comments, expectedActor, adapterVersion) {
             ).map((comment) => comment.body),
           ]
         : [body];
+    const requestMarkerCount =
+      codexResultRequestMarkerCountFromBodies(requestBodies);
     result.request_id =
-      kind === "PULL_REQUEST_REVIEW"
-        ? codexResultRequestIdFromBodies(requestBodies)
-        : codexResultRequestId(body);
+      requestMarkerCount === 1
+        ? kind === "PULL_REQUEST_REVIEW"
+          ? codexResultRequestIdFromBodies(requestBodies)
+          : codexResultRequestId(body)
+        : null;
     Object.defineProperty(result, REQUEST_MARKER_COUNT, {
-      value: codexResultRequestMarkerCountFromBodies(requestBodies),
+      value: requestMarkerCount,
     });
   }
   if (kind === "ISSUE_COMMENT") {

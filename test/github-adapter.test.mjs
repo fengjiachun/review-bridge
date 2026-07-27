@@ -224,6 +224,26 @@ test("version 2 does not fall back for a malformed request marker", async () => 
   assert.equal(result.results[0].verdict, "UNKNOWN");
 });
 
+test("version 2 rejects a valid clean marker with a malformed extra marker", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.issue_comments[1].body = `${withRequestMarker(
+    input.issue_comments[1].body,
+    requestId,
+  )}\n\n<!-- review-bridge-request-id: malformed -->`;
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
+});
+
 test("version 2 preserves stored unbound requests in later snapshots", async () => {
   const input = await fixture("codex-clean");
   const requestId = `rbreq-${"1".repeat(32)}`;
@@ -278,6 +298,26 @@ test("version 2 binds findings by request ID and native review commit", async ()
   assert.equal(result.results[0].association, "CORRELATED_REQUEST_ID");
   assert.equal(result.results[0].format, "CODEX_FINDINGS_REVIEW_V2");
   assert.equal(result.results[0].verdict, "FINDINGS");
+});
+
+test("version 2 rejects a valid findings marker with a malformed extra marker", async () => {
+  const input = await fixture("codex-findings");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.pull_request_review_comments[0].body = `${withRequestMarker(
+    input.pull_request_review_comments[0].body,
+    requestId,
+  )}\n\n<!-- review-bridge-request-id: malformed -->`;
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
 });
 
 test("version 2 rejects duplicate markers across a review and its attachments", async () => {
