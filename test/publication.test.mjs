@@ -3299,6 +3299,83 @@ test("ruleset-only OAuth administration proof passes observation validation", as
   assert.equal(recorded.revision, 2);
 });
 
+test("ruleset-only GitHub App administration proof enforces response order", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const value = observation({
+    at: startedAt + 1_000,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  const policySources = value.required_checks.collection.policy_sources;
+  policySources.find(
+    (source) => source.kind === "BRANCH_METADATA",
+  ).protected = true;
+  const classicAt = policySources[0].collected_at;
+  const appPermission = {
+    kind: "GITHUB_APP_INSTALLATION_PERMISSIONS",
+    endpoint: "GET /repos/owner/repo/installation",
+    collected_at: new Date(Date.parse(classicAt) - 1).toISOString(),
+    result: "SUCCESS",
+    credential_type: "GITHUB_APP",
+    field: "permissions.administration",
+    level: "READ",
+  };
+  policySources.push(
+    {
+      kind: "CLASSIC_BRANCH_PROTECTION",
+      endpoint: "GET /repos/owner/repo/branches/main/protection",
+      collected_at: classicAt,
+      result: "NOT_CONFIGURED",
+      http_status: 404,
+    },
+    appPermission,
+  );
+  value.required_checks.policy = "REQUIRED";
+  value.required_checks.requirements = [
+    {
+      context: "ruleset-only",
+      app_binding: "PINNED",
+      required_app_id: 15368,
+      binding_sources: [
+        {
+          kind: "APPLICABLE_RULES",
+          field:
+            "rules[].parameters.required_status_checks[].integration_id",
+          raw_representation: "POSITIVE_INTEGER",
+        },
+      ],
+    },
+  ];
+
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 1, observation: value },
+      { clock: () => startedAt + 1_020 },
+    ),
+    /administration proof must not precede the classic-protection 404/,
+  );
+  assert.equal((await getPublication(state.store, state.reviewId)).revision, 1);
+
+  appPermission.collected_at = new Date(
+    Date.parse(classicAt) + 1,
+  ).toISOString();
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: value },
+    { clock: () => startedAt + 1_030 },
+  );
+  assert.equal(recorded.revision, 2);
+});
+
 test("publication mutations serialize independently from review mutations", async (t) => {
   const first = await fixture();
   t.after(() => fsp.rm(first.root, { recursive: true, force: true }));
