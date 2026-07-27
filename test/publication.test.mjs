@@ -730,6 +730,102 @@ test("version 2 rejects a forged correlated baseline classification", async (t) 
   );
 });
 
+test("version 2 validates unbound request IDs and canonical bodies", async (t) => {
+  for (const [name, requestId, bodySha256] of [
+    ["missing request ID", undefined, digest("@codex review")],
+    ["null request ID", null, digest("@codex review")],
+    [
+      "mismatched body",
+      `rbreq-${"e".repeat(32)}`,
+      digest("@codex review with changed guidance"),
+    ],
+  ]) {
+    await t.test(name, async (t) => {
+      const state = await fixture();
+      t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+      const startedAt = Date.now();
+      await start(state, startedAt, baselineV2(startedAt - 100));
+      const current = observationV2(
+        {
+          at: startedAt + 1_000,
+          baseSha: state.baseSha,
+          headSha: state.headSha,
+          requestId: null,
+          requestAt: startedAt,
+          withResult: false,
+        },
+        null,
+      );
+      current.codex_review.unbound_requests.push({
+        resource_id: 150,
+        resource_kind: "ISSUE_COMMENT",
+        url: "https://github.com/owner/repo/issues/7#issuecomment-150",
+        event_at: iso(startedAt + 500),
+        timestamp_field: "created_at",
+        body_sha256: bodySha256,
+        ...(requestId === undefined ? {} : { request_id: requestId }),
+        reason: "MISSING_POST_BINDING",
+      });
+      await assert.rejects(
+        recordGithubSnapshot(
+          state.store,
+          state.reviewId,
+          { expectedRevision: 1, observation: current },
+          { clock: () => startedAt + 1_010 },
+        ),
+        /version 2 unbound request is not canonical/,
+      );
+    });
+  }
+
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt, baselineV2(startedAt - 100));
+  const requestId = `rbreq-${"e".repeat(32)}`;
+  const current = observationV2(
+    {
+      at: startedAt + 1_000,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: null,
+      requestAt: startedAt,
+      withResult: false,
+    },
+    null,
+  );
+  current.codex_review.unbound_requests.push({
+    resource_id: 150,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-150",
+    event_at: iso(startedAt + 500),
+    timestamp_field: "created_at",
+    body_sha256: digest(correlatedRequestBody(requestId)),
+    request_id: requestId,
+    reason: "MISSING_POST_BINDING",
+  });
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: current },
+    { clock: () => startedAt + 1_010 },
+  );
+  recorded.codex_request_history[0].request_id = null;
+  await atomicWriteCanonicalJson(
+    path.join(
+      state.store,
+      "reviews",
+      state.reviewId,
+      "publication.json",
+    ),
+    recorded,
+  );
+  await assert.rejects(
+    getPublication(state.store, state.reviewId),
+    /stored version 2 unbound request is not canonical/,
+  );
+});
+
 test("version 2 acknowledgements keep closed request IDs out of replay", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

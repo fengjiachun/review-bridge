@@ -1179,6 +1179,22 @@ function validateCodexPartitions(codexReview, ledger) {
   validateRequestFacts(unsupported, "codex_review.unsupported_requests");
   for (const item of unbound) {
     if (
+      adapterVersion === 2 &&
+      (!codexRequestIdPattern.test(item.request_id ?? "") ||
+        item.body_sha256 !==
+          sha256(
+            Buffer.from(
+              correlatedRequestBody(item.request_id),
+              "utf8",
+            ),
+          ))
+    ) {
+      fail(
+        "INVALID_INPUT",
+        "version 2 unbound request is not canonical",
+      );
+    }
+    if (
       item.resource_kind !== "ISSUE_COMMENT" ||
       item.reason !== "MISSING_POST_BINDING"
     ) {
@@ -1589,6 +1605,22 @@ function validateStoredLedger(ledger) {
           "version 2 recognized request_id is invalid",
         );
       }
+    } else if (
+      baseline.collection.adapter_version === 2 &&
+      item.classification === "UNBOUND" &&
+      (!codexRequestIdPattern.test(item.request_id ?? "") ||
+        item.body_sha256 !==
+          sha256(
+            Buffer.from(
+              correlatedRequestBody(item.request_id),
+              "utf8",
+            ),
+          ))
+    ) {
+      fail(
+        "PUBLICATION_STORE_INVALID",
+        "stored version 2 unbound request is not canonical",
+      );
     } else if (item.requested_head_sha !== null) {
       fail("PUBLICATION_STORE_INVALID", "unbound request history cannot carry a head");
     }
