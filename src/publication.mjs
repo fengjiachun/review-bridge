@@ -1291,7 +1291,10 @@ function baselineRequestClassification(request, adapterVersion) {
   return {
     classification: "BASELINE_UNSUPPORTED",
     reason:
-      request.resource_kind !== "ISSUE_COMMENT"
+      adapterVersion === 1 &&
+      request.body_sha256 !== REQUEST_BODY_SHA256
+        ? "NON_EXACT_TRIGGER_SHAPE"
+        : request.resource_kind !== "ISSUE_COMMENT"
         ? "WRONG_RESOURCE_KIND"
         : "NON_EXACT_TRIGGER_SHAPE",
   };

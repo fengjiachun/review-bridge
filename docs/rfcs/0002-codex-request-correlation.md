@@ -40,9 +40,10 @@ The workflow posts that body unchanged and immediately supplies the same ID to
 current revision and rejects caller-selected or stale IDs.
 
 Codex results must contain exactly one matching marker. A clean issue comment
-also needs the existing reviewed-commit prefix. A findings review also needs
-the existing native GitHub `commit_id` and structurally attached review
-comments.
+must carry it in that comment and also needs the existing reviewed-commit
+prefix. A findings review may carry it in the formal review body or one
+structurally attached review comment; it also needs the existing native GitHub
+`commit_id` and structurally attached review comments.
 
 ## Association
 

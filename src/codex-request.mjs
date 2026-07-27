@@ -15,9 +15,15 @@ export function codexRequestBody(requestId) {
   ].join("\n");
 }
 
-export function codexResultRequestId(body) {
-  const matches = [...body.matchAll(markerPattern)];
+export function codexResultRequestIdFromBodies(bodies) {
+  const matches = bodies.flatMap((body) => [
+    ...String(body).matchAll(markerPattern),
+  ]);
   return matches.length === 1 ? matches[0][1] : null;
+}
+
+export function codexResultRequestId(body) {
+  return codexResultRequestIdFromBodies([body]);
 }
 
 export function codexRequestIdFromBody(body) {

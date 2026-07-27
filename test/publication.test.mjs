@@ -1459,6 +1459,35 @@ test("version 1 local ledgers remain readable and completable", async (t) => {
   assert.equal(verified.reviewer_provider, "CLAUDE_DESKTOP");
 });
 
+test("version 1 preserves legacy baseline reason precedence", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const unsupported = {
+    resource_id: 90,
+    resource_kind: "PULL_REQUEST_REVIEW",
+    url: "https://github.com/owner/repo/pull/7#pullrequestreview-90",
+    event_at: iso(startedAt - 1_000),
+    timestamp_field: "submitted_at",
+    body_sha256: digest("@codex review with guidance"),
+    actor: { id: 7, type: "User" },
+  };
+  const started = await start(
+    state,
+    startedAt,
+    baseline(startedAt - 100, [unsupported]),
+  );
+  assert.equal(
+    started.codex_review_baseline.requests[0].reason,
+    "NON_EXACT_TRIGGER_SHAPE",
+  );
+  assert.equal(
+    (await getPublication(state.store, state.reviewId))
+      .codex_review_baseline.requests[0].reason,
+    "NON_EXACT_TRIGGER_SHAPE",
+  );
+});
+
 test("remote-only authorization is explicit and binds a clean local head", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

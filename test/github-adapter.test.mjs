@@ -155,8 +155,8 @@ test("version 2 binds findings by request ID and native review commit", async ()
   const body = requestBody(requestId);
   input.adapter_version = 2;
   input.issue_comments[0].body = body;
-  input.pull_request_reviews[0].body = withRequestMarker(
-    input.pull_request_reviews[0].body,
+  input.pull_request_review_comments[0].body = withRequestMarker(
+    input.pull_request_review_comments[0].body,
     requestId,
   );
   input.request_history[0].request_id = requestId;
@@ -167,6 +167,30 @@ test("version 2 binds findings by request ID and native review commit", async ()
   assert.equal(result.results[0].association, "CORRELATED_REQUEST_ID");
   assert.equal(result.results[0].format, "CODEX_FINDINGS_REVIEW_V2");
   assert.equal(result.results[0].verdict, "FINDINGS");
+});
+
+test("version 2 rejects duplicate markers across a review and its attachments", async () => {
+  const input = await fixture("codex-findings");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.pull_request_reviews[0].body = withRequestMarker(
+    input.pull_request_reviews[0].body,
+    requestId,
+  );
+  input.pull_request_review_comments[0].body = withRequestMarker(
+    input.pull_request_review_comments[0].body,
+    requestId,
+  );
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
 });
 
 test("version 2 rejects duplicate results for one request ID", async () => {

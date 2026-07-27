@@ -3,6 +3,7 @@ import {
   codexRequestBody,
   codexRequestIdFromBody,
   codexResultRequestId,
+  codexResultRequestIdFromBodies,
 } from "./codex-request.mjs";
 
 const EXACT_REQUEST = "@codex review";
@@ -162,14 +163,18 @@ function closedSets(acknowledgements) {
   };
 }
 
-function normalizedAttachments(review, comments, expectedActor) {
+function matchingReviewComments(review, comments, expectedActor) {
   return comments
     .filter(
       (comment) =>
         comment.pull_request_review_id === review.id &&
         comment.user?.id === expectedActor.id &&
         comment.user?.type === expectedActor.type,
-    )
+    );
+}
+
+function normalizedAttachments(review, comments, expectedActor) {
+  return matchingReviewComments(review, comments, expectedActor)
     .map((comment) => ({
       comment_id: resourceId(comment),
       actor: {
@@ -195,7 +200,17 @@ function makeResult(kind, object, comments, expectedActor, adapterVersion) {
     verdict: "UNKNOWN",
   };
   if (adapterVersion === 2) {
-    result.request_id = codexResultRequestId(body);
+    result.request_id =
+      kind === "PULL_REQUEST_REVIEW"
+        ? codexResultRequestIdFromBodies([
+            body,
+            ...matchingReviewComments(
+              object,
+              comments,
+              expectedActor,
+            ).map((comment) => comment.body),
+          ])
+        : codexResultRequestId(body);
   }
   if (kind === "ISSUE_COMMENT") {
     const markers = [...body.matchAll(CLEAN_MARKER)];
