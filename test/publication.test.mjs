@@ -3099,6 +3099,38 @@ test("observation validation rejects incomplete provenance and unsafe check bind
       },
     })),
     {
+      pattern: /administration proof must not precede the classic-protection 404/,
+      mutate(value) {
+        const policySources =
+          value.required_checks.collection.policy_sources;
+        policySources.find(
+          (source) => source.kind === "BRANCH_METADATA",
+        ).protected = true;
+        const classicAt = policySources[0].collected_at;
+        policySources.push(
+          {
+            kind: "CLASSIC_BRANCH_PROTECTION",
+            endpoint: "GET /repos/owner/repo/branches/main/protection",
+            collected_at: classicAt,
+            result: "NOT_CONFIGURED",
+            http_status: 404,
+          },
+          {
+            kind: "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
+            endpoint: "GET /repos/owner/repo",
+            collected_at: new Date(
+              Date.parse(classicAt) - 1,
+            ).toISOString(),
+            result: "SUCCESS",
+            credential_type: "OAUTH_SCOPE_TOKEN",
+            field: "x-oauth-scopes+permissions.admin",
+            level: "ADMIN",
+            scope: "repo",
+          },
+        );
+      },
+    },
+    {
       pattern: /classic-protection NOT_CONFIGURED requires endpoint-specific administration proof/,
       mutate(value) {
         const policySources =
@@ -3231,7 +3263,9 @@ test("ruleset-only OAuth administration proof passes observation validation", as
     {
       kind: "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
       endpoint: "GET /repos/owner/repo",
-      collected_at: policySources[0].collected_at,
+      collected_at: new Date(
+        Date.parse(policySources[0].collected_at) + 1,
+      ).toISOString(),
       result: "SUCCESS",
       credential_type: "OAUTH_SCOPE_TOKEN",
       field: "x-oauth-scopes+permissions.admin",

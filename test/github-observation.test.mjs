@@ -356,7 +356,7 @@ test("GitHub observation normalization accepts an authenticated ruleset-only pol
         'HTTP/2 200 OK\nX-OAuth-Scopes: gist, repo, workflow\n\n{"permissions":{"admin":true}}',
     },
     "/repos/owner/repo",
-    "2026-07-27T00:00:07.250Z",
+    "2026-07-27T00:00:07.500Z",
   );
   raw.classic_protection = normalizeClassicProtectionResponse(
     {
@@ -366,7 +366,7 @@ test("GitHub observation normalization accepts an authenticated ruleset-only pol
     },
     "/repos/owner/repo/branches/main/protection",
     permissionSource,
-    "2026-07-27T00:00:07.500Z",
+    "2026-07-27T00:00:07.250Z",
   );
 
   const observation = normalizeGithubObservation(publication(), raw);
@@ -388,6 +388,14 @@ test("GitHub observation normalization accepts an authenticated ruleset-only pol
     );
   assert.equal(oauthSource.scope, "repo");
   assert.equal(oauthSource.endpoint, "GET /repos/owner/repo");
+
+  const reversed = structuredClone(raw);
+  reversed.classic_protection.permission_source.collected_at =
+    "2026-07-27T00:00:07.000Z";
+  assert.throws(
+    () => normalizeGithubObservation(publication(), reversed),
+    /administration proof must not precede the classic-protection 404/,
+  );
 
   assert.throws(
     () =>

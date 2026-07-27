@@ -170,6 +170,10 @@ function normalizePolicy(publication, raw) {
   if (raw.classic_protection != null) {
     const classicEntry = object(raw.classic_protection, "classic_protection");
     const classicResult = classicEntry.result ?? "SUCCESS";
+    const classicCollectedAt = canonicalTime(
+      classicEntry.collected_at,
+      "classic_protection.collected_at",
+    );
     let permissionSource = null;
     if (classicResult === "NOT_CONFIGURED") {
       const permission = object(
@@ -192,13 +196,21 @@ function normalizePolicy(publication, raw) {
           "classic branch protection absence requires repo-scoped OAuth administration proof",
         );
       }
+      const permissionCollectedAt = canonicalTime(
+        permission.collected_at,
+        "classic_protection.permission_source.collected_at",
+      );
+      if (
+        Date.parse(permissionCollectedAt) < Date.parse(classicCollectedAt)
+      ) {
+        throw new Error(
+          "administration proof must not precede the classic-protection 404",
+        );
+      }
       permissionSource = completeSource(
         permission.kind,
         permission.endpoint,
-        canonicalTime(
-          permission.collected_at,
-          "classic_protection.permission_source.collected_at",
-        ),
+        permissionCollectedAt,
         {
           result: permission.result,
           credential_type: permission.credential_type,
@@ -217,10 +229,7 @@ function normalizePolicy(publication, raw) {
         "CLASSIC_BRANCH_PROTECTION",
         classicEntry.endpoint ??
           `GET /repos/${target.owner}/${target.repo}/branches/${target.base_branch}/protection`,
-        canonicalTime(
-          classicEntry.collected_at,
-          "classic_protection.collected_at",
-        ),
+        classicCollectedAt,
         {
           result: classicResult,
           binding_field: "required_status_checks.checks[].app_id",

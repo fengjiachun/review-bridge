@@ -938,6 +938,27 @@ function validateChecks(requiredChecks, pullRequest, target) {
         "classic-protection NOT_CONFIGURED requires endpoint-specific administration proof",
       );
     }
+    const classicCollectedAt = timestampMs(
+      classicSource.collected_at,
+      "CLASSIC_BRANCH_PROTECTION.collected_at",
+    );
+    const permissionFollowsClassic =
+      (appPermissionValid &&
+        timestampMs(
+          appPermission.collected_at,
+          "GITHUB_APP_INSTALLATION_PERMISSIONS.collected_at",
+        ) >= classicCollectedAt) ||
+      (oauthPermissionValid &&
+        timestampMs(
+          oauthPermission.collected_at,
+          "GITHUB_OAUTH_REPOSITORY_PERMISSIONS.collected_at",
+        ) >= classicCollectedAt);
+    if (!permissionFollowsClassic) {
+      fail(
+        "INVALID_INPUT",
+        "administration proof must not precede the classic-protection 404",
+      );
+    }
   }
   for (const source of requiredChecks.strict_policy.sources ?? []) {
     assertEnum(
