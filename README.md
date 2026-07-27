@@ -374,24 +374,32 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the pull request process and
 State-changing tools return structured errors. Whether a retry is safe depends
 on `details`:
 
-**`REVIEW_BUSY` / `PUBLICATION_BUSY` with `details.retryable: true`** — another
-process owns the lock and the bounded wait expired. Reread the review summary
-and retry the same transition only if it is still required.
+**`REVIEW_BUSY` with `details.retryable: true`** — another process owns the
+review lock and the bounded wait expired. Call `get_review_summary` and retry
+the same transition only if it is still required.
+
+**`PUBLICATION_BUSY` with `details.retryable: true`** — another process owns the
+publication lock and the bounded wait expired. Call `get_publication` for the
+current state and revision, then retry the same transition only if it is still
+required.
 
 Errors with `details.retryable: false` are fail-closed: resolve the stated cause
 before retrying. Three of them also set `details.state_may_have_changed: true`,
 meaning the write may already be on disk:
 
-**`LOCK_OWNERSHIP_LOST`** — the transition may already have been applied. Reread
-the review before deciding whether any retry is still required.
+**`LOCK_OWNERSHIP_LOST`** — the transition may already have been applied. Call
+`get_review_summary` after a review operation or `get_publication` after a
+publication operation before deciding whether any retry is still required.
 
 **`LOCK_CLEANUP_FAILED`** — the protected write may already be on disk while the
 named lock record remains. Stop the owning Review Bridge process before
-inspecting or removing that record; do not loop on the same mutation.
+inspecting or removing that record. After cleanup, reread the affected review or
+publication state; do not loop on the same mutation.
 
 **`STORE_WRITE_INDETERMINATE`** — the canonical file was replaced, but syncing
-its parent directory failed. Reread the relevant review state before deciding
-whether a retry is still required.
+its parent directory failed. Call `get_review_summary` after a review operation
+or `get_publication` after a publication operation before deciding whether any
+retry is still required.
 
 Other common situations:
 
