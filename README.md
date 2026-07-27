@@ -53,18 +53,25 @@ The two halves install differently:
 | Component | Source |
 | --- | --- |
 | Claude Desktop reviewer extension | Prebuilt `.mcpb` on the [latest release](https://github.com/fengjiachun/review-bridge/releases/latest) |
-| Codex plugin (author + `CODEX_TASK` reviewer) | Build locally — the marketplace directory is not published as a release asset |
+| Codex plugin (author + `CODEX_TASK` reviewer) | Build from a clone at the same release tag — the marketplace directory is not published as a release asset |
 
 Install every process that shares a store from the same Review Bridge build. Do
 not mix a locking-enabled build with artifacts from an earlier release; earlier
 processes do not participate in the locking protocol.
 
+Because the two halves come from different places, **pin them to the same
+release tag**: install the extension from a release, then build the Codex plugin
+from a checkout of that same tag. Building from an arbitrary `main` checkout can
+pair a newer author process with an older reviewer extension against one store.
+The version examples below use `v0.4.0`; substitute the release you installed.
+
 ### Claude Desktop extension
 
 Download `review-bridge-reviewer-<version>.mcpb` from the
-[latest release](https://github.com/fengjiachun/review-bridge/releases/latest).
-A `.dxt` compatibility copy is published for Claude Desktop versions that still
-use the older file extension; the two files are byte-identical.
+[latest release](https://github.com/fengjiachun/review-bridge/releases/latest),
+and note the tag — you will build the Codex plugin from it. A `.dxt`
+compatibility copy is published for Claude Desktop versions that still use the
+older file extension; the two files are byte-identical.
 
 Optionally verify the download against the release's `SHA256SUMS.txt`:
 
@@ -84,13 +91,21 @@ Then, in Claude Desktop:
 
 ### Codex plugin
 
-Build the local marketplace first, then register it:
+Clone the repository and check out the release tag matching the extension you
+installed, then build the local marketplace and register it:
 
 ```bash
+git clone https://github.com/fengjiachun/review-bridge.git
+cd review-bridge
+git checkout v0.4.0
 npm ci
 npm run build
 codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.4.0/codex-marketplace"
 ```
+
+Build from a Git clone, not from the release's source archive: `scripts/build.mjs`
+runs `git status` to reject a dirty tree, which fails outside a Git worktree. The
+archive is for inspection and provenance.
 
 Restart the Codex desktop app, open Plugins, select **Review Bridge Local**, and
 install **Review Bridge**.
@@ -98,10 +113,11 @@ install **Review Bridge**.
 The local marketplace remains the source of the installed plugin. Keep the
 `codex-marketplace` directory in place while using this build.
 
-Two things about `npm run build` are worth knowing before you run it: it
-refuses to build from a dirty working tree, and it runs `npm install` for the
-packaged runtime, so it needs network access. See [Develop](#develop) for the
-full build and verification loop.
+Two things about `npm run build` are worth knowing before you run it: it refuses
+to build from a working tree with any modified or untracked file, and it runs
+`npm install` for the packaged runtime, so it needs network access. A fresh
+clone at a release tag satisfies both. See [Develop](#develop) for the full
+build and verification loop.
 
 ### Build output
 
@@ -112,7 +128,9 @@ full build and verification loop.
 - `review-bridge-reviewer-v0.4.0.mcpb` — MCP Bundle for Claude Desktop.
 - `review-bridge-reviewer-v0.4.0.dxt` — compatibility copy of the same bundle.
 - `claude-extension-source/` — inspectable source of the Claude extension.
-- `review-bridge-source-v0.4.0.zip` — source archive of the built commit.
+- `review-bridge-source-v0.4.0.zip` — source archive of the built commit, for
+  inspection and provenance. It carries no Git metadata, so it cannot be used to
+  run the build itself.
 - `SHA256SUMS.txt` — checksums for the bundle, compatibility copy, and source
   archive.
 
@@ -335,8 +353,10 @@ npm run build
 npm run verify:build
 ```
 
-`npm run build` refuses to run against a dirty working tree — commit or stash
-first — and needs network access to install the packaged runtime. Set
+`npm run build` refuses to run against a dirty working tree and needs network
+access to install the packaged runtime. The check uses
+`git status --untracked-files=all`, so untracked files block it too; see
+[Troubleshooting](#troubleshooting) for how to clear them. Set
 `REVIEW_BRIDGE_OUTPUT_ROOT` to write the build somewhere other than `dist/`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the pull request process and
@@ -369,8 +389,18 @@ whether a retry is still required.
 
 Other common situations:
 
-**`npm run build` fails immediately** — the working tree is dirty. Commit or
-stash, then rebuild.
+**`npm run build` fails immediately with `refusing to build from a dirty working
+tree`** — the check runs `git status --porcelain --untracked-files=all`, so
+untracked files count, and a plain `git stash` will not clear them. Commit the
+changes, delete the stray files, or stash everything including untracked:
+
+```bash
+git stash --include-untracked
+```
+
+**`npm run build` fails with `fatal: not a git repository`** — you are building
+from the extracted source archive. That check needs a Git worktree; clone the
+repository and check out the release tag instead.
 
 **Claude Desktop shows no Review Bridge tools** — restart the app. If they are
 still missing, confirm the extension's data directory matches the Codex
