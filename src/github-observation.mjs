@@ -819,29 +819,46 @@ export function normalizeOauthAdminProofResponse(
   );
 }
 
-function getOauthAdminProof(endpoint) {
-  return normalizeOauthAdminProofResponse(
-    spawnSync("gh", ["api", "--include", endpoint], {
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-    }),
-    endpoint,
-  );
-}
-
-function getClassicProtection(endpoint, repositoryEndpoint) {
-  const result = spawnSync("gh", ["api", endpoint], {
+function spawnGh(args) {
+  return spawnSync("gh", args, {
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
   });
+}
+
+function getOauthAdminProof(
+  endpoint,
+  execute = spawnGh,
+  clock = () => new Date().toISOString(),
+) {
+  const result = execute(["api", "--include", endpoint]);
+  const collectedAt = clock();
+  return normalizeOauthAdminProofResponse(
+    result,
+    endpoint,
+    collectedAt,
+  );
+}
+
+export function collectClassicProtection(
+  endpoint,
+  repositoryEndpoint,
+  {
+    execute = spawnGh,
+    clock = () => new Date().toISOString(),
+  } = {},
+) {
+  const result = execute(["api", endpoint]);
+  const collectedAt = clock();
   const message = result.stderr.trim() || result.stdout.trim();
   const permissionSource = /\(HTTP 404\)\s*$/.test(message)
-    ? getOauthAdminProof(repositoryEndpoint)
+    ? getOauthAdminProof(repositoryEndpoint, execute, clock)
     : null;
   return normalizeClassicProtectionResponse(
     result,
     endpoint,
     permissionSource,
+    collectedAt,
   );
 }
 
@@ -883,7 +900,7 @@ export function collectGithubObservation(publicationInput) {
     policyBaseBranch.value.protected ||
     rules.some((rule) => rule?.type === "required_status_checks");
   const classicProtection = needsClassicProtection
-    ? getClassicProtection(
+    ? collectClassicProtection(
         `${root}/branches/${branch}/protection`,
         root,
       )

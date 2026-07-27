@@ -3008,7 +3008,7 @@ test("observation validation rejects incomplete provenance and unsafe check bind
       },
     },
     {
-      pattern: /classic-protection NOT_CONFIGURED requires endpoint-specific administration proof/,
+      pattern: /classic-protection NOT_CONFIGURED must prove the exact target HTTP 404/,
       mutate(value) {
         const branch = value.required_checks.collection.policy_sources.find(
           (source) => source.kind === "BRANCH_METADATA",
@@ -3039,6 +3039,7 @@ test("observation validation rejects incomplete provenance and unsafe check bind
             endpoint: "GET /repos/owner/repo/branches/main/protection",
             collected_at: policySources[0].collected_at,
             result: "NOT_CONFIGURED",
+            http_status: 404,
           },
           {
             kind: "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
@@ -3051,6 +3052,80 @@ test("observation validation rejects incomplete provenance and unsafe check bind
             scope: "repo",
           },
         );
+      },
+    },
+    ...[
+      {
+        endpoint: "GET /repos/other/repo/branches/main/protection",
+        httpStatus: 404,
+      },
+      {
+        endpoint: "GET /repos/owner/repo/branches/main/protection",
+        httpStatus: 403,
+      },
+      {
+        endpoint: "GET /repos/owner/repo/branches/main/protection",
+        httpStatus: undefined,
+      },
+    ].map(({ endpoint, httpStatus }) => ({
+      pattern: /classic-protection NOT_CONFIGURED must prove the exact target HTTP 404/,
+      mutate(value) {
+        const policySources =
+          value.required_checks.collection.policy_sources;
+        policySources.find(
+          (source) => source.kind === "BRANCH_METADATA",
+        ).protected = true;
+        policySources.push(
+          {
+            kind: "CLASSIC_BRANCH_PROTECTION",
+            endpoint,
+            collected_at: policySources[0].collected_at,
+            result: "NOT_CONFIGURED",
+            ...(httpStatus === undefined
+              ? {}
+              : { http_status: httpStatus }),
+          },
+          {
+            kind: "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",
+            endpoint: "GET /repos/owner/repo",
+            collected_at: policySources[0].collected_at,
+            result: "SUCCESS",
+            credential_type: "OAUTH_SCOPE_TOKEN",
+            field: "x-oauth-scopes+permissions.admin",
+            level: "ADMIN",
+            scope: "repo",
+          },
+        );
+      },
+    })),
+    {
+      pattern: /classic-protection NOT_CONFIGURED requires endpoint-specific administration proof/,
+      mutate(value) {
+        const policySources =
+          value.required_checks.collection.policy_sources;
+        policySources.push({
+          kind: "CLASSIC_BRANCH_PROTECTION",
+          endpoint: "GET /repos/owner/repo/branches/main/protection",
+          collected_at: policySources[0].collected_at,
+          result: "NOT_CONFIGURED",
+          http_status: 404,
+        });
+        value.required_checks.policy = "REQUIRED";
+        value.required_checks.requirements = [
+          {
+            context: "ruleset-only",
+            app_binding: "PINNED",
+            required_app_id: 15368,
+            binding_sources: [
+              {
+                kind: "APPLICABLE_RULES",
+                field:
+                  "rules[].parameters.required_status_checks[].integration_id",
+                raw_representation: "POSITIVE_INTEGER",
+              },
+            ],
+          },
+        ];
       },
     },
     {
@@ -3151,6 +3226,7 @@ test("ruleset-only OAuth administration proof passes observation validation", as
       endpoint: "GET /repos/owner/repo/branches/main/protection",
       collected_at: policySources[0].collected_at,
       result: "NOT_CONFIGURED",
+      http_status: 404,
     },
     {
       kind: "GITHUB_OAUTH_REPOSITORY_PERMISSIONS",

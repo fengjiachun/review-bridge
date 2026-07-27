@@ -897,7 +897,22 @@ function validateChecks(requiredChecks, pullRequest, target) {
       "classic protection may be omitted only for an unprotected branch with empty applicable rules",
     );
   }
-  if (classicSource?.result === "NOT_CONFIGURED" && branchSource.protected) {
+  if (classicSource?.result === "NOT_CONFIGURED") {
+    const encodedRepository =
+      `/repos/${encodeURIComponent(target.owner)}/` +
+      encodeURIComponent(target.repo);
+    const expectedClassicEndpoint =
+      `GET ${encodedRepository}/branches/` +
+      `${encodeURIComponent(target.base_branch)}/protection`;
+    if (
+      classicSource.endpoint !== expectedClassicEndpoint ||
+      classicSource.http_status !== 404
+    ) {
+      fail(
+        "INVALID_INPUT",
+        "classic-protection NOT_CONFIGURED must prove the exact target HTTP 404",
+      );
+    }
     const appPermission = policySources.find(
       (source) => source.kind === "GITHUB_APP_INSTALLATION_PERMISSIONS",
     );
@@ -906,23 +921,18 @@ function validateChecks(requiredChecks, pullRequest, target) {
     );
     const appPermissionValid =
       appPermission?.result === "SUCCESS" &&
-      appPermission.endpoint ===
-        `GET /repos/${target.owner}/${target.repo}/installation` &&
+      appPermission.endpoint === `GET ${encodedRepository}/installation` &&
       appPermission.credential_type === "GITHUB_APP" &&
       appPermission.field === "permissions.administration" &&
       ["READ", "WRITE"].includes(appPermission.level);
     const oauthPermissionValid =
       oauthPermission?.result === "SUCCESS" &&
-      oauthPermission.endpoint ===
-        `GET /repos/${target.owner}/${target.repo}` &&
+      oauthPermission.endpoint === `GET ${encodedRepository}` &&
       oauthPermission.credential_type === "OAUTH_SCOPE_TOKEN" &&
       oauthPermission.field === "x-oauth-scopes+permissions.admin" &&
       oauthPermission.level === "ADMIN" &&
       oauthPermission.scope === "repo";
-    if (
-      !appPermissionValid &&
-      !oauthPermissionValid
-    ) {
+    if (!appPermissionValid && !oauthPermissionValid) {
       fail(
         "INVALID_INPUT",
         "classic-protection NOT_CONFIGURED requires endpoint-specific administration proof",

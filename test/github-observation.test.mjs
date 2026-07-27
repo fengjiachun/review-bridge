@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  collectClassicProtection,
   normalizeClassicProtectionResponse,
   normalizeGithubObservation,
   normalizeOauthAdminProofResponse,
@@ -419,6 +420,48 @@ test("GitHub observation normalization accepts an authenticated ruleset-only pol
       /repo-scoped admin gh credentials/,
     );
   }
+});
+
+test("classic protection collection preserves each response completion time", () => {
+  const calls = [];
+  const times = [
+    "2026-07-27T00:00:07.250Z",
+    "2026-07-27T00:00:07.500Z",
+  ];
+  const collected = collectClassicProtection(
+    "/repos/owner/repo/branches/main/protection",
+    "/repos/owner/repo",
+    {
+      execute(args) {
+        calls.push(args);
+        return calls.length === 1
+          ? {
+              status: 1,
+              stderr: "gh: Branch not protected (HTTP 404)\n",
+              stdout: "",
+            }
+          : {
+              status: 0,
+              stderr: "",
+              stdout:
+                'HTTP/2 200 OK\nX-OAuth-Scopes: repo\n\n{"permissions":{"admin":true}}',
+            };
+      },
+      clock() {
+        return times.shift();
+      },
+    },
+  );
+
+  assert.deepEqual(calls, [
+    ["api", "/repos/owner/repo/branches/main/protection"],
+    ["api", "--include", "/repos/owner/repo"],
+  ]);
+  assert.equal(collected.collected_at, "2026-07-27T00:00:07.250Z");
+  assert.equal(
+    collected.permission_source.collected_at,
+    "2026-07-27T00:00:07.500Z",
+  );
 });
 
 test("GitHub observation normalization rejects legacy classic contexts", () => {

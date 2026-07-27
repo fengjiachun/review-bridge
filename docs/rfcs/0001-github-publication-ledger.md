@@ -911,7 +911,10 @@ successful branch-metadata or applicable-rules reads do not prove access to
 classic protection because that endpoint has a separate Administration
 permission. A classic-protection `404` may then be classified as
 `NOT_CONFIGURED` only when the connector also supplies this endpoint-specific
-authorization proof:
+authorization proof. The classic source itself must name the exact
+`GET /repos/{owner}/{repo}/branches/{base_branch}/protection` endpoint, retain
+`http_status: 404`, and timestamp the completion of that response before any
+follow-up permission lookup:
 
 ```json
 {

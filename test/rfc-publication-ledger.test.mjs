@@ -58,13 +58,14 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
     (match) => JSON.parse(match[1]),
   );
 
-  assert.equal(examples.length, 11);
+  assert.equal(examples.length, 12);
   const [
     ledger,
     clearedObservationEvent,
     unsupportedExample,
     baselineReplayExample,
     permissionProof,
+    oauthPermissionProof,
     terminalExample,
     acknowledgement,
     verification,
@@ -124,6 +125,9 @@ test("publication ledger RFC JSON examples are internally consistent", async () 
   );
   assert.equal(permissionProof.result, "SUCCESS");
   assert.equal(permissionProof.credential_type, "GITHUB_APP");
+  assert.equal(oauthPermissionProof.result, "SUCCESS");
+  assert.equal(oauthPermissionProof.credential_type, "OAUTH_SCOPE_TOKEN");
+  assert.equal(oauthPermissionProof.scope, "repo");
   assert.equal(terminalExample.status, "INVALIDATED");
   assert.equal("request_refs" in acknowledgement, false);
   assert.equal("ambiguous_results" in acknowledgement, false);
