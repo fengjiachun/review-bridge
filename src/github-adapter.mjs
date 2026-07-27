@@ -273,14 +273,16 @@ function resultLooksCodex(kind, object) {
 }
 
 function requestCompatible(result, request) {
-  if (request.requested_head_sha == null) {
+  const requestedHeadSha =
+    request.requested_head_sha ?? request.issuance?.requested_head_sha;
+  if (requestedHeadSha == null) {
     return true;
   }
   if (result.resource_kind === "PULL_REQUEST_REVIEW") {
-    return result.reviewed_head_sha === request.requested_head_sha;
+    return result.reviewed_head_sha === requestedHeadSha;
   }
   const prefix = result.commit_binding?.prefix;
-  return typeof prefix === "string" && request.requested_head_sha.startsWith(prefix);
+  return typeof prefix === "string" && requestedHeadSha.startsWith(prefix);
 }
 
 function associateResults({
@@ -423,7 +425,19 @@ function associateCorrelatedResults({
             identity(request.resource_kind, request.resource_id),
           ) && isStrictlyBefore(request, result),
       );
-      if (openRecognized.length === 1 && openUnbound.length === 0) {
+      const openBaseline = baseline.filter(
+        (request) =>
+          !closed.requests.has(
+            identity(request.resource_kind, request.resource_id),
+          ) &&
+          isStrictlyBefore(request, result) &&
+          requestCompatible(result, request),
+      );
+      if (
+        openRecognized.length === 1 &&
+        openUnbound.length === 0 &&
+        openBaseline.length === 0
+      ) {
         const request = openRecognized[0];
         result.association = "SINGLE_OPEN_REQUEST";
         result.request_ref = {
@@ -716,6 +730,7 @@ export function adaptCodexEvidence({
       ...(adapterVersion === 2
         ? { request_id: requestIdFromBody(String(current.object.body ?? "")) }
         : {}),
+      ...("issuance" in stored ? { issuance: stored.issuance } : {}),
       classification: stored.classification,
       reason: stored.reason,
     });

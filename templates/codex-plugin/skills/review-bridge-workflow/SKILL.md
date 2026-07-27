@@ -164,8 +164,10 @@ For either mode:
    and call `acknowledge_codex_review_ambiguity` only after direct approval of
    both exact sets and the `NO_FURTHER_RESULTS_EXPECTED` risk statement. If the
    baseline contains no open legacy or unsupported request, continue without
-   an acknowledgement. A version-2 `BASELINE_CORRELATED` request is already
-   isolated by its request ID and does not require closure.
+   an acknowledgement. A version-2 `BASELINE_CORRELATED` request with
+   server-verified issuance provenance from another head is not a candidate for
+   a later markerless result; an unverified, same-head, or legacy unscoped
+   baseline request remains a candidate.
 5. Refresh the PR head and require it to equal the publication authorization
    head. Call `get_publication_summary` and require
    `next_action: POST_AND_RECORD_CODEX_REVIEW_REQUEST`. Post exactly one issue
@@ -196,14 +198,15 @@ For either mode:
 7. For adapter version 2, prefer a clean issue comment or findings review that
    echoes the exact current Review Bridge request ID. When the GitHub Codex App
    omits it, accept only the server-replayed fallback of exactly one recorded
-   open request, no preceding unbound request, and a compatible reviewed-commit
-   prefix or native GitHub `commit_id`. Adapter-version-1 ledgers retain the
-   legacy exact-body and single-open-request rules. In either version, treat an
-   eyes reaction, silence, missing pagination, an unsupported standalone review
-   comment, an unbound request, an ambiguous result, or an unknown response
-   shape as non-passing. Findings must be a formal review with its complete
-   structurally attached Codex review comments. Never infer correlation from
-   timestamps alone.
+   open request, no preceding unbound or compatible unresolved baseline
+   request, and a compatible reviewed-commit prefix or native GitHub
+   `commit_id`. Adapter-version-1 ledgers retain the legacy exact-body and
+   single-open-request rules. In either version, treat an eyes reaction,
+   silence, missing pagination, an unsupported standalone review comment, an
+   unbound request, an ambiguous result, or an unknown response shape as
+   non-passing. Findings must be a formal review with its complete structurally
+   attached Codex review comments. Never infer correlation from timestamps
+   alone.
 8. If the ledger reports `GITHUB_REVIEW_UNKNOWN` because of ambiguity or an
    unbound or unsupported request, call `get_publication_summary` and present
    its entire `required_request_refs` and `required_ambiguous_results` sets to

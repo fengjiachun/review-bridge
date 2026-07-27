@@ -153,6 +153,99 @@ test("version 2 falls back to one head-bound clean result without a request ID",
   );
 });
 
+test("version 2 keeps a markerless result ambiguous with an unverified baseline request", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const baselineRequestId = `rbreq-${"2".repeat(32)}`;
+  const body = requestBody(requestId);
+  const baselineBody = requestBody(baselineRequestId);
+  const baselineRequest = {
+    id: 90,
+    html_url: "https://github.com/fengjiachun/review-bridge/pull/6#issuecomment-90",
+    created_at: "2026-07-25T23:07:00Z",
+    body: baselineBody,
+    user: {
+      id: 3860496,
+      type: "User",
+      login: "fengjiachun",
+    },
+  };
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.issue_comments.unshift(baselineRequest);
+  input.baseline.requests = [
+    {
+      resource_id: baselineRequest.id,
+      resource_kind: "ISSUE_COMMENT",
+      url: baselineRequest.html_url,
+      event_at: "2026-07-25T23:07:00.000Z",
+      timestamp_field: "created_at",
+      body_sha256: digest(baselineBody),
+      request_id: baselineRequestId,
+      actor: { id: 3860496, type: "User" },
+      classification: "BASELINE_CORRELATED",
+      reason: null,
+    },
+  ];
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
+});
+
+test("version 2 ignores a trusted baseline request issued for another head", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const baselineRequestId = `rbreq-${"2".repeat(32)}`;
+  const body = requestBody(requestId);
+  const baselineBody = requestBody(baselineRequestId);
+  const baselineRequest = {
+    id: 90,
+    html_url: "https://github.com/fengjiachun/review-bridge/pull/6#issuecomment-90",
+    created_at: "2026-07-25T23:07:00Z",
+    body: baselineBody,
+    user: {
+      id: 3860496,
+      type: "User",
+      login: "fengjiachun",
+    },
+  };
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.issue_comments.unshift(baselineRequest);
+  input.baseline.requests = [
+    {
+      resource_id: baselineRequest.id,
+      resource_kind: "ISSUE_COMMENT",
+      url: baselineRequest.html_url,
+      event_at: "2026-07-25T23:07:00.000Z",
+      timestamp_field: "created_at",
+      body_sha256: digest(baselineBody),
+      request_id: baselineRequestId,
+      actor: { id: 3860496, type: "User" },
+      issuance: {
+        review_id: "rb-2026-07-25T230000-000Z-deadbeef",
+        recorded_revision: 2,
+        requested_head_sha: "f".repeat(40),
+      },
+      classification: "BASELINE_CORRELATED",
+      reason: null,
+    },
+  ];
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "SINGLE_OPEN_REQUEST");
+  assert.equal(result.results[0].format, "CODEX_CLEAN_COMMENT_V1");
+  assert.equal(result.results[0].verdict, "CLEAN");
+});
+
 test("version 2 keeps markerless results ambiguous with two open requests", async () => {
   const input = await fixture("codex-clean");
   const firstRequestId = `rbreq-${"1".repeat(32)}`;

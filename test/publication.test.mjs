@@ -378,6 +378,25 @@ async function start(fixtureState, startedAt, baselineOverride = null) {
   );
 }
 
+async function successorFixture(state) {
+  await fsp.writeFile(
+    path.join(state.repository, "value.js"),
+    "export const value = 3;\n",
+  );
+  git(state.repository, "add", ".");
+  git(state.repository, "commit", "-m", "successor");
+  const headSha = git(state.repository, "rev-parse", "HEAD");
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: "Change the exported value again.",
+    implementationScope: "Update value.js.",
+  });
+  await submitInitialReview(state.store, review.id, []);
+  await finalizeLocalGate(state.store, review.id);
+  return { ...state, reviewId: review.id, headSha };
+}
+
 async function reachReady(state, startedAt = Date.now()) {
   await start(state, startedAt);
   const requestAt = startedAt + 1_000;
@@ -596,6 +615,111 @@ test("version 2 accepts one markerless result bound to the authorized head", asy
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const startedAt = Date.now();
+  await start(state, startedAt, baselineV2(startedAt - 100));
+  const source = await getPublicationSummary(state.store, state.reviewId);
+  const oldRequestId = source.codex_review_request.request_id;
+  const oldRequestAt = startedAt + 1_000;
+  const oldRequest = {
+    resource_id: 90,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-90",
+    event_at: iso(oldRequestAt),
+    timestamp_field: "created_at",
+    body_sha256: digest(correlatedRequestBody(oldRequestId)),
+    request_id: oldRequestId,
+    actor: { id: 7, type: "User" },
+  };
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 90,
+      url: oldRequest.url,
+      createdAt: oldRequest.event_at,
+      requestedHeadSha: state.headSha,
+      requestId: oldRequestId,
+    },
+    { clock: () => oldRequestAt + 10 },
+  );
+  const successor = await successorFixture(state);
+  await start(
+    successor,
+    startedAt + 2_000,
+    baselineV2(startedAt + 1_900, [oldRequest]),
+  );
+  const publication = await getPublication(
+    successor.store,
+    successor.reviewId,
+  );
+  const storedBaseline = publication.codex_review_baseline.requests[0];
+  assert.deepEqual(storedBaseline.issuance, {
+    review_id: state.reviewId,
+    recorded_revision: 2,
+    requested_head_sha: state.headSha,
+  });
+  const created = await getPublicationSummary(
+    successor.store,
+    successor.reviewId,
+  );
+  const requestAt = startedAt + 3_000;
+  await recordCodexReviewRequest(
+    successor.store,
+    successor.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(requestAt),
+      requestedHeadSha: successor.headSha,
+      requestId: created.codex_review_request.request_id,
+    },
+    { clock: () => requestAt + 10 },
+  );
+  const current = observationV2(
+    {
+      at: startedAt + 4_000,
+      baseSha: successor.baseSha,
+      headSha: successor.headSha,
+      requestId: 100,
+      requestAt,
+      baselineRequests: [
+        {
+          ...oldRequest,
+          issuance: storedBaseline.issuance,
+        },
+      ],
+    },
+    created.codex_review_request.request_id,
+  );
+  current.codex_review.results[0].request_id = null;
+  current.codex_review.results[0].association = "SINGLE_OPEN_REQUEST";
+  current.codex_review.results[0].format = "CODEX_CLEAN_COMMENT_V1";
+  const missingRequestId = structuredClone(current);
+  delete missingRequestId.codex_review.results[0].request_id;
+  await assert.rejects(
+    recordGithubSnapshot(
+      successor.store,
+      successor.reviewId,
+      { expectedRevision: 2, observation: missingRequestId },
+      { clock: () => startedAt + 4_010 },
+    ),
+    /version 2 results must include request_id/,
+  );
+
+  const ready = await recordGithubSnapshot(
+    successor.store,
+    successor.reviewId,
+    { expectedRevision: 2, observation: current },
+    { clock: () => startedAt + 4_010 },
+  );
+  assert.equal(ready.status, "MERGE_READY");
+});
+
+test("version 2 rejects a markerless result with an unverified baseline request", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
   const oldRequestId = `rbreq-${"1".repeat(32)}`;
   const oldRequest = {
     resource_id: 90,
@@ -641,25 +765,70 @@ test("version 2 accepts one markerless result bound to the authorized head", asy
   current.codex_review.results[0].request_id = null;
   current.codex_review.results[0].association = "SINGLE_OPEN_REQUEST";
   current.codex_review.results[0].format = "CODEX_CLEAN_COMMENT_V1";
-  const missingRequestId = structuredClone(current);
-  delete missingRequestId.codex_review.results[0].request_id;
-  await assert.rejects(
-    recordGithubSnapshot(
-      state.store,
-      state.reviewId,
-      { expectedRevision: 2, observation: missingRequestId },
-      { clock: () => startedAt + 2_010 },
-    ),
-    /version 2 results must include request_id/,
-  );
 
-  const ready = await recordGithubSnapshot(
+  const blocked = await recordGithubSnapshot(
     state.store,
     state.reviewId,
     { expectedRevision: 2, observation: current },
     { clock: () => startedAt + 2_010 },
   );
-  assert.equal(ready.status, "MERGE_READY");
+  assert.equal(blocked.status, "GITHUB_REVIEW_UNKNOWN");
+});
+
+test("version 2 rejects caller-supplied baseline issuance provenance", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const request = {
+    resource_id: 90,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-90",
+    event_at: iso(startedAt - 1_000),
+    timestamp_field: "created_at",
+    body_sha256: digest(correlatedRequestBody(requestId)),
+    request_id: requestId,
+    actor: { id: 7, type: "User" },
+    issuance: {
+      review_id: state.reviewId,
+      recorded_revision: 2,
+      requested_head_sha: state.headSha,
+    },
+  };
+  await assert.rejects(
+    start(
+      state,
+      startedAt,
+      baselineV2(startedAt - 100, [request]),
+    ),
+    /issuance provenance is server-derived/,
+  );
+});
+
+test("version 2 rejects head-claiming 64-hex request IDs", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const requestId = `rbreq-${state.baseSha}${"1".repeat(24)}`;
+  await assert.rejects(
+    start(
+      state,
+      startedAt,
+      baselineV2(startedAt - 100, [
+        {
+          resource_id: 90,
+          resource_kind: "ISSUE_COMMENT",
+          url: "https://github.com/owner/repo/issues/7#issuecomment-90",
+          event_at: iso(startedAt - 1_000),
+          timestamp_field: "created_at",
+          body_sha256: digest(correlatedRequestBody(requestId)),
+          request_id: requestId,
+          actor: { id: 7, type: "User" },
+        },
+      ]),
+    ),
+    /request_id is invalid/,
+  );
 });
 
 test("version 2 ignores a delayed result correlated to a baseline request", async (t) => {

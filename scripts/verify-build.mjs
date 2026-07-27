@@ -333,17 +333,21 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /server-replayed fallback of exactly one recorded\s+   open request, no preceding unbound request, and a compatible reviewed-commit\s+   prefix or native GitHub `commit_id`/,
+  /server-replayed fallback of exactly one recorded\s+   open request, no preceding unbound or compatible unresolved baseline\s+   request, and a compatible reviewed-commit prefix or native GitHub\s+   `commit_id`/,
 );
 assert.match(
   workflowSkill,
-  /Adapter-version-1 ledgers retain the\s+   legacy exact-body and single-open-request rules/,
+  /Adapter-version-1 ledgers retain the legacy exact-body and\s+   single-open-request rules/,
 );
-assert.match(workflowSkill, /eyes reaction.*as non-passing/s);
+assert.match(
+  workflowSkill,
+  /version-2 `BASELINE_CORRELATED` request with\s+   server-verified issuance provenance from another head is not a candidate/,
+);
+assert.match(workflowSkill, /eyes reaction.*as\s+non-passing/s);
 assert.match(workflowSkill, /immediately call\s+`record_codex_review_request`/);
 assert.match(
   workflowSkill,
-  /Findings must be a formal review with its complete\s+   structurally attached Codex review comments/,
+  /Findings must be a formal review with its complete\s+structurally\s+attached Codex review comments/,
 );
 assert.match(workflowSkill, /get_review_summary/);
 assert.match(workflowSkill, /wait_for_review_state/);

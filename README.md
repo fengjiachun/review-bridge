@@ -270,11 +270,14 @@ The GitHub adapter is deliberately fail-closed: a standalone review comment, a
 reaction, silence, an unbound or unsupported request, incomplete pagination,
 or an ambiguous result all fail rather than pass. Version-2 requests carry a
 server-derived ID. If Codex omits it, Review Bridge accepts only one recorded
-open request with no preceding unbound request and a compatible reviewed-commit
-prefix or native GitHub `commit_id`; multiple candidates and incompatible heads
-remain ambiguous. Inline comments count only when structurally attached to a
-formal review. Legacy ambiguity still requires direct human approval of the
-complete resource-scoped request/result set.
+open request with no preceding unbound request, no compatible unresolved
+baseline request, and a compatible reviewed-commit prefix or native GitHub
+`commit_id`. A historical baseline request is head-scoped only when its exact
+GitHub facts match a valid prior local publication ledger; caller-supplied
+provenance is rejected. Multiple candidates and incompatible heads remain
+ambiguous. Inline comments count only when structurally attached to a formal
+review. Legacy ambiguity still requires direct human approval of the complete
+resource-scoped request/result set.
 
 Version 0.4 writes authorization-union publication ledgers with schema version 2
 and remains able to read and complete version-1 local-gate ledgers. New

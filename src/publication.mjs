@@ -120,13 +120,21 @@ function createPublicationId() {
   return `rb-${stamp}-${crypto.randomBytes(4).toString("hex")}`;
 }
 
-function correlatedRequestId(ledger) {
+function correlatedRequestIdFor(reviewId, revision, headSha) {
   return `rbreq-${sha256(
     Buffer.from(
-      `${ledger.review_id}\0${ledger.revision}\0${authorizationForLedger(ledger).head_sha}`,
+      `${reviewId}\0${revision}\0${headSha}`,
       "utf8",
     ),
   ).slice(0, 32)}`;
+}
+
+function correlatedRequestId(ledger) {
+  return correlatedRequestIdFor(
+    ledger.review_id,
+    ledger.revision,
+    authorizationForLedger(ledger).head_sha,
+  );
 }
 
 function correlatedRequestBody(requestId) {
@@ -507,6 +515,16 @@ function validateBaseline(input, currentMs, createdAt = null, expectedActor = nu
   if (requests.length + results.length > 5_000) {
     fail("PUBLICATION_LIMIT_EXCEEDED", "baseline exceeds 5,000 evidence entries");
   }
+  if (
+    requests.some(
+      (request) => isJsonObject(request) && "issuance" in request,
+    )
+  ) {
+    fail(
+      "INVALID_INPUT",
+      "baseline request issuance provenance is server-derived",
+    );
+  }
   validateRequestFacts(requests, "baseline.requests", { baseline: true });
   validateResultFacts(results, "baseline.candidate_results", {
     baseline: true,
@@ -550,6 +568,44 @@ function validateRequestFacts(items, name, { baseline = false } = {}) {
       !isCodexRequestId(item.request_id)
     ) {
       fail("INVALID_INPUT", `${name}[${index}].request_id is invalid`);
+    }
+    if ("issuance" in item) {
+      const issuance = assertObject(
+        item.issuance,
+        `${name}[${index}].issuance`,
+      );
+      assertExactKeys(
+        issuance,
+        ["review_id", "recorded_revision", "requested_head_sha"],
+        `${name}[${index}].issuance`,
+      );
+      publicationDirectory("/store", issuance.review_id);
+      if (
+        !Number.isSafeInteger(issuance.recorded_revision) ||
+        issuance.recorded_revision < 2
+      ) {
+        fail(
+          "INVALID_INPUT",
+          `${name}[${index}].issuance.recorded_revision is invalid`,
+        );
+      }
+      assertSha(
+        issuance.requested_head_sha,
+        `${name}[${index}].issuance.requested_head_sha`,
+      );
+      if (
+        item.request_id !==
+        correlatedRequestIdFor(
+          issuance.review_id,
+          issuance.recorded_revision - 1,
+          issuance.requested_head_sha,
+        )
+      ) {
+        fail(
+          "INVALID_INPUT",
+          `${name}[${index}].issuance does not authenticate request_id`,
+        );
+      }
     }
     if (baseline) {
       assertObject(item.actor, `${name}[${index}].actor`);
@@ -1120,6 +1176,7 @@ function validateCodexPartitions(codexReview, ledger) {
         "timestamp_field",
         "body_sha256",
         ...(adapterVersion === 2 ? ["request_id"] : []),
+        ...("issuance" in item ? ["issuance"] : []),
         "actor",
       ],
       `codex_review.preexisting_requests[${index}]`,
@@ -1129,6 +1186,13 @@ function validateCodexPartitions(codexReview, ledger) {
       ["id", "type"],
       `codex_review.preexisting_requests[${index}].actor`,
     );
+    if ("issuance" in item) {
+      assertExactKeys(
+        item.issuance,
+        ["review_id", "recorded_revision", "requested_head_sha"],
+        `codex_review.preexisting_requests[${index}].issuance`,
+      );
+    }
   }
   for (const [index, item] of baselineResults.entries()) {
     assertExactKeys(
@@ -1322,13 +1386,16 @@ function baselineRequestClassification(request, adapterVersion) {
   };
 }
 
-function normalizeBaseline(baseline, recordedAt) {
+function normalizeBaseline(baseline, recordedAt, issuances = new Map()) {
   const adapterVersion = baseline.collection.adapter_version;
   return {
     ...baseline,
     recorded_at: recordedAt,
     requests: baseline.requests.map((request) => ({
       ...request,
+      ...(issuances.has(resourceIdentity(request))
+        ? { issuance: issuances.get(resourceIdentity(request)) }
+        : {}),
       ...baselineRequestClassification(request, adapterVersion),
     })),
     candidate_results: baseline.candidate_results.map((result) => ({
@@ -2180,6 +2247,119 @@ async function loadPublicationFile(
   }
 }
 
+function issuanceFacts(item) {
+  return {
+    resource_id: item.resource_id,
+    resource_kind: item.resource_kind,
+    url: item.url,
+    event_at: item.event_at,
+    timestamp_field: item.timestamp_field,
+    body_sha256: item.body_sha256,
+    request_id: item.request_id,
+  };
+}
+
+async function findBaselineIssuances(
+  storeRoot,
+  currentReviewId,
+  target,
+  baseline,
+) {
+  if (baseline.collection.adapter_version !== 2) {
+    return new Map();
+  }
+  let entries;
+  try {
+    entries = await fsp.readdir(path.join(storeRoot, "reviews"), {
+      withFileTypes: true,
+    });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return new Map();
+    }
+    throw error;
+  }
+  if (entries.length > 10_000) {
+    return new Map();
+  }
+  const candidates = new Map(
+    baseline.requests
+      .filter(
+        (request) =>
+          baselineRequestClassification(request, 2).classification ===
+          "BASELINE_CORRELATED",
+      )
+      .map((request) => [resourceIdentity(request), request]),
+  );
+  const matches = new Map();
+  for (const entry of entries) {
+    if (
+      !entry.isDirectory() ||
+      entry.name === currentReviewId ||
+      !/^rb-[0-9TZ-]+-[a-f0-9]{8}$/.test(entry.name)
+    ) {
+      continue;
+    }
+    let ledger;
+    try {
+      ledger = await loadPublicationFile(
+        pathsFor(storeRoot, entry.name),
+        entry.name,
+        { allowMissing: true },
+      );
+    } catch {
+      continue;
+    }
+    if (
+      ledger == null ||
+      ledger.codex_review_baseline.collection.adapter_version !== 2 ||
+      ledger.target.repository_id !== target.repository_id ||
+      ledger.target.owner !== target.owner ||
+      ledger.target.repo !== target.repo ||
+      ledger.target.pr_number !== target.pr_number
+    ) {
+      continue;
+    }
+    const authorizedHead = authorizationForLedger(ledger).head_sha;
+    for (const history of ledger.codex_request_history) {
+      const identity = resourceIdentity(history);
+      const request = candidates.get(identity);
+      if (
+        request == null ||
+        history.classification !== "RECOGNIZED" ||
+        history.binding_source !== "RECORDED_AT_POST" ||
+        history.recorded_revision < 2 ||
+        history.requested_head_sha !== authorizedHead ||
+        history.request_id !==
+          correlatedRequestIdFor(
+            ledger.review_id,
+            history.recorded_revision - 1,
+            authorizedHead,
+          ) ||
+        history.body_sha256 !==
+          sha256(
+            Buffer.from(correlatedRequestBody(history.request_id), "utf8"),
+          ) ||
+        !sameCanonical(issuanceFacts(history), issuanceFacts(request))
+      ) {
+        continue;
+      }
+      const existing = matches.get(identity) ?? [];
+      existing.push({
+        review_id: ledger.review_id,
+        recorded_revision: history.recorded_revision,
+        requested_head_sha: authorizedHead,
+      });
+      matches.set(identity, existing);
+    }
+  }
+  return new Map(
+    [...matches]
+      .filter(([, values]) => values.length === 1)
+      .map(([identity, values]) => [identity, values[0]]),
+  );
+}
+
 function requireRevision(ledger, expectedRevision) {
   assertRevision(expectedRevision);
   if (ledger.revision !== expectedRevision) {
@@ -2428,16 +2608,18 @@ function correlationRequestBeforeResult(request, result) {
 }
 
 function correlationRequestCompatible(request, result) {
-  if (request.requested_head_sha == null) {
+  const requestedHeadSha =
+    request.requested_head_sha ?? request.issuance?.requested_head_sha;
+  if (requestedHeadSha == null) {
     return true;
   }
   if (result.resource_kind === "PULL_REQUEST_REVIEW") {
-    return result.reviewed_head_sha === request.requested_head_sha;
+    return result.reviewed_head_sha === requestedHeadSha;
   }
   const prefix = result.commit_binding?.prefix;
   return (
     typeof prefix === "string" &&
-    request.requested_head_sha.startsWith(prefix)
+    requestedHeadSha.startsWith(prefix)
   );
 }
 
@@ -2595,7 +2777,16 @@ function replayCorrelatedResultAssociations(ledger) {
       const unboundMatches = unbound.filter((request) =>
         correlationRequestBeforeResult(request, result),
       );
-      if (recognizedMatches.length === 1 && unboundMatches.length === 0) {
+      const baselineMatches = baseline.filter(
+        (request) =>
+          correlationRequestBeforeResult(request, result) &&
+          correlationRequestCompatible(request, result),
+      );
+      if (
+        recognizedMatches.length === 1 &&
+        unboundMatches.length === 0 &&
+        baselineMatches.length === 0
+      ) {
         const request = recognizedMatches[0];
         replayed.set(resultIdentity, {
           association: "SINGLE_OPEN_REQUEST",
@@ -2607,7 +2798,7 @@ function replayCorrelatedResultAssociations(ledger) {
         matched.add(`${request.resource_kind}:${request.resource_id}`);
       } else {
         replayed.set(resultIdentity, {
-          association: [...recognized, ...unbound, ...baseline].some(
+          association: [...recognized, ...unbound, ...baselineMatches].some(
             (request) => correlationRequestBeforeResult(request, result),
           )
             ? "AMBIGUOUS"
@@ -3993,7 +4184,22 @@ export async function startPublication(
         "automatic-quiescence acknowledgement requires a completed baseline from the last 30 seconds",
       );
     }
-    const normalizedBaseline = normalizeBaseline(validatedBaseline, timestamp);
+    const baselineIssuances = await findBaselineIssuances(
+      storeRoot,
+      reviewId,
+      {
+        repository_id: repositoryId,
+        owner,
+        repo,
+        pr_number: prNumber,
+      },
+      validatedBaseline,
+    );
+    const normalizedBaseline = normalizeBaseline(
+      validatedBaseline,
+      timestamp,
+      baselineIssuances,
+    );
     const ledger = {
       version: 2,
       revision: 1,
