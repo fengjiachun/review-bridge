@@ -394,7 +394,10 @@ assert.match(
   /`AUTOMATIC_QUIESCENCE_ACKNOWLEDGED` requires direct human/,
 );
 assert.match(workflowSkill, /Immediately\s+before merge call `verify_publication_gate`/);
-assert.match(workflowSkill, /normalize-codex-evidence\.mjs/);
+assert.match(
+  workflowSkill,
+  /\.\.\/\.\.\/scripts\/normalize-codex-evidence\.mjs/,
+);
 assert.match(
   workflowSkill,
   /\.\.\/\.\.\/scripts\/collect-github-observation\.mjs/,

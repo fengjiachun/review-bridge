@@ -145,9 +145,10 @@ For either mode:
    approval, an operator label, and a rationale immediately before this fresh
    baseline; never infer quiescence from elapsed time, silence, reactions, or a
    general instruction to continue. Normalize the raw three-feed payload with
-   the packaged `scripts/normalize-codex-evidence.mjs` adapter in `BASELINE`
-   mode and set `authorization_head_sha` to the immutable publication head; do
-   not reproduce provider body parsing ad hoc. The legacy
+   the packaged `../../scripts/normalize-codex-evidence.mjs` adapter resolved
+   relative to this SKILL in `BASELINE` mode and set `authorization_head_sha`
+   to the immutable publication head; do not reproduce provider body parsing
+   ad hoc. The legacy
    `local_gate_head_sha` input remains compatible only for older local-ledger
    callers.
 4. Call `start_publication`. If its immutable baseline contains any request,
