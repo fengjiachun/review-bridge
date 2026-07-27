@@ -533,6 +533,11 @@ export function normalizeGithubObservation(publicationInput, rawInput) {
   const authorizationValue = authorization(publication);
   const prEntry = object(raw.pull_request, "pull_request");
   const pr = object(prEntry.value, "pull_request.value");
+  for (const field of ["draft", "merged"]) {
+    if (typeof pr[field] !== "boolean") {
+      throw new Error(`pull_request.${field} must be boolean`);
+    }
+  }
   const pullBranchEntry = object(raw.pull_base_branch, "pull_base_branch");
   const pullBranch = object(pullBranchEntry.value, "pull_base_branch.value");
   const baseHeadEntry = object(raw.base_head_comparison, "base_head_comparison");

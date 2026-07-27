@@ -239,6 +239,28 @@ test("GitHub observation normalization canonicalizes times and pagination", () =
   );
 });
 
+test("GitHub observation normalization requires boolean pull-request flags", () => {
+  for (const field of ["draft", "merged"]) {
+    for (const [label, value, present] of [
+      ["omitted", undefined, false],
+      ["null", null, true],
+      ["non-boolean", "false", true],
+    ]) {
+      const raw = rawCollection();
+      if (present) {
+        raw.pull_request.value[field] = value;
+      } else {
+        delete raw.pull_request.value[field];
+      }
+      assert.throws(
+        () => normalizeGithubObservation(publication(), raw),
+        new RegExp(`pull_request\\.${field} must be boolean`),
+        `${field} ${label}`,
+      );
+    }
+  }
+});
+
 test("GitHub observation normalization fails closed without protected-branch evidence", () => {
   const raw = rawCollection();
   raw.policy_base_branch.value.protected = true;

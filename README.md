@@ -281,9 +281,13 @@ not access GitHub or return the full ledger. For a fresh snapshot, pass the
 full JSON returned by `get_publication` to the packaged read-only collector:
 
 ```bash
-node scripts/collect-github-observation.mjs publication.json > observation.json
+node dist/review-bridge-v0.4.1/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs \
+  publication.json > observation.json
 ```
 
+Run that command from the repository root after `npm run build`. Inside an
+installed Codex plugin, the workflow skill resolves the same helper as
+`../../scripts/collect-github-observation.mjs` relative to its own `SKILL.md`.
 The collector reads the target from the ledger, uses the authenticated `gh`
 CLI, follows every required REST and GraphQL page, canonicalizes GitHub
 timestamps to UTC milliseconds, and fails closed when required policy evidence

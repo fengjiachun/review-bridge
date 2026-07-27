@@ -395,17 +395,25 @@ assert.match(
 );
 assert.match(workflowSkill, /Immediately\s+before merge call `verify_publication_gate`/);
 assert.match(workflowSkill, /normalize-codex-evidence\.mjs/);
-assert.match(workflowSkill, /collect-github-observation\.mjs/);
+assert.match(
+  workflowSkill,
+  /\.\.\/\.\.\/scripts\/collect-github-observation\.mjs/,
+);
 assert.match(workflowSkill, /canonicalizes GitHub timestamps to UTC milliseconds/);
 assert.ok(
   await fsp.stat(
     path.join(pluginRoot, "scripts", "normalize-codex-evidence.mjs"),
   ),
 );
-assert.ok(
-  await fsp.stat(
-    path.join(pluginRoot, "scripts", "collect-github-observation.mjs"),
-  ),
+const collectorPath = path.join(
+  pluginRoot,
+  "scripts",
+  "collect-github-observation.mjs",
+);
+assert.ok(await fsp.stat(collectorPath));
+assert.match(
+  run(process.execPath, [collectorPath, "--help"], pluginRoot),
+  /Usage: collect-github-observation\.mjs/,
 );
 assert.ok(
   await fsp.stat(

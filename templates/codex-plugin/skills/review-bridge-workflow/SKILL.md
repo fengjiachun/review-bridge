@@ -152,7 +152,8 @@ For either mode:
    callers.
 4. Call `start_publication`. If its immutable baseline contains any request,
    call `get_publication`, supply that returned JSON to the packaged read-only
-   `scripts/collect-github-observation.mjs` helper, and call
+   `../../scripts/collect-github-observation.mjs` helper resolved relative to
+   this SKILL, and call
    `record_github_snapshot` with its output. Then call
    `get_publication_summary`, present its complete
    `required_request_refs` and `required_ambiguous_results` sets to the human,
@@ -168,11 +169,12 @@ For either mode:
    crash between post and binding leaves an unbound request and must fail
    closed.
 6. Call `get_publication` and supply its returned JSON to the packaged
-   `scripts/collect-github-observation.mjs` helper. The helper uses the user's
-   authenticated `gh` CLI in read-only mode to collect the PR and both base
-   comparisons, applicable rules, two independent branch reads, classic
-   protection when applicable, every check-run page using `filter=all`, every
-   commit-status page, all three Codex feeds, and all review-thread pages. It
+   `../../scripts/collect-github-observation.mjs` helper resolved relative to
+   this SKILL. The helper uses the user's authenticated `gh` CLI in read-only
+   mode to collect the PR and both base comparisons, applicable rules, two
+   independent branch reads, classic protection when applicable, every
+   check-run page using `filter=all`, every commit-status page, all three Codex
+   feeds, and all review-thread pages. It
    canonicalizes GitHub timestamps to UTC milliseconds, preserves pagination
    proof, and fails closed when policy evidence is unavailable. Call
    `record_github_snapshot` with its complete output, then use
