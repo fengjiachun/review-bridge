@@ -261,6 +261,25 @@ test("GitHub observation normalization requires boolean pull-request flags", () 
   }
 });
 
+test("GitHub observation normalization requires an explicit check-run total", () => {
+  for (const [label, value, present] of [
+    ["omitted", undefined, false],
+    ["null", null, true],
+  ]) {
+    const raw = rawCollection();
+    const page = { check_runs: [] };
+    if (present) {
+      page.total_count = value;
+    }
+    raw.check_runs.pages = [page];
+    assert.throws(
+      () => normalizeGithubObservation(publication(), raw),
+      /check-run pagination is incomplete or inconsistent/,
+      label,
+    );
+  }
+});
+
 test("GitHub observation normalization fails closed without protected-branch evidence", () => {
   const raw = rawCollection();
   raw.policy_base_branch.value.protected = true;

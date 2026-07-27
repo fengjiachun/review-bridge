@@ -533,6 +533,38 @@ test("publication summary refinalizes an uncommitted crash candidate", async (t)
   assert.equal(summary.gate_state, "INVALID");
 });
 
+test("publication summary refreshes GitHub evidence to recover a malformed gate", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, observedAt } = await reachReady(state);
+  await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  await fsp.writeFile(
+    path.join(
+      state.store,
+      "reviews",
+      state.reviewId,
+      "publication-gate.json",
+    ),
+    "{malformed\n",
+    { mode: 0o600 },
+  );
+
+  const summary = await getPublicationSummary(
+    state.store,
+    state.reviewId,
+    { clock: () => observedAt + 30 },
+  );
+  assert.equal(summary.status, "MERGE_READY");
+  assert.equal(summary.blocking_reason, "PUBLICATION_GATE_MALFORMED");
+  assert.equal(summary.next_action, "REFRESH_GITHUB_SNAPSHOT");
+  assert.equal(summary.gate_state, "MALFORMED");
+});
+
 test("publication state rejects mutually consistent foreign review IDs", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

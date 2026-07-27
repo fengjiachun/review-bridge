@@ -332,8 +332,12 @@ function normalizeRuns(publication, raw) {
   const checkRuns = checkPages.flatMap((page, index) =>
     array(page?.check_runs, `check_runs.pages[${index}].check_runs`),
   );
-  const reportedTotal = checkPages[0]?.total_count ?? 0;
-  if (!Number.isSafeInteger(reportedTotal) || reportedTotal !== checkRuns.length) {
+  const reportedTotal = checkPages[0]?.total_count;
+  if (
+    !Number.isSafeInteger(reportedTotal) ||
+    reportedTotal < 0 ||
+    reportedTotal !== checkRuns.length
+  ) {
     throw new Error("check-run pagination is incomplete or inconsistent");
   }
   const statusPage = itemPages(raw.commit_statuses, "commit_statuses");

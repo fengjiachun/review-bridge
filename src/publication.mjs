@@ -3751,7 +3751,7 @@ function nextPublicationAction(ledger, derived, gateState, evidenceStale) {
         return "VERIFY_PUBLICATION_GATE";
       }
       return gateState === "MALFORMED"
-        ? "REPAIR_PUBLICATION_GATE"
+        ? "REFRESH_GITHUB_SNAPSHOT"
         : "FINALIZE_PUBLICATION_GATE";
     case "GITHUB_REVIEW_UNKNOWN":
       return "ACKNOWLEDGE_CODEX_REVIEW_AMBIGUITY";
