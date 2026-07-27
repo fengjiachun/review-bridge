@@ -149,6 +149,26 @@ test("version 2 rejects a clean result that omits the request ID", async () => {
   assert.equal(result.results[0].verdict, "UNKNOWN");
 });
 
+test("version 2 preserves stored unbound requests in later snapshots", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.request_history[0] = {
+    ...input.request_history[0],
+    classification: "UNBOUND",
+    requested_head_sha: null,
+    request_id: requestId,
+    body_sha256: digest(body),
+  };
+
+  const result = adaptCodexEvidence(input);
+  assert.deepEqual(result.requests, []);
+  assert.equal(result.unbound_requests.length, 1);
+  assert.equal(result.unbound_requests[0].request_id, requestId);
+});
+
 test("version 2 binds findings by request ID and native review commit", async () => {
   const input = await fixture("codex-findings");
   const requestId = `rbreq-${"1".repeat(32)}`;

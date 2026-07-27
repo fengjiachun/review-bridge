@@ -755,7 +755,11 @@ export function adaptCodexEvidence({
             : requestId != null &&
               bound?.request_id === requestId &&
               bound?.body_sha256 === digest(body);
-        if (recognizedBody && kind === "ISSUE_COMMENT" && bound) {
+        if (
+          recognizedBody &&
+          kind === "ISSUE_COMMENT" &&
+          bound?.classification === "RECOGNIZED"
+        ) {
           requests.push({
             comment_id: facts.resource_id,
             resource_kind: kind,

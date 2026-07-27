@@ -18,6 +18,7 @@
     {
       "resource_id": 500,
       "resource_kind": "ISSUE_COMMENT",
+      "classification": "RECOGNIZED",
       "requested_head_sha": "ec32bd284e383bf5e618cbb2ae1ae04ea8302416"
     }
   ],
