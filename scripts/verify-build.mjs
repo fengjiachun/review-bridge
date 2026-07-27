@@ -316,7 +316,7 @@ assert.match(
   /when present, the returned\s+`codex_review_request\.request_id`/,
 );
 assert.match(workflowSkill, /legacy exact body without a request ID/);
-assert.match(workflowSkill, /Never infer correlation from timestamps/);
+assert.match(workflowSkill, /Never infer\s+correlation from timestamps/);
 assert.match(workflowSkill, /Set `adapter_version: 2` in the normalizer\s+input/);
 assert.match(
   workflowSkill,
@@ -329,9 +329,14 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /clean issue comment.*Findings must echo the same request ID in\s+   a formal review/s,
+  /adapter version 2, require a clean issue comment or findings review to\s+   echo the exact current Review Bridge request ID/,
 );
-assert.match(workflowSkill, /Treat an eyes reaction.*as non-passing/s);
+assert.match(workflowSkill, /version-1 ledgers.*do not require a request ID/s);
+assert.match(
+  workflowSkill,
+  /clean issue comment.*recognized version-specific format.*Findings must be a formal review/s,
+);
+assert.match(workflowSkill, /eyes reaction.*as non-passing/s);
 assert.match(workflowSkill, /immediately call\s+`record_codex_review_request`/);
 assert.match(workflowSkill, /formal review bound by native\s+`commit_id`/);
 assert.match(workflowSkill, /get_review_summary/);

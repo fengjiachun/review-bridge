@@ -193,16 +193,17 @@ For either mode:
    acknowledgement sets, gate state, and `next_action`. Use the full
    `get_publication` result again only as the next collector input or for an
    audit that needs the complete ledger.
-7. For adapter version 2, treat a result that omits or changes the exact Review
-   Bridge request ID as non-passing. Adapter-version-1 ledgers retain the
-   legacy exact-body and single-open-request rules. In either version, treat an
-   eyes reaction, silence, missing pagination, an unsupported
+7. For adapter version 2, require a clean issue comment or findings review to
+   echo the exact current Review Bridge request ID; a missing or changed ID is
+   non-passing. Adapter-version-1 ledgers retain the legacy exact-body and
+   single-open-request rules and do not require a request ID. In either
+   version, treat an eyes reaction, silence, missing pagination, an unsupported
    standalone review comment, an unbound request, an ambiguous result, or an
-   unknown response shape as non-passing. A clean issue comment must echo the
-   current request ID, use the recognized clean format, and carry the commit
-   prefix for the exact request head. Findings must echo the same request ID in
-   a formal review bound by native `commit_id` with its complete structurally
-   attached Codex review comments. Never infer correlation from timestamps.
+   unknown response shape as non-passing. A clean issue comment must use the
+   recognized version-specific format and carry the commit prefix for the exact
+   request head. Findings must be a formal review bound by native `commit_id`
+   with its complete structurally attached Codex review comments. Never infer
+   correlation from timestamps.
 8. If the ledger reports `GITHUB_REVIEW_UNKNOWN` because of ambiguity or an
    unbound or unsupported request, call `get_publication_summary` and present
    its entire `required_request_refs` and `required_ambiguous_results` sets to
