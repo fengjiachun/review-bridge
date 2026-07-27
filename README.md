@@ -1,34 +1,144 @@
-# Review Bridge v0.4.0
+# Review Bridge
 
-Review Bridge is a manually triggered code-review handoff between a Codex
-author and an explicitly bound reviewer: Claude Desktop, a fresh Codex task, or
-GitHub Codex in remote-only publication mode.
+[![CI](https://github.com/fengjiachun/review-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/fengjiachun/review-bridge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
+[![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey.svg)](#platform-support)
 
-For local review, it creates an immutable Git snapshot, gives the reviewer
-read-only tools, lets the author answer every finding, and stops after two
-rounds when a finding remains.
+A manually triggered code-review handoff between a Codex author and an
+explicitly bound reviewer: Claude Desktop, a fresh Codex task, or GitHub Codex
+in remote-only publication mode.
+
+A local review runs like this:
+
+1. You finish a change in a Codex task and ask it to prepare a review. Review
+   Bridge captures an **immutable snapshot** of the diff and the changed files.
+2. You open a **fresh reviewer context** — a new Claude Desktop conversation or
+   a brand-new Codex task — which gets read-only tools over that snapshot and
+   submits structured findings.
+3. If the reviewer submits no findings, the review is already `CLEAN` and you
+   finalize it. Otherwise you go back to the author task, **answer every
+   finding**, and prepare round two.
+4. The review ends in `LOCAL_GATE_PASSED`, or in `HUMAN_REQUIRED` when a
+   finding still stands after round two.
 
 Review Bridge is an independent community project. It is not affiliated with,
 endorsed by, or sponsored by OpenAI or Anthropic.
 
+## Contents
+
+- [Platform support](#platform-support)
+- [Install](#install)
+- [Use](#use)
+- [Successor reviews](#successor-reviews)
+- [State machine](#state-machine)
+- [GitHub publication gate](#github-publication-gate)
+- [Security and scope](#security-and-scope)
+- [Data handling and cleanup](#data-handling-and-cleanup)
+- [Develop](#develop)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
+
 ## Platform support
 
-Review Bridge v0.4.0 supports macOS 13 Ventura or newer. The Claude Desktop
-extension manifest is Darwin-only; Linux and Windows are not currently
-supported or tested. State locking uses the macOS system tools
-`/usr/bin/lockf` and `/bin/ps`.
+Review Bridge supports macOS 13 Ventura or newer. The Claude Desktop extension
+manifest is Darwin-only; Linux and Windows are not currently supported or
+tested. State locking uses the macOS system tools `/usr/bin/lockf` and
+`/bin/ps`.
 
-## What is included
+Node.js 18 or newer is required. CI verifies each change on macOS with Node 20.
 
-- `codex-marketplace/`: local Codex marketplace containing the Review Bridge
+## Install
+
+The two halves install differently:
+
+| Component | Source |
+| --- | --- |
+| Claude Desktop reviewer extension | Prebuilt `.mcpb` on the [latest release](https://github.com/fengjiachun/review-bridge/releases/latest) |
+| Codex plugin (author + `CODEX_TASK` reviewer) | Build from a clone at the same release tag — the marketplace directory is not published as a release asset |
+
+Install every process that shares a store from the same Review Bridge build. Do
+not mix a locking-enabled build with artifacts from an earlier release; earlier
+processes do not participate in the locking protocol.
+
+Because the two halves come from different places, **pin them to the same
+release tag**: install the extension from a release, then build the Codex plugin
+from a checkout of that same tag. Building from an arbitrary `main` checkout can
+pair a newer author process with an older reviewer extension against one store.
+The version examples below use `v0.4.0`; substitute the release you installed.
+
+### Claude Desktop extension
+
+Download `review-bridge-reviewer-<version>.mcpb` from the
+[latest release](https://github.com/fengjiachun/review-bridge/releases/latest),
+and note the tag — you will build the Codex plugin from it. A `.dxt`
+compatibility copy is published for Claude Desktop versions that still use the
+older file extension; the two files are byte-identical.
+
+Optionally verify the download against the release's `SHA256SUMS.txt`:
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+```
+
+Then, in Claude Desktop:
+
+1. Open **Settings → Extensions → Advanced settings**.
+2. Choose **Install Extension**.
+3. Select the `.mcpb` file. If the picker only accepts `.dxt`, select the
+   compatibility copy.
+4. Keep the default Review Bridge data directory, or select the same directory
+   configured through `REVIEW_BRIDGE_HOME` for Codex.
+5. Restart Claude Desktop if its tools do not appear immediately.
+
+### Codex plugin
+
+Clone the repository and check out the release tag matching the extension you
+installed, then build the local marketplace and register it:
+
+```bash
+git clone https://github.com/fengjiachun/review-bridge.git
+cd review-bridge
+git checkout v0.4.0
+npm ci
+npm run build
+codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.4.0/codex-marketplace"
+```
+
+Build from a Git clone, not from the release's source archive: `scripts/build.mjs`
+runs `git status` to reject a dirty tree, which fails outside a Git worktree. The
+archive is for inspection and provenance.
+
+Restart the Codex desktop app, open Plugins, select **Review Bridge Local**, and
+install **Review Bridge**.
+
+The local marketplace remains the source of the installed plugin. Keep the
+`codex-marketplace` directory in place while using this build.
+
+Two things about `npm run build` are worth knowing before you run it: it refuses
+to build from a working tree with any modified or untracked file, and it runs
+`npm install` for the packaged runtime, so it needs network access. A fresh
+clone at a release tag satisfies both. See [Develop](#develop) for the full
+build and verification loop.
+
+### Build output
+
+`npm run build` writes everything under `dist/review-bridge-v0.4.0/`:
+
+- `codex-marketplace/` — local Codex marketplace containing the Review Bridge
   plugin, author MCP server, and `CODEX_TASK` reviewer MCP server.
-- `review-bridge-reviewer-v0.4.0.mcpb`: current MCP Bundle for Claude Desktop.
-- `review-bridge-reviewer-v0.4.0.dxt`: compatibility copy for Claude Desktop
-  versions that still use the DXT file extension.
-- `claude-extension-source/`: inspectable source of the Claude extension.
+- `review-bridge-reviewer-v0.4.0.mcpb` — MCP Bundle for Claude Desktop.
+- `review-bridge-reviewer-v0.4.0.dxt` — compatibility copy of the same bundle.
+- `claude-extension-source/` — inspectable source of the Claude extension.
+- `review-bridge-source-v0.4.0.zip` — source archive of the built commit, for
+  inspection and provenance. It carries no Git metadata, so it cannot be used to
+  run the build itself.
+- `SHA256SUMS.txt` — checksums for the bundle, compatibility copy, and source
+  archive.
 
-Run `npm run build` to create these files under
-`dist/review-bridge-v0.4.0/`.
+Set `REVIEW_BRIDGE_OUTPUT_ROOT` to write a build to a different directory.
+
+### Shared data directory
 
 All MCP processes use this default shared data directory:
 
@@ -38,36 +148,6 @@ All MCP processes use this default shared data directory:
 
 Set `REVIEW_BRIDGE_HOME` to override it. When installing the Claude extension,
 select the same directory in its configuration.
-
-Install every process that shares a store from the same Review Bridge
-build. Do not mix a locking-enabled build with artifacts from an earlier
-release; earlier processes do not participate in the locking protocol.
-
-## Install the Codex plugin
-
-From a terminal:
-
-```bash
-codex plugin marketplace add "/absolute/path/to/codex-marketplace"
-```
-
-Restart the Codex desktop app, open Plugins, select **Review Bridge Local**, and
-install **Review Bridge**.
-
-The local marketplace remains the source of the installed plugin. Keep the
-`codex-marketplace` directory in place while using this build.
-
-## Install the Claude extension
-
-In Claude Desktop:
-
-1. Open **Settings → Extensions → Advanced settings**.
-2. Choose **Install Extension**.
-3. Select `review-bridge-reviewer-v0.4.0.mcpb`. If the picker only accepts
-   `.dxt`, select the compatibility copy.
-4. Keep the default Review Bridge data directory, or select the same directory
-   configured through `REVIEW_BRIDGE_HOME` for Codex.
-5. Restart Claude Desktop if its tools do not appear immediately.
 
 ## Use
 
@@ -85,25 +165,9 @@ polling. A timed-out wait is expected while a human-paced review is still in
 progress; call it again with the same `state_version`, or resume when the user
 confirms the review is complete.
 
-State-changing tools can return a structured `REVIEW_BUSY` error with
-`details.retryable: true` after a bounded lock wait. Reread the review summary
-and retry the same transition only if it is still required. Treat errors with
-`details.retryable: false` as fail-closed and resolve their stated cause before
-retrying.
-
-`LOCK_OWNERSHIP_LOST` is a special non-retryable result with
-`details.state_may_have_changed: true`: the transition may already be on disk.
-Reread the review before deciding whether any retry is still required.
-
-`LOCK_CLEANUP_FAILED` is also non-retryable and sets
-`details.state_may_have_changed: true`. The protected write may already be on
-disk while the named lock record remains. Stop the owning Review Bridge process
-before inspecting or removing that record; do not loop on the same mutation.
-
-`STORE_WRITE_INDETERMINATE` is non-retryable and also sets
-`details.state_may_have_changed: true`. The canonical file was replaced, but
-syncing its parent directory failed, so reread the relevant review state before
-deciding whether a retry is still required.
+State-changing tools can also return structured concurrency and durability
+errors. See [Troubleshooting](#troubleshooting) for what each one means and
+whether retrying is safe.
 
 For a `CODEX_TASK` review, create a new Codex task. Do not fork the author task
 or include its chat history. Give the new task only this request:
@@ -118,7 +182,11 @@ use the equivalent request:
 > review strategy, inspect the required artifacts and relevant snapshot files,
 > then submit structured findings.
 
-Back in Codex:
+If the reviewer submitted no findings, the review is already `CLEAN` and its
+next action is `FINALIZE_LOCAL_GATE`; there is nothing to answer and
+`prepare_rereview` will reject the state. Skip ahead and finalize.
+
+Otherwise, back in Codex:
 
 > Read the reviewer's findings, address each one, and prepare round two.
 
@@ -128,7 +196,7 @@ Resume the same reviewer context for round two. The final state is one of:
   still matches the reviewed snapshot.
 - `HUMAN_REQUIRED`: a finding remains or a new finding appears after round two.
 
-### Successor reviews
+## Successor reviews
 
 Start a fresh reviewer context for each new `review_id`; a round-two rereview
 may stay in the same context. A `CODEX_TASK` reviewer must be a newly created
@@ -169,8 +237,7 @@ CLEAN -> snapshot recheck -> LOCAL_GATE_PASSED
 
 ## GitHub publication gate
 
-The installed Codex skill supports two explicit publication authorization
-modes:
+Publishing to GitHub requires an explicit authorization, in one of two modes:
 
 ```text
 LOCAL_GATE_PASSED ────────────┐
@@ -181,34 +248,36 @@ REMOTE_ONLY authorization ────┴─> publication baseline
   -> finalize + immediate verification
 ```
 
-`LOCAL_GATE` remains the default. `REMOTE_ONLY` is available only when the
-operator directly chooses to skip local review. The
-`authorize_remote_publication` tool records the exact
+`LOCAL_GATE` is the default: a passed local review authorizes publication.
+`REMOTE_ONLY` is available only when the operator directly chooses to skip local
+review. Its `authorize_remote_publication` tool records the exact
 `LOCAL_REVIEW_SKIPPED` acknowledgement, operator label, rationale, clean local
-repository, reviewed base SHA, and head SHA under a new review ID. The reviewed
-base is the merge base of the freshly observed PR base tip and head, so an
-advanced base branch does not need to be an ancestor of the feature head. The
-tool does not create or claim `LOCAL_GATE_PASSED`.
+repository, reviewed base SHA, and head SHA under a new review ID, and does not
+create or claim `LOCAL_GATE_PASSED`. The reviewed base is the merge base of the
+freshly observed PR base tip and head, so an advanced base branch does not need
+to be an ancestor of the feature head.
 
-Version 0.4 writes authorization-union publication ledgers with schema version
-2 and remains able to read and complete version-1 local-gate ledgers. The
-author tools bind the selected authorization, pull request, required checks,
-exact request, pinned Codex Bot actor, result, and review threads to one head
-SHA. Every mutation carries an expected revision and revokes an older
-`publication-gate.json`. Finalization creates an expiring gate and appends a
-chained audit event; Codex must call `verify_publication_gate` immediately
-before a head-matching merge.
+Either way, the author tools bind the selected authorization, pull request,
+required checks, exact request, pinned Codex Bot actor, result, and review
+threads to **one head SHA**. Every mutation carries an expected revision and
+revokes an older `publication-gate.json`. Finalization creates an expiring gate
+and appends a chained audit event; Codex must call `verify_publication_gate`
+immediately before a head-matching merge.
+
+The GitHub adapter is deliberately fail-closed: a standalone review comment, a
+reaction, silence, an unbound or unsupported request, incomplete pagination, or
+an ambiguous result all fail rather than pass. Inline comments count only when
+structurally attached to a formal review. Closing such ambiguity requires direct
+human approval of the complete resource-scoped request/result set.
+
+Version 0.4 writes authorization-union publication ledgers with schema version 2
+and remains able to read and complete version-1 local-gate ledgers.
 
 The packaged Codex plugin also includes
 `scripts/inspect-publication-audit.mjs <review_id>` for read-only, full-chain
 offline audit validation.
 
-The packaged version-1 adapter recognizes the observed clean issue-comment
-shape and findings formal-review shape. Inline comments count only when
-structurally attached to that formal review. A standalone review comment,
-reaction, silence, unbound request, unsupported request, incomplete pagination,
-or ambiguous result fails closed. Closing ambiguity requires direct human
-approval of the complete resource-scoped request/result set.
+### Head-SHA discipline
 
 Before requesting GitHub review, both the local branch head and PR head must
 equal the selected authorization's `head_sha`. A mismatch invalidates the
@@ -221,6 +290,9 @@ before committing, then pass that SHA to `prepare_review`. Commit before local
 review and commit fixes before rereview. This binds the reviewed diff to the
 pre-change base and the local snapshot to the exact commit later pushed as the
 PR head.
+
+Design background: [RFC 0001 — GitHub Publication
+Ledger](docs/rfcs/0001-github-publication-ledger.md).
 
 ## Security and scope
 
@@ -276,7 +348,8 @@ release policy.
 ## Develop
 
 Requirements: macOS 13 Ventura or newer with `/usr/bin/lockf` and `/bin/ps`,
-Node.js 18 or newer, npm, Git, and `unzip`.
+Node.js 18 or newer, npm, and Git. `npm run verify:build` additionally requires
+`unzip`.
 
 ```bash
 npm ci
@@ -286,4 +359,71 @@ npm run build
 npm run verify:build
 ```
 
-Set `REVIEW_BRIDGE_OUTPUT_ROOT` to write a build to a different directory.
+`npm run build` refuses to run against a dirty working tree and needs network
+access to install the packaged runtime. The check uses
+`git status --untracked-files=all`, so untracked files block it too; see
+[Troubleshooting](#troubleshooting) for how to clear them. Set
+`REVIEW_BRIDGE_OUTPUT_ROOT` to write the build somewhere other than `dist/`.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the pull request process and
+[docs/rfcs/](docs/rfcs/) for design records. Release history is in
+[CHANGELOG.md](CHANGELOG.md).
+
+## Troubleshooting
+
+State-changing tools return structured errors. Whether a retry is safe depends
+on `details`:
+
+**`REVIEW_BUSY` with `details.retryable: true`** — another process owns the
+review lock and the bounded wait expired. Call `get_review_summary` and retry
+the same transition only if it is still required.
+
+**`PUBLICATION_BUSY` with `details.retryable: true`** — another process owns the
+publication lock and the bounded wait expired. Call `get_publication` for the
+current state and revision, then retry the same transition only if it is still
+required.
+
+Errors with `details.retryable: false` are fail-closed: resolve the stated cause
+before retrying. Three of them also set `details.state_may_have_changed: true`,
+meaning the write may already be on disk:
+
+**`LOCK_OWNERSHIP_LOST`** — the transition may already have been applied. Call
+`get_review_summary` after a review operation or `get_publication` after a
+publication operation before deciding whether any retry is still required.
+
+**`LOCK_CLEANUP_FAILED`** — the protected write may already be on disk while the
+named lock record remains. Stop the owning Review Bridge process before
+inspecting or removing that record. After cleanup, reread the affected review or
+publication state; do not loop on the same mutation.
+
+**`STORE_WRITE_INDETERMINATE`** — the canonical file was replaced, but syncing
+its parent directory failed. Call `get_review_summary` after a review operation
+or `get_publication` after a publication operation before deciding whether any
+retry is still required.
+
+Other common situations:
+
+**`npm run build` fails immediately with `refusing to build from a dirty working
+tree`** — the check runs `git status --porcelain --untracked-files=all`, so
+untracked files count, and a plain `git stash` will not clear them. Commit the
+changes, delete the stray files, or stash everything including untracked:
+
+```bash
+git stash --include-untracked
+```
+
+**`npm run build` fails with `fatal: not a git repository`** — you are building
+from the extracted source archive. That check needs a Git worktree; clone the
+repository and check out the release tag instead.
+
+**Claude Desktop shows no Review Bridge tools** — restart the app. If they are
+still missing, confirm the extension's data directory matches the Codex
+`REVIEW_BRIDGE_HOME`.
+
+**A reviewer cannot see a pending review** — each review is immutably bound to
+one provider. A `CLAUDE_DESKTOP` reviewer cannot list or open a `CODEX_TASK`
+review, and vice versa.
+
+## License
+
+[MIT](LICENSE).
