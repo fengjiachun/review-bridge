@@ -2,6 +2,8 @@ export const codexRequestIdPattern = /^rbreq-[0-9a-f]{32}$/;
 
 const markerPattern =
   /<!-- review-bridge-request-id: (rbreq-[0-9a-f]{32}) -->/g;
+const markerPresencePattern =
+  /<!--\s*review-bridge-request-id\s*:/gi;
 
 export function isCodexRequestId(value) {
   return (
@@ -28,6 +30,14 @@ export function codexResultRequestIdFromBodies(bodies) {
     ...String(body).matchAll(markerPattern),
   ]);
   return matches.length === 1 ? matches[0][1] : null;
+}
+
+export function codexResultRequestMarkerCountFromBodies(bodies) {
+  return bodies.reduce(
+    (count, body) =>
+      count + [...String(body).matchAll(markerPresencePattern)].length,
+    0,
+  );
 }
 
 export function codexResultRequestId(body) {

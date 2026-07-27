@@ -133,12 +133,87 @@ test("version 2 keeps a delayed predecessor result out of the active request", a
   assert.equal(activeResult.verdict, "CLEAN");
 });
 
-test("version 2 rejects a clean result that omits the request ID", async () => {
+test("version 2 falls back to one head-bound clean result without a request ID", async () => {
   const input = await fixture("codex-clean");
   const requestId = `rbreq-${"1".repeat(32)}`;
   const body = requestBody(requestId);
   input.adapter_version = 2;
   input.issue_comments[0].body = body;
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "SINGLE_OPEN_REQUEST");
+  assert.equal(result.results[0].format, "CODEX_CLEAN_COMMENT_V1");
+  assert.equal(result.results[0].verdict, "CLEAN");
+  assert.equal(
+    result.results[0].reviewed_head_sha,
+    input.local_gate_head_sha,
+  );
+});
+
+test("version 2 keeps markerless results ambiguous with two open requests", async () => {
+  const input = await fixture("codex-clean");
+  const firstRequestId = `rbreq-${"1".repeat(32)}`;
+  const secondRequestId = `rbreq-${"2".repeat(32)}`;
+  const firstBody = requestBody(firstRequestId);
+  const secondBody = requestBody(secondRequestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = firstBody;
+  input.request_history[0].request_id = firstRequestId;
+  input.request_history[0].body_sha256 = digest(firstBody);
+  input.issue_comments.splice(1, 0, {
+    ...structuredClone(input.issue_comments[0]),
+    id: input.issue_comments[0].id + 1,
+    created_at: "2026-07-25T23:09:01Z",
+    body: secondBody,
+  });
+  input.request_history.push({
+    ...structuredClone(input.request_history[0]),
+    resource_id: input.issue_comments[1].id,
+    request_id: secondRequestId,
+    body_sha256: digest(secondBody),
+  });
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
+});
+
+test("version 2 keeps markerless results ambiguous with an unbound request", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const unboundRequestId = `rbreq-${"2".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+  input.issue_comments.splice(1, 0, {
+    ...structuredClone(input.issue_comments[0]),
+    id: input.issue_comments[0].id + 1,
+    created_at: "2026-07-25T23:09:01Z",
+    body: requestBody(unboundRequestId),
+  });
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.unbound_requests.length, 1);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
+});
+
+test("version 2 does not fall back for a malformed request marker", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.issue_comments[1].body +=
+    "\n\n<!-- review-bridge-request-id: malformed -->";
   input.request_history[0].request_id = requestId;
   input.request_history[0].body_sha256 = digest(body);
 
@@ -167,6 +242,22 @@ test("version 2 preserves stored unbound requests in later snapshots", async () 
   assert.deepEqual(result.requests, []);
   assert.equal(result.unbound_requests.length, 1);
   assert.equal(result.unbound_requests[0].request_id, requestId);
+});
+
+test("version 2 falls back to one head-bound findings review without a request ID", async () => {
+  const input = await fixture("codex-findings");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "SINGLE_OPEN_REQUEST");
+  assert.equal(result.results[0].format, "CODEX_FINDINGS_REVIEW_V1");
+  assert.equal(result.results[0].verdict, "FINDINGS");
 });
 
 test("version 2 binds findings by request ID and native review commit", async () => {

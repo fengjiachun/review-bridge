@@ -4,6 +4,7 @@ import {
   codexRequestIdFromBody,
   codexResultRequestId,
   codexResultRequestIdFromBodies,
+  codexResultRequestMarkerCountFromBodies,
 } from "./codex-request.mjs";
 
 const EXACT_REQUEST = "@codex review";
@@ -16,6 +17,7 @@ const RESOURCE_KINDS = {
   pull_request_reviews: "PULL_REQUEST_REVIEW",
   pull_request_review_comments: "PULL_REQUEST_REVIEW_COMMENT",
 };
+const REQUEST_MARKER_COUNT = Symbol("requestMarkerCount");
 
 function requestIdFromBody(body) {
   return codexRequestIdFromBody(body);
@@ -200,17 +202,24 @@ function makeResult(kind, object, comments, expectedActor, adapterVersion) {
     verdict: "UNKNOWN",
   };
   if (adapterVersion === 2) {
-    result.request_id =
+    const requestBodies =
       kind === "PULL_REQUEST_REVIEW"
-        ? codexResultRequestIdFromBodies([
+        ? [
             body,
             ...matchingReviewComments(
               object,
               comments,
               expectedActor,
             ).map((comment) => comment.body),
-          ])
+          ]
+        : [body];
+    result.request_id =
+      kind === "PULL_REQUEST_REVIEW"
+        ? codexResultRequestIdFromBodies(requestBodies)
         : codexResultRequestId(body);
+    Object.defineProperty(result, REQUEST_MARKER_COUNT, {
+      value: codexResultRequestMarkerCountFromBodies(requestBodies),
+    });
   }
   if (kind === "ISSUE_COMMENT") {
     const markers = [...body.matchAll(CLEAN_MARKER)];
@@ -383,14 +392,55 @@ function associateCorrelatedResults({
       continue;
     }
     if (result.request_id == null) {
-      result.association = [...recognized, ...unbound, ...baseline].some(
+      const hasPriorRequest = [...recognized, ...unbound, ...baseline].some(
         (request) =>
           !closed.requests.has(
             identity(request.resource_kind, request.resource_id),
           ) && isStrictlyBefore(request, result),
-      )
-        ? "AMBIGUOUS"
-        : "UNSOLICITED";
+      );
+      if (result[REQUEST_MARKER_COUNT] !== 0) {
+        result.association = hasPriorRequest ? "AMBIGUOUS" : "UNSOLICITED";
+        result.format = "UNKNOWN";
+        result.verdict = "UNKNOWN";
+        continue;
+      }
+      const openRecognized = recognized.filter(
+        (request) =>
+          !closed.requests.has(
+            identity(request.resource_kind, request.resource_id),
+          ) &&
+          !matched.has(identity(request.resource_kind, request.resource_id)) &&
+          isStrictlyBefore(request, result) &&
+          requestCompatible(result, request),
+      );
+      const openUnbound = unbound.filter(
+        (request) =>
+          !closed.requests.has(
+            identity(request.resource_kind, request.resource_id),
+          ) && isStrictlyBefore(request, result),
+      );
+      if (openRecognized.length === 1 && openUnbound.length === 0) {
+        const request = openRecognized[0];
+        result.association = "SINGLE_OPEN_REQUEST";
+        result.request_ref = {
+          resource_kind: request.resource_kind,
+          resource_id: request.resource_id,
+        };
+        matched.add(identity(request.resource_kind, request.resource_id));
+        if (
+          result.resource_kind === "ISSUE_COMMENT" &&
+          result.commit_binding?.source ===
+            "CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD" &&
+          request.requested_head_sha === headSha &&
+          headSha.startsWith(result.commit_binding.prefix)
+        ) {
+          result.reviewed_head_sha = request.requested_head_sha;
+          result.format = "CODEX_CLEAN_COMMENT_V1";
+          result.verdict = "CLEAN";
+        }
+        continue;
+      }
+      result.association = hasPriorRequest ? "AMBIGUOUS" : "UNSOLICITED";
       result.format = "UNKNOWN";
       result.verdict = "UNKNOWN";
       continue;

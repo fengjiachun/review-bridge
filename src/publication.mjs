@@ -1211,6 +1211,12 @@ function validateCodexPartitions(codexReview, ledger) {
   validateResultFacts(results, "codex_review.results", {
     expectedActor: ledger.target.codex_actor,
   });
+  if (
+    adapterVersion === 2 &&
+    results.some((result) => !("request_id" in result))
+  ) {
+    fail("INVALID_INPUT", "version 2 results must include request_id");
+  }
   const allIdentities = [];
   for (const item of [
     ...baselineRequests,
@@ -2580,14 +2586,35 @@ function replayCorrelatedResultAssociations(ledger) {
       continue;
     }
     if (!isCodexRequestId(result.request_id)) {
-      replayed.set(resultIdentity, {
-        association: [...recognized, ...unbound, ...baseline].some(
-          (request) => correlationRequestBeforeResult(request, result),
-        )
-          ? "AMBIGUOUS"
-          : "UNSOLICITED",
-        request_ref: null,
-      });
+      const recognizedMatches = recognized.filter(
+        (request) =>
+          !matched.has(`${request.resource_kind}:${request.resource_id}`) &&
+          correlationRequestBeforeResult(request, result) &&
+          correlationRequestCompatible(request, result),
+      );
+      const unboundMatches = unbound.filter((request) =>
+        correlationRequestBeforeResult(request, result),
+      );
+      if (recognizedMatches.length === 1 && unboundMatches.length === 0) {
+        const request = recognizedMatches[0];
+        replayed.set(resultIdentity, {
+          association: "SINGLE_OPEN_REQUEST",
+          request_ref: {
+            resource_kind: request.resource_kind,
+            resource_id: request.resource_id,
+          },
+        });
+        matched.add(`${request.resource_kind}:${request.resource_id}`);
+      } else {
+        replayed.set(resultIdentity, {
+          association: [...recognized, ...unbound, ...baseline].some(
+            (request) => correlationRequestBeforeResult(request, result),
+          )
+            ? "AMBIGUOUS"
+            : "UNSOLICITED",
+          request_ref: null,
+        });
+      }
       continue;
     }
     const matches = (items) =>
@@ -2821,7 +2848,7 @@ function codexStatus(ledger) {
       Date.parse(left.event_at) - Date.parse(right.event_at) ||
       left.resource_id - right.resource_id,
   ).at(-1);
-  const correlated =
+  const adapterVersionTwo =
     ledger.codex_review_baseline.collection.adapter_version === 2;
   const results = observation.codex_review.results.filter(
     (result) => {
@@ -2829,8 +2856,9 @@ function codexStatus(ledger) {
         `${result.resource_kind}:${result.result_id}`,
       );
       return (
-        replay?.association ===
-          (correlated ? "CORRELATED_REQUEST_ID" : "SINGLE_OPEN_REQUEST") &&
+        (replay?.association === "SINGLE_OPEN_REQUEST" ||
+          (adapterVersionTwo &&
+            replay?.association === "CORRELATED_REQUEST_ID")) &&
         replay.request_ref?.resource_kind === latest.resource_kind &&
         replay.request_ref?.resource_id === latest.resource_id
       );
@@ -2842,7 +2870,15 @@ function codexStatus(ledger) {
   if (results.length !== 1) {
     return "GITHUB_REVIEW_UNKNOWN";
   }
-  const earlierUnanswered = !correlated && correlation.recognized
+  const result = results[0];
+  const resultReplay = correlation.replayed.get(
+    `${result.resource_kind}:${result.result_id}`,
+  );
+  const idCorrelated =
+    resultReplay?.association === "CORRELATED_REQUEST_ID";
+  const earlierUnanswered =
+    resultReplay?.association === "SINGLE_OPEN_REQUEST" &&
+    correlation.recognized
     .filter((request) => request.resource_id !== latest.resource_id)
     .some(
       (request) =>
@@ -2863,7 +2899,6 @@ function codexStatus(ledger) {
   if (earlierUnanswered) {
     return "GITHUB_REVIEW_UNKNOWN";
   }
-  const result = results[0];
   if (result.actor.id !== ledger.target.codex_actor.id || result.actor.type !== "Bot") {
     return "GITHUB_REVIEW_UNKNOWN";
   }
@@ -2879,13 +2914,16 @@ function codexStatus(ledger) {
   }
   if (
     result.format ===
-    (correlated ? "CODEX_CLEAN_COMMENT_V2" : "CODEX_CLEAN_COMMENT_V1")
+    (idCorrelated ? "CODEX_CLEAN_COMMENT_V2" : "CODEX_CLEAN_COMMENT_V1")
   ) {
     if (
       result.resource_kind !== "ISSUE_COMMENT" ||
       result.native_review_state !== null ||
       result.verdict !== "CLEAN" ||
-      (correlated && result.request_id !== latest.request_id) ||
+      (adapterVersionTwo &&
+        (idCorrelated
+          ? result.request_id !== latest.request_id
+          : result.request_id !== null)) ||
       result.reviewed_head_sha !== authorization.head_sha ||
       result.commit_binding?.source !==
         "CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD" ||
@@ -2899,7 +2937,7 @@ function codexStatus(ledger) {
   }
   if (
     result.format ===
-    (correlated ? "CODEX_FINDINGS_REVIEW_V2" : "CODEX_FINDINGS_REVIEW_V1")
+    (idCorrelated ? "CODEX_FINDINGS_REVIEW_V2" : "CODEX_FINDINGS_REVIEW_V1")
   ) {
     if (
       result.resource_kind !== "PULL_REQUEST_REVIEW" ||
@@ -2907,7 +2945,10 @@ function codexStatus(ledger) {
         result.native_review_state,
       ) ||
       result.verdict !== "FINDINGS" ||
-      (correlated && result.request_id !== latest.request_id) ||
+      (adapterVersionTwo &&
+        (idCorrelated
+          ? result.request_id !== latest.request_id
+          : result.request_id !== null)) ||
       result.reviewed_head_sha !== authorization.head_sha ||
       result.commit_binding?.source !== "PULL_REQUEST_REVIEW_COMMIT_ID" ||
       result.commit_binding?.field !== "commit_id" ||

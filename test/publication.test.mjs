@@ -592,6 +592,76 @@ test("version 2 derives and binds one correlated Codex request", async (t) => {
   assert.equal(ready.status, "MERGE_READY");
 });
 
+test("version 2 accepts one markerless result bound to the authorized head", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const oldRequestId = `rbreq-${"1".repeat(32)}`;
+  const oldRequest = {
+    resource_id: 90,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-90",
+    event_at: iso(startedAt - 1_000),
+    timestamp_field: "created_at",
+    body_sha256: digest(correlatedRequestBody(oldRequestId)),
+    request_id: oldRequestId,
+    actor: { id: 7, type: "User" },
+  };
+  await start(
+    state,
+    startedAt,
+    baselineV2(startedAt - 100, [oldRequest]),
+  );
+  const created = await getPublicationSummary(state.store, state.reviewId);
+  const requestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(requestAt),
+      requestedHeadSha: state.headSha,
+      requestId: created.codex_review_request.request_id,
+    },
+    { clock: () => requestAt + 10 },
+  );
+  const current = observationV2(
+    {
+      at: startedAt + 2_000,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: 100,
+      requestAt,
+      baselineRequests: [oldRequest],
+    },
+    created.codex_review_request.request_id,
+  );
+  current.codex_review.results[0].request_id = null;
+  current.codex_review.results[0].association = "SINGLE_OPEN_REQUEST";
+  current.codex_review.results[0].format = "CODEX_CLEAN_COMMENT_V1";
+  const missingRequestId = structuredClone(current);
+  delete missingRequestId.codex_review.results[0].request_id;
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 2, observation: missingRequestId },
+      { clock: () => startedAt + 2_010 },
+    ),
+    /version 2 results must include request_id/,
+  );
+
+  const ready = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 2, observation: current },
+    { clock: () => startedAt + 2_010 },
+  );
+  assert.equal(ready.status, "MERGE_READY");
+});
+
 test("version 2 ignores a delayed result correlated to a baseline request", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

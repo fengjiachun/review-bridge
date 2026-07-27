@@ -39,11 +39,16 @@ The workflow posts that body unchanged and immediately supplies the same ID to
 `record_codex_review_request`. The server recomputes the expected ID from its
 current revision and rejects caller-selected or stale IDs.
 
-Codex results must contain exactly one matching marker. A clean issue comment
-must carry it in that comment and also needs the existing reviewed-commit
-prefix. A findings review may carry it in the formal review body or one
-structurally attached review comment; it also needs the existing native GitHub
-`commit_id` and structurally attached review comments.
+Codex results should contain exactly one matching marker. A clean issue comment
+may carry it in that comment; a findings review may carry it in the formal
+review body or one structurally attached review comment.
+
+The GitHub Codex App can omit requested markers from otherwise native,
+head-bound results. Version 2 therefore retains a narrow fallback: a markerless
+result can bind only when exactly one recorded workflow request is open, no
+unbound request precedes the result, and the result carries the existing
+compatible reviewed-commit prefix or native GitHub `commit_id`. Findings still
+require structurally attached review comments.
 
 ## Association
 
@@ -53,14 +58,17 @@ For adapter version 2, the server independently replays these rules:
   `CORRELATED_REQUEST_ID`;
 - one matching preexisting correlated request produces
   `BASELINE_LATE_RESULT` and cannot satisfy the current publication;
+- one markerless, strongly head-bound result after exactly one open recorded
+  request produces `SINGLE_OPEN_REQUEST`;
 - a matching unbound request, duplicate ID, or incompatible binding is
   `AMBIGUOUS`;
-- an expected-actor result after an open request that omits the marker is
-  `AMBIGUOUS`;
+- a markerless result with multiple open requests, an open unbound request, or
+  no compatible head binding is `AMBIGUOUS`;
 - an unrelated result with no open request is `UNSOLICITED`.
 
-Timestamps establish only that a request existed before a result. They never
-replace the request ID.
+Timestamps establish only that a request existed before a result. The fallback
+also requires a unique recorded request and a GitHub-native or reviewed-commit
+head binding; time alone never establishes correlation.
 
 ## Successor behavior
 
@@ -84,7 +92,10 @@ publication baseline. New workflows start with adapter version 2.
 ## Security boundary
 
 The request marker is a provider assertion, not a GitHub-native or signed
-identifier. Review Bridge validates its exact value, pinned actor, immutable
-request body, and head binding, and fails closed when any are absent or
-inconsistent. Stronger authenticity would require a provider-signed request ID
-or a GitHub-native check run that carries both an external ID and full head SHA.
+identifier. Review Bridge validates its exact value when present, the pinned
+actor, immutable request body, and head binding. Without a marker it accepts
+only the unique-open-request fallback with a compatible native or
+reviewed-commit head binding; multiple candidates, unbound requests, duplicate
+results, and incompatible heads fail closed. Stronger authenticity would
+require a provider-signed request ID or a GitHub-native check run that carries
+both an external ID and full head SHA.

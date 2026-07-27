@@ -193,17 +193,17 @@ For either mode:
    acknowledgement sets, gate state, and `next_action`. Use the full
    `get_publication` result again only as the next collector input or for an
    audit that needs the complete ledger.
-7. For adapter version 2, require a clean issue comment or findings review to
-   echo the exact current Review Bridge request ID; a missing or changed ID is
-   non-passing. Adapter-version-1 ledgers retain the legacy exact-body and
-   single-open-request rules and do not require a request ID. In either
-   version, treat an eyes reaction, silence, missing pagination, an unsupported
-   standalone review comment, an unbound request, an ambiguous result, or an
-   unknown response shape as non-passing. A clean issue comment must use the
-   recognized version-specific format and carry the commit prefix for the exact
-   request head. Findings must be a formal review bound by native `commit_id`
-   with its complete structurally attached Codex review comments. Never infer
-   correlation from timestamps.
+7. For adapter version 2, prefer a clean issue comment or findings review that
+   echoes the exact current Review Bridge request ID. When the GitHub Codex App
+   omits it, accept only the server-replayed fallback of exactly one recorded
+   open request, no preceding unbound request, and a compatible reviewed-commit
+   prefix or native GitHub `commit_id`. Adapter-version-1 ledgers retain the
+   legacy exact-body and single-open-request rules. In either version, treat an
+   eyes reaction, silence, missing pagination, an unsupported standalone review
+   comment, an unbound request, an ambiguous result, or an unknown response
+   shape as non-passing. Findings must be a formal review with its complete
+   structurally attached Codex review comments. Never infer correlation from
+   timestamps alone.
 8. If the ledger reports `GITHUB_REVIEW_UNKNOWN` because of ambiguity or an
    unbound or unsupported request, call `get_publication_summary` and present
    its entire `required_request_refs` and `required_ambiguous_results` sets to
