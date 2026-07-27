@@ -1204,6 +1204,15 @@ function authorizationForLedger(ledger) {
   };
 }
 
+function requireStoredReviewId(ledger, reviewId) {
+  if (ledger.review_id !== reviewId) {
+    fail(
+      "PUBLICATION_STORE_INVALID",
+      "publication review_id does not match the requested review",
+    );
+  }
+}
+
 function validateStoredLedger(ledger) {
   assertObject(ledger, "publication");
   if (![1, 2].includes(ledger.version)) {
@@ -1807,6 +1816,7 @@ async function openAuthorizationFiles(
       "publication.json is not canonical JSON",
     );
     validateStoredLedger(ledger);
+    requireStoredReviewId(ledger, reviewId);
     const expectedAuthorization = authorizationForLedger(ledger);
     const usesLocalGate = expectedAuthorization.mode === "LOCAL_GATE";
     const unexpectedPath = usesLocalGate
@@ -1894,7 +1904,11 @@ async function closeAuthorizationFiles(authorization) {
   );
 }
 
-async function loadPublicationFile(paths, { allowMissing = false } = {}) {
+async function loadPublicationFile(
+  paths,
+  reviewId,
+  { allowMissing = false } = {},
+) {
   const opened = await readSecureFile(paths.publication, {
     maxBytes: MAX_PUBLICATION_BYTES,
     requiredMode: 0o600,
@@ -1922,6 +1936,7 @@ async function loadPublicationFile(paths, { allowMissing = false } = {}) {
       "publication.json is not canonical JSON",
     );
     validateStoredLedger(ledger);
+    requireStoredReviewId(ledger, reviewId);
     return ledger;
   } finally {
     await opened.handle.close();
@@ -3559,7 +3574,9 @@ export async function startPublication(
       reviewId,
       { verifyRepository: true },
     );
-    const existing = await loadPublicationFile(paths, { allowMissing: true });
+    const existing = await loadPublicationFile(paths, reviewId, {
+      allowMissing: true,
+    });
     if (existing != null || (await pathExists(paths.gate))) {
       fail("PUBLICATION_ALREADY_STARTED", "publication state already exists");
     }
@@ -3645,7 +3662,9 @@ export async function startPublication(
 
 export async function getPublication(storeRoot, reviewId) {
   const paths = pathsFor(storeRoot, reviewId);
-  const ledger = await loadPublicationFile(paths, { allowMissing: true });
+  const ledger = await loadPublicationFile(paths, reviewId, {
+    allowMissing: true,
+  });
   if (ledger == null) {
     fail("PUBLICATION_NOT_FOUND", `publication for ${reviewId} not found`);
   }
@@ -3848,7 +3867,7 @@ export async function recordCodexReviewRequest(
     ) {
       fail("EVIDENCE_STALE", "request comment response is not fresh");
     }
-    const ledger = await loadPublicationFile(paths);
+    const ledger = await loadPublicationFile(paths, reviewId);
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
     const originalLedger = clone(ledger);
@@ -3927,7 +3946,7 @@ export async function recordGithubSnapshot(
   return publicationLock(paths, reviewId, async () => {
     const currentMs = clock();
     assertRevision(expectedRevision);
-    const ledger = await loadPublicationFile(paths);
+    const ledger = await loadPublicationFile(paths, reviewId);
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
     const originalLedger = clone(ledger);
@@ -4056,7 +4075,7 @@ export async function acknowledgeCodexReviewAmbiguity(
     }
     assertString(operatorLabel, "operator_label", 500);
     assertString(rationale, "rationale", 20_000);
-    const ledger = await loadPublicationFile(paths);
+    const ledger = await loadPublicationFile(paths, reviewId);
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
     const originalLedger = clone(ledger);

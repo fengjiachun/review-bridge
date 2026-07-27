@@ -533,6 +533,43 @@ test("publication summary refinalizes an uncommitted crash candidate", async (t)
   assert.equal(summary.gate_state, "INVALID");
 });
 
+test("publication state rejects mutually consistent foreign review IDs", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, observedAt } = await reachReady(state);
+  await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  const directory = path.join(state.store, "reviews", state.reviewId);
+  const publicationPath = path.join(directory, "publication.json");
+  const gatePath = path.join(directory, "publication-gate.json");
+  const publication = JSON.parse(await fsp.readFile(publicationPath, "utf8"));
+  const gate = JSON.parse(await fsp.readFile(gatePath, "utf8"));
+  const foreignReviewId = `${state.reviewId.slice(0, -8)}deadbeef`;
+  await atomicWriteCanonicalJson(publicationPath, {
+    ...publication,
+    review_id: foreignReviewId,
+  });
+  await atomicWriteCanonicalJson(gatePath, {
+    ...gate,
+    review_id: foreignReviewId,
+  });
+
+  for (const operation of [
+    () => getPublication(state.store, state.reviewId),
+    () => getPublicationSummary(state.store, state.reviewId),
+    () => verifyPublicationGate(state.store, state.reviewId),
+  ]) {
+    await assert.rejects(
+      operation(),
+      (error) => error?.code === "PUBLICATION_STORE_INVALID",
+    );
+  }
+});
+
 test("publication summary exposes the exact ambiguity acknowledgement sets", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
