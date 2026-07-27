@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeGithubObservation } from "../src/github-observation.mjs";
+import {
+  normalizeClassicProtectionResponse,
+  normalizeGithubObservation,
+} from "../src/github-observation.mjs";
 
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
@@ -336,6 +339,57 @@ test("GitHub observation normalization retains ruleset and classic check binding
         required_app_id: 15368,
       },
     ],
+  );
+});
+
+test("GitHub observation normalization accepts an authenticated ruleset-only policy", () => {
+  const raw = protectedPolicyRaw({
+    rulesetChecks: [{ context: "ruleset-only", integration_id: 15368 }],
+  });
+  raw.classic_protection = normalizeClassicProtectionResponse(
+    {
+      status: 1,
+      stderr: "gh: Branch not protected (HTTP 404)\n",
+      stdout: "",
+    },
+    "/repos/owner/repo/branches/main/protection",
+    {
+      value: { permissions: { admin: true } },
+      endpoint: "GET /repos/owner/repo",
+      collected_at: "2026-07-27T00:00:07.250Z",
+    },
+    "2026-07-27T00:00:07.500Z",
+  );
+
+  const observation = normalizeGithubObservation(publication(), raw);
+
+  assert.equal(observation.required_checks.policy, "REQUIRED");
+  assert.equal(
+    observation.required_checks.requirements[0].context,
+    "ruleset-only",
+  );
+  const classicSource =
+    observation.required_checks.collection.policy_sources.find(
+      (source) => source.kind === "CLASSIC_BRANCH_PROTECTION",
+    );
+  assert.equal(classicSource.result, "NOT_CONFIGURED");
+  assert.equal(classicSource.http_status, 404);
+  assert.equal(classicSource.permission, "ADMIN");
+  assert.equal(classicSource.permission_endpoint, "GET /repos/owner/repo");
+
+  assert.throws(
+    () =>
+      normalizeClassicProtectionResponse(
+        {
+          status: 1,
+          stderr: "gh: Resource not accessible (HTTP 404)\n",
+          stdout: "",
+        },
+        "/repos/owner/repo/branches/main/protection",
+        { value: { permissions: { admin: false } } },
+        "2026-07-27T00:00:07.500Z",
+      ),
+    /HTTP 404/,
   );
 });
 

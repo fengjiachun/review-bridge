@@ -169,7 +169,34 @@ function normalizePolicy(publication, raw) {
   let classic = null;
   if (raw.classic_protection != null) {
     const classicEntry = object(raw.classic_protection, "classic_protection");
-    classic = object(classicEntry.value, "classic_protection.value");
+    const classicResult = classicEntry.result ?? "SUCCESS";
+    if (classicResult === "NOT_CONFIGURED") {
+      if (
+        classicEntry.value !== null ||
+        classicEntry.http_status !== 404 ||
+        classicEntry.permission !== "ADMIN"
+      ) {
+        throw new Error(
+          "classic branch protection absence requires an admin-authorized HTTP 404",
+        );
+      }
+      canonicalTime(
+        classicEntry.permission_collected_at,
+        "classic_protection.permission_collected_at",
+      );
+      if (
+        typeof classicEntry.permission_endpoint !== "string" ||
+        classicEntry.permission_endpoint.length === 0
+      ) {
+        throw new Error(
+          "classic_protection.permission_endpoint must be a non-empty string",
+        );
+      }
+    } else if (classicResult === "SUCCESS") {
+      classic = object(classicEntry.value, "classic_protection.value");
+    } else {
+      throw new Error("classic branch protection result is unsupported");
+    }
     policySources.push(
       completeSource(
         "CLASSIC_BRANCH_PROTECTION",
@@ -180,8 +207,17 @@ function normalizePolicy(publication, raw) {
           "classic_protection.collected_at",
         ),
         {
-          result: "SUCCESS",
+          result: classicResult,
           binding_field: "required_status_checks.checks[].app_id",
+          ...(classicResult === "NOT_CONFIGURED"
+            ? {
+                http_status: classicEntry.http_status,
+                permission: classicEntry.permission,
+                permission_endpoint: classicEntry.permission_endpoint,
+                permission_collected_at:
+                  classicEntry.permission_collected_at,
+              }
+            : {}),
         },
       ),
     );
@@ -692,6 +728,50 @@ function getPages(endpoint) {
   };
 }
 
+export function normalizeClassicProtectionResponse(
+  result,
+  endpoint,
+  permissionEntry,
+  collectedAt = new Date().toISOString(),
+) {
+  if (result.status === 0) {
+    return {
+      value: JSON.parse(result.stdout),
+      endpoint: `GET ${endpoint}`,
+      collected_at: collectedAt,
+      result: "SUCCESS",
+    };
+  }
+  const message = result.stderr.trim() || result.stdout.trim();
+  if (
+    /\(HTTP 404\)\s*$/.test(message) &&
+    permissionEntry.value?.permissions?.admin === true
+  ) {
+    return {
+      value: null,
+      endpoint: `GET ${endpoint}`,
+      collected_at: collectedAt,
+      result: "NOT_CONFIGURED",
+      http_status: 404,
+      permission: "ADMIN",
+      permission_endpoint: permissionEntry.endpoint,
+      permission_collected_at: permissionEntry.collected_at,
+    };
+  }
+  throw new Error(`gh api ${endpoint} failed: ${message}`);
+}
+
+function getClassicProtection(endpoint, permissionEntry) {
+  return normalizeClassicProtectionResponse(
+    spawnSync("gh", ["api", endpoint], {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    }),
+    endpoint,
+    permissionEntry,
+  );
+}
+
 const REVIEW_THREADS_QUERY = `
 query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $repo) {
@@ -726,11 +806,15 @@ export function collectGithubObservation(publicationInput) {
   );
   const policyBaseBranch = get(`${root}/branches/${branch}`);
   const rules = applicableRules.pages.flatMap((page) => page);
-  const classicProtection =
+  const needsClassicProtection =
     policyBaseBranch.value.protected ||
-    rules.some((rule) => rule?.type === "required_status_checks")
-      ? get(`${root}/branches/${branch}/protection`)
-      : null;
+    rules.some((rule) => rule?.type === "required_status_checks");
+  const classicProtection = needsClassicProtection
+    ? getClassicProtection(
+        `${root}/branches/${branch}/protection`,
+        get(root),
+      )
+    : null;
   const checkRuns = getPages(
     `${root}/commits/${authorizationValue.head_sha}/check-runs?filter=all&per_page=100`,
   );
