@@ -47,6 +47,8 @@ tested. State locking uses the macOS system tools `/usr/bin/lockf` and
 `/bin/ps`.
 
 Node.js 18 or newer is required. CI verifies each change on macOS with Node 20.
+The GitHub publication collector also requires an authenticated
+[GitHub CLI](https://cli.github.com/) (`gh auth status`).
 
 ## Install
 
@@ -65,7 +67,7 @@ Because the two halves come from different places, **pin them to the same
 release tag**: install the extension from a release, then build the Codex plugin
 from a checkout of that same tag. Building from an arbitrary `main` checkout can
 pair a newer author process with an older reviewer extension against one store.
-The version examples below use `v0.4.0`; substitute the release you installed.
+The version examples below use `v0.4.1`; substitute the release you installed.
 
 ### Claude Desktop extension
 
@@ -99,10 +101,10 @@ installed, then build the local marketplace and register it:
 ```bash
 git clone https://github.com/fengjiachun/review-bridge.git
 cd review-bridge
-git checkout v0.4.0
+git checkout v0.4.1
 npm ci
 npm run build
-codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.4.0/codex-marketplace"
+codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.4.1/codex-marketplace"
 ```
 
 Build from a Git clone, not from the release's source archive: `scripts/build.mjs`
@@ -123,14 +125,14 @@ build and verification loop.
 
 ### Build output
 
-`npm run build` writes everything under `dist/review-bridge-v0.4.0/`:
+`npm run build` writes everything under `dist/review-bridge-v0.4.1/`:
 
 - `codex-marketplace/` — local Codex marketplace containing the Review Bridge
   plugin, author MCP server, and `CODEX_TASK` reviewer MCP server.
-- `review-bridge-reviewer-v0.4.0.mcpb` — MCP Bundle for Claude Desktop.
-- `review-bridge-reviewer-v0.4.0.dxt` — compatibility copy of the same bundle.
+- `review-bridge-reviewer-v0.4.1.mcpb` — MCP Bundle for Claude Desktop.
+- `review-bridge-reviewer-v0.4.1.dxt` — compatibility copy of the same bundle.
 - `claude-extension-source/` — inspectable source of the Claude extension.
-- `review-bridge-source-v0.4.0.zip` — source archive of the built commit, for
+- `review-bridge-source-v0.4.1.zip` — source archive of the built commit, for
   inspection and provenance. It carries no Git metadata, so it cannot be used to
   run the build itself.
 - `SHA256SUMS.txt` — checksums for the bundle, compatibility copy, and source
@@ -273,6 +275,22 @@ human approval of the complete resource-scoped request/result set.
 Version 0.4 writes authorization-union publication ledgers with schema version 2
 and remains able to read and complete version-1 local-gate ledgers.
 
+Use `get_publication_summary` for the compact current revision,
+`blocking_reason`, `next_action`, gate state, and exact ambiguity sets. It does
+not access GitHub or return the full ledger. For a fresh snapshot, pass the
+full JSON returned by `get_publication` to the packaged read-only collector:
+
+```bash
+node scripts/collect-github-observation.mjs publication.json > observation.json
+```
+
+The collector reads the target from the ledger, uses the authenticated `gh`
+CLI, follows every required REST and GraphQL page, canonicalizes GitHub
+timestamps to UTC milliseconds, and fails closed when required policy evidence
+is unavailable. Pass its output to `record_github_snapshot`. Do not read
+`publication.json` directly from the private store; use the MCP tool response
+as the collector input.
+
 The packaged Codex plugin also includes
 `scripts/inspect-publication-audit.mjs <review_id>` for read-only, full-chain
 offline audit validation.
@@ -314,8 +332,8 @@ Ledger](docs/rfcs/0001-github-publication-ledger.md).
   or GitHub security boundaries. Review Bridge does not install a `pre-push`
   hook.
 - The Review Bridge MCP server receives no GitHub credentials. The packaged
-  Codex skill uses the user's separately configured GitHub tools after the
-  selected publication authorization exists.
+  Codex skill and read-only observation collector use the user's separately
+  configured GitHub tools after the selected publication authorization exists.
 
 Provider binding and separate Codex tasks are workflow attestations, not
 authenticated human or model identity. A `CODEX_TASK` review improves context

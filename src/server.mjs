@@ -26,6 +26,7 @@ import {
   authorizeRemotePublication,
   finalizePublicationGate,
   getPublication,
+  getPublicationSummary,
   recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
@@ -62,7 +63,7 @@ const storeRoot = defaultStoreRoot();
 const server = new McpServer(
   {
     name: `review-bridge-${role}`,
-    version: "0.4.0",
+    version: "0.4.1",
   },
   {
     instructions:
@@ -327,6 +328,17 @@ if (role === "author") {
       inputSchema: { review_id: z.string() },
     },
     (input) => getPublication(storeRoot, input.review_id),
+  );
+
+  register(
+    "get_publication_summary",
+    {
+      title: "Get compact GitHub publication status",
+      description:
+        "Read the current revision, blocking reason, next action, gate state, and exact ambiguity acknowledgement sets without returning the full publication ledger or accessing GitHub.",
+      inputSchema: { review_id: z.string() },
+    },
+    (input) => getPublicationSummary(storeRoot, input.review_id),
   );
 
   register(

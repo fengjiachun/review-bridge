@@ -16,6 +16,7 @@ import {
   derivePublicationStatus,
   finalizePublicationGate,
   getPublication,
+  getPublicationSummary,
   inspectPublicationAudit,
   publicationConstants,
   recordCodexReviewRequest,
@@ -377,6 +378,156 @@ async function reachReady(state, startedAt = Date.now()) {
   );
   return { ready, requestAt, observedAt };
 }
+
+test("publication summary reports compact next actions and gate state", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+
+  const created = await getPublicationSummary(state.store, state.reviewId);
+  assert.deepEqual(created, {
+    review_id: state.reviewId,
+    revision: 1,
+    status: "PR_PENDING",
+    authorization_mode: "LOCAL_GATE",
+    base_sha: state.baseSha,
+    head_sha: state.headSha,
+    target: {
+      owner: "owner",
+      repo: "repo",
+      pr_number: 7,
+      base_branch: "main",
+      head_branch: "agent/change",
+    },
+    latest_observed_at: null,
+    blocking_reason: "NO_GITHUB_SNAPSHOT",
+    next_action: "POST_AND_RECORD_CODEX_REVIEW_REQUEST",
+    required_request_refs: [],
+    required_ambiguous_results: [],
+    gate_state: "ABSENT",
+  });
+
+  const requestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(requestAt),
+      requestedHeadSha: state.headSha,
+    },
+    { clock: () => requestAt + 10 },
+  );
+  const requested = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(requested.blocking_reason, "NO_GITHUB_SNAPSHOT");
+  assert.equal(requested.next_action, "RECORD_GITHUB_SNAPSHOT");
+
+  const pendingAt = startedAt + 2_000;
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 2,
+      observation: observation({
+        at: pendingAt,
+        baseSha: state.baseSha,
+        headSha: state.headSha,
+        requestId: 100,
+        requestAt,
+        withResult: false,
+      }),
+    },
+    { clock: () => pendingAt + 10 },
+  );
+  const pending = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(pending.status, "GITHUB_REVIEW_PENDING");
+  assert.equal(pending.blocking_reason, "GITHUB_REVIEW_PENDING");
+  assert.equal(pending.next_action, "REFRESH_GITHUB_SNAPSHOT");
+
+  const readyAt = startedAt + 3_000;
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 3,
+      observation: observation({
+        at: readyAt,
+        baseSha: state.baseSha,
+        headSha: state.headSha,
+        requestId: 100,
+        requestAt,
+      }),
+    },
+    { clock: () => readyAt + 10 },
+  );
+  const ready = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(ready.status, "MERGE_READY");
+  assert.equal(ready.blocking_reason, null);
+  assert.equal(ready.next_action, "FINALIZE_PUBLICATION_GATE");
+  assert.equal(ready.gate_state, "ABSENT");
+
+  await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 4 },
+    { clock: () => readyAt + 20 },
+  );
+  const finalized = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(finalized.next_action, "VERIFY_PUBLICATION_GATE");
+  assert.equal(finalized.gate_state, "PRESENT");
+});
+
+test("publication summary exposes the exact ambiguity acknowledgement sets", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const baselineRequest = {
+    resource_id: 77,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-77",
+    event_at: iso(startedAt - 500),
+    timestamp_field: "created_at",
+    body_sha256: publicationConstants.request_body_sha256,
+    actor: { id: 123, type: "User" },
+  };
+  await start(
+    state,
+    startedAt,
+    baseline(startedAt - 100, [baselineRequest]),
+  );
+  const observedAt = startedAt + 1_000;
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      observation: observation({
+        at: observedAt,
+        baseSha: state.baseSha,
+        headSha: state.headSha,
+        requestId: null,
+        requestAt: observedAt,
+        withResult: false,
+        baselineRequests: [baselineRequest],
+      }),
+    },
+    { clock: () => observedAt + 10 },
+  );
+
+  const summary = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(summary.status, "GITHUB_REVIEW_UNKNOWN");
+  assert.equal(
+    summary.next_action,
+    "ACKNOWLEDGE_CODEX_REVIEW_AMBIGUITY",
+  );
+  assert.deepEqual(summary.required_request_refs, [
+    { resource_kind: "ISSUE_COMMENT", resource_id: 77 },
+  ]);
+  assert.deepEqual(summary.required_ambiguous_results, []);
+});
 
 test("publication ledger reaches a fresh audited merge gate", async (t) => {
   const state = await fixture();

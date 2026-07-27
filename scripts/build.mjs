@@ -7,13 +7,13 @@ import { fileURLToPath } from "node:url";
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = process.env.REVIEW_BRIDGE_OUTPUT_ROOT
   ? path.resolve(process.env.REVIEW_BRIDGE_OUTPUT_ROOT)
-  : path.join(projectRoot, "dist", "review-bridge-v0.4.0");
+  : path.join(projectRoot, "dist", "review-bridge-v0.4.1");
 const codexMarketplace = path.join(outputRoot, "codex-marketplace");
 const codexPlugin = path.join(codexMarketplace, "plugins", "review-bridge");
 const claudeSource = path.join(outputRoot, "claude-extension-source");
-const mcpbOutput = path.join(outputRoot, "review-bridge-reviewer-v0.4.0.mcpb");
-const dxtOutput = path.join(outputRoot, "review-bridge-reviewer-v0.4.0.dxt");
-const sourceOutput = path.join(outputRoot, "review-bridge-source-v0.4.0.zip");
+const mcpbOutput = path.join(outputRoot, "review-bridge-reviewer-v0.4.1.mcpb");
+const dxtOutput = path.join(outputRoot, "review-bridge-reviewer-v0.4.1.dxt");
+const sourceOutput = path.join(outputRoot, "review-bridge-source-v0.4.1.zip");
 
 function run(command, args, cwd) {
   const result = spawnSync(command, args, {
@@ -38,7 +38,7 @@ function run(command, args, cwd) {
 async function installRuntime(target) {
   const runtimePackage = {
     name: "review-bridge-runtime",
-    version: "0.4.0",
+    version: "0.4.1",
     private: true,
     type: "module",
     dependencies: {
@@ -83,6 +83,10 @@ async function copyServer(target) {
   await fsp.copyFile(
     path.join(projectRoot, "src", "github-adapter.mjs"),
     path.join(serverTarget, "github-adapter.mjs"),
+  );
+  await fsp.copyFile(
+    path.join(projectRoot, "src", "github-observation.mjs"),
+    path.join(serverTarget, "github-observation.mjs"),
   );
 }
 

@@ -23,7 +23,7 @@ async function connectClient(
     env: { ...process.env, REVIEW_BRIDGE_HOME: store },
     stderr: "pipe",
   });
-  const client = new Client({ name: "review-bridge-test", version: "0.4.0" });
+  const client = new Client({ name: "review-bridge-test", version: "0.4.1" });
   await client.connect(transport);
   return client;
 }
@@ -50,6 +50,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
     "finalize_local_gate",
     "finalize_publication_gate",
     "get_publication",
+    "get_publication_summary",
     "get_review",
     "get_review_summary",
     "list_reviews",
