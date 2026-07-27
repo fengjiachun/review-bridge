@@ -3652,9 +3652,70 @@ export async function getPublication(storeRoot, reviewId) {
   return ledger;
 }
 
-function nextPublicationAction(ledger, derived, gateState) {
+function assessPublicationGate(
+  ledger,
+  publicationAuthorization,
+  sourceAuthorization,
+  gate,
+  gateParseError,
+  currentMs,
+) {
+  if (gateParseError) {
+    return { state: "MALFORMED", reviewerProvider: null, expiresAt: null };
+  }
+  if (gate == null) {
+    return { state: "ABSENT", reviewerProvider: null, expiresAt: null };
+  }
+  const derived = derivePublication(ledger);
+  const expectedExpiresAt =
+    ledger.latest_observation == null ? null : expiresAtFor(ledger);
+  const gateReviewerProvider =
+    gate.reviewer_provider ??
+    (publicationAuthorization.mode === "LOCAL_GATE"
+      ? "CLAUDE_DESKTOP"
+      : null);
+  const authorizationBindingMatches =
+    ledger.version === 1
+      ? gate.version === 1 &&
+        gate.local_gate_sha256 === publicationAuthorization.source_sha256
+      : gate.version === 2 &&
+        gate.authorization_mode === publicationAuthorization.mode &&
+        gate.authorization_sha256 === publicationAuthorization.source_sha256;
+  if (
+    !authorizationBindingMatches ||
+    gate.review_id !== ledger.review_id ||
+    gate.issuance_committed !== true ||
+    gate.status !== "MERGE_READY" ||
+    gate.publication_revision !== ledger.revision ||
+    gate.head_sha !== publicationAuthorization.head_sha ||
+    gateReviewerProvider !== publicationAuthorization.reviewer_provider ||
+    sourceAuthorization.source_sha256 !== publicationAuthorization.source_sha256 ||
+    gate.github_observation_sha256 !== canonicalDigest(ledger.latest_observation) ||
+    gate.expires_at !== expectedExpiresAt ||
+    derived.status !== "MERGE_READY"
+  ) {
+    return { state: "INVALID", reviewerProvider: null, expiresAt: null };
+  }
+  if (currentMs > Date.parse(expectedExpiresAt)) {
+    return {
+      state: "EXPIRED",
+      reviewerProvider: gateReviewerProvider,
+      expiresAt: expectedExpiresAt,
+    };
+  }
+  return {
+    state: "PRESENT",
+    reviewerProvider: gateReviewerProvider,
+    expiresAt: expectedExpiresAt,
+  };
+}
+
+function nextPublicationAction(ledger, derived, gateState, evidenceStale) {
   if (ledger.terminal != null || ["CLOSED", "INVALIDATED", "MERGED"].includes(derived.status)) {
     return "NONE";
+  }
+  if (evidenceStale) {
+    return "REFRESH_GITHUB_SNAPSHOT";
   }
   if (ledger.latest_observation == null) {
     if (
@@ -3667,8 +3728,11 @@ function nextPublicationAction(ledger, derived, gateState) {
   }
   switch (derived.status) {
     case "MERGE_READY":
-      return gateState === "PRESENT"
-        ? "VERIFY_PUBLICATION_GATE"
+      if (gateState === "PRESENT") {
+        return "VERIFY_PUBLICATION_GATE";
+      }
+      return gateState === "MALFORMED"
+        ? "REPAIR_PUBLICATION_GATE"
         : "FINALIZE_PUBLICATION_GATE";
     case "GITHUB_REVIEW_UNKNOWN":
       return "ACKNOWLEDGE_CODEX_REVIEW_AMBIGUITY";
@@ -3689,19 +3753,38 @@ function nextPublicationAction(ledger, derived, gateState) {
   }
 }
 
-export async function getPublicationSummary(storeRoot, reviewId) {
+export async function getPublicationSummary(
+  storeRoot,
+  reviewId,
+  { clock = Date.now } = {},
+) {
   const paths = pathsFor(storeRoot, reviewId);
   return publicationLock(paths, reviewId, async () => {
+    const currentMs = clock();
     const authorization = await openAuthorizationFiles(paths, reviewId);
     try {
       const ledger = authorization.ledger;
       const publicationAuthorization = authorizationForLedger(ledger);
       const derived = derivePublication(ledger);
-      const gateState = authorization.gateParseError
-        ? "MALFORMED"
-        : authorization.publicationGate == null
-          ? "ABSENT"
-          : "PRESENT";
+      const gate = assessPublicationGate(
+        ledger,
+        publicationAuthorization,
+        authorization.sourceAuthorization,
+        authorization.publicationGate,
+        authorization.gateParseError,
+        currentMs,
+      );
+      const evidenceStale =
+        ledger.terminal == null &&
+        ledger.latest_observation != null &&
+        currentMs > Date.parse(expiresAtFor(ledger));
+      const blockingReason = evidenceStale
+        ? "EVIDENCE_STALE"
+        : derived.status === "MERGE_READY" && gate.state === "INVALID"
+          ? "PUBLICATION_GATE_INVALID"
+          : derived.status === "MERGE_READY" && gate.state === "MALFORMED"
+            ? "PUBLICATION_GATE_MALFORMED"
+            : derived.blockingReason;
       const closure =
         ledger.latest_observation == null
           ? { requests: [], results: [] }
@@ -3721,11 +3804,16 @@ export async function getPublicationSummary(storeRoot, reviewId) {
           head_branch: ledger.target.head_branch,
         },
         latest_observed_at: ledger.latest_observation?.observed_at ?? null,
-        blocking_reason: derived.blockingReason,
-        next_action: nextPublicationAction(ledger, derived, gateState),
+        blocking_reason: blockingReason,
+        next_action: nextPublicationAction(
+          ledger,
+          derived,
+          gate.state,
+          evidenceStale,
+        ),
         required_request_refs: clone(closure.requests),
         required_ambiguous_results: clone(closure.results),
-        gate_state: gateState,
+        gate_state: gate.state,
       };
     } finally {
       await closeAuthorizationFiles(authorization);
@@ -4167,48 +4255,24 @@ export async function verifyPublicationGate(
             verifiedAt,
           );
         } else {
-          const derived = derivePublication(ledger);
-          const expectedExpiresAt =
-            ledger.latest_observation == null ? null : expiresAtFor(ledger);
-          const gateReviewerProvider =
-            gate.reviewer_provider ??
-            (publicationAuthorization.mode === "LOCAL_GATE"
-              ? "CLAUDE_DESKTOP"
-              : null);
-          const authorizationBindingMatches =
-            ledger.version === 1
-              ? gate.version === 1 &&
-                gate.local_gate_sha256 ===
-                  publicationAuthorization.source_sha256
-              : gate.version === 2 &&
-                gate.authorization_mode === publicationAuthorization.mode &&
-                gate.authorization_sha256 ===
-                  publicationAuthorization.source_sha256;
-          if (
-            !authorizationBindingMatches ||
-            gate.review_id !== reviewId ||
-            gate.issuance_committed !== true ||
-            gate.status !== "MERGE_READY" ||
-            gate.publication_revision !== ledger.revision ||
-            gate.head_sha !== publicationAuthorization.head_sha ||
-            gateReviewerProvider !==
-              publicationAuthorization.reviewer_provider ||
-            authorization.sourceAuthorization.source_sha256 !==
-              publicationAuthorization.source_sha256 ||
-            gate.github_observation_sha256 !==
-              canonicalDigest(ledger.latest_observation) ||
-            gate.expires_at !== expectedExpiresAt ||
-            derived.status !== "MERGE_READY"
-          ) {
+          const gateAssessment = assessPublicationGate(
+            ledger,
+            publicationAuthorization,
+            authorization.sourceAuthorization,
+            gate,
+            false,
+            currentMs,
+          );
+          if (gateAssessment.state === "INVALID") {
             response = verificationFailure("GATE_MISMATCH", verifiedAt);
-          } else if (currentMs > Date.parse(expectedExpiresAt)) {
+          } else if (gateAssessment.state === "EXPIRED") {
             response = verificationFailure("EVIDENCE_STALE", verifiedAt);
           } else {
             response = {
               valid: true,
               status: "MERGE_READY",
               head_sha: gate.head_sha,
-              reviewer_provider: gateReviewerProvider,
+              reviewer_provider: gateAssessment.reviewerProvider,
               publication_revision: gate.publication_revision,
               expires_at: gate.expires_at,
               verified_at: verifiedAt,
