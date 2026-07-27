@@ -16,7 +16,9 @@ A local review runs like this:
 2. You open a **fresh reviewer context** — a new Claude Desktop conversation or
    a brand-new Codex task — which gets read-only tools over that snapshot and
    submits structured findings.
-3. Back in the author task, you **answer every finding** and prepare round two.
+3. If the reviewer submits no findings, the review is already `CLEAN` and you
+   finalize it. Otherwise you go back to the author task, **answer every
+   finding**, and prepare round two.
 4. The review ends in `LOCAL_GATE_PASSED`, or in `HUMAN_REQUIRED` when a
    finding still stands after round two.
 
@@ -180,7 +182,11 @@ use the equivalent request:
 > review strategy, inspect the required artifacts and relevant snapshot files,
 > then submit structured findings.
 
-Back in Codex:
+If the reviewer submitted no findings, the review is already `CLEAN` and its
+next action is `FINALIZE_LOCAL_GATE`; there is nothing to answer and
+`prepare_rereview` will reject the state. Skip ahead and finalize.
+
+Otherwise, back in Codex:
 
 > Read the reviewer's findings, address each one, and prepare round two.
 
