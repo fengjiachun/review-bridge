@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.2 - 2026-07-28
+
+### Added
+
+- Version-2 Codex review requests carry server-derived correlation IDs that
+  bind clean comments and formal findings reviews to the exact workflow
+  request.
+- Prior local publication ledgers provide durable issuance provenance for
+  historical requests, so requests from older heads no longer require repeated
+  human closure before each successor review.
+
+### Fixed
+
+- Markerless Codex results remain fail-closed when a compatible unresolved
+  baseline or unbound request could own the response.
+- Correlated request parsing rejects malformed or duplicate markers while
+  preserving adapter-version-1 and earlier version-2 publication ledgers.
+- Later snapshots retain acknowledged unbound requests instead of
+  reclassifying them as recognized.
+
 ## 0.4.1 - 2026-07-27
 
 ### Added
