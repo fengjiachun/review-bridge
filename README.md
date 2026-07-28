@@ -267,17 +267,30 @@ and appends a chained audit event; Codex must call `verify_publication_gate`
 immediately before a head-matching merge.
 
 The GitHub adapter is deliberately fail-closed: a standalone review comment, a
-reaction, silence, an unbound or unsupported request, incomplete pagination, or
-an ambiguous result all fail rather than pass. Inline comments count only when
-structurally attached to a formal review. Closing such ambiguity requires direct
-human approval of the complete resource-scoped request/result set.
+reaction, silence, an unbound or unsupported request, incomplete pagination,
+or an ambiguous result all fail rather than pass. Version-2 requests carry a
+server-derived ID. If Codex omits it, Review Bridge accepts only one recorded
+open request with no preceding unbound request, no compatible unresolved
+baseline request, and a compatible reviewed-commit prefix or native GitHub
+`commit_id`. A historical baseline request is head-scoped only when its exact
+GitHub facts match a valid prior local publication ledger; caller-supplied
+provenance is rejected. Multiple candidates and incompatible heads remain
+ambiguous. Inline comments count only when structurally attached to a formal
+review. Legacy ambiguity still requires direct human approval of the complete
+resource-scoped request/result set.
 
 Version 0.4 writes authorization-union publication ledgers with schema version 2
-and remains able to read and complete version-1 local-gate ledgers.
+and remains able to read and complete version-1 local-gate ledgers. New
+baselines use GitHub adapter version 2; adapter-version-1 publication ledgers
+remain completable.
 
 Use `get_publication_summary` for the compact current revision,
 `blocking_reason`, `next_action`, gate state, and exact ambiguity sets. It does
-not access GitHub or return the full ledger. For a fresh snapshot, pass the
+not access GitHub or return the full ledger. When `next_action` is
+`POST_AND_RECORD_CODEX_REVIEW_REQUEST`, post the returned
+`codex_review_request.body` unchanged and bind the post with its
+`codex_review_request.request_id` when present. Adapter-version-1 ledgers
+return the legacy exact body without an ID. For a fresh snapshot, pass the
 full JSON returned by `get_publication` to the packaged read-only collector:
 
 ```bash

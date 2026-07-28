@@ -309,8 +309,15 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /Post exactly\s+one issue comment whose entire body is `@codex review`/,
+  /Post exactly one issue\s+comment whose entire body equals the returned `codex_review_request\.body`/,
 );
+assert.match(
+  workflowSkill,
+  /when present, the returned\s+`codex_review_request\.request_id`/,
+);
+assert.match(workflowSkill, /legacy exact body without a request ID/);
+assert.match(workflowSkill, /Never infer\s+correlation from\s+timestamps/);
+assert.match(workflowSkill, /Set `adapter_version: 2` in the normalizer\s+input/);
 assert.match(
   workflowSkill,
   /Require the PR head commit to equal the immutable publication authorization\s+`head_sha`/,
@@ -322,11 +329,26 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /clean issue comment.*Findings must be a formal review/s,
+  /adapter version 2, prefer a clean issue comment or findings review that\s+   echoes the exact current Review Bridge request ID/,
 );
-assert.match(workflowSkill, /Treat an eyes reaction.*as non-passing/s);
+assert.match(
+  workflowSkill,
+  /server-replayed fallback of exactly one recorded\s+   open request, no preceding unbound or compatible unresolved baseline\s+   request, and a compatible reviewed-commit prefix or native GitHub\s+   `commit_id`/,
+);
+assert.match(
+  workflowSkill,
+  /Adapter-version-1 ledgers retain the legacy exact-body and\s+   single-open-request rules/,
+);
+assert.match(
+  workflowSkill,
+  /version-2 `BASELINE_CORRELATED` request with\s+   server-verified issuance provenance from another head is not a candidate/,
+);
+assert.match(workflowSkill, /eyes reaction.*as\s+non-passing/s);
 assert.match(workflowSkill, /immediately call\s+`record_codex_review_request`/);
-assert.match(workflowSkill, /formal review bound by native\s+`commit_id`/);
+assert.match(
+  workflowSkill,
+  /Findings must be a formal review with its complete\s+structurally\s+attached Codex review comments/,
+);
 assert.match(workflowSkill, /get_review_summary/);
 assert.match(workflowSkill, /wait_for_review_state/);
 assert.match(workflowSkill, /pass that task as `parent_review_id`/);
@@ -353,7 +375,7 @@ assert.match(workflowSkill, /`STORE_WRITE_INDETERMINATE`/);
 assert.match(workflowSkill, /do not\s+loop on the same mutation/);
 assert.match(
   workflowSkill,
-  /an unsupported\s+standalone review comment/,
+  /an\s+unsupported\s+standalone\s+review\s+comment/,
 );
 assert.match(
   workflowSkill,

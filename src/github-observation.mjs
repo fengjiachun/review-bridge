@@ -521,7 +521,8 @@ function normalizeCodex(publication, raw) {
       status: "COMPLETE",
       collected_at: collectionAt,
       sources: feeds.map((feed) => feed.source),
-      adapter_version: 1,
+      adapter_version:
+        publication.codex_review_baseline.collection.adapter_version,
     },
     expected_actor: {
       id: target.codex_actor.id,

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
@@ -15,9 +16,26 @@ async function fixture(name) {
   );
 }
 
+function requestBody(requestId) {
+  return [
+    "@codex review",
+    "",
+    "When you finish, append exactly this marker to the review summary:",
+    `<!-- review-bridge-request-id: ${requestId} -->`,
+  ].join("\n");
+}
+
+function withRequestMarker(body, requestId) {
+  return `${body}\n\n<!-- review-bridge-request-id: ${requestId} -->`;
+}
+
+function digest(body) {
+  return createHash("sha256").update(body, "utf8").digest("hex");
+}
+
 test("version 1 adapter recognizes the observed clean issue-comment shape", async () => {
   const result = adaptCodexEvidence(await fixture("codex-clean"));
-  assert.equal(githubAdapterVersion, 1);
+  assert.equal(githubAdapterVersion, 2);
   assert.equal(result.collection.adapter_version, 1);
   assert.equal(result.requests.length, 1);
   assert.equal(result.results.length, 1);
@@ -28,6 +46,418 @@ test("version 1 adapter recognizes the observed clean issue-comment shape", asyn
     result.results[0].reviewed_head_sha,
     "e059e4f846e9e55890dc44e656ed653431d812d5",
   );
+});
+
+test("version 2 adapter binds a clean result by request ID and exact head", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.issue_comments[1].body = withRequestMarker(
+    input.issue_comments[1].body,
+    requestId,
+  );
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.collection.adapter_version, 2);
+  assert.equal(result.requests[0].request_id, requestId);
+  assert.equal(result.results[0].request_id, requestId);
+  assert.equal(result.results[0].association, "CORRELATED_REQUEST_ID");
+  assert.equal(result.results[0].format, "CODEX_CLEAN_COMMENT_V2");
+  assert.equal(result.results[0].verdict, "CLEAN");
+});
+
+test("version 2 keeps a delayed predecessor result out of the active request", async () => {
+  const input = await fixture("codex-clean");
+  const oldRequestId = `rbreq-${"1".repeat(32)}`;
+  const activeRequestId = `rbreq-${"2".repeat(32)}`;
+  const oldRequestBody = requestBody(oldRequestId);
+  const activeRequestBody = requestBody(activeRequestId);
+  const oldRequest = {
+    id: 90,
+    html_url: "https://github.com/fengjiachun/review-bridge/pull/6#issuecomment-90",
+    created_at: "2026-07-25T23:07:00Z",
+    body: oldRequestBody,
+    user: {
+      id: 3860496,
+      type: "User",
+      login: "fengjiachun",
+    },
+  };
+  const delayedResult = {
+    ...structuredClone(input.issue_comments[1]),
+    id: 91,
+    html_url: "https://github.com/fengjiachun/review-bridge/pull/6#issuecomment-91",
+    created_at: "2026-07-25T23:10:22Z",
+    body: withRequestMarker(input.issue_comments[1].body, oldRequestId),
+  };
+
+  input.adapter_version = 2;
+  input.baseline.requests = [
+    {
+      resource_id: oldRequest.id,
+      resource_kind: "ISSUE_COMMENT",
+      url: oldRequest.html_url,
+      event_at: "2026-07-25T23:07:00.000Z",
+      timestamp_field: "created_at",
+      body_sha256: digest(oldRequestBody),
+      request_id: oldRequestId,
+      actor: { id: 3860496, type: "User" },
+      classification: "BASELINE_CORRELATED",
+      reason: null,
+    },
+  ];
+  input.issue_comments[0].body = activeRequestBody;
+  input.issue_comments[1].body = withRequestMarker(
+    input.issue_comments[1].body,
+    activeRequestId,
+  );
+  input.issue_comments.unshift(oldRequest);
+  input.issue_comments.splice(2, 0, delayedResult);
+  input.request_history[0].request_id = activeRequestId;
+  input.request_history[0].body_sha256 = digest(activeRequestBody);
+
+  const result = adaptCodexEvidence(input);
+  const oldResult = result.results.find((item) => item.result_id === 91);
+  const activeResult = result.results.find(
+    (item) => item.result_id === 5080972188,
+  );
+  assert.equal(oldResult.request_id, oldRequestId);
+  assert.equal(oldResult.association, "BASELINE_LATE_RESULT");
+  assert.equal(oldResult.verdict, "UNKNOWN");
+  assert.equal(activeResult.request_id, activeRequestId);
+  assert.equal(activeResult.association, "CORRELATED_REQUEST_ID");
+  assert.equal(activeResult.verdict, "CLEAN");
+});
+
+test("version 2 falls back to one head-bound clean result without a request ID", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "SINGLE_OPEN_REQUEST");
+  assert.equal(result.results[0].format, "CODEX_CLEAN_COMMENT_V1");
+  assert.equal(result.results[0].verdict, "CLEAN");
+  assert.equal(
+    result.results[0].reviewed_head_sha,
+    input.local_gate_head_sha,
+  );
+});
+
+test("version 2 keeps a markerless result ambiguous with an unverified baseline request", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const baselineRequestId = `rbreq-${"2".repeat(32)}`;
+  const body = requestBody(requestId);
+  const baselineBody = requestBody(baselineRequestId);
+  const baselineRequest = {
+    id: 90,
+    html_url: "https://github.com/fengjiachun/review-bridge/pull/6#issuecomment-90",
+    created_at: "2026-07-25T23:07:00Z",
+    body: baselineBody,
+    user: {
+      id: 3860496,
+      type: "User",
+      login: "fengjiachun",
+    },
+  };
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.issue_comments.unshift(baselineRequest);
+  input.baseline.requests = [
+    {
+      resource_id: baselineRequest.id,
+      resource_kind: "ISSUE_COMMENT",
+      url: baselineRequest.html_url,
+      event_at: "2026-07-25T23:07:00.000Z",
+      timestamp_field: "created_at",
+      body_sha256: digest(baselineBody),
+      request_id: baselineRequestId,
+      actor: { id: 3860496, type: "User" },
+      classification: "BASELINE_CORRELATED",
+      reason: null,
+    },
+  ];
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
+});
+
+test("version 2 ignores a trusted baseline request issued for another head", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const baselineRequestId = `rbreq-${"2".repeat(32)}`;
+  const body = requestBody(requestId);
+  const baselineBody = requestBody(baselineRequestId);
+  const baselineRequest = {
+    id: 90,
+    html_url: "https://github.com/fengjiachun/review-bridge/pull/6#issuecomment-90",
+    created_at: "2026-07-25T23:07:00Z",
+    body: baselineBody,
+    user: {
+      id: 3860496,
+      type: "User",
+      login: "fengjiachun",
+    },
+  };
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.issue_comments.unshift(baselineRequest);
+  input.baseline.requests = [
+    {
+      resource_id: baselineRequest.id,
+      resource_kind: "ISSUE_COMMENT",
+      url: baselineRequest.html_url,
+      event_at: "2026-07-25T23:07:00.000Z",
+      timestamp_field: "created_at",
+      body_sha256: digest(baselineBody),
+      request_id: baselineRequestId,
+      actor: { id: 3860496, type: "User" },
+      issuance: {
+        review_id: "rb-2026-07-25T230000-000Z-deadbeef",
+        recorded_revision: 2,
+        requested_head_sha: "f".repeat(40),
+      },
+      classification: "BASELINE_CORRELATED",
+      reason: null,
+    },
+  ];
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "SINGLE_OPEN_REQUEST");
+  assert.equal(result.results[0].format, "CODEX_CLEAN_COMMENT_V1");
+  assert.equal(result.results[0].verdict, "CLEAN");
+});
+
+test("version 2 keeps markerless results ambiguous with two open requests", async () => {
+  const input = await fixture("codex-clean");
+  const firstRequestId = `rbreq-${"1".repeat(32)}`;
+  const secondRequestId = `rbreq-${"2".repeat(32)}`;
+  const firstBody = requestBody(firstRequestId);
+  const secondBody = requestBody(secondRequestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = firstBody;
+  input.request_history[0].request_id = firstRequestId;
+  input.request_history[0].body_sha256 = digest(firstBody);
+  input.issue_comments.splice(1, 0, {
+    ...structuredClone(input.issue_comments[0]),
+    id: input.issue_comments[0].id + 1,
+    created_at: "2026-07-25T23:09:01Z",
+    body: secondBody,
+  });
+  input.request_history.push({
+    ...structuredClone(input.request_history[0]),
+    resource_id: input.issue_comments[1].id,
+    request_id: secondRequestId,
+    body_sha256: digest(secondBody),
+  });
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
+});
+
+test("version 2 keeps markerless results ambiguous with an unbound request", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const unboundRequestId = `rbreq-${"2".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+  input.issue_comments.splice(1, 0, {
+    ...structuredClone(input.issue_comments[0]),
+    id: input.issue_comments[0].id + 1,
+    created_at: "2026-07-25T23:09:01Z",
+    body: requestBody(unboundRequestId),
+  });
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.unbound_requests.length, 1);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
+});
+
+test("version 2 does not fall back for a malformed request marker", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.issue_comments[1].body +=
+    "\n\n<!-- review-bridge-request-id: malformed -->";
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
+});
+
+test("version 2 rejects a valid clean marker with a malformed extra marker", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.issue_comments[1].body = `${withRequestMarker(
+    input.issue_comments[1].body,
+    requestId,
+  )}\n\n<!-- review-bridge-request-id: malformed -->`;
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
+});
+
+test("version 2 preserves stored unbound requests in later snapshots", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.request_history[0] = {
+    ...input.request_history[0],
+    classification: "UNBOUND",
+    requested_head_sha: null,
+    request_id: requestId,
+    body_sha256: digest(body),
+  };
+
+  const result = adaptCodexEvidence(input);
+  assert.deepEqual(result.requests, []);
+  assert.equal(result.unbound_requests.length, 1);
+  assert.equal(result.unbound_requests[0].request_id, requestId);
+});
+
+test("version 2 falls back to one head-bound findings review without a request ID", async () => {
+  const input = await fixture("codex-findings");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "SINGLE_OPEN_REQUEST");
+  assert.equal(result.results[0].format, "CODEX_FINDINGS_REVIEW_V1");
+  assert.equal(result.results[0].verdict, "FINDINGS");
+});
+
+test("version 2 binds findings by request ID and native review commit", async () => {
+  const input = await fixture("codex-findings");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.pull_request_review_comments[0].body = withRequestMarker(
+    input.pull_request_review_comments[0].body,
+    requestId,
+  );
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, requestId);
+  assert.equal(result.results[0].association, "CORRELATED_REQUEST_ID");
+  assert.equal(result.results[0].format, "CODEX_FINDINGS_REVIEW_V2");
+  assert.equal(result.results[0].verdict, "FINDINGS");
+});
+
+test("version 2 rejects a valid findings marker with a malformed extra marker", async () => {
+  const input = await fixture("codex-findings");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.pull_request_review_comments[0].body = `${withRequestMarker(
+    input.pull_request_review_comments[0].body,
+    requestId,
+  )}\n\n<!-- review-bridge-request-id: malformed -->`;
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
+});
+
+test("version 2 rejects duplicate markers across a review and its attachments", async () => {
+  const input = await fixture("codex-findings");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.pull_request_reviews[0].body = withRequestMarker(
+    input.pull_request_reviews[0].body,
+    requestId,
+  );
+  input.pull_request_review_comments[0].body = withRequestMarker(
+    input.pull_request_review_comments[0].body,
+    requestId,
+  );
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].request_id, null);
+  assert.equal(result.results[0].association, "AMBIGUOUS");
+  assert.equal(result.results[0].format, "UNKNOWN");
+  assert.equal(result.results[0].verdict, "UNKNOWN");
+});
+
+test("version 2 rejects duplicate results for one request ID", async () => {
+  const input = await fixture("codex-clean");
+  const requestId = `rbreq-${"1".repeat(32)}`;
+  const body = requestBody(requestId);
+  input.adapter_version = 2;
+  input.issue_comments[0].body = body;
+  input.issue_comments[1].body = withRequestMarker(
+    input.issue_comments[1].body,
+    requestId,
+  );
+  input.request_history[0].request_id = requestId;
+  input.request_history[0].body_sha256 = digest(body);
+  input.issue_comments.push({
+    ...structuredClone(input.issue_comments[1]),
+    id: input.issue_comments[1].id + 1,
+    created_at: "2026-07-25T23:10:24Z",
+  });
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results[0].association, "CORRELATED_REQUEST_ID");
+  assert.equal(result.results[1].association, "AMBIGUOUS");
 });
 
 test("adapter accepts the authorization head and rejects conflicting legacy input", async () => {
@@ -171,6 +601,17 @@ test("generic expected-actor responses remain UNKNOWN instead of disappearing", 
   assert.equal(result.results.length, 1);
   assert.equal(result.results[0].format, "UNKNOWN");
   assert.equal(result.results[0].verdict, "UNKNOWN");
+});
+
+test("version 2 baseline keeps request_id on generic expected-actor results", async () => {
+  const input = await fixture("codex-findings");
+  input.adapter_version = 2;
+  input.mode = "BASELINE";
+  input.pull_request_reviews[0].body = "Review completed without a recognized format.";
+  input.pull_request_review_comments = [];
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.candidate_results.length, 1);
+  assert.equal(result.candidate_results[0].request_id, null);
 });
 
 test("clean comment recognition rejects marker and actor lookalikes", async () => {

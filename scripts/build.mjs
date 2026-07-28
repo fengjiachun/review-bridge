@@ -85,6 +85,10 @@ async function copyServer(target) {
     path.join(serverTarget, "github-adapter.mjs"),
   );
   await fsp.copyFile(
+    path.join(projectRoot, "src", "codex-request.mjs"),
+    path.join(serverTarget, "codex-request.mjs"),
+  );
+  await fsp.copyFile(
     path.join(projectRoot, "src", "github-observation.mjs"),
     path.join(serverTarget, "github-observation.mjs"),
   );
