@@ -351,6 +351,7 @@ assert.match(
 );
 assert.match(workflowSkill, /get_review_summary/);
 assert.match(workflowSkill, /wait_for_review_state/);
+assert.match(workflowSkill, /export_human_arbitration/);
 assert.match(workflowSkill, /pass that task as `parent_review_id`/);
 assert.match(workflowSkill, /Choose `reviewer_provider` explicitly/);
 assert.match(workflowSkill, /newly created Codex task/);

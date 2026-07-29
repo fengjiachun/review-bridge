@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import {
   defaultStoreRoot,
+  exportHumanArbitration,
   finalizeLocalGate,
   getReview,
   getReviewSummary,
@@ -177,6 +178,29 @@ if (role === "author") {
       inputSchema: { review_id: z.string() },
     },
     (input) => getReviewSummary(storeRoot, input.review_id),
+  );
+
+  register(
+    "export_human_arbitration",
+    {
+      title: "Export human arbitration packet",
+      description:
+        "Read a HUMAN_REQUIRED review at an exact state version and return structured canonical ledger data plus deterministic copyable Markdown without changing review state.",
+      inputSchema: {
+        review_id: z.string(),
+        expected_state_version: z
+          .number()
+          .int()
+          .min(0)
+          .max(Number.MAX_SAFE_INTEGER),
+      },
+    },
+    (input) =>
+      exportHumanArbitration(
+        storeRoot,
+        input.review_id,
+        input.expected_state_version,
+      ),
   );
 
   register(

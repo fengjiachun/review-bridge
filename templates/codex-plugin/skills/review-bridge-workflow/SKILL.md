@@ -103,7 +103,11 @@ the mutation still needs to be retried.
   verdict.
 - Treat `LOCAL_GATE_PASSED` as permission to continue the user's publication
   workflow, not as permission by itself to push or create a pull request.
-- If the state is `HUMAN_REQUIRED`, stop. Do not start a third model round.
+- If the state is `HUMAN_REQUIRED`, call `get_review_summary`, then call
+  `export_human_arbitration` with its exact `state_version`. Give the returned
+  Markdown to the human or externally coordinated reviewer. The export is
+  read-only and does not authorize publication. Do not start a third model
+  round.
 
 The review ledger, not free-form chat text, is the source of truth.
 
