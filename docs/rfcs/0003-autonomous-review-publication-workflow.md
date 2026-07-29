@@ -72,7 +72,7 @@ Codex thread whose fix has already been independently verified.
 - **Author task**: the Codex task that implements the change and orchestrates
   the workflow.
 - **Reviewer task**: a newly created Codex task that receives a Review Bridge
-  `review_id`, an optional opaque dispatch marker, and an instruction to use the
+  `review_id`, one required opaque dispatch marker, and an instruction to use the
   packaged reviewer skill.
 - **Head attempt**: one committed topic-branch head that enters local review.
 - **Local review chain**: the ordered `review_id` values for all head attempts
@@ -162,13 +162,16 @@ The author must record direct operator authorization containing:
   - create or update one draft pull request;
   - post workflow-generated GitHub Codex review requests;
   - mark the pull request ready after all other gates pass; and
-  - resolve eligible workflow-owned Codex threads.
+  - resolve eligible workflow-owned Codex threads; and
+  - unresolve only a thread that this workflow previously resolved when the
+    server has invalidated that resolution record.
 
 This authorization does not include:
 
 - merging;
 - force-pushing or rebasing published history;
 - resolving a human or unknown-provenance thread;
+- changing the resolution state of a thread that the workflow did not resolve;
 - dismissing a review;
 - choosing `REMOTE_ONLY`;
 - acknowledging result ambiguity or automatic-review quiescence; or
@@ -178,7 +181,7 @@ Those operations retain their existing direct-approval requirements.
 
 The server canonicalizes the structured authorization payload, including its
 exact capability set and publication target but excluding the digest field
-itself, and stores an `authorization_sha256`. Every later workflow,
+itself, and stores a `workflow_authorization_sha256`. Every later workflow,
 publication, and automatic thread-resolution transition rechecks that digest
 and rejects a target or capability that was not in the original decision.
 Free-form conversation history is not a substitute for the persisted
@@ -233,12 +236,13 @@ Every new `review_id` uses a newly created task, not a fork of the author task
 and not a previously used reviewer task. The task receives only:
 
 - the immutable `review_id`;
-- an optional opaque dispatch marker used only for task discovery and
+- one server-issued opaque dispatch marker used only for task discovery and
   reconciliation; and
 - an instruction to follow the packaged reviewer skill.
 
-The dispatch marker contains no requirement, diff, finding, test result, or
-authoring context.
+The dispatch marker is mandatory for autonomous dispatch and appears in both
+the task title and prompt. It contains no requirement, diff, finding, test
+result, or authoring context.
 
 Round two for that same `review_id` may reuse the same reviewer task. A new head
 and new `review_id` require a new reviewer task.
@@ -298,7 +302,8 @@ workflows/<workflow_id>/
       "CREATE_OR_UPDATE_DRAFT_PR",
       "POST_CODEX_REVIEW_REQUESTS",
       "MARK_PR_READY",
-      "RESOLVE_ELIGIBLE_CODEX_THREADS"
+      "RESOLVE_ELIGIBLE_CODEX_THREADS",
+      "UNRESOLVE_INVALIDATED_CODEX_THREADS"
     ],
     "publication_target": {
       "base_repository_id": 123,
@@ -311,7 +316,7 @@ workflows/<workflow_id>/
       "head_branch": "agent/example",
       "push_remote": "origin"
     },
-    "authorization_sha256": "<64 lowercase hexadecimal characters>"
+    "workflow_authorization_sha256": "<64 lowercase hexadecimal characters>"
   },
   "status": "ACTIVE",
   "phase": "IMPLEMENTING",
@@ -328,11 +333,12 @@ The exact schema may add bounded diagnostic fields, but the following
 invariants are required:
 
 - repository identity, requirement, base SHA, topic branch, publication target,
-  exact capability set, and authorization digest are immutable;
-- every action kind requires its corresponding persisted capability;
-- every push, pull-request, publication, mark-ready, and thread-resolution
-  target must equal the immutable authorized repository IDs, branches, and
-  push remote;
+  exact capability set, and workflow-authorization digest are immutable;
+- every action kind requires its corresponding persisted workflow capability
+  or the exact single-use supplemental capability defined below;
+- every push, pull-request, publication, mark-ready, thread-resolution, and
+  compensating-unresolve target must equal the immutable authorized repository
+  IDs, branches, and push remote;
 - one workflow owns at most one open pull request;
 - one active or paused workflow exclusively owns a canonical
   `(git_common_dir, topic_branch)` and GitHub
@@ -400,8 +406,8 @@ Before a non-idempotent external write, it records an action intent containing:
 - workflow revision;
 - action kind;
 - exact target;
-- immutable authorization digest, required capability, and applicable ownership
-  claim;
+- immutable workflow-authorization digest, required capability or exact
+  supplemental capability, and applicable ownership claim;
 - immutable head, when applicable;
 - provider-specific correlation marker, when available; and
 - the facts that must be observed before the action can be marked complete.
@@ -433,9 +439,13 @@ recorded its result. Therefore recovery always reconciles first:
 - **GitHub Codex review request**: retain the publication ledger's exact body,
   request ID, immediate binding, unbound-request detection, and ambiguity
   rules. The workflow ledger references that action rather than weakening it.
-- **Thread resolution**: query the exact thread ID. If already resolved, record
-  the observed state as completion. If still unresolved, repeat the mutation
-  only when the original eligibility proof remains valid for the current head.
+- **Thread resolution or compensating unresolve**: query the exact thread ID.
+  If it already has the intended state, record the observed state as
+  completion. Repeat a resolve only while the original eligibility proof
+  remains valid for the current head. Repeat an unresolve only while the server
+  still reports that this workflow's resolution record is invalid, the
+  `UNRESOLVE_INVALIDATED_CODEX_THREADS` capability is present, and no different
+  workflow or thread is targeted.
 - **Mark ready for review**: read the pull request's current draft state before
   issuing the mutation.
 
@@ -583,10 +593,41 @@ while draft, the workflow pauses with `DRAFT_GATE_DEADLOCK`. Marking ready early
 requires a new direct operator decision; the controller does not infer that
 permission from elapsed time or missing checks.
 
+If the operator chooses that escape, the server first confirms that the current
+projection is exactly `DRAFT_GATE_DEADLOCK` and persists a single-use
+`draft_gate_exception` on the current head attempt. The canonical record
+contains:
+
+- `workflow_id`, pull-request repository ID and number, exact head SHA, and
+  publication ID and revision;
+- the exact normalized blocker set and its observation digest;
+- supplemental capability `MARK_PR_READY_WITH_DRAFT_GATE_EXCEPTION`;
+- exact acknowledgement `DRAFT_GATE_DEADLOCK_READY_EXCEPTION`;
+- operator label, rationale, and authorization timestamp; and
+- `ready_exception_sha256`, derived from the complete record except its digest.
+
+The mark-ready action intent binds both `workflow_authorization_sha256` and
+`ready_exception_sha256`. Any change to the workflow, pull request, head,
+publication, revision, or blocker set invalidates the exception. It is consumed
+by one reconciled mark-ready action and cannot authorize another head or waive
+any check, review, thread, or terminal gate. Without this record, the pause
+cannot resume through an autonomous mark-ready action.
+
 The first autonomous version requires `EXPLICIT_ONLY`. A repository that also
 uses automatic Codex review needs the existing direct
 `AUTOMATIC_QUIESCENCE_ACKNOWLEDGED` decision and therefore leaves the no-human
 normal path.
+
+Autonomous `start_publication` creates publication schema version 3. It
+preserves the version-2 `authorization` object and its `source_sha256`
+semantics, and adds top-level `workflow_id` and
+`workflow_authorization_sha256`. A version-3 `publication-gate.json` likewise
+preserves the existing `authorization_sha256`, which still binds the
+`LOCAL_GATE` or `REMOTE_ONLY` publication authorization, and separately stores
+`workflow_id` and `workflow_authorization_sha256`. Start, every snapshot
+recording, both autonomous projections, finalization, and gate verification
+validate the publication-authorization and workflow-authorization digests
+independently. A mismatch in either fails closed.
 
 Every fix commit creates a new head attempt. The old publication ledger remains
 historical and cannot authorize the new head. The new head must pass a new
@@ -656,9 +697,10 @@ association from the pinned Codex Bot through the correlated publication
 result to the root finding.
 
 For an autonomous publication, `start_publication` also binds the workflow ID
-and immutable `authorization_sha256`. Server-owned automatic-resolution records
-are referenced by the publication ledger. A caller cannot manufacture a
-resolution record in an observation.
+and immutable `workflow_authorization_sha256` without replacing the publication
+authorization's existing `source_sha256`. Server-owned automatic-resolution
+records are referenced by the publication ledger. A caller cannot manufacture
+a resolution record in an observation.
 
 From each complete normalized thread, the server derives a thread watermark.
 Eligibility and resolution audit entries bind that exact watermark, not merely
@@ -732,9 +774,17 @@ and pauses with the exact thread and watermark evidence. Failure to unresolve
 remains fail-closed because the invalid resolution record independently blocks
 the autonomous pre-ready projection and publication gate.
 
-A final gate for an autonomous workflow must bind the current workflow
-authorization digest and the digest of every automatic-resolution record.
-Finalization replays those records against the final complete observation.
+Every compensating unresolve uses its own durable action intent and the
+`UNRESOLVE_INVALIDATED_CODEX_THREADS` capability. The server permits it only
+for the same workflow, pull request, thread ID, and invalidated resolution
+record. An absent capability, unrelated thread, valid resolution record, or
+indeterminate reconciliation pauses without issuing the mutation.
+
+A final gate for an autonomous workflow must bind
+`workflow_authorization_sha256`, preserve the independent publication
+`authorization_sha256`, and bind the digest of every automatic-resolution
+record plus any consumed `ready_exception_sha256`. Finalization replays those
+records against the final complete observation.
 
 Human and unknown-provenance threads remain blocking and produce
 `PAUSED_HUMAN`, with their exact thread IDs and URLs presented to the operator.
@@ -754,13 +804,27 @@ the server-derived `autonomous_pre_ready` projection is
 review under the recorded authorization. It then records one fresh complete
 observation.
 
-When that observation derives `MERGE_READY`, the workflow records:
+The server evaluates that post-ready observation through a second pure
+`autonomous_terminal` projection. It requires the existing publication status
+to be `MERGE_READY`, then independently revalidates the exact workflow, pull
+request, head, publication ID, publication-authorization digest,
+workflow-authorization digest, and any consumed draft-gate exception. It also
+replays the complete server-owned automatic-resolution record set against the
+thread watermarks in that same complete observation. A missing, extra,
+invalidated, or mismatched record returns its fail-closed blocker even when the
+main publication status is `MERGE_READY`.
+
+Only when `autonomous_terminal.status` is `MERGE_READY` may the workflow record:
 
 - terminal status `MERGE_READY`;
 - workflow revision;
 - pull request identity and URL;
 - exact head;
 - current local review and publication IDs; and
+- post-ready observation revision and digest;
+- publication- and workflow-authorization digests;
+- automatic-resolution record-set digest;
+- consumed `ready_exception_sha256`, if any; and
 - remaining human-review requirements imposed by repository policy.
 
 The workflow stops. It does not call `verify_publication_gate` or merge unless
@@ -825,7 +889,8 @@ requires a specific recorded opt-in and narrow target binding.
 The main risks and controls are:
 
 - **Author/reviewer context leakage**: every new review ID uses a fresh,
-  non-forked reviewer task with only the review ID.
+  non-forked reviewer task with only the review ID, the mandatory opaque
+  dispatch marker, and the packaged-skill instruction.
 - **Wrong-head evidence**: every local gate, push, publication, remote result,
   check, and thread-resolution proof carries the full head SHA.
 - **Duplicate external writes**: persist intent first, reconcile stable
@@ -851,8 +916,9 @@ The main risks and controls are:
   stop loops that cannot demonstrate progress.
 - **Unintended publication**: autonomous authorization names the repository,
   base, topic branch, stable GitHub base and head repository IDs, push remote,
-  and exact permitted writes; every action rechecks the authorization digest,
-  and another target requires new authorization.
+  and exact permitted writes; every action rechecks
+  `workflow_authorization_sha256`, and another target requires new
+  authorization.
 
 Review Bridge ledgers remain workflow attestations, not Git or GitHub security
 boundaries. Repository protections remain necessary.
@@ -864,10 +930,14 @@ boundaries. Repository protections remain necessary.
 - Existing manual workflows continue to require a person or controller to
   resolve threads; they do not gain automatic resolution merely by upgrading.
 - The existing publication `status` and `next_action` remain unchanged;
-  `autonomous_pre_ready` is an additional projection used only by a bound
-  autonomous workflow.
+  `autonomous_pre_ready` and `autonomous_terminal` are additional projections
+  used only by a bound autonomous workflow.
 - Workflow schema version 1 references existing review and publication IDs
   without modifying their historical records.
+- Publication schema version 3 preserves version 2's publication authorization
+  and adds the independent workflow binding required by autonomous mode.
+  Version-1 and version-2 publication ledgers remain readable but cannot be
+  attached to an autonomous workflow or produce an autonomous terminal record.
 - RFC 0001's `unresolved_count > 0 -> CHANGES_REQUIRED` rule is unchanged.
 - If this RFC is accepted, RFC 0001's statement that a human must always
   resolve an unresolved thread is superseded only for eligible workflow-owned
@@ -958,8 +1028,11 @@ thread mutation have distinct safety boundaries and test matrices.
 ### Workflow-ledger unit tests
 
 - immutable requirement, base, branch, repository, stable publication target,
-  exact capability set, and authorization digest;
+  exact capability set, and workflow-authorization digest;
 - rejection of an action whose target or capability was not authorized;
+- rejection of compensating unresolve without
+  `UNRESOLVE_INVALIDATED_CODEX_THREADS`;
+- exact, single-use draft-gate exception authorization and invalidation;
 - optimistic revision conflicts;
 - legal and illegal phase transitions;
 - one active external action;
@@ -976,8 +1049,8 @@ thread mutation have distinct safety boundaries and test matrices.
 
 ### External-action recovery tests
 
-For task creation, push, pull-request creation, review request, mark-ready, and
-thread resolution, inject a failure:
+For task creation, push, pull-request creation, review request, mark-ready,
+thread resolution, and compensating unresolve, inject a failure:
 
 - before intent;
 - after intent but before the provider call;
@@ -997,7 +1070,7 @@ blindly repeat an indeterminate write.
 - open or new finding after round two;
 - new head using a valid `SUCCESSOR`;
 - invalid successor preconditions falling back to `FULL`;
-- duplicate or undiscoverable reviewer dispatch; and
+- missing, duplicate, or undiscoverable mandatory reviewer dispatch marker; and
 - author working-tree change preventing local-gate finalization.
 
 ### Publication integration tests
@@ -1009,8 +1082,15 @@ blindly repeat an indeterminate write.
   `autonomous_pre_ready.status == READY_TO_MARK`;
 - checks or remote review that cannot materialize while draft produce
   `DRAFT_GATE_DEADLOCK`;
+- an early mark-ready requires an exact head/PR/blocker-bound single-use
+  `draft_gate_exception`, and recovery rejects a stale or mismatched exception;
 - existing manual publication summaries retain their status and next-action
   behavior;
+- version-3 autonomous publication preserves `authorization_sha256` and
+  independently validates `workflow_authorization_sha256` at start, snapshot,
+  terminal projection, finalization, and verification;
+- a mismatch in either authorization digest fails closed, while version-1 and
+  version-2 non-autonomous ledgers retain their existing behavior;
 - actionable remote finding, fix commit, successor local review, push, and new
   remote request;
 - required-check failure repaired through a new gated head;
@@ -1019,7 +1099,11 @@ blindly repeat an indeterminate write.
 - semantic conflict pausing;
 - ambiguous or unbound Codex result pausing for exact acknowledgement;
 - force-push or unexpected head invalidation;
-- mark-ready recovery; and
+- mark-ready recovery;
+- a new thread comment between mark-ready and the terminal observation blocks
+  `autonomous_terminal`;
+- the terminal projection replays every automatic-resolution record against
+  the same post-ready observation; and
 - terminal `MERGE_READY` without merge.
 
 ### Thread-resolution tests
@@ -1047,9 +1131,11 @@ blindly repeat an indeterminate write.
   invalidates the resolution record and gate;
 - later pinned-Codex-Bot feedback reopens the thread and returns to the remote
   finding path;
+- compensating unresolve requires the exact workflow capability and invalidated
+  resolution record;
 - unresolve failure remains blocked by `THREAD_RESOLUTION_UNSAFE`;
-- finalization binds and replays the authorization and resolution-record
-  digests; and
+- post-ready terminal projection and finalization both bind and replay the two
+  authorization domains and resolution-record digests; and
 - unresolved human thread continues to block `MERGE_READY`.
 
 ### End-to-end scenarios
