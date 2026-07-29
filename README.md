@@ -67,7 +67,7 @@ Because the two halves come from different places, **pin them to the same
 release tag**: install the extension from a release, then build the Codex plugin
 from a checkout of that same tag. Building from an arbitrary `main` checkout can
 pair a newer author process with an older reviewer extension against one store.
-The version examples below use `v0.4.2`; substitute the release you installed.
+The version examples below use `v0.4.3`; substitute the release you installed.
 
 ### Claude Desktop extension
 
@@ -101,10 +101,10 @@ installed, then build the local marketplace and register it:
 ```bash
 git clone https://github.com/fengjiachun/review-bridge.git
 cd review-bridge
-git checkout v0.4.2
+git checkout v0.4.3
 npm ci
 npm run build
-codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.4.2/codex-marketplace"
+codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.4.3/codex-marketplace"
 ```
 
 Build from a Git clone, not from the release's source archive: `scripts/build.mjs`
@@ -125,14 +125,14 @@ build and verification loop.
 
 ### Build output
 
-`npm run build` writes everything under `dist/review-bridge-v0.4.2/`:
+`npm run build` writes everything under `dist/review-bridge-v0.4.3/`:
 
 - `codex-marketplace/` — local Codex marketplace containing the Review Bridge
   plugin, author MCP server, and `CODEX_TASK` reviewer MCP server.
-- `review-bridge-reviewer-v0.4.2.mcpb` — MCP Bundle for Claude Desktop.
-- `review-bridge-reviewer-v0.4.2.dxt` — compatibility copy of the same bundle.
+- `review-bridge-reviewer-v0.4.3.mcpb` — MCP Bundle for Claude Desktop.
+- `review-bridge-reviewer-v0.4.3.dxt` — compatibility copy of the same bundle.
 - `claude-extension-source/` — inspectable source of the Claude extension.
-- `review-bridge-source-v0.4.2.zip` — source archive of the built commit, for
+- `review-bridge-source-v0.4.3.zip` — source archive of the built commit, for
   inspection and provenance. It carries no Git metadata, so it cannot be used to
   run the build itself.
 - `SHA256SUMS.txt` — checksums for the bundle, compatibility copy, and source
@@ -304,7 +304,7 @@ return the legacy exact body without an ID. For a fresh snapshot, pass the
 full JSON returned by `get_publication` to the packaged read-only collector:
 
 ```bash
-node dist/review-bridge-v0.4.2/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs \
+node dist/review-bridge-v0.4.3/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs \
   publication.json > observation.json
 ```
 
