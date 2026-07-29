@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.3 - 2026-07-29
+
+### Added
+
+- An author-only `export_human_arbitration` tool returns exact-version,
+  deterministic structured data and copyable Markdown for `HUMAN_REQUIRED`
+  reviews without changing the review ledger.
+
 ## 0.4.2 - 2026-07-28
 
 ### Added
