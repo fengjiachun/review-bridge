@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  exportHumanArbitration,
   finalizeLocalGate,
   getReview,
   getReviewSummary,
@@ -1041,6 +1042,114 @@ test("unresolved round-two finding escalates to a human", async (t) => {
     [],
   );
   assert.equal(result.status, "HUMAN_REQUIRED");
+  const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
+  const beforeLedger = await fsp.readFile(reviewPath, "utf8");
+  const beforeRepositoryStatus = git(repository, "status", "--porcelain");
+  const exported = await exportHumanArbitration(
+    store,
+    prepared.id,
+    result.state_version,
+  );
+  assert.deepEqual(
+    await exportHumanArbitration(store, prepared.id, result.state_version),
+    exported,
+  );
+  assert.equal(exported.arbitration.status, "HUMAN_REQUIRED");
+  assert.equal(exported.arbitration.requirement, prepared.requirement);
+  assert.equal(
+    exported.arbitration.implementation_scope,
+    prepared.implementation_scope,
+  );
+  assert.equal(exported.arbitration.snapshots.length, 2);
+  assert.deepEqual(
+    exported.arbitration.snapshots,
+    result.rounds.map((round) => ({
+      round: round.round,
+      base_sha: round.base_sha,
+      head_sha: round.head_sha,
+      snapshot_hash: round.snapshot_hash,
+    })),
+  );
+  assert.equal(exported.arbitration.active_findings[0].finding.id, "F-001");
+  assert.equal(
+    exported.arbitration.active_findings[0].author_resolution.disposition,
+    "rejected",
+  );
+  assert.equal(
+    exported.arbitration.active_findings[0].rereview_decision.decision,
+    "still_open",
+  );
+  assert.equal(
+    exported.arbitration.human_required_reason.event,
+    "REREVIEW_UNRESOLVED",
+  );
+  assert.match(exported.markdown, /^# Human Arbitration Packet$/m);
+  assert.match(exported.markdown, /## Active findings \(1\)/);
+  assert.equal(await fsp.readFile(reviewPath, "utf8"), beforeLedger);
+  assert.equal(
+    git(repository, "status", "--porcelain"),
+    beforeRepositoryStatus,
+  );
+  await assert.rejects(
+    exportHumanArbitration(
+      store,
+      prepared.id,
+      result.state_version - 1,
+    ),
+    /review state_version mismatch/,
+  );
+});
+
+test("human arbitration export rejects reviews that are not awaiting a human", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  });
+
+  await assert.rejects(
+    exportHumanArbitration(store, prepared.id, prepared.state_version),
+    /review does not require human arbitration/,
+  );
+  for (const invalidStateVersion of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(
+      exportHumanArbitration(store, prepared.id, invalidStateVersion),
+      /expected_state_version must be a non-negative safe integer/,
+    );
+  }
+
+  await submitInitialReview(store, prepared.id, [
+    {
+      severity: "major",
+      title: "Needs a product decision",
+      explanation: "The correct behavior is not specified.",
+    },
+  ]);
+  const escalated = await submitResolutions(store, prepared.id, [
+    {
+      finding_id: "F-001",
+      disposition: "human_required",
+      rationale: "A human must choose the intended behavior.",
+    },
+  ]);
+  const exported = await exportHumanArbitration(
+    store,
+    prepared.id,
+    escalated.state_version,
+  );
+  assert.equal(
+    exported.arbitration.human_required_reason.event,
+    "AUTHOR_ESCALATED",
+  );
+  assert.equal(exported.arbitration.snapshots.length, 1);
+  assert.equal(
+    exported.arbitration.active_findings[0].rereview_decision,
+    null,
+  );
 });
 
 test("compact review summaries support bounded state-change waits", async (t) => {
@@ -1234,6 +1343,27 @@ test("compact finding histograms distinguish active and all-time severity", asyn
   assert.deepEqual(
     summary.active_findings.map((finding) => finding.id),
     ["F-003"],
+  );
+  const exported = await exportHumanArbitration(
+    store,
+    prepared.id,
+    summary.state_version,
+  );
+  assert.deepEqual(
+    exported.arbitration.active_findings.map(({ finding }) => finding.id),
+    ["F-003"],
+  );
+  assert.deepEqual(
+    exported.arbitration.resolved_findings.map(({ finding }) => finding.id),
+    ["F-001", "F-002"],
+  );
+  assert.ok(
+    exported.markdown.indexOf('"id": "F-003"') <
+      exported.markdown.indexOf("## Resolved findings"),
+  );
+  assert.ok(
+    exported.markdown.indexOf('"id": "F-001"') >
+      exported.markdown.indexOf("## Resolved findings"),
   );
 });
 

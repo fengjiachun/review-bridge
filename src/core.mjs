@@ -746,11 +746,15 @@ function countBy(values) {
   return Object.fromEntries(Object.entries(result).sort());
 }
 
+const RESOLVED_FINDING_STATUSES = new Set([
+  "RESOLVED",
+  "REBUTTAL_ACCEPTED",
+]);
+
 function reviewSummary(review) {
   const currentSnapshot = review.rounds.at(-1) ?? null;
   const activeFindings = review.findings.filter(
-    (finding) =>
-      !["RESOLVED", "REBUTTAL_ACCEPTED"].includes(finding.status),
+    (finding) => !RESOLVED_FINDING_STATUSES.has(finding.status),
   );
   return {
     id: review.id,
@@ -923,6 +927,158 @@ export async function getReview(storeRoot, reviewId) {
 
 export async function getReviewSummary(storeRoot, reviewId) {
   return reviewSummary(await loadReview(storeRoot, reviewId));
+}
+
+function arbitrationFinding(
+  finding,
+  resolutionsByFinding,
+  decisionsByFinding,
+) {
+  return {
+    finding,
+    author_resolution: resolutionsByFinding.get(finding.id) ?? null,
+    rereview_decision: decisionsByFinding.get(finding.id) ?? null,
+  };
+}
+
+function markdownLiteral(value) {
+  return String(value)
+    .split("\n")
+    .map((line) => `    ${line}`)
+    .join("\n");
+}
+
+function prettySortedJson(value) {
+  return JSON.stringify(
+    value,
+    (_key, current) =>
+      current && typeof current === "object" && !Array.isArray(current)
+        ? Object.fromEntries(
+            Object.keys(current)
+              .sort()
+              .map((key) => [key, current[key]]),
+          )
+        : current,
+    2,
+  );
+}
+
+function renderHumanArbitrationMarkdown(arbitration) {
+  return `${[
+    "# Human Arbitration Packet",
+    "> This is a read-only export of the canonical Review Bridge ledger. It does not change review state or authorize publication.",
+    "Decide whether each active finding should be upheld or overruled. Resolved findings are context only and must not be treated as open.",
+    "## Review identity",
+    [
+      `- Review ID: \`${arbitration.review_id}\``,
+      `- State: \`${arbitration.status}\``,
+      `- State version: ${arbitration.state_version}`,
+      `- Reviewer provider: \`${arbitration.reviewer_provider}\``,
+      `- Review strategy: \`${arbitration.review_strategy.mode}\``,
+      `- Current round: ${arbitration.current_round} of ${arbitration.max_rounds}`,
+    ].join("\n"),
+    "## Requirement",
+    markdownLiteral(arbitration.requirement),
+    "## Implementation scope",
+    markdownLiteral(arbitration.implementation_scope),
+    "## Immutable snapshot identity",
+    markdownLiteral(prettySortedJson(arbitration.snapshots)),
+    "## Why human arbitration is required",
+    arbitration.human_required_reason == null
+      ? "No reason was recorded."
+      : markdownLiteral(prettySortedJson(arbitration.human_required_reason)),
+    `## Active findings (${arbitration.active_findings.length})`,
+    markdownLiteral(prettySortedJson(arbitration.active_findings)),
+    `## Resolved findings (${arbitration.resolved_findings.length})`,
+    markdownLiteral(prettySortedJson(arbitration.resolved_findings)),
+  ].join("\n\n")}\n`;
+}
+
+export async function exportHumanArbitration(
+  storeRoot,
+  reviewId,
+  expectedStateVersion,
+) {
+  if (
+    !Number.isSafeInteger(expectedStateVersion) ||
+    expectedStateVersion < 0
+  ) {
+    throw new Error(
+      "expected_state_version must be a non-negative safe integer",
+    );
+  }
+  const review = await loadReview(storeRoot, reviewId);
+  const stateVersion = review.state_version ?? 0;
+  if (stateVersion !== expectedStateVersion) {
+    throw new Error(
+      `review state_version mismatch (expected=${expectedStateVersion}, actual=${stateVersion})`,
+    );
+  }
+  if (review.status !== "HUMAN_REQUIRED") {
+    throw new Error(
+      `review does not require human arbitration (status=${review.status})`,
+    );
+  }
+
+  const resolutionsByFinding = new Map(
+    review.resolutions.map((resolution) => [
+      resolution.finding_id,
+      resolution,
+    ]),
+  );
+  const decisionsByFinding = new Map(
+    review.rereview_decisions.map((decision) => [
+      decision.finding_id,
+      decision,
+    ]),
+  );
+  const findings = review.findings.map((finding) =>
+    arbitrationFinding(finding, resolutionsByFinding, decisionsByFinding),
+  );
+  const humanRequiredEvents = new Set([
+    "AUTHOR_ESCALATED",
+    "ROUND_LIMIT_REACHED",
+    "REREVIEW_UNRESOLVED",
+  ]);
+  const humanRequiredReason =
+    [...review.history]
+      .reverse()
+      .find((event) => humanRequiredEvents.has(event.event)) ??
+    review.history.at(-1) ??
+    null;
+  const arbitration = {
+    schema_version: 1,
+    review_id: review.id,
+    status: review.status,
+    state_version: stateVersion,
+    reviewer_provider: reviewerProviderFor(review),
+    review_strategy: review.review_strategy ?? {
+      mode: "FULL",
+      parent_review_id: null,
+      fallback_reason: null,
+    },
+    requirement: review.requirement,
+    implementation_scope: review.implementation_scope,
+    current_round: review.current_round,
+    max_rounds: review.max_rounds,
+    snapshots: review.rounds.map((round) => ({
+      round: round.round,
+      base_sha: round.base_sha,
+      head_sha: round.head_sha,
+      snapshot_hash: round.snapshot_hash,
+    })),
+    human_required_reason: humanRequiredReason,
+    active_findings: findings.filter(
+      ({ finding }) => !RESOLVED_FINDING_STATUSES.has(finding.status),
+    ),
+    resolved_findings: findings.filter(({ finding }) =>
+      RESOLVED_FINDING_STATUSES.has(finding.status),
+    ),
+  };
+  return {
+    arbitration,
+    markdown: renderHumanArbitrationMarkdown(arbitration),
+  };
 }
 
 export async function waitForReviewState(

@@ -198,6 +198,16 @@ Resume the same reviewer context for round two. The final state is one of:
   still matches the reviewed snapshot.
 - `HUMAN_REQUIRED`: a finding remains or a new finding appears after round two.
 
+For `HUMAN_REQUIRED`, call `get_review_summary`, then pass its exact
+`state_version` to `export_human_arbitration`. The read-only export fails if the
+ledger has advanced or does not require human arbitration. It returns an
+`arbitration` object containing the requirement, implementation scope,
+immutable round identities, escalation reason, and active and resolved findings
+with their author resolutions and rereview decisions. Its deterministic
+`markdown` field is ready to copy to a human or externally coordinated
+reviewer. Exporting does not change the ledger, consume a review round, contact
+another model, or authorize publication.
+
 ## Successor reviews
 
 Start a fresh reviewer context for each new `review_id`; a round-two rereview

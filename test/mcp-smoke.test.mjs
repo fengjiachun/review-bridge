@@ -47,6 +47,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
   assert.deepEqual(author, [
     "acknowledge_codex_review_ambiguity",
     "authorize_remote_publication",
+    "export_human_arbitration",
     "finalize_local_gate",
     "finalize_publication_gate",
     "get_publication",
@@ -92,6 +93,18 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       ["CLAUDE_DESKTOP", "CODEX_TASK"],
     );
     assert.ok(prepare.inputSchema.required.includes("reviewer_provider"));
+
+    const arbitrationExport = authorTools.tools.find(
+      (tool) => tool.name === "export_human_arbitration",
+    );
+    assert.deepEqual(arbitrationExport.inputSchema.required.sort(), [
+      "expected_state_version",
+      "review_id",
+    ]);
+    assert.equal(
+      arbitrationExport.inputSchema.properties.expected_state_version.minimum,
+      0,
+    );
 
     const reviewerTools = await reviewer.listTools();
     const readArtifact = reviewerTools.tools.find(
