@@ -432,9 +432,16 @@ recorded its result. Therefore recovery always reconciles first:
   identity, then compare the exact remote ref head. Re-push only when the
   desired object is absent and the update is still a permitted fast-forward.
 - **Pull request creation**: search the authorized repository for an open pull
-  request with the exact head repository, head branch, and base branch. Bind
-  exactly one match; pause on zero-after-an-indeterminate-create or multiple
-  matches.
+  request with the exact head repository, head branch, and base branch. The
+  create intent contains a server-generated high-entropy correlation marker
+  bound to the workflow ID, action ID, repositories, branches, and head. The
+  controller includes that marker in the initial pull-request body, requests
+  draft state, and records the authenticated creator's numeric actor identity.
+  Recovery binds exactly one match only when the marker, creator, repository
+  identities, branches, head, and draft state all match. A same-branch pull
+  request without the marker, a marker match that is already ready, zero
+  matches after an indeterminate create, or multiple matches pauses; branch
+  equality alone never establishes workflow ownership.
 - **Codex reviewer task creation**: include a deterministic dispatch marker in
   the task prompt and title. Discover and bind exactly one matching task before
   creating another. If the client cannot enumerate matching tasks after an
@@ -455,8 +462,12 @@ recorded its result. Therefore recovery always reconciles first:
   only while the server still reports that this workflow's proven resolution
   record is invalid, the `UNRESOLVE_INVALIDATED_CODEX_THREADS` capability is
   present, and no different workflow or thread is targeted.
-- **Mark ready for review**: read the pull request's current draft state before
-  issuing the mutation.
+- **Mark ready for review**: immediately before the provider call and during
+  reconciliation, read the live pull-request repository ID, number, base and
+  head branches, full head SHA, and draft state. They must equal the
+  action-bound workflow-owned pull request and gated head. An already-ready
+  state completes reconciliation only for that exact head; any identity or
+  head drift pauses without issuing or crediting the mutation.
 - **Return to draft for repair**: read the exact pull request and head. Treat an
   already-draft pull request as reconciled completion. Repeat the mutation only
   while the same workflow-owned pull request remains ready on the same head,
@@ -1143,6 +1154,12 @@ failure:
 Verify that recovery binds exactly one observed object or pauses. It must never
 blindly repeat an indeterminate write.
 
+Pull-request recovery additionally verifies that matching branches without the
+action-bound creation marker, a mismatched creator, or a non-draft match cannot
+be adopted. Mark-ready recovery additionally changes the live head between the
+gated observation and provider call and verifies that the mutation is not
+issued or credited.
+
 ### Local-review integration tests
 
 - first-round `CLEAN`;
@@ -1195,6 +1212,8 @@ blindly repeat an indeterminate write.
 - ambiguous or unbound Codex result pausing for exact acknowledgement;
 - force-push or unexpected head invalidation;
 - mark-ready recovery;
+- head or pull-request identity drift immediately before mark-ready pauses
+  without exposing or crediting the ungated head;
 - a new thread comment between mark-ready and the terminal observation blocks
   `autonomous_terminal`;
 - the terminal projection replays every automatic-resolution record against
