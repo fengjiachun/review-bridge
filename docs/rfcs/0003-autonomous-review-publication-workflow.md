@@ -161,7 +161,9 @@ The author must record direct operator authorization containing:
   - push the topic branch;
   - create or update one draft pull request;
   - post workflow-generated GitHub Codex review requests;
-  - mark the pull request ready after all other gates pass; and
+  - mark the pull request ready after all other gates pass;
+  - return a workflow-owned ready pull request to draft before repairing an
+    actionable current-head machine finding or required-check failure;
   - resolve eligible workflow-owned Codex threads; and
   - unresolve only a thread that this workflow previously resolved when the
     server has invalidated that resolution record.
@@ -302,6 +304,7 @@ workflows/<workflow_id>/
       "CREATE_OR_UPDATE_DRAFT_PR",
       "POST_CODEX_REVIEW_REQUESTS",
       "MARK_PR_READY",
+      "RETURN_PR_TO_DRAFT_FOR_REPAIR",
       "RESOLVE_ELIGIBLE_CODEX_THREADS",
       "UNRESOLVE_INVALIDATED_CODEX_THREADS"
     ],
@@ -448,6 +451,12 @@ recorded its result. Therefore recovery always reconciles first:
   workflow or thread is targeted.
 - **Mark ready for review**: read the pull request's current draft state before
   issuing the mutation.
+- **Return to draft for repair**: read the exact pull request and head. Treat an
+  already-draft pull request as reconciled completion. Repeat the mutation only
+  while the same workflow-owned pull request remains ready on the same head,
+  the current complete observation still contains the actionable machine
+  finding or required-check failure, and
+  `RETURN_PR_TO_DRAFT_FOR_REPAIR` is authorized.
 
 When absence cannot be proved or multiple external objects match, the workflow
 pauses. It does not claim exactly-once execution and does not choose an object
@@ -481,10 +490,12 @@ IMPLEMENTING
                     -> START_PUBLICATION
                     -> REQUEST_REMOTE_CODEX_REVIEW
                     -> WAIT_PUBLICATION
-                         ├─ remote findings -> ADDRESS_REMOTE_FINDINGS
+                         ├─ remote findings -> ENSURE_DRAFT_FOR_REPAIR
+                         │                      -> ADDRESS_REMOTE_FINDINGS
                          │                      -> COMMIT_HEAD
                          │                      -> PREPARE_LOCAL_REVIEW
-                         ├─ required check failure -> ADDRESS_CHECK_FAILURE
+                         ├─ required check failure -> ENSURE_DRAFT_FOR_REPAIR
+                         │                           -> ADDRESS_CHECK_FAILURE
                          │                           -> COMMIT_HEAD
                          │                           -> PREPARE_LOCAL_REVIEW
                          ├─ eligible old Codex threads
@@ -614,7 +625,8 @@ The server then persists a single-use `draft_gate_exception` on the current head
 attempt. The canonical record contains:
 
 - `workflow_id`, pull-request repository ID and number, exact head SHA, and
-  publication ID and revision;
+  publication ID;
+- the workflow and publication revisions at authorization;
 - the exact normalized blocker set and its observation digest;
 - basis `PROVIDER_VERIFIED` plus the policy-proof digest, or basis
   `OPERATOR_ASSERTED` plus a null policy-proof digest;
@@ -626,12 +638,25 @@ attempt. The canonical record contains:
 - `ready_exception_sha256`, derived from the complete record except its digest.
 
 The mark-ready action intent binds both `workflow_authorization_sha256` and
-`ready_exception_sha256`. Any change to the workflow, pull request, head,
-publication, revision, blocker set, or provider-policy proof invalidates the
-exception. It is consumed by one reconciled mark-ready action and cannot
-authorize another head or waive any check, review, thread, or terminal gate.
-Without this record, neither pause can resume through an autonomous mark-ready
-action.
+`ready_exception_sha256`, the exact mark-ready action ID, and the authorized
+starting revisions. Before consumption, a change to the workflow identity,
+pull request, head, publication ID, blocker set, observation digest,
+provider-policy proof, or operator assertion invalidates the exception.
+Revision increments made by the bound action's own
+`PLANNED -> EXECUTING -> OBSERVED -> COMPLETED` bookkeeping do not. No other
+action may consume the exception or interleave while that action is active.
+
+Successful reconciliation consumes the exception exactly once and records the
+action ID, observed ready state, and consumption revisions in the append-only
+action audit. The consumed record remains immutable evidence for terminal
+replay; later complete observations and their publication revisions do not
+invalidate it. Terminal replay instead requires the original exception digest,
+its completed action audit chain, and the same workflow, pull request,
+publication ID, and head. A target or head change invalidates the head attempt,
+but ordinary post-ready observation bookkeeping does not erase the consumed
+proof. The exception cannot authorize another action or waive any check,
+review, thread, or terminal gate. Without this record, neither pause can resume
+through an autonomous mark-ready action.
 
 The first autonomous version requires `EXPLICIT_ONLY`. A repository that also
 uses automatic Codex review needs the existing direct
@@ -811,7 +836,19 @@ Human and unknown-provenance threads remain blocking and produce
 
 ## Ready-for-review and terminal state
 
-The pull request remains draft while fixes are in progress. After:
+The pull request remains draft while fixes are in progress. If a post-ready
+observation reports an actionable current-head Codex finding or required-check
+failure, the server first returns `ENSURE_DRAFT_FOR_REPAIR`. The controller
+must persist and reconcile a `RETURN_PR_TO_DRAFT_FOR_REPAIR` action for the
+exact workflow-owned pull request and head before it edits files or creates a
+replacement commit. An already-draft observation completes that action
+without another mutation. An unauthorized, failed, or indeterminate draft
+transition pauses the workflow and leaves the current head unchanged; it must
+not proceed with a repair while the pull request is publicly ready. Human
+formal review feedback still pauses rather than entering this automatic repair
+path.
+
+After:
 
 - current-head local gate;
 - correlated remote `CLEAN`;
@@ -1054,6 +1091,8 @@ thread mutation have distinct safety boundaries and test matrices.
 - rejection of compensating unresolve without
   `UNRESOLVE_INVALIDATED_CODEX_THREADS`;
 - exact, single-use draft-gate exception authorization and invalidation;
+- preservation of a bound draft-gate exception across its own action
+  bookkeeping revisions and immutable replay after consumption;
 - optimistic revision conflicts;
 - legal and illegal phase transitions;
 - one active external action;
@@ -1071,7 +1110,8 @@ thread mutation have distinct safety boundaries and test matrices.
 ### External-action recovery tests
 
 For task creation, push, pull-request creation, review request, mark-ready,
-thread resolution, and compensating unresolve, inject a failure:
+return-to-draft, thread resolution, and compensating unresolve, inject a
+failure:
 
 - before intent;
 - after intent but before the provider call;
@@ -1111,6 +1151,9 @@ blindly repeat an indeterminate write.
   acknowledgement `READY_ONLY_GATES_OPERATOR_ASSERTED`;
 - recovery rejects a stale or mismatched exception, policy proof, blocker set,
   or operator assertion;
+- the bound mark-ready action may advance workflow and publication bookkeeping
+  revisions, consumes its exception once, and preserves the consumed record
+  across post-ready observations;
 - existing manual publication summaries retain their status and next-action
   behavior;
 - version-3 autonomous publication preserves `authorization_sha256` and
@@ -1121,6 +1164,10 @@ blindly repeat an indeterminate write.
 - actionable remote finding, fix commit, successor local review, push, and new
   remote request;
 - required-check failure repaired through a new gated head;
+- a ready pull request with an actionable current-head machine finding or
+  required-check failure returns to draft before repair; missing capability,
+  provider failure, or indeterminate reconciliation pauses before any edit or
+  replacement commit;
 - base advancement that remains valid;
 - update-required head returning through local review;
 - semantic conflict pausing;
