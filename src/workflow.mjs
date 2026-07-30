@@ -845,6 +845,7 @@ async function recoverClaimTransactions(storeRoot, registry) {
       for (const workflowClaim of workflow.claims) {
         const matching = next.claims.filter(
           (entry) =>
+            entry.disposition === "ACTIVE" &&
             entry.kind === workflowClaim.kind &&
             entry.canonical_key_sha256 ===
               workflowClaim.canonical_key_sha256,

@@ -357,6 +357,84 @@ test("claim journal aborts a pre-workflow start and rolls forward a persisted wo
   );
 });
 
+test("claim journal recovers a new workflow over released historical claims", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+
+  const predecessor = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const cancelled = await cancelAutonomousWorkflow(
+    state.store,
+    predecessor.workflow_id,
+    predecessor.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "Release the predecessor claims.",
+    },
+  );
+  await releaseWorkflowClaims(
+    state.store,
+    predecessor.workflow_id,
+    cancelled.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "No external objects remain.",
+      reconciledClaims: claimReleaseEvidence(cancelled),
+    },
+  );
+
+  const successor = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const registryPath = path.join(state.store, "workflow-claims.json");
+  const interruptedRegistry = JSON.parse(
+    await fsp.readFile(registryPath, "utf8"),
+  );
+  const startTransaction = interruptedRegistry.transactions.find(
+    (entry) => entry.workflow_id === successor.workflow_id,
+  );
+  startTransaction.state = "PREPARED";
+  startTransaction.completed_at = null;
+  interruptedRegistry.claims = interruptedRegistry.claims.filter(
+    (entry) => entry.workflow_id !== successor.workflow_id,
+  );
+  await fsp.writeFile(
+    registryPath,
+    `${canonicalJson(interruptedRegistry)}\n`,
+    { mode: 0o600 },
+  );
+
+  await getAutonomousWorkflow(state.store, successor.workflow_id);
+  const recoveredRegistry = JSON.parse(
+    await fsp.readFile(registryPath, "utf8"),
+  );
+  assert.equal(
+    recoveredRegistry.transactions.find(
+      (entry) => entry.workflow_id === successor.workflow_id,
+    ).state,
+    "COMMITTED",
+  );
+  assert.equal(
+    recoveredRegistry.claims.filter(
+      (entry) =>
+        entry.workflow_id === predecessor.workflow_id &&
+        entry.disposition === "RELEASED",
+    ).length,
+    predecessor.claims.length,
+  );
+  assert.equal(
+    recoveredRegistry.claims.filter(
+      (entry) =>
+        entry.workflow_id === successor.workflow_id &&
+        entry.disposition === "ACTIVE",
+    ).length,
+    successor.claims.length,
+  );
+});
+
 test("workflow start rejects authorization and repository drift", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
