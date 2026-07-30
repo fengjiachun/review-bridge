@@ -866,6 +866,10 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
   const workflowPath = path.join(workflowRoot, "workflow.json");
   const auditPath = path.join(workflowRoot, "action-audit.jsonl");
   const auditHeadPath = path.join(workflowRoot, "action-audit-head.json");
+  const auditTerminalPath = path.join(
+    workflowRoot,
+    "action-audit-terminal.json",
+  );
   const maxAuditBytes = 4 * 1024 * 1024;
   const maxEventBytes = 256 * 1024 + 1;
   const workflowState = {
@@ -907,8 +911,8 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
       digest: event.event_sha256,
     };
   };
-  while (committedBytes < maxAuditBytes - 1) {
-    const remaining = maxAuditBytes - 1 - committedBytes;
+  while (committedBytes < maxAuditBytes) {
+    const remaining = maxAuditBytes - committedBytes;
     const empty = auditLine(0);
     const paddingLength =
       remaining <= empty.bytes.length + 200_000
@@ -922,7 +926,7 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
     previousDigest = line.digest;
     sequence += 1;
   }
-  assert.equal(committedBytes, maxAuditBytes - 1);
+  assert.equal(committedBytes, maxAuditBytes);
   await fsp.writeFile(auditPath, Buffer.concat(lines), { mode: 0o600 });
   await fsp.writeFile(
     auditHeadPath,
@@ -932,6 +936,7 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
       committed_bytes: committedBytes,
       next_sequence: sequence,
       last_event_sha256: previousDigest,
+      terminal_event_sha256: null,
     })}\n`,
     { mode: 0o600 },
   );
@@ -945,6 +950,8 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
     `${canonicalJson(storedWorkflow)}\n`,
     { mode: 0o600 },
   );
+  const preCancellationHead = await fsp.readFile(auditHeadPath);
+  const preCancellationWorkflow = await fsp.readFile(workflowPath);
 
   await assert.rejects(
     pauseAutonomousWorkflow(
@@ -971,17 +978,33 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
   );
   assert.equal(cancelled.status, "CANCELLED");
   const cancelledAuditBytes = (await fsp.stat(auditPath)).size;
-  assert.ok(cancelledAuditBytes > committedBytes);
-  assert.ok(cancelledAuditBytes <= maxAuditBytes + maxEventBytes);
+  assert.equal(cancelledAuditBytes, committedBytes);
+  assert.equal(cancelledAuditBytes, maxAuditBytes);
+  const terminalBytes = await fsp.readFile(auditTerminalPath);
+  assert.ok(terminalBytes.length <= maxEventBytes);
+  const terminalEvent = JSON.parse(terminalBytes.toString("utf8"));
+  assert.equal(terminalEvent.event, "WORKFLOW_CANCELLED");
+  assert.equal(terminalEvent.previous_event_sha256, previousDigest);
+  await fsp.writeFile(auditHeadPath, preCancellationHead, { mode: 0o600 });
+  await fsp.writeFile(workflowPath, preCancellationWorkflow, { mode: 0o600 });
+  const recoveredCancellation = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(recoveredCancellation.status, "CANCELLED");
+  assert.equal(
+    recoveredCancellation.action_audit.last_event_sha256,
+    terminalEvent.event_sha256,
+  );
 
   const released = await releaseWorkflowClaims(
     state.store,
     workflow.workflow_id,
-    cancelled.revision,
+    recoveredCancellation.revision,
     {
       operatorLabel: "Test Operator",
       rationale: "No external objects remain.",
-      reconciledClaims: claimReleaseEvidence(cancelled),
+      reconciledClaims: claimReleaseEvidence(recoveredCancellation),
     },
   );
   assert.equal(

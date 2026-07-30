@@ -275,7 +275,8 @@ workflow-claims.json
 workflows/<workflow_id>/
 ├── workflow.json
 ├── action-audit.jsonl
-└── action-audit-head.json
+├── action-audit-head.json
+└── action-audit-terminal.json  # optional cancellation segment
 ```
 
 `workflow.json` is a private, canonical JSON ledger. It contains:
@@ -394,6 +395,12 @@ Workflow files use the existing private mode, size limits, exclusive lock,
 canonical serialization, atomic replacement, file sync, and directory sync
 rules. The action audit is append-only with a committed digest-chain head,
 using the same durability model as the publication-gate audit.
+`action-audit.jsonl` retains an absolute 4 MiB readable limit. Ordinary events
+stop early enough to reserve one maximum-sized cancellation event within that
+limit. If a previously valid near-full log predates that reserve, the optional
+terminal segment stores exactly one bounded `WORKFLOW_CANCELLED` event linked
+to the main log's final digest; the same head commits the cross-segment
+sequence and recovery may adopt one complete terminal crash candidate.
 
 No existing `review.json` or `publication.json` is migrated. Older Review
 Bridge clients may continue their existing workflows but cannot advance a new

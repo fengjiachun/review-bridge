@@ -32,10 +32,10 @@ const SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
 const MAX_CLAIMS_BYTES = 4 * 1024 * 1024;
-const MAX_ORDINARY_AUDIT_BYTES = 4 * 1024 * 1024;
+const MAX_AUDIT_BYTES = 4 * 1024 * 1024;
 const MAX_AUDIT_EVENT_BYTES = 256 * 1024;
-const MAX_AUDIT_BYTES =
-  MAX_ORDINARY_AUDIT_BYTES + MAX_AUDIT_EVENT_BYTES + 1;
+const MAX_ORDINARY_AUDIT_BYTES =
+  MAX_AUDIT_BYTES - MAX_AUDIT_EVENT_BYTES - 1;
 const MAX_RECONCILIATION_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_CLOCK_SKEW_MS = 30 * 1000;
 
@@ -445,6 +445,7 @@ function workflowPaths(storeRoot, workflowId) {
     workflow: path.join(directory, "workflow.json"),
     auditLog: path.join(directory, "action-audit.jsonl"),
     auditHead: path.join(directory, "action-audit-head.json"),
+    auditTerminal: path.join(directory, "action-audit-terminal.json"),
   };
 }
 
@@ -1122,9 +1123,41 @@ async function truncateAuditLog(filePath, length) {
   }
 }
 
+function parseTerminalAudit(bytes, workflowId, sequence, previousDigest) {
+  if (
+    bytes.length === 0 ||
+    bytes.at(-1) !== 0x0a ||
+    [...bytes].filter((byte) => byte === 0x0a).length !== 1
+  ) {
+    fail("WORKFLOW_AUDIT_CORRUPT", "audit terminal event is malformed");
+  }
+  const line = bytes.toString("utf8").slice(0, -1);
+  if (Buffer.byteLength(line) > MAX_AUDIT_EVENT_BYTES) {
+    fail("WORKFLOW_AUDIT_CORRUPT", "audit terminal event is too large");
+  }
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    fail("WORKFLOW_AUDIT_CORRUPT", "audit terminal event is malformed");
+  }
+  if (canonicalJson(event) !== line) {
+    fail("WORKFLOW_AUDIT_CORRUPT", "audit terminal event is not canonical JSON");
+  }
+  validateAuditEvent(event, workflowId, sequence, previousDigest);
+  if (event.event !== "WORKFLOW_CANCELLED") {
+    fail(
+      "WORKFLOW_AUDIT_CORRUPT",
+      "audit terminal segment must contain cancellation",
+    );
+  }
+  return event;
+}
+
 async function readAudit(paths, workflowId) {
   let head;
   let openedLog;
+  let openedTerminal;
   try {
     head = await readCanonicalSecureJson(
       paths.auditHead,
@@ -1134,6 +1167,11 @@ async function readAudit(paths, workflowId) {
     openedLog = await readSecureFile(paths.auditLog, {
       requiredMode: 0o600,
       maxBytes: MAX_AUDIT_BYTES,
+    });
+    openedTerminal = await readSecureFile(paths.auditTerminal, {
+      requiredMode: 0o600,
+      maxBytes: MAX_AUDIT_EVENT_BYTES + 1,
+      allowMissing: true,
     });
   } catch (error) {
     if (error?.code === "ENOENT") {
@@ -1153,7 +1191,10 @@ async function readAudit(paths, workflowId) {
       !Number.isSafeInteger(head.next_sequence) ||
       head.next_sequence < 1 ||
       (head.last_event_sha256 !== null &&
-        !DIGEST_RE.test(head.last_event_sha256))
+        !DIGEST_RE.test(head.last_event_sha256)) ||
+      (head.terminal_event_sha256 !== undefined &&
+        head.terminal_event_sha256 !== null &&
+        !DIGEST_RE.test(head.terminal_event_sha256))
     ) {
       fail("WORKFLOW_AUDIT_CORRUPT", "audit head is malformed");
     }
@@ -1163,6 +1204,57 @@ async function readAudit(paths, workflowId) {
     const committed = openedLog.bytes.subarray(0, head.committed_bytes);
     let events = parseAuditLines(committed, workflowId);
     const committedLast = events.at(-1)?.event_sha256 ?? null;
+    const tail = openedLog.bytes.subarray(head.committed_bytes);
+    const terminalDigest = head.terminal_event_sha256 ?? null;
+    if (openedTerminal != null) {
+      if (tail.length !== 0) {
+        fail(
+          "WORKFLOW_AUDIT_CORRUPT",
+          "audit log tail conflicts with its terminal segment",
+        );
+      }
+      const terminal = parseTerminalAudit(
+        openedTerminal.bytes,
+        workflowId,
+        events.length + 1,
+        committedLast,
+      );
+      if (terminalDigest === null) {
+        if (
+          head.next_sequence !== events.length + 1 ||
+          head.last_event_sha256 !== committedLast
+        ) {
+          fail(
+            "WORKFLOW_AUDIT_CORRUPT",
+            "audit cursor cannot adopt its terminal segment",
+          );
+        }
+        const adoptedHead = {
+          version: 1,
+          workflow_id: workflowId,
+          committed_bytes: head.committed_bytes,
+          next_sequence: head.next_sequence + 1,
+          last_event_sha256: terminal.event_sha256,
+          terminal_event_sha256: terminal.event_sha256,
+        };
+        await atomicWriteCanonicalJson(paths.auditHead, adoptedHead);
+        return { head: adoptedHead, events: [...events, terminal] };
+      }
+      if (
+        terminalDigest !== terminal.event_sha256 ||
+        head.next_sequence !== events.length + 2 ||
+        head.last_event_sha256 !== terminal.event_sha256
+      ) {
+        fail(
+          "WORKFLOW_AUDIT_CORRUPT",
+          "audit cursor disagrees with its terminal segment",
+        );
+      }
+      return { head, events: [...events, terminal] };
+    }
+    if (terminalDigest !== null) {
+      fail("WORKFLOW_AUDIT_CORRUPT", "audit terminal segment is missing");
+    }
     if (
       head.next_sequence !== events.length + 1 ||
       head.last_event_sha256 !== committedLast
@@ -1172,7 +1264,6 @@ async function readAudit(paths, workflowId) {
         "audit cursor disagrees with committed events",
       );
     }
-    const tail = openedLog.bytes.subarray(head.committed_bytes);
     if (tail.length === 0) {
       return { head, events };
     }
@@ -1210,12 +1301,14 @@ async function readAudit(paths, workflowId) {
       committed_bytes: openedLog.bytes.length,
       next_sequence: head.next_sequence + 1,
       last_event_sha256: adopted.event_sha256,
+      terminal_event_sha256: null,
     };
     await atomicWriteCanonicalJson(paths.auditHead, adoptedHead);
     events = [...events, adopted];
     return { head: adoptedHead, events };
   } finally {
     await openedLog.handle.close();
+    await openedTerminal?.handle.close();
   }
 }
 
@@ -1262,15 +1355,32 @@ async function appendAuditEvent(
   if (eventBytes.length > MAX_AUDIT_EVENT_BYTES + 1) {
     fail("WORKFLOW_AUDIT_EVENT_TOO_LARGE", "audit event is too large");
   }
-  const maxAuditBytes =
-    event === "WORKFLOW_CANCELLED"
-      ? MAX_AUDIT_BYTES
-      : MAX_ORDINARY_AUDIT_BYTES;
-  if (session.head.committed_bytes + eventBytes.length > maxAuditBytes) {
+  const nextCommittedBytes =
+    session.head.committed_bytes + eventBytes.length;
+  if (
+    event !== "WORKFLOW_CANCELLED" &&
+    nextCommittedBytes > MAX_ORDINARY_AUDIT_BYTES
+  ) {
     fail(
       "WORKFLOW_AUDIT_LOG_FULL",
       "audit event would exceed the readable audit log limit",
     );
+  }
+  if (
+    event === "WORKFLOW_CANCELLED" &&
+    nextCommittedBytes > MAX_AUDIT_BYTES
+  ) {
+    await atomicWriteFile(paths.auditTerminal, eventBytes, { mode: 0o600 });
+    const head = {
+      version: 1,
+      workflow_id: workflow.workflow_id,
+      committed_bytes: session.head.committed_bytes,
+      next_sequence: session.head.next_sequence + 1,
+      last_event_sha256: auditEvent.event_sha256,
+      terminal_event_sha256: auditEvent.event_sha256,
+    };
+    await atomicWriteCanonicalJson(paths.auditHead, head);
+    return { event: auditEvent, head };
   }
   const handle = await fsp.open(
     paths.auditLog,
@@ -1291,9 +1401,10 @@ async function appendAuditEvent(
   const head = {
     version: 1,
     workflow_id: workflow.workflow_id,
-    committed_bytes: session.head.committed_bytes + eventBytes.length,
+    committed_bytes: nextCommittedBytes,
     next_sequence: session.head.next_sequence + 1,
     last_event_sha256: auditEvent.event_sha256,
+    terminal_event_sha256: null,
   };
   await atomicWriteCanonicalJson(paths.auditHead, head);
   return { event: auditEvent, head };
@@ -1777,6 +1888,7 @@ export async function startAutonomousWorkflow(
         committed_bytes: 0,
         next_sequence: 1,
         last_event_sha256: null,
+        terminal_event_sha256: null,
       });
       await writeWorkflow(paths, workflow);
       const committedRegistry = structuredClone(preparedRegistry);
