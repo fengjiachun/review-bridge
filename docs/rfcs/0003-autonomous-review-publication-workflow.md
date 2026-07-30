@@ -865,11 +865,36 @@ record with a proven workflow mutation. An absent capability, unrelated
 thread, `OBSERVED_PRE_RESOLVED` outcome, valid resolution record, or
 indeterminate reconciliation pauses without issuing the mutation.
 
+Automatic-resolution records remain immutable and append-only. The server
+derives one per-thread resolution frontier from those records and append-only
+lifecycle events. New pinned-Codex-Bot feedback appends an `INVALIDATED` event
+that binds the prior record ID, old and new watermarks, exact follow-up
+comments, and reason. A completed compensating unresolve appends
+`UNRESOLVED_FOR_REPAIR`; neither event deletes or rewrites the old record.
+
+After the follow-up finding is addressed by a descendant head with a new local
+gate and correlated remote `CLEAN`, the normal resolution sequence may create a
+new proven resolution record. The server appends a `SUPERSEDES` event only when
+the predecessor and successor have the same workflow, pull request, and thread,
+the predecessor was invalidated solely by pinned Codex feedback, the bound
+compensating unresolve completed, the successor head contains the recorded fix,
+and the successor record has its own complete mutation proof and fresh
+watermark. The event binds both record IDs and every intervening invalidation,
+unresolve, fix, gate, result, and resolution action.
+
+A human or unknown-actor invalidation, missing compensating unresolve,
+ambiguous result, mismatched thread or workflow, ancestry gap, fork, cycle, or
+second active successor can never be superseded automatically. It remains a
+blocking invalidated frontier. A valid supersession retires its predecessor
+only from the active frontier; the predecessor and its invalidation remain in
+the audit and final digest.
+
 A final gate for an autonomous workflow must bind
 `workflow_authorization_sha256`, preserve the independent publication
 `authorization_sha256`, and bind the digest of every automatic-resolution
-record plus any consumed `ready_exception_sha256`. Finalization replays those
-records against the final complete observation.
+record and lifecycle event plus any consumed `ready_exception_sha256`.
+Finalization replays every per-thread chain and its active frontier against the
+final complete observation.
 
 Human and unknown-provenance threads remain blocking and produce
 `PAUSED_HUMAN`, with their exact thread IDs and URLs presented to the operator.
@@ -906,10 +931,13 @@ The server evaluates that post-ready observation through a second pure
 to be `MERGE_READY`, then independently revalidates the exact workflow, pull
 request, head, publication ID, publication-authorization digest,
 workflow-authorization digest, and any consumed draft-gate exception. It also
-replays the complete server-owned automatic-resolution record set against the
-thread watermarks in that same complete observation. A missing, extra,
-invalidated, or mismatched record returns its fail-closed blocker even when the
-main publication status is `MERGE_READY`.
+replays the complete server-owned automatic-resolution records and lifecycle
+events against the thread watermarks in that same complete observation. An
+invalidated active frontier, missing or extra record, broken supersession
+chain, or mismatched active record returns its fail-closed blocker even when
+the main publication status is `MERGE_READY`. A valid superseded predecessor
+remains audit evidence but is not compared to the current watermark as though
+it were still active.
 
 Only when `autonomous_terminal.status` is `MERGE_READY` may the workflow record:
 
@@ -920,7 +948,7 @@ Only when `autonomous_terminal.status` is `MERGE_READY` may the workflow record:
 - current local review and publication IDs; and
 - post-ready observation revision and digest;
 - publication- and workflow-authorization digests;
-- automatic-resolution record-set digest;
+- automatic-resolution record-and-lifecycle-set digest;
 - consumed `ready_exception_sha256`, if any; and
 - remaining human-review requirements imposed by repository policy.
 
@@ -1226,8 +1254,8 @@ issued or credited.
   without exposing or crediting the ungated head;
 - a new thread comment between mark-ready and the terminal observation blocks
   `autonomous_terminal`;
-- the terminal projection replays every automatic-resolution record against
-  the same post-ready observation; and
+- the terminal projection replays every automatic-resolution record and
+  lifecycle chain against the same post-ready observation; and
 - terminal `MERGE_READY` without merge.
 
 ### Thread-resolution tests
@@ -1260,11 +1288,19 @@ issued or credited.
   invalidates the resolution record and gate;
 - later pinned-Codex-Bot feedback reopens the thread and returns to the remote
   finding path;
+- pinned-Codex-Bot feedback appends invalidation and unresolve lifecycle
+  events; a later proven resolution may supersede the exact predecessor without
+  deleting it;
+- terminal replay accepts one complete linear supersession chain whose active
+  record matches the final watermark;
+- a missing unresolve, human or unknown participation, ancestry gap, fork,
+  cycle, or multiple active successors prevents automatic supersession and
+  remains blocking;
 - compensating unresolve requires the exact workflow capability and invalidated
   resolution record;
 - unresolve failure remains blocked by `THREAD_RESOLUTION_UNSAFE`;
 - post-ready terminal projection and finalization both bind and replay the two
-  authorization domains and resolution-record digests; and
+  authorization domains and resolution-record and lifecycle digests; and
 - unresolved human thread continues to block `MERGE_READY`.
 
 ### End-to-end scenarios
