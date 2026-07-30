@@ -270,6 +270,8 @@ audit and recover one committed crash-tail event before another mutation.
 The complete marker-bound task title and prompt remain in the active action and
 compact summary, so a restarted controller reuses the persisted dispatch
 instead of replanning or reconstructing it.
+Pause and cancellation are committed to the same audit chain, so recovery
+replays a durable stop or rejects a stale active ledger before another write.
 Claim start and release use a store-wide `PREPARED -> COMMITTED` journal:
 recovery rolls a persisted workflow forward and rolls an unapplied release
 back before another owner can observe the registry.

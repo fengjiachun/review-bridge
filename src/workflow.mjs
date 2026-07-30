@@ -1217,6 +1217,8 @@ async function appendAuditEvent(paths, workflow, event, workflowState) {
       phase: workflowState.phase,
       active_action: workflowState.active_action,
       reviewer_task: workflowState.reviewer_task,
+      pause: workflowState.pause,
+      cancellation: workflowState.cancellation,
     },
   };
   const auditEvent = {
@@ -1256,14 +1258,27 @@ async function appendAuditEvent(paths, workflow, event, workflowState) {
 
 function requireWorkflowAuditBinding(workflow, audit) {
   const lastState = audit.events.at(-1)?.workflow_state ?? {
+    status: null,
+    phase: null,
     active_action: null,
     reviewer_task: null,
+    pause: null,
+    cancellation: null,
   };
+  const stopStateMustMatch =
+    ["PAUSED", "CANCELLED"].includes(workflow.status) ||
+    ["PAUSED", "CANCELLED"].includes(lastState.status);
   if (
     canonicalJson(workflow.active_action) !==
       canonicalJson(lastState.active_action) ||
     canonicalJson(workflow.reviewer_task) !==
-      canonicalJson(lastState.reviewer_task)
+      canonicalJson(lastState.reviewer_task) ||
+    (stopStateMustMatch &&
+      (workflow.status !== lastState.status ||
+        workflow.phase !== lastState.phase ||
+        canonicalJson(workflow.pause) !== canonicalJson(lastState.pause) ||
+        canonicalJson(workflow.cancellation) !==
+          canonicalJson(lastState.cancellation)))
   ) {
     fail(
       "WORKFLOW_AUDIT_CORRUPT",
@@ -1301,6 +1316,8 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "phase",
     "active_action",
     "reviewer_task",
+    "pause",
+    "cancellation",
   ]) {
     recovered[field] = structuredClone(lastEvent.workflow_state[field]);
   }
@@ -2166,8 +2183,13 @@ export async function advanceLocalWorkflow(
         "bound review snapshot does not equal the workflow head",
       );
     }
+    const save =
+      summary.status === "HUMAN_REQUIRED"
+        ? (mutate) =>
+            saveActionMutation(paths, workflow, "WORKFLOW_PAUSED", mutate)
+        : (mutate) => saveMutation(paths, workflow, mutate);
     return publicWorkflow(
-      await saveMutation(paths, workflow, async (next) => {
+      await save(async (next) => {
         next.current_review = {
           ...next.current_review,
           state_version: summary.state_version,
@@ -2250,18 +2272,23 @@ export async function pauseAutonomousWorkflow(
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
     return publicWorkflow(
-      await saveMutation(paths, workflow, async (next) => {
-        next.status = "PAUSED";
-        next.phase = "PAUSED_HUMAN";
-        next.pause = {
-          reason_code: reasonCode,
-          blocked_action: blockedAction,
-          evidence,
-          review_id: next.current_review?.review_id ?? null,
-          action_id: next.active_action?.action_id ?? null,
-          paused_at: now(),
-        };
-      }),
+      await saveActionMutation(
+        paths,
+        workflow,
+        "WORKFLOW_PAUSED",
+        async (next) => {
+          next.status = "PAUSED";
+          next.phase = "PAUSED_HUMAN";
+          next.pause = {
+            reason_code: reasonCode,
+            blocked_action: blockedAction,
+            evidence,
+            review_id: next.current_review?.review_id ?? null,
+            action_id: next.active_action?.action_id ?? null,
+            paused_at: now(),
+          };
+        },
+      ),
     );
   });
 }
@@ -2283,16 +2310,21 @@ export async function cancelAutonomousWorkflow(
       );
     }
     return publicWorkflow(
-      await saveMutation(paths, workflow, async (next) => {
-        next.status = "CANCELLED";
-        next.phase = "CANCELLED";
-        next.pause = null;
-        next.cancellation = {
-          operator_label: operatorLabel,
-          rationale,
-          cancelled_at: now(),
-        };
-      }),
+      await saveActionMutation(
+        paths,
+        workflow,
+        "WORKFLOW_CANCELLED",
+        async (next) => {
+          next.status = "CANCELLED";
+          next.phase = "CANCELLED";
+          next.pause = null;
+          next.cancellation = {
+            operator_label: operatorLabel,
+            rationale,
+            cancelled_at: now(),
+          };
+        },
+      ),
     );
   });
 }

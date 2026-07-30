@@ -650,6 +650,81 @@ test("active action tampering fails before another external transition", async (
   }
 });
 
+test("pause and cancellation cannot be rewound to a stale active action", async (t) => {
+  for (const transition of ["pause", "cancel"]) {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    const { workflow, review } = await prepareBoundWorkflow(state);
+    const planned = await planCodexTaskDispatch(
+      state.store,
+      workflow.workflow_id,
+      workflow.revision,
+      review.id,
+    );
+    const workflowRoot = path.join(
+      state.store,
+      "workflows",
+      workflow.workflow_id,
+    );
+    const workflowPath = path.join(workflowRoot, "workflow.json");
+    const staleActive = await fsp.readFile(workflowPath);
+    const stopped =
+      transition === "pause"
+        ? await pauseAutonomousWorkflow(
+            state.store,
+            workflow.workflow_id,
+            planned.workflow.revision,
+            {
+              reasonCode: "TASK_ORCHESTRATION_UNAVAILABLE",
+              blockedAction: "CREATE_CODEX_REVIEWER_TASK",
+              evidence: "The task provider is unavailable.",
+            },
+          )
+        : await cancelAutonomousWorkflow(
+            state.store,
+            workflow.workflow_id,
+            planned.workflow.revision,
+            {
+              operatorLabel: "Test Operator",
+              rationale: "Cancel before dispatch.",
+            },
+          );
+    const expectedStatus = transition === "pause" ? "PAUSED" : "CANCELLED";
+    const expectedPhase =
+      transition === "pause" ? "PAUSED_HUMAN" : "CANCELLED";
+
+    await fsp.writeFile(workflowPath, staleActive, { mode: 0o600 });
+    const recovered = await getAutonomousWorkflow(
+      state.store,
+      workflow.workflow_id,
+    );
+    assert.equal(recovered.status, expectedStatus);
+    assert.equal(recovered.phase, expectedPhase);
+    assert.deepEqual(recovered.action_audit, stopped.action_audit);
+
+    const forged = JSON.parse(staleActive);
+    forged.action_audit = structuredClone(stopped.action_audit);
+    await fsp.writeFile(workflowPath, `${canonicalJson(forged)}\n`, {
+      mode: 0o600,
+    });
+    await assert.rejects(
+      getAutonomousWorkflow(state.store, workflow.workflow_id),
+      /WORKFLOW_AUDIT_CORRUPT/,
+    );
+
+    const audit = (
+      await fsp.readFile(path.join(workflowRoot, "action-audit.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.equal(
+      audit.at(-1).event,
+      transition === "pause" ? "WORKFLOW_PAUSED" : "WORKFLOW_CANCELLED",
+    );
+  }
+});
+
 test("action audit recovery replays one committed event and truncates a partial tail", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
