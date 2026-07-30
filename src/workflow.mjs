@@ -378,7 +378,14 @@ function runGit(repositoryPath, args, { allowExitCodes = [0] } = {}) {
 
 async function repositoryIdentity(repositoryPath) {
   assertString(repositoryPath, "repository_path", { max: 4096 });
-  const canonicalPath = await fsp.realpath(path.resolve(repositoryPath));
+  const inputPath = await fsp.realpath(path.resolve(repositoryPath));
+  const worktreeRoot = runGit(inputPath, [
+    "rev-parse",
+    "--show-toplevel",
+  ]).stdout;
+  const canonicalPath = await fsp.realpath(
+    path.resolve(inputPath, worktreeRoot),
+  );
   const commonDir = runGit(canonicalPath, [
     "rev-parse",
     "--git-common-dir",
@@ -2386,6 +2393,25 @@ export async function advanceLocalWorkflow(
         "WORKFLOW_REVIEW_HEAD_MISMATCH",
         "bound review snapshot does not equal the workflow head",
       );
+    }
+    if (summary.status === "AUTHOR_RESPONDED") {
+      const repository = await repositoryIdentity(workflow.repository.path);
+      if (
+        repository.path !== workflow.repository.path ||
+        repository.git_common_dir !== workflow.repository.git_common_dir
+      ) {
+        fail("WORKFLOW_REPOSITORY_DRIFT", "repository identity changed");
+      }
+      requireCleanRepository(repository.path);
+      if (currentBranch(repository.path) !== workflow.topic_branch) {
+        fail("WORKFLOW_BRANCH_MISMATCH", "topic branch is not checked out");
+      }
+      if (currentHead(repository.path) !== workflow.current_head_sha) {
+        fail(
+          "WORKFLOW_HEAD_MISMATCH",
+          "HEAD does not equal the recorded workflow head",
+        );
+      }
     }
     const save =
       summary.status === "HUMAN_REQUIRED"

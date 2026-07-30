@@ -236,6 +236,45 @@ test("workflow start binds immutable authorization and exclusive claims", async 
   );
 });
 
+test("workflow repository paths normalize to the worktree root", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const subdirectory = path.join(state.repository, "nested");
+  await fsp.mkdir(subdirectory);
+  const repositoryRoot = await fsp.realpath(state.repository);
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(subdirectory, state.baseSha),
+  );
+  assert.equal(workflow.repository.path, repositoryRoot);
+  assert.equal(
+    workflow.authorization.scope.repository.path,
+    repositoryRoot,
+  );
+
+  const headSha = await commitImplementation(state.repository);
+  const recorded = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    headSha,
+  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: subdirectory,
+    baseRef: state.baseSha,
+    requirement: workflow.requirement,
+    implementationScope: workflow.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  const bound = await bindWorkflowReview(
+    state.store,
+    workflow.workflow_id,
+    recorded.revision,
+    review.id,
+  );
+  assert.equal(bound.current_review.review_id, review.id);
+});
+
 test("concurrent starts admit exactly one owner", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -1474,6 +1513,88 @@ test("a resolved round-two review reaches the local gate on the fixed head", asy
   assert.equal(gated.phase, "LOCAL_GATE_PASSED");
   assert.equal(gated.current_head_sha, fixedHead);
   assert.equal(gated.current_review.status, "LOCAL_GATE_PASSED");
+});
+
+test("author responses retain the findings phase after unrecorded head drift", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const { completed } = await dispatchReviewer(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [
+      {
+        severity: "major",
+        title: "Fix the committed value",
+        explanation: "The committed value needs a second revision.",
+      },
+    ],
+    "CODEX_TASK",
+  );
+  const findings = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    completed.revision,
+  );
+  const fixedHead = await commitImplementation(
+    state.repository,
+    "export const value = 3;\n",
+  );
+  const fixed = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    findings.revision,
+    fixedHead,
+  );
+  await submitResolutions(state.store, review.id, [
+    {
+      finding_id: "F-001",
+      disposition: "fixed",
+      rationale: "Committed the requested value.",
+      evidence: "The recorded descendant head contains the fix.",
+    },
+  ]);
+  const unrecordedHead = await commitImplementation(
+    state.repository,
+    "export const value = 4;\n",
+  );
+
+  await assert.rejects(
+    advanceLocalWorkflow(
+      state.store,
+      workflow.workflow_id,
+      fixed.revision,
+    ),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_HEAD_MISMATCH");
+      return true;
+    },
+  );
+  const unchanged = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(unchanged.phase, "ADDRESS_LOCAL_FINDINGS");
+  assert.equal(unchanged.revision, fixed.revision);
+
+  const recovered = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    unchanged.revision,
+    unrecordedHead,
+  );
+  const responded = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    recovered.revision,
+  );
+  assert.equal(responded.phase, "PREPARE_REREVIEW");
 });
 
 test("round-two unresolved findings pause without creating a third round", async (t) => {
