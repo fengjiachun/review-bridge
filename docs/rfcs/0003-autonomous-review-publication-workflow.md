@@ -443,12 +443,18 @@ recorded its result. Therefore recovery always reconciles first:
   request ID, immediate binding, unbound-request detection, and ambiguity
   rules. The workflow ledger references that action rather than weakening it.
 - **Thread resolution or compensating unresolve**: query the exact thread ID.
-  If it already has the intended state, record the observed state as
-  completion. Repeat a resolve only while the original eligibility proof
-  remains valid for the current head. Repeat an unresolve only while the server
-  still reports that this workflow's resolution record is invalid, the
-  `UNRESOLVE_INVALIDATED_CODEX_THREADS` capability is present, and no different
-  workflow or thread is targeted.
+  If a resolution action finds the thread already resolved, complete it with
+  outcome `OBSERVED_PRE_RESOLVED`; do not create a workflow-owned
+  automatic-resolution record. A resolution creates that record only when an
+  immediately preceding read proved the thread unresolved, a durably recorded
+  provider response attests that this action performed the transition, and the
+  post-read proves the same watermark is now resolved. A crash after provider
+  acceptance but before that response is recorded cannot claim ownership from
+  the resolved state alone. Repeat a resolve only while the original
+  eligibility proof remains valid for the current head. Repeat an unresolve
+  only while the server still reports that this workflow's proven resolution
+  record is invalid, the `UNRESOLVE_INVALIDATED_CODEX_THREADS` capability is
+  present, and no different workflow or thread is targeted.
 - **Mark ready for review**: read the pull request's current draft state before
   issuing the mutation.
 - **Return to draft for repair**: read the exact pull request and head. Treat an
@@ -792,11 +798,15 @@ For each eligible thread, the controller:
    complete nested comment pagination;
 4. asks the server to revalidate the head, provenance, eligibility, and exact
    watermark at the action's expected revision;
-5. resolves the exact GitHub thread ID;
+5. resolves the exact GitHub thread ID and durably records a provider response
+   whose pinned semantics attest an unresolved-to-resolved transition by this
+   action;
 6. immediately re-reads the exact thread, requiring the same comment watermark
    and an observed resolved state;
-7. collects and records a new complete GitHub publication snapshot; and
-8. requires the publication server to revalidate the automatic-resolution
+7. creates the server-owned automatic-resolution record only from the
+   unresolved pre-read, transition-attesting response, and resolved post-read;
+8. collects and records a new complete GitHub publication snapshot; and
+9. requires the publication server to revalidate the automatic-resolution
    record and watermark before any pre-ready or final gate can pass.
 
 The server does not call GitHub. The workflow audit stores stable IDs, head,
@@ -804,6 +814,16 @@ source review and result references, local gate reference, evidence digest,
 pre- and post-mutation watermarks, action timestamps, and the mutation result.
 It need not store GitHub comment bodies already represented by digests and URLs
 in the publication ledger.
+
+An already-resolved observation never proves who performed the mutation. If
+the thread becomes resolved before the provider call, or recovery observes it
+resolved without a durably recorded transition-attesting response, the action
+records `OBSERVED_PRE_RESOLVED` and no automatic-resolution record. The
+resolved thread is no longer a publication blocker, but this workflow can
+never perform a compensating unresolve on it. A provider whose response cannot
+distinguish an applied transition from an idempotent read of an
+already-resolved thread is not eligible for automatic resolution in the first
+implementation.
 
 The publication gate still requires `unresolved_count == 0` from the fresh
 post-resolution observation. A successful mutation response by itself is not
@@ -822,7 +842,8 @@ the autonomous pre-ready projection and publication gate.
 Every compensating unresolve uses its own durable action intent and the
 `UNRESOLVE_INVALIDATED_CODEX_THREADS` capability. The server permits it only
 for the same workflow, pull request, thread ID, and invalidated resolution
-record. An absent capability, unrelated thread, valid resolution record, or
+record with a proven workflow mutation. An absent capability, unrelated
+thread, `OBSERVED_PRE_RESOLVED` outcome, valid resolution record, or
 indeterminate reconciliation pauses without issuing the mutation.
 
 A final gate for an autonomous workflow must bind
@@ -1194,9 +1215,14 @@ blindly repeat an indeterminate write.
 - thread from another review, head, pull request, or workflow is rejected;
 - current-head findings are not resolved;
 - ambiguity-acknowledged result is insufficient;
-- already-resolved thread reconciles without a second mutation;
+- already-resolved thread reconciles as `OBSERVED_PRE_RESOLVED`, creates no
+  automatic-resolution record, and can never authorize compensating unresolve;
 - head changes after eligibility and before mutation;
 - mutation succeeds but completion recording fails;
+- a crash after provider acceptance but before its transition-attesting
+  response is recorded cannot claim the observed resolution;
+- a human resolution after the last unresolved read is not claimed when the
+  provider response does not attest that this action applied the transition;
 - a comment arriving between eligibility and the pre-mutation read blocks the
   mutation;
 - a comment arriving between the pre-mutation read and mutation triggers
