@@ -1346,14 +1346,35 @@ test("cancellation retains claims until exact reconciled release", async (t) => 
     released.claims.every((claim) => claim.disposition === "RELEASED"),
     true,
   );
-  const claims = JSON.parse(
-    await fsp.readFile(
-      path.join(state.store, "workflow-claims.json"),
-      "utf8",
-    ),
-  );
+  const registryPath = path.join(state.store, "workflow-claims.json");
+  const registryBeforeRepeat = await fsp.readFile(registryPath, "utf8");
+  const claims = JSON.parse(registryBeforeRepeat);
   assert.equal(
     claims.claims.every((claim) => claim.disposition === "RELEASED"),
+    true,
+  );
+
+  await assert.rejects(
+    releaseWorkflowClaims(
+      state.store,
+      workflow.workflow_id,
+      released.revision,
+      {
+        operatorLabel: "Test Operator",
+        rationale: "Repeat release must not write an empty transaction.",
+        reconciledClaims: [],
+      },
+    ),
+    /WORKFLOW_CLAIMS_ALREADY_RELEASED/,
+  );
+  assert.equal(await fsp.readFile(registryPath, "utf8"), registryBeforeRepeat);
+  const intact = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(intact.revision, released.revision);
+  assert.equal(
+    intact.claims.every((claim) => claim.disposition === "RELEASED"),
     true,
   );
 });

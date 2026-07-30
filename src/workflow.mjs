@@ -2468,6 +2468,12 @@ export async function releaseWorkflowClaims(
     const activeClaims = workflow.claims.filter(
       (entry) => entry.disposition === "ACTIVE",
     );
+    if (activeClaims.length === 0) {
+      fail(
+        "WORKFLOW_CLAIMS_ALREADY_RELEASED",
+        "workflow has no active claims to release",
+      );
+    }
     const evidenceByDigest = new Map(
       reconciledClaims.map((entry) => [
         `${entry.kind}:${entry.canonical_key_sha256}`,
