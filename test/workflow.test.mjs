@@ -31,7 +31,11 @@ import {
   resumeAutonomousWorkflow,
   startAutonomousWorkflow,
 } from "../src/workflow.mjs";
-import { canonicalJson, sha256 } from "../src/storage.mjs";
+import {
+  canonicalJson,
+  sha256,
+  withStateLock,
+} from "../src/storage.mjs";
 
 function git(cwd, ...args) {
   const result = spawnSync("git", args, {
@@ -1354,18 +1358,27 @@ test("cancellation retains claims until exact reconciled release", async (t) => 
     true,
   );
 
-  await assert.rejects(
-    releaseWorkflowClaims(
-      state.store,
-      workflow.workflow_id,
-      released.revision,
-      {
-        operatorLabel: "Test Operator",
-        rationale: "Repeat release must not write an empty transaction.",
-        reconciledClaims: [],
-      },
-    ),
-    /WORKFLOW_CLAIMS_ALREADY_RELEASED/,
+  await withStateLock(
+    {
+      directory: state.store,
+      reviewId: "workflow-claims",
+      domain: "claims",
+    },
+    async () => {
+      await assert.rejects(
+        releaseWorkflowClaims(
+          state.store,
+          workflow.workflow_id,
+          released.revision,
+          {
+            operatorLabel: "Test Operator",
+            rationale: "Repeat release must not write an empty transaction.",
+            reconciledClaims: [],
+          },
+        ),
+        /WORKFLOW_CLAIMS_ALREADY_RELEASED/,
+      );
+    },
   );
   assert.equal(await fsp.readFile(registryPath, "utf8"), registryBeforeRepeat);
   const intact = await getAutonomousWorkflow(

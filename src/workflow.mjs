@@ -1015,32 +1015,36 @@ function validateClaimEntry(entry, name, { requireTarget = false } = {}) {
   }
 }
 
+function requireWorkflowClaimsInRegistry(workflow, registry) {
+  for (const expected of workflow.claims) {
+    validateClaimEntry(expected, "workflow claim", { requireTarget: true });
+    const matching = registry.claims.filter(
+      (entry) =>
+        entry.workflow_id === workflow.workflow_id &&
+        entry.kind === expected.kind &&
+        entry.canonical_key_sha256 === expected.canonical_key_sha256,
+    );
+    if (
+      matching.length !== 1 ||
+      matching[0].disposition !== expected.disposition ||
+      (["ACTIVE", "PAUSED"].includes(workflow.status) &&
+        expected.disposition !== "ACTIVE")
+    ) {
+      fail(
+        "WORKFLOW_OWNERSHIP_LOST",
+        `workflow does not own claim ${expected.kind} in the recorded disposition`,
+        {
+          claim_kind: expected.kind,
+          canonical_key_sha256: expected.canonical_key_sha256,
+        },
+      );
+    }
+  }
+}
+
 async function requireWorkflowClaims(storeRoot, workflow) {
   await withClaimsLock(storeRoot, async (registry) => {
-    for (const expected of workflow.claims) {
-      validateClaimEntry(expected, "workflow claim", { requireTarget: true });
-      const matching = registry.claims.filter(
-        (entry) =>
-          entry.workflow_id === workflow.workflow_id &&
-          entry.kind === expected.kind &&
-          entry.canonical_key_sha256 === expected.canonical_key_sha256,
-      );
-      if (
-        matching.length !== 1 ||
-        matching[0].disposition !== expected.disposition ||
-        (["ACTIVE", "PAUSED"].includes(workflow.status) &&
-          expected.disposition !== "ACTIVE")
-      ) {
-        fail(
-          "WORKFLOW_OWNERSHIP_LOST",
-          `workflow does not own claim ${expected.kind} in the recorded disposition`,
-          {
-            claim_kind: expected.kind,
-            canonical_key_sha256: expected.canonical_key_sha256,
-          },
-        );
-      }
-    }
+    requireWorkflowClaimsInRegistry(workflow, registry);
   });
 }
 
@@ -1365,7 +1369,7 @@ async function loadWorkflowWhileLocked(paths) {
   return reconcileWorkflowAudit(paths, await readWorkflowRaw(paths));
 }
 
-async function withWorkflowLock(storeRoot, workflowId, operation) {
+async function withWorkflowStateLock(storeRoot, workflowId, operation) {
   const paths = workflowPaths(storeRoot, workflowId);
   await fsp.stat(paths.directory);
   return withStateLock(
@@ -1376,6 +1380,16 @@ async function withWorkflowLock(storeRoot, workflowId, operation) {
     },
     async () => {
       const workflow = await loadWorkflowWhileLocked(paths);
+      return operation(workflow, paths);
+    },
+  );
+}
+
+async function withWorkflowLock(storeRoot, workflowId, operation) {
+  return withWorkflowStateLock(
+    storeRoot,
+    workflowId,
+    async (workflow, paths) => {
       await requireWorkflowClaims(storeRoot, workflow);
       return operation(workflow, paths);
     },
@@ -2457,7 +2471,7 @@ export async function releaseWorkflowClaims(
   if (!Array.isArray(reconciledClaims)) {
     throw new TypeError("reconciled_claims must be an array");
   }
-  return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
+  return withWorkflowStateLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
     if (workflow.status !== "CANCELLED") {
       fail(
@@ -2519,6 +2533,7 @@ export async function releaseWorkflowClaims(
     return withClaimsLock(
       storeRoot,
       async (registry) => {
+        requireWorkflowClaimsInRegistry(workflow, registry);
         const releaseAt = now();
         const transaction = {
           transaction_id: `rbwfct-${crypto.randomBytes(16).toString("hex")}`,
