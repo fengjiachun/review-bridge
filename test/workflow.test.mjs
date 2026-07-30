@@ -851,6 +851,121 @@ test("action audit recovery replays one committed event and truncates a partial 
   assert.equal((await fsp.stat(auditPath)).size, committedSize);
 });
 
+test("action audit rejects an append beyond its readable limit", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const workflowRoot = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+  );
+  const workflowPath = path.join(workflowRoot, "workflow.json");
+  const auditPath = path.join(workflowRoot, "action-audit.jsonl");
+  const auditHeadPath = path.join(workflowRoot, "action-audit-head.json");
+  const maxAuditBytes = 4 * 1024 * 1024;
+  const maxEventBytes = 256 * 1024 + 1;
+  const workflowState = {
+    revision: workflow.revision,
+    updated_at: workflow.updated_at,
+    status: workflow.status,
+    phase: workflow.phase,
+    active_action: workflow.active_action,
+    reviewer_task: workflow.reviewer_task,
+    current_review: workflow.current_review,
+    progress_fingerprint: workflow.progress_fingerprint,
+    pause: workflow.pause,
+    cancellation: workflow.cancellation,
+  };
+  const lines = [];
+  let previousDigest = null;
+  let sequence = 1;
+  let committedBytes = 0;
+  const auditLine = (paddingLength) => {
+    const unsigned = {
+      version: 1,
+      workflow_id: workflow.workflow_id,
+      sequence,
+      previous_event_sha256: previousDigest,
+      event_id: sequence.toString(16).padStart(32, "0"),
+      at: new Date().toISOString(),
+      event: "WORKFLOW_AUDIT_PADDING",
+      metadata: { padding: "x".repeat(paddingLength) },
+      workflow_revision: workflow.revision,
+      action_id: null,
+      workflow_state: workflowState,
+    };
+    const event = {
+      ...unsigned,
+      event_sha256: sha256(canonicalJson(unsigned)),
+    };
+    return {
+      bytes: Buffer.from(`${canonicalJson(event)}\n`),
+      digest: event.event_sha256,
+    };
+  };
+  while (committedBytes < maxAuditBytes - 1) {
+    const remaining = maxAuditBytes - 1 - committedBytes;
+    const empty = auditLine(0);
+    const paddingLength =
+      remaining <= empty.bytes.length + 200_000
+        ? remaining - empty.bytes.length
+        : 200_000;
+    assert.ok(paddingLength >= 0);
+    const line = auditLine(paddingLength);
+    assert.ok(line.bytes.length <= maxEventBytes);
+    lines.push(line.bytes);
+    committedBytes += line.bytes.length;
+    previousDigest = line.digest;
+    sequence += 1;
+  }
+  assert.equal(committedBytes, maxAuditBytes - 1);
+  await fsp.writeFile(auditPath, Buffer.concat(lines), { mode: 0o600 });
+  await fsp.writeFile(
+    auditHeadPath,
+    `${canonicalJson({
+      version: 1,
+      workflow_id: workflow.workflow_id,
+      committed_bytes: committedBytes,
+      next_sequence: sequence,
+      last_event_sha256: previousDigest,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  const storedWorkflow = structuredClone(workflow);
+  storedWorkflow.action_audit = {
+    next_sequence: sequence,
+    last_event_sha256: previousDigest,
+  };
+  await fsp.writeFile(
+    workflowPath,
+    `${canonicalJson(storedWorkflow)}\n`,
+    { mode: 0o600 },
+  );
+
+  await assert.rejects(
+    pauseAutonomousWorkflow(
+      state.store,
+      workflow.workflow_id,
+      workflow.revision,
+      {
+        reasonCode: "TASK_ORCHESTRATION_UNAVAILABLE",
+        blockedAction: "CREATE_CODEX_REVIEWER_TASK",
+        evidence: "The action audit is at its readable byte limit.",
+      },
+    ),
+    /WORKFLOW_AUDIT_LOG_FULL/,
+  );
+  assert.equal((await fsp.stat(auditPath)).size, committedBytes);
+  assert.equal(
+    (await getAutonomousWorkflow(state.store, workflow.workflow_id)).revision,
+    workflow.revision,
+  );
+});
+
 test("missing task orchestration pauses with its active intent intact", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

@@ -1260,6 +1260,12 @@ async function appendAuditEvent(
   if (eventBytes.length > MAX_AUDIT_EVENT_BYTES + 1) {
     fail("WORKFLOW_AUDIT_EVENT_TOO_LARGE", "audit event is too large");
   }
+  if (session.head.committed_bytes + eventBytes.length > MAX_AUDIT_BYTES) {
+    fail(
+      "WORKFLOW_AUDIT_LOG_FULL",
+      "audit event would exceed the readable audit log limit",
+    );
+  }
   const handle = await fsp.open(
     paths.auditLog,
     fsConstants.O_WRONLY |
