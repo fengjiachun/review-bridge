@@ -939,6 +939,13 @@ test("an author human-required resolution pauses without preparing round two", a
     },
   ]);
 
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const beforePause = await fsp.readFile(workflowPath);
   const paused = await advanceLocalWorkflow(
     state.store,
     workflow.workflow_id,
@@ -951,6 +958,15 @@ test("an author human-required resolution pauses without preparing round two", a
   const reviewState = await getReviewSummary(state.store, review.id);
   assert.equal(reviewState.status, "HUMAN_REQUIRED");
   assert.equal(reviewState.current_round, 1);
+
+  await fsp.writeFile(workflowPath, beforePause, { mode: 0o600 });
+  const recovered = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.deepEqual(recovered.current_review, paused.current_review);
+  assert.equal(recovered.progress_fingerprint, paused.progress_fingerprint);
+  assert.deepEqual(recovered.pause, paused.pause);
 });
 
 test("a resolved round-two review reaches the local gate on the fixed head", async (t) => {
@@ -1117,9 +1133,22 @@ test("round-two unresolved findings pause without creating a third round", async
         rationale: "The public contract remains unspecified.",
       },
     ],
-    [],
+    [
+      {
+        severity: "minor",
+        title: "New round-two risk",
+        explanation: "The rereview found an additional unresolved risk.",
+      },
+    ],
     "CODEX_TASK",
   );
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const beforePause = await fsp.readFile(workflowPath);
   const paused = await advanceLocalWorkflow(
     state.store,
     workflow.workflow_id,
@@ -1129,6 +1158,15 @@ test("round-two unresolved findings pause without creating a third round", async
   assert.equal(paused.phase, "PAUSED_HUMAN");
   assert.equal(paused.pause.reason_code, "LOCAL_REVIEW_HUMAN_REQUIRED");
   assert.equal(paused.pause.review_id, review.id);
+
+  await fsp.writeFile(workflowPath, beforePause, { mode: 0o600 });
+  const recovered = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.deepEqual(recovered.current_review, paused.current_review);
+  assert.equal(recovered.progress_fingerprint, paused.progress_fingerprint);
+  assert.deepEqual(recovered.pause, paused.pause);
   assert.equal(
     (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
       .next_action,

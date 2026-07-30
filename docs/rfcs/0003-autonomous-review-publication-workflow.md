@@ -988,8 +988,9 @@ prevents further automatic writes but does not delete commits, branches, pull
 requests, reviews, or audit evidence. Cleanup is a separate explicit action.
 Pause and cancellation transitions are committed to the workflow action audit.
 Recovery replays one committed stop or rejects a ledger whose active status,
-phase, pause evidence, or cancellation evidence disagrees with the audit
-before another external mutation.
+phase, bound review summary, finding fingerprint, pause evidence, or
+cancellation evidence disagrees with the audit before another external
+mutation.
 
 A paused workflow resumes only after the operator supplies the exact missing
 decision or external state changes and the controller freshly verifies it.

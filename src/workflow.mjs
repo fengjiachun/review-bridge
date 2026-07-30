@@ -1217,6 +1217,8 @@ async function appendAuditEvent(paths, workflow, event, workflowState) {
       phase: workflowState.phase,
       active_action: workflowState.active_action,
       reviewer_task: workflowState.reviewer_task,
+      current_review: workflowState.current_review,
+      progress_fingerprint: workflowState.progress_fingerprint,
       pause: workflowState.pause,
       cancellation: workflowState.cancellation,
     },
@@ -1276,6 +1278,9 @@ function requireWorkflowAuditBinding(workflow, audit) {
     (stopStateMustMatch &&
       (workflow.status !== lastState.status ||
         workflow.phase !== lastState.phase ||
+        canonicalJson(workflow.current_review) !==
+          canonicalJson(lastState.current_review) ||
+        workflow.progress_fingerprint !== lastState.progress_fingerprint ||
         canonicalJson(workflow.pause) !== canonicalJson(lastState.pause) ||
         canonicalJson(workflow.cancellation) !==
           canonicalJson(lastState.cancellation)))
@@ -1316,6 +1321,8 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "phase",
     "active_action",
     "reviewer_task",
+    "current_review",
+    "progress_fingerprint",
     "pause",
     "cancellation",
   ]) {
