@@ -163,7 +163,8 @@ The author must record direct operator authorization containing:
   - post workflow-generated GitHub Codex review requests;
   - mark the pull request ready after all other gates pass;
   - return a workflow-owned ready pull request to draft before repairing an
-    actionable current-head machine finding or required-check failure;
+    actionable current-head machine finding, required-check failure, or
+    required base update;
   - resolve eligible workflow-owned Codex threads; and
   - unresolve only a thread that this workflow previously resolved when the
     server has invalidated that resolution record.
@@ -472,7 +473,7 @@ recorded its result. Therefore recovery always reconciles first:
   already-draft pull request as reconciled completion. Repeat the mutation only
   while the same workflow-owned pull request remains ready on the same head,
   the current complete observation still contains the actionable machine
-  finding or required-check failure, and
+  finding, required-check failure, or `PR_UPDATE_REQUIRED` blocker, and
   `RETURN_PR_TO_DRAFT_FOR_REPAIR` is authorized.
 
 When absence cannot be proved or multiple external objects match, the workflow
@@ -515,6 +516,10 @@ IMPLEMENTING
                          │                           -> ADDRESS_CHECK_FAILURE
                          │                           -> COMMIT_HEAD
                          │                           -> PREPARE_LOCAL_REVIEW
+                         ├─ update required -> ENSURE_DRAFT_FOR_REPAIR
+                         │                     -> UPDATE_FROM_BASE
+                         │                     -> COMMIT_HEAD
+                         │                     -> PREPARE_LOCAL_REVIEW
                          ├─ eligible old Codex threads
                          │    + current remote CLEAN
                          │    -> RESOLVE_VERIFIED_CODEX_THREADS
@@ -722,8 +727,11 @@ If the target base advances while remaining compatible with the publication
 ledger's existing ancestry rules, the existing publication decision applies.
 
 If GitHub requires the topic branch to be updated, the update creates a new
-head and must return to local review. A non-destructive merge of the fresh base
-may be performed only when it applies cleanly. A semantic conflict, required
+head and must return to local review. When the pull request is already ready,
+the controller must first complete `ENSURE_DRAFT_FOR_REPAIR` for the exact
+current head; it must not merge the base or create the replacement commit while
+the pull request remains ready. A non-destructive merge of the fresh base may
+be performed only when it applies cleanly. A semantic conflict, required
 history rewrite, rebase, or force push pauses for operator direction.
 
 Restoring an earlier head or base does not revive an invalidated publication
@@ -869,16 +877,16 @@ Human and unknown-provenance threads remain blocking and produce
 ## Ready-for-review and terminal state
 
 The pull request remains draft while fixes are in progress. If a post-ready
-observation reports an actionable current-head Codex finding or required-check
-failure, the server first returns `ENSURE_DRAFT_FOR_REPAIR`. The controller
-must persist and reconcile a `RETURN_PR_TO_DRAFT_FOR_REPAIR` action for the
-exact workflow-owned pull request and head before it edits files or creates a
-replacement commit. An already-draft observation completes that action
-without another mutation. An unauthorized, failed, or indeterminate draft
-transition pauses the workflow and leaves the current head unchanged; it must
-not proceed with a repair while the pull request is publicly ready. Human
-formal review feedback still pauses rather than entering this automatic repair
-path.
+observation reports an actionable current-head Codex finding, required-check
+failure, or `PR_UPDATE_REQUIRED`, the server first returns
+`ENSURE_DRAFT_FOR_REPAIR`. The controller must persist and reconcile a
+`RETURN_PR_TO_DRAFT_FOR_REPAIR` action for the exact workflow-owned pull
+request and head before it edits files, merges the base, or creates a
+replacement commit. An already-draft observation completes that action without
+another mutation. An unauthorized, failed, or indeterminate draft transition
+pauses the workflow and leaves the current head unchanged; it must not proceed
+with a repair while the pull request is publicly ready. Human formal review
+feedback still pauses rather than entering this automatic repair path.
 
 After:
 
@@ -1207,7 +1215,9 @@ issued or credited.
   provider failure, or indeterminate reconciliation pauses before any edit or
   replacement commit;
 - base advancement that remains valid;
-- update-required head returning through local review;
+- update-required head returning through draft restoration and local review;
+- an update-required ready pull request cannot merge the base or create a
+  replacement head until return-to-draft reconciliation completes;
 - semantic conflict pausing;
 - ambiguous or unbound Codex result pausing for exact acknowledgement;
 - force-push or unexpected head invalidation;
