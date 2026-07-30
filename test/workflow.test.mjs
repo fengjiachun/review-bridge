@@ -492,18 +492,30 @@ test("Codex task dispatch is marker-bound and cannot skip action states", async 
   assert.match(planned.dispatch.marker, /^rbwf-dispatch-[0-9a-f]{32}$/);
   assert.match(planned.dispatch.title, new RegExp(planned.dispatch.marker));
   assert.match(planned.dispatch.prompt, new RegExp(planned.dispatch.marker));
+  const reloaded = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  const reloadedSummary = await getAutonomousWorkflowSummary(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.deepEqual(reloaded.active_action.dispatch, planned.dispatch);
+  assert.deepEqual(reloadedSummary.active_action.dispatch, planned.dispatch);
+  const recoveredActionId = reloaded.active_action.action_id;
+  const recoveredDispatch = reloaded.active_action.dispatch;
 
   await assert.rejects(
     recordCodexTaskObservation(
       state.store,
       workflow.workflow_id,
       planned.workflow.revision,
-      planned.action.action_id,
+      recoveredActionId,
       {
         matchingTaskIds: ["task-123"],
         taskId: "task-123",
-        title: planned.dispatch.title,
-        prompt: planned.dispatch.prompt,
+        title: recoveredDispatch.title,
+        prompt: recoveredDispatch.prompt,
       },
     ),
     /action must be EXECUTING/,
@@ -513,19 +525,19 @@ test("Codex task dispatch is marker-bound and cannot skip action states", async 
     state.store,
     workflow.workflow_id,
     planned.workflow.revision,
-    planned.action.action_id,
+    recoveredActionId,
   );
   await assert.rejects(
     recordCodexTaskObservation(
       state.store,
       workflow.workflow_id,
       executing.revision,
-      planned.action.action_id,
+      recoveredActionId,
       {
         matchingTaskIds: ["task-123", "task-456"],
         taskId: "task-123",
-        title: planned.dispatch.title,
-        prompt: planned.dispatch.prompt,
+        title: recoveredDispatch.title,
+        prompt: recoveredDispatch.prompt,
       },
     ),
     /exactly one matching task/,
@@ -535,12 +547,12 @@ test("Codex task dispatch is marker-bound and cannot skip action states", async 
     state.store,
     workflow.workflow_id,
     executing.revision,
-    planned.action.action_id,
+    recoveredActionId,
     {
       matchingTaskIds: ["task-123"],
       taskId: "task-123",
-      title: planned.dispatch.title,
-      prompt: planned.dispatch.prompt,
+      title: recoveredDispatch.title,
+      prompt: recoveredDispatch.prompt,
     },
   );
   assert.equal(observed.active_action.status, "OBSERVED");
@@ -548,7 +560,7 @@ test("Codex task dispatch is marker-bound and cannot skip action states", async 
     state.store,
     workflow.workflow_id,
     observed.revision,
-    planned.action.action_id,
+    recoveredActionId,
   );
   assert.equal(completed.active_action, null);
   assert.equal(completed.phase, "WAIT_LOCAL_REVIEW");
@@ -579,6 +591,63 @@ test("Codex task dispatch is marker-bound and cannot skip action states", async 
   );
   assert.equal(audit[0].previous_event_sha256, null);
   assert.match(audit.at(-1).event_sha256, /^[0-9a-f]{64}$/);
+});
+
+test("active action tampering fails before another external transition", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  await planCodexTaskDispatch(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const mutations = [
+    (action) => {
+      action.correlation_marker = `rbwf-dispatch-${"0".repeat(32)}`;
+    },
+    (action) => {
+      action.target.review_id = "rb-tampered-review";
+    },
+    (action) => {
+      action.authorization_sha256 = "0".repeat(64);
+    },
+    (action) => {
+      action.ownership_claim.canonical_key_sha256 = "0".repeat(64);
+    },
+    (action) => {
+      action.status = "EXECUTING";
+      action.executing_at = new Date().toISOString();
+    },
+    (action) => {
+      action.dispatch.title = "Tampered task title";
+    },
+    (action) => {
+      action.planned_at = new Date(
+        Date.parse(action.planned_at) + 1_000,
+      ).toISOString();
+    },
+  ];
+
+  for (const mutate of mutations) {
+    const tampered = structuredClone(stored);
+    mutate(tampered.active_action);
+    await fsp.writeFile(workflowPath, `${canonicalJson(tampered)}\n`, {
+      mode: 0o600,
+    });
+    await assert.rejects(
+      getAutonomousWorkflow(state.store, workflow.workflow_id),
+      /WORKFLOW_ACTION_INVALID|WORKFLOW_AUDIT_CORRUPT/,
+    );
+  }
 });
 
 test("action audit recovery replays one committed event and truncates a partial tail", async (t) => {
@@ -807,6 +876,95 @@ test("an author human-required resolution pauses without preparing round two", a
   const reviewState = await getReviewSummary(state.store, review.id);
   assert.equal(reviewState.status, "HUMAN_REQUIRED");
   assert.equal(reviewState.current_round, 1);
+});
+
+test("a resolved round-two review reaches the local gate on the fixed head", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const { completed } = await dispatchReviewer(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [
+      {
+        severity: "major",
+        title: "Fix the committed value",
+        explanation: "The committed value needs a second revision.",
+      },
+    ],
+    "CODEX_TASK",
+  );
+  const findings = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    completed.revision,
+  );
+  const fixedHead = await commitImplementation(
+    state.repository,
+    "export const value = 3;\n",
+  );
+  const fixed = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    findings.revision,
+    fixedHead,
+  );
+  await submitResolutions(state.store, review.id, [
+    {
+      finding_id: "F-001",
+      disposition: "fixed",
+      rationale: "Committed the requested value.",
+      evidence: "The descendant head contains the fix.",
+    },
+  ]);
+  const responded = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    fixed.revision,
+  );
+  await prepareRereview(state.store, review.id);
+  const waiting = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    responded.revision,
+  );
+  await submitRereview(
+    state.store,
+    review.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "resolved",
+        rationale: "The committed descendant fixes the finding.",
+      },
+    ],
+    [],
+    "CODEX_TASK",
+  );
+  const clean = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(clean.phase, "FINALIZE_LOCAL_GATE");
+  assert.equal(clean.current_review.status, "CLEAN");
+  assert.equal(clean.current_review.head_sha, fixedHead);
+
+  await finalizeLocalGate(state.store, review.id);
+  const gated = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    clean.revision,
+  );
+  assert.equal(gated.phase, "LOCAL_GATE_PASSED");
+  assert.equal(gated.current_head_sha, fixedHead);
+  assert.equal(gated.current_review.status, "LOCAL_GATE_PASSED");
 });
 
 test("round-two unresolved findings pause without creating a third round", async (t) => {

@@ -114,6 +114,240 @@ function assertCapabilities(capabilities) {
   return [...AUTONOMOUS_CAPABILITIES];
 }
 
+function codexTaskActionId(workflow, plannedRevision, reviewId) {
+  return `rbwfa-${sha256(
+    canonicalJson({
+      workflow_id: workflow.workflow_id,
+      workflow_revision: plannedRevision,
+      kind: "CREATE_CODEX_REVIEWER_TASK",
+      review_id: reviewId,
+    }),
+  ).slice(0, 32)}`;
+}
+
+function codexTaskCorrelationMarker(workflow, actionId) {
+  return `rbwf-dispatch-${sha256(
+    canonicalJson({
+      workflow_id: workflow.workflow_id,
+      action_id: actionId,
+      authorization_sha256:
+        workflow.authorization.workflow_authorization_sha256,
+    }),
+  ).slice(0, 32)}`;
+}
+
+function expectedDispatchFor(action) {
+  const marker = action.correlation_marker;
+  return {
+    marker,
+    title: `Review Bridge ${marker}`,
+    prompt: [
+      marker,
+      `Review ${action.target.review_id} using the packaged review-bridge-reviewer skill.`,
+      "Do not use author context and do not fork the author task.",
+    ].join("\n"),
+  };
+}
+
+function validateCurrentReview(workflow) {
+  if (workflow.current_review == null) {
+    if (workflow.active_action != null || workflow.reviewer_task != null) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "workflow action and reviewer task require a current review",
+      );
+    }
+    return;
+  }
+  const review = assertObject(
+    workflow.current_review,
+    "workflow.current_review",
+  );
+  assertString(review.review_id, "workflow.current_review.review_id", {
+    max: 1024,
+  });
+  assertPositiveInteger(
+    review.state_version,
+    "workflow.current_review.state_version",
+  );
+  assertString(review.status, "workflow.current_review.status", { max: 1024 });
+  assertObject(review.strategy, "workflow.current_review.strategy");
+  if (
+    review.snapshot_hash !== null &&
+    !DIGEST_RE.test(review.snapshot_hash ?? "")
+  ) {
+    fail("WORKFLOW_STATE_INVALID", "current review snapshot hash is invalid");
+  }
+  if (review.head_sha !== null) {
+    assertSha(review.head_sha, "workflow.current_review.head_sha");
+  }
+
+  if (workflow.reviewer_task != null) {
+    const task = assertObject(
+      workflow.reviewer_task,
+      "workflow.reviewer_task",
+    );
+    assertString(task.task_id, "workflow.reviewer_task.task_id", {
+      max: 4096,
+    });
+    if (
+      task.review_id !== review.review_id ||
+      task.reviewer_provider !== "CODEX_TASK" ||
+      typeof task.dispatch_marker !== "string" ||
+      !/^rbwf-dispatch-[0-9a-f]{32}$/.test(task.dispatch_marker)
+    ) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "reviewer task does not match the current Codex review",
+      );
+    }
+    assertTimestamp(task.observed_at, "workflow.reviewer_task.observed_at");
+  }
+}
+
+function validateActiveAction(workflow) {
+  const action = workflow.active_action;
+  if (action == null) {
+    return;
+  }
+  assertObject(action, "workflow.active_action");
+  assertPositiveInteger(
+    action.planned_revision,
+    "workflow.active_action.planned_revision",
+  );
+  if (
+    action.kind !== "CREATE_CODEX_REVIEWER_TASK" ||
+    !["PLANNED", "EXECUTING", "OBSERVED"].includes(action.status) ||
+    action.required_capability !== "CREATE_CODEX_REVIEWER_TASKS" ||
+    action.authorization_sha256 !==
+      workflow.authorization.workflow_authorization_sha256
+  ) {
+    fail("WORKFLOW_ACTION_INVALID", "active action contract is invalid");
+  }
+  assertObject(action.target, "workflow.active_action.target");
+  if (
+    action.target.review_id !== workflow.current_review?.review_id ||
+    action.target.reviewer_provider !== "CODEX_TASK"
+  ) {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      "active action target does not match the current review",
+    );
+  }
+  const expectedActionId = codexTaskActionId(
+    workflow,
+    action.planned_revision,
+    action.target.review_id,
+  );
+  const expectedMarker = codexTaskCorrelationMarker(
+    workflow,
+    expectedActionId,
+  );
+  if (
+    action.action_id !== expectedActionId ||
+    action.correlation_marker !== expectedMarker
+  ) {
+    fail("WORKFLOW_ACTION_INVALID", "active action identity is invalid");
+  }
+  const localClaim = workflow.claims.find(
+    (entry) => entry.kind === "LOCAL_BRANCH",
+  );
+  if (
+    localClaim == null ||
+    canonicalJson(action.ownership_claim) !==
+      canonicalJson({
+        kind: localClaim.kind,
+        canonical_key_sha256: localClaim.canonical_key_sha256,
+      })
+  ) {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      "active action ownership claim is invalid",
+    );
+  }
+  const expectedDispatch = expectedDispatchFor(action);
+  if (canonicalJson(action.dispatch) !== canonicalJson(expectedDispatch)) {
+    fail("WORKFLOW_ACTION_INVALID", "active action dispatch is invalid");
+  }
+  assertTimestamp(action.planned_at, "workflow.active_action.planned_at");
+  if (action.completed_at !== null) {
+    fail("WORKFLOW_ACTION_INVALID", "active action is already completed");
+  }
+  const statusOffset = {
+    PLANNED: 1,
+    EXECUTING: 2,
+    OBSERVED: 3,
+  }[action.status];
+  if (
+    workflow.revision < action.planned_revision + statusOffset ||
+    (workflow.status === "ACTIVE" &&
+      workflow.revision !== action.planned_revision + statusOffset)
+  ) {
+    fail("WORKFLOW_ACTION_INVALID", "active action revision is invalid");
+  }
+  if (
+    (action.status === "PLANNED" && action.executing_at !== null) ||
+    (action.status !== "PLANNED" && action.executing_at === null)
+  ) {
+    fail("WORKFLOW_ACTION_INVALID", "active action execution time is invalid");
+  }
+  if (action.executing_at !== null) {
+    assertTimestamp(
+      action.executing_at,
+      "workflow.active_action.executing_at",
+    );
+  }
+  if (
+    (action.status === "OBSERVED" && action.observed_at === null) ||
+    (action.status !== "OBSERVED" && action.observed_at !== null)
+  ) {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      "active action observation time is invalid",
+    );
+  }
+  if (action.observed_at !== null) {
+    assertTimestamp(action.observed_at, "workflow.active_action.observed_at");
+  }
+  if (action.status === "OBSERVED") {
+    const response = assertObject(
+      action.provider_response,
+      "workflow.active_action.provider_response",
+    );
+    assertString(response.task_id, "workflow.active_action.task_id", {
+      max: 4096,
+    });
+    if (
+      !Array.isArray(response.matching_task_ids) ||
+      response.matching_task_ids.length !== 1 ||
+      response.matching_task_ids[0] !== response.task_id ||
+      response.title_sha256 !== sha256(action.dispatch.title) ||
+      response.prompt_sha256 !== sha256(action.dispatch.prompt)
+    ) {
+      fail("WORKFLOW_ACTION_INVALID", "active action response is invalid");
+    }
+    assertTimestamp(
+      response.observed_at,
+      "workflow.active_action.provider_response.observed_at",
+    );
+  } else if (action.provider_response !== null) {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      "unobserved action has a provider response",
+    );
+  }
+  if (
+    (workflow.status === "ACTIVE" &&
+      workflow.phase !== "DISPATCH_CODEX_REVIEWER") ||
+    workflow.reviewer_task != null
+  ) {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      "active action is inconsistent with workflow state",
+    );
+  }
+}
+
 function runGit(repositoryPath, args, { allowExitCodes = [0] } = {}) {
   const result = spawnSync("git", args, {
     cwd: repositoryPath,
@@ -373,6 +607,8 @@ function validateWorkflow(workflow) {
       );
     }
   }
+  validateCurrentReview(workflow);
+  validateActiveAction(workflow);
   assertObject(workflow.action_audit, "workflow.action_audit");
   assertPositiveInteger(
     workflow.action_audit.next_sequence,
@@ -1018,12 +1254,31 @@ async function appendAuditEvent(paths, workflow, event, workflowState) {
   return { event: auditEvent, head };
 }
 
+function requireWorkflowAuditBinding(workflow, audit) {
+  const lastState = audit.events.at(-1)?.workflow_state ?? {
+    active_action: null,
+    reviewer_task: null,
+  };
+  if (
+    canonicalJson(workflow.active_action) !==
+      canonicalJson(lastState.active_action) ||
+    canonicalJson(workflow.reviewer_task) !==
+      canonicalJson(lastState.reviewer_task)
+  ) {
+    fail(
+      "WORKFLOW_AUDIT_CORRUPT",
+      "workflow action state does not match the committed audit chain",
+    );
+  }
+}
+
 async function reconcileWorkflowAudit(paths, workflow) {
   const audit = await readAudit(paths, workflow.workflow_id);
   if (
     workflow.action_audit.next_sequence === audit.head.next_sequence &&
     workflow.action_audit.last_event_sha256 === audit.head.last_event_sha256
   ) {
+    requireWorkflowAuditBinding(workflow, audit);
     return workflow;
   }
   const lastEvent = audit.events.at(-1);
@@ -1053,6 +1308,7 @@ async function reconcileWorkflowAudit(paths, workflow) {
     next_sequence: audit.head.next_sequence,
     last_event_sha256: audit.head.last_event_sha256,
   };
+  requireWorkflowAuditBinding(recovered, audit);
   await writeWorkflow(paths, recovered);
   return recovered;
 }
@@ -1253,6 +1509,7 @@ function workflowSummary(workflow) {
             action_id: workflow.active_action.action_id,
             kind: workflow.active_action.kind,
             status: workflow.active_action.status,
+            dispatch: structuredClone(workflow.active_action.dispatch),
           },
     pause: workflow.pause,
     progress_fingerprint: workflow.progress_fingerprint,
@@ -1612,16 +1869,8 @@ export async function bindWorkflowReview(
 }
 
 function dispatchFor(workflow, action) {
-  const marker = action.correlation_marker;
-  return {
-    marker,
-    title: `Review Bridge ${marker}`,
-    prompt: [
-      marker,
-      `Review ${action.target.review_id} using the packaged review-bridge-reviewer skill.`,
-      "Do not use author context and do not fork the author task.",
-    ].join("\n"),
-  };
+  validateActiveAction({ ...workflow, active_action: action });
+  return structuredClone(action.dispatch);
 }
 
 export async function planCodexTaskDispatch(
@@ -1654,26 +1903,17 @@ export async function planCodexTaskDispatch(
         "Codex task dispatch requires the active local branch claim",
       );
     }
-    const actionId = `rbwfa-${sha256(
-      canonicalJson({
-        workflow_id: workflow.workflow_id,
-        workflow_revision: workflow.revision,
-        kind: "CREATE_CODEX_REVIEWER_TASK",
-        review_id: reviewId,
-      }),
-    ).slice(0, 32)}`;
-    const correlationMarker = `rbwf-dispatch-${sha256(
-      canonicalJson({
-        workflow_id: workflow.workflow_id,
-        action_id: actionId,
-        authorization_sha256:
-          workflow.authorization.workflow_authorization_sha256,
-      }),
-    ).slice(0, 32)}`;
+    const actionId = codexTaskActionId(
+      workflow,
+      workflow.revision,
+      reviewId,
+    );
+    const correlationMarker = codexTaskCorrelationMarker(workflow, actionId);
     const action = {
       action_id: actionId,
       kind: "CREATE_CODEX_REVIEWER_TASK",
       status: "PLANNED",
+      planned_revision: workflow.revision,
       planned_at: now(),
       executing_at: null,
       observed_at: null,
@@ -1690,8 +1930,10 @@ export async function planCodexTaskDispatch(
         canonical_key_sha256: ownershipClaim.canonical_key_sha256,
       },
       correlation_marker: correlationMarker,
+      dispatch: null,
       provider_response: null,
     };
+    action.dispatch = expectedDispatchFor(action);
     const next = await saveActionMutation(
       paths,
       workflow,

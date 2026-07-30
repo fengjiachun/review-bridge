@@ -267,6 +267,9 @@ digest. Store-wide claims admit only one active or paused owner for the local
 branch and GitHub head ref. The task-dispatch tools persist
 `PLANNED -> EXECUTING -> OBSERVED -> COMPLETED` in a digest-chained action
 audit and recover one committed crash-tail event before another mutation.
+The complete marker-bound task title and prompt remain in the active action and
+compact summary, so a restarted controller reuses the persisted dispatch
+instead of replanning or reconstructing it.
 Claim start and release use a store-wide `PREPARED -> COMMITTED` journal:
 recovery rolls a persisted workflow forward and rolls an unapplied release
 back before another owner can observe the registry.

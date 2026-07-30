@@ -37,7 +37,10 @@ publication, remote findings, ready-state changes, or thread resolution.
    the returned dispatch payload. Enumerate the exact opaque marker and call
    `record_codex_task_observation` only when exactly one matching task exists;
    then call `complete_workflow_action`. After an indeterminate create,
-   reconcile the marker before creating anything else.
+   reconcile the marker before creating anything else. After a restart,
+   recover the exact title and prompt from `active_action.dispatch` in
+   `get_autonomous_workflow` or `get_autonomous_workflow_summary`; never
+   reconstruct the strings or call `plan_codex_task_dispatch` again.
 6. If the client cannot create, discover, or wait for that independent task,
    call `pause_autonomous_workflow` with
    `TASK_ORCHESTRATION_UNAVAILABLE`. If creation may have succeeded but

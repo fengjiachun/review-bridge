@@ -214,7 +214,7 @@ if (role === "author") {
     {
       title: "Get compact autonomous workflow status",
       description:
-        "Read the exact revision, phase, next action, bound head and review, active action, and pause reason.",
+        "Read the exact revision, phase, next action, bound head and review, recoverable active-action dispatch, and pause reason.",
       inputSchema: { workflow_id: z.string() },
     },
     (input) => getAutonomousWorkflowSummary(storeRoot, input.workflow_id),
