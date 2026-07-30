@@ -278,10 +278,15 @@ function validateActiveAction(workflow) {
     EXECUTING: 2,
     OBSERVED: 3,
   }[action.status];
+  const revisionOffset = action.revision_offset ?? 0;
   if (
-    workflow.revision < action.planned_revision + statusOffset ||
+    !Number.isSafeInteger(revisionOffset) ||
+    revisionOffset < 0 ||
+    workflow.revision <
+      action.planned_revision + statusOffset + revisionOffset ||
     (workflow.status === "ACTIVE" &&
-      workflow.revision !== action.planned_revision + statusOffset)
+      workflow.revision !==
+        action.planned_revision + statusOffset + revisionOffset)
   ) {
     fail("WORKFLOW_ACTION_INVALID", "active action revision is invalid");
   }
@@ -641,8 +646,10 @@ async function readWorkflowRaw(paths) {
     return workflow;
   } catch (error) {
     if (error?.code === "ENOENT") {
-      throw new Error(
+      fail(
+        "WORKFLOW_NOT_FOUND",
         `autonomous workflow ${path.basename(paths.directory)} not found`,
+        { retryable: true },
       );
     }
     throw error;
@@ -1195,7 +1202,13 @@ async function readAudit(paths, workflowId) {
   }
 }
 
-async function appendAuditEvent(paths, workflow, event, workflowState) {
+async function appendAuditEvent(
+  paths,
+  workflow,
+  event,
+  workflowState,
+  metadata = null,
+) {
   const session = await readAudit(paths, workflow.workflow_id);
   const unsigned = {
     version: 1,
@@ -1205,6 +1218,7 @@ async function appendAuditEvent(paths, workflow, event, workflowState) {
     event_id: crypto.randomBytes(16).toString("hex"),
     at: now(),
     event,
+    ...(metadata == null ? {} : { metadata }),
     workflow_revision: workflowState.revision,
     action_id:
       workflowState.active_action?.action_id ??
@@ -1399,12 +1413,24 @@ async function saveMutation(paths, workflow, mutate) {
   return next;
 }
 
-async function saveActionMutation(paths, workflow, event, mutate) {
+async function saveActionMutation(
+  paths,
+  workflow,
+  event,
+  mutate,
+  metadata = null,
+) {
   const next = structuredClone(workflow);
   await mutate(next);
   next.revision += 1;
   next.updated_at = now();
-  const appended = await appendAuditEvent(paths, workflow, event, next);
+  const appended = await appendAuditEvent(
+    paths,
+    workflow,
+    event,
+    next,
+    metadata,
+  );
   next.action_audit = {
     next_sequence: appended.head.next_sequence,
     last_event_sha256: appended.head.last_event_sha256,
@@ -1771,9 +1797,14 @@ export async function listAutonomousWorkflows(storeRoot, statuses = null) {
       if (statusSet == null || statusSet.has(workflow.status)) {
         result.push(workflowSummary(workflow));
       }
-    } catch {
-      // Ignore incomplete workflow directories; canonical records fail closed
-      // when addressed directly.
+    } catch (error) {
+      if (
+        error?.code === "ENOENT" ||
+        error?.code === "WORKFLOW_NOT_FOUND"
+      ) {
+        continue;
+      }
+      throw error;
     }
   }
   return result.sort((left, right) =>
@@ -2284,16 +2315,85 @@ export async function pauseAutonomousWorkflow(
         workflow,
         "WORKFLOW_PAUSED",
         async (next) => {
+          const resumePhase = next.phase;
           next.status = "PAUSED";
           next.phase = "PAUSED_HUMAN";
           next.pause = {
             reason_code: reasonCode,
             blocked_action: blockedAction,
             evidence,
+            resume_phase: resumePhase,
             review_id: next.current_review?.review_id ?? null,
             action_id: next.active_action?.action_id ?? null,
             paused_at: now(),
           };
+        },
+      ),
+    );
+  });
+}
+
+export async function resumeAutonomousWorkflow(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  { operatorLabel, rationale },
+) {
+  assertString(operatorLabel, "operator_label", { max: 1024 });
+  assertString(rationale, "rationale");
+  return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
+    requireRevision(workflow, expectedRevision);
+    if (workflow.status !== "PAUSED") {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        `cannot resume a ${workflow.status} workflow`,
+      );
+    }
+    if (workflow.pause?.reason_code === "LOCAL_REVIEW_HUMAN_REQUIRED") {
+      fail(
+        "WORKFLOW_RESUME_INVALID",
+        "human-required local review must use human arbitration",
+      );
+    }
+    const resumedPhase = workflow.pause?.resume_phase;
+    if (
+      typeof resumedPhase !== "string" ||
+      resumedPhase.length === 0 ||
+      ["PAUSED_HUMAN", "CANCELLED"].includes(resumedPhase)
+    ) {
+      fail(
+        "WORKFLOW_RESUME_INVALID",
+        "paused workflow does not contain a valid resume phase",
+      );
+    }
+    const pauseReasonCode = workflow.pause.reason_code;
+    return publicWorkflow(
+      await saveActionMutation(
+        paths,
+        workflow,
+        "WORKFLOW_RESUMED",
+        async (next) => {
+          next.status = "ACTIVE";
+          next.phase = resumedPhase;
+          next.pause = null;
+          if (next.active_action != null) {
+            const statusOffset = {
+              PLANNED: 1,
+              EXECUTING: 2,
+              OBSERVED: 3,
+            }[next.active_action.status];
+            next.active_action.revision_offset =
+              next.revision +
+              1 -
+              next.active_action.planned_revision -
+              statusOffset;
+          }
+        },
+        {
+          operator_label: operatorLabel,
+          pause_reason_code: pauseReasonCode,
+          rationale,
+          resumed_phase: resumedPhase,
         },
       ),
     );

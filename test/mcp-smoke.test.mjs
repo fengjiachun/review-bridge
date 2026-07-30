@@ -72,6 +72,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
     "record_github_snapshot",
     "record_workflow_head",
     "release_workflow_claims",
+    "resume_autonomous_workflow",
     "start_autonomous_workflow",
     "start_publication",
     "submit_resolutions",
@@ -151,6 +152,15 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
         "workflow_revision",
       ],
     );
+    const resumeWorkflow = authorTools.tools.find(
+      (tool) => tool.name === "resume_autonomous_workflow",
+    );
+    assert.deepEqual(resumeWorkflow.inputSchema.required.sort(), [
+      "expected_revision",
+      "operator_label",
+      "rationale",
+      "workflow_id",
+    ]);
 
     const arbitrationExport = authorTools.tools.find(
       (tool) => tool.name === "export_human_arbitration",

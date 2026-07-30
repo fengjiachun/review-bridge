@@ -48,6 +48,7 @@ import {
   recordCodexTaskObservation,
   recordWorkflowHead,
   releaseWorkflowClaims,
+  resumeAutonomousWorkflow,
   startAutonomousWorkflow,
 } from "./workflow.mjs";
 
@@ -291,6 +292,31 @@ if (role === "author") {
           reasonCode: input.reason_code,
           blockedAction: input.blocked_action,
           evidence: input.evidence,
+        },
+      ),
+  );
+
+  register(
+    "resume_autonomous_workflow",
+    {
+      title: "Resume autonomous workflow",
+      description:
+        "Resume a transiently paused workflow at its audited prior phase after the blocking condition is cleared.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        operator_label: z.string(),
+        rationale: z.string(),
+      },
+    },
+    (input) =>
+      resumeAutonomousWorkflow(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        {
+          operatorLabel: input.operator_label,
+          rationale: input.rationale,
         },
       ),
   );

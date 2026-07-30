@@ -21,12 +21,14 @@ import {
   completeWorkflowAction,
   getAutonomousWorkflow,
   getAutonomousWorkflowSummary,
+  listAutonomousWorkflows,
   markWorkflowActionExecuting,
   pauseAutonomousWorkflow,
   planCodexTaskDispatch,
   recordCodexTaskObservation,
   recordWorkflowHead,
   releaseWorkflowClaims,
+  resumeAutonomousWorkflow,
   startAutonomousWorkflow,
 } from "../src/workflow.mjs";
 import { canonicalJson, sha256 } from "../src/storage.mjs";
@@ -795,6 +797,84 @@ test("missing task orchestration pauses with its active intent intact", async (t
       .next_action,
     "AWAIT_OPERATOR",
   );
+
+  const resumed = await resumeAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    paused.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "The Codex task provider is available again.",
+    },
+  );
+  assert.equal(resumed.status, "ACTIVE");
+  assert.equal(resumed.phase, "DISPATCH_CODEX_REVIEWER");
+  assert.equal(resumed.pause, null);
+  assert.equal(resumed.active_action.action_id, planned.action.action_id);
+  assert.equal(
+    (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
+      .next_action,
+    "CREATE_CODEX_REVIEWER_TASK",
+  );
+
+  const audit = (
+    await fsp.readFile(
+      path.join(
+        state.store,
+        "workflows",
+        workflow.workflow_id,
+        "action-audit.jsonl",
+      ),
+      "utf8",
+    )
+  )
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+  assert.equal(audit.at(-1).event, "WORKFLOW_RESUMED");
+  assert.deepEqual(audit.at(-1).metadata, {
+    operator_label: "Test Operator",
+    pause_reason_code: "TASK_ORCHESTRATION_UNAVAILABLE",
+    rationale: "The Codex task provider is available again.",
+    resumed_phase: "DISPATCH_CODEX_REVIEWER",
+  });
+
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    resumed.revision,
+    planned.action.action_id,
+  );
+  assert.equal(executing.active_action.status, "EXECUTING");
+});
+
+test("workflow listing ignores incomplete directories but surfaces corrupt state", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflowsRoot = path.join(state.store, "workflows");
+  await fsp.mkdir(
+    path.join(workflowsRoot, "rbwf-2026-07-30T000000-000Z-deadbeef"),
+    { recursive: true },
+  );
+  assert.deepEqual(await listAutonomousWorkflows(state.store), []);
+
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  await fsp.writeFile(
+    path.join(
+      workflowsRoot,
+      workflow.workflow_id,
+      "workflow.json",
+    ),
+    "{malformed",
+    { mode: 0o600 },
+  );
+  await assert.rejects(
+    listAutonomousWorkflows(state.store),
+    /WORKFLOW_STATE_INVALID/,
+  );
 });
 
 test("a clean independent review advances the local workflow to its PR1 boundary", async (t) => {
@@ -958,6 +1038,18 @@ test("an author human-required resolution pauses without preparing round two", a
   const reviewState = await getReviewSummary(state.store, review.id);
   assert.equal(reviewState.status, "HUMAN_REQUIRED");
   assert.equal(reviewState.current_round, 1);
+  await assert.rejects(
+    resumeAutonomousWorkflow(
+      state.store,
+      workflow.workflow_id,
+      paused.revision,
+      {
+        operatorLabel: "Test Operator",
+        rationale: "Attempt to bypass arbitration.",
+      },
+    ),
+    /WORKFLOW_RESUME_INVALID/,
+  );
 
   await fsp.writeFile(workflowPath, beforePause, { mode: 0o600 });
   const recovered = await getAutonomousWorkflow(
