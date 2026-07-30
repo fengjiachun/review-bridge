@@ -435,6 +435,62 @@ test("claim journal recovers a new workflow over released historical claims", as
   );
 });
 
+test("claim registry rejects growth beyond its readable limit before writing", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const cancelled = await cancelAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "Release the boundary-test claims.",
+    },
+  );
+  await releaseWorkflowClaims(
+    state.store,
+    workflow.workflow_id,
+    cancelled.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "No external objects remain.",
+      reconciledClaims: claimReleaseEvidence(cancelled),
+    },
+  );
+
+  const registryPath = path.join(state.store, "workflow-claims.json");
+  const registry = JSON.parse(await fsp.readFile(registryPath, "utf8"));
+  registry.padding = "";
+  const maxClaimsBytes = 4 * 1024 * 1024;
+  const emptyPaddingBytes = Buffer.byteLength(
+    `${canonicalJson(registry)}\n`,
+  );
+  registry.padding = "x".repeat(maxClaimsBytes - emptyPaddingBytes);
+  const boundaryBytes = Buffer.from(`${canonicalJson(registry)}\n`);
+  assert.equal(boundaryBytes.length, maxClaimsBytes);
+  await fsp.writeFile(registryPath, boundaryBytes, { mode: 0o600 });
+
+  await assert.rejects(
+    startAutonomousWorkflow(
+      state.store,
+      workflowInput(state.repository, state.baseSha),
+    ),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_CLAIMS_FULL");
+      return true;
+    },
+  );
+  assert.deepEqual(await fsp.readFile(registryPath), boundaryBytes);
+  assert.equal(
+    (await getAutonomousWorkflow(state.store, workflow.workflow_id)).status,
+    "CANCELLED",
+  );
+});
+
 test("workflow start rejects authorization and repository drift", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

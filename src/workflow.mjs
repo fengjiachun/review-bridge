@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { getReviewSummary, loadReview } from "./core.mjs";
+import { getReviewSnapshot } from "./core.mjs";
 import {
   atomicWriteCanonicalJson,
   atomicWriteFile,
@@ -451,6 +451,33 @@ function workflowPaths(storeRoot, workflowId) {
 
 function claimsPath(storeRoot) {
   return path.join(storeRoot, "workflow-claims.json");
+}
+
+function claimsRegistryBytes(registry) {
+  return Buffer.from(`${canonicalJson(registry)}\n`);
+}
+
+function requireClaimsCapacity(registry) {
+  const bytes = claimsRegistryBytes(registry);
+  if (bytes.length > MAX_CLAIMS_BYTES) {
+    fail(
+      "WORKFLOW_CLAIMS_FULL",
+      "claim registry mutation would exceed its readable limit",
+      {
+        candidate_bytes: bytes.length,
+        max_bytes: MAX_CLAIMS_BYTES,
+      },
+    );
+  }
+  return bytes;
+}
+
+async function writeClaims(storeRoot, registry) {
+  await atomicWriteFile(
+    claimsPath(storeRoot),
+    requireClaimsCapacity(registry),
+    { mode: 0o600 },
+  );
 }
 
 function createWorkflowId() {
@@ -966,7 +993,7 @@ async function recoverClaimTransactions(storeRoot, registry) {
     changed = true;
   }
   if (changed) {
-    await atomicWriteCanonicalJson(claimsPath(storeRoot), next);
+    await writeClaims(storeRoot, next);
   }
   return next;
 }
@@ -1871,10 +1898,18 @@ export async function startAutonomousWorkflow(
       };
       const preparedRegistry = structuredClone(registry);
       preparedRegistry.transactions.push(transaction);
-      await atomicWriteCanonicalJson(
-        claimsPath(storeRoot),
-        preparedRegistry,
+      const committedRegistry = structuredClone(preparedRegistry);
+      committedRegistry.claims.push(
+        ...workflowClaims.map((entry) => registryClaim(entry)),
       );
+      const committedTransaction = committedRegistry.transactions.find(
+        (entry) => entry.transaction_id === transaction.transaction_id,
+      );
+      committedTransaction.state = "COMMITTED";
+      committedTransaction.completed_at = now();
+      requireClaimsCapacity(preparedRegistry);
+      requireClaimsCapacity(committedRegistry);
+      await writeClaims(storeRoot, preparedRegistry);
       const paths = workflowPaths(storeRoot, workflowId);
       await fsp.mkdir(path.dirname(paths.directory), {
         recursive: true,
@@ -1891,19 +1926,7 @@ export async function startAutonomousWorkflow(
         terminal_event_sha256: null,
       });
       await writeWorkflow(paths, workflow);
-      const committedRegistry = structuredClone(preparedRegistry);
-      committedRegistry.claims.push(
-        ...workflowClaims.map((entry) => registryClaim(entry)),
-      );
-      const committedTransaction = committedRegistry.transactions.find(
-        (entry) => entry.transaction_id === transaction.transaction_id,
-      );
-      committedTransaction.state = "COMMITTED";
-      committedTransaction.completed_at = now();
-      await atomicWriteCanonicalJson(
-        claimsPath(storeRoot),
-        committedRegistry,
-      );
+      await writeClaims(storeRoot, committedRegistry);
       return publicWorkflow(workflow);
     },
   );
@@ -2035,10 +2058,7 @@ export async function bindWorkflowReview(
         `cannot bind a review in phase ${workflow.phase}`,
       );
     }
-    const [review, summary] = await Promise.all([
-      loadReview(storeRoot, reviewId),
-      getReviewSummary(storeRoot, reviewId),
-    ]);
+    const { review, summary } = await getReviewSnapshot(storeRoot, reviewId);
     requireCleanReviewRound(review);
     const reviewRepository = await fsp.realpath(review.repository_path);
     if (
@@ -2321,10 +2341,7 @@ export async function advanceLocalWorkflow(
       );
     }
     const reviewId = workflow.current_review.review_id;
-    const [review, summary] = await Promise.all([
-      loadReview(storeRoot, reviewId),
-      getReviewSummary(storeRoot, reviewId),
-    ]);
+    const { review, summary } = await getReviewSnapshot(storeRoot, reviewId);
     requireCleanReviewRound(review);
     if (
       review.repository_path !== workflow.repository.path ||
@@ -2690,10 +2707,15 @@ export async function releaseWorkflowClaims(
           stored.disposition = "RELEASED";
           stored.released_at = releaseAt;
         }
-        await atomicWriteCanonicalJson(
-          claimsPath(storeRoot),
-          preparedRegistry,
+        const committedRegistry = structuredClone(preparedRegistry);
+        const committedTransaction = committedRegistry.transactions.find(
+          (entry) => entry.transaction_id === transaction.transaction_id,
         );
+        committedTransaction.state = "COMMITTED";
+        committedTransaction.completed_at = now();
+        requireClaimsCapacity(preparedRegistry);
+        requireClaimsCapacity(committedRegistry);
+        await writeClaims(storeRoot, preparedRegistry);
         const next = await saveMutation(paths, workflow, async (draft) => {
           for (const entry of draft.claims) {
             if (entry.disposition === "ACTIVE") {
@@ -2708,16 +2730,7 @@ export async function releaseWorkflowClaims(
             reconciliation: structuredClone(reconciledClaims),
           };
         });
-        const committedRegistry = structuredClone(preparedRegistry);
-        const committedTransaction = committedRegistry.transactions.find(
-          (entry) => entry.transaction_id === transaction.transaction_id,
-        );
-        committedTransaction.state = "COMMITTED";
-        committedTransaction.completed_at = now();
-        await atomicWriteCanonicalJson(
-          claimsPath(storeRoot),
-          committedRegistry,
-        );
+        await writeClaims(storeRoot, committedRegistry);
         return publicWorkflow(next);
       },
     );

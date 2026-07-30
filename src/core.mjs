@@ -929,6 +929,16 @@ export async function getReviewSummary(storeRoot, reviewId) {
   return reviewSummary(await loadReview(storeRoot, reviewId));
 }
 
+export async function getReviewSnapshot(storeRoot, reviewId) {
+  return withReviewMutationLock(storeRoot, reviewId, async () => {
+    const review = await loadReview(storeRoot, reviewId);
+    return {
+      review: publicReview(review),
+      summary: reviewSummary(review),
+    };
+  });
+}
+
 function arbitrationFinding(
   finding,
   resolutionsByFinding,
