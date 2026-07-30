@@ -588,30 +588,50 @@ ambiguous, incomplete, and unresolved-thread projections return their
 underlying blocker instead.
 
 Some repositories start required checks or remote review only after a pull
-request leaves draft state. When required pre-ready evidence cannot materialize
-while draft, the workflow pauses with `DRAFT_GATE_DEADLOCK`. Marking ready early
-requires a new direct operator decision; the controller does not infer that
-permission from elapsed time or missing checks.
+request leaves draft state. The server derives `DRAFT_GATE_DEADLOCK` only when
+fresh, complete provider-policy evidence unambiguously declares that every
+remaining blocker is activated by leaving draft state. The proof binds the
+provider configuration resource and revision, collection completeness, exact
+gate identities and trigger condition, target repository and pull request, and
+current head. The source must be maintainer-approved and pinned independently
+of the candidate observation.
 
-If the operator chooses that escape, the server first confirms that the current
-projection is exactly `DRAFT_GATE_DEADLOCK` and persists a single-use
-`draft_gate_exception` on the current head attempt. The canonical record
-contains:
+A missing run, pending status, silent provider, elapsed interval, or workflow
+guess is never deadlock proof. When all currently evaluable gates pass but no
+supported provider-policy source can prove why the remaining gates have not
+started, the workflow pauses as `DRAFT_GATE_INDETERMINATE`, not
+`DRAFT_GATE_DEADLOCK`. The first implementation does not assume that GitHub
+exposes a generic ready-only policy source; a repository without one therefore
+uses the indeterminate path.
+
+Marking ready from either pause requires a new direct operator decision. For a
+proven deadlock, the server replays the exact provider-policy proof. For an
+indeterminate pause, the operator must directly assert that the displayed exact
+blocker set is ready-only; the server records that assertion without claiming
+it is provider-verified. The controller does not infer either permission.
+
+The server then persists a single-use `draft_gate_exception` on the current head
+attempt. The canonical record contains:
 
 - `workflow_id`, pull-request repository ID and number, exact head SHA, and
   publication ID and revision;
 - the exact normalized blocker set and its observation digest;
+- basis `PROVIDER_VERIFIED` plus the policy-proof digest, or basis
+  `OPERATOR_ASSERTED` plus a null policy-proof digest;
 - supplemental capability `MARK_PR_READY_WITH_DRAFT_GATE_EXCEPTION`;
-- exact acknowledgement `DRAFT_GATE_DEADLOCK_READY_EXCEPTION`;
+- exact acknowledgement `DRAFT_GATE_DEADLOCK_READY_EXCEPTION` for
+  `PROVIDER_VERIFIED`, or `READY_ONLY_GATES_OPERATOR_ASSERTED` for
+  `OPERATOR_ASSERTED`;
 - operator label, rationale, and authorization timestamp; and
 - `ready_exception_sha256`, derived from the complete record except its digest.
 
 The mark-ready action intent binds both `workflow_authorization_sha256` and
 `ready_exception_sha256`. Any change to the workflow, pull request, head,
-publication, revision, or blocker set invalidates the exception. It is consumed
-by one reconciled mark-ready action and cannot authorize another head or waive
-any check, review, thread, or terminal gate. Without this record, the pause
-cannot resume through an autonomous mark-ready action.
+publication, revision, blocker set, or provider-policy proof invalidates the
+exception. It is consumed by one reconciled mark-ready action and cannot
+authorize another head or waive any check, review, thread, or terminal gate.
+Without this record, neither pause can resume through an autonomous mark-ready
+action.
 
 The first autonomous version requires `EXPLICIT_ONLY`. A repository that also
 uses automatic Codex review needs the existing direct
@@ -847,6 +867,7 @@ Pause reasons include:
 - `WORKFLOW_OWNERSHIP_CONFLICT`;
 - `GITHUB_REVIEW_AMBIGUOUS`;
 - `DRAFT_GATE_DEADLOCK`;
+- `DRAFT_GATE_INDETERMINATE`;
 - `HUMAN_REVIEW_REQUIRED`;
 - `HUMAN_OR_UNKNOWN_THREAD`;
 - `THREAD_RESOLUTION_UNSAFE`;
@@ -1080,10 +1101,16 @@ blindly repeat an indeterminate write.
   or unresolved threads do not become ready;
 - a draft pull request becomes ready only when
   `autonomous_pre_ready.status == READY_TO_MARK`;
-- checks or remote review that cannot materialize while draft produce
-  `DRAFT_GATE_DEADLOCK`;
+- ready-only checks or review produce `DRAFT_GATE_DEADLOCK` only with complete,
+  pinned provider-policy proof bound to their exact gate identities;
+- missing, pending, silent, or delayed evidence without that proof produces
+  `DRAFT_GATE_INDETERMINATE`, regardless of elapsed time;
+- ordinary pending gates never produce a provider-verified deadlock exception;
 - an early mark-ready requires an exact head/PR/blocker-bound single-use
-  `draft_gate_exception`, and recovery rejects a stale or mismatched exception;
+  `draft_gate_exception`; an indeterminate pause additionally requires exact
+  acknowledgement `READY_ONLY_GATES_OPERATOR_ASSERTED`;
+- recovery rejects a stale or mismatched exception, policy proof, blocker set,
+  or operator assertion;
 - existing manual publication summaries retain their status and next-action
   behavior;
 - version-3 autonomous publication preserves `authorization_sha256` and
