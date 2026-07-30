@@ -32,8 +32,10 @@ const SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
 const MAX_CLAIMS_BYTES = 4 * 1024 * 1024;
-const MAX_AUDIT_BYTES = 4 * 1024 * 1024;
+const MAX_ORDINARY_AUDIT_BYTES = 4 * 1024 * 1024;
 const MAX_AUDIT_EVENT_BYTES = 256 * 1024;
+const MAX_AUDIT_BYTES =
+  MAX_ORDINARY_AUDIT_BYTES + MAX_AUDIT_EVENT_BYTES + 1;
 const MAX_RECONCILIATION_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_CLOCK_SKEW_MS = 30 * 1000;
 
@@ -1260,7 +1262,11 @@ async function appendAuditEvent(
   if (eventBytes.length > MAX_AUDIT_EVENT_BYTES + 1) {
     fail("WORKFLOW_AUDIT_EVENT_TOO_LARGE", "audit event is too large");
   }
-  if (session.head.committed_bytes + eventBytes.length > MAX_AUDIT_BYTES) {
+  const maxAuditBytes =
+    event === "WORKFLOW_CANCELLED"
+      ? MAX_AUDIT_BYTES
+      : MAX_ORDINARY_AUDIT_BYTES;
+  if (session.head.committed_bytes + eventBytes.length > maxAuditBytes) {
     fail(
       "WORKFLOW_AUDIT_LOG_FULL",
       "audit event would exceed the readable audit log limit",

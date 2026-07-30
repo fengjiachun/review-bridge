@@ -960,9 +960,33 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
     /WORKFLOW_AUDIT_LOG_FULL/,
   );
   assert.equal((await fsp.stat(auditPath)).size, committedBytes);
-  assert.equal(
-    (await getAutonomousWorkflow(state.store, workflow.workflow_id)).revision,
+  const cancelled = await cancelAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
     workflow.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "Preserve the terminal audit reserve for cleanup.",
+    },
+  );
+  assert.equal(cancelled.status, "CANCELLED");
+  const cancelledAuditBytes = (await fsp.stat(auditPath)).size;
+  assert.ok(cancelledAuditBytes > committedBytes);
+  assert.ok(cancelledAuditBytes <= maxAuditBytes + maxEventBytes);
+
+  const released = await releaseWorkflowClaims(
+    state.store,
+    workflow.workflow_id,
+    cancelled.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "No external objects remain.",
+      reconciledClaims: claimReleaseEvidence(cancelled),
+    },
+  );
+  assert.equal(
+    released.claims.every((claim) => claim.disposition === "RELEASED"),
+    true,
   );
 });
 
