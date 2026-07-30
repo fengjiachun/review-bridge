@@ -267,12 +267,16 @@ digest. Store-wide claims admit only one active or paused owner for the local
 branch and GitHub head ref. The task-dispatch tools persist
 `PLANNED -> EXECUTING -> OBSERVED -> COMPLETED` in a digest-chained action
 audit and recover one committed crash-tail event before another mutation.
+Claim start and release use a store-wide `PREPARED -> COMMITTED` journal:
+recovery rolls a persisted workflow forward and rolls an unapplied release
+back before another owner can observe the registry.
 
 The compact workflow summary is the controller's source of truth for the next
 action. A missing or ambiguous Codex task pauses rather than falling back to
 the author task. Round-two `HUMAN_REQUIRED` also pauses and never creates a
 third model round. Cancellation retains claims until an explicit,
-exactly-reconciled release proves every claimed object absent.
+exactly-reconciled release proves every claimed object absent with a fresh
+observation bound to the current workflow revision and canonical claim target.
 
 This release stops at `PUBLISH_GATED_HEAD`. Autonomous draft PR publication,
 remote review repair cycles, ready-state changes, and evidence-backed thread

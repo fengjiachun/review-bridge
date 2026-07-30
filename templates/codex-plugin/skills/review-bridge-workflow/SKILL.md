@@ -56,9 +56,11 @@ publication, remote findings, ready-state changes, or thread resolution.
 Every mutation uses the exact current workflow revision. On `WORKFLOW_BUSY`,
 `WORKFLOW_CLAIMS_BUSY`, `LOCK_OWNERSHIP_LOST`, or an indeterminate store write,
 freshly reread the workflow before deciding whether a transition is still
-needed. Cancellation retains claims. Release them only after exact
-reconciliation proves every claimed object absent and the operator explicitly
-requests cleanup.
+needed. Claim-journal recovery completes or rolls back any prepared ownership
+transition before returning the workflow. Cancellation retains claims. Release
+them only after exact reconciliation proves every claimed object absent, with
+each observation bound to the current workflow revision and exact canonical
+claim target, and the operator explicitly requests cleanup.
 
 ## Prepare
 

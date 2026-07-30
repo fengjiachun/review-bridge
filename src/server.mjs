@@ -448,6 +448,8 @@ if (role === "author") {
           z.object({
             kind: z.enum(["LOCAL_BRANCH", "GITHUB_HEAD_REF"]),
             canonical_key_sha256: z.string(),
+            target: z.record(z.unknown()),
+            workflow_revision: z.number().int().positive(),
             present: z.literal(false),
             observed_at: z.string(),
           }),

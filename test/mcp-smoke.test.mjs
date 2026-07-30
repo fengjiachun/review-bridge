@@ -137,6 +137,20 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       "review_id",
       "workflow_id",
     ]);
+    const releaseClaims = authorTools.tools.find(
+      (tool) => tool.name === "release_workflow_claims",
+    );
+    assert.deepEqual(
+      releaseClaims.inputSchema.properties.reconciled_claims.items.required.sort(),
+      [
+        "canonical_key_sha256",
+        "kind",
+        "observed_at",
+        "present",
+        "target",
+        "workflow_revision",
+      ],
+    );
 
     const arbitrationExport = authorTools.tools.find(
       (tool) => tool.name === "export_human_arbitration",
