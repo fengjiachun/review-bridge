@@ -9,6 +9,57 @@ Use the Review Bridge author tools to coordinate a manual, two-round review with
 Claude Desktop or a fresh Codex reviewer task, or an explicitly authorized
 remote-only GitHub publication.
 
+## Autonomous local workflow
+
+The schema-version-1 autonomous workflow is opt-in and currently advances only
+through the local `CODEX_TASK` gate. It does not yet automate GitHub
+publication, remote findings, ready-state changes, or thread resolution.
+
+1. Obtain direct operator authorization for the exact repository path,
+   operator-selected base ref and resolved full base SHA, requirement,
+   implementation scope, topic branch, publication target, push remote, and
+   the complete capability set returned by the
+   `start_autonomous_workflow` schema. A general instruction to implement,
+   test, review, or continue is not autonomous authorization.
+2. Require a clean worktree with the authorized topic branch checked out at
+   the immutable base. Call `start_autonomous_workflow`, record its
+   `workflow_id` and revision, and follow only the server-derived
+   `next_action`.
+3. For `COMMIT_HEAD`, implement only the recorded requirement, test it, commit
+   it without rewriting published history, require a clean worktree, and call
+   `record_workflow_head` with the full `HEAD`.
+4. For `PREPARE_LOCAL_REVIEW`, call `prepare_review` with the workflow's full
+   base SHA, exact requirement and scope, and `CODEX_TASK`; then call
+   `bind_workflow_review` at the workflow's current revision.
+5. For `PLAN_CODEX_TASK_DISPATCH`, call `plan_codex_task_dispatch`. Persist
+   `EXECUTING` with `mark_workflow_action_executing` immediately before task
+   creation. Create a fresh non-forked Codex task whose title and prompt equal
+   the returned dispatch payload. Enumerate the exact opaque marker and call
+   `record_codex_task_observation` only when exactly one matching task exists;
+   then call `complete_workflow_action`. After an indeterminate create,
+   reconcile the marker before creating anything else.
+6. If the client cannot create, discover, or wait for that independent task,
+   call `pause_autonomous_workflow` with
+   `TASK_ORCHESTRATION_UNAVAILABLE`. If creation may have succeeded but
+   uniqueness cannot be proved, use `EXTERNAL_ACTION_INDETERMINATE`. Never
+   review from the author task or discard the active intent.
+7. Use `advance_local_workflow` after every local-review ledger transition.
+   Address findings and record any committed descendant fix head before
+   submitting resolutions. Round two reuses the same reviewer task. A
+   `HUMAN_REQUIRED` review pauses the workflow and must not create a third
+   model round.
+8. Stop this implementation at `PUBLISH_GATED_HEAD`. GitHub autonomous
+   publication remains unavailable until the later workflow schema and skill
+   update ship. Continue manually through the existing `LOCAL_GATE`
+   publication flow only after a fresh operator instruction.
+
+Every mutation uses the exact current workflow revision. On `WORKFLOW_BUSY`,
+`WORKFLOW_CLAIMS_BUSY`, `LOCK_OWNERSHIP_LOST`, or an indeterminate store write,
+freshly reread the workflow before deciding whether a transition is still
+needed. Cancellation retains claims. Release them only after exact
+reconciliation proves every claimed object absent and the operator explicitly
+requests cleanup.
+
 ## Prepare
 
 1. Confirm the repository path and choose the exact base ref. Resolve it to an

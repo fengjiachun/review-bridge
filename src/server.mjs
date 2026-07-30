@@ -33,6 +33,23 @@ import {
   startPublication,
   verifyPublicationGate,
 } from "./publication.mjs";
+import {
+  advanceLocalWorkflow,
+  AUTONOMOUS_CAPABILITIES,
+  bindWorkflowReview,
+  cancelAutonomousWorkflow,
+  completeWorkflowAction,
+  getAutonomousWorkflow,
+  getAutonomousWorkflowSummary,
+  listAutonomousWorkflows,
+  markWorkflowActionExecuting,
+  pauseAutonomousWorkflow,
+  planCodexTaskDispatch,
+  recordCodexTaskObservation,
+  recordWorkflowHead,
+  releaseWorkflowClaims,
+  startAutonomousWorkflow,
+} from "./workflow.mjs";
 
 function parseOption(argv, name) {
   const equals = argv.find((arg) => arg.startsWith(`--${name}=`));
@@ -120,7 +137,336 @@ const findingSchema = z.object({
   line: z.number().int().positive().optional(),
 });
 
+const workflowPublicationTargetSchema = z.object({
+  base_repository_id: z.number().int().positive(),
+  base_owner: z.string(),
+  base_repo: z.string(),
+  base_branch: z.string(),
+  head_repository_id: z.number().int().positive(),
+  head_owner: z.string(),
+  head_repo: z.string(),
+  head_branch: z.string(),
+  push_remote: z.string(),
+});
+
 if (role === "author") {
+  register(
+    "start_autonomous_workflow",
+    {
+      title: "Start autonomous local workflow",
+      description:
+        "Create an opt-in workflow ledger at an immutable clean base, bind the exact capability set, and atomically claim the local branch and GitHub head ref.",
+      inputSchema: {
+        repository_path: z.string(),
+        base_ref: z.string(),
+        base_sha: z.string(),
+        requirement: z.string(),
+        implementation_scope: z.string(),
+        topic_branch: z.string(),
+        operator_label: z.string(),
+        capabilities: z.array(z.enum(AUTONOMOUS_CAPABILITIES)),
+        publication_target: workflowPublicationTargetSchema,
+      },
+    },
+    (input) =>
+      startAutonomousWorkflow(storeRoot, {
+        repositoryPath: input.repository_path,
+        baseRef: input.base_ref,
+        baseSha: input.base_sha,
+        requirement: input.requirement,
+        implementationScope: input.implementation_scope,
+        topicBranch: input.topic_branch,
+        operatorLabel: input.operator_label,
+        capabilities: input.capabilities,
+        publicationTarget: input.publication_target,
+      }),
+  );
+
+  register(
+    "list_autonomous_workflows",
+    {
+      title: "List autonomous workflows",
+      description:
+        "List compact autonomous workflow states without advancing them.",
+      inputSchema: {
+        statuses: z
+          .array(z.enum(["ACTIVE", "PAUSED", "CANCELLED"]))
+          .optional(),
+      },
+    },
+    (input) =>
+      listAutonomousWorkflows(storeRoot, input.statuses ?? null),
+  );
+
+  register(
+    "get_autonomous_workflow",
+    {
+      title: "Get autonomous workflow",
+      description:
+        "Read the complete workflow ledger and reconcile one committed action-audit event when recovery requires it.",
+      inputSchema: { workflow_id: z.string() },
+    },
+    (input) => getAutonomousWorkflow(storeRoot, input.workflow_id),
+  );
+
+  register(
+    "get_autonomous_workflow_summary",
+    {
+      title: "Get compact autonomous workflow status",
+      description:
+        "Read the exact revision, phase, next action, bound head and review, active action, and pause reason.",
+      inputSchema: { workflow_id: z.string() },
+    },
+    (input) => getAutonomousWorkflowSummary(storeRoot, input.workflow_id),
+  );
+
+  register(
+    "record_workflow_head",
+    {
+      title: "Record committed workflow head",
+      description:
+        "Verify the authorized topic branch is clean at an exact descendant commit and append the head attempt.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        head_sha: z.string(),
+      },
+    },
+    (input) =>
+      recordWorkflowHead(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.head_sha,
+      ),
+  );
+
+  register(
+    "bind_workflow_review",
+    {
+      title: "Bind autonomous local review",
+      description:
+        "Bind one new CODEX_TASK review only when its repository, requirement, scope, base, and head equal the workflow.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        review_id: z.string(),
+      },
+    },
+    (input) =>
+      bindWorkflowReview(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.review_id,
+      ),
+  );
+
+  register(
+    "pause_autonomous_workflow",
+    {
+      title: "Pause autonomous workflow",
+      description:
+        "Fail closed when task orchestration, action reconciliation, authorization, permission, or progress evidence is unavailable.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        reason_code: z.enum([
+          "TASK_ORCHESTRATION_UNAVAILABLE",
+          "EXTERNAL_ACTION_INDETERMINATE",
+          "AUTHORIZATION_REQUIRED",
+          "PERMISSION_REQUIRED",
+          "NO_PROGRESS",
+        ]),
+        blocked_action: z.string(),
+        evidence: z.string(),
+      },
+    },
+    (input) =>
+      pauseAutonomousWorkflow(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        {
+          reasonCode: input.reason_code,
+          blockedAction: input.blocked_action,
+          evidence: input.evidence,
+        },
+      ),
+  );
+
+  register(
+    "plan_codex_task_dispatch",
+    {
+      title: "Plan Codex reviewer task dispatch",
+      description:
+        "Persist a single CREATE_CODEX_REVIEWER_TASK intent and return its exact opaque marker, task title, and prompt.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        review_id: z.string(),
+      },
+    },
+    (input) =>
+      planCodexTaskDispatch(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.review_id,
+      ),
+  );
+
+  register(
+    "mark_workflow_action_executing",
+    {
+      title: "Mark workflow action executing",
+      description:
+        "Durably record EXECUTING immediately before the controller performs the planned external task write.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+      },
+    },
+    (input) =>
+      markWorkflowActionExecuting(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
+      ),
+  );
+
+  register(
+    "record_codex_task_observation",
+    {
+      title: "Record Codex reviewer task observation",
+      description:
+        "Reconcile exactly one task whose title and prompt equal the server-issued dispatch payload.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+        matching_task_ids: z.array(z.string()),
+        task_id: z.string(),
+        title: z.string(),
+        prompt: z.string(),
+      },
+    },
+    (input) =>
+      recordCodexTaskObservation(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
+        {
+          matchingTaskIds: input.matching_task_ids,
+          taskId: input.task_id,
+          title: input.title,
+          prompt: input.prompt,
+        },
+      ),
+  );
+
+  register(
+    "complete_workflow_action",
+    {
+      title: "Complete observed workflow action",
+      description:
+        "Complete a uniquely observed action and advance the workflow without performing another provider write.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+      },
+    },
+    (input) =>
+      completeWorkflowAction(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
+      ),
+  );
+
+  register(
+    "advance_local_workflow",
+    {
+      title: "Advance autonomous local review",
+      description:
+        "Re-read the bound local-review ledger and advance only the matching two-round CODEX_TASK state or pause for human arbitration.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+      },
+    },
+    (input) =>
+      advanceLocalWorkflow(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+      ),
+  );
+
+  register(
+    "cancel_autonomous_workflow",
+    {
+      title: "Cancel autonomous workflow",
+      description:
+        "Explicitly stop future workflow writes while retaining branches, reviews, audit evidence, and ownership claims.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        operator_label: z.string(),
+        rationale: z.string(),
+      },
+    },
+    (input) =>
+      cancelAutonomousWorkflow(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        {
+          operatorLabel: input.operator_label,
+          rationale: input.rationale,
+        },
+      ),
+  );
+
+  register(
+    "release_workflow_claims",
+    {
+      title: "Release cancelled workflow claims",
+      description:
+        "Release every active claim only after exact caller-supplied reconciliation proves the corresponding object absent.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        operator_label: z.string(),
+        rationale: z.string(),
+        reconciled_claims: z.array(
+          z.object({
+            kind: z.enum(["LOCAL_BRANCH", "GITHUB_HEAD_REF"]),
+            canonical_key_sha256: z.string(),
+            present: z.literal(false),
+            observed_at: z.string(),
+          }),
+        ),
+      },
+    },
+    (input) =>
+      releaseWorkflowClaims(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        {
+          operatorLabel: input.operator_label,
+          rationale: input.rationale,
+          reconciledClaims: input.reconciled_claims,
+        },
+      ),
+  );
+
   register(
     "prepare_review",
     {

@@ -46,19 +46,33 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
 
   assert.deepEqual(author, [
     "acknowledge_codex_review_ambiguity",
+    "advance_local_workflow",
     "authorize_remote_publication",
+    "bind_workflow_review",
+    "cancel_autonomous_workflow",
+    "complete_workflow_action",
     "export_human_arbitration",
     "finalize_local_gate",
     "finalize_publication_gate",
+    "get_autonomous_workflow",
+    "get_autonomous_workflow_summary",
     "get_publication",
     "get_publication_summary",
     "get_review",
     "get_review_summary",
+    "list_autonomous_workflows",
     "list_reviews",
+    "mark_workflow_action_executing",
+    "pause_autonomous_workflow",
+    "plan_codex_task_dispatch",
     "prepare_rereview",
     "prepare_review",
     "record_codex_review_request",
+    "record_codex_task_observation",
     "record_github_snapshot",
+    "record_workflow_head",
+    "release_workflow_claims",
+    "start_autonomous_workflow",
     "start_publication",
     "submit_resolutions",
     "verify_publication_gate",
@@ -93,6 +107,36 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       ["CLAUDE_DESKTOP", "CODEX_TASK"],
     );
     assert.ok(prepare.inputSchema.required.includes("reviewer_provider"));
+
+    const startWorkflow = authorTools.tools.find(
+      (tool) => tool.name === "start_autonomous_workflow",
+    );
+    assert.deepEqual(
+      startWorkflow.inputSchema.properties.capabilities.items.enum,
+      [
+        "EDIT_AND_TEST",
+        "CREATE_COMMITS",
+        "CREATE_CODEX_REVIEWER_TASKS",
+        "PUSH_TOPIC_BRANCH",
+        "CREATE_OR_UPDATE_DRAFT_PR",
+        "POST_CODEX_REVIEW_REQUESTS",
+        "MARK_PR_READY",
+        "RETURN_PR_TO_DRAFT_FOR_REPAIR",
+        "RESOLVE_ELIGIBLE_CODEX_THREADS",
+        "UNRESOLVE_INVALIDATED_CODEX_THREADS",
+      ],
+    );
+    assert.ok(
+      startWorkflow.inputSchema.required.includes("publication_target"),
+    );
+    const planDispatch = authorTools.tools.find(
+      (tool) => tool.name === "plan_codex_task_dispatch",
+    );
+    assert.deepEqual(planDispatch.inputSchema.required.sort(), [
+      "expected_revision",
+      "review_id",
+      "workflow_id",
+    ]);
 
     const arbitrationExport = authorTools.tools.find(
       (tool) => tool.name === "export_human_arbitration",
