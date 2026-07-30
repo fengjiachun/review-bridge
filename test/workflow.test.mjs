@@ -275,6 +275,36 @@ test("workflow repository paths normalize to the worktree root", async (t) => {
   assert.equal(bound.current_review.review_id, review.id);
 });
 
+test("workflow start rejects an unreadable canonical ledger before claiming ownership", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const escaped = "\0".repeat(200_000);
+
+  await assert.rejects(
+    startAutonomousWorkflow(
+      state.store,
+      workflowInput(state.repository, state.baseSha, {
+        requirement: escaped,
+        implementationScope: escaped,
+      }),
+    ),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_STATE_TOO_LARGE");
+      return true;
+    },
+  );
+  await assert.rejects(
+    fsp.stat(path.join(state.store, "workflow-claims.json")),
+    (error) => error.code === "ENOENT",
+  );
+
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  assert.equal(workflow.status, "ACTIVE");
+});
+
 test("concurrent starts admit exactly one owner", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -762,6 +792,8 @@ test("Codex task dispatch is marker-bound and cannot skip action states", async 
   assert.deepEqual(
     audit.map((event) => event.event),
     [
+      "WORKFLOW_STATE_UPDATED",
+      "WORKFLOW_STATE_UPDATED",
       "ACTION_PLANNED",
       "ACTION_EXECUTING",
       "ACTION_OBSERVED",
@@ -770,6 +802,76 @@ test("Codex task dispatch is marker-bound and cannot skip action states", async 
   );
   assert.equal(audit[0].previous_event_sha256, null);
   assert.match(audit.at(-1).event_sha256, /^[0-9a-f]{64}$/);
+});
+
+test("active workflow phases stay bound to the audit chain from initial state onward", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const initial = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const forgedInitial = structuredClone(initial);
+  forgedInitial.phase = "LOCAL_GATE_PASSED";
+  await fsp.writeFile(
+    workflowPath,
+    `${canonicalJson(forgedInitial)}\n`,
+    { mode: 0o600 },
+  );
+  await assert.rejects(
+    getAutonomousWorkflowSummary(state.store, workflow.workflow_id),
+    /WORKFLOW_AUDIT_CORRUPT/,
+  );
+
+  await fsp.writeFile(workflowPath, `${canonicalJson(initial)}\n`, {
+    mode: 0o600,
+  });
+  const headSha = await commitImplementation(state.repository);
+  const recorded = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    headSha,
+  );
+  await fsp.writeFile(workflowPath, `${canonicalJson(initial)}\n`, {
+    mode: 0o600,
+  });
+  const recovered = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(recovered.current_head_sha, headSha);
+  assert.deepEqual(recovered.attempts, recorded.attempts);
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: workflow.requirement,
+    implementationScope: workflow.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  await bindWorkflowReview(
+    state.store,
+    workflow.workflow_id,
+    recovered.revision,
+    review.id,
+  );
+  const bound = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const forgedBound = structuredClone(bound);
+  forgedBound.phase = "LOCAL_GATE_PASSED";
+  await fsp.writeFile(workflowPath, `${canonicalJson(forgedBound)}\n`, {
+    mode: 0o600,
+  });
+  await assert.rejects(
+    getAutonomousWorkflowSummary(state.store, workflow.workflow_id),
+    /WORKFLOW_AUDIT_CORRUPT/,
+  );
 });
 
 test("active action tampering fails before another external transition", async (t) => {
@@ -972,6 +1074,9 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
     updated_at: workflow.updated_at,
     status: workflow.status,
     phase: workflow.phase,
+    current_head_sha: workflow.current_head_sha,
+    pull_request: workflow.pull_request,
+    attempts: workflow.attempts,
     active_action: workflow.active_action,
     reviewer_task: workflow.reviewer_task,
     current_review: workflow.current_review,

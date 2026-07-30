@@ -693,9 +693,28 @@ async function readWorkflowRaw(paths) {
   }
 }
 
-async function writeWorkflow(paths, workflow) {
+function requireWorkflowCapacity(workflow) {
   validateWorkflow(workflow);
-  await atomicWriteCanonicalJson(paths.workflow, workflow);
+  const bytes = Buffer.from(`${canonicalJson(workflow)}\n`);
+  if (bytes.length > MAX_WORKFLOW_BYTES) {
+    fail(
+      "WORKFLOW_STATE_TOO_LARGE",
+      "workflow mutation would exceed its readable limit",
+      {
+        candidate_bytes: bytes.length,
+        max_bytes: MAX_WORKFLOW_BYTES,
+      },
+    );
+  }
+  return bytes;
+}
+
+async function writeWorkflow(paths, workflow) {
+  await atomicWriteFile(
+    paths.workflow,
+    requireWorkflowCapacity(workflow),
+    { mode: 0o600 },
+  );
 }
 
 async function loadClaims(storeRoot) {
@@ -1373,6 +1392,9 @@ async function appendAuditEvent(
       updated_at: workflowState.updated_at,
       status: workflowState.status,
       phase: workflowState.phase,
+      current_head_sha: workflowState.current_head_sha,
+      pull_request: workflowState.pull_request,
+      attempts: workflowState.attempts,
       active_action: workflowState.active_action,
       reviewer_task: workflowState.reviewer_task,
       current_review: workflowState.current_review,
@@ -1445,31 +1467,49 @@ async function appendAuditEvent(
 }
 
 function requireWorkflowAuditBinding(workflow, audit) {
-  const lastState = audit.events.at(-1)?.workflow_state ?? {
-    status: null,
-    phase: null,
+  const lastEvent = audit.events.at(-1) ?? null;
+  const lastState = lastEvent?.workflow_state ?? {
+    revision: 1,
+    updated_at: workflow.created_at,
+    status: "ACTIVE",
+    phase: "IMPLEMENTING",
+    current_head_sha: null,
+    pull_request: null,
+    attempts: [],
     active_action: null,
     reviewer_task: null,
+    current_review: null,
+    progress_fingerprint: null,
     pause: null,
     cancellation: null,
   };
-  const stopStateMustMatch =
-    ["PAUSED", "CANCELLED"].includes(workflow.status) ||
-    ["PAUSED", "CANCELLED"].includes(lastState.status);
+  const claimReleaseFollowsCancellation =
+    workflow.status === "CANCELLED" &&
+    lastState.status === "CANCELLED" &&
+    workflow.claim_release != null &&
+    workflow.claims.every((entry) => entry.disposition !== "ACTIVE") &&
+    workflow.revision === (lastEvent?.workflow_revision ?? 0) + 1;
   if (
+    (!claimReleaseFollowsCancellation &&
+      (workflow.revision !== (lastEvent?.workflow_revision ?? 1) ||
+        workflow.revision !== lastState.revision ||
+        workflow.updated_at !== lastState.updated_at)) ||
+    workflow.status !== lastState.status ||
+    workflow.phase !== lastState.phase ||
+    workflow.current_head_sha !== lastState.current_head_sha ||
+    canonicalJson(workflow.pull_request) !==
+      canonicalJson(lastState.pull_request) ||
+    canonicalJson(workflow.attempts) !== canonicalJson(lastState.attempts) ||
     canonicalJson(workflow.active_action) !==
       canonicalJson(lastState.active_action) ||
     canonicalJson(workflow.reviewer_task) !==
       canonicalJson(lastState.reviewer_task) ||
-    (stopStateMustMatch &&
-      (workflow.status !== lastState.status ||
-        workflow.phase !== lastState.phase ||
-        canonicalJson(workflow.current_review) !==
-          canonicalJson(lastState.current_review) ||
-        workflow.progress_fingerprint !== lastState.progress_fingerprint ||
-        canonicalJson(workflow.pause) !== canonicalJson(lastState.pause) ||
-        canonicalJson(workflow.cancellation) !==
-          canonicalJson(lastState.cancellation)))
+    canonicalJson(workflow.current_review) !==
+      canonicalJson(lastState.current_review) ||
+    workflow.progress_fingerprint !== lastState.progress_fingerprint ||
+    canonicalJson(workflow.pause) !== canonicalJson(lastState.pause) ||
+    canonicalJson(workflow.cancellation) !==
+      canonicalJson(lastState.cancellation)
   ) {
     fail(
       "WORKFLOW_AUDIT_CORRUPT",
@@ -1505,6 +1545,9 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "updated_at",
     "status",
     "phase",
+    "current_head_sha",
+    "pull_request",
+    "attempts",
     "active_action",
     "reviewer_task",
     "current_review",
@@ -1587,10 +1630,19 @@ function requireCapability(workflow, capability) {
 }
 
 async function saveMutation(paths, workflow, mutate) {
+  if (workflow.status === "ACTIVE") {
+    return saveActionMutation(
+      paths,
+      workflow,
+      "WORKFLOW_STATE_UPDATED",
+      mutate,
+    );
+  }
   const next = structuredClone(workflow);
   await mutate(next);
   next.revision += 1;
   next.updated_at = now();
+  requireWorkflowCapacity(next);
   await writeWorkflow(paths, next);
   return next;
 }
@@ -1606,6 +1658,7 @@ async function saveActionMutation(
   await mutate(next);
   next.revision += 1;
   next.updated_at = now();
+  requireWorkflowCapacity(next);
   const appended = await appendAuditEvent(
     paths,
     workflow,
@@ -1867,6 +1920,7 @@ export async function startAutonomousWorkflow(
       last_event_sha256: null,
     },
   };
+  requireWorkflowCapacity(workflow);
 
   await fsp.mkdir(storeRoot, { recursive: true, mode: 0o700 });
   return withClaimsLock(

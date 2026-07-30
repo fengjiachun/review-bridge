@@ -395,6 +395,10 @@ Workflow files use the existing private mode, size limits, exclusive lock,
 canonical serialization, atomic replacement, file sync, and directory sync
 rules. The action audit is append-only with a committed digest-chain head,
 using the same durability model as the publication-gate audit.
+Every active workflow mutation commits a bounded state event before replacing
+the ledger, binding its revision, phase, recorded head and attempts, review
+summary, finding fingerprint, and task state. The unaudited initial revision is
+validated against the canonical `ACTIVE` / `IMPLEMENTING` initial state.
 `action-audit.jsonl` retains an absolute 4 MiB readable limit. Ordinary events
 stop early enough to reserve one maximum-sized cancellation event within that
 limit. If a previously valid near-full log predates that reserve, the optional
