@@ -877,6 +877,32 @@ test("workflow listing ignores incomplete directories but surfaces corrupt state
   );
 });
 
+test("workflow listing surfaces missing mandatory audit artifacts", async (t) => {
+  for (const artifact of [
+    "action-audit.jsonl",
+    "action-audit-head.json",
+  ]) {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    const workflow = await startAutonomousWorkflow(
+      state.store,
+      workflowInput(state.repository, state.baseSha),
+    );
+    await fsp.rm(
+      path.join(
+        state.store,
+        "workflows",
+        workflow.workflow_id,
+        artifact,
+      ),
+    );
+    await assert.rejects(
+      listAutonomousWorkflows(state.store),
+      /WORKFLOW_AUDIT_CORRUPT/,
+    );
+  }
+});
+
 test("a clean independent review advances the local workflow to its PR1 boundary", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

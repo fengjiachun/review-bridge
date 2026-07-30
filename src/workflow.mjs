@@ -1116,17 +1116,27 @@ async function truncateAuditLog(filePath, length) {
 }
 
 async function readAudit(paths, workflowId) {
-  const [head, openedLog] = await Promise.all([
-    readCanonicalSecureJson(
+  let head;
+  let openedLog;
+  try {
+    head = await readCanonicalSecureJson(
       paths.auditHead,
       16 * 1024,
       "WORKFLOW_AUDIT_CORRUPT",
-    ),
-    readSecureFile(paths.auditLog, {
+    );
+    openedLog = await readSecureFile(paths.auditLog, {
       requiredMode: 0o600,
       maxBytes: MAX_AUDIT_BYTES,
-    }),
-  ]);
+    });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      fail(
+        "WORKFLOW_AUDIT_CORRUPT",
+        "workflow action audit artifact is missing",
+      );
+    }
+    throw error;
+  }
   try {
     if (
       head?.version !== 1 ||
