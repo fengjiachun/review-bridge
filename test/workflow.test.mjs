@@ -98,6 +98,54 @@ function workflowInput(repository, baseSha, overrides = {}) {
   };
 }
 
+function workflowAuditEvent(
+  workflow,
+  {
+    sequence,
+    previousEventSha256,
+    eventId,
+    at,
+    event = "WORKFLOW_STATE_UPDATED",
+    metadata = null,
+  },
+) {
+  const unsigned = {
+    version: 1,
+    workflow_id: workflow.workflow_id,
+    sequence,
+    previous_event_sha256: previousEventSha256,
+    event_id: eventId,
+    at,
+    event,
+    ...(metadata == null ? {} : { metadata }),
+    workflow_revision: workflow.revision,
+    action_id: workflow.active_action?.action_id ?? null,
+    workflow_state: {
+      revision: workflow.revision,
+      updated_at: workflow.updated_at,
+      status: workflow.status,
+      phase: workflow.phase,
+      current_head_sha: workflow.current_head_sha,
+      pull_request: workflow.pull_request,
+      attempts: workflow.attempts,
+      active_action: workflow.active_action,
+      reviewer_task: workflow.reviewer_task,
+      current_review: workflow.current_review,
+      progress_fingerprint: workflow.progress_fingerprint,
+      pause: workflow.pause,
+      cancellation: workflow.cancellation,
+    },
+  };
+  const auditEvent = {
+    ...unsigned,
+    event_sha256: sha256(canonicalJson(unsigned)),
+  };
+  return {
+    event: auditEvent,
+    bytes: Buffer.from(`${canonicalJson(auditEvent)}\n`),
+  };
+}
+
 async function commitImplementation(repository, content = "export const value = 2;\n") {
   await fsp.writeFile(path.join(repository, "app.js"), content);
   git(repository, "add", ".");
@@ -303,6 +351,102 @@ test("workflow start rejects an unreadable canonical ledger before claiming owne
     workflowInput(state.repository, state.baseSha),
   );
   assert.equal(workflow.status, "ACTIVE");
+});
+
+test("action mutation preflights the projected audit cursor before committing", async (t) => {
+  const maxWorkflowBytes = 2 * 1024 * 1024;
+  const runBoundary = async (pauseCycles, expectedSequence) => {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    let workflow = await startAutonomousWorkflow(
+      state.store,
+      workflowInput(state.repository, state.baseSha),
+    );
+    for (let index = 0; index < pauseCycles; index += 1) {
+      workflow = await pauseAutonomousWorkflow(
+        state.store,
+        workflow.workflow_id,
+        workflow.revision,
+        {
+          reasonCode: "TASK_ORCHESTRATION_UNAVAILABLE",
+          blockedAction: "CREATE_CODEX_REVIEWER_TASK",
+          evidence: "Exercise the audit cursor boundary.",
+        },
+      );
+      workflow = await resumeAutonomousWorkflow(
+        state.store,
+        workflow.workflow_id,
+        workflow.revision,
+        {
+          operatorLabel: "Test Operator",
+          rationale: "Continue the boundary test.",
+        },
+      );
+    }
+    assert.equal(workflow.action_audit.next_sequence, expectedSequence);
+
+    const headSha = await commitImplementation(state.repository);
+    const workflowRoot = path.join(
+      state.store,
+      "workflows",
+      workflow.workflow_id,
+    );
+    const workflowPath = path.join(workflowRoot, "workflow.json");
+    const auditPath = path.join(workflowRoot, "action-audit.jsonl");
+    const auditHeadPath = path.join(
+      workflowRoot,
+      "action-audit-head.json",
+    );
+    const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+    stored.padding = "";
+    const candidate = structuredClone(stored);
+    candidate.current_head_sha = headSha;
+    candidate.attempts.push({
+      number: candidate.attempts.length + 1,
+      head_sha: headSha,
+      review_id: null,
+      recorded_at: new Date().toISOString(),
+    });
+    candidate.phase = "PREPARE_LOCAL_REVIEW";
+    candidate.revision += 1;
+    candidate.updated_at = new Date().toISOString();
+    const unpaddedBytes = Buffer.byteLength(
+      `${canonicalJson(candidate)}\n`,
+    );
+    stored.padding = "x".repeat(maxWorkflowBytes - unpaddedBytes);
+    candidate.padding = stored.padding;
+    assert.equal(
+      Buffer.byteLength(`${canonicalJson(candidate)}\n`),
+      maxWorkflowBytes,
+    );
+    await fsp.writeFile(
+      workflowPath,
+      `${canonicalJson(stored)}\n`,
+      { mode: 0o600 },
+    );
+    const beforeWorkflow = await fsp.readFile(workflowPath);
+    const beforeAudit = await fsp.readFile(auditPath);
+    const beforeAuditHead = await fsp.readFile(auditHeadPath);
+
+    await assert.rejects(
+      recordWorkflowHead(
+        state.store,
+        workflow.workflow_id,
+        workflow.revision,
+        headSha,
+      ),
+      (error) => {
+        assert.equal(error.code, "WORKFLOW_STATE_TOO_LARGE");
+        return true;
+      },
+    );
+    assert.deepEqual(await fsp.readFile(workflowPath), beforeWorkflow);
+    assert.deepEqual(await fsp.readFile(auditPath), beforeAudit);
+    assert.deepEqual(await fsp.readFile(auditHeadPath), beforeAuditHead);
+  };
+
+  await runBoundary(0, 1);
+  await runBoundary(4, 9);
 });
 
 test("concurrent starts admit exactly one owner", async (t) => {
@@ -1069,48 +1213,19 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
   );
   const maxAuditBytes = 4 * 1024 * 1024;
   const maxEventBytes = 256 * 1024 + 1;
-  const workflowState = {
-    revision: workflow.revision,
-    updated_at: workflow.updated_at,
-    status: workflow.status,
-    phase: workflow.phase,
-    current_head_sha: workflow.current_head_sha,
-    pull_request: workflow.pull_request,
-    attempts: workflow.attempts,
-    active_action: workflow.active_action,
-    reviewer_task: workflow.reviewer_task,
-    current_review: workflow.current_review,
-    progress_fingerprint: workflow.progress_fingerprint,
-    pause: workflow.pause,
-    cancellation: workflow.cancellation,
-  };
   const lines = [];
   let previousDigest = null;
   let sequence = 1;
   let committedBytes = 0;
-  const auditLine = (paddingLength) => {
-    const unsigned = {
-      version: 1,
-      workflow_id: workflow.workflow_id,
+  const auditLine = (paddingLength) =>
+    workflowAuditEvent(workflow, {
       sequence,
-      previous_event_sha256: previousDigest,
-      event_id: sequence.toString(16).padStart(32, "0"),
+      previousEventSha256: previousDigest,
+      eventId: sequence.toString(16).padStart(32, "0"),
       at: new Date().toISOString(),
       event: "WORKFLOW_AUDIT_PADDING",
       metadata: { padding: "x".repeat(paddingLength) },
-      workflow_revision: workflow.revision,
-      action_id: null,
-      workflow_state: workflowState,
-    };
-    const event = {
-      ...unsigned,
-      event_sha256: sha256(canonicalJson(unsigned)),
-    };
-    return {
-      bytes: Buffer.from(`${canonicalJson(event)}\n`),
-      digest: event.event_sha256,
-    };
-  };
+    });
   while (committedBytes < maxAuditBytes) {
     const remaining = maxAuditBytes - committedBytes;
     const empty = auditLine(0);
@@ -1123,7 +1238,7 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
     assert.ok(line.bytes.length <= maxEventBytes);
     lines.push(line.bytes);
     committedBytes += line.bytes.length;
-    previousDigest = line.digest;
+    previousDigest = line.event.event_sha256;
     sequence += 1;
   }
   assert.equal(committedBytes, maxAuditBytes);
@@ -1152,6 +1267,11 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
   );
   const preCancellationHead = await fsp.readFile(auditHeadPath);
   const preCancellationWorkflow = await fsp.readFile(workflowPath);
+  const maxEscapedCancellationRationale = "\0".repeat(5_461);
+  assert.equal(
+    Buffer.byteLength(canonicalJson(maxEscapedCancellationRationale)),
+    32 * 1024,
+  );
 
   await assert.rejects(
     pauseAutonomousWorkflow(
@@ -1173,7 +1293,7 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
     workflow.revision,
     {
       operatorLabel: "Test Operator",
-      rationale: "Preserve the terminal audit reserve for cleanup.",
+      rationale: maxEscapedCancellationRationale,
     },
   );
   assert.equal(cancelled.status, "CANCELLED");
@@ -1211,6 +1331,151 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
     released.claims.every((claim) => claim.disposition === "RELEASED"),
     true,
   );
+});
+
+test("active mutations preserve per-event cancellation headroom", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const workflowRoot = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+  );
+  const workflowPath = path.join(workflowRoot, "workflow.json");
+  const auditPath = path.join(workflowRoot, "action-audit.jsonl");
+  const auditHeadPath = path.join(workflowRoot, "action-audit-head.json");
+  const timestamp = new Date().toISOString();
+  const stored = structuredClone(workflow);
+  stored.revision = 2;
+  stored.updated_at = timestamp;
+  stored.current_head_sha = state.baseSha;
+  stored.attempts = [
+    {
+      number: 1,
+      head_sha: state.baseSha,
+      review_id: null,
+      recorded_at: timestamp,
+      padding: "",
+    },
+  ];
+  const pessimisticCancellation = structuredClone(stored);
+  pessimisticCancellation.revision = Number.MAX_SAFE_INTEGER;
+  pessimisticCancellation.updated_at = "9999-12-31T23:59:59.999Z";
+  pessimisticCancellation.status = "CANCELLED";
+  pessimisticCancellation.phase = "CANCELLED";
+  pessimisticCancellation.cancellation = {
+    operator_label: "\0".repeat(1_024),
+    rationale: "x".repeat(32 * 1024 - 2),
+    cancelled_at: "9999-12-31T23:59:59.999Z",
+  };
+  const pessimisticOptions = {
+    sequence: Number.MAX_SAFE_INTEGER,
+    previousEventSha256: "f".repeat(64),
+    eventId: "f".repeat(32),
+    at: "9999-12-31T23:59:59.999Z",
+    event: "WORKFLOW_CANCELLED",
+  };
+  const maxEventBytes = 256 * 1024 + 1;
+  const unpaddedCancellationBytes = workflowAuditEvent(
+    pessimisticCancellation,
+    pessimisticOptions,
+  ).bytes.length;
+  stored.attempts[0].padding = "x".repeat(
+    maxEventBytes - unpaddedCancellationBytes - 64,
+  );
+  pessimisticCancellation.attempts = structuredClone(stored.attempts);
+  assert.equal(
+    workflowAuditEvent(
+      pessimisticCancellation,
+      pessimisticOptions,
+    ).bytes.length,
+    maxEventBytes - 64,
+  );
+
+  const seedEvent = workflowAuditEvent(stored, {
+    sequence: 1,
+    previousEventSha256: null,
+    eventId: "1".repeat(32),
+    at: timestamp,
+  });
+  assert.ok(seedEvent.bytes.length <= maxEventBytes);
+  await fsp.writeFile(auditPath, seedEvent.bytes, { mode: 0o600 });
+  stored.action_audit = {
+    next_sequence: 2,
+    last_event_sha256: seedEvent.event.event_sha256,
+  };
+  await fsp.writeFile(
+    auditHeadPath,
+    `${canonicalJson({
+      version: 1,
+      workflow_id: workflow.workflow_id,
+      committed_bytes: seedEvent.bytes.length,
+      next_sequence: 2,
+      last_event_sha256: seedEvent.event.event_sha256,
+      terminal_event_sha256: null,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  await fsp.writeFile(
+    workflowPath,
+    `${canonicalJson(stored)}\n`,
+    { mode: 0o600 },
+  );
+
+  const headSha = await commitImplementation(state.repository);
+  const beforeWorkflow = await fsp.readFile(workflowPath);
+  const beforeAudit = await fsp.readFile(auditPath);
+  const beforeAuditHead = await fsp.readFile(auditHeadPath);
+  await assert.rejects(
+    recordWorkflowHead(
+      state.store,
+      workflow.workflow_id,
+      stored.revision,
+      headSha,
+    ),
+    (error) => {
+      assert.equal(
+        error.code,
+        "WORKFLOW_CANCELLATION_RESERVE_EXHAUSTED",
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(await fsp.readFile(workflowPath), beforeWorkflow);
+  assert.deepEqual(await fsp.readFile(auditPath), beforeAudit);
+  assert.deepEqual(await fsp.readFile(auditHeadPath), beforeAuditHead);
+
+  await assert.rejects(
+    cancelAutonomousWorkflow(
+      state.store,
+      workflow.workflow_id,
+      stored.revision,
+      {
+        operatorLabel: "Test Operator",
+        rationale: "\0".repeat(5_462),
+      },
+    ),
+    /canonical byte limit/,
+  );
+  assert.deepEqual(await fsp.readFile(workflowPath), beforeWorkflow);
+  assert.deepEqual(await fsp.readFile(auditPath), beforeAudit);
+  assert.deepEqual(await fsp.readFile(auditHeadPath), beforeAuditHead);
+
+  const cancelled = await cancelAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    stored.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "\0".repeat(5_461),
+    },
+  );
+  assert.equal(cancelled.status, "CANCELLED");
+  assert.ok((await fsp.stat(auditPath)).size > beforeAudit.length);
 });
 
 test("missing task orchestration pauses with its active intent intact", async (t) => {

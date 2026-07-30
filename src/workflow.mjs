@@ -36,6 +36,7 @@ const MAX_AUDIT_BYTES = 4 * 1024 * 1024;
 const MAX_AUDIT_EVENT_BYTES = 256 * 1024;
 const MAX_ORDINARY_AUDIT_BYTES =
   MAX_AUDIT_BYTES - MAX_AUDIT_EVENT_BYTES - 1;
+const MAX_CANCELLATION_RATIONALE_BYTES = 32 * 1024;
 const MAX_RECONCILIATION_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_CLOCK_SKEW_MS = 30 * 1000;
 
@@ -57,6 +58,13 @@ function assertString(value, name, { max = 200_000 } = {}) {
     value.length > max
   ) {
     throw new TypeError(`${name} must be a non-empty string`);
+  }
+  return value;
+}
+
+function assertCanonicalStringCapacity(value, name, maxBytes) {
+  if (Buffer.byteLength(canonicalJson(value)) > maxBytes) {
+    throw new TypeError(`${name} exceeds its canonical byte limit`);
   }
   return value;
 }
@@ -1365,21 +1373,43 @@ async function readAudit(paths, workflowId) {
   }
 }
 
-async function appendAuditEvent(
-  paths,
+function auditedWorkflowState(workflow) {
+  return {
+    revision: workflow.revision,
+    updated_at: workflow.updated_at,
+    status: workflow.status,
+    phase: workflow.phase,
+    current_head_sha: workflow.current_head_sha,
+    pull_request: workflow.pull_request,
+    attempts: workflow.attempts,
+    active_action: workflow.active_action,
+    reviewer_task: workflow.reviewer_task,
+    current_review: workflow.current_review,
+    progress_fingerprint: workflow.progress_fingerprint,
+    pause: workflow.pause,
+    cancellation: workflow.cancellation,
+  };
+}
+
+function prepareAuditEvent(
   workflow,
   event,
   workflowState,
-  metadata = null,
+  metadata,
+  {
+    sequence,
+    previousEventSha256,
+    eventId = crypto.randomBytes(16).toString("hex"),
+    at = now(),
+  },
 ) {
-  const session = await readAudit(paths, workflow.workflow_id);
   const unsigned = {
     version: 1,
     workflow_id: workflow.workflow_id,
-    sequence: session.head.next_sequence,
-    previous_event_sha256: session.head.last_event_sha256,
-    event_id: crypto.randomBytes(16).toString("hex"),
-    at: now(),
+    sequence,
+    previous_event_sha256: previousEventSha256,
+    event_id: eventId,
+    at,
     event,
     ...(metadata == null ? {} : { metadata }),
     workflow_revision: workflowState.revision,
@@ -1387,27 +1417,75 @@ async function appendAuditEvent(
       workflowState.active_action?.action_id ??
       workflow.active_action?.action_id ??
       null,
-    workflow_state: {
-      revision: workflowState.revision,
-      updated_at: workflowState.updated_at,
-      status: workflowState.status,
-      phase: workflowState.phase,
-      current_head_sha: workflowState.current_head_sha,
-      pull_request: workflowState.pull_request,
-      attempts: workflowState.attempts,
-      active_action: workflowState.active_action,
-      reviewer_task: workflowState.reviewer_task,
-      current_review: workflowState.current_review,
-      progress_fingerprint: workflowState.progress_fingerprint,
-      pause: workflowState.pause,
-      cancellation: workflowState.cancellation,
-    },
+    workflow_state: auditedWorkflowState(workflowState),
   };
   const auditEvent = {
     ...unsigned,
     event_sha256: sha256(canonicalJson(unsigned)),
   };
-  const eventBytes = Buffer.from(`${canonicalJson(auditEvent)}\n`);
+  return {
+    event: auditEvent,
+    bytes: Buffer.from(`${canonicalJson(auditEvent)}\n`),
+  };
+}
+
+function requireCancellationReserve(workflow) {
+  const cancelled = structuredClone(workflow);
+  cancelled.revision = Number.MAX_SAFE_INTEGER;
+  cancelled.updated_at = "9999-12-31T23:59:59.999Z";
+  cancelled.status = "CANCELLED";
+  cancelled.phase = "CANCELLED";
+  cancelled.pause = null;
+  cancelled.cancellation = {
+    operator_label: "\0".repeat(1024),
+    rationale: "x".repeat(MAX_CANCELLATION_RATIONALE_BYTES - 2),
+    cancelled_at: "9999-12-31T23:59:59.999Z",
+  };
+  const prepared = prepareAuditEvent(
+    cancelled,
+    "WORKFLOW_CANCELLED",
+    cancelled,
+    null,
+    {
+      sequence: Number.MAX_SAFE_INTEGER,
+      previousEventSha256: "f".repeat(64),
+      eventId: "f".repeat(32),
+      at: "9999-12-31T23:59:59.999Z",
+    },
+  );
+  if (prepared.bytes.length > MAX_AUDIT_EVENT_BYTES + 1) {
+    fail(
+      "WORKFLOW_CANCELLATION_RESERVE_EXHAUSTED",
+      "workflow mutation would leave no room for a cancellation event",
+      {
+        candidate_bytes: prepared.bytes.length,
+        max_bytes: MAX_AUDIT_EVENT_BYTES + 1,
+      },
+    );
+  }
+}
+
+async function appendAuditEvent(
+  paths,
+  workflow,
+  event,
+  workflowState,
+  metadata = null,
+  beforeCommit = null,
+) {
+  const session = await readAudit(paths, workflow.workflow_id);
+  const prepared = prepareAuditEvent(
+    workflow,
+    event,
+    workflowState,
+    metadata,
+    {
+      sequence: session.head.next_sequence,
+      previousEventSha256: session.head.last_event_sha256,
+    },
+  );
+  const auditEvent = prepared.event;
+  const eventBytes = prepared.bytes;
   if (eventBytes.length > MAX_AUDIT_EVENT_BYTES + 1) {
     fail("WORKFLOW_AUDIT_EVENT_TOO_LARGE", "audit event is too large");
   }
@@ -1422,19 +1500,24 @@ async function appendAuditEvent(
       "audit event would exceed the readable audit log limit",
     );
   }
-  if (
+  const terminal =
     event === "WORKFLOW_CANCELLED" &&
-    nextCommittedBytes > MAX_AUDIT_BYTES
-  ) {
+    nextCommittedBytes > MAX_AUDIT_BYTES;
+  const head = {
+    version: 1,
+    workflow_id: workflow.workflow_id,
+    committed_bytes: terminal
+      ? session.head.committed_bytes
+      : nextCommittedBytes,
+    next_sequence: session.head.next_sequence + 1,
+    last_event_sha256: auditEvent.event_sha256,
+    terminal_event_sha256: terminal
+      ? auditEvent.event_sha256
+      : null,
+  };
+  beforeCommit?.({ event: auditEvent, head });
+  if (terminal) {
     await atomicWriteFile(paths.auditTerminal, eventBytes, { mode: 0o600 });
-    const head = {
-      version: 1,
-      workflow_id: workflow.workflow_id,
-      committed_bytes: session.head.committed_bytes,
-      next_sequence: session.head.next_sequence + 1,
-      last_event_sha256: auditEvent.event_sha256,
-      terminal_event_sha256: auditEvent.event_sha256,
-    };
     await atomicWriteCanonicalJson(paths.auditHead, head);
     return { event: auditEvent, head };
   }
@@ -1454,14 +1537,6 @@ async function appendAuditEvent(
   } finally {
     await handle.close();
   }
-  const head = {
-    version: 1,
-    workflow_id: workflow.workflow_id,
-    committed_bytes: nextCommittedBytes,
-    next_sequence: session.head.next_sequence + 1,
-    last_event_sha256: auditEvent.event_sha256,
-    terminal_event_sha256: null,
-  };
   await atomicWriteCanonicalJson(paths.auditHead, head);
   return { event: auditEvent, head };
 }
@@ -1658,13 +1733,23 @@ async function saveActionMutation(
   await mutate(next);
   next.revision += 1;
   next.updated_at = now();
-  requireWorkflowCapacity(next);
+  if (next.status !== "CANCELLED") {
+    requireCancellationReserve(next);
+  }
   const appended = await appendAuditEvent(
     paths,
     workflow,
     event,
     next,
     metadata,
+    ({ head }) => {
+      const candidate = structuredClone(next);
+      candidate.action_audit = {
+        next_sequence: head.next_sequence,
+        last_event_sha256: head.last_event_sha256,
+      };
+      requireWorkflowCapacity(candidate);
+    },
   );
   next.action_audit = {
     next_sequence: appended.head.next_sequence,
@@ -1920,6 +2005,7 @@ export async function startAutonomousWorkflow(
       last_event_sha256: null,
     },
   };
+  requireCancellationReserve(workflow);
   requireWorkflowCapacity(workflow);
 
   await fsp.mkdir(storeRoot, { recursive: true, mode: 0o700 });
@@ -2654,6 +2740,11 @@ export async function cancelAutonomousWorkflow(
 ) {
   assertString(operatorLabel, "operator_label", { max: 1024 });
   assertString(rationale, "rationale");
+  assertCanonicalStringCapacity(
+    rationale,
+    "rationale",
+    MAX_CANCELLATION_RATIONALE_BYTES,
+  );
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
     if (!["ACTIVE", "PAUSED"].includes(workflow.status)) {

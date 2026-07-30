@@ -399,12 +399,19 @@ Every active workflow mutation commits a bounded state event before replacing
 the ledger, binding its revision, phase, recorded head and attempts, review
 summary, finding fingerprint, and task state. The unaudited initial revision is
 validated against the canonical `ACTIVE` / `IMPLEMENTING` initial state.
+Before either audit artifact is written, the exact replacement ledger is
+serialized with the projected sequence and digest cursor and checked against
+the 2 MiB ledger limit.
 `action-audit.jsonl` retains an absolute 4 MiB readable limit. Ordinary events
 stop early enough to reserve one maximum-sized cancellation event within that
 limit. If a previously valid near-full log predates that reserve, the optional
 terminal segment stores exactly one bounded `WORKFLOW_CANCELLED` event linked
 to the main log's final digest; the same head commits the cross-segment
-sequence and recovery may adopt one complete terminal crash candidate.
+sequence and recovery may adopt one complete terminal crash candidate. Active
+and paused mutations also reserve enough of the 256 KiB per-event limit for a
+worst-case accepted cancellation. Cancellation rationale is capped at 32 KiB
+after canonical JSON string encoding, so escaped input cannot consume that
+reserved headroom.
 
 No existing `review.json` or `publication.json` is migrated. Older Review
 Bridge clients may continue their existing workflows but cannot advance a new
