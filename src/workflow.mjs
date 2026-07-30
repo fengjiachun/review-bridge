@@ -1898,7 +1898,10 @@ export async function advanceLocalWorkflow(
         "CLEAN",
         "HUMAN_REQUIRED",
       ]),
-      ADDRESS_LOCAL_FINDINGS: new Set(["AUTHOR_RESPONDED"]),
+      ADDRESS_LOCAL_FINDINGS: new Set([
+        "AUTHOR_RESPONDED",
+        "HUMAN_REQUIRED",
+      ]),
       PREPARE_REREVIEW: new Set(["WAITING_FOR_REREVIEW"]),
       WAIT_LOCAL_REREVIEW: new Set(["CLEAN", "HUMAN_REQUIRED"]),
       FINALIZE_LOCAL_GATE: new Set(["LOCAL_GATE_PASSED"]),

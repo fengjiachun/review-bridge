@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   finalizeLocalGate,
+  getReviewSummary,
   prepareRereview,
   prepareReview,
   submitInitialReview,
@@ -757,6 +758,55 @@ test("round-two advancement rejects an overlay-bearing snapshot", async (t) => {
     ),
     /WORKFLOW_REVIEW_DIRTY/,
   );
+});
+
+test("an author human-required resolution pauses without preparing round two", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const { completed } = await dispatchReviewer(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [
+      {
+        severity: "major",
+        title: "Requires operator policy",
+        explanation: "The implementation depends on an operator decision.",
+      },
+    ],
+    "CODEX_TASK",
+  );
+  const findings = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    completed.revision,
+  );
+  await submitResolutions(state.store, review.id, [
+    {
+      finding_id: "F-001",
+      disposition: "human_required",
+      rationale: "Only the operator can choose the required policy.",
+    },
+  ]);
+
+  const paused = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    findings.revision,
+  );
+  assert.equal(paused.status, "PAUSED");
+  assert.equal(paused.phase, "PAUSED_HUMAN");
+  assert.equal(paused.pause.reason_code, "LOCAL_REVIEW_HUMAN_REQUIRED");
+  assert.equal(paused.pause.review_id, review.id);
+  const reviewState = await getReviewSummary(state.store, review.id);
+  assert.equal(reviewState.status, "HUMAN_REQUIRED");
+  assert.equal(reviewState.current_round, 1);
 });
 
 test("round-two unresolved findings pause without creating a third round", async (t) => {
