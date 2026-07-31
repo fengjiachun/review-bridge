@@ -310,11 +310,24 @@ function diffHeaderPath(header) {
     }
     candidate = decoded.slice(2);
   } else {
-    const separator = header.lastIndexOf(" b/");
-    if (separator < 0) {
+    // An unquoted header is `diff --git a/X b/X`, and a filename may legally
+    // contain ` b/` (`a/foo b/bar b/foo b/bar`), so searching for the
+    // separator is ambiguous. The two sides have equal length, which pins the
+    // split to exactly one position; verify it instead of guessing. Renames
+    // (`a/old b/new`) fail the check and stay path-null, which the reviewer
+    // instructions turn into a mandatory read.
+    const content = header.slice(DIFF_HEADER.length);
+    const pathLength = (content.length - 5) / 2;
+    if (
+      !Number.isInteger(pathLength) ||
+      pathLength < 1 ||
+      !content.startsWith("a/") ||
+      content.slice(2 + pathLength, 5 + pathLength) !== " b/" ||
+      content.slice(2, 2 + pathLength) !== content.slice(5 + pathLength)
+    ) {
       return null;
     }
-    candidate = header.slice(separator + 3);
+    candidate = content.slice(5 + pathLength);
   }
   if (candidate === "") {
     return null;
@@ -1060,18 +1073,27 @@ async function automaticParentCandidates(storeRoot, { manifest, requirement }) {
     if (ancestry.error || ancestry.status !== 0) {
       continue;
     }
-    candidates.push(review);
+    // Candidates travel as their validated directory names, never as the
+    // ledger's internal id: a corrupted stored id would otherwise throw in
+    // the successor proof and abort preparation outright, instead of being
+    // rejected by the proof's own id-mismatch fallback.
+    candidates.push({ id: entry.name, review });
   }
   // Prefer a parent gated for the same stated requirement; otherwise the most
   // recently gated ancestor, which is the smallest delta.
   return candidates
     .sort((a, b) => {
-      const aMatch = a.requirement === requirement ? 0 : 1;
-      const bMatch = b.requirement === requirement ? 0 : 1;
-      return aMatch - bMatch || b.updated_at.localeCompare(a.updated_at);
+      const aMatch = a.review.requirement === requirement ? 0 : 1;
+      const bMatch = b.review.requirement === requirement ? 0 : 1;
+      return (
+        aMatch - bMatch ||
+        String(b.review.updated_at ?? "").localeCompare(
+          String(a.review.updated_at ?? ""),
+        )
+      );
     })
     .slice(0, MAX_AUTOMATIC_PARENT_CANDIDATES)
-    .map((review) => review.id);
+    .map((candidate) => candidate.id);
 }
 
 async function resolveReviewStrategy({

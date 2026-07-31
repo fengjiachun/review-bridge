@@ -30,9 +30,11 @@
   Past 400 files the index is
   truncated but still spans the whole patch: a final `path: null` entry covers
   the remainder, which reviewers must read in full. Quoted Git paths —
-  filenames with quotes, control bytes, or non-ASCII — are decoded, and any
-  section whose name still cannot be decoded keeps `path: null` and is read in
-  full under the same rule. The index is advisory and is not part of the
+  filenames with quotes, control bytes, or non-ASCII — are decoded, unquoted
+  headers are resolved by the equal-length structure of `a/X b/X` rather than
+  by searching for a separator a filename could legally contain, and any
+  section whose name still cannot be resolved — including renames — keeps
+  `path: null` and is read in full under the same rule. The index is advisory and is not part of the
   snapshot commitment.
 
 ### Changed

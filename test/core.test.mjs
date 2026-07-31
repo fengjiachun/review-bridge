@@ -2002,3 +2002,101 @@ test("the served patch index comes from the immutable patch, not the ledger", as
   assert.equal(reopened.current_snapshot.patch_index, null);
   assert.equal(reopened.current_snapshot.patch_index_truncated, false);
 });
+
+test("the patch index resolves filenames containing ' b/' unambiguously", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  await fsp.mkdir(path.join(repository, "foo b"), { recursive: true });
+  await fsp.writeFile(
+    path.join(repository, "foo b", "bar"),
+    "export const tricky = 1;\n",
+  );
+  await fsp.writeFile(path.join(repository, "plain.js"), "export const p = 1;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "ambiguous name");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Add an awkward directory name.",
+    implementationScope: "Add files under 'foo b'.",
+  });
+  const opened = await openReview(store, prepared.id);
+  const index = opened.current_snapshot.patch_index;
+
+  // `diff --git a/foo b/bar b/foo b/bar` must resolve to the whole path, not
+  // to a spurious `bar` cut at the last ` b/`.
+  assert.deepEqual(
+    index.map((entry) => entry.path).sort(),
+    ["foo b/bar", "plain.js"],
+  );
+  const tricky = index.find((entry) => entry.path === "foo b/bar");
+  const section = await readReviewArtifact(
+    store,
+    prepared.id,
+    1,
+    "patch.diff",
+    tricky.offset,
+    tricky.bytes,
+  );
+  assert.match(section.content, /export const tricky = 1;/);
+  assert.doesNotMatch(section.content, /const p = 1;/);
+});
+
+test("a corrupted stored candidate cannot abort unattended preparation", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const requirement = "Harden the fixture in reviewed increments.";
+
+  await fsp.writeFile(path.join(repository, "parent-only.js"), "export const p = 1;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "parent change");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement,
+    implementationScope: "Add the parent behavior.",
+  });
+  await submitInitialReview(store, parent.id, []);
+  await finalizeLocalGate(store, parent.id);
+
+  // A second gated review whose internal id was tampered with. It passes the
+  // candidate filters, so preparation must survive it and fall through to the
+  // proof's own id-mismatch rejection rather than throwing.
+  const decoy = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement,
+    implementationScope: "Decoy candidate.",
+  });
+  await submitInitialReview(store, decoy.id, []);
+  await finalizeLocalGate(store, decoy.id);
+  const decoyPath = path.join(store, "reviews", decoy.id, "review.json");
+  const decoyLedger = JSON.parse(await fsp.readFile(decoyPath, "utf8"));
+  decoyLedger.id = "not-a-valid-review-id";
+  // Push the decoy to the front of the preference order.
+  decoyLedger.updated_at = "2999-01-01T00:00:00.000Z";
+  await fsp.writeFile(decoyPath, `${JSON.stringify(decoyLedger)}\n`, {
+    mode: 0o600,
+  });
+
+  await fsp.writeFile(path.join(repository, "child-only.js"), "export const c = 2;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "child change");
+
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement,
+    implementationScope: "Add the child behavior.",
+  });
+
+  // The corrupted candidate is rejected by the proof, and selection falls
+  // through to the intact parent.
+  assert.equal(child.review_strategy.mode, "SUCCESSOR");
+  assert.equal(child.review_strategy.parent_selection, "AUTOMATIC");
+  assert.equal(child.review_strategy.parent_review_id, parent.id);
+});
