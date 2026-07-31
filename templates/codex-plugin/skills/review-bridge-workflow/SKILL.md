@@ -11,9 +11,11 @@ remote-only GitHub publication.
 
 ## Autonomous local workflow
 
-The schema-version-1 autonomous workflow is opt-in and currently advances only
-through the local `CODEX_TASK` gate. It does not yet automate GitHub
-publication, remote findings, ready-state changes, or thread resolution.
+The schema-version-1 autonomous workflow is opt-in and currently advances
+through the local `CODEX_TASK` gate, the reconciled push of the gated head,
+and the marker-bound draft pull request, stopping at `START_PUBLICATION`.
+It does not yet automate publication ledgers, remote review waiting or
+repair, ready-state changes, or thread resolution.
 
 1. Obtain direct operator authorization for the exact repository path,
    operator-selected base ref and resolved full base SHA, requirement,
