@@ -66,13 +66,16 @@ publication, remote findings, ready-state changes, or thread resolution.
    the URL against the rule's **value** and rewrites it to the base, so a
    rule can capture the pinned URL in only two shapes, and each needs its
    own defense. First, immediately before pushing, run
-   `git config --get-regexp '^url\..*\.(insteadof|pushinsteadof)$'` and
-   take each rule's **value** (the second field of the output line): if any
-   value equals `active_action.target.remote_url` exactly, pause with
-   `EXTERNAL_ACTION_INDETERMINATE` — Git breaks equal-length ties in favor
-   of the earliest-parsed rule, so an exact-value rule cannot be overridden
-   from the command line, and its base is where the push would actually
-   go. Then push with identity
+   `git config -z --get-regexp '^url\..*\.(insteadof|pushinsteadof)$'` and
+   parse the NUL-terminated records: in each record the key ends at the
+   first newline and everything after it is the rule's **value** — never
+   split on spaces, because a key's base may legally contain them
+   (`url."ext::sh -c …"`). If any value equals
+   `active_action.target.remote_url` exactly, or any record cannot be
+   parsed this way, pause with `EXTERNAL_ACTION_INDETERMINATE` — Git breaks
+   equal-length ties in favor of the earliest-parsed rule, so an
+   exact-value rule cannot be overridden from the command line, and its
+   base is where the push would actually go. Then push with identity
    rules that defeat every shorter-prefix rule — `git -c
    "url.<PINNED>.insteadOf=<PINNED>" -c "url.<PINNED>.pushInsteadOf=<PINNED>"
    push <PINNED> <active_action.target.head_sha>:refs/heads/<topic_branch>`
