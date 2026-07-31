@@ -395,8 +395,12 @@ holds no claims and is ignored by conflict scans, reads, and listings. Claim
 release mutates only the owning ledger, so a torn multi-file claim state
 cannot exist, and the ledger validates that an active or paused workflow holds
 exactly its two authorized claims while released claims appear only on a
-cancelled workflow together with their release evidence. Concurrent starts are
-serialized so exactly one claimant succeeds.
+cancelled workflow together with their release evidence. Claim dispositions
+and release evidence are part of the audited workflow state, and the release
+itself commits an audit event: a ledger that claims released ownership
+without that committed transition fails the audit binding, and a conflict
+scan trusts released claims only after the full locked load replays that
+proof. Concurrent starts are serialized so exactly one claimant succeeds.
 
 Workflow files use the existing private mode, size limits, exclusive lock,
 canonical serialization, atomic replacement, file sync, and directory sync
@@ -410,16 +414,17 @@ Before either audit artifact is written, the exact replacement ledger is
 serialized with the projected sequence and digest cursor and checked against
 the 2 MiB ledger limit.
 `action-audit.jsonl` retains an absolute 4 MiB readable limit. Ordinary events
-stop early enough to reserve one maximum-sized cancellation event within that
-limit, so an accepted cancellation always fits the main log. Workflow start
-and every active or paused mutation also reserve the full worst-case
-cancellation: the pessimistic cancelled audit event must fit the 256 KiB
-per-event limit, and the pessimistic cancelled ledger — including a maximal
-revision, audit cursor, operator label, and rationale — must still fit the
-2 MiB ledger limit. A mutation that would leave either reserve short is
-rejected before any artifact is written. Cancellation rationale is capped at
-32 KiB after canonical JSON string encoding, so escaped input cannot consume
-that reserved headroom.
+stop early enough to reserve two maximum-sized terminal events within that
+limit, so an accepted cancellation and its later audited claim release always
+fit the main log. Workflow start and every active or paused mutation also
+reserve the full worst-case stop: the pessimistic cancelled-and-released
+audit event must fit the 256 KiB per-event limit, and the pessimistic
+cancelled-and-released ledger — including a maximal revision, audit cursor,
+operator label, rationale, and reconciled release evidence — must still fit
+the 2 MiB ledger limit. A mutation that would leave either reserve short is
+rejected before any artifact is written. Cancellation and release rationale
+are capped at 32 KiB after canonical JSON string encoding, so escaped input
+cannot consume that reserved headroom.
 
 No existing `review.json` or `publication.json` is migrated. Older Review
 Bridge clients may continue their existing workflows but cannot advance a new

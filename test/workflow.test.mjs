@@ -130,6 +130,8 @@ function workflowAuditEvent(
       progress_fingerprint: workflow.progress_fingerprint,
       pause: workflow.pause,
       cancellation: workflow.cancellation,
+      claims: workflow.claims,
+      claim_release: workflow.claim_release ?? null,
     },
   };
   const auditEvent = {
@@ -361,22 +363,40 @@ test("workflow start rejects a ledger that cannot reserve its cancellation", asy
 test("mutations reserve full cancellation persistence before any write", async (t) => {
   const maxWorkflowBytes = 2 * 1024 * 1024;
   const pessimisticCancelBytes = (candidate) => {
-    const cancelled = structuredClone(candidate);
-    cancelled.revision = Number.MAX_SAFE_INTEGER;
-    cancelled.updated_at = "9999-12-31T23:59:59.999Z";
-    cancelled.status = "CANCELLED";
-    cancelled.phase = "CANCELLED";
-    cancelled.pause = null;
-    cancelled.cancellation = {
+    const released = structuredClone(candidate);
+    released.revision = Number.MAX_SAFE_INTEGER;
+    released.updated_at = "9999-12-31T23:59:59.999Z";
+    released.status = "CANCELLED";
+    released.phase = "CANCELLED";
+    released.pause = null;
+    released.cancellation = {
       operator_label: "\0".repeat(1024),
       rationale: "x".repeat(32 * 1024 - 2),
       cancelled_at: "9999-12-31T23:59:59.999Z",
     };
-    cancelled.action_audit = {
+    released.claims = released.claims.map((entry) => ({
+      ...entry,
+      disposition: "RELEASED",
+      released_at: "9999-12-31T23:59:59.999Z",
+    }));
+    released.claim_release = {
+      operator_label: "\0".repeat(1024),
+      rationale: "x".repeat(32 * 1024 - 2),
+      released_at: "9999-12-31T23:59:59.999Z",
+      reconciliation: released.claims.map((entry) => ({
+        kind: entry.kind,
+        canonical_key_sha256: entry.canonical_key_sha256,
+        target: structuredClone(entry.target),
+        workflow_revision: Number.MAX_SAFE_INTEGER,
+        present: false,
+        observed_at: "9999-12-31T23:59:59.999Z",
+      })),
+    };
+    released.action_audit = {
       next_sequence: Number.MAX_SAFE_INTEGER,
       last_event_sha256: "f".repeat(64),
     };
-    return Buffer.byteLength(`${canonicalJson(cancelled)}\n`);
+    return Buffer.byteLength(`${canonicalJson(released)}\n`);
   };
   const runBoundary = async (excessBytes) => {
     const state = await fixture();
@@ -1167,7 +1187,7 @@ test("the audit log reserves cancellation headroom at its ordinary limit", async
   const auditHeadPath = path.join(workflowRoot, "action-audit-head.json");
   const maxAuditBytes = 4 * 1024 * 1024;
   const maxEventBytes = 256 * 1024 + 1;
-  const ordinaryLimit = maxAuditBytes - maxEventBytes;
+  const ordinaryLimit = maxAuditBytes - 2 * maxEventBytes;
   const lines = [];
   let previousDigest = null;
   let sequence = 1;
@@ -2361,6 +2381,138 @@ test("derived ownership claims stay bound to the authorized scope", async (t) =>
     getAutonomousWorkflow(state.store, workflow.workflow_id),
     /does not match its authorized scope/,
   );
+});
+
+
+test("a verdict recorded before dispatch completion cannot be adopted", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const planned = await planCodexTaskDispatch(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    planned.workflow.revision,
+    planned.action.action_id,
+  );
+  const observed = await recordCodexTaskObservation(
+    state.store,
+    workflow.workflow_id,
+    executing.revision,
+    planned.action.action_id,
+    {
+      matchingTaskIds: ["task-early"],
+      taskId: "task-early",
+      title: planned.dispatch.title,
+      prompt: planned.dispatch.prompt,
+    },
+  );
+
+  // A verdict lands between task observation and dispatch completion: it
+  // predates the completed independent task and must not be adopted.
+  await submitInitialReview(state.store, review.id, [], "CODEX_TASK");
+
+  await assert.rejects(
+    completeWorkflowAction(
+      state.store,
+      workflow.workflow_id,
+      observed.revision,
+      planned.action.action_id,
+    ),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_REVIEW_TRANSITION_INVALID");
+      return true;
+    },
+  );
+  const stuck = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(stuck.phase, "DISPATCH_CODEX_REVIEWER");
+  assert.equal(stuck.active_action.status, "OBSERVED");
+  assert.equal(stuck.reviewer_task, null);
+});
+
+test("a fabricated claim release fails the audit binding and keeps the branch owned", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const cancelled = await cancelAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "Stop before the tamper attempt.",
+    },
+  );
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const releasedAt = new Date().toISOString();
+  const tampered = structuredClone(stored);
+  for (const entry of tampered.claims) {
+    entry.disposition = "RELEASED";
+    entry.released_at = releasedAt;
+  }
+  tampered.claim_release = {
+    operator_label: "Test Operator",
+    rationale: "Fabricated release without an audited transition.",
+    released_at: releasedAt,
+    reconciliation: [],
+  };
+  tampered.revision += 1;
+  await fsp.writeFile(workflowPath, `${canonicalJson(tampered)}\n`, {
+    mode: 0o600,
+  });
+
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, workflow.workflow_id),
+    /WORKFLOW_AUDIT_CORRUPT/,
+  );
+  await assert.rejects(
+    startAutonomousWorkflow(
+      state.store,
+      workflowInput(state.repository, state.baseSha),
+    ),
+    /WORKFLOW_AUDIT_CORRUPT/,
+  );
+
+  // The audited release still works and frees the branch for a successor.
+  await fsp.writeFile(workflowPath, `${canonicalJson(stored)}\n`, {
+    mode: 0o600,
+  });
+  const released = await releaseWorkflowClaims(
+    state.store,
+    workflow.workflow_id,
+    cancelled.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "No external objects remain.",
+      reconciledClaims: claimReleaseEvidence(cancelled),
+    },
+  );
+  assert.equal(
+    released.claims.every((entry) => entry.disposition === "RELEASED"),
+    true,
+  );
+  const successor = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  assert.equal(successor.status, "ACTIVE");
 });
 
 test("an active workflow cannot carry released claims", async (t) => {

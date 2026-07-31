@@ -33,8 +33,10 @@ const DIGEST_RE = /^[0-9a-f]{64}$/;
 const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
 const MAX_AUDIT_BYTES = 4 * 1024 * 1024;
 const MAX_AUDIT_EVENT_BYTES = 256 * 1024;
+const MAX_TERMINAL_AUDIT_EVENTS = 2;
 const MAX_ORDINARY_AUDIT_BYTES =
-  MAX_AUDIT_BYTES - MAX_AUDIT_EVENT_BYTES - 1;
+  MAX_AUDIT_BYTES -
+  MAX_TERMINAL_AUDIT_EVENTS * (MAX_AUDIT_EVENT_BYTES + 1);
 const MAX_CANCELLATION_RATIONALE_BYTES = 32 * 1024;
 const MAX_RECONCILIATION_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_CLOCK_SKEW_MS = 30 * 1000;
@@ -777,6 +779,16 @@ async function collectActiveClaims(storeRoot) {
       }
       throw error;
     }
+    if (workflow.claims.some((claimEntry) => claimEntry.disposition !== "ACTIVE")) {
+      // Released ownership frees the claim key, so it is trusted only after
+      // the full locked load proves the release against the audit chain. A
+      // ledger that cannot prove its release fails the start closed.
+      workflow = await withWorkflowLock(
+        storeRoot,
+        entry.name,
+        async (verified) => verified,
+      );
+    }
     active.push(
       ...workflow.claims.filter(
         (claimEntry) => claimEntry.disposition === "ACTIVE",
@@ -995,6 +1007,8 @@ function auditedWorkflowState(workflow) {
     progress_fingerprint: workflow.progress_fingerprint,
     pause: workflow.pause,
     cancellation: workflow.cancellation,
+    claims: workflow.claims,
+    claim_release: workflow.claim_release ?? null,
   };
 }
 
@@ -1037,21 +1051,43 @@ function prepareAuditEvent(
 }
 
 function requireCancellationReserve(workflow) {
-  const cancelled = structuredClone(workflow);
-  cancelled.revision = Number.MAX_SAFE_INTEGER;
-  cancelled.updated_at = "9999-12-31T23:59:59.999Z";
-  cancelled.status = "CANCELLED";
-  cancelled.phase = "CANCELLED";
-  cancelled.pause = null;
-  cancelled.cancellation = {
+  // Model the largest state this workflow can still be forced through: an
+  // operator cancellation followed by a reconciled claim release, both with
+  // maximal bounded inputs. Admission requires that terminal path to fit the
+  // per-event and ledger limits, so a stop can always be persisted.
+  const released = structuredClone(workflow);
+  released.revision = Number.MAX_SAFE_INTEGER;
+  released.updated_at = "9999-12-31T23:59:59.999Z";
+  released.status = "CANCELLED";
+  released.phase = "CANCELLED";
+  released.pause = null;
+  released.cancellation = {
     operator_label: "\0".repeat(1024),
     rationale: "x".repeat(MAX_CANCELLATION_RATIONALE_BYTES - 2),
     cancelled_at: "9999-12-31T23:59:59.999Z",
   };
+  released.claims = released.claims.map((entry) => ({
+    ...entry,
+    disposition: "RELEASED",
+    released_at: "9999-12-31T23:59:59.999Z",
+  }));
+  released.claim_release = {
+    operator_label: "\0".repeat(1024),
+    rationale: "x".repeat(MAX_CANCELLATION_RATIONALE_BYTES - 2),
+    released_at: "9999-12-31T23:59:59.999Z",
+    reconciliation: released.claims.map((entry) => ({
+      kind: entry.kind,
+      canonical_key_sha256: entry.canonical_key_sha256,
+      target: structuredClone(entry.target),
+      workflow_revision: Number.MAX_SAFE_INTEGER,
+      present: false,
+      observed_at: "9999-12-31T23:59:59.999Z",
+    })),
+  };
   const prepared = prepareAuditEvent(
-    cancelled,
-    "WORKFLOW_CANCELLED",
-    cancelled,
+    released,
+    "WORKFLOW_CLAIMS_RELEASED",
+    released,
     null,
     {
       sequence: Number.MAX_SAFE_INTEGER,
@@ -1063,18 +1099,18 @@ function requireCancellationReserve(workflow) {
   if (prepared.bytes.length > MAX_AUDIT_EVENT_BYTES + 1) {
     fail(
       "WORKFLOW_CANCELLATION_RESERVE_EXHAUSTED",
-      "workflow mutation would leave no room for a cancellation event",
+      "workflow mutation would leave no room for its cancellation events",
       {
         candidate_bytes: prepared.bytes.length,
         max_bytes: MAX_AUDIT_EVENT_BYTES + 1,
       },
     );
   }
-  cancelled.action_audit = {
+  released.action_audit = {
     next_sequence: Number.MAX_SAFE_INTEGER,
     last_event_sha256: "f".repeat(64),
   };
-  const ledgerBytes = Buffer.from(`${canonicalJson(cancelled)}\n`);
+  const ledgerBytes = Buffer.from(`${canonicalJson(released)}\n`);
   if (ledgerBytes.length > MAX_WORKFLOW_BYTES) {
     fail(
       "WORKFLOW_CANCELLATION_RESERVE_EXHAUSTED",
@@ -1114,9 +1150,11 @@ async function appendAuditEvent(
   const nextCommittedBytes =
     session.head.committed_bytes + eventBytes.length;
   const committedLimit =
-    event === "WORKFLOW_CANCELLED"
+    event === "WORKFLOW_CLAIMS_RELEASED"
       ? MAX_AUDIT_BYTES
-      : MAX_ORDINARY_AUDIT_BYTES;
+      : event === "WORKFLOW_CANCELLED"
+        ? MAX_AUDIT_BYTES - MAX_AUDIT_EVENT_BYTES - 1
+        : MAX_ORDINARY_AUDIT_BYTES;
   if (nextCommittedBytes > committedLimit) {
     fail(
       "WORKFLOW_AUDIT_LOG_FULL",
@@ -1167,18 +1205,13 @@ function requireWorkflowAuditBinding(workflow, audit) {
     progress_fingerprint: null,
     pause: null,
     cancellation: null,
+    claims: workflow.claims,
+    claim_release: null,
   };
-  const claimReleaseFollowsCancellation =
-    workflow.status === "CANCELLED" &&
-    lastState.status === "CANCELLED" &&
-    workflow.claim_release != null &&
-    workflow.claims.every((entry) => entry.disposition !== "ACTIVE") &&
-    workflow.revision === (lastEvent?.workflow_revision ?? 0) + 1;
   if (
-    (!claimReleaseFollowsCancellation &&
-      (workflow.revision !== (lastEvent?.workflow_revision ?? 1) ||
-        workflow.revision !== lastState.revision ||
-        workflow.updated_at !== lastState.updated_at)) ||
+    workflow.revision !== (lastEvent?.workflow_revision ?? 1) ||
+    workflow.revision !== lastState.revision ||
+    workflow.updated_at !== lastState.updated_at ||
     workflow.status !== lastState.status ||
     workflow.phase !== lastState.phase ||
     workflow.current_head_sha !== lastState.current_head_sha ||
@@ -1194,7 +1227,10 @@ function requireWorkflowAuditBinding(workflow, audit) {
     workflow.progress_fingerprint !== lastState.progress_fingerprint ||
     canonicalJson(workflow.pause) !== canonicalJson(lastState.pause) ||
     canonicalJson(workflow.cancellation) !==
-      canonicalJson(lastState.cancellation)
+      canonicalJson(lastState.cancellation) ||
+    canonicalJson(workflow.claims) !== canonicalJson(lastState.claims) ||
+    canonicalJson(workflow.claim_release ?? null) !==
+      canonicalJson(lastState.claim_release ?? null)
   ) {
     fail(
       "WORKFLOW_AUDIT_CORRUPT",
@@ -1239,6 +1275,8 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "progress_fingerprint",
     "pause",
     "cancellation",
+    "claims",
+    "claim_release",
   ]) {
     recovered[field] = structuredClone(lastEvent.workflow_state[field]);
   }
@@ -1304,21 +1342,12 @@ function requireCapability(workflow, capability) {
 }
 
 async function saveMutation(paths, workflow, mutate) {
-  if (workflow.status === "ACTIVE") {
-    return saveActionMutation(
-      paths,
-      workflow,
-      "WORKFLOW_STATE_UPDATED",
-      mutate,
-    );
-  }
-  const next = structuredClone(workflow);
-  await mutate(next);
-  next.revision += 1;
-  next.updated_at = now();
-  requireWorkflowCapacity(next);
-  await writeWorkflow(paths, next);
-  return next;
+  return saveActionMutation(
+    paths,
+    workflow,
+    "WORKFLOW_STATE_UPDATED",
+    mutate,
+  );
 }
 
 async function saveActionMutation(
@@ -1334,6 +1363,11 @@ async function saveActionMutation(
   next.updated_at = now();
   if (next.status !== "CANCELLED") {
     requireCancellationReserve(next);
+  } else if (event === "WORKFLOW_STATE_UPDATED") {
+    fail(
+      "WORKFLOW_STATE_INVALID",
+      "a cancelled workflow only accepts its audited claim release",
+    );
   }
   const appended = await appendAuditEvent(
     paths,
@@ -1594,6 +1628,7 @@ export async function startAutonomousWorkflow(
     progress_fingerprint: null,
     pause: null,
     cancellation: null,
+    claim_release: null,
     action_audit: {
       next_sequence: 1,
       last_event_sha256: null,
@@ -1768,37 +1803,41 @@ export async function bindWorkflowReview(
         `cannot bind a review in phase ${workflow.phase}`,
       );
     }
-    const { review, summary } = await getReviewSnapshot(storeRoot, reviewId);
-    requireCleanReviewRound(review);
-    const reviewRepository = await fsp.realpath(review.repository_path);
-    if (
-      reviewRepository !== workflow.repository.path ||
-      review.base_ref !== workflow.base_sha ||
-      review.requirement !== workflow.requirement ||
-      review.implementation_scope !== workflow.implementation_scope ||
-      review.reviewer_provider !== "CODEX_TASK" ||
-      summary.status !== "WAITING_FOR_REVIEW" ||
-      summary.current_snapshot?.head_sha !== workflow.current_head_sha
-    ) {
-      fail(
-        "WORKFLOW_REVIEW_MISMATCH",
-        "local review does not match the workflow repository, requirement, provider, base, head, and state",
+    // Validate and bind under the review mutation lock so a review verdict
+    // submitted after this snapshot cannot be hidden behind a stale
+    // WAITING_FOR_REVIEW binding that then dispatches a reviewer task.
+    return getReviewSnapshot(storeRoot, reviewId, async ({ review, summary }) => {
+      requireCleanReviewRound(review);
+      const reviewRepository = await fsp.realpath(review.repository_path);
+      if (
+        reviewRepository !== workflow.repository.path ||
+        review.base_ref !== workflow.base_sha ||
+        review.requirement !== workflow.requirement ||
+        review.implementation_scope !== workflow.implementation_scope ||
+        review.reviewer_provider !== "CODEX_TASK" ||
+        summary.status !== "WAITING_FOR_REVIEW" ||
+        summary.current_snapshot?.head_sha !== workflow.current_head_sha
+      ) {
+        fail(
+          "WORKFLOW_REVIEW_MISMATCH",
+          "local review does not match the workflow repository, requirement, provider, base, head, and state",
+        );
+      }
+      return publicWorkflow(
+        await saveMutation(paths, workflow, async (next) => {
+          next.attempts.at(-1).review_id = reviewId;
+          next.current_review = {
+            review_id: reviewId,
+            state_version: summary.state_version,
+            status: summary.status,
+            strategy: summary.review_strategy,
+            snapshot_hash: summary.current_snapshot.snapshot_hash,
+            head_sha: summary.current_snapshot.head_sha,
+          };
+          next.phase = "DISPATCH_CODEX_REVIEWER";
+        }),
       );
-    }
-    return publicWorkflow(
-      await saveMutation(paths, workflow, async (next) => {
-        next.attempts.at(-1).review_id = reviewId;
-        next.current_review = {
-          review_id: reviewId,
-          state_version: summary.state_version,
-          status: summary.status,
-          strategy: summary.review_strategy,
-          snapshot_hash: summary.current_snapshot.snapshot_hash,
-          head_sha: summary.current_snapshot.head_sha,
-        };
-        next.phase = "DISPATCH_CODEX_REVIEWER";
-      }),
-    );
+    });
   });
 }
 
@@ -1979,6 +2018,28 @@ export async function completeWorkflowAction(
     }
     if (action.kind !== "CREATE_CODEX_REVIEWER_TASK") {
       fail("WORKFLOW_ACTION_KIND_INVALID", "unsupported workflow action");
+    }
+    // The bound review must still be exactly the state that was bound before
+    // dispatch. Any verdict recorded by now predates the completed reviewer
+    // task and must not be accepted as its independent result.
+    const { summary } = await getReviewSnapshot(
+      storeRoot,
+      action.target.review_id,
+    );
+    if (
+      summary.status !== "WAITING_FOR_REVIEW" ||
+      summary.state_version !== workflow.current_review.state_version
+    ) {
+      fail(
+        "WORKFLOW_REVIEW_TRANSITION_INVALID",
+        "local review changed before the reviewer task dispatch completed",
+        {
+          review_id: action.target.review_id,
+          bound_state_version: workflow.current_review.state_version,
+          observed_state_version: summary.state_version,
+          observed_status: summary.status,
+        },
+      );
     }
     return publicWorkflow(
       await saveActionMutation(
@@ -2337,6 +2398,11 @@ export async function releaseWorkflowClaims(
 ) {
   assertString(operatorLabel, "operator_label", { max: 1024 });
   assertString(rationale, "rationale");
+  assertCanonicalStringCapacity(
+    rationale,
+    "rationale",
+    MAX_CANCELLATION_RATIONALE_BYTES,
+  );
   if (!Array.isArray(reconciledClaims)) {
     throw new TypeError("reconciled_claims must be an array");
   }
@@ -2364,6 +2430,7 @@ export async function releaseWorkflowClaims(
       ]),
     );
     if (
+      reconciledClaims.length !== activeClaims.length ||
       evidenceByDigest.size !== activeClaims.length ||
       activeClaims.some((entry) => {
         const evidence = evidenceByDigest.get(
@@ -2400,20 +2467,40 @@ export async function releaseWorkflowClaims(
       );
     }
     const releaseAt = now();
-    const next = await saveMutation(paths, workflow, async (draft) => {
-      for (const entry of draft.claims) {
-        if (entry.disposition === "ACTIVE") {
-          entry.disposition = "RELEASED";
-          entry.released_at = releaseAt;
+    // The release is an audited transition: claims and release evidence are
+    // part of the audited state, so a ledger claiming released ownership
+    // without this committed event fails the audit binding.
+    const next = await saveActionMutation(
+      paths,
+      workflow,
+      "WORKFLOW_CLAIMS_RELEASED",
+      async (draft) => {
+        for (const entry of draft.claims) {
+          if (entry.disposition === "ACTIVE") {
+            entry.disposition = "RELEASED";
+            entry.released_at = releaseAt;
+          }
         }
-      }
-      draft.claim_release = {
-        operator_label: operatorLabel,
-        rationale,
-        released_at: releaseAt,
-        reconciliation: structuredClone(reconciledClaims),
-      };
-    });
+        draft.claim_release = {
+          operator_label: operatorLabel,
+          rationale,
+          released_at: releaseAt,
+          reconciliation: activeClaims.map((entry) => {
+            const evidence = evidenceByDigest.get(
+              `${entry.kind}:${entry.canonical_key_sha256}`,
+            );
+            return {
+              kind: entry.kind,
+              canonical_key_sha256: entry.canonical_key_sha256,
+              target: structuredClone(entry.target),
+              workflow_revision: evidence.workflow_revision,
+              present: false,
+              observed_at: evidence.observed_at,
+            };
+          }),
+        };
+      },
+    );
     return publicWorkflow(next);
   });
 }

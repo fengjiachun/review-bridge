@@ -929,13 +929,14 @@ export async function getReviewSummary(storeRoot, reviewId) {
   return reviewSummary(await loadReview(storeRoot, reviewId));
 }
 
-export async function getReviewSnapshot(storeRoot, reviewId) {
+export async function getReviewSnapshot(storeRoot, reviewId, operation = null) {
   return withReviewMutationLock(storeRoot, reviewId, async () => {
     const review = await loadReview(storeRoot, reviewId);
-    return {
+    const snapshot = {
       review: publicReview(review),
       summary: reviewSummary(review),
     };
+    return operation == null ? snapshot : operation(snapshot);
   });
 }
 
