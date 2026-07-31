@@ -474,11 +474,13 @@ if (role === "author") {
     {
       title: "Mark workflow action executing",
       description:
-        "Durably record EXECUTING immediately before the controller performs the planned external task write.",
+        "Durably record EXECUTING immediately before the planned external write; a push additionally requires the pinned URL resolved to the authorized repository ID.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
         action_id: z.string(),
+        resolved_repository_id: z.number().int().positive().optional(),
+        resolved_url: z.string().optional(),
       },
     },
     (input) =>
@@ -487,6 +489,12 @@ if (role === "author") {
         input.workflow_id,
         input.expected_revision,
         input.action_id,
+        input.resolved_repository_id == null && input.resolved_url == null
+          ? null
+          : {
+              resolved_repository_id: input.resolved_repository_id,
+              resolved_url: input.resolved_url,
+            },
       ),
   );
 

@@ -229,6 +229,19 @@ const ACTION_KIND_SPECS = {
       }
     },
     dispatch: null,
+    validateExecutingProof(action, proof) {
+      if (
+        proof == null ||
+        proof.resolved_repository_id !==
+          action.target.head_repository_id ||
+        proof.resolved_url !== action.target.remote_url
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "the pinned push URL must be resolved to the authorized repository before executing",
+        );
+      }
+    },
     validateResponse(action, response) {
       if (
         response.remote_ref_sha !== action.target.head_sha ||
@@ -458,6 +471,21 @@ function validateActiveAction(workflow) {
   ) {
     fail("WORKFLOW_ACTION_INVALID", "active action execution time is invalid");
   }
+  if (action.status === "PLANNED") {
+    if (action.executing_proof !== null) {
+      fail(
+        "WORKFLOW_ACTION_INVALID",
+        "a planned action cannot carry an executing proof",
+      );
+    }
+  } else if (spec.validateExecutingProof) {
+    spec.validateExecutingProof(action, action.executing_proof);
+  } else if (action.executing_proof !== null) {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      "this action kind does not take an executing proof",
+    );
+  }
   if (action.executing_at !== null) {
     assertTimestamp(
       action.executing_at,
@@ -505,6 +533,14 @@ function validateActiveAction(workflow) {
 
 function requireCredentialFreePushUrl(url, name) {
   assertString(url, name, { max: 4096 });
+  // Legitimate git push URLs never carry a query or fragment; both are
+  // common secret carriers (?access_token=...) and would be persisted.
+  if (/[?#]/.test(url)) {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      `${name} must not carry a query or fragment`,
+    );
+  }
   // scp-like ssh syntax (user@host:path) has no password field; the user is
   // an ssh login name, not a credential.
   if (/^[A-Za-z0-9._-]+@[^:@/]+:/.test(url)) {
@@ -2213,6 +2249,7 @@ async function planWorkflowAction(
           ? null
           : workflowCorrelationMarker(spec.markerPrefix, workflow, actionId),
       dispatch: null,
+      executing_proof: null,
       provider_response: null,
     };
     action.dispatch = spec.dispatch == null ? null : spec.dispatch(action);
@@ -2366,16 +2403,24 @@ export async function markWorkflowActionExecuting(
   workflowId,
   expectedRevision,
   actionId,
+  executingProof = null,
 ) {
   assertString(actionId, "action_id", { max: 1024 });
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
-    if (
-      workflow.active_action?.action_id !== actionId ||
-      workflow.active_action.status !== "PLANNED"
-    ) {
+    const action = workflow.active_action;
+    if (action?.action_id !== actionId || action.status !== "PLANNED") {
       fail("WORKFLOW_ACTION_STATE_INVALID", "action must be PLANNED");
+    }
+    const spec = ACTION_KIND_SPECS[action.kind];
+    if (spec.validateExecutingProof) {
+      spec.validateExecutingProof(action, executingProof);
+    } else if (executingProof != null) {
+      fail(
+        "WORKFLOW_ACTION_INVALID",
+        "this action kind does not take an executing proof",
+      );
     }
     return publicWorkflow(
       await saveActionMutation(
@@ -2385,6 +2430,8 @@ export async function markWorkflowActionExecuting(
         async (next) => {
           next.active_action.status = "EXECUTING";
           next.active_action.executing_at = now();
+          next.active_action.executing_proof =
+            executingProof == null ? null : structuredClone(executingProof);
         },
       ),
     );

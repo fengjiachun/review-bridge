@@ -1626,11 +1626,41 @@ test("a clean review advances through push and draft PR to publication", async (
   assert.equal(pushPlanned.action.correlation_marker, null);
   assert.equal(pushPlanned.dispatch, null);
   assert.equal(pushPlanned.action.target.head_sha, headSha);
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      state.store,
+      workflow.workflow_id,
+      pushPlanned.workflow.revision,
+      pushPlanned.action.action_id,
+    ),
+    /resolved to the authorized repository/,
+  );
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      state.store,
+      workflow.workflow_id,
+      pushPlanned.workflow.revision,
+      pushPlanned.action.action_id,
+      {
+        resolved_repository_id: 999,
+        resolved_url: pushPlanned.action.target.remote_url,
+      },
+    ),
+    /resolved to the authorized repository/,
+  );
   const pushExecuting = await markWorkflowActionExecuting(
     state.store,
     workflow.workflow_id,
     pushPlanned.workflow.revision,
     pushPlanned.action.action_id,
+    {
+      resolved_repository_id: 101,
+      resolved_url: pushPlanned.action.target.remote_url,
+    },
+  );
+  assert.equal(
+    pushExecuting.active_action.executing_proof.resolved_repository_id,
+    101,
   );
   const pushProof = {
     remoteRefSha: headSha,
@@ -1856,6 +1886,10 @@ test("one pull request cannot be claimed by two workflows", async (t) => {
       workflowId,
       pushPlanned.workflow.revision,
       pushPlanned.action.action_id,
+      {
+        resolved_repository_id: 101,
+        resolved_url: pushPlanned.action.target.remote_url,
+      },
     );
     const pushObserved = await recordPushObservation(
       state.store,
@@ -2049,6 +2083,10 @@ test("a claim committed to the audit but not the ledger still blocks a rival", a
       workflowId,
       pushPlanned.workflow.revision,
       pushPlanned.action.action_id,
+      {
+        resolved_repository_id: 101,
+        resolved_url: pushPlanned.action.target.remote_url,
+      },
     );
     const pushObserved = await recordPushObservation(
       state.store,
@@ -2297,11 +2335,13 @@ test("a drifted or dirty head cannot plan the gated push", async (t) => {
   for (const credentialUrl of [
     "https://x-access-token:secret@github.com/example/review-bridge.git",
     "https://ghp_token@github.com/example/review-bridge.git",
+    "https://github.com/example/review-bridge.git?access_token=secret",
+    "https://github.com/example/review-bridge.git#secret-fragment",
   ]) {
     git(state.repository, "remote", "set-url", "--push", "origin", credentialUrl);
     await assert.rejects(
       planWorkflowPush(state.store, workflow.workflow_id, gated.revision),
-      /embeds credentials/,
+      /embeds credentials|query or fragment/,
     );
   }
   git(state.repository, "remote", "set-url", "--push", "origin", pushUrl);

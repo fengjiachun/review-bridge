@@ -54,8 +54,13 @@ publication, remote findings, ready-state changes, or thread resolution.
 8. For `PLAN_PUSH`, call `plan_workflow_push`; it verifies the clean
    checked-out HEAD still equals the gated workflow head and binds the
    remote's single push URL into the intent; a push URL that embeds
-   credentials is rejected before anything is persisted. Persist `EXECUTING`
-   with `mark_workflow_action_executing` immediately before pushing, then
+   credentials is rejected before anything is persisted. Before marking
+   `EXECUTING`, resolve the pinned `active_action.target.remote_url` to its
+   GitHub repository and numeric repository ID through the provider, and
+   call `mark_workflow_action_executing` with `resolved_repository_id` and
+   `resolved_url`; the server refuses to record `EXECUTING` unless they
+   equal the authorized target, so a remote repointed before planning can
+   never receive the gated commit. Then
    push the immutable gated commit to the pinned URL — `git push
    <active_action.target.remote_url>
    <active_action.target.head_sha>:refs/heads/<topic_branch>`, recovering
