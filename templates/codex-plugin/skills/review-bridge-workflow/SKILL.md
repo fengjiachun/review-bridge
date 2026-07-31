@@ -62,34 +62,34 @@ repair, ready-state changes, or thread resolution.
    call `mark_workflow_action_executing` with `resolved_repository_id` and
    `resolved_url`; the server refuses to record `EXECUTING` unless they
    equal the authorized target, so a remote repointed before planning can
-   never receive the gated commit. Then
-   push the immutable gated commit to the pinned URL with Git's URL
-   rewriting neutralized. In `url.<base>.insteadOf = <value>` Git matches
-   the URL against the rule's **value** and rewrites it to the base, so a
-   rule can capture the pinned URL in only two shapes, and each needs its
-   own defense. First, immediately before pushing, run
-   `git config -z --get-regexp '^url\..*\.(insteadof|pushinsteadof)$'` and
-   parse the NUL-terminated records: in each record the key ends at the
-   first newline and everything after it is the rule's **value** — never
-   split on spaces, because a key's base may legally contain them
-   (`url."ext::sh -c …"`). If any value equals
-   `active_action.target.remote_url` exactly, or any record cannot be
-   parsed this way, pause with `EXTERNAL_ACTION_INDETERMINATE` — Git breaks
-   equal-length ties in favor of the earliest-parsed rule, so an
-   exact-value rule cannot be overridden from the command line, and its
-   base is where the push would actually go. Then push with identity
-   rules that defeat every shorter-prefix rule — `git -c
-   "url.<PINNED>.insteadOf=<PINNED>" -c "url.<PINNED>.pushInsteadOf=<PINNED>"
-   push <PINNED> <active_action.target.head_sha>:refs/heads/<topic_branch>`
-   where `<PINNED>` is `active_action.target.remote_url` — recovering both
-   operands from the persisted intent after a restart, never the mutable
-   remote name or branch name. Git rewrites by the longest matching value
-   prefix, so the identity rules win over any rule whose value is strictly
-   shorter than the pinned URL while leaving credential helpers untouched;
-   combined with the exact-value check and the pinned operand, neither a
-   branch that advanced, a repointed remote, nor a late config rewrite can
-   leak an ungated commit to an unauthorized repository. Never
-   force-push. Reconcile from the provider, never
+   never receive the gated commit. Then push the immutable gated commit to
+   the pinned URL from an isolated, immutable Git configuration, so no
+   mutable config source — including a `url.<base>.insteadOf` or
+   `pushInsteadOf` rewrite added at any moment — can participate in the
+   invocation:
+
+   ```bash
+   quarantine=$(mktemp -d)
+   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+     git init --bare --quiet "$quarantine"
+   git rev-parse --path-format=absolute --git-path objects \
+     > /dev/null # resolve the repository's object store path
+   echo "<absolute objects path>" >> "$quarantine/objects/info/alternates"
+   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+     git --git-dir="$quarantine" push <PINNED> \
+     <active_action.target.head_sha>:refs/heads/<topic_branch>
+   ```
+
+   where `<PINNED>` is `active_action.target.remote_url`, both operands
+   recovered from the persisted intent after a restart — never the mutable
+   remote name or branch name. The quarantine directory's fresh config
+   contains no rewrite rules, the global and system sources are disabled
+   for the invocation, and the object alternates expose the gated commit
+   without inheriting the working repository's configuration, so neither a
+   branch that advanced, a repointed remote, nor any config rewrite can
+   leak an ungated commit to an unauthorized repository. Authenticate over
+   ssh; the quarantined invocation deliberately drops configuration-based
+   credential helpers. Never force-push. Reconcile from the provider, never
    from the plan: freshly read the remote's configured push URL,
    resolve that URL to its GitHub repository and numeric repository ID, and
    freshly read the exact remote ref head. Call `record_push_observation`
