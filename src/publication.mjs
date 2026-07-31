@@ -4698,10 +4698,28 @@ function normalizedBlockers(ledger, derived) {
     return [];
   }
   if (derived.status === "CHECKS_FAILED") {
-    return observation.required_checks.runs
-      .filter((run) => FAILING_CONCLUSIONS.has(run.conclusion))
-      .map((run) => `check:${run.run_kind}:${run.context}:${run.conclusion}`)
-      .sort();
+    // Only declared requirements decide the status, so only they may enter the
+    // fingerprint. Including every failing run would let one flaky non-required
+    // check change the digest on every attempt and silently disable the stall
+    // detection this feeds.
+    const required = new Set(
+      observation.required_checks.requirements.map(
+        (requirement) => requirement.context,
+      ),
+    );
+    return [
+      ...new Set(
+        observation.required_checks.runs
+          .filter(
+            (run) =>
+              required.has(run.context) &&
+              FAILING_CONCLUSIONS.has(run.conclusion),
+          )
+          .map(
+            (run) => `check:${run.run_kind}:${run.context}:${run.conclusion}`,
+          ),
+      ),
+    ].sort();
   }
   if (
     derived.status === "CHANGES_REQUIRED" &&

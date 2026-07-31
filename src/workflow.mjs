@@ -977,13 +977,39 @@ function validateWorkflow(workflow) {
   return workflow;
 }
 
+/**
+ * Fields this change adds to an existing schema-version-1 ledger. A workflow
+ * written before it has neither key, so both are filled in on read and persist
+ * on the next mutation. Without this a released workflow could not even be
+ * cancelled, and because the store-wide claim scan validates every ledger, one
+ * such workflow would block starts on unrelated branches.
+ */
+const REMOTE_FIELD_DEFAULTS = Object.freeze({
+  remote_attempts: [],
+  current_publication: null,
+});
+
+function withRemoteFieldDefaults(workflow) {
+  if (workflow == null || typeof workflow !== "object") {
+    return workflow;
+  }
+  for (const [field, value] of Object.entries(REMOTE_FIELD_DEFAULTS)) {
+    if (workflow[field] === undefined) {
+      workflow[field] = structuredClone(value);
+    }
+  }
+  return workflow;
+}
+
 async function readWorkflowRaw(paths) {
   try {
     const workflow = validateWorkflow(
-      await readCanonicalSecureJson(
-        paths.workflow,
-        MAX_WORKFLOW_BYTES,
-        "WORKFLOW_STATE_INVALID",
+      withRemoteFieldDefaults(
+        await readCanonicalSecureJson(
+          paths.workflow,
+          MAX_WORKFLOW_BYTES,
+          "WORKFLOW_STATE_INVALID",
+        ),
       ),
     );
     if (workflow.workflow_id !== path.basename(paths.directory)) {
@@ -1604,7 +1630,14 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "claims",
     "claim_release",
   ]) {
-    recovered[field] = structuredClone(lastEvent.workflow_state[field]);
+    // An audit event committed before this change carries neither remote
+    // field, so recovery restores their defaults instead of undefined.
+    recovered[field] = structuredClone(
+      lastEvent.workflow_state[field] ??
+        (field in REMOTE_FIELD_DEFAULTS
+          ? REMOTE_FIELD_DEFAULTS[field]
+          : lastEvent.workflow_state[field]),
+    );
   }
   recovered.action_audit = {
     next_sequence: audit.head.next_sequence,
@@ -3139,6 +3172,15 @@ export async function advanceRemoteWorkflow(
       (previous.head_sha === workflow.current_head_sha ||
         previous.tree_sha === tree);
     if (stalled || pauseReason != null) {
+      // Resume where the operator's remedy is actually possible. Returning to
+      // WAIT_PUBLICATION would strand every pause whose fix is a new commit:
+      // record_workflow_head rejects that phase, so resume and advance would
+      // re-derive the same stop forever.
+      const resumePhase =
+        repairPhase ??
+        (pauseReason === "SEMANTIC_CONFLICT"
+          ? "UPDATE_FROM_BASE"
+          : "WAIT_PUBLICATION");
       return publicWorkflow(
         await saveActionMutation(
           paths,
@@ -3146,6 +3188,19 @@ export async function advanceRemoteWorkflow(
           "WORKFLOW_PAUSED",
           async (next) => {
             next.current_publication.awaiting_revision = projection.revision;
+            if (stalled) {
+              // Keep the attempt chain complete for the operator, and make the
+              // next comparison run against this stop rather than the attempt
+              // before it.
+              next.remote_attempts.push({
+                number: next.remote_attempts.length + 1,
+                head_sha: next.current_head_sha,
+                tree_sha: tree,
+                blocker_sha256: projection.blocker_sha256,
+                status: projection.status,
+                at: now(),
+              });
+            }
             next.status = "PAUSED";
             next.phase = "PAUSED_HUMAN";
             next.pause = {
@@ -3168,7 +3223,7 @@ export async function advanceRemoteWorkflow(
                   ? { previous_remote_attempt: previous }
                   : {}),
               }),
-              resume_phase: "WAIT_PUBLICATION",
+              resume_phase: resumePhase,
               review_id: workflow.current_review?.review_id ?? null,
               action_id: null,
               paused_at: now(),

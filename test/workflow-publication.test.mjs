@@ -25,8 +25,10 @@ import {
   AUTONOMOUS_CAPABILITIES,
   bindWorkflowPublication,
   bindWorkflowReview,
+  cancelAutonomousWorkflow,
   completeWorkflowAction,
   getAutonomousWorkflowSummary,
+  listAutonomousWorkflows,
   markWorkflowActionExecuting,
   planCodexTaskDispatch,
   planDraftPullRequest,
@@ -35,6 +37,7 @@ import {
   recordDraftPullRequestObservation,
   recordPushObservation,
   recordWorkflowHead,
+  resumeAutonomousWorkflow,
   startAutonomousWorkflow,
 } from "../src/workflow.mjs";
 import { atomicWriteCanonicalJson, canonicalJson } from "../src/storage.mjs";
@@ -724,6 +727,8 @@ test("the remote wait routes each blocker to its repair phase or pause", async (
       },
       phase: "PAUSED_HUMAN",
       pause: "GITHUB_REVIEW_AMBIGUOUS",
+      // The remedy is an external acknowledgement, then a fresh observation.
+      resumePhase: "WAIT_PUBLICATION",
       nextAction: "AWAIT_OPERATOR",
     },
     {
@@ -734,6 +739,9 @@ test("the remote wait routes each blocker to its repair phase or pause", async (
       },
       phase: "PAUSED_HUMAN",
       pause: "SEMANTIC_CONFLICT",
+      // The remedy is a clean base merge and a new commit, which is only
+      // possible from a phase that can record a head.
+      resumePhase: "UPDATE_FROM_BASE",
       nextAction: "AWAIT_OPERATOR",
     },
     {
@@ -796,7 +804,11 @@ test("the remote wait routes each blocker to its repair phase or pause", async (
     if (scenario.pause) {
       assert.equal(advanced.status, "PAUSED", scenario.name);
       assert.equal(advanced.pause.reason_code, scenario.pause, scenario.name);
-      assert.equal(advanced.pause.resume_phase, "WAIT_PUBLICATION");
+      assert.equal(
+        advanced.pause.resume_phase,
+        scenario.resumePhase,
+        scenario.name,
+      );
     } else {
       assert.equal(advanced.status, "ACTIVE", scenario.name);
     }
@@ -932,7 +944,7 @@ test("a repeated blocker without a tree change pauses NO_PROGRESS", async (t) =>
   );
   assert.equal(stalled.status, "PAUSED");
   assert.equal(stalled.pause.reason_code, "NO_PROGRESS");
-  assert.equal(stalled.remote_attempts.length, 1);
+  assert.equal(stalled.remote_attempts.length, 2);
   const evidence = JSON.parse(stalled.pause.evidence);
   assert.equal(evidence.head_sha, secondHead);
   assert.equal(evidence.previous_remote_attempt.head_sha, firstHead);
@@ -940,6 +952,75 @@ test("a repeated blocker without a tree change pauses NO_PROGRESS", async (t) =>
     evidence.previous_remote_attempt.tree_sha,
     evidence.tree_sha,
   );
+
+  // The operator's only remedy is a real change, so the pause must resume
+  // where a head can be recorded. Resuming into WAIT_PUBLICATION would make
+  // record_workflow_head fail and re-derive the same stall forever.
+  assert.equal(stalled.pause.resume_phase, "ADDRESS_REMOTE_FINDINGS");
+  const resumed = await resumeAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    stalled.revision,
+    { operatorLabel: "Test Operator", rationale: "apply a real fix" },
+  );
+  assert.equal(resumed.status, "ACTIVE");
+  assert.equal(resumed.phase, "ADDRESS_REMOTE_FINDINGS");
+  const realFix = await commit(state.repository, "export const value = 9;\n");
+  const progressing = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    resumed.revision,
+    realFix,
+  );
+  assert.equal(progressing.phase, "PREPARE_LOCAL_REVIEW");
+});
+
+test("a workflow written before the remote fields stays readable and cancellable", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+
+  // Reproduce a ledger written before this change: schema version 1 with
+  // neither remote field. A released v0.5.0 workflow looks exactly like this.
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  assert.equal(stored.version, 1);
+  delete stored.remote_attempts;
+  delete stored.current_publication;
+  await atomicWriteCanonicalJson(workflowPath, stored);
+
+  const summary = await getAutonomousWorkflowSummary(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(summary.status, "ACTIVE");
+  assert.deepEqual(summary.remote_attempts, []);
+  assert.equal(summary.current_publication, null);
+
+  // The store-wide claim scan validates every ledger, so an unreadable one
+  // would also block starts on unrelated branches.
+  const listed = await listAutonomousWorkflows(state.store);
+  assert.deepEqual(
+    listed.map((entry) => entry.workflow_id),
+    [workflow.workflow_id],
+  );
+
+  // Cancellation is the path that releases the branch and head-ref claims.
+  const cancelled = await cancelAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    summary.revision,
+    { operatorLabel: "Test Operator", rationale: "cleanup" },
+  );
+  assert.equal(cancelled.status, "CANCELLED");
 });
 
 test("a different finding after a real change is progress, not a stall", async (t) => {
@@ -997,6 +1078,85 @@ test("a different finding after a real change is progress, not a stall", async (
     advanced.remote_attempts[0].blocker_sha256,
     advanced.remote_attempts[1].blocker_sha256,
   );
+});
+
+test("the check fingerprint ignores runs that are not required", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    Date.now(),
+    (payload) => failingCheck(payload),
+  );
+  const withoutNoise = await getAutonomousPreReady(state.store, reviewId);
+
+  // The same required failure, plus an unrelated non-required run that also
+  // failed. The status is decided only by declared requirements, so the stall
+  // fingerprint must not move either.
+  const other = await fixture();
+  t.after(() => fsp.rm(other.root, { recursive: true, force: true }));
+  const otherWorkflow = await startAutonomousWorkflow(
+    other.store,
+    workflowInput(other.repository, other.baseSha),
+  );
+  const otherHead = await commit(other.repository, "export const value = 2;\n");
+  const otherPublication = await gateAndPublishHead(
+    other,
+    otherWorkflow,
+    otherHead,
+    "one",
+  );
+  await reachRemoteWait(
+    other,
+    otherPublication.workflow,
+    otherPublication.reviewId,
+    otherHead,
+    Date.now(),
+    (payload) => {
+      failingCheck(payload);
+      payload.required_checks.runs.push({
+        run_kind: "CHECK_RUN",
+        run_id: 502,
+        context: "flaky-optional",
+        app_id: 1,
+        app_id_source: "CHECK_RUN_APP_ID",
+        status: "COMPLETED",
+        conclusion: "FAILURE",
+        started_at: payload.required_checks.collection.collected_at,
+        completed_at: payload.required_checks.collection.collected_at,
+        head_sha: payload.pull_request.head_sha,
+      });
+      const source = payload.required_checks.collection.run_sources.find(
+        (entry) => entry.kind === "CHECK_RUN",
+      );
+      source.item_count = 2;
+      source.reported_total_count = 2;
+      return payload;
+    },
+  );
+  const withNoise = await getAutonomousPreReady(
+    other.store,
+    otherPublication.reviewId,
+  );
+
+  assert.equal(withoutNoise.status, "CHECKS_FAILED");
+  assert.equal(withNoise.status, "CHECKS_FAILED");
+  assert.deepEqual(withNoise.blockers, withoutNoise.blockers);
+  assert.equal(withNoise.blocker_sha256, withoutNoise.blocker_sha256);
 });
 
 test("the version 3 gate carries both digests and verifies them independently", async (t) => {
