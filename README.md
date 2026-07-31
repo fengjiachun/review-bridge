@@ -247,6 +247,51 @@ WAITING_FOR_REVIEW
 CLEAN -> snapshot recheck -> LOCAL_GATE_PASSED
 ```
 
+## Autonomous local workflow
+
+An explicitly authorized schema-version-1 workflow can persist the local half
+of RFC 0003:
+
+```text
+IMPLEMENTING
+  -> committed clean head
+  -> bound CODEX_TASK review
+  -> marker-reconciled independent reviewer task
+  -> local findings and round two when needed
+  -> LOCAL_GATE_PASSED
+```
+
+`start_autonomous_workflow` binds the immutable repository, base, requirement,
+topic branch, publication target, complete capability set, and authorization
+digest. Store-wide claims admit only one active or paused owner for the local
+branch and GitHub head ref. The task-dispatch tools persist
+`PLANNED -> EXECUTING -> OBSERVED -> COMPLETED` in a digest-chained action
+audit and recover one committed crash-tail event before another mutation.
+The complete marker-bound task title and prompt remain in the active action and
+compact summary, so a restarted controller reuses the persisted dispatch
+instead of replanning or reconstructing it.
+Pause and cancellation are committed to the same audit chain, so recovery
+replays a durable stop with its bound review and finding state, or rejects a
+stale active ledger before another write.
+Ownership claims live in each workflow ledger: the atomic `workflow.json`
+write is the single claim commit point, starts scan every persisted ledger for
+conflicts under one store-wide lock, and a crashed start leaves no claims
+behind. Every start and mutation also reserves the full worst-case
+cancellation — both the bounded audit event and the resulting near-limit
+ledger — so an admitted workflow can always persist an operator cancellation.
+
+The compact workflow summary is the controller's source of truth for the next
+action. A missing or ambiguous Codex task pauses rather than falling back to
+the author task. Round-two `HUMAN_REQUIRED` also pauses and never creates a
+third model round. Cancellation retains claims until an explicit,
+exactly-reconciled release proves every claimed object absent with a fresh
+observation bound to the current workflow revision and canonical claim target.
+
+This release stops at `PUBLISH_GATED_HEAD`. Autonomous draft PR publication,
+remote review repair cycles, ready-state changes, and evidence-backed thread
+resolution ship in the later RFC 0003 implementation changes. The existing
+manual publication flow below remains unchanged.
+
 ## GitHub publication gate
 
 Publishing to GitHub requires an explicit authorization, in one of two modes:

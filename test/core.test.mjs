@@ -9,6 +9,7 @@ import {
   exportHumanArbitration,
   finalizeLocalGate,
   getReview,
+  getReviewSnapshot,
   getReviewSummary,
   openReview,
   prepareRereview,
@@ -1254,6 +1255,38 @@ test("core review mutations wait behind the review-state lock without changing s
   const updated = await mutation;
   assert.equal(updated.status, "CLEAN");
   assert.equal(updated.state_version, prepared.state_version + 1);
+});
+
+test("review snapshots derive review and summary under one mutation lock", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Update the exported value.",
+    implementationScope: "Change app.js.",
+  });
+  const release = await acquireStateLock({
+    directory: path.join(store, "reviews", prepared.id),
+    reviewId: prepared.id,
+    domain: "review",
+  });
+  let settled = false;
+  const snapshot = getReviewSnapshot(store, prepared.id).finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(settled, false);
+  await release();
+  const value = await snapshot;
+  assert.equal(value.review.status, "WAITING_FOR_REVIEW");
+  assert.equal(value.summary.status, value.review.status);
+  assert.equal(value.summary.state_version, value.review.state_version);
+  assert.equal(
+    value.summary.current_snapshot.snapshot_hash,
+    value.review.rounds[0].snapshot_hash,
+  );
 });
 
 test("a missing review mutation does not create an empty review directory", async (t) => {

@@ -81,6 +81,10 @@ async function copyServer(target) {
     path.join(serverTarget, "publication.mjs"),
   );
   await fsp.copyFile(
+    path.join(projectRoot, "src", "workflow.mjs"),
+    path.join(serverTarget, "workflow.mjs"),
+  );
+  await fsp.copyFile(
     path.join(projectRoot, "src", "github-adapter.mjs"),
     path.join(serverTarget, "github-adapter.mjs"),
   );

@@ -353,7 +353,13 @@ function processIdentityStatus(pid, expectedStartTime) {
 }
 
 function lockErrorCode(domain) {
-  return domain === "review" ? "REVIEW_BUSY" : "PUBLICATION_BUSY";
+  const codes = {
+    review: "REVIEW_BUSY",
+    publication: "PUBLICATION_BUSY",
+    workflow: "WORKFLOW_BUSY",
+    claims: "WORKFLOW_CLAIMS_BUSY",
+  };
+  return codes[domain];
 }
 
 function lockRecordOwnershipIsUntrusted(error) {
@@ -385,7 +391,12 @@ function lockOwnershipLostError(
   status,
   { causeCode } = {},
 ) {
-  const stateName = domain === "review" ? "review" : "publication ledger";
+  const stateName = {
+    review: "review",
+    publication: "publication ledger",
+    workflow: "workflow ledger",
+    claims: "workflow claim registry",
+  }[domain];
   return new StoreError(
     "LOCK_OWNERSHIP_LOST",
     `state-lock ownership for ${reviewId} was lost (${status}); the ${stateName} state change may already have been applied; reread the ${stateName} before deciding whether to retry`,
@@ -400,7 +411,12 @@ function lockOwnershipLostError(
 }
 
 function lockCleanupFailedError(reviewId, domain, lockPath, cause) {
-  const stateName = domain === "review" ? "review" : "publication ledger";
+  const stateName = {
+    review: "review",
+    publication: "publication ledger",
+    workflow: "workflow ledger",
+    claims: "workflow claim registry",
+  }[domain];
   return new StoreError(
     "LOCK_CLEANUP_FAILED",
     `state-lock cleanup for ${reviewId} failed; the lock record at ${lockPath} may remain and the ${stateName} state change may already have been applied; stop the owning Review Bridge process before inspecting or removing the lock record`,
@@ -468,7 +484,7 @@ async function readLock(
     !Number.isFinite(Date.parse(record.acquired_at)) ||
     typeof record.heartbeat_at !== "string" ||
     !Number.isFinite(Date.parse(record.heartbeat_at)) ||
-    !["review", "publication"].includes(record.domain) ||
+    !["review", "publication", "workflow", "claims"].includes(record.domain) ||
     typeof record.review_id !== "string"
   ) {
     throw invalidLockRecord(
@@ -959,8 +975,10 @@ export async function acquireStateLock({
   staleMs = LOCK_STALE_MS,
   heartbeatMs = LOCK_HEARTBEAT_MS,
 }) {
-  if (!["review", "publication"].includes(domain)) {
-    throw new TypeError("lock domain must be review or publication");
+  if (!["review", "publication", "workflow", "claims"].includes(domain)) {
+    throw new TypeError(
+      "lock domain must be review, publication, workflow, or claims",
+    );
   }
   for (const [name, value] of [
     ["waitMs", waitMs],

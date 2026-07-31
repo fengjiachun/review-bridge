@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Draft |
+| Status | Accepted |
 | Authors | Review Bridge contributors |
 | Created | 2026-07-29 |
 | Target release | TBD |
@@ -271,7 +271,6 @@ Login text is display metadata only.
 Workflow state is separate from local-review and publication state:
 
 ```text
-workflow-claims.json
 workflows/<workflow_id>/
 ├── workflow.json
 ├── action-audit.jsonl
@@ -366,8 +365,9 @@ invariants are required:
 ## Workflow ownership
 
 Per-workflow locks do not protect a branch or pull request from another
-workflow. Review Bridge therefore maintains a store-wide ownership registry
-under its own lock.
+workflow. Ownership claims are therefore part of each workflow ledger itself,
+and every claim-affecting start is serialized under one store-wide claims
+lock.
 
 Before branch creation or reuse, workflow start atomically claims:
 
@@ -386,14 +386,49 @@ requires an explicit operator action after a fresh external-state
 reconciliation. This prevents a stale workflow from resuming into objects that
 another workflow has started to mutate.
 
-The registry stores workflow ID, claim kind, canonical key digest, creation
-revision, and current disposition. It does not duplicate the workflow ledger.
+Under the store-wide claims lock, start reads every persisted workflow ledger,
+rejects the new claim set when any readable ledger still holds a conflicting
+active claim, and fails closed when any persisted ledger cannot be read. The
+atomic write of the new `workflow.json` is the single claim commit point: a
+start interrupted before that write leaves a directory without a ledger, which
+holds no claims and is ignored by conflict scans, reads, and listings. Claim
+release mutates only the owning ledger, so a torn multi-file claim state
+cannot exist, and the ledger validates that an active or paused workflow holds
+exactly its two authorized claims while released claims appear only on a
+cancelled workflow together with their release evidence. Claim dispositions
+and release evidence are part of the audited workflow state, and the release
+itself commits an audit event: a ledger that claims released ownership
+without that committed transition fails the audit binding, and a conflict
+scan trusts released claims only after the full locked load replays that
+proof. A bound local review is likewise exclusively owned: binding persists a
+workflow marker under the review's own mutation lock, a second workflow whose
+scope matches the same review fails closed at bind, and dispatch completion
+and every advance revalidate that ownership before adopting a verdict.
 Concurrent starts are serialized so exactly one claimant succeeds.
 
 Workflow files use the existing private mode, size limits, exclusive lock,
 canonical serialization, atomic replacement, file sync, and directory sync
 rules. The action audit is append-only with a committed digest-chain head,
 using the same durability model as the publication-gate audit.
+Every active workflow mutation commits a bounded state event before replacing
+the ledger, binding its revision, phase, recorded head and attempts, review
+summary, finding fingerprint, and task state. The unaudited initial revision is
+validated against the canonical `ACTIVE` / `IMPLEMENTING` initial state.
+Before either audit artifact is written, the exact replacement ledger is
+serialized with the projected sequence and digest cursor and checked against
+the 2 MiB ledger limit.
+`action-audit.jsonl` retains an absolute 4 MiB readable limit. Ordinary events
+stop early enough to reserve two maximum-sized terminal events within that
+limit, so an accepted cancellation and its later audited claim release always
+fit the main log. Workflow start and every active or paused mutation also
+reserve the full worst-case stop: the pessimistic cancelled-and-released
+audit event must fit the 256 KiB per-event limit, and the pessimistic
+cancelled-and-released ledger — including a maximal revision, audit cursor,
+operator label, rationale, and reconciled release evidence — must still fit
+the 2 MiB ledger limit. A mutation that would leave either reserve short is
+rejected before any artifact is written. Cancellation and release rationale
+are capped at 32 KiB after canonical JSON string encoding, so escaped input
+cannot consume that reserved headroom.
 
 No existing `review.json` or `publication.json` is migrated. Older Review
 Bridge clients may continue their existing workflows but cannot advance a new
@@ -986,6 +1021,11 @@ Pause reasons include:
 An operator may explicitly cancel an active or paused workflow. Cancellation
 prevents further automatic writes but does not delete commits, branches, pull
 requests, reviews, or audit evidence. Cleanup is a separate explicit action.
+Pause and cancellation transitions are committed to the workflow action audit.
+Recovery replays one committed stop or rejects a ledger whose active status,
+phase, bound review summary, finding fingerprint, pause evidence, or
+cancellation evidence disagrees with the audit before another external
+mutation.
 
 A paused workflow resumes only after the operator supplies the exact missing
 decision or external state changes and the controller freshly verifies it.
