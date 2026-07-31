@@ -18,7 +18,9 @@
   authors reword requirements between rounds of the same work, and instead
   records `parent_requirement` and `requirement_match` in the successor proof.
   Candidates are matched on shared Git repository identity, so a parent gated
-  in one linked worktree is found from another. The collector's `--out` file
+  in one linked worktree is found from another, and ranked by ancestry
+  distance to the captured head rather than by gate recency, so gates landing
+  out of commit order cannot pull selection toward a farther parent. The collector's `--out` file
   is replaced atomically through a fresh `0600` temp file, so reusing an
   observation path never inherits looser permissions. With `--review-id` the
   observation defaults into the private store beside the ledger, and an
@@ -36,7 +38,10 @@
   snapshot commitment.
   Past 400 files the index is
   truncated but still spans the whole patch: a final `path: null` entry covers
-  the remainder, which reviewers must read in full. Quoted Git paths —
+  the remainder, which reviewers must read in full. Snapshot capture forces
+  `core.quotePath=true` and header decoding is strict UTF-8, so a raw
+  non-UTF-8 filename byte can never produce a lossy but plausible path — such
+  sections stay `path: null` and are read in full. Quoted Git paths —
   filenames with quotes, control bytes, or non-ASCII — are decoded, unquoted
   headers are resolved by the equal-length structure of `a/X b/X` rather than
   by searching for a separator a filename could legally contain, and any

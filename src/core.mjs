@@ -343,7 +343,7 @@ function diffHeaderPath(header) {
 // only the sections that matter instead of the whole cumulative patch. The
 // index is advisory: it is not part of the snapshot commitment, and a reader
 // that ignores it still sees the exact same bytes.
-function buildPatchIndex(patch) {
+export function buildPatchIndex(patch) {
   const starts = [];
   let cursor = 0;
   while (cursor <= patch.length - DIFF_HEADER.length) {
@@ -367,9 +367,21 @@ function buildPatchIndex(patch) {
     if (!DIFF_HEADER_FOLLOWERS.some((prefix) => nextLine.startsWith(prefix))) {
       continue;
     }
+    // The header must decode fatally: with core.quotePath=false Git emits
+    // raw non-UTF-8 filename bytes, and a lossy decode would substitute
+    // U+FFFD and label the section with a plausible path that exists in no
+    // tree. Undecodable headers stay path-null, which is a mandatory read.
+    let header = null;
+    try {
+      header = new TextDecoder("utf-8", { fatal: true }).decode(
+        patch.subarray(found, lineEnd),
+      );
+    } catch {
+      // fall through with header = null
+    }
     starts.push({
       offset: found,
-      path: diffHeaderPath(patch.subarray(found, lineEnd).toString("utf8")),
+      path: header == null ? null : diffHeaderPath(header),
     });
   }
   const entries = starts.map((entry, position) => ({
@@ -408,7 +420,16 @@ function buildPatchIndex(patch) {
 function appendUntrackedDiff(repositoryPath, relativePath) {
   const output = runGit(
     repositoryPath,
-    ["diff", "--no-index", "--binary", "--", "/dev/null", relativePath],
+    [
+      "-c",
+      "core.quotePath=true",
+      "diff",
+      "--no-index",
+      "--binary",
+      "--",
+      "/dev/null",
+      relativePath,
+    ],
     { allowExitCodes: [0, 1] },
   );
   return Buffer.from(output);
@@ -436,6 +457,10 @@ async function buildSnapshot({
 
   const trackedPatch = Buffer.from(
     runGit(repository, [
+      // Quoting is forced so diff headers stay decodable UTF-8 for the patch
+      // index even when the repository sets core.quotePath=false.
+      "-c",
+      "core.quotePath=true",
       "diff",
       "--binary",
       "--full-index",
@@ -1088,20 +1113,47 @@ async function automaticParentCandidates(storeRoot, { manifest, requirement }) {
     if (ancestry.error || ancestry.status !== 0) {
       continue;
     }
+    // Rank by how far the gated head is behind the current head. Gate
+    // chronology cannot stand in for this: gates land out of commit order
+    // across linked worktrees, and a farther parent means a delta that
+    // re-includes already-reviewed commits.
+    const distanceResult = spawnSync(
+      "git",
+      [
+        "rev-list",
+        "--count",
+        `${cleanRound.head_sha}..${manifest.head_sha}`,
+      ],
+      {
+        cwd: manifest.repository_path,
+        encoding: "utf8",
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+      },
+    );
+    const distance = Number(distanceResult.stdout?.trim());
+    if (
+      distanceResult.error ||
+      distanceResult.status !== 0 ||
+      !Number.isSafeInteger(distance)
+    ) {
+      continue;
+    }
     // Candidates travel as their validated directory names, never as the
     // ledger's internal id: a corrupted stored id would otherwise throw in
     // the successor proof and abort preparation outright, instead of being
     // rejected by the proof's own id-mismatch fallback.
-    candidates.push({ id: entry.name, review });
+    candidates.push({ id: entry.name, review, distance });
   }
-  // Prefer a parent gated for the same stated requirement; otherwise the most
-  // recently gated ancestor, which is the smallest delta.
+  // Prefer a parent gated for the same stated requirement, then the nearest
+  // gated ancestor — the smallest delta — with gate recency only as a tie
+  // break between equally near heads.
   return candidates
     .sort((a, b) => {
       const aMatch = a.review.requirement === requirement ? 0 : 1;
       const bMatch = b.review.requirement === requirement ? 0 : 1;
       return (
         aMatch - bMatch ||
+        a.distance - b.distance ||
         String(b.review.updated_at ?? "").localeCompare(
           String(a.review.updated_at ?? ""),
         )

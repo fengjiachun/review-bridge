@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  buildPatchIndex,
   exportHumanArbitration,
   finalizeLocalGate,
   getReview,
@@ -2166,4 +2167,94 @@ test("index coverage starts at offset zero even when the patch does not", async 
     opened.current_snapshot.patch_bytes,
   );
   assert.ok(index.some((entry) => entry.path === "brand-new.js"));
+});
+
+test("a non-UTF-8 diff header stays path-null instead of gaining a lossy name", () => {
+  const section = (headerBytes, body) =>
+    Buffer.concat([
+      Buffer.from("diff --git "),
+      headerBytes,
+      Buffer.from("\nindex 000..111 100644\n"),
+      Buffer.from(body),
+    ]);
+  // core.quotePath=false lets a raw 0xFF filename byte through; a lossy
+  // decode would produce "a/f<U+FFFD>.js b/f<U+FFFD>.js" — a plausible path
+  // that exists in no tree.
+  const rawByteHeader = Buffer.concat([
+    Buffer.from("a/f"),
+    Buffer.from([0xff]),
+    Buffer.from(".js b/f"),
+    Buffer.from([0xff]),
+    Buffer.from(".js"),
+  ]);
+  const patch = Buffer.concat([
+    section(rawByteHeader, "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-1\n+2\n"),
+    section(Buffer.from("a/ok.js b/ok.js"), "--- a/ok.js\n+++ b/ok.js\n"),
+  ]);
+
+  const { entries, truncated } = buildPatchIndex(patch);
+
+  assert.equal(truncated, false);
+  assert.deepEqual(
+    entries.map((entry) => entry.path),
+    [null, "ok.js"],
+  );
+  assert.equal(entries[0].offset, 0);
+  assert.equal(
+    entries.reduce((total, entry) => total + entry.bytes, 0),
+    patch.length,
+  );
+});
+
+test("automatic parent selection prefers the nearest ancestor over the newest gate", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const requirement = "Harden the fixture in reviewed increments.";
+
+  await fsp.writeFile(path.join(repository, "step1.js"), "export const s1 = 1;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "step 1");
+  const far = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement,
+    implementationScope: "Add step 1.",
+  });
+  await submitInitialReview(store, far.id, []);
+  await finalizeLocalGate(store, far.id);
+
+  await fsp.writeFile(path.join(repository, "step2.js"), "export const s2 = 2;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "step 2");
+  const near = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement,
+    implementationScope: "Add step 2.",
+  });
+  await submitInitialReview(store, near.id, []);
+  await finalizeLocalGate(store, near.id);
+
+  // Make the farther ancestor the most recently touched gate, as happens
+  // when gates land out of commit order across linked worktrees.
+  const farPath = path.join(store, "reviews", far.id, "review.json");
+  const farLedger = JSON.parse(await fsp.readFile(farPath, "utf8"));
+  farLedger.updated_at = "2999-01-01T00:00:00.000Z";
+  await fsp.writeFile(farPath, `${JSON.stringify(farLedger)}\n`, { mode: 0o600 });
+
+  await fsp.writeFile(path.join(repository, "step3.js"), "export const s3 = 3;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "step 3");
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement,
+    implementationScope: "Add step 3.",
+  });
+
+  assert.equal(child.review_strategy.mode, "SUCCESSOR");
+  assert.equal(child.review_strategy.parent_review_id, near.id);
+  // The delta re-reviews only the unreviewed commit, not step 2 again.
+  assert.deepEqual(child.rounds[0].successor.changed_files, ["step3.js"]);
 });
