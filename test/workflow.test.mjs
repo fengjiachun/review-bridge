@@ -2438,6 +2438,97 @@ test("a verdict recorded before dispatch completion cannot be adopted", async (t
   assert.equal(stuck.reviewer_task, null);
 });
 
+
+test("one local review cannot serve two workflows", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+
+  const first = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  git(state.repository, "switch", "-c", "agent/workflow-alt");
+  const second = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, {
+      topicBranch: "agent/workflow-alt",
+      publicationTarget: {
+        base_repository_id: 101,
+        base_owner: "example",
+        base_repo: "review-bridge",
+        base_branch: "main",
+        head_repository_id: 101,
+        head_owner: "example",
+        head_repo: "review-bridge",
+        head_branch: "agent/workflow-alt",
+        push_remote: "origin",
+      },
+    }),
+  );
+
+  const headSha = await commitImplementation(state.repository);
+  const secondRecorded = await recordWorkflowHead(
+    state.store,
+    second.workflow_id,
+    second.revision,
+    headSha,
+  );
+  git(state.repository, "switch", "agent/workflow-core");
+  git(state.repository, "merge", "--ff-only", headSha);
+  const firstRecorded = await recordWorkflowHead(
+    state.store,
+    first.workflow_id,
+    first.revision,
+    headSha,
+  );
+
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: first.requirement,
+    implementationScope: first.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  const bound = await bindWorkflowReview(
+    state.store,
+    first.workflow_id,
+    firstRecorded.revision,
+    review.id,
+  );
+  assert.equal(bound.current_review.review_id, review.id);
+
+  git(state.repository, "switch", "agent/workflow-alt");
+  await assert.rejects(
+    bindWorkflowReview(
+      state.store,
+      second.workflow_id,
+      secondRecorded.revision,
+      review.id,
+    ),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_REVIEW_OWNERSHIP_CONFLICT");
+      assert.equal(error.details.owner_workflow_id, first.workflow_id);
+      return true;
+    },
+  );
+
+  // The losing workflow still binds its own separate review.
+  const separate = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: second.requirement,
+    implementationScope: second.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  const rebound = await bindWorkflowReview(
+    state.store,
+    second.workflow_id,
+    secondRecorded.revision,
+    separate.id,
+  );
+  assert.equal(rebound.current_review.review_id, separate.id);
+});
+
 test("a fabricated claim release fails the audit binding and keeps the branch owned", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

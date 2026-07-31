@@ -400,7 +400,11 @@ and release evidence are part of the audited workflow state, and the release
 itself commits an audit event: a ledger that claims released ownership
 without that committed transition fails the audit binding, and a conflict
 scan trusts released claims only after the full locked load replays that
-proof. Concurrent starts are serialized so exactly one claimant succeeds.
+proof. A bound local review is likewise exclusively owned: binding persists a
+workflow marker under the review's own mutation lock, a second workflow whose
+scope matches the same review fails closed at bind, and dispatch completion
+and every advance revalidate that ownership before adopting a verdict.
+Concurrent starts are serialized so exactly one claimant succeeds.
 
 Workflow files use the existing private mode, size limits, exclusive lock,
 canonical serialization, atomic replacement, file sync, and directory sync

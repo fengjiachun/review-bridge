@@ -1439,6 +1439,45 @@ function claim(kind, key, workflowId) {
   };
 }
 
+function reviewBindingPath(storeRoot, reviewId) {
+  return path.join(storeRoot, "reviews", reviewId, "workflow-binding.json");
+}
+
+async function readReviewBinding(storeRoot, reviewId) {
+  let binding;
+  try {
+    binding = await readCanonicalSecureJson(
+      reviewBindingPath(storeRoot, reviewId),
+      16 * 1024,
+      "WORKFLOW_REVIEW_BINDING_INVALID",
+    );
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+  if (binding?.version !== 1 || binding.review_id !== reviewId) {
+    fail(
+      "WORKFLOW_REVIEW_BINDING_INVALID",
+      "review workflow binding is malformed",
+    );
+  }
+  assertWorkflowId(binding.workflow_id);
+  assertTimestamp(binding.bound_at, "binding.bound_at");
+  return binding;
+}
+
+async function requireReviewBinding(storeRoot, workflow, reviewId) {
+  const binding = await readReviewBinding(storeRoot, reviewId);
+  if (binding == null || binding.workflow_id !== workflow.workflow_id) {
+    fail(
+      "WORKFLOW_REVIEW_MISMATCH",
+      "local review is not bound to this workflow",
+    );
+  }
+}
+
 function requireCleanReviewRound(review) {
   const round = review.rounds?.find(
     (entry) => entry.round === review.current_round,
@@ -1823,6 +1862,29 @@ export async function bindWorkflowReview(
           "local review does not match the workflow repository, requirement, provider, base, head, and state",
         );
       }
+      // One review may serve one workflow. The exclusive binding marker is
+      // written under the review mutation lock, so a second workflow whose
+      // scope also matches this review fails closed instead of adopting a
+      // verdict produced for another workflow's reviewer task.
+      const binding = await readReviewBinding(storeRoot, reviewId);
+      if (binding != null && binding.workflow_id !== workflow.workflow_id) {
+        fail(
+          "WORKFLOW_REVIEW_OWNERSHIP_CONFLICT",
+          `review ${reviewId} is already bound to ${binding.workflow_id}`,
+          { owner_workflow_id: binding.workflow_id, review_id: reviewId },
+        );
+      }
+      if (binding == null) {
+        await atomicWriteCanonicalJson(
+          reviewBindingPath(storeRoot, reviewId),
+          {
+            version: 1,
+            review_id: reviewId,
+            workflow_id: workflow.workflow_id,
+            bound_at: now(),
+          },
+        );
+      }
       return publicWorkflow(
         await saveMutation(paths, workflow, async (next) => {
           next.attempts.at(-1).review_id = reviewId;
@@ -2028,6 +2090,11 @@ export async function completeWorkflowAction(
       storeRoot,
       action.target.review_id,
       async ({ summary }) => {
+        await requireReviewBinding(
+          storeRoot,
+          workflow,
+          action.target.review_id,
+        );
         if (
           summary.status !== "WAITING_FOR_REVIEW" ||
           summary.state_version !== workflow.current_review.state_version
@@ -2109,6 +2176,7 @@ export async function advanceLocalWorkflow(
       );
     }
     const reviewId = workflow.current_review.review_id;
+    await requireReviewBinding(storeRoot, workflow, reviewId);
     const { review, summary } = await getReviewSnapshot(storeRoot, reviewId);
     requireCleanReviewRound(review);
     if (
