@@ -2020,45 +2020,49 @@ export async function completeWorkflowAction(
       fail("WORKFLOW_ACTION_KIND_INVALID", "unsupported workflow action");
     }
     // The bound review must still be exactly the state that was bound before
-    // dispatch. Any verdict recorded by now predates the completed reviewer
-    // task and must not be accepted as its independent result.
-    const { summary } = await getReviewSnapshot(
+    // dispatch, and it must stay that way until ACTION_COMPLETED is
+    // persisted: the check and the completion commit share the review
+    // mutation lock, so a verdict can never slip in between them and predate
+    // the completed reviewer task.
+    return getReviewSnapshot(
       storeRoot,
       action.target.review_id,
-    );
-    if (
-      summary.status !== "WAITING_FOR_REVIEW" ||
-      summary.state_version !== workflow.current_review.state_version
-    ) {
-      fail(
-        "WORKFLOW_REVIEW_TRANSITION_INVALID",
-        "local review changed before the reviewer task dispatch completed",
-        {
-          review_id: action.target.review_id,
-          bound_state_version: workflow.current_review.state_version,
-          observed_state_version: summary.state_version,
-          observed_status: summary.status,
-        },
-      );
-    }
-    return publicWorkflow(
-      await saveActionMutation(
-        paths,
-        workflow,
-        "ACTION_COMPLETED",
-        async (next) => {
-          next.reviewer_task = {
-            task_id: next.active_action.provider_response.task_id,
-            review_id: next.active_action.target.review_id,
-            reviewer_provider: "CODEX_TASK",
-            dispatch_marker: next.active_action.correlation_marker,
-            observed_at: next.active_action.provider_response.observed_at,
-          };
-          next.active_action.completed_at = now();
-          next.active_action = null;
-          next.phase = "WAIT_LOCAL_REVIEW";
-        },
-      ),
+      async ({ summary }) => {
+        if (
+          summary.status !== "WAITING_FOR_REVIEW" ||
+          summary.state_version !== workflow.current_review.state_version
+        ) {
+          fail(
+            "WORKFLOW_REVIEW_TRANSITION_INVALID",
+            "local review changed before the reviewer task dispatch completed",
+            {
+              review_id: action.target.review_id,
+              bound_state_version: workflow.current_review.state_version,
+              observed_state_version: summary.state_version,
+              observed_status: summary.status,
+            },
+          );
+        }
+        return publicWorkflow(
+          await saveActionMutation(
+            paths,
+            workflow,
+            "ACTION_COMPLETED",
+            async (next) => {
+              next.reviewer_task = {
+                task_id: next.active_action.provider_response.task_id,
+                review_id: next.active_action.target.review_id,
+                reviewer_provider: "CODEX_TASK",
+                dispatch_marker: next.active_action.correlation_marker,
+                observed_at: next.active_action.provider_response.observed_at,
+              };
+              next.active_action.completed_at = now();
+              next.active_action = null;
+              next.phase = "WAIT_LOCAL_REVIEW";
+            },
+          ),
+        );
+      },
     );
   });
 }
