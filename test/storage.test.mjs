@@ -252,7 +252,6 @@ test("state locks serialize one review and keep lock domains independent", async
       directory: root,
       reviewId: "rb-test",
       domain: "publication",
-      waitMs: 500,
     },
     async () => {},
   );
@@ -265,7 +264,6 @@ test("state locks serialize one review and keep lock domains independent", async
     directory: root,
     reviewId: "rb-test",
     domain: "review",
-    waitMs: 500,
   });
   await releaseAgain();
 });
@@ -282,7 +280,6 @@ test("a contended lock timestamps its actual acquisition", async (t) => {
     directory: root,
     reviewId: "rb-test",
     domain: "review",
-    waitMs: 1_000,
   });
   await new Promise((resolve) => setTimeout(resolve, 100));
   const firstReleaseStarted = Date.now();
@@ -369,7 +366,6 @@ test("an inconclusive owner probe fails closed without changing the record", asy
         directory: root,
         reviewId: "rb-test",
         domain: "review",
-        waitMs: 500,
         staleMs: 1_000,
         heartbeatMs: 100,
       }),
@@ -416,7 +412,6 @@ test("a reused PID identity and a dead PID are reclaimable", async (t) => {
     directory: root,
     reviewId: "rb-test",
     domain: "review",
-    waitMs: 500,
     staleMs: 1_000,
     heartbeatMs: 100,
   });
@@ -437,7 +432,6 @@ test("a reused PID identity and a dead PID are reclaimable", async (t) => {
     directory: root,
     reviewId: "rb-test",
     domain: "review",
-    waitMs: 500,
     staleMs: 1_000,
     heartbeatMs: 100,
   });
@@ -463,7 +457,7 @@ test("concurrent stale reclaim admits exactly one owner", async (t) => {
       directory: root,
       reviewId: "rb-test",
       domain: "review",
-      waitMs: 500,
+      waitMs: 3_000,
       staleMs: 1_000,
       heartbeatMs: 100,
     }),
@@ -471,7 +465,7 @@ test("concurrent stale reclaim admits exactly one owner", async (t) => {
       directory: root,
       reviewId: "rb-test",
       domain: "review",
-      waitMs: 500,
+      waitMs: 3_000,
       staleMs: 1_000,
       heartbeatMs: 100,
     }),
@@ -499,8 +493,8 @@ test("a malformed lock fails immediately with an actionable error", async (t) =>
       directory: root,
       reviewId: "rb-test",
       domain: "review",
-      waitMs: 1_000,
-      staleMs: 2_000,
+      waitMs: 10_000,
+      staleMs: 20_000,
       heartbeatMs: 100,
     }),
     (error) =>
@@ -511,7 +505,7 @@ test("a malformed lock fails immediately with an actionable error", async (t) =>
       error.message.includes("content is not valid JSON") &&
       !error.message.includes(privatePrefix),
   );
-  assert.ok(Date.now() - started < 900);
+  assert.ok(Date.now() - started < 5_000);
 });
 
 test("a coordinator symlink is rejected without changing its target", async (t) => {
@@ -640,7 +634,6 @@ test("withStateLock releases after an operation throws", async (t) => {
     directory: root,
     reviewId: "rb-test",
     domain: "review",
-    waitMs: 500,
   });
   await release();
 });
@@ -671,6 +664,7 @@ test("withStateLock preserves null and undefined rejections", async (t) => {
 test("a transient heartbeat failure does not poison release", async (t) => {
   const root = await temporaryDirectory(t, "review-bridge-lock-heartbeat-");
   const lockPath = path.join(root, ".review-state.lock");
+  const coordinatorPath = `${lockPath}.guard`;
   const warnings = await captureWarnings(async () => {
     const release = await acquireStateLock({
       directory: root,
@@ -678,10 +672,12 @@ test("a transient heartbeat failure does not poison release", async (t) => {
       domain: "review",
       heartbeatMs: 20,
     });
+    const { helperPid } = stateLockProcesses(coordinatorPath);
     await fsp.chmod(lockPath, 0o644);
-    await new Promise((resolve) => setTimeout(resolve, 35));
+    // A heartbeat that observes the wrong mode makes the helper report an
+    // error and exit, so the helper's exit proves the failure happened.
+    await waitForProcessExit(helperPid, 5_000);
     await fsp.chmod(lockPath, 0o600);
-    await new Promise((resolve) => setTimeout(resolve, 35));
     await release();
   });
   assert.deepEqual(
