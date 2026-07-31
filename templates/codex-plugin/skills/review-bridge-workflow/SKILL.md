@@ -51,10 +51,30 @@ publication, remote findings, ready-state changes, or thread resolution.
    submitting resolutions. Round two reuses the same reviewer task. A
    `HUMAN_REQUIRED` review pauses the workflow and must not create a third
    model round.
-8. Stop this implementation at `PUBLISH_GATED_HEAD`. GitHub autonomous
-   publication remains unavailable until the later workflow schema and skill
-   update ship. Continue manually through the existing `LOCAL_GATE`
-   publication flow only after a fresh operator instruction.
+8. For `PLAN_PUSH`, call `plan_workflow_push`; it verifies the clean
+   checked-out HEAD still equals the gated workflow head. Persist `EXECUTING`
+   with `mark_workflow_action_executing` immediately before pushing, push the
+   topic branch to the authorized remote without force, freshly read the exact
+   remote ref head, and call `record_push_observation` with it; the observed
+   ref must equal the gated head. Then call `complete_workflow_action`. If the
+   remote ref cannot be read or does not converge, pause with
+   `EXTERNAL_ACTION_INDETERMINATE` instead of re-pushing blindly.
+9. For `PLAN_DRAFT_PULL_REQUEST`, call `plan_draft_pull_request` and include
+   the returned exact `body_marker` in the initial pull-request body. Persist
+   `EXECUTING` before creating the draft pull request against the authorized
+   base. Reconcile by searching the authorized repository for open pull
+   requests with the exact head branch: bind exactly one match whose marker,
+   repository, branches, head, draft state, and creator all verify, and call
+   `record_draft_pull_request_observation` with those facts; then call
+   `complete_workflow_action`, which atomically claims the pull request
+   store-wide. A same-branch pull request without the marker, a non-draft
+   match, or multiple matches pauses; branch equality alone never establishes
+   ownership.
+10. Stop this implementation at `START_PUBLICATION`. Autonomous publication
+    ledgers, remote Codex waiting, and repair cycles remain unavailable until
+    the later workflow schema and skill update ship. Continue manually through
+    the existing `LOCAL_GATE` publication flow only after a fresh operator
+    instruction.
 
 Every mutation uses the exact current workflow revision. On `WORKFLOW_BUSY`,
 `WORKFLOW_CLAIMS_BUSY`, `LOCK_OWNERSHIP_LOST`, or an indeterminate store write,

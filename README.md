@@ -301,12 +301,17 @@ IMPLEMENTING
   -> marker-reconciled independent reviewer task
   -> local findings and round two when needed
   -> LOCAL_GATE_PASSED
+  -> reconciled fast-forward push of the exact gated head
+  -> marker-bound draft pull request, claimed store-wide
+  -> START_PUBLICATION
 ```
 
 `start_autonomous_workflow` binds the immutable repository, base, requirement,
 topic branch, publication target, complete capability set, and authorization
 digest. Store-wide claims admit only one active or paused owner for the local
-branch and GitHub head ref. The task-dispatch tools persist
+branch, the GitHub head ref, and — once a draft pull request is bound — the
+exact pull request. Every external action (reviewer task dispatch, gated-head
+push, draft pull-request creation) persists
 `PLANNED -> EXECUTING -> OBSERVED -> COMPLETED` in a digest-chained action
 audit and recover one committed crash-tail event before another mutation.
 The complete marker-bound task title and prompt remain in the active action and
@@ -329,10 +334,10 @@ third model round. Cancellation retains claims until an explicit,
 exactly-reconciled release proves every claimed object absent with a fresh
 observation bound to the current workflow revision and canonical claim target.
 
-This release stops at `PUBLISH_GATED_HEAD`. Autonomous draft PR publication,
-remote review repair cycles, ready-state changes, and evidence-backed thread
-resolution ship in the later RFC 0003 implementation changes. The existing
-manual publication flow below remains unchanged.
+This release stops at `START_PUBLICATION`. Autonomous publication ledgers,
+remote review waiting and repair cycles, ready-state changes, and
+evidence-backed thread resolution ship in the later RFC 0003 implementation
+changes. The existing manual publication flow below remains unchanged.
 
 ## GitHub publication gate
 

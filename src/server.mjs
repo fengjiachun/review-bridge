@@ -46,7 +46,11 @@ import {
   markWorkflowActionExecuting,
   pauseAutonomousWorkflow,
   planCodexTaskDispatch,
+  planDraftPullRequest,
+  planWorkflowPush,
   recordCodexTaskObservation,
+  recordDraftPullRequestObservation,
+  recordPushObservation,
   recordWorkflowHead,
   releaseWorkflowClaims,
   resumeAutonomousWorkflow,
@@ -346,6 +350,112 @@ if (role === "author") {
   );
 
   register(
+    "plan_workflow_push",
+    {
+      title: "Plan gated head push",
+      description:
+        "Persist a single PUSH_TOPIC_BRANCH intent after verifying the clean checked-out HEAD still equals the gated workflow head.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+      },
+    },
+    (input) =>
+      planWorkflowPush(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+      ),
+  );
+
+  register(
+    "record_push_observation",
+    {
+      title: "Record push observation",
+      description:
+        "Reconcile the authorized remote ref: the freshly read remote head must equal the exact pushed workflow head.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+        remote_ref_sha: z.string(),
+      },
+    },
+    (input) =>
+      recordPushObservation(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
+        { remoteRefSha: input.remote_ref_sha },
+      ),
+  );
+
+  register(
+    "plan_draft_pull_request",
+    {
+      title: "Plan draft pull request",
+      description:
+        "Persist a single CREATE_DRAFT_PULL_REQUEST intent and return the exact body marker that binds the created pull request.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+      },
+    },
+    (input) =>
+      planDraftPullRequest(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+      ),
+  );
+
+  register(
+    "record_draft_pull_request_observation",
+    {
+      title: "Record draft pull request observation",
+      description:
+        "Reconcile exactly one marker-bound draft pull request whose repository, branches, head, and creator match the authorized target.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+        matching_pr_numbers: z.array(z.number().int().positive()),
+        pr_number: z.number().int().positive(),
+        repository_id: z.number().int().positive(),
+        base_branch: z.string(),
+        head_branch: z.string(),
+        head_sha: z.string(),
+        draft: z.boolean(),
+        marker_present: z.boolean(),
+        creator_actor_id: z.number().int().positive(),
+        creator_actor_type: z.enum(["User", "Bot"]),
+        url: z.string(),
+      },
+    },
+    (input) =>
+      recordDraftPullRequestObservation(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
+        {
+          matchingPrNumbers: input.matching_pr_numbers,
+          prNumber: input.pr_number,
+          repositoryId: input.repository_id,
+          baseBranch: input.base_branch,
+          headBranch: input.head_branch,
+          headSha: input.head_sha,
+          draft: input.draft,
+          markerPresent: input.marker_present,
+          creatorActorId: input.creator_actor_id,
+          creatorActorType: input.creator_actor_type,
+          url: input.url,
+        },
+      ),
+  );
+
+  register(
     "mark_workflow_action_executing",
     {
       title: "Mark workflow action executing",
@@ -475,7 +585,7 @@ if (role === "author") {
         rationale: z.string(),
         reconciled_claims: z.array(
           z.object({
-            kind: z.enum(["LOCAL_BRANCH", "GITHUB_HEAD_REF"]),
+            kind: z.enum(["LOCAL_BRANCH", "GITHUB_HEAD_REF", "PULL_REQUEST"]),
             canonical_key_sha256: z.string(),
             target: z.record(z.unknown()),
             workflow_revision: z.number().int().positive(),

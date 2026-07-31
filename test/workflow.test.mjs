@@ -25,7 +25,11 @@ import {
   markWorkflowActionExecuting,
   pauseAutonomousWorkflow,
   planCodexTaskDispatch,
+  planDraftPullRequest,
+  planWorkflowPush,
   recordCodexTaskObservation,
+  recordDraftPullRequestObservation,
+  recordPushObservation,
   recordWorkflowHead,
   releaseWorkflowClaims,
   resumeAutonomousWorkflow,
@@ -1577,7 +1581,7 @@ test("workflow listing surfaces missing mandatory audit artifacts", async (t) =>
   }
 });
 
-test("a clean independent review advances the local workflow to its PR1 boundary", async (t) => {
+test("a clean review advances through push and draft PR to publication", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const { workflow, review, headSha } = await prepareBoundWorkflow(state);
@@ -1595,11 +1599,6 @@ test("a clean independent review advances the local workflow to its PR1 boundary
     completed.revision,
   );
   assert.equal(clean.phase, "FINALIZE_LOCAL_GATE");
-  assert.equal(
-    (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
-      .next_action,
-    "FINALIZE_LOCAL_GATE",
-  );
 
   await finalizeLocalGate(state.store, review.id);
   const gated = await advanceLocalWorkflow(
@@ -1608,14 +1607,405 @@ test("a clean independent review advances the local workflow to its PR1 boundary
     clean.revision,
   );
   assert.equal(gated.phase, "LOCAL_GATE_PASSED");
-  assert.equal(gated.status, "ACTIVE");
   assert.equal(gated.current_head_sha, headSha);
-  assert.equal(gated.attempts.at(-1).review_id, review.id);
   assert.equal(
     (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
       .next_action,
-    "PUBLISH_GATED_HEAD",
+    "PLAN_PUSH",
   );
+
+  const pushPlanned = await planWorkflowPush(
+    state.store,
+    workflow.workflow_id,
+    gated.revision,
+  );
+  assert.equal(pushPlanned.workflow.phase, "PUSH_GATED_HEAD");
+  assert.equal(pushPlanned.action.kind, "PUSH_TOPIC_BRANCH");
+  assert.equal(pushPlanned.action.correlation_marker, null);
+  assert.equal(pushPlanned.dispatch, null);
+  assert.equal(pushPlanned.action.target.head_sha, headSha);
+  const pushExecuting = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    pushPlanned.workflow.revision,
+    pushPlanned.action.action_id,
+  );
+  await assert.rejects(
+    recordPushObservation(
+      state.store,
+      workflow.workflow_id,
+      pushExecuting.revision,
+      pushPlanned.action.action_id,
+      { remoteRefSha: state.baseSha },
+    ),
+    /observed remote ref does not equal the pushed head/,
+  );
+  const pushObserved = await recordPushObservation(
+    state.store,
+    workflow.workflow_id,
+    pushExecuting.revision,
+    pushPlanned.action.action_id,
+    { remoteRefSha: headSha },
+  );
+  const pushed = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    pushObserved.revision,
+    pushPlanned.action.action_id,
+  );
+  assert.equal(pushed.phase, "ENSURE_DRAFT_PR");
+  assert.equal(
+    (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
+      .next_action,
+    "PLAN_DRAFT_PULL_REQUEST",
+  );
+
+  const prPlanned = await planDraftPullRequest(
+    state.store,
+    workflow.workflow_id,
+    pushed.revision,
+  );
+  assert.match(prPlanned.action.correlation_marker, /^rbwf-pr-[0-9a-f]{32}$/);
+  assert.equal(
+    prPlanned.dispatch.body_marker,
+    `<!-- ${prPlanned.action.correlation_marker} -->`,
+  );
+  const prExecuting = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    prPlanned.workflow.revision,
+    prPlanned.action.action_id,
+  );
+  const prObservation = {
+    matchingPrNumbers: [7],
+    prNumber: 7,
+    repositoryId: 101,
+    baseBranch: "main",
+    headBranch: "agent/workflow-core",
+    headSha,
+    draft: true,
+    markerPresent: true,
+    creatorActorId: 555,
+    creatorActorType: "User",
+    url: "https://github.com/example/review-bridge/pull/7",
+  };
+  await assert.rejects(
+    recordDraftPullRequestObservation(
+      state.store,
+      workflow.workflow_id,
+      prExecuting.revision,
+      prPlanned.action.action_id,
+      { ...prObservation, draft: false },
+    ),
+    /WORKFLOW_ACTION_INVALID/,
+  );
+  await assert.rejects(
+    recordDraftPullRequestObservation(
+      state.store,
+      workflow.workflow_id,
+      prExecuting.revision,
+      prPlanned.action.action_id,
+      { ...prObservation, markerPresent: false },
+    ),
+    /WORKFLOW_ACTION_INVALID/,
+  );
+  const prObserved = await recordDraftPullRequestObservation(
+    state.store,
+    workflow.workflow_id,
+    prExecuting.revision,
+    prPlanned.action.action_id,
+    prObservation,
+  );
+  const bound = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    prObserved.revision,
+    prPlanned.action.action_id,
+  );
+  assert.equal(bound.phase, "START_PUBLICATION");
+  assert.equal(bound.pull_request.pr_number, 7);
+  assert.equal(bound.pull_request.repository_id, 101);
+  assert.equal(
+    bound.claims.filter((entry) => entry.kind === "PULL_REQUEST").length,
+    1,
+  );
+  assert.equal(
+    (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
+      .next_action,
+    "START_PUBLICATION",
+  );
+
+  // Cancellation retains all three claims until their reconciled release.
+  const cancelled = await cancelAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    bound.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "Stop after the publication boundary.",
+    },
+  );
+  assert.equal(
+    cancelled.claims.filter((entry) => entry.disposition === "ACTIVE").length,
+    3,
+  );
+  const released = await releaseWorkflowClaims(
+    state.store,
+    workflow.workflow_id,
+    cancelled.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "No external objects remain.",
+      reconciledClaims: claimReleaseEvidence(cancelled),
+    },
+  );
+  assert.equal(
+    released.claims.every((entry) => entry.disposition === "RELEASED"),
+    true,
+  );
+});
+
+
+test("one pull request cannot be claimed by two workflows", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+
+  const drive = async (workflowId, startRevision, reviewId, prNumber, headBranch) => {
+    const { completed } = await dispatchReviewer(
+      state.store,
+      workflowId,
+      startRevision,
+      reviewId,
+    );
+    await submitInitialReview(state.store, reviewId, [], "CODEX_TASK");
+    const clean = await advanceLocalWorkflow(
+      state.store,
+      workflowId,
+      completed.revision,
+    );
+    await finalizeLocalGate(state.store, reviewId);
+    const gated = await advanceLocalWorkflow(
+      state.store,
+      workflowId,
+      clean.revision,
+    );
+    const pushPlanned = await planWorkflowPush(
+      state.store,
+      workflowId,
+      gated.revision,
+    );
+    const pushExecuting = await markWorkflowActionExecuting(
+      state.store,
+      workflowId,
+      pushPlanned.workflow.revision,
+      pushPlanned.action.action_id,
+    );
+    const pushObserved = await recordPushObservation(
+      state.store,
+      workflowId,
+      pushExecuting.revision,
+      pushPlanned.action.action_id,
+      { remoteRefSha: pushPlanned.action.target.head_sha },
+    );
+    const pushed = await completeWorkflowAction(
+      state.store,
+      workflowId,
+      pushObserved.revision,
+      pushPlanned.action.action_id,
+    );
+    const prPlanned = await planDraftPullRequest(
+      state.store,
+      workflowId,
+      pushed.revision,
+    );
+    const prExecuting = await markWorkflowActionExecuting(
+      state.store,
+      workflowId,
+      prPlanned.workflow.revision,
+      prPlanned.action.action_id,
+    );
+    const prObserved = await recordDraftPullRequestObservation(
+      state.store,
+      workflowId,
+      prExecuting.revision,
+      prPlanned.action.action_id,
+      {
+        matchingPrNumbers: [prNumber],
+        prNumber,
+        repositoryId: 101,
+        baseBranch: "main",
+        headBranch,
+        headSha: prPlanned.action.target.head_sha,
+        draft: true,
+        markerPresent: true,
+        creatorActorId: 555,
+        creatorActorType: "User",
+        url: `https://github.com/example/review-bridge/pull/${prNumber}`,
+      },
+    );
+    return { prPlanned, prObserved };
+  };
+
+  const first = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commitImplementation(state.repository);
+  const firstRecorded = await recordWorkflowHead(
+    state.store,
+    first.workflow_id,
+    first.revision,
+    headSha,
+  );
+  const firstReview = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: first.requirement,
+    implementationScope: first.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  const firstBound = await bindWorkflowReview(
+    state.store,
+    first.workflow_id,
+    firstRecorded.revision,
+    firstReview.id,
+  );
+  const firstRun = await drive(
+    first.workflow_id,
+    firstBound.revision,
+    firstReview.id,
+    7,
+    "agent/workflow-core",
+  );
+  const firstDone = await completeWorkflowAction(
+    state.store,
+    first.workflow_id,
+    firstRun.prObserved.revision,
+    firstRun.prPlanned.action.action_id,
+  );
+  assert.equal(firstDone.pull_request.pr_number, 7);
+
+  git(state.repository, "switch", "-c", "agent/workflow-alt", state.baseSha);
+  const second = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, {
+      topicBranch: "agent/workflow-alt",
+      publicationTarget: {
+        base_repository_id: 101,
+        base_owner: "example",
+        base_repo: "review-bridge",
+        base_branch: "main",
+        head_repository_id: 101,
+        head_owner: "example",
+        head_repo: "review-bridge",
+        head_branch: "agent/workflow-alt",
+        push_remote: "origin",
+      },
+    }),
+  );
+  git(state.repository, "merge", "--ff-only", headSha);
+  const secondRecorded = await recordWorkflowHead(
+    state.store,
+    second.workflow_id,
+    second.revision,
+    headSha,
+  );
+  const secondReview = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: second.requirement,
+    implementationScope: second.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  const secondBound = await bindWorkflowReview(
+    state.store,
+    second.workflow_id,
+    secondRecorded.revision,
+    secondReview.id,
+  );
+  const secondRun = await drive(
+    second.workflow_id,
+    secondBound.revision,
+    secondReview.id,
+    7,
+    "agent/workflow-alt",
+  );
+  await assert.rejects(
+    completeWorkflowAction(
+      state.store,
+      second.workflow_id,
+      secondRun.prObserved.revision,
+      secondRun.prPlanned.action.action_id,
+    ),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_OWNERSHIP_CONFLICT");
+      assert.equal(error.details.owner_workflow_id, first.workflow_id);
+      return true;
+    },
+  );
+  const blocked = await getAutonomousWorkflow(
+    state.store,
+    second.workflow_id,
+  );
+  assert.equal(blocked.phase, "ENSURE_DRAFT_PR");
+  assert.equal(blocked.active_action.status, "OBSERVED");
+  assert.equal(blocked.pull_request, null);
+});
+
+test("a drifted or dirty head cannot plan the gated push", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review, headSha } = await prepareBoundWorkflow(state);
+  const { completed } = await dispatchReviewer(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  await submitInitialReview(state.store, review.id, [], "CODEX_TASK");
+  const clean = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    completed.revision,
+  );
+  await finalizeLocalGate(state.store, review.id);
+  const gated = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    clean.revision,
+  );
+  assert.equal(gated.current_head_sha, headSha);
+
+  const drifted = await commitImplementation(
+    state.repository,
+    "export const value = 99;\n",
+  );
+  assert.notEqual(drifted, headSha);
+  await assert.rejects(
+    planWorkflowPush(state.store, workflow.workflow_id, gated.revision),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_HEAD_MISMATCH");
+      return true;
+    },
+  );
+  git(state.repository, "reset", "--hard", headSha);
+
+  await fsp.writeFile(
+    path.join(state.repository, "untracked.txt"),
+    "dirty\n",
+  );
+  await assert.rejects(
+    planWorkflowPush(state.store, workflow.workflow_id, gated.revision),
+    /WORKTREE_DIRTY/,
+  );
+  await fsp.rm(path.join(state.repository, "untracked.txt"));
+
+  const planned = await planWorkflowPush(
+    state.store,
+    workflow.workflow_id,
+    gated.revision,
+  );
+  assert.equal(planned.workflow.phase, "PUSH_GATED_HEAD");
 });
 
 test("round-two advancement rejects an overlay-bearing snapshot", async (t) => {
