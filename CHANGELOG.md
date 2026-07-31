@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `record_github_snapshot` accepts `observation_path`, and the packaged
+  collector accepts `--review-id` and `--out`, so a publication ledger and its
+  GitHub observation move between the store, the collector, and the ledger as
+  files instead of being retyped through the model.
+- `prepare_review` selects a successor parent itself when `parent_review_id` is
+  omitted, considering only gated tasks for the same repository, base SHA, and
+  requirement whose gated head is a strict ancestor of the captured head, and
+  still requiring the full successor proof. `review_strategy.parent_selection`
+  reports `AUTOMATIC`, `EXPLICIT`, or `NONE`, and `force_full_review` demands a
+  full-patch review.
+- Every round records `patch_index`, the byte offset and length of each file's
+  section in `patch.diff`, so a reviewer can read the sections a review depends
+  on instead of the whole cumulative patch. The index is advisory and is not
+  part of the snapshot commitment.
+
+### Changed
+
+- Reviewer instructions state decidable conditions for expanding a `SUCCESSOR`
+  review to the full patch, replacing the open-ended "whenever uncertainty
+  warrants it" that sent nearly every review back to reading everything.
+- `open_review` returns one compact descriptor per round plus the full current
+  snapshot, instead of every round in full alongside a duplicate copy of the
+  current one.
+- MCP responses are serialized without indentation.
+
 ## 0.4.3 - 2026-07-29
 
 ### Added

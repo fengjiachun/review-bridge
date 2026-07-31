@@ -18,13 +18,20 @@ reviewer task.
 3. Call `open_review`. Require `reviewer_provider: CODEX_TASK`; a mismatch is a
    workflow error.
 4. Follow `review_strategy`:
-   - `SUCCESSOR`: read all of `successor.json` and `successor.diff`. Inspect
+   - `SUCCESSOR`: read all of `successor.json` and `successor.diff`. The delta
+     is the reviewed unit; everything before it was already gated. Inspect
      every changed file plus relevant callers, contracts, and tests with
-     `read_snapshot_file` and `search_snapshot`. Read all of `patch.diff` when
-     the delta is cross-cutting, security- or compatibility-sensitive, or any
-     uncertainty remains.
-   - `FULL`: read all of `patch.diff`.
-   Continue chunked artifact reads from `next_offset` until it is null.
+     `read_snapshot_file` and `search_snapshot`. Read `patch.diff` only when
+     the delta changes a contract used outside it, touches a security or
+     compatibility surface, or the successor proof fails to verify. Delta size
+     alone is not a reason.
+   - `FULL`: read `patch.diff` through `current_snapshot.patch_index`, which
+     gives each file's byte offset and length. Read the sections the reviewed
+     behavior depends on and skip sections that cannot affect it, such as
+     generated lockfiles or prose documents, unless the requirement is about
+     that content. Report which sections you skipped.
+   Continue chunked artifact reads from `next_offset` until you have the range
+   you intended to read.
 5. Review correctness, regressions, security, compatibility, error handling,
    and test coverage. Treat every actionable finding as blocking the clean
    verdict; do not waive lower-severity findings.

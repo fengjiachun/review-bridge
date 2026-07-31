@@ -19,6 +19,7 @@ import {
   getPublicationSummary,
   inspectPublicationAudit,
   publicationConstants,
+  readObservationFile,
   recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
@@ -4739,4 +4740,57 @@ test("monotonic state enforces exact individual and aggregate boundaries", async
   referenceBoundary.codex_review_ambiguity_acknowledgements[0].closed_results =
     [{ resource_kind: "ISSUE_COMMENT", result_id: 1_001 }];
   await assert.rejects(write(referenceBoundary), /more than 1,000 references/);
+});
+
+test("observations reach the ledger by path instead of through the caller", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-obs-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+
+  const valid = path.join(root, "observation.json");
+  await fsp.writeFile(valid, `${JSON.stringify({ observed_at: "now", runs: [1, 2] })}\n`);
+  assert.deepEqual(await readObservationFile(valid), {
+    observed_at: "now",
+    runs: [1, 2],
+  });
+
+  await assert.rejects(
+    readObservationFile(path.join(root, "missing.json")),
+    (error) => {
+      assert.equal(error.code, "OBSERVATION_FILE_UNREADABLE");
+      assert.equal(error.details.retryable, false);
+      return true;
+    },
+  );
+  await assert.rejects(readObservationFile(root), (error) => {
+    assert.equal(error.code, "OBSERVATION_FILE_UNREADABLE");
+    return true;
+  });
+  await assert.rejects(readObservationFile(""), (error) => {
+    assert.equal(error.code, "INVALID_INPUT");
+    return true;
+  });
+
+  const array = path.join(root, "array.json");
+  await fsp.writeFile(array, "[1,2,3]\n");
+  await assert.rejects(readObservationFile(array), (error) => {
+    assert.equal(error.code, "OBSERVATION_FILE_MALFORMED");
+    return true;
+  });
+
+  const truncated = path.join(root, "truncated.json");
+  await fsp.writeFile(truncated, '{"observed_at": ');
+  await assert.rejects(readObservationFile(truncated), (error) => {
+    assert.equal(error.code, "OBSERVATION_FILE_MALFORMED");
+    return true;
+  });
+
+  const oversized = path.join(root, "oversized.json");
+  await fsp.writeFile(
+    oversized,
+    `{"pad":"${"x".repeat(publicationConstants.max_observation_bytes)}"}`,
+  );
+  await assert.rejects(readObservationFile(oversized), (error) => {
+    assert.equal(error.code, "OBSERVATION_FILE_TOO_LARGE");
+    return true;
+  });
 });

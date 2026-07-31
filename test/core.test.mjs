@@ -1519,3 +1519,216 @@ test("build refuses to package a dirty working tree", async (t) => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /refusing to build from a dirty working tree/);
 });
+
+test("the patch index addresses each file's exact section without reading the whole patch", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "export function divide(a, b) {\n  if (b === 0) return null;\n  return a / b;\n}\n",
+  );
+  // A document whose own content mimics a diff header must not split the index.
+  await fsp.writeFile(
+    path.join(repository, "NOTES.md"),
+    `# Notes\n\ndiff --git a/decoy.js b/decoy.js\nstill the same section\n${"filler line\n".repeat(400)}`,
+  );
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "change");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Guard the zero divisor.",
+    implementationScope: "Edit app.js and add notes.",
+  });
+  const opened = await openReview(store, prepared.id);
+  const index = opened.current_snapshot.patch_index;
+
+  assert.deepEqual(
+    index.map((entry) => entry.path),
+    ["NOTES.md", "app.js"],
+  );
+  assert.equal(opened.current_snapshot.patch_index_truncated, false);
+  assert.equal(
+    index.reduce((total, entry) => total + entry.bytes, 0),
+    opened.current_snapshot.patch_bytes,
+  );
+
+  const appEntry = index.find((entry) => entry.path === "app.js");
+  const section = await readReviewArtifact(
+    store,
+    prepared.id,
+    1,
+    "patch.diff",
+    appEntry.offset,
+    appEntry.bytes,
+  );
+  assert.match(section.content, /^diff --git a\/app\.js b\/app\.js\n/);
+  assert.match(section.content, /if \(b === 0\) return null;/);
+  assert.doesNotMatch(section.content, /filler line/);
+  assert.ok(appEntry.bytes < opened.current_snapshot.patch_bytes / 2);
+});
+
+test("open_review states each round once and keeps the current snapshot whole", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  await fsp.writeFile(path.join(repository, "app.js"), "export const a = 1;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "change");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Simplify the module.",
+    implementationScope: "Replace divide with a constant.",
+  });
+  await submitInitialReview(store, prepared.id, [
+    {
+      severity: "minor",
+      title: "Explain the constant",
+      explanation: "State why the constant replaces the function.",
+    },
+  ]);
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "// The module exposes one constant.\nexport const a = 1;\n",
+  );
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "explain the constant");
+  await submitResolutions(store, prepared.id, [
+    {
+      finding_id: "F-001",
+      disposition: "fixed",
+      rationale: "Documented why the constant replaces the function.",
+      evidence: "app.js now states the contract.",
+    },
+  ]);
+  await prepareRereview(store, prepared.id);
+
+  const opened = await openReview(store, prepared.id);
+
+  assert.deepEqual(
+    opened.rounds.map((round) => round.round),
+    [1, 2],
+  );
+  assert.equal(opened.rounds[0].changed_files, undefined);
+  assert.equal(opened.rounds[0].changed_file_count, 1);
+  assert.equal(opened.current_snapshot.round, 2);
+  assert.deepEqual(opened.current_snapshot.changed_files, ["app.js"]);
+  // Round two must not carry a second full copy of itself.
+  const serialized = JSON.stringify(opened);
+  assert.equal(
+    serialized.split(`"snapshot_hash":"${opened.current_snapshot.snapshot_hash}"`)
+      .length - 1,
+    2,
+  );
+  assert.deepEqual(opened.findings.length, 1);
+});
+
+test("an unattended review selects a verified successor parent and can be forced full", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const requirement = "Harden the fixture in reviewed increments.";
+
+  await fsp.writeFile(path.join(repository, "parent-only.js"), "export const p = 1;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "parent change");
+  const parentHead = git(repository, "rev-parse", "HEAD");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement,
+    implementationScope: "Add the parent behavior.",
+  });
+  assert.equal(parent.review_strategy.mode, "FULL");
+  assert.equal(parent.review_strategy.parent_selection, "NONE");
+  await submitInitialReview(store, parent.id, []);
+  await finalizeLocalGate(store, parent.id);
+
+  await fsp.writeFile(path.join(repository, "child-only.js"), "export const c = 2;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "child change");
+
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement,
+    implementationScope: "Add the child behavior.",
+  });
+
+  assert.equal(child.review_strategy.mode, "SUCCESSOR");
+  assert.equal(child.review_strategy.parent_selection, "AUTOMATIC");
+  assert.equal(child.review_strategy.parent_review_id, parent.id);
+  assert.equal(child.rounds[0].successor.parent_head_sha, parentHead);
+  assert.deepEqual(child.rounds[0].successor.changed_files, ["child-only.js"]);
+  assert.ok(child.rounds[0].successor.delta_bytes < child.rounds[0].patch_bytes);
+
+  const forced = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement,
+    implementationScope: "Add the child behavior.",
+    forceFullReview: true,
+  });
+  assert.equal(forced.review_strategy.mode, "FULL");
+  assert.equal(forced.review_strategy.parent_selection, "NONE");
+  assert.equal(forced.review_strategy.parent_review_id, null);
+  assert.match(forced.review_strategy.fallback_reason, /requested by the author/);
+});
+
+test("automatic parent selection ignores unrelated and ungated history", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  await fsp.writeFile(path.join(repository, "one.js"), "export const one = 1;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "one");
+  const gated = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "One requirement.",
+    implementationScope: "Add one.",
+  });
+  await submitInitialReview(store, gated.id, []);
+  await finalizeLocalGate(store, gated.id);
+
+  await fsp.writeFile(path.join(repository, "two.js"), "export const two = 2;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "two");
+
+  // A different requirement is a different review, not a continuation.
+  const unrelated = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "A different requirement.",
+    implementationScope: "Add two.",
+  });
+  assert.equal(unrelated.review_strategy.mode, "FULL");
+  assert.equal(unrelated.review_strategy.parent_selection, "NONE");
+  assert.equal(unrelated.review_strategy.parent_review_id, null);
+
+  // An ungated task with the matching requirement is not a parent either.
+  const ungated = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Never gated.",
+    implementationScope: "Add two.",
+  });
+  await fsp.writeFile(path.join(repository, "three.js"), "export const three = 3;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "three");
+  const afterUngated = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Never gated.",
+    implementationScope: "Add three.",
+  });
+  assert.equal(ungated.review_strategy.mode, "FULL");
+  assert.equal(afterUngated.review_strategy.mode, "FULL");
+  assert.equal(afterUngated.review_strategy.parent_selection, "NONE");
+});

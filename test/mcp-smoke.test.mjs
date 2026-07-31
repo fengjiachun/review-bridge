@@ -106,6 +106,16 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       0,
     );
 
+    const snapshot = authorTools.tools.find(
+      (tool) => tool.name === "record_github_snapshot",
+    );
+    assert.ok(snapshot.inputSchema.properties.observation_path);
+    assert.deepEqual(snapshot.inputSchema.required.sort(), [
+      "expected_revision",
+      "review_id",
+    ]);
+    assert.match(snapshot.description, /never retype the observation inline/);
+
     const reviewerTools = await reviewer.listTools();
     const readArtifact = reviewerTools.tools.find(
       (tool) => tool.name === "read_review_artifact",
@@ -211,4 +221,69 @@ test("MCP errors preserve StoreError code and retryability details", async (t) =
   } finally {
     await reviewer.close();
   }
+});
+
+test("record_github_snapshot takes an observation file instead of an inline payload", async (t) => {
+  const store = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-mcp-"));
+  t.after(() => fsp.rm(store, { recursive: true, force: true }));
+  const author = await connectClient("author", store);
+  t.after(() => author.close());
+  const reviewId = "rb-2026-07-26T000000-000Z-deadbeef";
+  const observationPath = path.join(store, "observation.json");
+  await fsp.writeFile(observationPath, `${JSON.stringify({ observed_at: 1 })}\n`);
+
+  const both = await author.callTool({
+    name: "record_github_snapshot",
+    arguments: {
+      review_id: reviewId,
+      expected_revision: 1,
+      observation_path: observationPath,
+      observation: { observed_at: 1 },
+    },
+  });
+  assert.equal(both.isError, true);
+  assert.match(
+    JSON.parse(both.content[0].text).error,
+    /exactly one of observation_path or observation/,
+  );
+
+  const neither = await author.callTool({
+    name: "record_github_snapshot",
+    arguments: { review_id: reviewId, expected_revision: 1 },
+  });
+  assert.equal(neither.isError, true);
+  assert.match(
+    JSON.parse(neither.content[0].text).error,
+    /exactly one of observation_path or observation/,
+  );
+
+  const missingFile = await author.callTool({
+    name: "record_github_snapshot",
+    arguments: {
+      review_id: reviewId,
+      expected_revision: 1,
+      observation_path: path.join(store, "absent.json"),
+    },
+  });
+  assert.equal(missingFile.isError, true);
+  assert.equal(
+    JSON.parse(missingFile.content[0].text).code,
+    "OBSERVATION_FILE_UNREADABLE",
+  );
+
+  // The file is read and handed to the ledger, which rejects it on its own
+  // terms rather than on how it arrived.
+  const read = await author.callTool({
+    name: "record_github_snapshot",
+    arguments: {
+      review_id: reviewId,
+      expected_revision: 1,
+      observation_path: observationPath,
+    },
+  });
+  assert.equal(read.isError, true);
+  assert.doesNotMatch(
+    JSON.parse(read.content[0].text).code ?? "",
+    /^OBSERVATION_FILE_/,
+  );
 });

@@ -437,10 +437,50 @@ const collectorPath = path.join(
   "collect-github-observation.mjs",
 );
 assert.ok(await fsp.stat(collectorPath));
+const collectorHelp = run(process.execPath, [collectorPath, "--help"], pluginRoot);
+assert.match(collectorHelp, /Usage: collect-github-observation\.mjs/);
+assert.match(collectorHelp, /--review-id <id>/);
+assert.match(collectorHelp, /--out <path>/);
+assert.match(collectorHelp, /never retype the observation itself/);
+assert.match(workflowSkill, /--review-id <review_id> --out <path>/);
 assert.match(
-  run(process.execPath, [collectorPath, "--help"], pluginRoot),
-  /Usage: collect-github-observation\.mjs/,
+  workflowSkill,
+  /`record_github_snapshot` with `observation_path`/,
 );
+assert.match(workflowSkill, /Never paste an\s+observation or a ledger/);
+const collectorStore = await fsp.mkdtemp(
+  path.join(os.tmpdir(), "review-bridge-collector-"),
+);
+const collectorFromStore = spawnSync(
+  process.execPath,
+  [
+    collectorPath,
+    "--review-id",
+    "rb-2026-07-26T000000-000Z-deadbeef",
+    "--out",
+    path.join(collectorStore, "observation.json"),
+  ],
+  {
+    cwd: pluginRoot,
+    encoding: "utf8",
+    env: { ...process.env, REVIEW_BRIDGE_HOME: collectorStore },
+  },
+);
+assert.notEqual(collectorFromStore.status, 0);
+assert.match(
+  collectorFromStore.stderr,
+  new RegExp(
+    `${collectorStore.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/reviews/rb-2026-07-26T000000-000Z-deadbeef/publication.json`,
+  ),
+);
+const collectorBadId = spawnSync(
+  process.execPath,
+  [collectorPath, "--review-id", "not-a-review", "--out", "/dev/null"],
+  { cwd: pluginRoot, encoding: "utf8" },
+);
+assert.equal(collectorBadId.status, 2);
+assert.match(collectorBadId.stderr, /invalid --review-id/);
+await fsp.rm(collectorStore, { recursive: true, force: true });
 assert.ok(
   await fsp.stat(
     path.join(pluginRoot, "scripts", "inspect-publication-audit.mjs"),
@@ -492,7 +532,12 @@ assert.match(
   reviewInstructions,
   /read all of `successor\.json` and `successor\.diff`/,
 );
-assert.match(reviewInstructions, /Read `patch\.diff` too whenever/);
+assert.match(reviewInstructions, /Read `patch\.diff` only when one of these holds/);
+assert.match(reviewInstructions, /`current_snapshot\.patch_index`/);
+assert.match(
+  reviewInstructions,
+  /cumulative base-to-head diff/,
+);
 assert.match(
   reviewInstructions,
   /For every review strategy, inspect relevant source beyond the patch with\s+`read_snapshot_file` and `search_snapshot`/,
