@@ -2266,12 +2266,45 @@ test("a drifted or dirty head cannot plan the gated push", async (t) => {
   );
   await fsp.rm(path.join(state.repository, "untracked.txt"));
 
+  // The intent binds the push URL — the URL git push actually uses — not
+  // the fetch URL, and a remote with several push URLs cannot be bound.
+  const pushUrl = "ssh://git@github.com/example/review-bridge-push.git";
+  git(state.repository, "remote", "set-url", "--push", "origin", pushUrl);
+  git(
+    state.repository,
+    "remote",
+    "set-url",
+    "--add",
+    "--push",
+    "origin",
+    "ssh://git@github.com/example/review-bridge-push2.git",
+  );
+  await assert.rejects(
+    planWorkflowPush(state.store, workflow.workflow_id, gated.revision),
+    /exactly one push URL/,
+  );
+  git(
+    state.repository,
+    "remote",
+    "set-url",
+    "--delete",
+    "--push",
+    "origin",
+    "ssh://git@github.com/example/review-bridge-push2.git",
+  );
+
   const planned = await planWorkflowPush(
     state.store,
     workflow.workflow_id,
     gated.revision,
   );
   assert.equal(planned.workflow.phase, "PUSH_GATED_HEAD");
+  // The bound URL is the push URL as git resolves it (insteadOf rewrites
+  // included), so assert on the distinct push-URL identity rather than the
+  // raw configured string.
+  assert.ok(
+    planned.action.target.remote_url.includes("review-bridge-push.git"),
+  );
 });
 
 test("round-two advancement rejects an overlay-bearing snapshot", async (t) => {
