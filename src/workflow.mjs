@@ -296,7 +296,7 @@ const ACTION_KIND_SPECS = {
         response.head_branch !== action.target.head_branch ||
         response.head_sha !== action.target.head_sha ||
         response.draft !== true ||
-        response.marker_present !== true ||
+        response.body_marker !== action.dispatch.body_marker ||
         response.creator_actor_id !==
           action.target.expected_creator_actor_id ||
         response.creator_actor_type !==
@@ -2490,12 +2490,13 @@ export async function recordDraftPullRequestObservation(
     headBranch,
     headSha,
     draft,
-    markerPresent,
+    bodyMarker,
     creatorActorId,
     creatorActorType,
     url,
   },
 ) {
+  assertString(bodyMarker, "body_marker", { max: 4096 });
   assertPositiveInteger(prNumber, "pr_number");
   assertPositiveInteger(repositoryId, "repository_id");
   assertPositiveInteger(headRepositoryId, "head_repository_id");
@@ -2529,7 +2530,7 @@ export async function recordDraftPullRequestObservation(
       head_branch: headBranch,
       head_sha: headSha,
       draft,
-      marker_present: markerPresent,
+      body_marker: bodyMarker,
       creator_actor_id: creatorActorId,
       creator_actor_type: creatorActorType,
       url,

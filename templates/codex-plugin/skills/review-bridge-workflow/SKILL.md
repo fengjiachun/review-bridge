@@ -82,7 +82,10 @@ publication, remote findings, ready-state changes, or thread resolution.
    base repository, head repository (by numeric ID — a fork is never the
    authorized head repository), branches, head, draft state, and creator all
    verify, and call
-   `record_draft_pull_request_observation` with those facts; then call
+   `record_draft_pull_request_observation` with those facts, including the
+   exact marker comment extracted from the freshly read pull-request body —
+   the server accepts only a byte-exact match with the marker it issued, so
+   never report a boolean or a reconstructed string; then call
    `complete_workflow_action`, which atomically claims the pull request
    store-wide. A same-branch pull request without the marker, a non-draft
    match, or multiple matches pauses; branch equality alone never establishes
