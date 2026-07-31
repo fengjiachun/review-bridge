@@ -19,8 +19,10 @@
   records `parent_requirement` and `requirement_match` in the successor proof.
 - Every round records `patch_index`, the byte offset and length of each file's
   section in `patch.diff`, so a reviewer can read the sections a review depends
-  on instead of the whole cumulative patch. The index is advisory and is not
-  part of the snapshot commitment.
+  on instead of the whole cumulative patch. Past 400 files the index is
+  truncated but still spans the whole patch: a final `path: null` entry covers
+  the remainder, which reviewers must read in full. The index is advisory and
+  is not part of the snapshot commitment.
 
 ### Changed
 

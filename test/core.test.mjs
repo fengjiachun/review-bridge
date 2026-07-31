@@ -1814,3 +1814,51 @@ test("automatic parent selection ignores unrelated and ungated history", async (
   assert.equal(afterUngated.review_strategy.parent_review_id, gated.id);
   assert.notEqual(afterUngated.review_strategy.parent_review_id, ungated.id);
 });
+
+test("a truncated patch index still spans the whole patch", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  for (let index = 0; index < 405; index += 1) {
+    await fsp.writeFile(
+      path.join(repository, `f${String(index).padStart(3, "0")}.js`),
+      `export const v${index} = ${index};\n`,
+    );
+  }
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "many files");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Add many modules.",
+    implementationScope: "Add 405 generated modules.",
+  });
+  const opened = await openReview(store, prepared.id);
+  const index = opened.current_snapshot.patch_index;
+
+  assert.equal(opened.current_snapshot.patch_index_truncated, true);
+  assert.equal(index.length, 401);
+  const tail = index.at(-1);
+  assert.equal(tail.path, null);
+  assert.ok(tail.bytes > 0);
+  // Coverage is exact: itemized sections plus the remainder equal the patch.
+  assert.equal(
+    index.reduce((total, entry) => total + entry.bytes, 0),
+    opened.current_snapshot.patch_bytes,
+  );
+  assert.equal(tail.offset + tail.bytes, opened.current_snapshot.patch_bytes);
+
+  // The remainder entry is readable like any itemized section and starts at
+  // a section boundary.
+  const remainder = await readReviewArtifact(
+    store,
+    prepared.id,
+    1,
+    "patch.diff",
+    tail.offset,
+    200,
+  );
+  assert.match(remainder.content, /^diff --git /);
+});

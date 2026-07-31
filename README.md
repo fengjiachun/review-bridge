@@ -257,9 +257,11 @@ context selection, not the final local gate.
 therefore also carries `patch_index`: the byte offset and length of each file's
 section in `patch.diff`, returned by `open_review` under `current_snapshot`. A
 reviewer reads the sections the reviewed behavior depends on through
-`read_review_artifact` and reports which it skipped. The index is advisory and is
-not part of the snapshot commitment; a reader that ignores it sees the same
-bytes.
+`read_review_artifact` and reports which it skipped. The index always spans the
+entire patch: past 400 files it is truncated, `patch_index_truncated` is set,
+and one final `path: null` entry covers the whole remainder, which the reviewer
+must read in full. The index is advisory and is not part of the snapshot
+commitment; a reader that ignores it sees the same bytes.
 
 ## State machine
 

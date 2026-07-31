@@ -290,7 +290,18 @@ function buildPatchIndex(patch) {
       entry.offset,
   }));
   if (entries.length > MAX_PATCH_INDEX_ENTRIES) {
-    return { entries: entries.slice(0, MAX_PATCH_INDEX_ENTRIES), truncated: true };
+    // Truncation must not cost coverage: the index always spans the whole
+    // patch, so a bounded ledger entry cannot hide the tail from a reviewer.
+    // Everything past the cap collapses into one final path-null entry.
+    const kept = entries.slice(0, MAX_PATCH_INDEX_ENTRIES);
+    const last = kept.at(-1);
+    const remainderOffset = last.offset + last.bytes;
+    kept.push({
+      path: null,
+      offset: remainderOffset,
+      bytes: patch.length - remainderOffset,
+    });
+    return { entries: kept, truncated: true };
   }
   return { entries, truncated: false };
 }
