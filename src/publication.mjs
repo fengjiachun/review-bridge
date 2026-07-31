@@ -1515,6 +1515,17 @@ async function requireWorkflowBinding(storeRoot, ledger) {
       "publication workflow authorization does not match the workflow ledger",
     );
   }
+  // Cancellation is the operator's kill switch, so it has to revoke what it
+  // authorized: a cancelled workflow's publication must stop projecting,
+  // recording, finalizing, and verifying. A paused workflow is still live and
+  // stays readable. `get_publication` takes no binding, so the audit trail of
+  // a cancelled workflow remains readable either way.
+  if (binding.status === "CANCELLED") {
+    fail(
+      "WORKFLOW_CANCELLED",
+      "the workflow that authorized this publication was cancelled",
+    );
+  }
   const authorized = binding.publication_target;
   const target = ledger.target;
   if (
@@ -4730,15 +4741,25 @@ function normalizedBlockers(ledger, derived) {
   if (derived.status === "CHANGES_REQUIRED") {
     // Every Codex round mints new comment IDs, so identity here is the comment
     // body digest: a genuinely repeated finding hashes the same, a reworded or
-    // different one does not.
-    return observation.codex_review.results
-      .filter((result) => result.verdict === "FINDINGS")
-      .flatMap((result) =>
-        (result.attached_review_comments ?? []).map(
-          (comment) => `finding:${comment.body_sha256}`,
-        ),
-      )
-      .sort();
+    // different one does not. Only results reviewing the authorized head
+    // count -- a result carried over from a dead head decides nothing, exactly
+    // as with the non-required check runs above.
+    const authorizedHead = authorizationForLedger(ledger).head_sha;
+    return [
+      ...new Set(
+        observation.codex_review.results
+          .filter(
+            (result) =>
+              result.verdict === "FINDINGS" &&
+              result.reviewed_head_sha === authorizedHead,
+          )
+          .flatMap((result) =>
+            (result.attached_review_comments ?? []).map(
+              (comment) => `finding:${comment.body_sha256}`,
+            ),
+          ),
+      ),
+    ].sort();
   }
   return [`${derived.status}:${derived.blockingReason ?? ""}`];
 }
@@ -4779,15 +4800,23 @@ export async function getAutonomousPreReady(
         ? "EVIDENCE_STALE"
         : derived.blockingReason;
       const ready = !evidenceStale && derived.status === "MERGE_READY";
-      const blockers = evidenceStale
-        ? ["EVIDENCE_STALE:"]
-        : normalizedBlockers(ledger, derived);
+      // Staleness is its own status, not a note on another one. A consumer
+      // switching on `status` must never be able to act on expired evidence by
+      // forgetting to also read `blocking_reason`.
+      const status = evidenceStale
+        ? "EVIDENCE_STALE"
+        : ready
+          ? "READY_TO_MARK"
+          : derived.status;
+      // The blockers still describe the underlying derived state, so two
+      // different failures never share a digest just because both are stale.
+      const blockers = normalizedBlockers(ledger, derived);
       return {
         review_id: ledger.review_id,
         revision: ledger.revision,
         workflow_id: ledger.workflow_id,
         workflow_revision: binding.revision,
-        status: ready ? "READY_TO_MARK" : derived.status,
+        status,
         blocking_reason: ready ? null : blockingReason,
         blockers,
         blocker_sha256: sha256(canonicalJson(blockers)),

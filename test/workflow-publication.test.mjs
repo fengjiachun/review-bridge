@@ -745,6 +745,19 @@ test("the remote wait routes each blocker to its repair phase or pause", async (
       nextAction: "AWAIT_OPERATOR",
     },
     {
+      name: "closed pull request",
+      mutate: (payload) => {
+        payload.pull_request.state = "CLOSED";
+        return payload;
+      },
+      phase: "PAUSED_HUMAN",
+      pause: "PUBLICATION_INVALIDATED",
+      // The publication is terminal, so the only remedy inside the workflow is
+      // a new head; returning to the wait would strand it forever.
+      resumePhase: "IMPLEMENTING",
+      nextAction: "AWAIT_OPERATOR",
+    },
+    {
       name: "clean and pre-ready",
       mutate: null,
       phase: "PRE_READY",
@@ -1157,6 +1170,270 @@ test("the check fingerprint ignores runs that are not required", async (t) => {
   assert.equal(withNoise.status, "CHECKS_FAILED");
   assert.deepEqual(withNoise.blockers, withoutNoise.blockers);
   assert.equal(withNoise.blocker_sha256, withoutNoise.blocker_sha256);
+});
+
+test("expired evidence never routes the remote wait anywhere", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => failingCheck(payload),
+  );
+
+  // Twenty minutes later the same observation is well past the freshness
+  // window. The manual summary already refuses to act on it.
+  const stale = at + 20 * 60 * 1000;
+  const summary = await getPublicationSummary(state.store, reviewId, {
+    clock: () => stale,
+  });
+  assert.equal(summary.blocking_reason, "EVIDENCE_STALE");
+  assert.equal(summary.next_action, "REFRESH_GITHUB_SNAPSHOT");
+
+  const projection = await getAutonomousPreReady(state.store, reviewId, {
+    clock: () => stale,
+  });
+  assert.equal(projection.status, "EVIDENCE_STALE");
+
+  // Leaving WAIT_PUBLICATION is one way, so acting on expired evidence would
+  // force a pointless commit, local review, push, and publication.
+  const advanced = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+    { clock: () => stale },
+  );
+  assert.equal(advanced.status, "ACTIVE");
+  assert.equal(advanced.phase, "WAIT_PUBLICATION");
+  assert.equal(advanced.remote_attempts.length, 0);
+
+  // Two different stale failures must not share a fingerprint.
+  const other = await fixture();
+  t.after(() => fsp.rm(other.root, { recursive: true, force: true }));
+  const otherWorkflow = await startAutonomousWorkflow(
+    other.store,
+    workflowInput(other.repository, other.baseSha),
+  );
+  const otherHead = await commit(other.repository, "export const value = 2;\n");
+  const otherPublication = await gateAndPublishHead(
+    other,
+    otherWorkflow,
+    otherHead,
+    "one",
+  );
+  await reachRemoteWait(
+    other,
+    otherPublication.workflow,
+    otherPublication.reviewId,
+    otherHead,
+    at,
+    (payload) => failingCheck(payload, "ci-beta"),
+  );
+  const otherProjection = await getAutonomousPreReady(
+    other.store,
+    otherPublication.reviewId,
+    { clock: () => stale },
+  );
+  assert.equal(otherProjection.status, "EVIDENCE_STALE");
+  assert.notEqual(otherProjection.blocker_sha256, projection.blocker_sha256);
+});
+
+test("cancelling the workflow revokes the publication it authorized", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => {
+      payload.pull_request.is_draft = false;
+      return payload;
+    },
+  );
+  assert.equal(
+    (await getAutonomousPreReady(state.store, reviewId)).status,
+    "READY_TO_MARK",
+  );
+
+  await cancelAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+    { operatorLabel: "Test Operator", rationale: "abandon this change" },
+  );
+
+  // The kill switch has to revoke what it granted.
+  await assert.rejects(
+    getAutonomousPreReady(state.store, reviewId),
+    /WORKFLOW_CANCELLED/,
+  );
+  await assert.rejects(
+    finalizePublicationGate(state.store, reviewId, { expectedRevision: 3 }),
+    /WORKFLOW_CANCELLED/,
+  );
+  await assert.rejects(
+    recordGithubSnapshot(state.store, reviewId, {
+      expectedRevision: 3,
+      observation: draftObservation(state, headSha, {
+        at: at + 4_000,
+        requestId: 100,
+        requestAt: at + 1_000,
+      }),
+    }),
+    /WORKFLOW_CANCELLED/,
+  );
+
+  // The audit trail stays readable: get_publication takes no binding.
+  const historical = await getPublication(state.store, reviewId);
+  assert.equal(historical.workflow_id, workflow.workflow_id);
+});
+
+test("the findings fingerprint dedupes, and a dead-head result fails closed", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    Date.now(),
+    (payload) => findingsResult(payload),
+  );
+  const projection = await getAutonomousPreReady(state.store, reviewId);
+  assert.equal(projection.status, "CHANGES_REQUIRED");
+  assert.equal(projection.blockers.length, 1);
+
+  // The same finding body reported twice is one blocker, not two.
+  const duplicated = await fixture();
+  t.after(() => fsp.rm(duplicated.root, { recursive: true, force: true }));
+  const duplicatedWorkflow = await startAutonomousWorkflow(
+    duplicated.store,
+    workflowInput(duplicated.repository, duplicated.baseSha),
+  );
+  const duplicatedHead = await commit(
+    duplicated.repository,
+    "export const value = 2;\n",
+  );
+  const duplicatedPublication = await gateAndPublishHead(
+    duplicated,
+    duplicatedWorkflow,
+    duplicatedHead,
+    "one",
+  );
+  await reachRemoteWait(
+    duplicated,
+    duplicatedPublication.workflow,
+    duplicatedPublication.reviewId,
+    duplicatedHead,
+    Date.now(),
+    (payload) => {
+      findingsResult(payload);
+      const comments = payload.codex_review.results[0].attached_review_comments;
+      comments.push({
+        ...structuredClone(comments[0]),
+        comment_id: 902,
+      });
+      return payload;
+    },
+  );
+  const duplicatedProjection = await getAutonomousPreReady(
+    duplicated.store,
+    duplicatedPublication.reviewId,
+  );
+  assert.deepEqual(duplicatedProjection.blockers, projection.blockers);
+  assert.equal(
+    duplicatedProjection.blocker_sha256,
+    projection.blocker_sha256,
+  );
+
+  // A findings result reviewing an older head decides nothing. It never
+  // reaches the fingerprint at all: the correlation rules classify the extra
+  // result as ambiguous first, which pauses instead of routing a repair.
+  const other = await fixture();
+  t.after(() => fsp.rm(other.root, { recursive: true, force: true }));
+  const otherWorkflow = await startAutonomousWorkflow(
+    other.store,
+    workflowInput(other.repository, other.baseSha),
+  );
+  const otherHead = await commit(other.repository, "export const value = 2;\n");
+  const otherPublication = await gateAndPublishHead(
+    other,
+    otherWorkflow,
+    otherHead,
+    "one",
+  );
+  await reachRemoteWait(
+    other,
+    otherPublication.workflow,
+    otherPublication.reviewId,
+    otherHead,
+    Date.now(),
+    (payload) => {
+      findingsResult(payload);
+      payload.codex_review.preexisting_candidate_results = [];
+      const carried = structuredClone(payload.codex_review.results[0]);
+      carried.result_id = 777;
+      carried.url = `https://github.com/example/review-bridge/pull/${PR_NUMBER}#discussion_r777`;
+      carried.reviewed_head_sha = other.baseSha;
+      carried.association = "BASELINE_LATE_RESULT";
+      carried.attached_review_comments = [
+        {
+          comment_id: 901,
+          actor: { id: CODEX_ACTOR_ID, type: "Bot", login: "codex" },
+          commit_id: other.baseSha,
+          body_sha256: digest("finding against a dead head"),
+        },
+      ];
+      payload.codex_review.results.push(carried);
+      return payload;
+    },
+  );
+  const otherProjection = await getAutonomousPreReady(
+    other.store,
+    otherPublication.reviewId,
+  );
+  assert.equal(otherProjection.status, "GITHUB_REVIEW_UNKNOWN");
+  assert.notEqual(otherProjection.blocker_sha256, projection.blocker_sha256);
 });
 
 test("the version 3 gate carries both digests and verifies them independently", async (t) => {

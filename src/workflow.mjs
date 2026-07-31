@@ -3120,6 +3120,7 @@ export async function advanceRemoteWorkflow(
   storeRoot,
   workflowId,
   expectedRevision,
+  { clock = Date.now } = {},
 ) {
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
@@ -3134,7 +3135,9 @@ export async function advanceRemoteWorkflow(
       fail("WORKFLOW_STATE_INVALID", "the remote wait has no bound publication");
     }
     const reviewId = workflow.current_publication.review_id;
-    const projection = await getAutonomousPreReady(storeRoot, reviewId);
+    const projection = await getAutonomousPreReady(storeRoot, reviewId, {
+      clock,
+    });
     if (
       projection.workflow_id !== workflow.workflow_id ||
       projection.review_id !== reviewId ||
@@ -3177,10 +3180,7 @@ export async function advanceRemoteWorkflow(
       // record_workflow_head rejects that phase, so resume and advance would
       // re-derive the same stop forever.
       const resumePhase =
-        repairPhase ??
-        (pauseReason === "SEMANTIC_CONFLICT"
-          ? "UPDATE_FROM_BASE"
-          : "WAIT_PUBLICATION");
+        repairPhase ?? REMOTE_PAUSE_RESUME_PHASES[pauseReason] ?? "WAIT_PUBLICATION";
       return publicWorkflow(
         await saveActionMutation(
           paths,
@@ -3264,6 +3264,25 @@ function remoteRepairPhase(projection) {
   }
   return null;
 }
+
+/**
+ * Where each pause resumes, when the implied repair phase does not already
+ * decide it. A pause must never return to WAIT_PUBLICATION when its remedy is
+ * a new commit: that phase cannot record a head, so resume and advance would
+ * re-derive the identical stop forever.
+ *
+ * `SEMANTIC_CONFLICT` is cleared by merging the fresh base cleanly and
+ * committing. An invalidated publication is terminal, so the only remedy
+ * inside the workflow is a new head and a new publication; if the pull request
+ * itself is gone, the operator cancels instead. `GITHUB_REVIEW_AMBIGUOUS` is
+ * the one case whose remedy really is external — an acknowledgement and a
+ * fresh observation — so it returns to the wait.
+ */
+const REMOTE_PAUSE_RESUME_PHASES = Object.freeze({
+  SEMANTIC_CONFLICT: "UPDATE_FROM_BASE",
+  PUBLICATION_INVALIDATED: "IMPLEMENTING",
+  GITHUB_REVIEW_AMBIGUOUS: "WAIT_PUBLICATION",
+});
 
 function remotePauseReason(projection) {
   if (projection.status === "GITHUB_REVIEW_UNKNOWN") {
