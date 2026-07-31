@@ -52,19 +52,28 @@ publication, remote findings, ready-state changes, or thread resolution.
    `HUMAN_REQUIRED` review pauses the workflow and must not create a third
    model round.
 8. For `PLAN_PUSH`, call `plan_workflow_push`; it verifies the clean
-   checked-out HEAD still equals the gated workflow head. Persist `EXECUTING`
-   with `mark_workflow_action_executing` immediately before pushing, push the
-   topic branch to the authorized remote without force, freshly read the exact
-   remote ref head, and call `record_push_observation` with it; the observed
-   ref must equal the gated head. Then call `complete_workflow_action`. If the
-   remote ref cannot be read or does not converge, pause with
+   checked-out HEAD still equals the gated workflow head and binds the
+   remote's current URL into the intent. Persist `EXECUTING` with
+   `mark_workflow_action_executing` immediately before pushing, then push the
+   topic branch to the authorized remote without force. Reconcile from the
+   provider, never from the plan: freshly read the remote's configured URL,
+   resolve that URL to its GitHub repository and numeric repository ID, and
+   freshly read the exact remote ref head. Call `record_push_observation`
+   with the `remote_ref_sha`, `remote_repository_id`, and `remote_url` taken
+   from that fresh read — echoing the planned target's values would make the
+   proof meaningless — and the server accepts them only when they prove the
+   authorized repository and the exact gated head. Then call
+   `complete_workflow_action`. If the remote URL, repository identity, or ref
+   cannot be read or does not converge, pause with
    `EXTERNAL_ACTION_INDETERMINATE` instead of re-pushing blindly.
 9. For `PLAN_DRAFT_PULL_REQUEST`, call `plan_draft_pull_request` and include
    the returned exact `body_marker` in the initial pull-request body. Persist
    `EXECUTING` before creating the draft pull request against the authorized
    base. Reconcile by searching the authorized repository for open pull
    requests with the exact head branch: bind exactly one match whose marker,
-   repository, branches, head, draft state, and creator all verify, and call
+   base repository, head repository (by numeric ID — a fork is never the
+   authorized head repository), branches, head, draft state, and creator all
+   verify, and call
    `record_draft_pull_request_observation` with those facts; then call
    `complete_workflow_action`, which atomically claims the pull request
    store-wide. A same-branch pull request without the marker, a non-draft
@@ -82,9 +91,10 @@ freshly reread the workflow before deciding whether a transition is still
 needed. Ownership claims live in the workflow ledger itself; a start that
 cannot read every persisted ledger, or that conflicts with an active claim,
 fails closed before writing anything. Cancellation retains claims. Release
-them only after exact reconciliation proves every claimed object absent, with
-each observation bound to the current workflow revision and exact canonical
-claim target, and the operator explicitly requests cleanup.
+them only after exact reconciliation proves each branch and head ref absent
+and each bound pull request closed, with each observation bound to the
+current workflow revision and exact canonical claim target, and the operator
+explicitly requests cleanup.
 
 ## Prepare
 

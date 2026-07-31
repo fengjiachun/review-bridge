@@ -331,8 +331,9 @@ The compact workflow summary is the controller's source of truth for the next
 action. A missing or ambiguous Codex task pauses rather than falling back to
 the author task. Round-two `HUMAN_REQUIRED` also pauses and never creates a
 third model round. Cancellation retains claims until an explicit,
-exactly-reconciled release proves every claimed object absent with a fresh
-observation bound to the current workflow revision and canonical claim target.
+exactly-reconciled release proves each branch and head ref absent — and each
+bound pull request closed — with a fresh observation bound to the current
+workflow revision and canonical claim target.
 
 This release stops at `START_PUBLICATION`. Autonomous publication ledgers,
 remote review waiting and repair cycles, ready-state changes, and

@@ -373,7 +373,7 @@ if (role === "author") {
     {
       title: "Record push observation",
       description:
-        "Reconcile the authorized remote ref: the freshly read remote head must equal the exact pushed workflow head.",
+        "Reconcile the push from a fresh provider read: the observed remote URL, resolved numeric repository ID, and ref head must prove the authorized repository and the exact pushed workflow head.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
@@ -585,7 +585,7 @@ if (role === "author") {
     {
       title: "Release cancelled workflow claims",
       description:
-        "Release every active claim only after exact caller-supplied reconciliation proves the corresponding object absent.",
+        "Release every active claim only after exact caller-supplied reconciliation proves each branch and head ref absent and each bound pull request closed.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),

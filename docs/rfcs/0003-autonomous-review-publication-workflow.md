@@ -383,7 +383,8 @@ Claims do not expire based on wall-clock time. A crash-resumed workflow can
 reacquire only its own claim. Cancellation or completion also does not silently
 release a branch or pull request that still exists; release or transfer
 requires an explicit operator action after a fresh external-state
-reconciliation. This prevents a stale workflow from resuming into objects that
+reconciliation that proves each branch and head ref absent and each bound
+pull request closed. This prevents a stale workflow from resuming into objects that
 another workflow has started to mutate.
 
 Under the store-wide claims lock, start reads every persisted workflow ledger,
