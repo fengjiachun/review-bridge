@@ -352,7 +352,12 @@ assert.match(
 assert.match(workflowSkill, /get_review_summary/);
 assert.match(workflowSkill, /wait_for_review_state/);
 assert.match(workflowSkill, /export_human_arbitration/);
-assert.match(workflowSkill, /pass that task as `parent_review_id`/);
+assert.match(
+  workflowSkill,
+  /Leave `parent_review_id` unset unless you have a specific parent in mind/,
+);
+assert.match(workflowSkill, /`force_full_review: true`/);
+assert.match(workflowSkill, /`current_snapshot\.patch_index`/);
 assert.match(workflowSkill, /Choose `reviewer_provider` explicitly/);
 assert.match(workflowSkill, /newly created Codex task/);
 assert.match(workflowSkill, /is not a fork of the\s+author task/);
