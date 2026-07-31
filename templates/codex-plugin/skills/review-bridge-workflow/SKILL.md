@@ -62,18 +62,25 @@ publication, remote findings, ready-state changes, or thread resolution.
    equal the authorized target, so a remote repointed before planning can
    never receive the gated commit. Then
    push the immutable gated commit to the pinned URL with Git's URL
-   rewriting pinned to identity — `git -c
+   rewriting neutralized. A rewrite rule can match the pinned URL in only
+   two shapes, and each needs its own defense. First, immediately before
+   pushing, run `git config --get-regexp '^url\..*\.(insteadof|pushinsteadof)$'`
+   and extract each rule's base (the key minus the `url.` prefix and the
+   final suffix): if any base equals `active_action.target.remote_url`
+   exactly, pause with `EXTERNAL_ACTION_INDETERMINATE` — Git breaks
+   equal-length ties in favor of the earliest-parsed rule, so an exact-base
+   rule cannot be overridden from the command line. Then push with identity
+   rules that defeat every shorter-prefix rule — `git -c
    "url.<PINNED>.insteadOf=<PINNED>" -c "url.<PINNED>.pushInsteadOf=<PINNED>"
    push <PINNED> <active_action.target.head_sha>:refs/heads/<topic_branch>`
    where `<PINNED>` is `active_action.target.remote_url` — recovering both
    operands from the persisted intent after a restart, never the mutable
-   remote name or branch name. Git rewrites URLs by longest matching prefix,
-   so the identity rules make any `insteadOf` or `pushInsteadOf`
-   configuration added after planning inert for this invocation while
-   leaving credential helpers untouched; combined with the pinned operand,
-   neither a branch that advanced, a repointed remote, nor a late config
-   rewrite can leak an ungated commit to an unauthorized repository. Never
-   force-push. Reconcile from the provider, never
+   remote name or branch name. Git rewrites URLs by longest matching
+   prefix, so the identity rules win over any strictly shorter base while
+   leaving credential helpers untouched; combined with the exact-base
+   check and the pinned operand, neither a branch that advanced, a
+   repointed remote, nor a late config rewrite can leak an ungated commit
+   to an unauthorized repository. Never force-push. Reconcile from the provider, never
    from the plan: freshly read the remote's configured push URL,
    resolve that URL to its GitHub repository and numeric repository ID, and
    freshly read the exact remote ref head. Call `record_push_observation`
