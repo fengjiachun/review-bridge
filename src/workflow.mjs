@@ -252,12 +252,17 @@ const ACTION_KIND_SPECS = {
     },
     validateTarget(workflow, target) {
       const authorized = workflow.authorization.publication_target;
+      assertPositiveInteger(
+        target.expected_creator_actor_id,
+        "pull-request target expected_creator_actor_id",
+      );
       if (
         target.base_repository_id !== authorized.base_repository_id ||
         target.base_branch !== authorized.base_branch ||
         target.head_repository_id !== authorized.head_repository_id ||
         target.head_branch !== authorized.head_branch ||
-        target.head_sha !== workflow.current_head_sha
+        target.head_sha !== workflow.current_head_sha ||
+        !["User", "Bot"].includes(target.expected_creator_actor_type)
       ) {
         fail(
           "WORKFLOW_ACTION_INVALID",
@@ -292,7 +297,10 @@ const ACTION_KIND_SPECS = {
         response.head_sha !== action.target.head_sha ||
         response.draft !== true ||
         response.marker_present !== true ||
-        !["User", "Bot"].includes(response.creator_actor_type)
+        response.creator_actor_id !==
+          action.target.expected_creator_actor_id ||
+        response.creator_actor_type !==
+          action.target.expected_creator_actor_type
       ) {
         fail("WORKFLOW_ACTION_INVALID", "active action response is invalid");
       }
@@ -2256,11 +2264,24 @@ export async function planWorkflowPush(
           );
         }
         const authorized = workflow.authorization.publication_target;
-        const remoteUrl = runGit(repository.path, [
+        // git push uses the push URL, which can differ from the fetch URL;
+        // multiple push URLs cannot be bound to one observation proof.
+        const pushUrls = runGit(repository.path, [
           "remote",
           "get-url",
+          "--push",
+          "--all",
           authorized.push_remote,
-        ]).stdout;
+        ])
+          .stdout.split("\n")
+          .filter((line) => line !== "");
+        if (pushUrls.length !== 1) {
+          fail(
+            "WORKFLOW_ACTION_INVALID",
+            "the authorized remote must have exactly one push URL",
+          );
+        }
+        const remoteUrl = pushUrls[0];
         return {
           push_remote: authorized.push_remote,
           remote_url: remoteUrl,
@@ -2277,7 +2298,12 @@ export async function planDraftPullRequest(
   storeRoot,
   workflowId,
   expectedRevision,
+  { creatorActorId, creatorActorType },
 ) {
+  assertPositiveInteger(creatorActorId, "creator_actor_id");
+  if (!["User", "Bot"].includes(creatorActorType)) {
+    throw new TypeError("creator_actor_type must be User or Bot");
+  }
   return planWorkflowAction(
     storeRoot,
     workflowId,
@@ -2294,6 +2320,8 @@ export async function planDraftPullRequest(
           head_repository_id: authorized.head_repository_id,
           head_branch: authorized.head_branch,
           head_sha: workflow.current_head_sha,
+          expected_creator_actor_id: creatorActorId,
+          expected_creator_actor_type: creatorActorType,
         };
       },
     },

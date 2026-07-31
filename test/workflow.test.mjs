@@ -1694,6 +1694,7 @@ test("a clean review advances through push and draft PR to publication", async (
     state.store,
     workflow.workflow_id,
     pushed.revision,
+    { creatorActorId: 555, creatorActorType: "User" },
   );
   assert.match(prPlanned.action.correlation_marker, /^rbwf-pr-[0-9a-f]{32}$/);
   assert.equal(
@@ -1747,6 +1748,16 @@ test("a clean review advances through push and draft PR to publication", async (
       prExecuting.revision,
       prPlanned.action.action_id,
       { ...prObservation, headRepositoryId: 999 },
+    ),
+    /WORKFLOW_ACTION_INVALID/,
+  );
+  await assert.rejects(
+    recordDraftPullRequestObservation(
+      state.store,
+      workflow.workflow_id,
+      prExecuting.revision,
+      prPlanned.action.action_id,
+      { ...prObservation, creatorActorId: 666 },
     ),
     /WORKFLOW_ACTION_INVALID/,
   );
@@ -1867,6 +1878,7 @@ test("one pull request cannot be claimed by two workflows", async (t) => {
       state.store,
       workflowId,
       pushed.revision,
+      { creatorActorId: 555, creatorActorType: "User" },
     );
     const prExecuting = await markWorkflowActionExecuting(
       state.store,
@@ -2059,6 +2071,7 @@ test("a claim committed to the audit but not the ledger still blocks a rival", a
       state.store,
       workflowId,
       pushed.revision,
+      { creatorActorId: 555, creatorActorType: "User" },
     );
     const prExecuting = await markWorkflowActionExecuting(
       state.store,

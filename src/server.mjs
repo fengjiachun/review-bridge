@@ -402,10 +402,12 @@ if (role === "author") {
     {
       title: "Plan draft pull request",
       description:
-        "Persist a single CREATE_DRAFT_PULL_REQUEST intent and return the exact body marker that binds the created pull request.",
+        "Persist a single CREATE_DRAFT_PULL_REQUEST intent pinned to the authenticated creator and return the exact body marker that binds the created pull request.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
+        creator_actor_id: z.number().int().positive(),
+        creator_actor_type: z.enum(["User", "Bot"]),
       },
     },
     (input) =>
@@ -413,6 +415,10 @@ if (role === "author") {
         storeRoot,
         input.workflow_id,
         input.expected_revision,
+        {
+          creatorActorId: input.creator_actor_id,
+          creatorActorType: input.creator_actor_type,
+        },
       ),
   );
 

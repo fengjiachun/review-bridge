@@ -53,10 +53,14 @@ publication, remote findings, ready-state changes, or thread resolution.
    model round.
 8. For `PLAN_PUSH`, call `plan_workflow_push`; it verifies the clean
    checked-out HEAD still equals the gated workflow head and binds the
-   remote's current URL into the intent. Persist `EXECUTING` with
+   remote's single push URL into the intent. Persist `EXECUTING` with
    `mark_workflow_action_executing` immediately before pushing, then push the
-   topic branch to the authorized remote without force. Reconcile from the
-   provider, never from the plan: freshly read the remote's configured URL,
+   immutable gated commit — `git push <remote>
+   <active_action.target.head_sha>:refs/heads/<topic_branch>`, recovering the
+   SHA from the persisted intent after a restart — never the mutable branch
+   name, so a branch that advanced after planning cannot leak an ungated
+   commit to the remote. Never force-push. Reconcile from the provider, never
+   from the plan: freshly read the remote's configured push URL,
    resolve that URL to its GitHub repository and numeric repository ID, and
    freshly read the exact remote ref head. Call `record_push_observation`
    with the `remote_ref_sha`, `remote_repository_id`, and `remote_url` taken
@@ -66,7 +70,11 @@ publication, remote findings, ready-state changes, or thread resolution.
    `complete_workflow_action`. If the remote URL, repository identity, or ref
    cannot be read or does not converge, pause with
    `EXTERNAL_ACTION_INDETERMINATE` instead of re-pushing blindly.
-9. For `PLAN_DRAFT_PULL_REQUEST`, call `plan_draft_pull_request` and include
+9. For `PLAN_DRAFT_PULL_REQUEST`, first resolve the authenticated principal
+   that will create the pull request (its numeric actor ID and User or Bot
+   type), and call `plan_draft_pull_request` with it; the intent pins that
+   creator, and recovery binds only a pull request created by the same
+   principal. Include
    the returned exact `body_marker` in the initial pull-request body. Persist
    `EXECUTING` before creating the draft pull request against the authorized
    base. Reconcile by searching the authorized repository for open pull
