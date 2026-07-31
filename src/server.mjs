@@ -379,6 +379,8 @@ if (role === "author") {
         expected_revision: z.number().int().positive(),
         action_id: z.string(),
         remote_ref_sha: z.string(),
+        remote_repository_id: z.number().int().positive(),
+        remote_url: z.string(),
       },
     },
     (input) =>
@@ -387,7 +389,11 @@ if (role === "author") {
         input.workflow_id,
         input.expected_revision,
         input.action_id,
-        { remoteRefSha: input.remote_ref_sha },
+        {
+          remoteRefSha: input.remote_ref_sha,
+          remoteRepositoryId: input.remote_repository_id,
+          remoteUrl: input.remote_url,
+        },
       ),
   );
 
@@ -423,6 +429,7 @@ if (role === "author") {
         matching_pr_numbers: z.array(z.number().int().positive()),
         pr_number: z.number().int().positive(),
         repository_id: z.number().int().positive(),
+        head_repository_id: z.number().int().positive(),
         base_branch: z.string(),
         head_branch: z.string(),
         head_sha: z.string(),
@@ -443,6 +450,7 @@ if (role === "author") {
           matchingPrNumbers: input.matching_pr_numbers,
           prNumber: input.pr_number,
           repositoryId: input.repository_id,
+          headRepositoryId: input.head_repository_id,
           baseBranch: input.base_branch,
           headBranch: input.head_branch,
           headSha: input.head_sha,
@@ -589,7 +597,8 @@ if (role === "author") {
             canonical_key_sha256: z.string(),
             target: z.record(z.unknown()),
             workflow_revision: z.number().int().positive(),
-            present: z.literal(false),
+            present: z.boolean(),
+            open: z.boolean().optional(),
             observed_at: z.string(),
           }),
         ),

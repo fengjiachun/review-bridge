@@ -212,6 +212,9 @@ const ACTION_KIND_SPECS = {
     },
     validateTarget(workflow, target) {
       const authorized = workflow.authorization.publication_target;
+      assertString(target.remote_url, "push target remote_url", {
+        max: 4096,
+      });
       if (
         target.push_remote !== authorized.push_remote ||
         target.head_repository_id !== authorized.head_repository_id ||
@@ -226,10 +229,15 @@ const ACTION_KIND_SPECS = {
     },
     dispatch: null,
     validateResponse(action, response) {
-      if (response.remote_ref_sha !== action.target.head_sha) {
+      if (
+        response.remote_ref_sha !== action.target.head_sha ||
+        response.remote_repository_id !==
+          action.target.head_repository_id ||
+        response.remote_url !== action.target.remote_url
+      ) {
         fail(
           "WORKFLOW_ACTION_INVALID",
-          "observed remote ref does not equal the pushed head",
+          "observed remote does not prove the authorized repository and pushed head",
         );
       }
     },
@@ -278,6 +286,7 @@ const ACTION_KIND_SPECS = {
         response.matching_pr_numbers.length !== 1 ||
         response.matching_pr_numbers[0] !== response.pr_number ||
         response.repository_id !== action.target.base_repository_id ||
+        response.head_repository_id !== action.target.head_repository_id ||
         response.base_branch !== action.target.base_branch ||
         response.head_branch !== action.target.head_branch ||
         response.head_sha !== action.target.head_sha ||
@@ -1248,7 +1257,8 @@ function requireCancellationReserve(workflow) {
       canonical_key_sha256: entry.canonical_key_sha256,
       target: structuredClone(entry.target),
       workflow_revision: Number.MAX_SAFE_INTEGER,
-      present: false,
+      present: entry.kind === "PULL_REQUEST",
+      ...(entry.kind === "PULL_REQUEST" ? { open: false } : {}),
       observed_at: "9999-12-31T23:59:59.999Z",
     })),
   };
@@ -2219,9 +2229,14 @@ export async function planWorkflowPush(
           );
         }
         const authorized = workflow.authorization.publication_target;
-        runGit(repository.path, ["remote", "get-url", authorized.push_remote]);
+        const remoteUrl = runGit(repository.path, [
+          "remote",
+          "get-url",
+          authorized.push_remote,
+        ]).stdout;
         return {
           push_remote: authorized.push_remote,
+          remote_url: remoteUrl,
           head_repository_id: authorized.head_repository_id,
           head_branch: authorized.head_branch,
           head_sha: workflow.current_head_sha,
@@ -2375,9 +2390,11 @@ export async function recordPushObservation(
   workflowId,
   expectedRevision,
   actionId,
-  { remoteRefSha },
+  { remoteRefSha, remoteRepositoryId, remoteUrl },
 ) {
   assertSha(remoteRefSha, "remote_ref_sha");
+  assertPositiveInteger(remoteRepositoryId, "remote_repository_id");
+  assertString(remoteUrl, "remote_url", { max: 4096 });
   return recordActionObservation(
     storeRoot,
     workflowId,
@@ -2385,13 +2402,21 @@ export async function recordPushObservation(
     actionId,
     "PUSH_TOPIC_BRANCH",
     (workflow, action) => {
-      if (remoteRefSha !== action.target.head_sha) {
+      if (
+        remoteRefSha !== action.target.head_sha ||
+        remoteRepositoryId !== action.target.head_repository_id ||
+        remoteUrl !== action.target.remote_url
+      ) {
         fail(
           "WORKFLOW_ACTION_INVALID",
-          "observed remote ref does not equal the pushed head",
+          "observed remote does not prove the authorized repository and pushed head",
         );
       }
-      return { remote_ref_sha: remoteRefSha };
+      return {
+        remote_ref_sha: remoteRefSha,
+        remote_repository_id: remoteRepositoryId,
+        remote_url: remoteUrl,
+      };
     },
   );
 }
@@ -2405,6 +2430,7 @@ export async function recordDraftPullRequestObservation(
     matchingPrNumbers,
     prNumber,
     repositoryId,
+    headRepositoryId,
     baseBranch,
     headBranch,
     headSha,
@@ -2417,6 +2443,7 @@ export async function recordDraftPullRequestObservation(
 ) {
   assertPositiveInteger(prNumber, "pr_number");
   assertPositiveInteger(repositoryId, "repository_id");
+  assertPositiveInteger(headRepositoryId, "head_repository_id");
   assertPositiveInteger(creatorActorId, "creator_actor_id");
   assertString(baseBranch, "base_branch", { max: 1024 });
   assertString(headBranch, "head_branch", { max: 1024 });
@@ -2442,6 +2469,7 @@ export async function recordDraftPullRequestObservation(
       pr_number: prNumber,
       matching_pr_numbers: [prNumber],
       repository_id: repositoryId,
+      head_repository_id: headRepositoryId,
       base_branch: baseBranch,
       head_branch: headBranch,
       head_sha: headSha,
@@ -2570,12 +2598,26 @@ export async function completeWorkflowAction(
   // workflow lock to preserve the claims -> workflow -> review lock order
   // that workflow start relies on.
   const peeked = await readWorkflowRaw(workflowPaths(storeRoot, workflowId));
+  const peekedClaimsLock =
+    peeked.active_action?.kind === "CREATE_DRAFT_PULL_REQUEST";
   const complete = async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
     const action = workflow.active_action;
     if (action?.action_id !== actionId || action.status !== "OBSERVED") {
       fail("WORKFLOW_ACTION_STATE_INVALID", "action must be OBSERVED");
+    }
+    // The peek chose the lock nesting; the locked state must agree, or the
+    // claims lock this kind requires may not actually be held. A racing
+    // driver that guessed a future revision retries against fresh state.
+    if (
+      (action.kind === "CREATE_DRAFT_PULL_REQUEST") !== peekedClaimsLock
+    ) {
+      fail(
+        "WORKFLOW_ACTION_STATE_INVALID",
+        "the workflow changed while its completion locks were being acquired",
+        { retryable: true },
+      );
     }
     if (action.kind === "CREATE_CODEX_REVIEWER_TASK") {
       return completeCodexTaskDispatch(storeRoot, workflow, paths, action);
@@ -2983,10 +3025,19 @@ export async function releaseWorkflowClaims(
         );
         if (
           evidence == null ||
-          evidence.present !== false ||
           evidence.workflow_revision !== expectedRevision ||
           canonicalJson(evidence.target) !== canonicalJson(entry.target)
         ) {
+          return true;
+        }
+        // A branch or head ref must be proven absent. A GitHub pull request
+        // can never be deleted, so its claim is released by proving the
+        // exact pull request is no longer open.
+        if (entry.kind === "PULL_REQUEST") {
+          if (evidence.present !== true || evidence.open !== false) {
+            return true;
+          }
+        } else if (evidence.present !== false || "open" in evidence) {
           return true;
         }
         try {
@@ -3039,7 +3090,8 @@ export async function releaseWorkflowClaims(
               canonical_key_sha256: entry.canonical_key_sha256,
               target: structuredClone(entry.target),
               workflow_revision: evidence.workflow_revision,
-              present: false,
+              present: evidence.present,
+              ...(entry.kind === "PULL_REQUEST" ? { open: false } : {}),
               observed_at: evidence.observed_at,
             };
           }),

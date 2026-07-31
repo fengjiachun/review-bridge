@@ -226,7 +226,9 @@ function claimReleaseEvidence(workflow, observedAt = new Date().toISOString()) {
       canonical_key_sha256: claim.canonical_key_sha256,
       target: claim.target,
       workflow_revision: workflow.revision,
-      present: false,
+      ...(claim.kind === "PULL_REQUEST"
+        ? { present: true, open: false }
+        : { present: false }),
       observed_at: observedAt,
     }));
 }
@@ -1630,22 +1632,50 @@ test("a clean review advances through push and draft PR to publication", async (
     pushPlanned.workflow.revision,
     pushPlanned.action.action_id,
   );
+  const pushProof = {
+    remoteRefSha: headSha,
+    remoteRepositoryId: 101,
+    remoteUrl: pushPlanned.action.target.remote_url,
+  };
   await assert.rejects(
     recordPushObservation(
       state.store,
       workflow.workflow_id,
       pushExecuting.revision,
       pushPlanned.action.action_id,
-      { remoteRefSha: state.baseSha },
+      { ...pushProof, remoteRefSha: state.baseSha },
     ),
-    /observed remote ref does not equal the pushed head/,
+    /does not prove the authorized repository and pushed head/,
+  );
+  await assert.rejects(
+    recordPushObservation(
+      state.store,
+      workflow.workflow_id,
+      pushExecuting.revision,
+      pushPlanned.action.action_id,
+      { ...pushProof, remoteRepositoryId: 999 },
+    ),
+    /does not prove the authorized repository and pushed head/,
+  );
+  await assert.rejects(
+    recordPushObservation(
+      state.store,
+      workflow.workflow_id,
+      pushExecuting.revision,
+      pushPlanned.action.action_id,
+      {
+        ...pushProof,
+        remoteUrl: "ssh://git@github.com/attacker/review-bridge.git",
+      },
+    ),
+    /does not prove the authorized repository and pushed head/,
   );
   const pushObserved = await recordPushObservation(
     state.store,
     workflow.workflow_id,
     pushExecuting.revision,
     pushPlanned.action.action_id,
-    { remoteRefSha: headSha },
+    pushProof,
   );
   const pushed = await completeWorkflowAction(
     state.store,
@@ -1680,6 +1710,7 @@ test("a clean review advances through push and draft PR to publication", async (
     matchingPrNumbers: [7],
     prNumber: 7,
     repositoryId: 101,
+    headRepositoryId: 101,
     baseBranch: "main",
     headBranch: "agent/workflow-core",
     headSha,
@@ -1706,6 +1737,16 @@ test("a clean review advances through push and draft PR to publication", async (
       prExecuting.revision,
       prPlanned.action.action_id,
       { ...prObservation, markerPresent: false },
+    ),
+    /WORKFLOW_ACTION_INVALID/,
+  );
+  await assert.rejects(
+    recordDraftPullRequestObservation(
+      state.store,
+      workflow.workflow_id,
+      prExecuting.revision,
+      prPlanned.action.action_id,
+      { ...prObservation, headRepositoryId: 999 },
     ),
     /WORKFLOW_ACTION_INVALID/,
   );
@@ -1805,7 +1846,11 @@ test("one pull request cannot be claimed by two workflows", async (t) => {
       workflowId,
       pushExecuting.revision,
       pushPlanned.action.action_id,
-      { remoteRefSha: pushPlanned.action.target.head_sha },
+      {
+        remoteRefSha: pushPlanned.action.target.head_sha,
+        remoteRepositoryId: 101,
+        remoteUrl: pushPlanned.action.target.remote_url,
+      },
     );
     const pushed = await completeWorkflowAction(
       state.store,
@@ -1833,6 +1878,7 @@ test("one pull request cannot be claimed by two workflows", async (t) => {
         matchingPrNumbers: [prNumber],
         prNumber,
         repositoryId: 101,
+        headRepositoryId: 101,
         baseBranch: "main",
         headBranch,
         headSha: prPlanned.action.target.head_sha,
