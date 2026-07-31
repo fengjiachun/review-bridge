@@ -20,7 +20,11 @@
   Candidates are matched on shared Git repository identity, so a parent gated
   in one linked worktree is found from another. The collector's `--out` file
   is replaced atomically through a fresh `0600` temp file, so reusing an
-  observation path never inherits looser permissions.
+  observation path never inherits looser permissions. With `--review-id` the
+  observation defaults into the private store beside the ledger, and an
+  explicit `--out` inside any Git worktree is refused, because an untracked
+  observation file would dirty the reviewed repository and fail
+  publication-gate verification.
 - `open_review` returns `patch_index`, the byte offset and length of each
   file's section in `patch.diff`, so a reviewer can read the sections a review
   depends on instead of the whole cumulative patch. The index is derived on

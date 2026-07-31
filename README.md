@@ -341,7 +341,7 @@ return the legacy exact body without an ID. For a fresh snapshot, run the
 packaged read-only collector against the review ID:
 
 ```bash
-node dist/review-bridge-v0.4.3/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id> --out observation.json
+node dist/review-bridge-v0.4.3/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id>
 ```
 
 Run that command from the repository root after `npm run build`. Inside an
@@ -350,8 +350,11 @@ installed Codex plugin, the workflow skill resolves the same helper as
 The collector reads the ledger from the store itself, uses the authenticated
 `gh` CLI, follows every required REST and GraphQL page, canonicalizes GitHub
 timestamps to UTC milliseconds, and fails closed when required policy evidence
-is unavailable. It writes the observation to `--out` and prints only a receipt;
-pass that path to `record_github_snapshot` as `observation_path`.
+is unavailable. It writes the observation into the private store beside the
+ledger and prints only a receipt; pass the printed path to
+`record_github_snapshot` as `observation_path`. An explicit `--out` is refused
+inside any Git worktree, because an untracked observation file would dirty the
+reviewed repository and fail publication-gate verification.
 
 Neither the ledger nor the observation should be routed through the reviewing
 or authoring model. Both run to tens of thousands of tokens, and a model that

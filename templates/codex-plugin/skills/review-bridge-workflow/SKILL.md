@@ -172,11 +172,12 @@ For either mode:
    callers.
 4. Call `start_publication`. If its immutable baseline contains any request,
    run the packaged read-only `../../scripts/collect-github-observation.mjs`
-   helper resolved relative to this SKILL as
-   `--review-id <review_id> --out <path>`, and call `record_github_snapshot`
-   with `observation_path: <path>`. The helper reads the ledger from the store
-   and writes the observation to disk, so neither payload passes through this
-   conversation. Then call
+   helper resolved relative to this SKILL as `--review-id <review_id>`, and
+   call `record_github_snapshot` with the `observation_path` the helper prints.
+   The helper reads the ledger from the store and writes the observation into
+   the private store beside it — never into a repository worktree, where an
+   untracked observation would dirty the tree and fail gate verification — so
+   neither payload passes through this conversation. Then call
    `get_publication_summary`, present its complete
    `required_request_refs` and `required_ambiguous_results` sets to the human,
    and call `acknowledge_codex_review_ambiguity` only after direct approval of
@@ -200,7 +201,7 @@ For either mode:
    crash between post and binding leaves an unbound request and must fail
    closed.
 6. Run the packaged `../../scripts/collect-github-observation.mjs` helper
-   resolved relative to this SKILL as `--review-id <review_id> --out <path>`.
+   resolved relative to this SKILL as `--review-id <review_id>`.
    The helper uses the user's authenticated `gh` CLI in read-only
    mode to collect the PR and both base comparisons, applicable rules, two
    independent branch reads, classic protection when applicable, every
@@ -208,8 +209,8 @@ For either mode:
    feeds, and all review-thread pages. It
    canonicalizes GitHub timestamps to UTC milliseconds, preserves pagination
    proof, and fails closed when policy evidence is unavailable. Call
-   `record_github_snapshot` with `observation_path` set to the helper's `--out`
-   file, then use `get_publication_summary` for the compact revision, blocker,
+   `record_github_snapshot` with the `observation_path` the helper prints,
+   then use `get_publication_summary` for the compact revision, blocker,
    exact acknowledgement sets, gate state, and `next_action`. Never paste an
    observation or a ledger into a tool call or a shell heredoc: the helper
    reads and writes those files itself, and retyping them costs more than every
@@ -240,8 +241,8 @@ For either mode:
     `authorize_remote_publication` again in `REMOTE_ONLY` mode. A new commit
     invalidates this ledger and its prior GitHub Codex result.
 10. After `MERGE_READY`, run the packaged collector once more with
-    `--review-id <review_id> --out <path>` for a final fresh GitHub observation
-    and call `record_github_snapshot` with that `observation_path`, then call
+    `--review-id <review_id>` for a final fresh GitHub observation and call
+    `record_github_snapshot` with the printed `observation_path`, then call
     `finalize_publication_gate`. Immediately before merge call `verify_publication_gate`;
     only `valid: true` authorizes the next operation. Merge with the returned full
     `head_sha` using a head-matching operation such as

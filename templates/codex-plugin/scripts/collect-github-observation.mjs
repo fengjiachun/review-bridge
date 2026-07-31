@@ -1,25 +1,59 @@
 #!/usr/bin/env node
 
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { defaultStoreRoot } from "../server/core.mjs";
 import { collectGithubObservation } from "../server/github-observation.mjs";
 import { atomicWriteFile } from "../server/storage.mjs";
 
 const USAGE = `Usage: collect-github-observation.mjs [publication.json]
-       collect-github-observation.mjs --review-id <id> --out <path>
+       collect-github-observation.mjs --review-id <id> [--out <path>]
 
   --review-id <id>  Read the publication ledger straight from the store instead
-                    of a get_publication result pasted through the model.
+                    of a get_publication result pasted through the model. The
+                    observation is written to the private store next to the
+                    ledger, and only a receipt is printed; pass the printed
+                    observation_path to record_github_snapshot. Never retype
+                    the observation itself.
   --publication <p> Read the ledger from an explicit file.
-  --out <path>      Write the observation to a file and print only a receipt.
-                    Pass that path to record_github_snapshot as
-                    observation_path; never retype the observation itself.
+  --out <path>      Override the observation file location. Refused inside any
+                    Git worktree: an untracked observation would dirty the
+                    reviewed repository and fail publication-gate verification.
 
 With neither --review-id nor a path, the ledger is read from stdin and the
 observation is written to stdout.
 `;
+
+// The store is 0700 and never a Git worktree, so the default output location
+// cannot dirty a reviewed repository. An explicit --out must uphold the same
+// property, checked against the nearest existing ancestor directory.
+async function assertOutsideGitWorktree(resolved) {
+  let probe = path.dirname(resolved);
+  for (;;) {
+    try {
+      await stat(probe);
+      break;
+    } catch {
+      const parent = path.dirname(probe);
+      if (parent === probe) {
+        break;
+      }
+      probe = parent;
+    }
+  }
+  const result = spawnSync("git", ["-C", probe, "rev-parse", "--show-toplevel"], {
+    encoding: "utf8",
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+  });
+  if (result.status === 0) {
+    process.stderr.write(
+      `refusing to write the observation inside the Git worktree at ${result.stdout.trim()}; omit --out to use the private store, or choose a path outside any repository\n`,
+    );
+    process.exit(2);
+  }
+}
 
 function option(argv, name) {
   const equals = argv.find((arg) => arg.startsWith(`--${name}=`));
@@ -49,7 +83,7 @@ if (argv[0] === "--help") {
 } else {
   const reviewId = option(argv, "review-id");
   const explicitPublication = option(argv, "publication");
-  const out = option(argv, "out");
+  const explicitOut = option(argv, "out");
   // A bare path stays supported, but only when no flag is in play, so a flag
   // value is never mistaken for one.
   const positional = argv.some((arg) => arg.startsWith("--")) ? null : argv[0];
@@ -59,9 +93,23 @@ if (argv[0] === "--help") {
     process.exit(2);
   }
 
+  const reviewDirectory =
+    reviewId == null
+      ? null
+      : path.join(defaultStoreRoot(), "reviews", reviewId);
+  const out =
+    explicitOut ??
+    (reviewDirectory == null
+      ? null
+      : path.join(reviewDirectory, "observation.json"));
+  if (explicitOut != null) {
+    // Fail fast, before any GitHub traffic is spent on a doomed run.
+    await assertOutsideGitWorktree(path.resolve(explicitOut));
+  }
+
   const publicationPath =
-    reviewId != null
-      ? path.join(defaultStoreRoot(), "reviews", reviewId, "publication.json")
+    reviewDirectory != null
+      ? path.join(reviewDirectory, "publication.json")
       : (explicitPublication ?? positional ?? null);
 
   const input =

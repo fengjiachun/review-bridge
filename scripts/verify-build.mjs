@@ -447,10 +447,11 @@ assert.match(collectorHelp, /Usage: collect-github-observation\.mjs/);
 assert.match(collectorHelp, /--review-id <id>/);
 assert.match(collectorHelp, /--out <path>/);
 assert.match(collectorHelp, /never retype the observation itself/);
-assert.match(workflowSkill, /--review-id <review_id> --out <path>/);
+assert.match(workflowSkill, /--review-id <review_id>/);
+assert.match(collectorHelp, /Refused inside any\s+Git worktree/);
 assert.match(
   workflowSkill,
-  /`record_github_snapshot` with `observation_path`/,
+  /`record_github_snapshot` with the `observation_path` the helper prints/,
 );
 assert.match(workflowSkill, /Never paste an\s+observation or a ledger/);
 const collectorStore = await fsp.mkdtemp(
@@ -477,6 +478,26 @@ assert.match(
   new RegExp(
     `${collectorStore.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/reviews/rb-2026-07-26T000000-000Z-deadbeef/publication.json`,
   ),
+);
+const collectorWorktreeOut = spawnSync(
+  process.execPath,
+  [
+    collectorPath,
+    "--review-id",
+    "rb-2026-07-26T000000-000Z-deadbeef",
+    "--out",
+    path.join(pluginRoot, "observation.json"),
+  ],
+  {
+    cwd: pluginRoot,
+    encoding: "utf8",
+    env: { ...process.env, REVIEW_BRIDGE_HOME: os.tmpdir() },
+  },
+);
+assert.equal(collectorWorktreeOut.status, 2);
+assert.match(
+  collectorWorktreeOut.stderr,
+  /refusing to write the observation inside the Git worktree/,
 );
 const collectorBadId = spawnSync(
   process.execPath,
