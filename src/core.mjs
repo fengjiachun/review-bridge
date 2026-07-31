@@ -233,13 +233,90 @@ const DIFF_HEADER_FOLLOWERS = [
   "GIT binary patch",
 ];
 
-function diffHeaderPath(header) {
-  const separator = header.lastIndexOf(" b/");
-  if (separator < 0) {
+// Git quotes a path containing quotes, control bytes, or (by default) any
+// non-ASCII byte, C-style: `diff --git "a/\346\226\207" "b/\346\226\207"`.
+// The escapes are ASCII, so the header line itself always decodes as UTF-8.
+const QUOTED_PATH_ESCAPES = {
+  a: 0x07,
+  b: 0x08,
+  t: 0x09,
+  n: 0x0a,
+  v: 0x0b,
+  f: 0x0c,
+  r: 0x0d,
+  '"': 0x22,
+  "\\": 0x5c,
+};
+
+function decodeQuotedGitPath(token) {
+  const inner = token.slice(1, -1);
+  const bytes = [];
+  for (let index = 0; index < inner.length; index += 1) {
+    if (inner[index] !== "\\") {
+      bytes.push(inner.charCodeAt(index));
+      continue;
+    }
+    index += 1;
+    const escape = inner[index];
+    if (escape >= "0" && escape <= "7") {
+      let octal = escape;
+      while (
+        octal.length < 3 &&
+        inner[index + 1] >= "0" &&
+        inner[index + 1] <= "7"
+      ) {
+        index += 1;
+        octal += inner[index];
+      }
+      bytes.push(parseInt(octal, 8));
+    } else if (escape in QUOTED_PATH_ESCAPES) {
+      bytes.push(QUOTED_PATH_ESCAPES[escape]);
+    } else {
+      return null;
+    }
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(
+      Uint8Array.from(bytes),
+    );
+  } catch {
     return null;
   }
-  const candidate = header.slice(separator + 3);
-  if (candidate === "" || candidate.startsWith('"')) {
+}
+
+function diffHeaderPath(header) {
+  let candidate;
+  if (header.endsWith('"')) {
+    let start = -1;
+    for (let index = header.length - 2; index >= 0; index -= 1) {
+      if (header[index] !== '"') {
+        continue;
+      }
+      let backslashes = 0;
+      for (let j = index - 1; j >= 0 && header[j] === "\\"; j -= 1) {
+        backslashes += 1;
+      }
+      if (backslashes % 2 === 0) {
+        start = index;
+        break;
+      }
+    }
+    if (start < 1 || header[start - 1] !== " ") {
+      return null;
+    }
+    const decoded = decodeQuotedGitPath(header.slice(start));
+    if (decoded == null || !decoded.startsWith("b/")) {
+      return null;
+    }
+    candidate = decoded.slice(2);
+  } else {
+    const separator = header.lastIndexOf(" b/");
+    if (separator < 0) {
+      return null;
+    }
+    candidate = header.slice(separator + 3);
+  }
+  if (candidate === "") {
     return null;
   }
   try {
@@ -924,6 +1001,16 @@ async function automaticParentCandidates(storeRoot, { manifest, requirement }) {
   } catch {
     return [];
   }
+  // Linked worktrees of one repository have distinct working-directory paths,
+  // so candidates are matched on the shared Git repository identity, the same
+  // comparison the successor proof itself uses.
+  let currentIdentity;
+  try {
+    currentIdentity = await repositoryIdentity(manifest.repository_path);
+  } catch {
+    return [];
+  }
+  const identityCache = new Map([[manifest.repository_path, currentIdentity]]);
   const candidates = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) {
@@ -937,9 +1024,20 @@ async function automaticParentCandidates(storeRoot, { manifest, requirement }) {
     }
     if (
       review.status !== "LOCAL_GATE_PASSED" ||
-      review.repository_path !== manifest.repository_path ||
       !Array.isArray(review.rounds)
     ) {
+      continue;
+    }
+    let identity = identityCache.get(review.repository_path);
+    if (identity === undefined) {
+      try {
+        identity = await repositoryIdentity(review.repository_path);
+      } catch {
+        identity = null;
+      }
+      identityCache.set(review.repository_path, identity);
+    }
+    if (identity == null || identity !== currentIdentity) {
       continue;
     }
     const cleanRound = review.rounds.find(

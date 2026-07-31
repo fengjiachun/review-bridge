@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 import crypto from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { defaultStoreRoot } from "../server/core.mjs";
 import { collectGithubObservation } from "../server/github-observation.mjs";
+import { atomicWriteFile } from "../server/storage.mjs";
 
 const USAGE = `Usage: collect-github-observation.mjs [publication.json]
        collect-github-observation.mjs --review-id <id> --out <path>
@@ -75,7 +76,10 @@ if (argv[0] === "--help") {
   } else {
     const serialized = `${JSON.stringify(observation)}\n`;
     const resolved = path.resolve(out);
-    await writeFile(resolved, serialized, { mode: 0o600 });
+    // Atomic replace through a fresh 0600 temp file: writeFile's mode option
+    // is ignored when the target already exists, so reusing an --out path
+    // must not inherit that file's old permissions.
+    await atomicWriteFile(resolved, serialized);
     process.stdout.write(
       `${JSON.stringify(
         {

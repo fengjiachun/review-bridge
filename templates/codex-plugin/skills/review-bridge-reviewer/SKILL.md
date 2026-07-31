@@ -32,10 +32,10 @@ reviewer task.
      gives each file's byte offset and length. Read the sections the reviewed
      behavior depends on and skip sections that cannot affect it, such as
      generated lockfiles or prose documents, unless the requirement is about
-     that content. Report which sections you skipped. When
-     `patch_index_truncated` is true, the final `path: null` entry spans every
-     file section that was not itemized; read it in full, because nothing in
-     it can be ruled out by path.
+     that content. Report which sections you skipped. Read every `path: null`
+     entry in full — the remainder entry when `patch_index_truncated` is true,
+     and any section whose filename could not be decoded — because a section
+     without a path cannot be ruled out by path.
    Continue chunked artifact reads from `next_offset` until you have the range
    you intended to read.
 5. Review correctness, regressions, security, compatibility, error handling,

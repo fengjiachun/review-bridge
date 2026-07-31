@@ -1862,3 +1862,89 @@ test("a truncated patch index still spans the whole patch", async (t) => {
   );
   assert.match(remainder.content, /^diff --git /);
 });
+
+test("the patch index decodes quoted Git paths", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  await fsp.writeFile(path.join(repository, "文档.js"), "export const doc = 1;\n");
+  await fsp.writeFile(
+    path.join(repository, 'say "hi".js'),
+    "export const greeting = 1;\n",
+  );
+  await fsp.writeFile(
+    path.join(repository, "with space.js"),
+    "export const spaced = 1;\n",
+  );
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "quoted names");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Add awkward filenames.",
+    implementationScope: "Add files whose names Git quotes.",
+  });
+  const opened = await openReview(store, prepared.id);
+  const index = opened.current_snapshot.patch_index;
+
+  assert.deepEqual(
+    index.map((entry) => entry.path).sort(),
+    ['say "hi".js', "with space.js", "文档.js"],
+  );
+  assert.equal(
+    index.reduce((total, entry) => total + entry.bytes, 0),
+    opened.current_snapshot.patch_bytes,
+  );
+
+  const quoted = index.find((entry) => entry.path === "文档.js");
+  const section = await readReviewArtifact(
+    store,
+    prepared.id,
+    1,
+    "patch.diff",
+    quoted.offset,
+    quoted.bytes,
+  );
+  assert.match(section.content, /export const doc = 1;/);
+  assert.doesNotMatch(section.content, /greeting|spaced/);
+});
+
+test("automatic parent selection reaches across linked worktrees", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const requirement = "Harden the fixture in reviewed increments.";
+
+  await fsp.writeFile(path.join(repository, "parent-only.js"), "export const p = 1;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "parent change");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement,
+    implementationScope: "Add the parent behavior.",
+  });
+  await submitInitialReview(store, parent.id, []);
+  await finalizeLocalGate(store, parent.id);
+
+  // Continue the same history from a linked worktree of the same repository.
+  const worktree = path.join(root, "linked-worktree");
+  git(repository, "worktree", "add", "--detach", worktree, "HEAD");
+  await fsp.writeFile(path.join(worktree, "child-only.js"), "export const c = 2;\n");
+  git(worktree, "add", ".");
+  git(worktree, "commit", "-m", "child change");
+
+  const child = await prepareReview(store, {
+    repositoryPath: worktree,
+    baseRef: baseSha,
+    requirement,
+    implementationScope: "Add the child behavior.",
+  });
+
+  assert.equal(child.review_strategy.mode, "SUCCESSOR");
+  assert.equal(child.review_strategy.parent_selection, "AUTOMATIC");
+  assert.equal(child.review_strategy.parent_review_id, parent.id);
+  assert.deepEqual(child.rounds[0].successor.changed_files, ["child-only.js"]);
+});

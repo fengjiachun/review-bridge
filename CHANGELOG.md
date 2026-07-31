@@ -17,12 +17,19 @@
   requirement exactly; server-side selection does not require it, because
   authors reword requirements between rounds of the same work, and instead
   records `parent_requirement` and `requirement_match` in the successor proof.
+  Candidates are matched on shared Git repository identity, so a parent gated
+  in one linked worktree is found from another. The collector's `--out` file
+  is replaced atomically through a fresh `0600` temp file, so reusing an
+  observation path never inherits looser permissions.
 - Every round records `patch_index`, the byte offset and length of each file's
   section in `patch.diff`, so a reviewer can read the sections a review depends
   on instead of the whole cumulative patch. Past 400 files the index is
   truncated but still spans the whole patch: a final `path: null` entry covers
-  the remainder, which reviewers must read in full. The index is advisory and
-  is not part of the snapshot commitment.
+  the remainder, which reviewers must read in full. Quoted Git paths —
+  filenames with quotes, control bytes, or non-ASCII — are decoded, and any
+  section whose name still cannot be decoded keeps `path: null` and is read in
+  full under the same rule. The index is advisory and is not part of the
+  snapshot commitment.
 
 ### Changed
 

@@ -27,10 +27,10 @@ When the user asks to review a pending Codex task:
      sections the reviewed behavior depends on; skip sections whose content
      cannot affect it, such as generated lockfiles or prose documents, unless
      the requirement is about that content. Say which sections you skipped.
-     When `patch_index_truncated` is true, the final entry has `path: null`
-     and spans every remaining file section; it is part of the patch like any
-     other entry — read it in full, since its contents were never itemized
-     for you to rule out.
+     Read every entry whose `path` is null in full — the final remainder
+     entry when `patch_index_truncated` is true, and any section whose
+     filename could not be decoded — because a section without a path cannot
+     be ruled out by path.
    Continue every artifact read from `next_offset` until you have the range you
    intended to read.
 
