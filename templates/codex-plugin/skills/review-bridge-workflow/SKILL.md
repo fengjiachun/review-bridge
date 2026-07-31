@@ -13,9 +13,10 @@ remote-only GitHub publication.
 
 The schema-version-1 autonomous workflow is opt-in and currently advances
 through the local `CODEX_TASK` gate, the reconciled push of the gated head,
-and the marker-bound draft pull request, stopping at `START_PUBLICATION`.
-It does not yet automate publication ledgers, remote review waiting or
-repair, ready-state changes, or thread resolution.
+the marker-bound draft pull request, the version-3 publication ledger, the
+remote wait, and the three repair loops that return a new head to local
+review. It stops at `PRE_READY`. The pull request stays draft for the whole
+run: ready-state changes and thread resolution remain unavailable.
 
 1. Obtain direct operator authorization for the exact repository path,
    operator-selected base ref and resolved full base SHA, requirement,
@@ -107,11 +108,50 @@ repair, ready-state changes, or thread resolution.
    store-wide. A same-branch pull request without the marker, a non-draft
    match, or multiple matches pauses; branch equality alone never establishes
    ownership.
-10. Stop this implementation at `START_PUBLICATION`. Autonomous publication
-    ledgers, remote Codex waiting, and repair cycles remain unavailable until
-    the later workflow schema and skill update ship. Continue manually through
-    the existing `LOCAL_GATE` publication flow only after a fresh operator
-    instruction.
+10. For `START_PUBLICATION`, follow the `LOCAL_GATE` publication steps below to
+    collect the complete fresh baseline, but call `start_publication` with the
+    workflow's `workflow_id` and current `expected_workflow_revision`. That
+    creates a version-3 ledger which keeps the existing `authorization` object
+    and separately binds the workflow authorization digest. Post and
+    immediately bind the exact server-generated Codex request through
+    `record_codex_review_request` as usual — the publication ledger owns
+    request generation, binding, and unbound detection, and the workflow adds
+    no second mechanism. Then call `bind_workflow_publication` with the
+    publication's `review_id`.
+11. For `WAIT_PUBLICATION`, run the packaged observation collector, call
+    `record_github_snapshot`, then call `advance_remote_workflow`. Read the
+    projection with `get_autonomous_pre_ready`: it evaluates every publication
+    invariant in its normal fail-closed order and ignores only the draft flag,
+    so `READY_TO_MARK` is the only status that proves a draft pull request is
+    otherwise complete. Never treat the manual summary's
+    `next_action: MARK_PULL_REQUEST_READY` as that proof; it fires on
+    `PR_DRAFT` alone, before any other invariant is evaluated. Keep waiting
+    while checks or review are still settling. Unresolved review threads block
+    and are operator work in this version, not an autonomous repair loop.
+12. `advance_remote_workflow` routes an actionable machine finding to
+    `ADDRESS_REMOTE_FINDINGS`, a failed required check to
+    `ADDRESS_CHECK_FAILURE`, and a strict-policy base gap to
+    `UPDATE_FROM_BASE`. All three end the same way: fix only the recorded
+    requirement, verify, commit, and call `record_workflow_head`, which returns
+    the workflow to `PREPARE_LOCAL_REVIEW` and drops the old publication
+    binding. The new head needs a new local review, gate, push, and
+    publication; the previous ledger stays on disk as history and can never
+    authorize it. Prefer letting the successor strategy stand for that review.
+13. The server pauses `GITHUB_REVIEW_AMBIGUOUS` on an ambiguous or unbound
+    result, `SEMANTIC_CONFLICT` on a conflicting merge state,
+    `PUBLICATION_INVALIDATED` when the pull request or head diverged from the
+    authorization, and `NO_PROGRESS` when an attempt repeats the same
+    normalized blockers with the same head or the same tree. Pause yourself
+    with `REQUIRED_CHECK_UNACTIONABLE` when logs or required evidence are
+    unavailable, the failure is external or administrative, a required secret
+    or permission is missing, or the fix would exceed the recorded
+    requirement; with `SEMANTIC_CONFLICT` or `HISTORY_REWRITE_REQUIRED` when
+    merging the fresh base does not apply cleanly. Never waive, remove, or
+    rename a required check, and never rebase or force-push to resolve one.
+14. Stop this implementation at `PRE_READY`. Marking the pull request ready,
+    the draft-gate exception, and automatic thread resolution remain
+    unavailable until the later skill update ships. Continue manually only
+    after a fresh operator instruction.
 
 Every mutation uses the exact current workflow revision. On `WORKFLOW_BUSY`,
 `WORKFLOW_CLAIMS_BUSY`, `LOCK_OWNERSHIP_LOST`, or an indeterminate store write,
@@ -364,12 +404,15 @@ For either mode:
     `gh pr merge --match-head-commit <head_sha>`. Never reuse a finalize result,
     direct file read, cached verification, or older revision.
 
-The nine publication tools are `authorize_remote_publication`,
+The ten publication tools are `authorize_remote_publication`,
 `start_publication`, `get_publication`, `get_publication_summary`,
-`record_codex_review_request`, `record_github_snapshot`,
-`acknowledge_codex_review_ambiguity`, `finalize_publication_gate`, and
-`verify_publication_gate`. Keep their revision ordering explicit and retry
-`PUBLICATION_BUSY` or `REVIEW_BUSY` only after rereading current state.
+`get_autonomous_pre_ready`, `record_codex_review_request`,
+`record_github_snapshot`, `acknowledge_codex_review_ambiguity`,
+`finalize_publication_gate`, and `verify_publication_gate`. Keep their
+revision ordering explicit and retry `PUBLICATION_BUSY` or `REVIEW_BUSY` only
+after rereading current state. `get_autonomous_pre_ready` exists only for a
+version-3 autonomous ledger; version-1 and version-2 ledgers keep their exact
+existing status and next-action behavior and can never bind a workflow.
 
 Any new commit invalidates the GitHub review gate. Compare the reviewed PR head
 before merge; a squash merge naturally creates a different merge commit.

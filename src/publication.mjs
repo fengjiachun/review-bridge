@@ -19,7 +19,9 @@ import {
   StoreError,
   withStateLock,
 } from "./storage.mjs";
+import { readWorkflowBinding, WORKFLOW_ID_RE } from "./workflow-binding.mjs";
 
+const SUPPORTED_PUBLICATION_VERSIONS = [1, 2, 3];
 const MAX_PUBLICATION_BYTES = 10 * 1024 * 1024;
 const TERMINAL_RESERVE_BYTES = 64 * 1024;
 const MAX_OBSERVATION_BYTES = 6 * 1024 * 1024;
@@ -1489,6 +1491,133 @@ function authorizationForLedger(ledger) {
   };
 }
 
+/**
+ * Revalidate a version-3 ledger's workflow binding against the workflow ledger
+ * itself. Every caller runs this independently: start, snapshot recording, the
+ * autonomous projection, finalization, and gate verification each re-derive the
+ * digest from the workflow file rather than trusting an earlier check or the
+ * copy stored in the gate.
+ *
+ * Returns null for version 1 and 2, which never bind a workflow.
+ */
+async function requireWorkflowBinding(storeRoot, ledger) {
+  if (ledger.version !== 3) {
+    return null;
+  }
+  const binding = await readWorkflowBinding(storeRoot, ledger.workflow_id);
+  if (
+    binding.workflow_id !== ledger.workflow_id ||
+    binding.workflow_authorization_sha256 !==
+      ledger.workflow_authorization_sha256
+  ) {
+    fail(
+      "WORKFLOW_AUTHORIZATION_MISMATCH",
+      "publication workflow authorization does not match the workflow ledger",
+    );
+  }
+  const authorized = binding.publication_target;
+  const target = ledger.target;
+  if (
+    authorized.base_repository_id !== target.repository_id ||
+    authorized.base_owner !== target.owner ||
+    authorized.base_repo !== target.repo ||
+    authorized.base_branch !== target.base_branch ||
+    authorized.head_branch !== target.head_branch
+  ) {
+    fail(
+      "WORKFLOW_AUTHORIZATION_MISMATCH",
+      "publication target does not match the authorized workflow publication target",
+    );
+  }
+  if (
+    binding.pull_request == null ||
+    binding.pull_request.repository_id !== target.repository_id ||
+    binding.pull_request.pr_number !== target.pr_number
+  ) {
+    fail(
+      "WORKFLOW_AUTHORIZATION_MISMATCH",
+      "publication pull request is not the workflow-owned pull request",
+    );
+  }
+  return binding;
+}
+
+/**
+ * Validate the workflow a new autonomous publication is about to bind. Start is
+ * the one site that also pins the workflow's revision, phase, and current head:
+ * later sites must stay readable after the workflow moves on, and report a
+ * stale ledger through the ordinary INVALIDATED decision instead of throwing.
+ */
+async function requireStartWorkflowBinding(
+  storeRoot,
+  workflowId,
+  {
+    expectedWorkflowRevision,
+    headSha,
+    repositoryId,
+    owner,
+    repo,
+    prNumber,
+    baseBranch,
+    headBranch,
+    authorizationMode,
+  },
+) {
+  if (authorizationMode !== "LOCAL_GATE") {
+    fail(
+      "INVALID_INPUT",
+      "an autonomous publication requires a LOCAL_GATE authorization",
+    );
+  }
+  const binding = await readWorkflowBinding(storeRoot, workflowId);
+  if (binding.revision !== expectedWorkflowRevision) {
+    fail("WORKFLOW_REVISION_CONFLICT", "workflow revision changed", {
+      expected: expectedWorkflowRevision,
+      actual: binding.revision,
+      retryable: true,
+    });
+  }
+  if (binding.status !== "ACTIVE") {
+    fail("WORKFLOW_NOT_ACTIVE", `workflow is ${binding.status}`);
+  }
+  if (binding.phase !== "START_PUBLICATION") {
+    fail(
+      "WORKFLOW_PHASE_INVALID",
+      `workflow phase ${binding.phase} cannot start a publication`,
+    );
+  }
+  if (binding.current_head_sha !== headSha) {
+    fail(
+      "WORKFLOW_HEAD_MISMATCH",
+      "publication authorization head is not the current workflow head",
+    );
+  }
+  const authorized = binding.publication_target;
+  if (
+    authorized.base_repository_id !== repositoryId ||
+    authorized.base_owner !== owner ||
+    authorized.base_repo !== repo ||
+    authorized.base_branch !== baseBranch ||
+    authorized.head_branch !== headBranch
+  ) {
+    fail(
+      "WORKFLOW_AUTHORIZATION_MISMATCH",
+      "publication target does not match the authorized workflow publication target",
+    );
+  }
+  if (
+    binding.pull_request == null ||
+    binding.pull_request.repository_id !== repositoryId ||
+    binding.pull_request.pr_number !== prNumber
+  ) {
+    fail(
+      "WORKFLOW_AUTHORIZATION_MISMATCH",
+      "publication pull request is not the workflow-owned pull request",
+    );
+  }
+  return binding;
+}
+
 function requireStoredReviewId(ledger, reviewId) {
   if (ledger.review_id !== reviewId) {
     fail(
@@ -1500,16 +1629,39 @@ function requireStoredReviewId(ledger, reviewId) {
 
 function validateStoredLedger(ledger) {
   assertObject(ledger, "publication");
-  if (![1, 2].includes(ledger.version)) {
+  if (!SUPPORTED_PUBLICATION_VERSIONS.includes(ledger.version)) {
     fail(
       "UNSUPPORTED_PUBLICATION_VERSION",
-      "only publication schema versions 1 and 2 are supported",
+      "only publication schema versions 1, 2, and 3 are supported",
     );
   }
   assertRevision(ledger.revision);
   publicationDirectory("/store", ledger.review_id);
   timestampMs(ledger.created_at, "publication.created_at");
   timestampMs(ledger.updated_at, "publication.updated_at");
+  if (ledger.version === 3) {
+    if (
+      typeof ledger.workflow_id !== "string" ||
+      !WORKFLOW_ID_RE.test(ledger.workflow_id)
+    ) {
+      fail(
+        "PUBLICATION_STORE_INVALID",
+        "version 3 publication workflow_id is invalid",
+      );
+    }
+    assertDigest(
+      ledger.workflow_authorization_sha256,
+      "publication.workflow_authorization_sha256",
+    );
+  } else if (
+    "workflow_id" in ledger ||
+    "workflow_authorization_sha256" in ledger
+  ) {
+    fail(
+      "PUBLICATION_STORE_INVALID",
+      "only a version 3 publication may bind an autonomous workflow",
+    );
+  }
   if (ledger.version === 1) {
     assertObject(ledger.local_gate, "publication.local_gate");
     assertSha(ledger.local_gate.head_sha, "publication.local_gate.head_sha");
@@ -2146,10 +2298,10 @@ async function openAuthorizationFiles(
       "PUBLICATION_STORE_INVALID",
       "publication.json is not a JSON object",
     );
-    if (![1, 2].includes(ledger.version)) {
+    if (!SUPPORTED_PUBLICATION_VERSIONS.includes(ledger.version)) {
       fail(
         "UNSUPPORTED_PUBLICATION_VERSION",
-        "only publication schema versions 1 and 2 are supported",
+        "only publication schema versions 1, 2, and 3 are supported",
       );
     }
     assertStoredCanonicalJsonBytes(
@@ -2266,10 +2418,10 @@ async function loadPublicationFile(
       "PUBLICATION_STORE_INVALID",
       "publication.json is not a JSON object",
     );
-    if (![1, 2].includes(ledger.version)) {
+    if (!SUPPORTED_PUBLICATION_VERSIONS.includes(ledger.version)) {
       fail(
         "UNSUPPORTED_PUBLICATION_VERSION",
-        "only publication schema versions 1 and 2 are supported",
+        "only publication schema versions 1, 2, and 3 are supported",
       );
     }
     assertStoredCanonicalJsonBytes(
@@ -3209,7 +3361,10 @@ function publicationDecision(
   };
 }
 
-function derivePublication(ledger, { historyConflict = null, visibilityGrace = false } = {}) {
+function derivePublication(
+  ledger,
+  { historyConflict = null, visibilityGrace = false, ignoreDraft = false } = {},
+) {
   if (ledger.terminal != null) {
     return publicationDecision(
       ledger.terminal.status,
@@ -3303,7 +3458,7 @@ function derivePublication(ledger, { historyConflict = null, visibilityGrace = f
   if (historyConflict) {
     return publicationDecision("INVALIDATED", historyConflict, historyConflict);
   }
-  if (pullRequest.is_draft) {
+  if (pullRequest.is_draft && !ignoreDraft) {
     return publicationDecision("PR_DRAFT");
   }
   if (pullRequest.mergeable === "UNKNOWN") {
@@ -4166,6 +4321,8 @@ export async function startPublication(
     operatorLabel = null,
     rationale = null,
     baseline,
+    workflowId = null,
+    expectedWorkflowRevision = null,
   },
   { clock = Date.now } = {},
 ) {
@@ -4196,11 +4353,31 @@ export async function startPublication(
       assertString(operatorLabel, "operator_label", 500);
       assertString(rationale, "rationale", 20_000);
     }
+    if ((workflowId == null) !== (expectedWorkflowRevision == null)) {
+      fail(
+        "INVALID_INPUT",
+        "an autonomous publication requires both workflow_id and expected_workflow_revision",
+      );
+    }
     const sourceAuthorization = await readStartAuthorization(
       paths,
       reviewId,
       { verifyRepository: true },
     );
+    const workflowBinding =
+      workflowId == null
+        ? null
+        : await requireStartWorkflowBinding(storeRoot, workflowId, {
+            expectedWorkflowRevision,
+            headSha: sourceAuthorization.head_sha,
+            repositoryId,
+            owner,
+            repo,
+            prNumber,
+            baseBranch,
+            headBranch,
+            authorizationMode: sourceAuthorization.mode,
+          });
     const existing = await loadPublicationFile(paths, reviewId, {
       allowMissing: true,
     });
@@ -4240,11 +4417,18 @@ export async function startPublication(
       baselineIssuances,
     );
     const ledger = {
-      version: 2,
+      version: workflowBinding == null ? 2 : 3,
       revision: 1,
       review_id: reviewId,
       created_at: timestamp,
       updated_at: timestamp,
+      ...(workflowBinding == null
+        ? {}
+        : {
+            workflow_id: workflowBinding.workflow_id,
+            workflow_authorization_sha256:
+              workflowBinding.workflow_authorization_sha256,
+          }),
       authorization: {
         mode: sourceAuthorization.mode,
         head_sha: sourceAuthorization.head_sha,
@@ -4320,6 +4504,7 @@ function assessPublicationGate(
   gate,
   gateParseError,
   currentMs,
+  workflowBinding = null,
 ) {
   if (gateParseError) {
     return { state: "MALFORMED", reviewerProvider: null, expiresAt: null };
@@ -4335,15 +4520,27 @@ function assessPublicationGate(
     (publicationAuthorization.mode === "LOCAL_GATE"
       ? "CLAUDE_DESKTOP"
       : null);
+  const workflowBindingMatches =
+    ledger.version !== 3
+      ? !("workflow_id" in gate) &&
+        !("workflow_authorization_sha256" in gate)
+      : workflowBinding != null &&
+        gate.workflow_id === ledger.workflow_id &&
+        gate.workflow_id === workflowBinding.workflow_id &&
+        gate.workflow_authorization_sha256 ===
+          ledger.workflow_authorization_sha256 &&
+        gate.workflow_authorization_sha256 ===
+          workflowBinding.workflow_authorization_sha256;
   const authorizationBindingMatches =
     ledger.version === 1
       ? gate.version === 1 &&
         gate.local_gate_sha256 === publicationAuthorization.source_sha256
-      : gate.version === 2 &&
+      : gate.version === ledger.version &&
         gate.authorization_mode === publicationAuthorization.mode &&
         gate.authorization_sha256 === publicationAuthorization.source_sha256;
   if (
     !authorizationBindingMatches ||
+    !workflowBindingMatches ||
     gate.review_id !== ledger.review_id ||
     gate.issuance_committed !== true ||
     gate.status !== "MERGE_READY" ||
@@ -4427,6 +4624,7 @@ export async function getPublicationSummary(
     const authorization = await openAuthorizationFiles(paths, reviewId);
     try {
       const ledger = authorization.ledger;
+      const workflowBinding = await requireWorkflowBinding(storeRoot, ledger);
       const publicationAuthorization = authorizationForLedger(ledger);
       const derived = derivePublication(ledger);
       const gate = assessPublicationGate(
@@ -4436,6 +4634,7 @@ export async function getPublicationSummary(
         authorization.publicationGate,
         authorization.gateParseError,
         currentMs,
+        workflowBinding,
       );
       const evidenceStale =
         ledger.terminal == null &&
@@ -4481,6 +4680,102 @@ export async function getPublicationSummary(
         required_request_refs: clone(closure.requests),
         required_ambiguous_results: clone(closure.results),
         gate_state: gate.state,
+      };
+    } finally {
+      await closeAuthorizationFiles(authorization);
+    }
+  });
+}
+
+/**
+ * The exact blocking items behind a projection status, normalized so that two
+ * attempts can be compared for progress. Titles, bodies, timestamps, run IDs,
+ * and URLs are excluded: only identities that a fix has to change.
+ */
+function normalizedBlockers(ledger, derived) {
+  const observation = ledger.latest_observation;
+  if (derived.status === "MERGE_READY" || observation == null) {
+    return [];
+  }
+  if (derived.status === "CHECKS_FAILED") {
+    return observation.required_checks.runs
+      .filter((run) => FAILING_CONCLUSIONS.has(run.conclusion))
+      .map((run) => `check:${run.run_kind}:${run.context}:${run.conclusion}`)
+      .sort();
+  }
+  if (
+    derived.status === "CHANGES_REQUIRED" &&
+    derived.blockingReason === "UNRESOLVED_REVIEW_THREADS"
+  ) {
+    return [`threads:${observation.review_threads.unresolved_count}`];
+  }
+  if (derived.status === "CHANGES_REQUIRED") {
+    // Every Codex round mints new comment IDs, so identity here is the comment
+    // body digest: a genuinely repeated finding hashes the same, a reworded or
+    // different one does not.
+    return observation.codex_review.results
+      .filter((result) => result.verdict === "FINDINGS")
+      .flatMap((result) =>
+        (result.attached_review_comments ?? []).map(
+          (comment) => `finding:${comment.body_sha256}`,
+        ),
+      )
+      .sort();
+  }
+  return [`${derived.status}:${derived.blockingReason ?? ""}`];
+}
+
+/**
+ * Pure projection for the autonomous workflow: every publication invariant in
+ * its normal fail-closed order, with the draft flag alone ignored.
+ *
+ * It shares one evaluator with the manual path, so a blocker can never pass
+ * here and fail there. `getPublicationSummary` keeps reporting `PR_DRAFT` and
+ * `MARK_PULL_REQUEST_READY` unchanged.
+ */
+export async function getAutonomousPreReady(
+  storeRoot,
+  reviewId,
+  { clock = Date.now } = {},
+) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    const currentMs = clock();
+    const authorization = await openAuthorizationFiles(paths, reviewId);
+    try {
+      const ledger = authorization.ledger;
+      if (ledger.version !== 3) {
+        fail(
+          "PUBLICATION_NOT_AUTONOMOUS",
+          "only a version 3 publication has an autonomous projection",
+        );
+      }
+      const binding = await requireWorkflowBinding(storeRoot, ledger);
+      const publicationAuthorization = authorizationForLedger(ledger);
+      const derived = derivePublication(ledger, { ignoreDraft: true });
+      const evidenceStale =
+        ledger.terminal == null &&
+        ledger.latest_observation != null &&
+        currentMs > Date.parse(expiresAtFor(ledger));
+      const blockingReason = evidenceStale
+        ? "EVIDENCE_STALE"
+        : derived.blockingReason;
+      const ready = !evidenceStale && derived.status === "MERGE_READY";
+      const blockers = evidenceStale
+        ? ["EVIDENCE_STALE:"]
+        : normalizedBlockers(ledger, derived);
+      return {
+        review_id: ledger.review_id,
+        revision: ledger.revision,
+        workflow_id: ledger.workflow_id,
+        workflow_revision: binding.revision,
+        status: ready ? "READY_TO_MARK" : derived.status,
+        blocking_reason: ready ? null : blockingReason,
+        blockers,
+        blocker_sha256: sha256(canonicalJson(blockers)),
+        head_sha: publicationAuthorization.head_sha,
+        is_draft: ledger.latest_observation?.pull_request?.is_draft ?? null,
+        latest_observed_at: ledger.latest_observation?.observed_at ?? null,
       };
     } finally {
       await closeAuthorizationFiles(authorization);
@@ -4624,6 +4919,7 @@ export async function recordGithubSnapshot(
       reviewId,
       ledger,
     );
+    await requireWorkflowBinding(storeRoot, ledger);
     const validated = validateObservation(
       observation,
       ledger,
@@ -4828,6 +5124,7 @@ export async function finalizePublicationGate(
     try {
       auditSession = await openAuditSession(paths, reviewId);
       const ledger = authorization.ledger;
+      const workflowBinding = await requireWorkflowBinding(storeRoot, ledger);
       const publicationAuthorization = authorizationForLedger(ledger);
       requireRevision(ledger, expectedRevision);
       requireMutable(ledger);
@@ -4868,6 +5165,13 @@ export async function finalizePublicationGate(
               authorization_mode: publicationAuthorization.mode,
               authorization_sha256: publicationAuthorization.source_sha256,
             }),
+        ...(ledger.version === 3
+          ? {
+              workflow_id: workflowBinding.workflow_id,
+              workflow_authorization_sha256:
+                workflowBinding.workflow_authorization_sha256,
+            }
+          : {}),
         publication_revision: ledger.revision,
         github_observation_sha256: observationDigest,
         github_observed_at: ledger.latest_observation.observed_at,
@@ -4943,6 +5247,14 @@ export async function verifyPublicationGate(
             verifiedAt,
           );
         } else {
+          // A broken workflow binding is a gate mismatch, not a crash: the
+          // GATE_VERIFIED audit event must still record the failed check.
+          let workflowBinding = null;
+          try {
+            workflowBinding = await requireWorkflowBinding(storeRoot, ledger);
+          } catch {
+            workflowBinding = null;
+          }
           const gateAssessment = assessPublicationGate(
             ledger,
             publicationAuthorization,
@@ -4950,6 +5262,7 @@ export async function verifyPublicationGate(
             gate,
             false,
             currentMs,
+            workflowBinding,
           );
           if (gateAssessment.state === "INVALID") {
             response = verificationFailure("GATE_MISMATCH", verifiedAt);

@@ -26,6 +26,7 @@ import {
   acknowledgeCodexReviewAmbiguity,
   authorizeRemotePublication,
   finalizePublicationGate,
+  getAutonomousPreReady,
   getPublication,
   getPublicationSummary,
   readObservationFile,
@@ -36,7 +37,9 @@ import {
 } from "./publication.mjs";
 import {
   advanceLocalWorkflow,
+  advanceRemoteWorkflow,
   AUTONOMOUS_CAPABILITIES,
+  bindWorkflowPublication,
   bindWorkflowReview,
   cancelAutonomousWorkflow,
   completeWorkflowAction,
@@ -570,6 +573,46 @@ if (role === "author") {
   );
 
   register(
+    "bind_workflow_publication",
+    {
+      title: "Bind autonomous publication and wait",
+      description:
+        "Bind the version-3 publication started for the current gated head and enter the remote wait, recording only which publication revision the workflow awaits.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        review_id: z.string(),
+      },
+    },
+    (input) =>
+      bindWorkflowPublication(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.review_id,
+      ),
+  );
+
+  register(
+    "advance_remote_workflow",
+    {
+      title: "Advance autonomous remote wait",
+      description:
+        "Re-read the bound publication's autonomous projection and take the single transition it implies: a repair phase for a new head, a fail-closed pause, the pre-ready stop, or continued waiting.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+      },
+    },
+    (input) =>
+      advanceRemoteWorkflow(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+      ),
+  );
+
+  register(
     "cancel_autonomous_workflow",
     {
       title: "Cancel autonomous workflow",
@@ -834,6 +877,8 @@ if (role === "author") {
         operator_label: z.string().optional(),
         rationale: z.string().optional(),
         codex_review_baseline: z.record(z.unknown()),
+        workflow_id: z.string().optional(),
+        expected_workflow_revision: z.number().int().positive().optional(),
       },
     },
     (input) =>
@@ -852,7 +897,20 @@ if (role === "author") {
         operatorLabel: input.operator_label ?? null,
         rationale: input.rationale ?? null,
         baseline: input.codex_review_baseline,
+        workflowId: input.workflow_id ?? null,
+        expectedWorkflowRevision: input.expected_workflow_revision ?? null,
       }),
+  );
+
+  register(
+    "get_autonomous_pre_ready",
+    {
+      title: "Get autonomous pre-ready projection",
+      description:
+        "Evaluate every publication invariant in its normal fail-closed order with the draft flag alone ignored, and return the exact normalized blocker set behind the result.",
+      inputSchema: { review_id: z.string() },
+    },
+    (input) => getAutonomousPreReady(storeRoot, input.review_id),
   );
 
   register(

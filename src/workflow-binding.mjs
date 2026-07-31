@@ -1,0 +1,166 @@
+import path from "node:path";
+import { canonicalJson, readSecureFile, sha256 } from "./storage.mjs";
+
+export const WORKFLOW_ID_RE = /^rbwf-[0-9TZ-]+-[a-f0-9]{8}$/;
+export const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
+
+const DIGEST_RE = /^[0-9a-f]{64}$/;
+const SHA_RE = /^[0-9a-f]{40}$/;
+
+function fail(code, message, details = {}) {
+  const error = new Error(`${code}: ${message}`);
+  error.code = code;
+  error.details = { retryable: false, ...details };
+  throw error;
+}
+
+export function assertWorkflowId(workflowId) {
+  if (typeof workflowId !== "string" || !WORKFLOW_ID_RE.test(workflowId)) {
+    throw new TypeError("invalid workflow_id");
+  }
+  return workflowId;
+}
+
+export function workflowDirectory(storeRoot, workflowId) {
+  assertWorkflowId(workflowId);
+  return path.join(storeRoot, "workflows", workflowId);
+}
+
+export function workflowPaths(storeRoot, workflowId) {
+  const directory = workflowDirectory(storeRoot, workflowId);
+  return {
+    directory,
+    workflow: path.join(directory, "workflow.json"),
+    auditLog: path.join(directory, "action-audit.jsonl"),
+    auditHead: path.join(directory, "action-audit-head.json"),
+  };
+}
+
+export function authorizationPayload(authorization) {
+  const {
+    workflow_authorization_sha256: _workflowAuthorizationSha256,
+    ...payload
+  } = authorization;
+  return payload;
+}
+
+export function authorizationDigest(authorization) {
+  return sha256(canonicalJson(authorizationPayload(authorization)));
+}
+
+/**
+ * Read the narrow workflow facts a publication ledger binds to, without taking
+ * the workflow lock. The authorization block is written once at workflow start
+ * and never mutated, so a lock-free read cannot observe a torn value and the
+ * publication and workflow locks never need a shared ordering.
+ *
+ * This deliberately validates only the binding contract. The full workflow
+ * ledger invariants stay in workflow.mjs and still run on every workflow-side
+ * operation.
+ */
+export async function readWorkflowBinding(storeRoot, workflowId) {
+  const paths = workflowPaths(storeRoot, workflowId);
+  let opened;
+  try {
+    opened = await readSecureFile(paths.workflow, {
+      requiredMode: 0o600,
+      maxBytes: MAX_WORKFLOW_BYTES,
+    });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      fail("WORKFLOW_NOT_FOUND", `autonomous workflow ${workflowId} not found`, {
+        retryable: true,
+      });
+    }
+    throw error;
+  }
+  try {
+    const text = opened.bytes.toString("utf8");
+    let workflow;
+    try {
+      workflow = JSON.parse(text);
+    } catch {
+      fail("WORKFLOW_STATE_INVALID", "workflow.json is malformed");
+    }
+    if (workflow === null || typeof workflow !== "object" || Array.isArray(workflow)) {
+      fail("WORKFLOW_STATE_INVALID", "workflow.json is not a JSON object");
+    }
+    if (`${canonicalJson(workflow)}\n` !== text) {
+      fail("WORKFLOW_STATE_INVALID", "workflow.json is not canonical JSON");
+    }
+    if (workflow.version !== 1) {
+      fail(
+        "WORKFLOW_SCHEMA_UNSUPPORTED",
+        `unsupported workflow schema version ${workflow.version}`,
+      );
+    }
+    if (
+      workflow.workflow_id !== workflowId ||
+      workflow.workflow_id !== path.basename(paths.directory)
+    ) {
+      fail("WORKFLOW_STATE_INVALID", "workflow ID does not match its store directory");
+    }
+    if (!Number.isSafeInteger(workflow.revision) || workflow.revision < 1) {
+      fail("WORKFLOW_STATE_INVALID", "workflow.revision is invalid");
+    }
+    if (!["ACTIVE", "PAUSED", "CANCELLED"].includes(workflow.status)) {
+      fail("WORKFLOW_STATE_INVALID", "workflow status is invalid");
+    }
+    if (typeof workflow.phase !== "string" || workflow.phase === "") {
+      fail("WORKFLOW_STATE_INVALID", "workflow phase is invalid");
+    }
+    const authorization = workflow.authorization;
+    if (
+      authorization === null ||
+      typeof authorization !== "object" ||
+      Array.isArray(authorization)
+    ) {
+      fail("WORKFLOW_AUTHORIZATION_INVALID", "workflow authorization is invalid");
+    }
+    const digest = authorization.workflow_authorization_sha256;
+    if (
+      !DIGEST_RE.test(digest ?? "") ||
+      authorizationDigest(authorization) !== digest
+    ) {
+      fail(
+        "WORKFLOW_AUTHORIZATION_INVALID",
+        "workflow authorization digest mismatch",
+      );
+    }
+    const publicationTarget = authorization.publication_target;
+    if (
+      publicationTarget === null ||
+      typeof publicationTarget !== "object" ||
+      Array.isArray(publicationTarget)
+    ) {
+      fail(
+        "WORKFLOW_AUTHORIZATION_INVALID",
+        "workflow publication target is invalid",
+      );
+    }
+    if (
+      workflow.current_head_sha !== null &&
+      !SHA_RE.test(workflow.current_head_sha ?? "")
+    ) {
+      fail("WORKFLOW_STATE_INVALID", "workflow head is invalid");
+    }
+    return {
+      workflow_id: workflow.workflow_id,
+      revision: workflow.revision,
+      status: workflow.status,
+      phase: workflow.phase,
+      base_sha: workflow.base_sha,
+      topic_branch: workflow.topic_branch,
+      current_head_sha: workflow.current_head_sha,
+      capabilities: [...(authorization.capabilities ?? [])],
+      publication_target: structuredClone(publicationTarget),
+      pull_request:
+        workflow.pull_request == null
+          ? null
+          : structuredClone(workflow.pull_request),
+      workflow_authorization_sha256: digest,
+    };
+  } finally {
+    await opened.handle.close();
+  }
+}
