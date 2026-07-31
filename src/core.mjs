@@ -524,7 +524,6 @@ async function buildSnapshot({
   hash.update(patch);
   const snapshotHash = hash.digest("hex");
 
-  const patchIndex = buildPatchIndex(patch);
   const manifest = {
     version: 1,
     captured_at: now(),
@@ -538,8 +537,6 @@ async function buildSnapshot({
     overlays,
     worktree_clean: worktreeClean,
     patch_bytes: patch.length,
-    patch_index: patchIndex.entries,
-    patch_index_truncated: patchIndex.truncated,
   };
 
   if (writeFiles) {
@@ -2144,19 +2141,21 @@ function roundDescriptor(round) {
   };
 }
 
-// Reviews captured before patch indexing still get one, derived from the
-// immutable patch on disk. Nothing here changes what the round committed to.
+// The index is always derived, on demand, from the same immutable patch.diff
+// the reviewer reads — never from the mutable review ledger. Deriving both
+// from one file makes it structurally impossible for a tampered index to hide
+// content the artifact read would return; a stored index would have to be
+// separately verified, and it sits outside the snapshot commitment. A patch
+// whose length no longer matches the ledger yields no index at all, and the
+// reviewer instructions then require reading the whole patch.
 async function patchIndexForRound(storeRoot, reviewId, round) {
-  if (Array.isArray(round.patch_index)) {
-    return {
-      entries: round.patch_index,
-      truncated: round.patch_index_truncated === true,
-    };
-  }
   try {
     const patch = await fsp.readFile(
       path.join(roundDirectory(storeRoot, reviewId, round.round), "patch.diff"),
     );
+    if (patch.length !== round.patch_bytes) {
+      return { entries: null, truncated: false };
+    }
     return buildPatchIndex(patch);
   } catch {
     return { entries: null, truncated: false };

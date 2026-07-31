@@ -35,7 +35,8 @@ reviewer task.
      that content. Report which sections you skipped. Read every `path: null`
      entry in full — the remainder entry when `patch_index_truncated` is true,
      and any section whose filename could not be decoded — because a section
-     without a path cannot be ruled out by path.
+     without a path cannot be ruled out by path. If `patch_index` itself is
+     null, no index could be derived: read all of `patch.diff`.
    Continue chunked artifact reads from `next_offset` until you have the range
    you intended to read.
 5. Review correctness, regressions, security, compatibility, error handling,

@@ -30,7 +30,8 @@ When the user asks to review a pending Codex task:
      Read every entry whose `path` is null in full — the final remainder
      entry when `patch_index_truncated` is true, and any section whose
      filename could not be decoded — because a section without a path cannot
-     be ruled out by path.
+     be ruled out by path. If `patch_index` itself is null, no index could be
+     derived: read all of `patch.diff`.
    Continue every artifact read from `next_offset` until you have the range you
    intended to read.
 

@@ -1948,3 +1948,57 @@ test("automatic parent selection reaches across linked worktrees", async (t) => 
   assert.equal(child.review_strategy.parent_review_id, parent.id);
   assert.deepEqual(child.rounds[0].successor.changed_files, ["child-only.js"]);
 });
+
+test("the served patch index comes from the immutable patch, not the ledger", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  await fsp.writeFile(path.join(repository, "app.js"), "export const a = 1;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "change");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Simplify the module.",
+    implementationScope: "Replace divide with a constant.",
+  });
+
+  // A tampered ledger index must not redirect what a reviewer skips: inject
+  // offsets that would hide the whole patch behind a zero-byte section.
+  const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  ledger.rounds[0].patch_index = [{ path: "app.js", offset: 0, bytes: 0 }];
+  ledger.rounds[0].patch_index_truncated = false;
+  await fsp.writeFile(reviewPath, `${JSON.stringify(ledger)}\n`, { mode: 0o600 });
+
+  const opened = await openReview(store, prepared.id);
+  const index = opened.current_snapshot.patch_index;
+  assert.deepEqual(
+    index.map((entry) => entry.path),
+    ["app.js"],
+  );
+  assert.equal(
+    index.reduce((total, entry) => total + entry.bytes, 0),
+    opened.current_snapshot.patch_bytes,
+  );
+  assert.ok(index[0].bytes > 0);
+
+  // A patch that no longer matches its recorded length yields no index at
+  // all, which the instructions turn into a whole-patch read.
+  const patchPath = path.join(
+    store,
+    "reviews",
+    prepared.id,
+    "rounds",
+    "1",
+    "patch.diff",
+  );
+  const patch = await fsp.readFile(patchPath);
+  await fsp.writeFile(patchPath, patch.subarray(0, patch.length - 1), {
+    mode: 0o600,
+  });
+  const reopened = await openReview(store, prepared.id);
+  assert.equal(reopened.current_snapshot.patch_index, null);
+  assert.equal(reopened.current_snapshot.patch_index_truncated, false);
+});

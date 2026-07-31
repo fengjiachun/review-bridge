@@ -253,15 +253,21 @@ fallback and the reviewer reviews the complete patch. The optimization changes
 context selection, not the final local gate.
 
 `patch.diff` is a cumulative base-to-head diff, so on a long-lived branch a
-`FULL` review re-reads code that earlier reviews already cleared. Every round
-therefore also carries `patch_index`: the byte offset and length of each file's
-section in `patch.diff`, returned by `open_review` under `current_snapshot`. A
-reviewer reads the sections the reviewed behavior depends on through
-`read_review_artifact` and reports which it skipped. The index always spans the
-entire patch: past 400 files it is truncated, `patch_index_truncated` is set,
-and one final `path: null` entry covers the whole remainder, which the reviewer
-must read in full. The index is advisory and is not part of the snapshot
-commitment; a reader that ignores it sees the same bytes.
+`FULL` review re-reads code that earlier reviews already cleared. `open_review`
+therefore returns `patch_index` under `current_snapshot`: the byte offset and
+length of each file's section in `patch.diff`. A reviewer reads the sections
+the reviewed behavior depends on through `read_review_artifact` and reports
+which it skipped. The index always spans the entire patch: past 400 files it is
+truncated, `patch_index_truncated` is set, and one final `path: null` entry
+covers the whole remainder, which the reviewer must read in full.
+
+The index is never stored: it is derived on demand from the same immutable
+`patch.diff` the reviewer reads, so an index that disagrees with the served
+bytes cannot exist, and nothing in the mutable ledger can redirect what a
+reviewer skips. If the patch cannot be read or no longer matches its recorded
+length, `patch_index` is null and the reviewer reads the whole patch. The index
+is advisory and is not part of the snapshot commitment; a reader that ignores
+it sees the same bytes.
 
 ## State machine
 
