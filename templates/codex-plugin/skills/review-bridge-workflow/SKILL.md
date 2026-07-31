@@ -53,13 +53,16 @@ publication, remote findings, ready-state changes, or thread resolution.
    model round.
 8. For `PLAN_PUSH`, call `plan_workflow_push`; it verifies the clean
    checked-out HEAD still equals the gated workflow head and binds the
-   remote's single push URL into the intent. Persist `EXECUTING` with
-   `mark_workflow_action_executing` immediately before pushing, then push the
-   immutable gated commit — `git push <remote>
-   <active_action.target.head_sha>:refs/heads/<topic_branch>`, recovering the
-   SHA from the persisted intent after a restart — never the mutable branch
-   name, so a branch that advanced after planning cannot leak an ungated
-   commit to the remote. Never force-push. Reconcile from the provider, never
+   remote's single push URL into the intent; a push URL that embeds
+   credentials is rejected before anything is persisted. Persist `EXECUTING`
+   with `mark_workflow_action_executing` immediately before pushing, then
+   push the immutable gated commit to the pinned URL — `git push
+   <active_action.target.remote_url>
+   <active_action.target.head_sha>:refs/heads/<topic_branch>`, recovering
+   both operands from the persisted intent after a restart — never the
+   mutable remote name or branch name, so neither a branch that advanced nor
+   a repointed remote can leak an ungated commit to an unauthorized
+   repository. Never force-push. Reconcile from the provider, never
    from the plan: freshly read the remote's configured push URL,
    resolve that URL to its GitHub repository and numeric repository ID, and
    freshly read the exact remote ref head. Call `record_push_observation`

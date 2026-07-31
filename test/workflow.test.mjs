@@ -2293,6 +2293,19 @@ test("a drifted or dirty head cannot plan the gated push", async (t) => {
     "ssh://git@github.com/example/review-bridge-push2.git",
   );
 
+  // A credential-bearing push URL must be rejected before anything persists.
+  for (const credentialUrl of [
+    "https://x-access-token:secret@github.com/example/review-bridge.git",
+    "https://ghp_token@github.com/example/review-bridge.git",
+  ]) {
+    git(state.repository, "remote", "set-url", "--push", "origin", credentialUrl);
+    await assert.rejects(
+      planWorkflowPush(state.store, workflow.workflow_id, gated.revision),
+      /embeds credentials/,
+    );
+  }
+  git(state.repository, "remote", "set-url", "--push", "origin", pushUrl);
+
   const planned = await planWorkflowPush(
     state.store,
     workflow.workflow_id,

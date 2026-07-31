@@ -212,9 +212,10 @@ const ACTION_KIND_SPECS = {
     },
     validateTarget(workflow, target) {
       const authorized = workflow.authorization.publication_target;
-      assertString(target.remote_url, "push target remote_url", {
-        max: 4096,
-      });
+      requireCredentialFreePushUrl(
+        target.remote_url,
+        "push target remote_url",
+      );
       if (
         target.push_remote !== authorized.push_remote ||
         target.head_repository_id !== authorized.head_repository_id ||
@@ -500,6 +501,35 @@ function validateActiveAction(workflow) {
       "active action is inconsistent with workflow state",
     );
   }
+}
+
+function requireCredentialFreePushUrl(url, name) {
+  assertString(url, name, { max: 4096 });
+  // scp-like ssh syntax (user@host:path) has no password field; the user is
+  // an ssh login name, not a credential.
+  if (/^[A-Za-z0-9._-]+@[^:@/]+:/.test(url)) {
+    return url;
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      `${name} is not a parseable push URL`,
+    );
+  }
+  const sshProtocol = ["ssh:", "git+ssh:"].includes(parsed.protocol);
+  if (
+    parsed.password !== "" ||
+    (parsed.username !== "" && !sshProtocol)
+  ) {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      `${name} embeds credentials and cannot be persisted`,
+    );
+  }
+  return url;
 }
 
 function runGit(repositoryPath, args, { allowExitCodes = [0] } = {}) {
@@ -2281,7 +2311,10 @@ export async function planWorkflowPush(
             "the authorized remote must have exactly one push URL",
           );
         }
-        const remoteUrl = pushUrls[0];
+        const remoteUrl = requireCredentialFreePushUrl(
+          pushUrls[0],
+          "push target remote_url",
+        );
         return {
           push_remote: authorized.push_remote,
           remote_url: remoteUrl,
@@ -2449,7 +2482,7 @@ export async function recordPushObservation(
 ) {
   assertSha(remoteRefSha, "remote_ref_sha");
   assertPositiveInteger(remoteRepositoryId, "remote_repository_id");
-  assertString(remoteUrl, "remote_url", { max: 4096 });
+  requireCredentialFreePushUrl(remoteUrl, "remote_url");
   return recordActionObservation(
     storeRoot,
     workflowId,
