@@ -446,7 +446,7 @@ const collectorHelp = run(process.execPath, [collectorPath, "--help"], pluginRoo
 assert.match(collectorHelp, /Usage: collect-github-observation\.mjs/);
 assert.match(collectorHelp, /--review-id <id>/);
 assert.match(collectorHelp, /--out <path>/);
-assert.match(collectorHelp, /never retype the observation itself/);
+assert.match(collectorHelp, /Never retype\s+the observation itself/);
 assert.match(workflowSkill, /--review-id <review_id>/);
 assert.match(collectorHelp, /Refused inside any\s+Git worktree/);
 assert.match(
