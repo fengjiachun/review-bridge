@@ -471,16 +471,20 @@ function validateActiveAction(workflow) {
   ) {
     fail("WORKFLOW_ACTION_INVALID", "active action execution time is invalid");
   }
+  // Ledgers persisted by v0.5.0 predate the executing-proof field; an
+  // absent field validates exactly like the explicit null those versions
+  // could never set, so upgraded stores keep loading.
+  const executingProof = action.executing_proof ?? null;
   if (action.status === "PLANNED") {
-    if (action.executing_proof !== null) {
+    if (executingProof !== null) {
       fail(
         "WORKFLOW_ACTION_INVALID",
         "a planned action cannot carry an executing proof",
       );
     }
   } else if (spec.validateExecutingProof) {
-    spec.validateExecutingProof(action, action.executing_proof);
-  } else if (action.executing_proof !== null) {
+    spec.validateExecutingProof(action, executingProof);
+  } else if (executingProof !== null) {
     fail(
       "WORKFLOW_ACTION_INVALID",
       "this action kind does not take an executing proof",

@@ -2256,6 +2256,87 @@ test("a claim committed to the audit but not the ledger still blocks a rival", a
   );
 });
 
+
+test("a v0.5.0 ledger without executing_proof still loads and scans", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const planned = await planCodexTaskDispatch(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+
+  // Reconstruct the store shape v0.5.0 persisted: the active action has no
+  // executing_proof field anywhere — ledger, audit event, or cursor.
+  const workflowRoot = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+  );
+  const workflowPath = path.join(workflowRoot, "workflow.json");
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  delete stored.active_action.executing_proof;
+  const legacyEvent = workflowAuditEvent(stored, {
+    sequence: 1,
+    previousEventSha256: null,
+    eventId: "a".repeat(32),
+    at: stored.updated_at,
+    event: "ACTION_PLANNED",
+  });
+  await fsp.writeFile(
+    path.join(workflowRoot, "action-audit.jsonl"),
+    legacyEvent.bytes,
+    { mode: 0o600 },
+  );
+  await fsp.writeFile(
+    path.join(workflowRoot, "action-audit-head.json"),
+    `${canonicalJson({
+      version: 1,
+      workflow_id: workflow.workflow_id,
+      committed_bytes: legacyEvent.bytes.length,
+      next_sequence: 2,
+      last_event_sha256: legacyEvent.event.event_sha256,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  stored.action_audit = {
+    next_sequence: 2,
+    last_event_sha256: legacyEvent.event.event_sha256,
+  };
+  await fsp.writeFile(workflowPath, `${canonicalJson(stored)}\n`, {
+    mode: 0o600,
+  });
+
+  const loaded = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(loaded.active_action.status, "PLANNED");
+
+  // The legacy ledger must not poison store-wide claim scans either.
+  git(state.repository, "switch", "-c", "agent/workflow-alt", state.baseSha);
+  const second = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, {
+      topicBranch: "agent/workflow-alt",
+      publicationTarget: {
+        base_repository_id: 101,
+        base_owner: "example",
+        base_repo: "review-bridge",
+        base_branch: "main",
+        head_repository_id: 101,
+        head_owner: "example",
+        head_repo: "review-bridge",
+        head_branch: "agent/workflow-alt",
+        push_remote: "origin",
+      },
+    }),
+  );
+  assert.equal(second.status, "ACTIVE");
+});
+
 test("a drifted or dirty head cannot plan the gated push", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
