@@ -1,8 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-07-31
 
 ### Added
+
+- An opt-in autonomous local workflow (RFC 0003 PR1): a schema-version-1
+  workflow ledger binds immutable authorization, store-wide ownership claims,
+  marker-reconciled Codex reviewer task dispatch, and crash recovery, and
+  drives the local two-round `CODEX_TASK` review loop through
+  `LOCAL_GATE_PASSED`. Pause, cancellation, `HUMAN_REQUIRED`, and finding
+  fingerprints are audited so stale active ledgers fail closed. It stops at
+  the local publication boundary.
 
 - `record_github_snapshot` accepts `observation_path`, and the packaged
   collector accepts `--review-id` and `--out`, so a publication ledger and its
