@@ -9,9 +9,9 @@
   GitHub observation move between the store, the collector, and the ledger as
   files instead of being retyped through the model.
 - `prepare_review` selects a successor parent itself when `parent_review_id` is
-  omitted, considering only gated tasks for the same repository, base SHA, and
-  requirement whose gated head is a strict ancestor of the captured head, and
-  still requiring the full successor proof. `review_strategy.parent_selection`
+  omitted, considering only gated tasks for the same repository and base SHA
+  whose gated head is a strict ancestor of the captured head, and still
+  requiring the full successor proof. `review_strategy.parent_selection`
   reports `AUTOMATIC`, `EXPLICIT`, or `NONE`, and `force_full_review` demands a
   full-patch review. An explicitly named parent must still match the
   requirement exactly; server-side selection does not require it, because
