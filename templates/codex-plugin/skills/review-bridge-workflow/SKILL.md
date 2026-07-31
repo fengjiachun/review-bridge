@@ -63,33 +63,20 @@ repair, ready-state changes, or thread resolution.
    `resolved_url`; the server refuses to record `EXECUTING` unless they
    equal the authorized target, so a remote repointed before planning can
    never receive the gated commit. Then push the immutable gated commit to
-   the pinned URL from an isolated, immutable Git configuration, so no
-   mutable config source — including a `url.<base>.insteadOf` or
-   `pushInsteadOf` rewrite added at any moment — can participate in the
-   invocation:
-
-   ```bash
-   quarantine=$(mktemp -d)
-   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-     git init --bare --quiet "$quarantine"
-   git rev-parse --path-format=absolute --git-path objects \
-     > /dev/null # resolve the repository's object store path
-   echo "<absolute objects path>" >> "$quarantine/objects/info/alternates"
-   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-     git --git-dir="$quarantine" push <PINNED> \
-     <active_action.target.head_sha>:refs/heads/<topic_branch>
-   ```
-
-   where `<PINNED>` is `active_action.target.remote_url`, both operands
-   recovered from the persisted intent after a restart — never the mutable
-   remote name or branch name. The quarantine directory's fresh config
-   contains no rewrite rules, the global and system sources are disabled
-   for the invocation, and the object alternates expose the gated commit
-   without inheriting the working repository's configuration, so neither a
-   branch that advanced, a repointed remote, nor any config rewrite can
-   leak an ungated commit to an unauthorized repository. Authenticate over
-   ssh; the quarantined invocation deliberately drops configuration-based
-   credential helpers. Never force-push. Reconcile from the provider, never
+   the pinned URL by refspec — `git push <active_action.target.remote_url>
+   <active_action.target.head_sha>:refs/heads/<topic_branch>`, both
+   operands recovered from the persisted intent after a restart, never the
+   mutable remote name or branch name. Never force-push. Review Bridge
+   trusts the local Git environment and does not try to harden this `git
+   push` against it: a controller that can rewrite local Git configuration
+   or inject configuration through the environment already holds the gated
+   commit and can disclose it directly, so hardening the invocation defends
+   nothing it does not already control. Integrity of the push target rests
+   instead on the reconciliation below — a push diverted by any such
+   rewrite leaves the authorized remote without the gated commit, so the
+   observation fails and the workflow pauses `EXTERNAL_ACTION_INDETERMINATE`
+   rather than completing; its only residual effect is disclosing a commit
+   the local attacker already holds. Reconcile from the provider, never
    from the plan: freshly read the remote's configured push URL,
    resolve that URL to its GitHub repository and numeric repository ID, and
    freshly read the exact remote ref head. Call `record_push_observation`
