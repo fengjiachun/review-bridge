@@ -29,8 +29,11 @@
   file's section in `patch.diff`, so a reviewer can read the sections a review
   depends on instead of the whole cumulative patch. The index is derived on
   demand from the immutable patch the reviewer reads — never stored in or
-  trusted from the mutable ledger — and is null, requiring a whole-patch read,
-  when the patch cannot be read back or no longer matches its recorded length.
+  trusted from the mutable ledger — is served only after the patch reproduces
+  the round's committed snapshot hash, covers every byte from offset zero, and
+  is null, requiring a whole-patch read, whenever those checks fail.
+  Finalizing the local gate likewise verifies the stored patch against its
+  snapshot commitment.
   Past 400 files the index is
   truncated but still spans the whole patch: a final `path: null` entry covers
   the remainder, which reviewers must read in full. Quoted Git paths —

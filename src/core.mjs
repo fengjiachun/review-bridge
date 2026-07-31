@@ -379,6 +379,15 @@ function buildPatchIndex(patch) {
       (position + 1 < starts.length ? starts[position + 1].offset : patch.length) -
       entry.offset,
   }));
+  // Coverage is contiguous from offset zero by construction: bytes before the
+  // first recognized section — a legitimate separator byte, or a corrupted
+  // header — get a leading path-null entry, which the reviewer instructions
+  // turn into a mandatory read. Without this, an unrecognized prefix would be
+  // the one range no index entry admits to.
+  const firstOffset = entries.length > 0 ? entries[0].offset : patch.length;
+  if (firstOffset > 0) {
+    entries.unshift({ path: null, offset: 0, bytes: firstOffset });
+  }
   if (entries.length > MAX_PATCH_INDEX_ENTRIES) {
     // Truncation must not cost coverage: the index always spans the whole
     // patch, so a bounded ledger entry cannot hide the tail from a reviewer.
@@ -568,6 +577,10 @@ async function snapshotHashFromReviewRound(
   reviewId,
   review,
   round,
+  // Callers that already hold the patch bytes pass them in, so hashing and
+  // any later use of the content see the same read and cannot be split by a
+  // concurrent file swap.
+  preloadedPatch = null,
 ) {
   if (
     !Number.isInteger(round?.round) ||
@@ -580,12 +593,14 @@ async function snapshotHashFromReviewRound(
   ) {
     throw new Error("review round is malformed");
   }
-  const patch = await fsp.readFile(
-    path.join(
-      roundDirectory(storeRoot, reviewId, round.round),
-      "patch.diff",
-    ),
-  );
+  const patch =
+    preloadedPatch ??
+    (await fsp.readFile(
+      path.join(
+        roundDirectory(storeRoot, reviewId, round.round),
+        "patch.diff",
+      ),
+    ));
   if (patch.length !== round.patch_bytes) {
     throw new Error("review patch length does not match its ledger");
   }
@@ -1855,6 +1870,20 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
     throw new Error("clean snapshot is not present in the review ledger");
   }
   await verifySuccessorArtifacts(storeRoot, reviewId, cleanRound);
+  // The gate attests the snapshot the reviewer actually saw, so the stored
+  // patch must still reproduce the committed hash — not merely the right
+  // byte length — before the live worktree is compared against it.
+  const storedHash = await snapshotHashFromReviewRound(
+    storeRoot,
+    reviewId,
+    review,
+    cleanRound,
+  );
+  if (storedHash !== review.clean_snapshot_hash) {
+    throw new Error(
+      "stored review patch does not match its snapshot commitment",
+    );
+  }
   const { manifest } = await buildSnapshot({
     repositoryPath: review.repository_path,
     baseRef: review.base_ref,
@@ -2167,15 +2196,24 @@ function roundDescriptor(round) {
 // the reviewer reads — never from the mutable review ledger. Deriving both
 // from one file makes it structurally impossible for a tampered index to hide
 // content the artifact read would return; a stored index would have to be
-// separately verified, and it sits outside the snapshot commitment. A patch
-// whose length no longer matches the ledger yields no index at all, and the
-// reviewer instructions then require reading the whole patch.
-async function patchIndexForRound(storeRoot, reviewId, round) {
+// separately verified, and it sits outside the snapshot commitment. Before
+// the index is served, the patch bytes must also reproduce the round's
+// committed snapshot_hash — a same-length corruption would otherwise shift
+// which sections the index recognizes. Any failure yields no index at all,
+// and the reviewer instructions then require reading the whole patch.
+async function patchIndexForRound(storeRoot, reviewId, review, round) {
   try {
     const patch = await fsp.readFile(
       path.join(roundDirectory(storeRoot, reviewId, round.round), "patch.diff"),
     );
-    if (patch.length !== round.patch_bytes) {
+    const snapshotHash = await snapshotHashFromReviewRound(
+      storeRoot,
+      reviewId,
+      review,
+      round,
+      patch,
+    );
+    if (snapshotHash !== round.snapshot_hash) {
       return { entries: null, truncated: false };
     }
     return buildPatchIndex(patch);
@@ -2192,7 +2230,12 @@ export async function openReview(
   const review = await loadReview(storeRoot, reviewId);
   requireReviewerProvider(review, reviewerProvider);
   const current = findRound(review, review.current_round);
-  const patchIndex = await patchIndexForRound(storeRoot, review.id, current);
+  const patchIndex = await patchIndexForRound(
+    storeRoot,
+    review.id,
+    review,
+    current,
+  );
   const { rounds, ...rest } = publicReview(review);
   return {
     ...rest,

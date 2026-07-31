@@ -2100,3 +2100,70 @@ test("a corrupted stored candidate cannot abort unattended preparation", async (
   assert.equal(child.review_strategy.parent_selection, "AUTOMATIC");
   assert.equal(child.review_strategy.parent_review_id, parent.id);
 });
+
+test("a same-length patch corruption withdraws the index and blocks the gate", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  await fsp.writeFile(path.join(repository, "app.js"), "export const a = 1;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "change");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Simplify the module.",
+    implementationScope: "Replace divide with a constant.",
+  });
+  await submitInitialReview(store, prepared.id, []);
+
+  // Corrupt the first diff marker without changing the byte length. A
+  // length-only check would still index from the next recognized header and
+  // silently exclude the prefix.
+  const patchPath = path.join(
+    store,
+    "reviews",
+    prepared.id,
+    "rounds",
+    "1",
+    "patch.diff",
+  );
+  const patch = await fsp.readFile(patchPath);
+  const tampered = Buffer.from(patch);
+  tampered.write("Xiff", 0);
+  await fsp.writeFile(patchPath, tampered, { mode: 0o600 });
+
+  const opened = await openReview(store, prepared.id);
+  assert.equal(opened.current_snapshot.patch_index, null);
+
+  await assert.rejects(
+    finalizeLocalGate(store, prepared.id),
+    /stored review patch does not match its snapshot commitment/,
+  );
+});
+
+test("index coverage starts at offset zero even when the patch does not", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  // An untracked-only change produces a patch with a separator byte before
+  // the first diff header.
+  await fsp.writeFile(path.join(repository, "brand-new.js"), "export const n = 1;\n");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Add a new module.",
+    implementationScope: "Add brand-new.js untracked.",
+  });
+  const opened = await openReview(store, prepared.id);
+  const index = opened.current_snapshot.patch_index;
+
+  assert.equal(index[0].offset, 0);
+  assert.equal(
+    index.reduce((total, entry) => total + entry.bytes, 0),
+    opened.current_snapshot.patch_bytes,
+  );
+  assert.ok(index.some((entry) => entry.path === "brand-new.js"));
+});

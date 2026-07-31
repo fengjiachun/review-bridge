@@ -264,8 +264,13 @@ covers the whole remainder, which the reviewer must read in full.
 The index is never stored: it is derived on demand from the same immutable
 `patch.diff` the reviewer reads, so an index that disagrees with the served
 bytes cannot exist, and nothing in the mutable ledger can redirect what a
-reviewer skips. If the patch cannot be read or no longer matches its recorded
-length, `patch_index` is null and the reviewer reads the whole patch. The index
+reviewer skips. Before the index is served, the patch must reproduce the
+round's committed `snapshot_hash`; coverage is contiguous from offset zero, so
+bytes before the first recognized section land in a leading `path: null` entry
+rather than outside the index. If the patch cannot be read or fails these
+checks, `patch_index` is null and the reviewer reads the whole patch. The
+local gate independently refuses to finalize when the stored patch no longer
+matches its commitment. The index
 is advisory and is not part of the snapshot commitment; a reader that ignores
 it sees the same bytes.
 
