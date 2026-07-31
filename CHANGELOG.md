@@ -13,7 +13,10 @@
   requirement whose gated head is a strict ancestor of the captured head, and
   still requiring the full successor proof. `review_strategy.parent_selection`
   reports `AUTOMATIC`, `EXPLICIT`, or `NONE`, and `force_full_review` demands a
-  full-patch review.
+  full-patch review. An explicitly named parent must still match the
+  requirement exactly; server-side selection does not require it, because
+  authors reword requirements between rounds of the same work, and instead
+  records `parent_requirement` and `requirement_match` in the successor proof.
 - Every round records `patch_index`, the byte offset and length of each file's
   section in `patch.diff`, so a reviewer can read the sections a review depends
   on instead of the whole cumulative patch. The index is advisory and is not

@@ -561,6 +561,11 @@ async function buildSuccessorArtifacts({
   requirement,
   manifest,
   roundRoot,
+  // An author naming a parent is asserting a continuation, so a requirement
+  // mismatch there is an author error and fails closed. Server-side selection
+  // asserts nothing: it reports the parent's requirement instead, because the
+  // gate attests the reviewed tree, not the prose that motivated the review.
+  requireRequirementMatch = true,
 }) {
   const fullStrategy = (fallbackReason = null) => ({
     strategy: {
@@ -677,7 +682,7 @@ async function buildSuccessorArtifacts({
   if (parentRound.base_sha !== manifest.base_sha) {
     return fullStrategy("parent and successor must use the same base SHA");
   }
-  if (parent.requirement !== requirement) {
+  if (requireRequirementMatch && parent.requirement !== requirement) {
     return fullStrategy("parent and successor must use the same requirement");
   }
   if (
@@ -751,6 +756,8 @@ async function buildSuccessorArtifacts({
       version: 1,
       parent_review_id: parent.id,
       parent_reviewer_provider: parentReviewerProvider,
+      parent_requirement: parent.requirement,
+      requirement_match: parent.requirement === requirement,
       parent_snapshot_hash: parent.clean_snapshot_hash,
       parent_gate_sha256: sha256(gateBytes),
       base_sha: manifest.base_sha,
@@ -919,7 +926,6 @@ async function automaticParentCandidates(storeRoot, { manifest, requirement }) {
     }
     if (
       review.status !== "LOCAL_GATE_PASSED" ||
-      review.requirement !== requirement ||
       review.repository_path !== manifest.repository_path ||
       !Array.isArray(review.rounds)
     ) {
@@ -950,8 +956,14 @@ async function automaticParentCandidates(storeRoot, { manifest, requirement }) {
     }
     candidates.push(review);
   }
+  // Prefer a parent gated for the same stated requirement; otherwise the most
+  // recently gated ancestor, which is the smallest delta.
   return candidates
-    .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+    .sort((a, b) => {
+      const aMatch = a.requirement === requirement ? 0 : 1;
+      const bMatch = b.requirement === requirement ? 0 : 1;
+      return aMatch - bMatch || b.updated_at.localeCompare(a.updated_at);
+    })
     .slice(0, MAX_AUTOMATIC_PARENT_CANDIDATES)
     .map((review) => review.id);
 }
@@ -1003,6 +1015,7 @@ async function resolveReviewStrategy({
       requirement,
       manifest,
       roundRoot,
+      requireRequirementMatch: false,
     });
     if (result.strategy.mode === "SUCCESSOR") {
       return {
@@ -1543,6 +1556,8 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
             requirement: review.requirement,
             manifest,
             roundRoot,
+            requireRequirementMatch:
+              review.review_strategy.parent_selection !== "AUTOMATIC",
           });
           return {
             ...rebuilt,

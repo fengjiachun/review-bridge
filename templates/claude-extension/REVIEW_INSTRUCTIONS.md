@@ -16,6 +16,12 @@ When the user asks to review a pending Codex task:
      the delta changes a contract used by files outside it, it touches a
      security or compatibility surface, or the successor proof fails to verify.
      Delta size alone is not a reason, and neither is unfocused doubt.
+     When the proof reports `requirement_match: false`, the parent gate was
+     granted while reviewing for `parent_requirement`, not for this task's
+     requirement. The parent's code was reviewed, but not with this question in
+     mind: read the already-gated code the current requirement bears on, using
+     `read_snapshot_file` and `search_snapshot`, before trusting the delta
+     alone.
    - `FULL`: read `patch.diff` through `current_snapshot.patch_index`, which
      gives the byte offset and length of every file's section. Read the
      sections the reviewed behavior depends on; skip sections whose content

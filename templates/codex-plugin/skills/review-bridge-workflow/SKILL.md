@@ -22,9 +22,14 @@ remote-only GitHub publication.
    lets the local gate attest the exact commit that will become the PR head.
 5. Leave `parent_review_id` unset unless you have a specific parent in mind.
    The server then selects one itself, considering only tasks that are already
-   `LOCAL_GATE_PASSED` for the same repository, immutable base SHA, and
-   requirement, and whose gated head is a strict ancestor of the head being
-   captured; each candidate still has to pass the full successor proof. The
+   `LOCAL_GATE_PASSED` for the same repository and immutable base SHA and whose
+   gated head is a strict ancestor of the head being captured; each candidate
+   still has to pass the full successor proof. It prefers a parent gated for
+   the same requirement, and when none exists it records the parent's
+   requirement and `requirement_match: false` in the proof so the reviewer
+   knows the gate was granted while reviewing for different work. Naming a
+   parent explicitly still requires the requirement to match exactly, because
+   there a mismatch means you picked the wrong parent. The
    result reports `review_strategy.parent_selection` as `AUTOMATIC`,
    `EXPLICIT`, or `NONE`. Pass `parent_review_id` to pin a specific parent, and
    `force_full_review: true` to demand a full-patch review. Prefer letting a

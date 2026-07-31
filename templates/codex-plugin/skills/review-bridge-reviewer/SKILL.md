@@ -24,7 +24,10 @@ reviewer task.
      `read_snapshot_file` and `search_snapshot`. Read `patch.diff` only when
      the delta changes a contract used outside it, touches a security or
      compatibility surface, or the successor proof fails to verify. Delta size
-     alone is not a reason.
+     alone is not a reason. When the proof reports `requirement_match: false`,
+     the parent gate was granted while reviewing for `parent_requirement`: read
+     the already-gated code the current requirement bears on before trusting
+     the delta alone.
    - `FULL`: read `patch.diff` through `current_snapshot.patch_index`, which
      gives each file's byte offset and length. Read the sections the reviewed
      behavior depends on and skip sections that cannot affect it, such as

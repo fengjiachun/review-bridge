@@ -218,13 +218,25 @@ unrelated reviews from consuming the new task's context window.
 When a committed change continues a prior `LOCAL_GATE_PASSED` task for the same
 repository, base SHA, and requirement, that task is the parent. Leave
 `parent_review_id` unset and Review Bridge finds the parent itself: it considers
-only gated tasks matching that repository, base SHA, and requirement whose gated
-head is a strict ancestor of the head being captured, and every candidate still
-has to pass the full successor proof — the parent gate, clean committed
-snapshots, and commit ancestry. `review_strategy.parent_selection` records
-whether the parent was `AUTOMATIC`, `EXPLICIT`, or `NONE`. Pass
-`parent_review_id` to pin a parent, or `force_full_review: true` to require a
-full-patch review. A valid `SUCCESSOR` task includes:
+only gated tasks for that repository and base SHA whose gated head is a strict
+ancestor of the head being captured, and every candidate still has to pass the
+full successor proof — the parent gate, clean committed snapshots, and commit
+ancestry. `review_strategy.parent_selection` records whether the parent was
+`AUTOMATIC`, `EXPLICIT`, or `NONE`. Pass `parent_review_id` to pin a parent, or
+`force_full_review: true` to require a full-patch review.
+
+Requirement text is treated differently in the two cases. Naming a parent is an
+assertion that the task continues it, so a requirement mismatch fails closed —
+it means the wrong parent was named. Server-side selection asserts nothing:
+requirements are free text that authors reword between rounds of the same work,
+so equality there would reject nearly every real continuation. Selection prefers
+a parent gated for the same requirement, and otherwise records the parent's
+requirement and `requirement_match: false` in the proof. A reviewer that sees
+`requirement_match: false` knows the parent's code was reviewed, but not with
+the current question in mind, and reads the gated code that question bears on
+rather than trusting the delta alone.
+
+A valid `SUCCESSOR` task includes:
 
 - `successor.json`, which binds the parent gate and snapshot, parent/current Git
   tree IDs, and delta hash;

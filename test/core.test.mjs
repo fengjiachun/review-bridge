@@ -1680,6 +1680,83 @@ test("an unattended review selects a verified successor parent and can be forced
   assert.match(forced.review_strategy.fallback_reason, /requested by the author/);
 });
 
+test("a drifting requirement blocks an explicit parent but is disclosed in an automatic one", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  await fsp.writeFile(path.join(repository, "one.js"), "export const one = 1;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "one");
+  const parent = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Implement PR1: the ledger and its owners.",
+    implementationScope: "Add one.",
+  });
+  await submitInitialReview(store, parent.id, []);
+  await finalizeLocalGate(store, parent.id);
+
+  await fsp.writeFile(path.join(repository, "two.js"), "export const two = 2;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "two");
+  // The same work, described differently on the next round, as authors do.
+  const driftedRequirement = "Implement PR1: the ledger, its owners, and the digest.";
+
+  const explicit = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: driftedRequirement,
+    implementationScope: "Add two.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(explicit.review_strategy.mode, "FULL");
+  assert.equal(explicit.review_strategy.parent_selection, "EXPLICIT");
+  assert.match(
+    explicit.review_strategy.fallback_reason,
+    /same requirement/,
+  );
+
+  const automatic = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: driftedRequirement,
+    implementationScope: "Add two.",
+  });
+  assert.equal(automatic.review_strategy.mode, "SUCCESSOR");
+  assert.equal(automatic.review_strategy.parent_selection, "AUTOMATIC");
+  assert.equal(automatic.rounds[0].successor.requirement_match, false);
+  assert.equal(
+    automatic.rounds[0].successor.parent_requirement,
+    "Implement PR1: the ledger and its owners.",
+  );
+  assert.deepEqual(automatic.rounds[0].successor.changed_files, ["two.js"]);
+
+  // Round two keeps the disclosed successor instead of silently going full.
+  await submitInitialReview(store, automatic.id, [
+    {
+      severity: "minor",
+      title: "Name the constant",
+      explanation: "The exported name should state its unit.",
+    },
+  ]);
+  await fsp.writeFile(path.join(repository, "two.js"), "export const twoUnits = 2;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "rename");
+  await submitResolutions(store, automatic.id, [
+    {
+      finding_id: "F-001",
+      disposition: "fixed",
+      rationale: "Renamed to state the unit.",
+      evidence: "two.js exports twoUnits.",
+    },
+  ]);
+  const round2 = await prepareRereview(store, automatic.id);
+  assert.equal(round2.review_strategy.mode, "SUCCESSOR");
+  assert.equal(round2.review_strategy.parent_selection, "AUTOMATIC");
+  assert.equal(round2.rounds[1].successor.requirement_match, false);
+});
+
 test("automatic parent selection ignores unrelated and ungated history", async (t) => {
   const { root, repository, store } = await fixture();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
@@ -1701,16 +1778,20 @@ test("automatic parent selection ignores unrelated and ungated history", async (
   git(repository, "add", ".");
   git(repository, "commit", "-m", "two");
 
-  // A different requirement is a different review, not a continuation.
-  const unrelated = await prepareReview(store, {
+  // A different base is a different reviewed range, so no parent applies.
+  const otherBase = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "later.js"), "export const later = 9;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "later");
+  const rebased = await prepareReview(store, {
     repositoryPath: repository,
-    baseRef: baseSha,
-    requirement: "A different requirement.",
-    implementationScope: "Add two.",
+    baseRef: otherBase,
+    requirement: "One requirement.",
+    implementationScope: "Add later.",
   });
-  assert.equal(unrelated.review_strategy.mode, "FULL");
-  assert.equal(unrelated.review_strategy.parent_selection, "NONE");
-  assert.equal(unrelated.review_strategy.parent_review_id, null);
+  assert.equal(rebased.review_strategy.mode, "FULL");
+  assert.equal(rebased.review_strategy.parent_selection, "NONE");
+  assert.equal(rebased.review_strategy.parent_review_id, null);
 
   // An ungated task with the matching requirement is not a parent either.
   const ungated = await prepareReview(store, {
@@ -1728,7 +1809,8 @@ test("automatic parent selection ignores unrelated and ungated history", async (
     requirement: "Never gated.",
     implementationScope: "Add three.",
   });
-  assert.equal(ungated.review_strategy.mode, "FULL");
-  assert.equal(afterUngated.review_strategy.mode, "FULL");
-  assert.equal(afterUngated.review_strategy.parent_selection, "NONE");
+  // The ungated task is never a parent, so selection reaches past it to the
+  // gated one rather than treating the nearest task as reviewed.
+  assert.equal(afterUngated.review_strategy.parent_review_id, gated.id);
+  assert.notEqual(afterUngated.review_strategy.parent_review_id, ungated.id);
 });
