@@ -1771,6 +1771,11 @@ test("a clean review advances through push and draft PR to publication", async (
     1,
   );
   assert.equal(
+    bound.claims.find((entry) => entry.kind === "PULL_REQUEST")
+      .created_revision,
+    bound.revision,
+  );
+  assert.equal(
     (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
       .next_action,
     "START_PUBLICATION",
@@ -1996,6 +2001,208 @@ test("one pull request cannot be claimed by two workflows", async (t) => {
   assert.equal(blocked.phase, "ENSURE_DRAFT_PR");
   assert.equal(blocked.active_action.status, "OBSERVED");
   assert.equal(blocked.pull_request, null);
+});
+
+
+test("a claim committed to the audit but not the ledger still blocks a rival", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+
+  const drive = async (workflowId, startRevision, reviewId, prNumber, headBranch) => {
+    const { completed } = await dispatchReviewer(
+      state.store,
+      workflowId,
+      startRevision,
+      reviewId,
+    );
+    await submitInitialReview(state.store, reviewId, [], "CODEX_TASK");
+    const clean = await advanceLocalWorkflow(
+      state.store,
+      workflowId,
+      completed.revision,
+    );
+    await finalizeLocalGate(state.store, reviewId);
+    const gated = await advanceLocalWorkflow(
+      state.store,
+      workflowId,
+      clean.revision,
+    );
+    const pushPlanned = await planWorkflowPush(
+      state.store,
+      workflowId,
+      gated.revision,
+    );
+    const pushExecuting = await markWorkflowActionExecuting(
+      state.store,
+      workflowId,
+      pushPlanned.workflow.revision,
+      pushPlanned.action.action_id,
+    );
+    const pushObserved = await recordPushObservation(
+      state.store,
+      workflowId,
+      pushExecuting.revision,
+      pushPlanned.action.action_id,
+      {
+        remoteRefSha: pushPlanned.action.target.head_sha,
+        remoteRepositoryId: 101,
+        remoteUrl: pushPlanned.action.target.remote_url,
+      },
+    );
+    const pushed = await completeWorkflowAction(
+      state.store,
+      workflowId,
+      pushObserved.revision,
+      pushPlanned.action.action_id,
+    );
+    const prPlanned = await planDraftPullRequest(
+      state.store,
+      workflowId,
+      pushed.revision,
+    );
+    const prExecuting = await markWorkflowActionExecuting(
+      state.store,
+      workflowId,
+      prPlanned.workflow.revision,
+      prPlanned.action.action_id,
+    );
+    const prObserved = await recordDraftPullRequestObservation(
+      state.store,
+      workflowId,
+      prExecuting.revision,
+      prPlanned.action.action_id,
+      {
+        matchingPrNumbers: [prNumber],
+        prNumber,
+        repositoryId: 101,
+        headRepositoryId: 101,
+        baseBranch: "main",
+        headBranch,
+        headSha: prPlanned.action.target.head_sha,
+        draft: true,
+        markerPresent: true,
+        creatorActorId: 555,
+        creatorActorType: "User",
+        url: `https://github.com/example/review-bridge/pull/${prNumber}`,
+      },
+    );
+    return { prPlanned, prObserved };
+  };
+
+  const first = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commitImplementation(state.repository);
+  const firstRecorded = await recordWorkflowHead(
+    state.store,
+    first.workflow_id,
+    first.revision,
+    headSha,
+  );
+  const firstReview = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: first.requirement,
+    implementationScope: first.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  const firstBound = await bindWorkflowReview(
+    state.store,
+    first.workflow_id,
+    firstRecorded.revision,
+    firstReview.id,
+  );
+  const firstRun = await drive(
+    first.workflow_id,
+    firstBound.revision,
+    firstReview.id,
+    7,
+    "agent/workflow-core",
+  );
+  const firstWorkflowPath = path.join(
+    state.store,
+    "workflows",
+    first.workflow_id,
+    "workflow.json",
+  );
+  const staleLedger = await fsp.readFile(firstWorkflowPath);
+  const firstDone = await completeWorkflowAction(
+    state.store,
+    first.workflow_id,
+    firstRun.prObserved.revision,
+    firstRun.prPlanned.action.action_id,
+  );
+  assert.equal(firstDone.pull_request.pr_number, 7);
+  // Simulate the crash window: the completion's audit event is committed,
+  // but the ledger write never landed.
+  await fsp.writeFile(firstWorkflowPath, staleLedger, { mode: 0o600 });
+
+  git(state.repository, "switch", "-c", "agent/workflow-alt", state.baseSha);
+  const second = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, {
+      topicBranch: "agent/workflow-alt",
+      publicationTarget: {
+        base_repository_id: 101,
+        base_owner: "example",
+        base_repo: "review-bridge",
+        base_branch: "main",
+        head_repository_id: 101,
+        head_owner: "example",
+        head_repo: "review-bridge",
+        head_branch: "agent/workflow-alt",
+        push_remote: "origin",
+      },
+    }),
+  );
+  git(state.repository, "merge", "--ff-only", headSha);
+  const secondRecorded = await recordWorkflowHead(
+    state.store,
+    second.workflow_id,
+    second.revision,
+    headSha,
+  );
+  const secondReview = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: second.requirement,
+    implementationScope: second.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  const secondBound = await bindWorkflowReview(
+    state.store,
+    second.workflow_id,
+    secondRecorded.revision,
+    secondReview.id,
+  );
+  const secondRun = await drive(
+    second.workflow_id,
+    secondBound.revision,
+    secondReview.id,
+    7,
+    "agent/workflow-alt",
+  );
+  await assert.rejects(
+    completeWorkflowAction(
+      state.store,
+      second.workflow_id,
+      secondRun.prObserved.revision,
+      secondRun.prPlanned.action.action_id,
+    ),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_OWNERSHIP_CONFLICT");
+      assert.equal(error.details.owner_workflow_id, first.workflow_id);
+      return true;
+    },
+  );
+  // The conflict scan's locked load also healed the crashed ledger.
+  const healed = await getAutonomousWorkflow(state.store, first.workflow_id);
+  assert.equal(healed.pull_request.pr_number, 7);
+  assert.equal(
+    healed.claims.filter((entry) => entry.kind === "PULL_REQUEST").length,
+    1,
+  );
 });
 
 test("a drifted or dirty head cannot plan the gated push", async (t) => {

@@ -954,10 +954,37 @@ async function collectActiveClaims(storeRoot) {
       }
       throw error;
     }
-    if (workflow.claims.some((claimEntry) => claimEntry.disposition !== "ACTIVE")) {
-      // Released ownership frees the claim key, so it is trusted only after
-      // the full locked load proves the release against the audit chain. A
-      // ledger that cannot prove its release fails the start closed.
+    let auditHead;
+    try {
+      auditHead = await readCanonicalSecureJson(
+        workflowPaths(storeRoot, entry.name).auditHead,
+        16 * 1024,
+        "WORKFLOW_AUDIT_CORRUPT",
+      );
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        fail(
+          "WORKFLOW_AUDIT_CORRUPT",
+          "workflow action audit artifact is missing",
+        );
+      }
+      throw error;
+    }
+    const recoveryPending =
+      auditHead?.next_sequence !== workflow.action_audit.next_sequence ||
+      auditHead?.last_event_sha256 !==
+        workflow.action_audit.last_event_sha256;
+    if (
+      recoveryPending ||
+      workflow.claims.some(
+        (claimEntry) => claimEntry.disposition !== "ACTIVE",
+      )
+    ) {
+      // Released ownership frees a claim key, and a ledger behind its audit
+      // cursor may be missing a claim committed to the audit log by a
+      // crashed mutation. Both are trusted only after the full locked load
+      // replays the audit chain; a ledger that cannot be proven fails the
+      // scan closed.
       workflow = await withWorkflowLock(
         storeRoot,
         entry.name,
@@ -1604,13 +1631,13 @@ function validatePublicationTarget(target, topicBranch) {
   };
 }
 
-function claim(kind, key, workflowId) {
+function claim(kind, key, workflowId, createdRevision = 1) {
   return {
     workflow_id: workflowId,
     kind,
     canonical_key_sha256: sha256(canonicalJson(key)),
     target: structuredClone(key),
-    created_revision: 1,
+    created_revision: createdRevision,
     disposition: "ACTIVE",
     created_at: now(),
     released_at: null,
@@ -2544,6 +2571,7 @@ async function completeDraftPullRequest(storeRoot, workflow, paths, action) {
       pr_number: response.pr_number,
     },
     workflow.workflow_id,
+    workflow.revision + 1,
   );
   const conflicting = (await collectActiveClaims(storeRoot)).find(
     (existing) =>
