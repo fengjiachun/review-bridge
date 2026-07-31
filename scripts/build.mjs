@@ -61,41 +61,23 @@ async function installRuntime(target) {
   );
 }
 
+// Copy every server module rather than a hand-maintained list: a module added
+// to src/ and forgotten here produces a package that only fails when the
+// server is launched.
 async function copyServer(target) {
+  const source = path.join(projectRoot, "src");
   const serverTarget = path.join(target, "server");
   await fsp.mkdir(serverTarget, { recursive: true });
-  await fsp.copyFile(
-    path.join(projectRoot, "src", "server.mjs"),
-    path.join(serverTarget, "server.mjs"),
-  );
-  await fsp.copyFile(
-    path.join(projectRoot, "src", "core.mjs"),
-    path.join(serverTarget, "core.mjs"),
-  );
-  await fsp.copyFile(
-    path.join(projectRoot, "src", "storage.mjs"),
-    path.join(serverTarget, "storage.mjs"),
-  );
-  await fsp.copyFile(
-    path.join(projectRoot, "src", "publication.mjs"),
-    path.join(serverTarget, "publication.mjs"),
-  );
-  await fsp.copyFile(
-    path.join(projectRoot, "src", "workflow.mjs"),
-    path.join(serverTarget, "workflow.mjs"),
-  );
-  await fsp.copyFile(
-    path.join(projectRoot, "src", "github-adapter.mjs"),
-    path.join(serverTarget, "github-adapter.mjs"),
-  );
-  await fsp.copyFile(
-    path.join(projectRoot, "src", "codex-request.mjs"),
-    path.join(serverTarget, "codex-request.mjs"),
-  );
-  await fsp.copyFile(
-    path.join(projectRoot, "src", "github-observation.mjs"),
-    path.join(serverTarget, "github-observation.mjs"),
-  );
+  const entries = (await fsp.readdir(source, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".mjs"))
+    .map((entry) => entry.name)
+    .sort();
+  if (!entries.includes("server.mjs")) {
+    throw new Error("src/server.mjs is missing");
+  }
+  for (const name of entries) {
+    await fsp.copyFile(path.join(source, name), path.join(serverTarget, name));
+  }
 }
 
 const workingTreeStatus = run(
