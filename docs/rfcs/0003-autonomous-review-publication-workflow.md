@@ -271,12 +271,10 @@ Login text is display metadata only.
 Workflow state is separate from local-review and publication state:
 
 ```text
-workflow-claims.json
 workflows/<workflow_id>/
 ├── workflow.json
 ├── action-audit.jsonl
-├── action-audit-head.json
-└── action-audit-terminal.json  # optional cancellation segment
+└── action-audit-head.json
 ```
 
 `workflow.json` is a private, canonical JSON ledger. It contains:
@@ -367,8 +365,9 @@ invariants are required:
 ## Workflow ownership
 
 Per-workflow locks do not protect a branch or pull request from another
-workflow. Review Bridge therefore maintains a store-wide ownership registry
-under its own lock.
+workflow. Ownership claims are therefore part of each workflow ledger itself,
+and every claim-affecting start is serialized under one store-wide claims
+lock.
 
 Before branch creation or reuse, workflow start atomically claims:
 
@@ -387,9 +386,17 @@ requires an explicit operator action after a fresh external-state
 reconciliation. This prevents a stale workflow from resuming into objects that
 another workflow has started to mutate.
 
-The registry stores workflow ID, claim kind, canonical key digest, creation
-revision, and current disposition. It does not duplicate the workflow ledger.
-Concurrent starts are serialized so exactly one claimant succeeds.
+Under the store-wide claims lock, start reads every persisted workflow ledger,
+rejects the new claim set when any readable ledger still holds a conflicting
+active claim, and fails closed when any persisted ledger cannot be read. The
+atomic write of the new `workflow.json` is the single claim commit point: a
+start interrupted before that write leaves a directory without a ledger, which
+holds no claims and is ignored by conflict scans, reads, and listings. Claim
+release mutates only the owning ledger, so a torn multi-file claim state
+cannot exist, and the ledger validates that an active or paused workflow holds
+exactly its two authorized claims while released claims appear only on a
+cancelled workflow together with their release evidence. Concurrent starts are
+serialized so exactly one claimant succeeds.
 
 Workflow files use the existing private mode, size limits, exclusive lock,
 canonical serialization, atomic replacement, file sync, and directory sync
@@ -404,14 +411,15 @@ serialized with the projected sequence and digest cursor and checked against
 the 2 MiB ledger limit.
 `action-audit.jsonl` retains an absolute 4 MiB readable limit. Ordinary events
 stop early enough to reserve one maximum-sized cancellation event within that
-limit. If a previously valid near-full log predates that reserve, the optional
-terminal segment stores exactly one bounded `WORKFLOW_CANCELLED` event linked
-to the main log's final digest; the same head commits the cross-segment
-sequence and recovery may adopt one complete terminal crash candidate. Active
-and paused mutations also reserve enough of the 256 KiB per-event limit for a
-worst-case accepted cancellation. Cancellation rationale is capped at 32 KiB
-after canonical JSON string encoding, so escaped input cannot consume that
-reserved headroom.
+limit, so an accepted cancellation always fits the main log. Workflow start
+and every active or paused mutation also reserve the full worst-case
+cancellation: the pessimistic cancelled audit event must fit the 256 KiB
+per-event limit, and the pessimistic cancelled ledger — including a maximal
+revision, audit cursor, operator label, and rationale — must still fit the
+2 MiB ledger limit. A mutation that would leave either reserve short is
+rejected before any artifact is written. Cancellation rationale is capped at
+32 KiB after canonical JSON string encoding, so escaped input cannot consume
+that reserved headroom.
 
 No existing `review.json` or `publication.json` is migrated. Older Review
 Bridge clients may continue their existing workflows but cannot advance a new

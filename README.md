@@ -273,9 +273,12 @@ instead of replanning or reconstructing it.
 Pause and cancellation are committed to the same audit chain, so recovery
 replays a durable stop with its bound review and finding state, or rejects a
 stale active ledger before another write.
-Claim start and release use a store-wide `PREPARED -> COMMITTED` journal:
-recovery rolls a persisted workflow forward and rolls an unapplied release
-back before another owner can observe the registry.
+Ownership claims live in each workflow ledger: the atomic `workflow.json`
+write is the single claim commit point, starts scan every persisted ledger for
+conflicts under one store-wide lock, and a crashed start leaves no claims
+behind. Every start and mutation also reserves the full worst-case
+cancellation — both the bounded audit event and the resulting near-limit
+ledger — so an admitted workflow can always persist an operator cancellation.
 
 The compact workflow summary is the controller's source of truth for the next
 action. A missing or ambiguous Codex task pauses rather than falling back to

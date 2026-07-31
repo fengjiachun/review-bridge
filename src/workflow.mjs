@@ -31,7 +31,6 @@ const WORKFLOW_ID_RE = /^rbwf-[0-9TZ-]+-[a-f0-9]{8}$/;
 const SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
-const MAX_CLAIMS_BYTES = 4 * 1024 * 1024;
 const MAX_AUDIT_BYTES = 4 * 1024 * 1024;
 const MAX_AUDIT_EVENT_BYTES = 256 * 1024;
 const MAX_ORDINARY_AUDIT_BYTES =
@@ -460,39 +459,7 @@ function workflowPaths(storeRoot, workflowId) {
     workflow: path.join(directory, "workflow.json"),
     auditLog: path.join(directory, "action-audit.jsonl"),
     auditHead: path.join(directory, "action-audit-head.json"),
-    auditTerminal: path.join(directory, "action-audit-terminal.json"),
   };
-}
-
-function claimsPath(storeRoot) {
-  return path.join(storeRoot, "workflow-claims.json");
-}
-
-function claimsRegistryBytes(registry) {
-  return Buffer.from(`${canonicalJson(registry)}\n`);
-}
-
-function requireClaimsCapacity(registry) {
-  const bytes = claimsRegistryBytes(registry);
-  if (bytes.length > MAX_CLAIMS_BYTES) {
-    fail(
-      "WORKFLOW_CLAIMS_FULL",
-      "claim registry mutation would exceed its readable limit",
-      {
-        candidate_bytes: bytes.length,
-        max_bytes: MAX_CLAIMS_BYTES,
-      },
-    );
-  }
-  return bytes;
-}
-
-async function writeClaims(storeRoot, registry) {
-  await atomicWriteFile(
-    claimsPath(storeRoot),
-    requireClaimsCapacity(registry),
-    { mode: 0o600 },
-  );
 }
 
 function createWorkflowId() {
@@ -628,12 +595,61 @@ function validateWorkflow(workflow) {
   }
   const claimKeys = new Set();
   for (const entry of workflow.claims) {
-    validateClaimEntry(entry, "workflow claim", { requireTarget: true });
+    validateClaimEntry(entry, "workflow claim");
+    if (entry.workflow_id !== workflow.workflow_id) {
+      fail("WORKFLOW_CLAIMS_INVALID", "workflow claim owner is invalid");
+    }
     const key = `${entry.kind}:${entry.canonical_key_sha256}`;
     if (claimKeys.has(key)) {
       fail("WORKFLOW_CLAIMS_INVALID", "workflow contains duplicate claims");
     }
     claimKeys.add(key);
+  }
+  if (workflow.claims.length !== 2) {
+    fail(
+      "WORKFLOW_CLAIMS_INVALID",
+      "workflow must own exactly its two authorized claims",
+    );
+  }
+  const dispositions = new Set(
+    workflow.claims.map((entry) => entry.disposition),
+  );
+  if (dispositions.size !== 1) {
+    fail(
+      "WORKFLOW_CLAIMS_INVALID",
+      "workflow claims must share one disposition",
+    );
+  }
+  const released = dispositions.has("RELEASED");
+  if (released && workflow.status !== "CANCELLED") {
+    fail(
+      "WORKFLOW_CLAIMS_INVALID",
+      "released claims require a cancelled workflow",
+    );
+  }
+  if (released !== (workflow.claim_release != null)) {
+    fail(
+      "WORKFLOW_CLAIMS_INVALID",
+      "claim release evidence does not match claim dispositions",
+    );
+  }
+  if (released) {
+    assertObject(workflow.claim_release, "workflow.claim_release");
+    assertTimestamp(
+      workflow.claim_release.released_at,
+      "workflow.claim_release.released_at",
+    );
+    if (
+      workflow.claims.some(
+        (entry) =>
+          entry.released_at !== workflow.claim_release.released_at,
+      )
+    ) {
+      fail(
+        "WORKFLOW_CLAIMS_INVALID",
+        "claim release timestamps disagree with their evidence",
+      );
+    }
   }
   const requiredClaimTargets = {
     LOCAL_BRANCH: {
@@ -725,313 +741,6 @@ async function writeWorkflow(paths, workflow) {
   );
 }
 
-async function loadClaims(storeRoot) {
-  try {
-    const registry = await readCanonicalSecureJson(
-      claimsPath(storeRoot),
-      MAX_CLAIMS_BYTES,
-      "WORKFLOW_CLAIMS_INVALID",
-    );
-    if (
-      registry?.version !== 1 ||
-      !Array.isArray(registry.claims)
-    ) {
-      fail("WORKFLOW_CLAIMS_INVALID", "workflow claim registry is malformed");
-    }
-    for (const entry of registry.claims) {
-      validateClaimEntry(entry, "workflow claim registry entry");
-    }
-    const activeClaimKeys = new Set();
-    for (const entry of registry.claims.filter(
-      (candidate) => candidate.disposition === "ACTIVE",
-    )) {
-      const key = `${entry.kind}:${entry.canonical_key_sha256}`;
-      if (activeClaimKeys.has(key)) {
-        fail(
-          "WORKFLOW_CLAIMS_INVALID",
-          "workflow claim registry has duplicate active ownership",
-        );
-      }
-      activeClaimKeys.add(key);
-    }
-    const transactions = registry.transactions ?? [];
-    if (!Array.isArray(transactions)) {
-      fail(
-        "WORKFLOW_CLAIMS_INVALID",
-        "workflow claim transactions are malformed",
-      );
-    }
-    const transactionIds = new Set();
-    for (const transaction of transactions) {
-      validateClaimTransaction(transaction);
-      if (transactionIds.has(transaction.transaction_id)) {
-        fail(
-          "WORKFLOW_CLAIMS_INVALID",
-          "workflow claim registry has duplicate transactions",
-        );
-      }
-      transactionIds.add(transaction.transaction_id);
-    }
-    return { ...registry, transactions };
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      return { version: 1, claims: [], transactions: [] };
-    }
-    throw error;
-  }
-}
-
-function validateClaimTransaction(transaction) {
-  assertObject(transaction, "workflow claim transaction");
-  if (
-    typeof transaction.transaction_id !== "string" ||
-    !/^rbwfct-[0-9a-f]{32}$/.test(transaction.transaction_id) ||
-    !["START", "RELEASE"].includes(transaction.operation) ||
-    !["PREPARED", "COMMITTED", "ABORTED"].includes(transaction.state)
-  ) {
-    fail(
-      "WORKFLOW_CLAIMS_INVALID",
-      "workflow claim transaction identity is invalid",
-    );
-  }
-  assertWorkflowId(transaction.workflow_id);
-  assertPositiveInteger(
-    transaction.workflow_revision,
-    "workflow claim transaction workflow_revision",
-  );
-  assertTimestamp(transaction.created_at, "workflow claim transaction created_at");
-  if (transaction.completed_at !== null) {
-    assertTimestamp(
-      transaction.completed_at,
-      "workflow claim transaction completed_at",
-    );
-  }
-  if (
-    (transaction.state === "PREPARED") !==
-    (transaction.completed_at === null)
-  ) {
-    fail(
-      "WORKFLOW_CLAIMS_INVALID",
-      "workflow claim transaction completion state is invalid",
-    );
-  }
-  if (!Array.isArray(transaction.claims) || transaction.claims.length === 0) {
-    fail(
-      "WORKFLOW_CLAIMS_INVALID",
-      "workflow claim transaction claims are invalid",
-    );
-  }
-  for (const entry of transaction.claims) {
-    assertObject(entry, "workflow claim transaction claim");
-    if (
-      !["LOCAL_BRANCH", "GITHUB_HEAD_REF", "PULL_REQUEST"].includes(
-        entry.kind,
-      ) ||
-      !DIGEST_RE.test(entry.canonical_key_sha256 ?? "")
-    ) {
-      fail(
-        "WORKFLOW_CLAIMS_INVALID",
-        "workflow claim transaction claim is invalid",
-      );
-    }
-  }
-}
-
-function claimReferences(claims) {
-  return claims.map((entry) => ({
-    kind: entry.kind,
-    canonical_key_sha256: entry.canonical_key_sha256,
-  }));
-}
-
-function sameClaimReferences(left, right) {
-  return (
-    left.length === right.length &&
-    left.every((entry) =>
-      right.some(
-        (candidate) =>
-          candidate.kind === entry.kind &&
-          candidate.canonical_key_sha256 === entry.canonical_key_sha256,
-      ),
-    )
-  );
-}
-
-async function readTransactionWorkflow(storeRoot, transaction) {
-  const paths = workflowPaths(storeRoot, transaction.workflow_id);
-  try {
-    await fsp.stat(paths.workflow);
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      return null;
-    }
-    throw error;
-  }
-  return readWorkflowRaw(paths);
-}
-
-async function recoverClaimTransactions(storeRoot, registry) {
-  const next = structuredClone(registry);
-  let changed = false;
-  for (const transaction of next.transactions) {
-    if (transaction.state !== "PREPARED") {
-      continue;
-    }
-    const workflow = await readTransactionWorkflow(storeRoot, transaction);
-    if (transaction.operation === "START") {
-      if (workflow == null) {
-        const unexpected = next.claims.some(
-          (entry) => entry.workflow_id === transaction.workflow_id,
-        );
-        if (unexpected) {
-          fail(
-            "WORKFLOW_CLAIMS_INVALID",
-            "orphaned start transaction already owns registry claims",
-          );
-        }
-        transaction.state = "ABORTED";
-        transaction.completed_at = now();
-        changed = true;
-        continue;
-      }
-      const workflowClaims = claimReferences(workflow.claims);
-      if (
-        workflow.revision !== transaction.workflow_revision ||
-        workflow.status !== "ACTIVE" ||
-        workflow.phase !== "IMPLEMENTING" ||
-        !sameClaimReferences(workflowClaims, transaction.claims)
-      ) {
-        fail(
-          "WORKFLOW_CLAIMS_INVALID",
-          "prepared start transaction does not match its workflow",
-        );
-      }
-      for (const workflowClaim of workflow.claims) {
-        const matching = next.claims.filter(
-          (entry) =>
-            entry.disposition === "ACTIVE" &&
-            entry.kind === workflowClaim.kind &&
-            entry.canonical_key_sha256 ===
-              workflowClaim.canonical_key_sha256,
-        );
-        if (
-          matching.length > 1 ||
-          (matching.length === 1 &&
-            (matching[0].workflow_id !== workflow.workflow_id ||
-              matching[0].disposition !== "ACTIVE"))
-        ) {
-          fail(
-            "WORKFLOW_OWNERSHIP_CONFLICT",
-            `prepared start cannot recover claim ${workflowClaim.kind}`,
-          );
-        }
-        if (matching.length === 0) {
-          next.claims.push(registryClaim(workflowClaim));
-        }
-      }
-      transaction.state = "COMMITTED";
-      transaction.completed_at = now();
-      changed = true;
-      continue;
-    }
-
-    if (workflow == null) {
-      fail(
-        "WORKFLOW_CLAIMS_INVALID",
-        "prepared release transaction has no workflow",
-      );
-    }
-    if (workflow.status !== "CANCELLED") {
-      fail(
-        "WORKFLOW_CLAIMS_INVALID",
-        "prepared release transaction workflow is not cancelled",
-      );
-    }
-    const workflowClaims = transaction.claims.map((reference) =>
-      workflow.claims.find(
-        (entry) =>
-          entry.kind === reference.kind &&
-          entry.canonical_key_sha256 === reference.canonical_key_sha256,
-      ),
-    );
-    if (workflowClaims.some((entry) => entry == null)) {
-      fail(
-        "WORKFLOW_CLAIMS_INVALID",
-        "prepared release transaction does not match its workflow",
-      );
-    }
-    const dispositions = new Set(
-      workflowClaims.map((entry) => entry.disposition),
-    );
-    if (dispositions.size !== 1) {
-      fail(
-        "WORKFLOW_CLAIMS_INVALID",
-        "prepared release transaction is only partially applied",
-      );
-    }
-    const workflowDisposition = workflowClaims[0].disposition;
-    if (!["ACTIVE", "RELEASED"].includes(workflowDisposition)) {
-      fail(
-        "WORKFLOW_CLAIMS_INVALID",
-        "prepared release transaction has an invalid disposition",
-      );
-    }
-    const expectedWorkflowRevision =
-      workflowDisposition === "RELEASED"
-        ? transaction.workflow_revision + 1
-        : transaction.workflow_revision;
-    if (workflow.revision !== expectedWorkflowRevision) {
-      fail(
-        "WORKFLOW_CLAIMS_INVALID",
-        "prepared release transaction revision is invalid",
-      );
-    }
-    if (
-      workflowDisposition === "RELEASED" &&
-      (workflow.claim_release == null ||
-        workflow.claim_release.released_at !==
-          workflowClaims[0].released_at)
-    ) {
-      fail(
-        "WORKFLOW_CLAIMS_INVALID",
-        "prepared release transaction lacks its workflow evidence",
-      );
-    }
-    for (const reference of transaction.claims) {
-      const stored = next.claims.find(
-        (entry) =>
-          entry.workflow_id === transaction.workflow_id &&
-          entry.kind === reference.kind &&
-          entry.canonical_key_sha256 === reference.canonical_key_sha256,
-      );
-      if (stored == null) {
-        fail(
-          "WORKFLOW_CLAIMS_INVALID",
-          "prepared release claim is missing from the registry",
-        );
-      }
-      stored.disposition = workflowDisposition;
-      stored.released_at =
-        workflowDisposition === "RELEASED"
-          ? workflowClaims.find(
-              (entry) =>
-                entry.kind === reference.kind &&
-                entry.canonical_key_sha256 ===
-                  reference.canonical_key_sha256,
-            ).released_at
-          : null;
-    }
-    transaction.state =
-      workflowDisposition === "RELEASED" ? "COMMITTED" : "ABORTED";
-    transaction.completed_at = now();
-    changed = true;
-  }
-  if (changed) {
-    await writeClaims(storeRoot, next);
-  }
-  return next;
-}
-
 async function withClaimsLock(storeRoot, operation) {
   return withStateLock(
     {
@@ -1039,78 +748,68 @@ async function withClaimsLock(storeRoot, operation) {
       reviewId: "workflow-claims",
       domain: "claims",
     },
-    async () =>
-      operation(
-        await recoverClaimTransactions(
-          storeRoot,
-          await loadClaims(storeRoot),
-        ),
-      ),
+    operation,
   );
 }
 
-function validateClaimEntry(entry, name, { requireTarget = false } = {}) {
+async function collectActiveClaims(storeRoot) {
+  const workflowsRoot = path.join(storeRoot, "workflows");
+  let entries;
+  try {
+    entries = await fsp.readdir(workflowsRoot, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+  const active = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !WORKFLOW_ID_RE.test(entry.name)) {
+      continue;
+    }
+    let workflow;
+    try {
+      workflow = await readWorkflowRaw(workflowPaths(storeRoot, entry.name));
+    } catch (error) {
+      if (error?.code === "WORKFLOW_NOT_FOUND") {
+        continue;
+      }
+      throw error;
+    }
+    active.push(
+      ...workflow.claims.filter(
+        (claimEntry) => claimEntry.disposition === "ACTIVE",
+      ),
+    );
+  }
+  return active;
+}
+
+function validateClaimEntry(entry, name) {
   assertObject(entry, name);
   assertWorkflowId(entry.workflow_id);
-  if (!["LOCAL_BRANCH", "GITHUB_HEAD_REF", "PULL_REQUEST"].includes(entry.kind)) {
+  if (!["LOCAL_BRANCH", "GITHUB_HEAD_REF"].includes(entry.kind)) {
     fail("WORKFLOW_CLAIMS_INVALID", `${name} kind is invalid`);
   }
   if (!DIGEST_RE.test(entry.canonical_key_sha256 ?? "")) {
     fail("WORKFLOW_CLAIMS_INVALID", `${name} digest is invalid`);
   }
-  if (requireTarget) {
-    assertObject(entry.target, `${name}.target`);
-    if (sha256(canonicalJson(entry.target)) !== entry.canonical_key_sha256) {
-      fail("WORKFLOW_CLAIMS_INVALID", `${name} target digest is invalid`);
-    }
+  assertObject(entry.target, `${name}.target`);
+  if (sha256(canonicalJson(entry.target)) !== entry.canonical_key_sha256) {
+    fail("WORKFLOW_CLAIMS_INVALID", `${name} target digest is invalid`);
   }
   assertPositiveInteger(entry.created_revision, `${name}.created_revision`);
-  if (!["ACTIVE", "RELEASED", "TRANSFERRED"].includes(entry.disposition)) {
+  if (!["ACTIVE", "RELEASED"].includes(entry.disposition)) {
     fail("WORKFLOW_CLAIMS_INVALID", `${name} disposition is invalid`);
   }
   assertTimestamp(entry.created_at, `${name}.created_at`);
-  if (entry.disposition === "ACTIVE" && entry.released_at !== null) {
-    fail("WORKFLOW_CLAIMS_INVALID", `${name} active claim is released`);
-  }
-  if (entry.disposition !== "ACTIVE" && entry.released_at === null) {
-    fail("WORKFLOW_CLAIMS_INVALID", `${name} released_at is missing`);
+  if ((entry.disposition === "ACTIVE") !== (entry.released_at === null)) {
+    fail("WORKFLOW_CLAIMS_INVALID", `${name} release state is invalid`);
   }
   if (entry.released_at !== null) {
     assertTimestamp(entry.released_at, `${name}.released_at`);
   }
-}
-
-function requireWorkflowClaimsInRegistry(workflow, registry) {
-  for (const expected of workflow.claims) {
-    validateClaimEntry(expected, "workflow claim", { requireTarget: true });
-    const matching = registry.claims.filter(
-      (entry) =>
-        entry.workflow_id === workflow.workflow_id &&
-        entry.kind === expected.kind &&
-        entry.canonical_key_sha256 === expected.canonical_key_sha256,
-    );
-    if (
-      matching.length !== 1 ||
-      matching[0].disposition !== expected.disposition ||
-      (["ACTIVE", "PAUSED"].includes(workflow.status) &&
-        expected.disposition !== "ACTIVE")
-    ) {
-      fail(
-        "WORKFLOW_OWNERSHIP_LOST",
-        `workflow does not own claim ${expected.kind} in the recorded disposition`,
-        {
-          claim_kind: expected.kind,
-          canonical_key_sha256: expected.canonical_key_sha256,
-        },
-      );
-    }
-  }
-}
-
-async function requireWorkflowClaims(storeRoot, workflow) {
-  await withClaimsLock(storeRoot, async (registry) => {
-    requireWorkflowClaimsInRegistry(workflow, registry);
-  });
 }
 
 function validateAuditEvent(event, workflowId, expectedSequence, previousDigest) {
@@ -1184,41 +883,9 @@ async function truncateAuditLog(filePath, length) {
   }
 }
 
-function parseTerminalAudit(bytes, workflowId, sequence, previousDigest) {
-  if (
-    bytes.length === 0 ||
-    bytes.at(-1) !== 0x0a ||
-    [...bytes].filter((byte) => byte === 0x0a).length !== 1
-  ) {
-    fail("WORKFLOW_AUDIT_CORRUPT", "audit terminal event is malformed");
-  }
-  const line = bytes.toString("utf8").slice(0, -1);
-  if (Buffer.byteLength(line) > MAX_AUDIT_EVENT_BYTES) {
-    fail("WORKFLOW_AUDIT_CORRUPT", "audit terminal event is too large");
-  }
-  let event;
-  try {
-    event = JSON.parse(line);
-  } catch {
-    fail("WORKFLOW_AUDIT_CORRUPT", "audit terminal event is malformed");
-  }
-  if (canonicalJson(event) !== line) {
-    fail("WORKFLOW_AUDIT_CORRUPT", "audit terminal event is not canonical JSON");
-  }
-  validateAuditEvent(event, workflowId, sequence, previousDigest);
-  if (event.event !== "WORKFLOW_CANCELLED") {
-    fail(
-      "WORKFLOW_AUDIT_CORRUPT",
-      "audit terminal segment must contain cancellation",
-    );
-  }
-  return event;
-}
-
 async function readAudit(paths, workflowId) {
   let head;
   let openedLog;
-  let openedTerminal;
   try {
     head = await readCanonicalSecureJson(
       paths.auditHead,
@@ -1228,11 +895,6 @@ async function readAudit(paths, workflowId) {
     openedLog = await readSecureFile(paths.auditLog, {
       requiredMode: 0o600,
       maxBytes: MAX_AUDIT_BYTES,
-    });
-    openedTerminal = await readSecureFile(paths.auditTerminal, {
-      requiredMode: 0o600,
-      maxBytes: MAX_AUDIT_EVENT_BYTES + 1,
-      allowMissing: true,
     });
   } catch (error) {
     if (error?.code === "ENOENT") {
@@ -1252,10 +914,7 @@ async function readAudit(paths, workflowId) {
       !Number.isSafeInteger(head.next_sequence) ||
       head.next_sequence < 1 ||
       (head.last_event_sha256 !== null &&
-        !DIGEST_RE.test(head.last_event_sha256)) ||
-      (head.terminal_event_sha256 !== undefined &&
-        head.terminal_event_sha256 !== null &&
-        !DIGEST_RE.test(head.terminal_event_sha256))
+        !DIGEST_RE.test(head.last_event_sha256))
     ) {
       fail("WORKFLOW_AUDIT_CORRUPT", "audit head is malformed");
     }
@@ -1265,57 +924,6 @@ async function readAudit(paths, workflowId) {
     const committed = openedLog.bytes.subarray(0, head.committed_bytes);
     let events = parseAuditLines(committed, workflowId);
     const committedLast = events.at(-1)?.event_sha256 ?? null;
-    const tail = openedLog.bytes.subarray(head.committed_bytes);
-    const terminalDigest = head.terminal_event_sha256 ?? null;
-    if (openedTerminal != null) {
-      if (tail.length !== 0) {
-        fail(
-          "WORKFLOW_AUDIT_CORRUPT",
-          "audit log tail conflicts with its terminal segment",
-        );
-      }
-      const terminal = parseTerminalAudit(
-        openedTerminal.bytes,
-        workflowId,
-        events.length + 1,
-        committedLast,
-      );
-      if (terminalDigest === null) {
-        if (
-          head.next_sequence !== events.length + 1 ||
-          head.last_event_sha256 !== committedLast
-        ) {
-          fail(
-            "WORKFLOW_AUDIT_CORRUPT",
-            "audit cursor cannot adopt its terminal segment",
-          );
-        }
-        const adoptedHead = {
-          version: 1,
-          workflow_id: workflowId,
-          committed_bytes: head.committed_bytes,
-          next_sequence: head.next_sequence + 1,
-          last_event_sha256: terminal.event_sha256,
-          terminal_event_sha256: terminal.event_sha256,
-        };
-        await atomicWriteCanonicalJson(paths.auditHead, adoptedHead);
-        return { head: adoptedHead, events: [...events, terminal] };
-      }
-      if (
-        terminalDigest !== terminal.event_sha256 ||
-        head.next_sequence !== events.length + 2 ||
-        head.last_event_sha256 !== terminal.event_sha256
-      ) {
-        fail(
-          "WORKFLOW_AUDIT_CORRUPT",
-          "audit cursor disagrees with its terminal segment",
-        );
-      }
-      return { head, events: [...events, terminal] };
-    }
-    if (terminalDigest !== null) {
-      fail("WORKFLOW_AUDIT_CORRUPT", "audit terminal segment is missing");
-    }
     if (
       head.next_sequence !== events.length + 1 ||
       head.last_event_sha256 !== committedLast
@@ -1325,6 +933,7 @@ async function readAudit(paths, workflowId) {
         "audit cursor disagrees with committed events",
       );
     }
+    const tail = openedLog.bytes.subarray(head.committed_bytes);
     if (tail.length === 0) {
       return { head, events };
     }
@@ -1362,14 +971,12 @@ async function readAudit(paths, workflowId) {
       committed_bytes: openedLog.bytes.length,
       next_sequence: head.next_sequence + 1,
       last_event_sha256: adopted.event_sha256,
-      terminal_event_sha256: null,
     };
     await atomicWriteCanonicalJson(paths.auditHead, adoptedHead);
     events = [...events, adopted];
     return { head: adoptedHead, events };
   } finally {
     await openedLog.handle.close();
-    await openedTerminal?.handle.close();
   }
 }
 
@@ -1463,6 +1070,21 @@ function requireCancellationReserve(workflow) {
       },
     );
   }
+  cancelled.action_audit = {
+    next_sequence: Number.MAX_SAFE_INTEGER,
+    last_event_sha256: "f".repeat(64),
+  };
+  const ledgerBytes = Buffer.from(`${canonicalJson(cancelled)}\n`);
+  if (ledgerBytes.length > MAX_WORKFLOW_BYTES) {
+    fail(
+      "WORKFLOW_CANCELLATION_RESERVE_EXHAUSTED",
+      "workflow mutation would leave no room to persist its cancellation",
+      {
+        candidate_bytes: ledgerBytes.length,
+        max_bytes: MAX_WORKFLOW_BYTES,
+      },
+    );
+  }
 }
 
 async function appendAuditEvent(
@@ -1491,36 +1113,24 @@ async function appendAuditEvent(
   }
   const nextCommittedBytes =
     session.head.committed_bytes + eventBytes.length;
-  if (
-    event !== "WORKFLOW_CANCELLED" &&
-    nextCommittedBytes > MAX_ORDINARY_AUDIT_BYTES
-  ) {
+  const committedLimit =
+    event === "WORKFLOW_CANCELLED"
+      ? MAX_AUDIT_BYTES
+      : MAX_ORDINARY_AUDIT_BYTES;
+  if (nextCommittedBytes > committedLimit) {
     fail(
       "WORKFLOW_AUDIT_LOG_FULL",
       "audit event would exceed the readable audit log limit",
     );
   }
-  const terminal =
-    event === "WORKFLOW_CANCELLED" &&
-    nextCommittedBytes > MAX_AUDIT_BYTES;
   const head = {
     version: 1,
     workflow_id: workflow.workflow_id,
-    committed_bytes: terminal
-      ? session.head.committed_bytes
-      : nextCommittedBytes,
+    committed_bytes: nextCommittedBytes,
     next_sequence: session.head.next_sequence + 1,
     last_event_sha256: auditEvent.event_sha256,
-    terminal_event_sha256: terminal
-      ? auditEvent.event_sha256
-      : null,
   };
   beforeCommit?.({ event: auditEvent, head });
-  if (terminal) {
-    await atomicWriteFile(paths.auditTerminal, eventBytes, { mode: 0o600 });
-    await atomicWriteCanonicalJson(paths.auditHead, head);
-    return { event: auditEvent, head };
-  }
   const handle = await fsp.open(
     paths.auditLog,
     fsConstants.O_WRONLY |
@@ -1645,7 +1255,7 @@ async function loadWorkflowWhileLocked(paths) {
   return reconcileWorkflowAudit(paths, await readWorkflowRaw(paths));
 }
 
-async function withWorkflowStateLock(storeRoot, workflowId, operation) {
+async function withWorkflowLock(storeRoot, workflowId, operation) {
   const paths = workflowPaths(storeRoot, workflowId);
   await fsp.stat(paths.directory);
   return withStateLock(
@@ -1656,17 +1266,6 @@ async function withWorkflowStateLock(storeRoot, workflowId, operation) {
     },
     async () => {
       const workflow = await loadWorkflowWhileLocked(paths);
-      return operation(workflow, paths);
-    },
-  );
-}
-
-async function withWorkflowLock(storeRoot, workflowId, operation) {
-  return withWorkflowStateLock(
-    storeRoot,
-    workflowId,
-    async (workflow, paths) => {
-      await requireWorkflowClaims(storeRoot, workflow);
       return operation(workflow, paths);
     },
   );
@@ -1804,11 +1403,6 @@ function claim(kind, key, workflowId) {
     created_at: now(),
     released_at: null,
   };
-}
-
-function registryClaim(entry) {
-  const { target: _target, ...stored } = entry;
-  return stored;
 }
 
 function requireCleanReviewRound(review) {
@@ -2009,74 +1603,43 @@ export async function startAutonomousWorkflow(
   requireWorkflowCapacity(workflow);
 
   await fsp.mkdir(storeRoot, { recursive: true, mode: 0o700 });
-  return withClaimsLock(
-    storeRoot,
-    async (registry) => {
-      const conflicting = registry.claims.find(
-        (existing) =>
-          existing.disposition === "ACTIVE" &&
-          workflowClaims.some(
-            (candidate) =>
-              candidate.kind === existing.kind &&
-              candidate.canonical_key_sha256 ===
-                existing.canonical_key_sha256,
-          ),
+  return withClaimsLock(storeRoot, async () => {
+    const activeClaims = await collectActiveClaims(storeRoot);
+    const conflicting = activeClaims.find((existing) =>
+      workflowClaims.some(
+        (candidate) =>
+          candidate.kind === existing.kind &&
+          candidate.canonical_key_sha256 === existing.canonical_key_sha256,
+      ),
+    );
+    if (conflicting) {
+      fail(
+        "WORKFLOW_OWNERSHIP_CONFLICT",
+        `claim ${conflicting.kind} is owned by ${conflicting.workflow_id}`,
+        {
+          owner_workflow_id: conflicting.workflow_id,
+          claim_kind: conflicting.kind,
+          canonical_key_sha256: conflicting.canonical_key_sha256,
+        },
       );
-      if (conflicting) {
-        fail(
-          "WORKFLOW_OWNERSHIP_CONFLICT",
-          `claim ${conflicting.kind} is owned by ${conflicting.workflow_id}`,
-          {
-            owner_workflow_id: conflicting.workflow_id,
-            claim_kind: conflicting.kind,
-            canonical_key_sha256: conflicting.canonical_key_sha256,
-          },
-        );
-      }
-      const transaction = {
-        transaction_id: `rbwfct-${crypto.randomBytes(16).toString("hex")}`,
-        operation: "START",
-        state: "PREPARED",
-        workflow_id: workflowId,
-        workflow_revision: workflow.revision,
-        claims: claimReferences(workflowClaims),
-        created_at: now(),
-        completed_at: null,
-      };
-      const preparedRegistry = structuredClone(registry);
-      preparedRegistry.transactions.push(transaction);
-      const committedRegistry = structuredClone(preparedRegistry);
-      committedRegistry.claims.push(
-        ...workflowClaims.map((entry) => registryClaim(entry)),
-      );
-      const committedTransaction = committedRegistry.transactions.find(
-        (entry) => entry.transaction_id === transaction.transaction_id,
-      );
-      committedTransaction.state = "COMMITTED";
-      committedTransaction.completed_at = now();
-      requireClaimsCapacity(preparedRegistry);
-      requireClaimsCapacity(committedRegistry);
-      await writeClaims(storeRoot, preparedRegistry);
-      const paths = workflowPaths(storeRoot, workflowId);
-      await fsp.mkdir(path.dirname(paths.directory), {
-        recursive: true,
-        mode: 0o700,
-      });
-      await fsp.mkdir(paths.directory, { recursive: false, mode: 0o700 });
-      await atomicWriteFile(paths.auditLog, Buffer.alloc(0), { mode: 0o600 });
-      await atomicWriteCanonicalJson(paths.auditHead, {
-        version: 1,
-        workflow_id: workflowId,
-        committed_bytes: 0,
-        next_sequence: 1,
-        last_event_sha256: null,
-        terminal_event_sha256: null,
-      });
-      await writeWorkflow(paths, workflow);
-      await writeClaims(storeRoot, committedRegistry);
-      return publicWorkflow(workflow);
-    },
-  );
+    }
+    const paths = workflowPaths(storeRoot, workflowId);
+    await fsp.mkdir(path.dirname(paths.directory), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await fsp.mkdir(paths.directory, { recursive: false, mode: 0o700 });
+    await atomicWriteFile(paths.auditLog, Buffer.alloc(0), { mode: 0o600 });
+    await atomicWriteCanonicalJson(paths.auditHead, {
+      version: 1,
+      workflow_id: workflowId,
+      committed_bytes: 0,
+      next_sequence: 1,
+      last_event_sha256: null,
+    });
+    await writeWorkflow(paths, workflow);
+    return publicWorkflow(workflow);
+  });
 }
 
 export async function getAutonomousWorkflow(storeRoot, workflowId) {
@@ -2265,15 +1828,8 @@ export async function planCodexTaskDispatch(
       );
     }
     const ownershipClaim = workflow.claims.find(
-      (entry) =>
-        entry.kind === "LOCAL_BRANCH" && entry.disposition === "ACTIVE",
+      (entry) => entry.kind === "LOCAL_BRANCH",
     );
-    if (ownershipClaim == null) {
-      fail(
-        "WORKFLOW_OWNERSHIP_LOST",
-        "Codex task dispatch requires the active local branch claim",
-      );
-    }
     const actionId = codexTaskActionId(
       workflow,
       workflow.revision,
@@ -2784,7 +2340,7 @@ export async function releaseWorkflowClaims(
   if (!Array.isArray(reconciledClaims)) {
     throw new TypeError("reconciled_claims must be an array");
   }
-  return withWorkflowStateLock(storeRoot, workflowId, async (workflow, paths) => {
+  return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
     if (workflow.status !== "CANCELLED") {
       fail(
@@ -2843,67 +2399,21 @@ export async function releaseWorkflowClaims(
         "reconciliation must cover every active claim and prove it absent",
       );
     }
-    return withClaimsLock(
-      storeRoot,
-      async (registry) => {
-        requireWorkflowClaimsInRegistry(workflow, registry);
-        const releaseAt = now();
-        const transaction = {
-          transaction_id: `rbwfct-${crypto.randomBytes(16).toString("hex")}`,
-          operation: "RELEASE",
-          state: "PREPARED",
-          workflow_id: workflowId,
-          workflow_revision: workflow.revision,
-          claims: claimReferences(activeClaims),
-          created_at: releaseAt,
-          completed_at: null,
-        };
-        const preparedRegistry = structuredClone(registry);
-        preparedRegistry.transactions.push(transaction);
-        for (const claimEntry of activeClaims) {
-          const stored = preparedRegistry.claims.find(
-            (entry) =>
-              entry.workflow_id === workflowId &&
-              entry.kind === claimEntry.kind &&
-              entry.canonical_key_sha256 ===
-                claimEntry.canonical_key_sha256 &&
-              entry.disposition === "ACTIVE",
-          );
-          if (stored == null) {
-            fail(
-              "WORKFLOW_CLAIMS_INVALID",
-              "active workflow claim is missing from the registry",
-            );
-          }
-          stored.disposition = "RELEASED";
-          stored.released_at = releaseAt;
+    const releaseAt = now();
+    const next = await saveMutation(paths, workflow, async (draft) => {
+      for (const entry of draft.claims) {
+        if (entry.disposition === "ACTIVE") {
+          entry.disposition = "RELEASED";
+          entry.released_at = releaseAt;
         }
-        const committedRegistry = structuredClone(preparedRegistry);
-        const committedTransaction = committedRegistry.transactions.find(
-          (entry) => entry.transaction_id === transaction.transaction_id,
-        );
-        committedTransaction.state = "COMMITTED";
-        committedTransaction.completed_at = now();
-        requireClaimsCapacity(preparedRegistry);
-        requireClaimsCapacity(committedRegistry);
-        await writeClaims(storeRoot, preparedRegistry);
-        const next = await saveMutation(paths, workflow, async (draft) => {
-          for (const entry of draft.claims) {
-            if (entry.disposition === "ACTIVE") {
-              entry.disposition = "RELEASED";
-              entry.released_at = releaseAt;
-            }
-          }
-          draft.claim_release = {
-            operator_label: operatorLabel,
-            rationale,
-            released_at: releaseAt,
-            reconciliation: structuredClone(reconciledClaims),
-          };
-        });
-        await writeClaims(storeRoot, committedRegistry);
-        return publicWorkflow(next);
-      },
-    );
+      }
+      draft.claim_release = {
+        operator_label: operatorLabel,
+        rationale,
+        released_at: releaseAt,
+        reconciliation: structuredClone(reconciledClaims),
+      };
+    });
+    return publicWorkflow(next);
   });
 }

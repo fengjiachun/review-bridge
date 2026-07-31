@@ -31,11 +31,7 @@ import {
   resumeAutonomousWorkflow,
   startAutonomousWorkflow,
 } from "../src/workflow.mjs";
-import {
-  canonicalJson,
-  sha256,
-  withStateLock,
-} from "../src/storage.mjs";
+import { canonicalJson, sha256 } from "../src/storage.mjs";
 
 function git(cwd, ...args) {
   const result = spawnSync("git", args, {
@@ -271,16 +267,25 @@ test("workflow start binds immutable authorization and exclusive claims", async 
     /WORKFLOW_OWNERSHIP_CONFLICT/,
   );
 
-  const claims = JSON.parse(
+  const stored = JSON.parse(
     await fsp.readFile(
-      path.join(state.store, "workflow-claims.json"),
+      path.join(
+        state.store,
+        "workflows",
+        workflow.workflow_id,
+        "workflow.json",
+      ),
       "utf8",
     ),
   );
-  assert.equal(claims.claims.length, 2);
+  assert.equal(stored.claims.length, 2);
   assert.equal(
-    claims.claims.every((claim) => claim.disposition === "ACTIVE"),
+    stored.claims.every((claim) => claim.disposition === "ACTIVE"),
     true,
+  );
+  await assert.rejects(
+    fsp.stat(path.join(state.store, "workflow-claims.json")),
+    (error) => error.code === "ENOENT",
   );
 });
 
@@ -323,7 +328,7 @@ test("workflow repository paths normalize to the worktree root", async (t) => {
   assert.equal(bound.current_review.review_id, review.id);
 });
 
-test("workflow start rejects an unreadable canonical ledger before claiming ownership", async (t) => {
+test("workflow start rejects a ledger that cannot reserve its cancellation", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const escaped = "\0".repeat(200_000);
@@ -337,12 +342,12 @@ test("workflow start rejects an unreadable canonical ledger before claiming owne
       }),
     ),
     (error) => {
-      assert.equal(error.code, "WORKFLOW_STATE_TOO_LARGE");
+      assert.equal(error.code, "WORKFLOW_CANCELLATION_RESERVE_EXHAUSTED");
       return true;
     },
   );
   await assert.rejects(
-    fsp.stat(path.join(state.store, "workflow-claims.json")),
+    fsp.stat(path.join(state.store, "workflows")),
     (error) => error.code === "ENOENT",
   );
 
@@ -353,38 +358,33 @@ test("workflow start rejects an unreadable canonical ledger before claiming owne
   assert.equal(workflow.status, "ACTIVE");
 });
 
-test("action mutation preflights the projected audit cursor before committing", async (t) => {
+test("mutations reserve full cancellation persistence before any write", async (t) => {
   const maxWorkflowBytes = 2 * 1024 * 1024;
-  const runBoundary = async (pauseCycles, expectedSequence) => {
+  const pessimisticCancelBytes = (candidate) => {
+    const cancelled = structuredClone(candidate);
+    cancelled.revision = Number.MAX_SAFE_INTEGER;
+    cancelled.updated_at = "9999-12-31T23:59:59.999Z";
+    cancelled.status = "CANCELLED";
+    cancelled.phase = "CANCELLED";
+    cancelled.pause = null;
+    cancelled.cancellation = {
+      operator_label: "\0".repeat(1024),
+      rationale: "x".repeat(32 * 1024 - 2),
+      cancelled_at: "9999-12-31T23:59:59.999Z",
+    };
+    cancelled.action_audit = {
+      next_sequence: Number.MAX_SAFE_INTEGER,
+      last_event_sha256: "f".repeat(64),
+    };
+    return Buffer.byteLength(`${canonicalJson(cancelled)}\n`);
+  };
+  const runBoundary = async (excessBytes) => {
     const state = await fixture();
     t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-    let workflow = await startAutonomousWorkflow(
+    const workflow = await startAutonomousWorkflow(
       state.store,
       workflowInput(state.repository, state.baseSha),
     );
-    for (let index = 0; index < pauseCycles; index += 1) {
-      workflow = await pauseAutonomousWorkflow(
-        state.store,
-        workflow.workflow_id,
-        workflow.revision,
-        {
-          reasonCode: "TASK_ORCHESTRATION_UNAVAILABLE",
-          blockedAction: "CREATE_CODEX_REVIEWER_TASK",
-          evidence: "Exercise the audit cursor boundary.",
-        },
-      );
-      workflow = await resumeAutonomousWorkflow(
-        state.store,
-        workflow.workflow_id,
-        workflow.revision,
-        {
-          operatorLabel: "Test Operator",
-          rationale: "Continue the boundary test.",
-        },
-      );
-    }
-    assert.equal(workflow.action_audit.next_sequence, expectedSequence);
-
     const headSha = await commitImplementation(state.repository);
     const workflowRoot = path.join(
       state.store,
@@ -410,43 +410,70 @@ test("action mutation preflights the projected audit cursor before committing", 
     candidate.phase = "PREPARE_LOCAL_REVIEW";
     candidate.revision += 1;
     candidate.updated_at = new Date().toISOString();
-    const unpaddedBytes = Buffer.byteLength(
-      `${canonicalJson(candidate)}\n`,
+    const unpaddedBytes = pessimisticCancelBytes(candidate);
+    stored.padding = "x".repeat(
+      maxWorkflowBytes - unpaddedBytes + excessBytes,
     );
-    stored.padding = "x".repeat(maxWorkflowBytes - unpaddedBytes);
     candidate.padding = stored.padding;
     assert.equal(
-      Buffer.byteLength(`${canonicalJson(candidate)}\n`),
-      maxWorkflowBytes,
+      pessimisticCancelBytes(candidate),
+      maxWorkflowBytes + excessBytes,
     );
     await fsp.writeFile(
       workflowPath,
       `${canonicalJson(stored)}\n`,
       { mode: 0o600 },
     );
-    const beforeWorkflow = await fsp.readFile(workflowPath);
-    const beforeAudit = await fsp.readFile(auditPath);
-    const beforeAuditHead = await fsp.readFile(auditHeadPath);
-
-    await assert.rejects(
-      recordWorkflowHead(
-        state.store,
-        workflow.workflow_id,
-        workflow.revision,
-        headSha,
-      ),
-      (error) => {
-        assert.equal(error.code, "WORKFLOW_STATE_TOO_LARGE");
-        return true;
-      },
-    );
-    assert.deepEqual(await fsp.readFile(workflowPath), beforeWorkflow);
-    assert.deepEqual(await fsp.readFile(auditPath), beforeAudit);
-    assert.deepEqual(await fsp.readFile(auditHeadPath), beforeAuditHead);
+    return { state, workflow, headSha, workflowPath, auditPath, auditHeadPath };
   };
 
-  await runBoundary(0, 1);
-  await runBoundary(4, 9);
+  // The largest admissible state both mutates and later cancels with a
+  // maximum-rationale operator decision that still fits every limit.
+  const admitted = await runBoundary(0);
+  const recorded = await recordWorkflowHead(
+    admitted.state.store,
+    admitted.workflow.workflow_id,
+    admitted.workflow.revision,
+    admitted.headSha,
+  );
+  assert.equal(recorded.phase, "PREPARE_LOCAL_REVIEW");
+  const cancelled = await cancelAutonomousWorkflow(
+    admitted.state.store,
+    admitted.workflow.workflow_id,
+    recorded.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "y".repeat(32 * 1024 - 2),
+    },
+  );
+  assert.equal(cancelled.status, "CANCELLED");
+  assert.ok(
+    (await fsp.stat(admitted.workflowPath)).size <= maxWorkflowBytes,
+  );
+
+  // One byte past the reserve is rejected before any artifact changes.
+  const rejected = await runBoundary(1);
+  const beforeWorkflow = await fsp.readFile(rejected.workflowPath);
+  const beforeAudit = await fsp.readFile(rejected.auditPath);
+  const beforeAuditHead = await fsp.readFile(rejected.auditHeadPath);
+  await assert.rejects(
+    recordWorkflowHead(
+      rejected.state.store,
+      rejected.workflow.workflow_id,
+      rejected.workflow.revision,
+      rejected.headSha,
+    ),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_CANCELLATION_RESERVE_EXHAUSTED");
+      return true;
+    },
+  );
+  assert.deepEqual(await fsp.readFile(rejected.workflowPath), beforeWorkflow);
+  assert.deepEqual(await fsp.readFile(rejected.auditPath), beforeAudit);
+  assert.deepEqual(
+    await fsp.readFile(rejected.auditHeadPath),
+    beforeAuditHead,
+  );
 });
 
 test("concurrent starts admit exactly one owner", async (t) => {
@@ -471,106 +498,58 @@ test("concurrent starts admit exactly one owner", async (t) => {
   const rejected = results.find((result) => result.status === "rejected");
   assert.equal(rejected.reason.code, "WORKFLOW_OWNERSHIP_CONFLICT");
 
-  const claims = JSON.parse(
-    await fsp.readFile(
-      path.join(state.store, "workflow-claims.json"),
-      "utf8",
-    ),
+  const fulfilled = results.find((result) => result.status === "fulfilled");
+  const workflowDirectories = await fsp.readdir(
+    path.join(state.store, "workflows"),
   );
-  assert.equal(claims.claims.length, 2);
-  assert.equal(new Set(claims.claims.map((entry) => entry.workflow_id)).size, 1);
+  assert.deepEqual(workflowDirectories, [fulfilled.value.workflow_id]);
+  assert.equal(
+    fulfilled.value.claims.every(
+      (claim) => claim.disposition === "ACTIVE",
+    ),
+    true,
+  );
 });
 
-test("claim journal aborts a pre-workflow start and rolls forward a persisted workflow", async (t) => {
-  const abortedState = await fixture();
-  const recoveredState = await fixture();
-  t.after(() => fsp.rm(abortedState.root, { recursive: true, force: true }));
-  t.after(() => fsp.rm(recoveredState.root, { recursive: true, force: true }));
+test("a crashed start holds no claims and cannot be read or listed", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
 
-  await fsp.mkdir(abortedState.store, { recursive: true, mode: 0o700 });
-  const orphanedTransaction = {
-    transaction_id: `rbwfct-${"1".repeat(32)}`,
-    operation: "START",
-    state: "PREPARED",
-    workflow_id: "rbwf-2026-01-01T000000-000Z-deadbeef",
-    workflow_revision: 1,
-    claims: [
-      {
-        kind: "LOCAL_BRANCH",
-        canonical_key_sha256: "2".repeat(64),
-      },
-    ],
-    created_at: new Date().toISOString(),
-    completed_at: null,
-  };
+  const orphanId = "rbwf-2026-01-01T000000-000Z-deadbeef";
+  const orphanRoot = path.join(state.store, "workflows", orphanId);
+  await fsp.mkdir(orphanRoot, { recursive: true, mode: 0o700 });
+  await fsp.writeFile(path.join(orphanRoot, "action-audit.jsonl"), "", {
+    mode: 0o600,
+  });
   await fsp.writeFile(
-    path.join(abortedState.store, "workflow-claims.json"),
+    path.join(orphanRoot, "action-audit-head.json"),
     `${canonicalJson({
       version: 1,
-      claims: [],
-      transactions: [orphanedTransaction],
+      workflow_id: orphanId,
+      committed_bytes: 0,
+      next_sequence: 1,
+      last_event_sha256: null,
     })}\n`,
     { mode: 0o600 },
   );
-  await startAutonomousWorkflow(
-    abortedState.store,
-    workflowInput(abortedState.repository, abortedState.baseSha),
-  );
-  const abortedRegistry = JSON.parse(
-    await fsp.readFile(
-      path.join(abortedState.store, "workflow-claims.json"),
-      "utf8",
-    ),
-  );
-  assert.equal(abortedRegistry.transactions[0].state, "ABORTED");
 
   const workflow = await startAutonomousWorkflow(
-    recoveredState.store,
-    workflowInput(recoveredState.repository, recoveredState.baseSha),
+    state.store,
+    workflowInput(state.repository, state.baseSha),
   );
-  const registryPath = path.join(
-    recoveredState.store,
-    "workflow-claims.json",
+  assert.equal(workflow.status, "ACTIVE");
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, orphanId),
+    /WORKFLOW_NOT_FOUND/,
   );
-  const interruptedRegistry = JSON.parse(
-    await fsp.readFile(registryPath, "utf8"),
-  );
-  const startTransaction = interruptedRegistry.transactions.find(
-    (entry) => entry.workflow_id === workflow.workflow_id,
-  );
-  startTransaction.state = "PREPARED";
-  startTransaction.completed_at = null;
-  interruptedRegistry.claims = interruptedRegistry.claims.filter(
-    (entry) => entry.workflow_id !== workflow.workflow_id,
-  );
-  await fsp.writeFile(
-    registryPath,
-    `${canonicalJson(interruptedRegistry)}\n`,
-    { mode: 0o600 },
-  );
-
-  await getAutonomousWorkflow(
-    recoveredState.store,
-    workflow.workflow_id,
-  );
-  const recoveredRegistry = JSON.parse(
-    await fsp.readFile(registryPath, "utf8"),
-  );
-  assert.equal(
-    recoveredRegistry.transactions.find(
-      (entry) => entry.workflow_id === workflow.workflow_id,
-    ).state,
-    "COMMITTED",
-  );
-  assert.equal(
-    recoveredRegistry.claims.filter(
-      (entry) => entry.workflow_id === workflow.workflow_id,
-    ).length,
-    2,
+  const listed = await listAutonomousWorkflows(state.store);
+  assert.deepEqual(
+    listed.map((entry) => entry.workflow_id),
+    [workflow.workflow_id],
   );
 });
 
-test("claim journal recovers a new workflow over released historical claims", async (t) => {
+test("cancelled claims block a successor until their reconciled release", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
 
@@ -587,6 +566,22 @@ test("claim journal recovers a new workflow over released historical claims", as
       rationale: "Release the predecessor claims.",
     },
   );
+
+  await assert.rejects(
+    startAutonomousWorkflow(
+      state.store,
+      workflowInput(state.repository, state.baseSha),
+    ),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_OWNERSHIP_CONFLICT");
+      assert.equal(
+        error.details.owner_workflow_id,
+        predecessor.workflow_id,
+      );
+      return true;
+    },
+  );
+
   await releaseWorkflowClaims(
     state.store,
     predecessor.workflow_id,
@@ -602,53 +597,24 @@ test("claim journal recovers a new workflow over released historical claims", as
     state.store,
     workflowInput(state.repository, state.baseSha),
   );
-  const registryPath = path.join(state.store, "workflow-claims.json");
-  const interruptedRegistry = JSON.parse(
-    await fsp.readFile(registryPath, "utf8"),
+  assert.equal(successor.status, "ACTIVE");
+  assert.equal(
+    successor.claims.every((claim) => claim.disposition === "ACTIVE"),
+    true,
   );
-  const startTransaction = interruptedRegistry.transactions.find(
-    (entry) => entry.workflow_id === successor.workflow_id,
-  );
-  startTransaction.state = "PREPARED";
-  startTransaction.completed_at = null;
-  interruptedRegistry.claims = interruptedRegistry.claims.filter(
-    (entry) => entry.workflow_id !== successor.workflow_id,
-  );
-  await fsp.writeFile(
-    registryPath,
-    `${canonicalJson(interruptedRegistry)}\n`,
-    { mode: 0o600 },
-  );
-
-  await getAutonomousWorkflow(state.store, successor.workflow_id);
-  const recoveredRegistry = JSON.parse(
-    await fsp.readFile(registryPath, "utf8"),
+  const predecessorLedger = await getAutonomousWorkflow(
+    state.store,
+    predecessor.workflow_id,
   );
   assert.equal(
-    recoveredRegistry.transactions.find(
-      (entry) => entry.workflow_id === successor.workflow_id,
-    ).state,
-    "COMMITTED",
-  );
-  assert.equal(
-    recoveredRegistry.claims.filter(
-      (entry) =>
-        entry.workflow_id === predecessor.workflow_id &&
-        entry.disposition === "RELEASED",
-    ).length,
-    predecessor.claims.length,
-  );
-  assert.equal(
-    recoveredRegistry.claims.filter(
-      (entry) =>
-        entry.workflow_id === successor.workflow_id &&
-        entry.disposition === "ACTIVE",
-    ).length,
-    successor.claims.length,
+    predecessorLedger.claims.every(
+      (claim) => claim.disposition === "RELEASED",
+    ),
+    true,
   );
 });
 
-test("claim registry rejects growth beyond its readable limit before writing", async (t) => {
+test("workflow start fails closed when any persisted ledger is unreadable", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(
@@ -661,7 +627,7 @@ test("claim registry rejects growth beyond its readable limit before writing", a
     workflow.revision,
     {
       operatorLabel: "Test Operator",
-      rationale: "Release the boundary-test claims.",
+      rationale: "Free the claims before corrupting the ledger.",
     },
   );
   await releaseWorkflowClaims(
@@ -675,33 +641,25 @@ test("claim registry rejects growth beyond its readable limit before writing", a
     },
   );
 
-  const registryPath = path.join(state.store, "workflow-claims.json");
-  const registry = JSON.parse(await fsp.readFile(registryPath, "utf8"));
-  registry.padding = "";
-  const maxClaimsBytes = 4 * 1024 * 1024;
-  const emptyPaddingBytes = Buffer.byteLength(
-    `${canonicalJson(registry)}\n`,
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
   );
-  registry.padding = "x".repeat(maxClaimsBytes - emptyPaddingBytes);
-  const boundaryBytes = Buffer.from(`${canonicalJson(registry)}\n`);
-  assert.equal(boundaryBytes.length, maxClaimsBytes);
-  await fsp.writeFile(registryPath, boundaryBytes, { mode: 0o600 });
+  await fsp.writeFile(workflowPath, "{not json\n", { mode: 0o600 });
 
   await assert.rejects(
     startAutonomousWorkflow(
       state.store,
       workflowInput(state.repository, state.baseSha),
     ),
-    (error) => {
-      assert.equal(error.code, "WORKFLOW_CLAIMS_FULL");
-      return true;
-    },
+    /WORKFLOW_STATE_INVALID/,
   );
-  assert.deepEqual(await fsp.readFile(registryPath), boundaryBytes);
-  assert.equal(
-    (await getAutonomousWorkflow(state.store, workflow.workflow_id)).status,
-    "CANCELLED",
+  const workflowDirectories = await fsp.readdir(
+    path.join(state.store, "workflows"),
   );
+  assert.deepEqual(workflowDirectories, [workflow.workflow_id]);
 });
 
 test("workflow start rejects authorization and repository drift", async (t) => {
@@ -1192,7 +1150,7 @@ test("action audit recovery replays one committed event and truncates a partial 
   assert.equal((await fsp.stat(auditPath)).size, committedSize);
 });
 
-test("action audit rejects an append beyond its readable limit", async (t) => {
+test("the audit log reserves cancellation headroom at its ordinary limit", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(
@@ -1207,12 +1165,9 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
   const workflowPath = path.join(workflowRoot, "workflow.json");
   const auditPath = path.join(workflowRoot, "action-audit.jsonl");
   const auditHeadPath = path.join(workflowRoot, "action-audit-head.json");
-  const auditTerminalPath = path.join(
-    workflowRoot,
-    "action-audit-terminal.json",
-  );
   const maxAuditBytes = 4 * 1024 * 1024;
   const maxEventBytes = 256 * 1024 + 1;
+  const ordinaryLimit = maxAuditBytes - maxEventBytes;
   const lines = [];
   let previousDigest = null;
   let sequence = 1;
@@ -1226,8 +1181,8 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
       event: "WORKFLOW_AUDIT_PADDING",
       metadata: { padding: "x".repeat(paddingLength) },
     });
-  while (committedBytes < maxAuditBytes) {
-    const remaining = maxAuditBytes - committedBytes;
+  while (committedBytes < ordinaryLimit) {
+    const remaining = ordinaryLimit - committedBytes;
     const empty = auditLine(0);
     const paddingLength =
       remaining <= empty.bytes.length + 200_000
@@ -1241,7 +1196,7 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
     previousDigest = line.event.event_sha256;
     sequence += 1;
   }
-  assert.equal(committedBytes, maxAuditBytes);
+  assert.equal(committedBytes, ordinaryLimit);
   await fsp.writeFile(auditPath, Buffer.concat(lines), { mode: 0o600 });
   await fsp.writeFile(
     auditHeadPath,
@@ -1251,7 +1206,6 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
       committed_bytes: committedBytes,
       next_sequence: sequence,
       last_event_sha256: previousDigest,
-      terminal_event_sha256: null,
     })}\n`,
     { mode: 0o600 },
   );
@@ -1265,8 +1219,6 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
     `${canonicalJson(storedWorkflow)}\n`,
     { mode: 0o600 },
   );
-  const preCancellationHead = await fsp.readFile(auditHeadPath);
-  const preCancellationWorkflow = await fsp.readFile(workflowPath);
   const maxEscapedCancellationRationale = "\0".repeat(5_461);
   assert.equal(
     Buffer.byteLength(canonicalJson(maxEscapedCancellationRationale)),
@@ -1281,12 +1233,13 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
       {
         reasonCode: "TASK_ORCHESTRATION_UNAVAILABLE",
         blockedAction: "CREATE_CODEX_REVIEWER_TASK",
-        evidence: "The action audit is at its readable byte limit.",
+        evidence: "The action audit is at its ordinary byte limit.",
       },
     ),
     /WORKFLOW_AUDIT_LOG_FULL/,
   );
   assert.equal((await fsp.stat(auditPath)).size, committedBytes);
+
   const cancelled = await cancelAutonomousWorkflow(
     state.store,
     workflow.workflow_id,
@@ -1298,33 +1251,26 @@ test("action audit rejects an append beyond its readable limit", async (t) => {
   );
   assert.equal(cancelled.status, "CANCELLED");
   const cancelledAuditBytes = (await fsp.stat(auditPath)).size;
-  assert.equal(cancelledAuditBytes, committedBytes);
-  assert.equal(cancelledAuditBytes, maxAuditBytes);
-  const terminalBytes = await fsp.readFile(auditTerminalPath);
-  assert.ok(terminalBytes.length <= maxEventBytes);
-  const terminalEvent = JSON.parse(terminalBytes.toString("utf8"));
-  assert.equal(terminalEvent.event, "WORKFLOW_CANCELLED");
-  assert.equal(terminalEvent.previous_event_sha256, previousDigest);
-  await fsp.writeFile(auditHeadPath, preCancellationHead, { mode: 0o600 });
-  await fsp.writeFile(workflowPath, preCancellationWorkflow, { mode: 0o600 });
-  const recoveredCancellation = await getAutonomousWorkflow(
+  assert.ok(cancelledAuditBytes > ordinaryLimit);
+  assert.ok(cancelledAuditBytes <= maxAuditBytes);
+  await assert.rejects(
+    fsp.stat(path.join(workflowRoot, "action-audit-terminal.json")),
+    (error) => error.code === "ENOENT",
+  );
+  const recovered = await getAutonomousWorkflow(
     state.store,
     workflow.workflow_id,
   );
-  assert.equal(recoveredCancellation.status, "CANCELLED");
-  assert.equal(
-    recoveredCancellation.action_audit.last_event_sha256,
-    terminalEvent.event_sha256,
-  );
+  assert.equal(recovered.status, "CANCELLED");
 
   const released = await releaseWorkflowClaims(
     state.store,
     workflow.workflow_id,
-    recoveredCancellation.revision,
+    recovered.revision,
     {
       operatorLabel: "Test Operator",
       rationale: "No external objects remain.",
-      reconciledClaims: claimReleaseEvidence(recoveredCancellation),
+      reconciledClaims: claimReleaseEvidence(recovered),
     },
   );
   assert.equal(
@@ -1416,7 +1362,6 @@ test("active mutations preserve per-event cancellation headroom", async (t) => {
       committed_bytes: seedEvent.bytes.length,
       next_sequence: 2,
       last_event_sha256: seedEvent.event.event_sha256,
-      terminal_event_sha256: null,
     })}\n`,
     { mode: 0o600 },
   );
@@ -2137,37 +2082,28 @@ test("cancellation retains claims until exact reconciled release", async (t) => 
     released.claims.every((claim) => claim.disposition === "RELEASED"),
     true,
   );
-  const registryPath = path.join(state.store, "workflow-claims.json");
-  const registryBeforeRepeat = await fsp.readFile(registryPath, "utf8");
-  const claims = JSON.parse(registryBeforeRepeat);
-  assert.equal(
-    claims.claims.every((claim) => claim.disposition === "RELEASED"),
-    true,
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
   );
+  const ledgerBeforeRepeat = await fsp.readFile(workflowPath, "utf8");
 
-  await withStateLock(
-    {
-      directory: state.store,
-      reviewId: "workflow-claims",
-      domain: "claims",
-    },
-    async () => {
-      await assert.rejects(
-        releaseWorkflowClaims(
-          state.store,
-          workflow.workflow_id,
-          released.revision,
-          {
-            operatorLabel: "Test Operator",
-            rationale: "Repeat release must not write an empty transaction.",
-            reconciledClaims: [],
-          },
-        ),
-        /WORKFLOW_CLAIMS_ALREADY_RELEASED/,
-      );
-    },
+  await assert.rejects(
+    releaseWorkflowClaims(
+      state.store,
+      workflow.workflow_id,
+      released.revision,
+      {
+        operatorLabel: "Test Operator",
+        rationale: "Repeat release must not mutate the ledger.",
+        reconciledClaims: [],
+      },
+    ),
+    /WORKFLOW_CLAIMS_ALREADY_RELEASED/,
   );
-  assert.equal(await fsp.readFile(registryPath, "utf8"), registryBeforeRepeat);
+  assert.equal(await fsp.readFile(workflowPath, "utf8"), ledgerBeforeRepeat);
   const intact = await getAutonomousWorkflow(
     state.store,
     workflow.workflow_id,
@@ -2179,7 +2115,7 @@ test("cancellation retains claims until exact reconciled release", async (t) => 
   );
 });
 
-test("claim journal rolls back and rolls forward interrupted releases", async (t) => {
+test("a torn claim release cannot be represented in the workflow ledger", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(
@@ -2195,50 +2131,42 @@ test("claim journal rolls back and rolls forward interrupted releases", async (t
       rationale: "Stop the test workflow.",
     },
   );
-  const registryPath = path.join(state.store, "workflow-claims.json");
-  const interrupted = JSON.parse(
-    await fsp.readFile(registryPath, "utf8"),
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
   );
-  const releaseTransaction = {
-    transaction_id: `rbwfct-${"3".repeat(32)}`,
-    operation: "RELEASE",
-    state: "PREPARED",
-    workflow_id: workflow.workflow_id,
-    workflow_revision: cancelled.revision,
-    claims: cancelled.claims.map((entry) => ({
-      kind: entry.kind,
-      canonical_key_sha256: entry.canonical_key_sha256,
-    })),
-    created_at: new Date().toISOString(),
-    completed_at: null,
-  };
-  interrupted.transactions.push(releaseTransaction);
-  for (const entry of interrupted.claims) {
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+
+  const partial = structuredClone(stored);
+  partial.claims[0].disposition = "RELEASED";
+  partial.claims[0].released_at = new Date().toISOString();
+  await fsp.writeFile(workflowPath, `${canonicalJson(partial)}\n`, {
+    mode: 0o600,
+  });
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, workflow.workflow_id),
+    /WORKFLOW_CLAIMS_INVALID/,
+  );
+
+  const unevidenced = structuredClone(stored);
+  const releasedAt = new Date().toISOString();
+  for (const entry of unevidenced.claims) {
     entry.disposition = "RELEASED";
-    entry.released_at = releaseTransaction.created_at;
+    entry.released_at = releasedAt;
   }
-  await fsp.writeFile(
-    registryPath,
-    `${canonicalJson(interrupted)}\n`,
-    { mode: 0o600 },
+  await fsp.writeFile(workflowPath, `${canonicalJson(unevidenced)}\n`, {
+    mode: 0o600,
+  });
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, workflow.workflow_id),
+    /WORKFLOW_CLAIMS_INVALID/,
   );
 
-  await getAutonomousWorkflow(state.store, workflow.workflow_id);
-  const rolledBack = JSON.parse(
-    await fsp.readFile(registryPath, "utf8"),
-  );
-  assert.equal(
-    rolledBack.transactions.find(
-      (entry) =>
-        entry.transaction_id === releaseTransaction.transaction_id,
-    ).state,
-    "ABORTED",
-  );
-  assert.equal(
-    rolledBack.claims.every((entry) => entry.disposition === "ACTIVE"),
-    true,
-  );
-
+  await fsp.writeFile(workflowPath, `${canonicalJson(stored)}\n`, {
+    mode: 0o600,
+  });
   const released = await releaseWorkflowClaims(
     state.store,
     workflow.workflow_id,
@@ -2248,34 +2176,6 @@ test("claim journal rolls back and rolls forward interrupted releases", async (t
       rationale: "No external objects remain.",
       reconciledClaims: claimReleaseEvidence(cancelled),
     },
-  );
-  const committed = JSON.parse(
-    await fsp.readFile(registryPath, "utf8"),
-  );
-  const committedRelease = committed.transactions.findLast(
-    (entry) =>
-      entry.workflow_id === workflow.workflow_id &&
-      entry.operation === "RELEASE" &&
-      entry.state === "COMMITTED",
-  );
-  committedRelease.state = "PREPARED";
-  committedRelease.completed_at = null;
-  await fsp.writeFile(
-    registryPath,
-    `${canonicalJson(committed)}\n`,
-    { mode: 0o600 },
-  );
-
-  await getAutonomousWorkflow(state.store, workflow.workflow_id);
-  const rolledForward = JSON.parse(
-    await fsp.readFile(registryPath, "utf8"),
-  );
-  assert.equal(
-    rolledForward.transactions.find(
-      (entry) =>
-        entry.transaction_id === committedRelease.transaction_id,
-    ).state,
-    "COMMITTED",
   );
   assert.equal(
     released.claims.every((entry) => entry.disposition === "RELEASED"),
@@ -2463,23 +2363,37 @@ test("derived ownership claims stay bound to the authorized scope", async (t) =>
   );
 });
 
-test("an active workflow fails closed after ownership loss", async (t) => {
+test("an active workflow cannot carry released claims", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(
     state.store,
     workflowInput(state.repository, state.baseSha),
   );
-  const claimsPath = path.join(state.store, "workflow-claims.json");
-  const claims = JSON.parse(await fsp.readFile(claimsPath, "utf8"));
-  claims.claims[0].disposition = "RELEASED";
-  claims.claims[0].released_at = new Date().toISOString();
-  await fsp.writeFile(claimsPath, `${canonicalJson(claims)}\n`, {
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const releasedAt = new Date().toISOString();
+  for (const entry of stored.claims) {
+    entry.disposition = "RELEASED";
+    entry.released_at = releasedAt;
+  }
+  stored.claim_release = {
+    operator_label: "Test Operator",
+    rationale: "Tampered release on an active workflow.",
+    released_at: releasedAt,
+    reconciliation: [],
+  };
+  await fsp.writeFile(workflowPath, `${canonicalJson(stored)}\n`, {
     mode: 0o600,
   });
 
   await assert.rejects(
     getAutonomousWorkflow(state.store, workflow.workflow_id),
-    /WORKFLOW_OWNERSHIP_LOST/,
+    /WORKFLOW_CLAIMS_INVALID/,
   );
 });
