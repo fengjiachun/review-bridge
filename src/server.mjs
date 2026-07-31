@@ -46,7 +46,11 @@ import {
   markWorkflowActionExecuting,
   pauseAutonomousWorkflow,
   planCodexTaskDispatch,
+  planDraftPullRequest,
+  planWorkflowPush,
   recordCodexTaskObservation,
+  recordDraftPullRequestObservation,
+  recordPushObservation,
   recordWorkflowHead,
   releaseWorkflowClaims,
   resumeAutonomousWorkflow,
@@ -346,15 +350,137 @@ if (role === "author") {
   );
 
   register(
-    "mark_workflow_action_executing",
+    "plan_workflow_push",
     {
-      title: "Mark workflow action executing",
+      title: "Plan gated head push",
       description:
-        "Durably record EXECUTING immediately before the controller performs the planned external task write.",
+        "Persist a single PUSH_TOPIC_BRANCH intent after verifying the clean checked-out HEAD still equals the gated workflow head.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+      },
+    },
+    (input) =>
+      planWorkflowPush(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+      ),
+  );
+
+  register(
+    "record_push_observation",
+    {
+      title: "Record push observation",
+      description:
+        "Reconcile the push from a fresh provider read: the observed remote URL, resolved numeric repository ID, and ref head must prove the authorized repository and the exact pushed workflow head.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
         action_id: z.string(),
+        remote_ref_sha: z.string(),
+        remote_repository_id: z.number().int().positive(),
+        remote_url: z.string(),
+      },
+    },
+    (input) =>
+      recordPushObservation(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
+        {
+          remoteRefSha: input.remote_ref_sha,
+          remoteRepositoryId: input.remote_repository_id,
+          remoteUrl: input.remote_url,
+        },
+      ),
+  );
+
+  register(
+    "plan_draft_pull_request",
+    {
+      title: "Plan draft pull request",
+      description:
+        "Persist a single CREATE_DRAFT_PULL_REQUEST intent pinned to the authenticated creator and return the exact body marker that binds the created pull request.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        creator_actor_id: z.number().int().positive(),
+        creator_actor_type: z.enum(["User", "Bot"]),
+      },
+    },
+    (input) =>
+      planDraftPullRequest(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        {
+          creatorActorId: input.creator_actor_id,
+          creatorActorType: input.creator_actor_type,
+        },
+      ),
+  );
+
+  register(
+    "record_draft_pull_request_observation",
+    {
+      title: "Record draft pull request observation",
+      description:
+        "Reconcile exactly one marker-bound draft pull request whose repository, branches, head, and creator match the authorized target.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+        matching_pr_numbers: z.array(z.number().int().positive()),
+        pr_number: z.number().int().positive(),
+        repository_id: z.number().int().positive(),
+        head_repository_id: z.number().int().positive(),
+        base_branch: z.string(),
+        head_branch: z.string(),
+        head_sha: z.string(),
+        draft: z.boolean(),
+        body_marker: z.string(),
+        creator_actor_id: z.number().int().positive(),
+        creator_actor_type: z.enum(["User", "Bot"]),
+        url: z.string(),
+      },
+    },
+    (input) =>
+      recordDraftPullRequestObservation(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
+        {
+          matchingPrNumbers: input.matching_pr_numbers,
+          prNumber: input.pr_number,
+          repositoryId: input.repository_id,
+          headRepositoryId: input.head_repository_id,
+          baseBranch: input.base_branch,
+          headBranch: input.head_branch,
+          headSha: input.head_sha,
+          draft: input.draft,
+          bodyMarker: input.body_marker,
+          creatorActorId: input.creator_actor_id,
+          creatorActorType: input.creator_actor_type,
+          url: input.url,
+        },
+      ),
+  );
+
+  register(
+    "mark_workflow_action_executing",
+    {
+      title: "Mark workflow action executing",
+      description:
+        "Durably record EXECUTING immediately before the planned external write; a push additionally requires the pinned URL resolved to the authorized repository ID.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+        resolved_repository_id: z.number().int().positive().optional(),
+        resolved_url: z.string().optional(),
       },
     },
     (input) =>
@@ -363,6 +489,12 @@ if (role === "author") {
         input.workflow_id,
         input.expected_revision,
         input.action_id,
+        input.resolved_repository_id == null && input.resolved_url == null
+          ? null
+          : {
+              resolved_repository_id: input.resolved_repository_id,
+              resolved_url: input.resolved_url,
+            },
       ),
   );
 
@@ -467,7 +599,7 @@ if (role === "author") {
     {
       title: "Release cancelled workflow claims",
       description:
-        "Release every active claim only after exact caller-supplied reconciliation proves the corresponding object absent.",
+        "Release every active claim only after exact caller-supplied reconciliation proves each branch and head ref absent and each bound pull request closed.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
@@ -475,11 +607,12 @@ if (role === "author") {
         rationale: z.string(),
         reconciled_claims: z.array(
           z.object({
-            kind: z.enum(["LOCAL_BRANCH", "GITHUB_HEAD_REF"]),
+            kind: z.enum(["LOCAL_BRANCH", "GITHUB_HEAD_REF", "PULL_REQUEST"]),
             canonical_key_sha256: z.string(),
             target: z.record(z.unknown()),
             workflow_revision: z.number().int().positive(),
-            present: z.literal(false),
+            present: z.boolean(),
+            open: z.boolean().optional(),
             observed_at: z.string(),
           }),
         ),

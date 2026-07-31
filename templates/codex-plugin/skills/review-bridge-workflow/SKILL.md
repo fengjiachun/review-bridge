@@ -11,9 +11,11 @@ remote-only GitHub publication.
 
 ## Autonomous local workflow
 
-The schema-version-1 autonomous workflow is opt-in and currently advances only
-through the local `CODEX_TASK` gate. It does not yet automate GitHub
-publication, remote findings, ready-state changes, or thread resolution.
+The schema-version-1 autonomous workflow is opt-in and currently advances
+through the local `CODEX_TASK` gate, the reconciled push of the gated head,
+and the marker-bound draft pull request, stopping at `START_PUBLICATION`.
+It does not yet automate publication ledgers, remote review waiting or
+repair, ready-state changes, or thread resolution.
 
 1. Obtain direct operator authorization for the exact repository path,
    operator-selected base ref and resolved full base SHA, requirement,
@@ -51,10 +53,65 @@ publication, remote findings, ready-state changes, or thread resolution.
    submitting resolutions. Round two reuses the same reviewer task. A
    `HUMAN_REQUIRED` review pauses the workflow and must not create a third
    model round.
-8. Stop this implementation at `PUBLISH_GATED_HEAD`. GitHub autonomous
-   publication remains unavailable until the later workflow schema and skill
-   update ship. Continue manually through the existing `LOCAL_GATE`
-   publication flow only after a fresh operator instruction.
+8. For `PLAN_PUSH`, call `plan_workflow_push`; it verifies the clean
+   checked-out HEAD still equals the gated workflow head and binds the
+   remote's single push URL into the intent; a push URL that embeds
+   credentials is rejected before anything is persisted. Before marking
+   `EXECUTING`, resolve the pinned `active_action.target.remote_url` to its
+   GitHub repository and numeric repository ID through the provider, and
+   call `mark_workflow_action_executing` with `resolved_repository_id` and
+   `resolved_url`; the server refuses to record `EXECUTING` unless they
+   equal the authorized target, so a remote repointed before planning can
+   never receive the gated commit. Then push the immutable gated commit to
+   the pinned URL by refspec — `git push <active_action.target.remote_url>
+   <active_action.target.head_sha>:refs/heads/<topic_branch>`, both
+   operands recovered from the persisted intent after a restart, never the
+   mutable remote name or branch name. Never force-push. Review Bridge
+   trusts the local Git environment and does not try to harden this `git
+   push` against it: a controller that can rewrite local Git configuration
+   or inject configuration through the environment already holds the gated
+   commit and can disclose it directly, so hardening the invocation defends
+   nothing it does not already control. Integrity of the push target rests
+   instead on the reconciliation below — a push diverted by any such
+   rewrite leaves the authorized remote without the gated commit, so the
+   observation fails and the workflow pauses `EXTERNAL_ACTION_INDETERMINATE`
+   rather than completing; its only residual effect is disclosing a commit
+   the local attacker already holds. Reconcile from the provider, never
+   from the plan: freshly read the remote's configured push URL,
+   resolve that URL to its GitHub repository and numeric repository ID, and
+   freshly read the exact remote ref head. Call `record_push_observation`
+   with the `remote_ref_sha`, `remote_repository_id`, and `remote_url` taken
+   from that fresh read — echoing the planned target's values would make the
+   proof meaningless — and the server accepts them only when they prove the
+   authorized repository and the exact gated head. Then call
+   `complete_workflow_action`. If the remote URL, repository identity, or ref
+   cannot be read or does not converge, pause with
+   `EXTERNAL_ACTION_INDETERMINATE` instead of re-pushing blindly.
+9. For `PLAN_DRAFT_PULL_REQUEST`, first resolve the authenticated principal
+   that will create the pull request (its numeric actor ID and User or Bot
+   type), and call `plan_draft_pull_request` with it; the intent pins that
+   creator, and recovery binds only a pull request created by the same
+   principal. Include
+   the returned exact `body_marker` in the initial pull-request body. Persist
+   `EXECUTING` before creating the draft pull request against the authorized
+   base. Reconcile by searching the authorized repository for open pull
+   requests with the exact head branch: bind exactly one match whose marker,
+   base repository, head repository (by numeric ID — a fork is never the
+   authorized head repository), branches, head, draft state, and creator all
+   verify, and call
+   `record_draft_pull_request_observation` with those facts, including the
+   exact marker comment extracted from the freshly read pull-request body —
+   the server accepts only a byte-exact match with the marker it issued, so
+   never report a boolean or a reconstructed string; then call
+   `complete_workflow_action`, which atomically claims the pull request
+   store-wide. A same-branch pull request without the marker, a non-draft
+   match, or multiple matches pauses; branch equality alone never establishes
+   ownership.
+10. Stop this implementation at `START_PUBLICATION`. Autonomous publication
+    ledgers, remote Codex waiting, and repair cycles remain unavailable until
+    the later workflow schema and skill update ship. Continue manually through
+    the existing `LOCAL_GATE` publication flow only after a fresh operator
+    instruction.
 
 Every mutation uses the exact current workflow revision. On `WORKFLOW_BUSY`,
 `WORKFLOW_CLAIMS_BUSY`, `LOCK_OWNERSHIP_LOST`, or an indeterminate store write,
@@ -62,9 +119,10 @@ freshly reread the workflow before deciding whether a transition is still
 needed. Ownership claims live in the workflow ledger itself; a start that
 cannot read every persisted ledger, or that conflicts with an active claim,
 fails closed before writing anything. Cancellation retains claims. Release
-them only after exact reconciliation proves every claimed object absent, with
-each observation bound to the current workflow revision and exact canonical
-claim target, and the operator explicitly requests cleanup.
+them only after exact reconciliation proves each branch and head ref absent
+and each bound pull request closed, with each observation bound to the
+current workflow revision and exact canonical claim target, and the operator
+explicitly requests cleanup.
 
 ## Prepare
 

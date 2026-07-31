@@ -125,19 +125,19 @@ function assertCapabilities(capabilities) {
   return [...AUTONOMOUS_CAPABILITIES];
 }
 
-function codexTaskActionId(workflow, plannedRevision, reviewId) {
+function workflowActionId(workflow, plannedRevision, kind, identityFacts) {
   return `rbwfa-${sha256(
     canonicalJson({
       workflow_id: workflow.workflow_id,
       workflow_revision: plannedRevision,
-      kind: "CREATE_CODEX_REVIEWER_TASK",
-      review_id: reviewId,
+      kind,
+      ...identityFacts,
     }),
   ).slice(0, 32)}`;
 }
 
-function codexTaskCorrelationMarker(workflow, actionId) {
-  return `rbwf-dispatch-${sha256(
+function workflowCorrelationMarker(markerPrefix, workflow, actionId) {
+  return `${markerPrefix}${sha256(
     canonicalJson({
       workflow_id: workflow.workflow_id,
       action_id: actionId,
@@ -147,18 +147,183 @@ function codexTaskCorrelationMarker(workflow, actionId) {
   ).slice(0, 32)}`;
 }
 
-function expectedDispatchFor(action) {
-  const marker = action.correlation_marker;
-  return {
-    marker,
-    title: `Review Bridge ${marker}`,
-    prompt: [
-      marker,
-      `Review ${action.target.review_id} using the packaged review-bridge-reviewer skill.`,
-      "Do not use author context and do not fork the author task.",
-    ].join("\n"),
-  };
-}
+// One spec per external-action kind. Every kind shares the same four-status
+// protocol, audit events, deterministic identity derivation, and revision
+// arithmetic; a spec only contributes the pieces that differ: the required
+// capability, the phase the action lives in, the ownership claim it rides
+// on, its target and provider-response contracts, and its completion effect
+// (implemented in completeWorkflowAction).
+const ACTION_KIND_SPECS = {
+  CREATE_CODEX_REVIEWER_TASK: {
+    capability: "CREATE_CODEX_REVIEWER_TASKS",
+    phase: "DISPATCH_CODEX_REVIEWER",
+    claimKind: "LOCAL_BRANCH",
+    markerPrefix: "rbwf-dispatch-",
+    // The reviewer task must not already exist while its dispatch is active.
+    forbidReviewerTask: true,
+    identityFacts(target) {
+      return { review_id: target.review_id };
+    },
+    validateTarget(workflow, target) {
+      if (
+        target.review_id !== workflow.current_review?.review_id ||
+        target.reviewer_provider !== "CODEX_TASK"
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "active action target does not match the current review",
+        );
+      }
+    },
+    dispatch(action) {
+      const marker = action.correlation_marker;
+      return {
+        marker,
+        title: `Review Bridge ${marker}`,
+        prompt: [
+          marker,
+          `Review ${action.target.review_id} using the packaged review-bridge-reviewer skill.`,
+          "Do not use author context and do not fork the author task.",
+        ].join("\n"),
+      };
+    },
+    validateResponse(action, response) {
+      assertString(response.task_id, "workflow.active_action.task_id", {
+        max: 4096,
+      });
+      if (
+        !Array.isArray(response.matching_task_ids) ||
+        response.matching_task_ids.length !== 1 ||
+        response.matching_task_ids[0] !== response.task_id ||
+        response.title_sha256 !== sha256(action.dispatch.title) ||
+        response.prompt_sha256 !== sha256(action.dispatch.prompt)
+      ) {
+        fail("WORKFLOW_ACTION_INVALID", "active action response is invalid");
+      }
+    },
+  },
+  PUSH_TOPIC_BRANCH: {
+    capability: "PUSH_TOPIC_BRANCH",
+    phase: "PUSH_GATED_HEAD",
+    claimKind: "GITHUB_HEAD_REF",
+    markerPrefix: null,
+    identityFacts(target) {
+      return { head_sha: target.head_sha };
+    },
+    validateTarget(workflow, target) {
+      const authorized = workflow.authorization.publication_target;
+      requireCredentialFreePushUrl(
+        target.remote_url,
+        "push target remote_url",
+      );
+      if (
+        target.push_remote !== authorized.push_remote ||
+        target.head_repository_id !== authorized.head_repository_id ||
+        target.head_branch !== authorized.head_branch ||
+        target.head_sha !== workflow.current_head_sha
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "push target does not match the authorized publication target and head",
+        );
+      }
+    },
+    dispatch: null,
+    validateExecutingProof(action, proof) {
+      if (
+        proof == null ||
+        proof.resolved_repository_id !==
+          action.target.head_repository_id ||
+        proof.resolved_url !== action.target.remote_url
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "the pinned push URL must be resolved to the authorized repository before executing",
+        );
+      }
+    },
+    validateResponse(action, response) {
+      if (
+        response.remote_ref_sha !== action.target.head_sha ||
+        response.remote_repository_id !==
+          action.target.head_repository_id ||
+        response.remote_url !== action.target.remote_url
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "observed remote does not prove the authorized repository and pushed head",
+        );
+      }
+    },
+  },
+  CREATE_DRAFT_PULL_REQUEST: {
+    capability: "CREATE_OR_UPDATE_DRAFT_PR",
+    phase: "ENSURE_DRAFT_PR",
+    claimKind: "GITHUB_HEAD_REF",
+    markerPrefix: "rbwf-pr-",
+    identityFacts(target) {
+      return { head_sha: target.head_sha };
+    },
+    validateTarget(workflow, target) {
+      const authorized = workflow.authorization.publication_target;
+      assertPositiveInteger(
+        target.expected_creator_actor_id,
+        "pull-request target expected_creator_actor_id",
+      );
+      if (
+        target.base_repository_id !== authorized.base_repository_id ||
+        target.base_branch !== authorized.base_branch ||
+        target.head_repository_id !== authorized.head_repository_id ||
+        target.head_branch !== authorized.head_branch ||
+        target.head_sha !== workflow.current_head_sha ||
+        !["User", "Bot"].includes(target.expected_creator_actor_type)
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "pull-request target does not match the authorized publication target and head",
+        );
+      }
+    },
+    dispatch(action) {
+      const marker = action.correlation_marker;
+      return {
+        marker,
+        body_marker: `<!-- ${marker} -->`,
+      };
+    },
+    validateResponse(action, response) {
+      assertPositiveInteger(
+        response.pr_number,
+        "workflow.active_action.provider_response.pr_number",
+      );
+      assertPositiveInteger(
+        response.creator_actor_id,
+        "workflow.active_action.provider_response.creator_actor_id",
+      );
+      if (
+        !Array.isArray(response.matching_pr_numbers) ||
+        response.matching_pr_numbers.length !== 1 ||
+        response.matching_pr_numbers[0] !== response.pr_number ||
+        response.repository_id !== action.target.base_repository_id ||
+        response.head_repository_id !== action.target.head_repository_id ||
+        response.base_branch !== action.target.base_branch ||
+        response.head_branch !== action.target.head_branch ||
+        response.head_sha !== action.target.head_sha ||
+        response.draft !== true ||
+        response.body_marker !== action.dispatch.body_marker ||
+        response.creator_actor_id !==
+          action.target.expected_creator_actor_id ||
+        response.creator_actor_type !==
+          action.target.expected_creator_actor_type
+      ) {
+        fail("WORKFLOW_ACTION_INVALID", "active action response is invalid");
+      }
+      assertString(response.url, "workflow.active_action.provider_response.url", {
+        max: 4096,
+      });
+    },
+  },
+};
 
 function validateCurrentReview(workflow) {
   if (workflow.current_review == null) {
@@ -226,49 +391,47 @@ function validateActiveAction(workflow) {
     action.planned_revision,
     "workflow.active_action.planned_revision",
   );
+  const spec = ACTION_KIND_SPECS[action.kind];
   if (
-    action.kind !== "CREATE_CODEX_REVIEWER_TASK" ||
+    spec == null ||
     !["PLANNED", "EXECUTING", "OBSERVED"].includes(action.status) ||
-    action.required_capability !== "CREATE_CODEX_REVIEWER_TASKS" ||
+    action.required_capability !== spec.capability ||
     action.authorization_sha256 !==
       workflow.authorization.workflow_authorization_sha256
   ) {
     fail("WORKFLOW_ACTION_INVALID", "active action contract is invalid");
   }
   assertObject(action.target, "workflow.active_action.target");
-  if (
-    action.target.review_id !== workflow.current_review?.review_id ||
-    action.target.reviewer_provider !== "CODEX_TASK"
-  ) {
-    fail(
-      "WORKFLOW_ACTION_INVALID",
-      "active action target does not match the current review",
-    );
-  }
-  const expectedActionId = codexTaskActionId(
+  spec.validateTarget(workflow, action.target);
+  const expectedActionId = workflowActionId(
     workflow,
     action.planned_revision,
-    action.target.review_id,
+    action.kind,
+    spec.identityFacts(action.target),
   );
-  const expectedMarker = codexTaskCorrelationMarker(
-    workflow,
-    expectedActionId,
-  );
+  const expectedMarker =
+    spec.markerPrefix == null
+      ? null
+      : workflowCorrelationMarker(
+          spec.markerPrefix,
+          workflow,
+          expectedActionId,
+        );
   if (
     action.action_id !== expectedActionId ||
     action.correlation_marker !== expectedMarker
   ) {
     fail("WORKFLOW_ACTION_INVALID", "active action identity is invalid");
   }
-  const localClaim = workflow.claims.find(
-    (entry) => entry.kind === "LOCAL_BRANCH",
+  const ownershipClaim = workflow.claims.find(
+    (entry) => entry.kind === spec.claimKind,
   );
   if (
-    localClaim == null ||
+    ownershipClaim == null ||
     canonicalJson(action.ownership_claim) !==
       canonicalJson({
-        kind: localClaim.kind,
-        canonical_key_sha256: localClaim.canonical_key_sha256,
+        kind: ownershipClaim.kind,
+        canonical_key_sha256: ownershipClaim.canonical_key_sha256,
       })
   ) {
     fail(
@@ -276,7 +439,8 @@ function validateActiveAction(workflow) {
       "active action ownership claim is invalid",
     );
   }
-  const expectedDispatch = expectedDispatchFor(action);
+  const expectedDispatch =
+    spec.dispatch == null ? null : spec.dispatch(action);
   if (canonicalJson(action.dispatch) !== canonicalJson(expectedDispatch)) {
     fail("WORKFLOW_ACTION_INVALID", "active action dispatch is invalid");
   }
@@ -307,6 +471,25 @@ function validateActiveAction(workflow) {
   ) {
     fail("WORKFLOW_ACTION_INVALID", "active action execution time is invalid");
   }
+  // Ledgers persisted by v0.5.0 predate the executing-proof field; an
+  // absent field validates exactly like the explicit null those versions
+  // could never set, so upgraded stores keep loading.
+  const executingProof = action.executing_proof ?? null;
+  if (action.status === "PLANNED") {
+    if (executingProof !== null) {
+      fail(
+        "WORKFLOW_ACTION_INVALID",
+        "a planned action cannot carry an executing proof",
+      );
+    }
+  } else if (spec.validateExecutingProof) {
+    spec.validateExecutingProof(action, executingProof);
+  } else if (executingProof !== null) {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      "this action kind does not take an executing proof",
+    );
+  }
   if (action.executing_at !== null) {
     assertTimestamp(
       action.executing_at,
@@ -330,18 +513,7 @@ function validateActiveAction(workflow) {
       action.provider_response,
       "workflow.active_action.provider_response",
     );
-    assertString(response.task_id, "workflow.active_action.task_id", {
-      max: 4096,
-    });
-    if (
-      !Array.isArray(response.matching_task_ids) ||
-      response.matching_task_ids.length !== 1 ||
-      response.matching_task_ids[0] !== response.task_id ||
-      response.title_sha256 !== sha256(action.dispatch.title) ||
-      response.prompt_sha256 !== sha256(action.dispatch.prompt)
-    ) {
-      fail("WORKFLOW_ACTION_INVALID", "active action response is invalid");
-    }
+    spec.validateResponse(action, response);
     assertTimestamp(
       response.observed_at,
       "workflow.active_action.provider_response.observed_at",
@@ -353,15 +525,51 @@ function validateActiveAction(workflow) {
     );
   }
   if (
-    (workflow.status === "ACTIVE" &&
-      workflow.phase !== "DISPATCH_CODEX_REVIEWER") ||
-    workflow.reviewer_task != null
+    (workflow.status === "ACTIVE" && workflow.phase !== spec.phase) ||
+    (spec.forbidReviewerTask && workflow.reviewer_task != null)
   ) {
     fail(
       "WORKFLOW_ACTION_INVALID",
       "active action is inconsistent with workflow state",
     );
   }
+}
+
+function requireCredentialFreePushUrl(url, name) {
+  assertString(url, name, { max: 4096 });
+  // Legitimate git push URLs never carry a query or fragment; both are
+  // common secret carriers (?access_token=...) and would be persisted.
+  if (/[?#]/.test(url)) {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      `${name} must not carry a query or fragment`,
+    );
+  }
+  // scp-like ssh syntax (user@host:path) has no password field; the user is
+  // an ssh login name, not a credential.
+  if (/^[A-Za-z0-9._-]+@[^:@/]+:/.test(url)) {
+    return url;
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      `${name} is not a parseable push URL`,
+    );
+  }
+  const sshProtocol = ["ssh:", "git+ssh:"].includes(parsed.protocol);
+  if (
+    parsed.password !== "" ||
+    (parsed.username !== "" && !sshProtocol)
+  ) {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      `${name} embeds credentials and cannot be persisted`,
+    );
+  }
+  return url;
 }
 
 function runGit(repositoryPath, args, { allowExitCodes = [0] } = {}) {
@@ -607,11 +815,56 @@ function validateWorkflow(workflow) {
     }
     claimKeys.add(key);
   }
-  if (workflow.claims.length !== 2) {
+  const pullRequestClaims = workflow.claims.filter(
+    (entry) => entry.kind === "PULL_REQUEST",
+  );
+  if (
+    workflow.claims.length !== 2 + pullRequestClaims.length ||
+    pullRequestClaims.length > 1
+  ) {
     fail(
       "WORKFLOW_CLAIMS_INVALID",
-      "workflow must own exactly its two authorized claims",
+      "workflow must own exactly its two authorized claims plus at most one pull request",
     );
+  }
+  if ((workflow.pull_request != null) !== (pullRequestClaims.length === 1)) {
+    fail(
+      "WORKFLOW_CLAIMS_INVALID",
+      "pull-request binding does not match its ownership claim",
+    );
+  }
+  if (workflow.pull_request != null) {
+    const pullRequest = assertObject(
+      workflow.pull_request,
+      "workflow.pull_request",
+    );
+    assertPositiveInteger(
+      pullRequest.repository_id,
+      "workflow.pull_request.repository_id",
+    );
+    assertPositiveInteger(
+      pullRequest.pr_number,
+      "workflow.pull_request.pr_number",
+    );
+    assertString(pullRequest.url, "workflow.pull_request.url", { max: 4096 });
+    const normalizedPublicationTarget =
+      workflow.authorization.publication_target;
+    if (
+      pullRequest.repository_id !==
+        normalizedPublicationTarget.base_repository_id ||
+      pullRequest.base_branch !== normalizedPublicationTarget.base_branch ||
+      pullRequest.head_branch !== normalizedPublicationTarget.head_branch ||
+      canonicalJson(pullRequestClaims[0].target) !==
+        canonicalJson({
+          repository_id: pullRequest.repository_id,
+          pr_number: pullRequest.pr_number,
+        })
+    ) {
+      fail(
+        "WORKFLOW_CLAIMS_INVALID",
+        "pull-request binding does not match the authorized target and claim",
+      );
+    }
   }
   const dispositions = new Set(
     workflow.claims.map((entry) => entry.disposition),
@@ -779,10 +1032,37 @@ async function collectActiveClaims(storeRoot) {
       }
       throw error;
     }
-    if (workflow.claims.some((claimEntry) => claimEntry.disposition !== "ACTIVE")) {
-      // Released ownership frees the claim key, so it is trusted only after
-      // the full locked load proves the release against the audit chain. A
-      // ledger that cannot prove its release fails the start closed.
+    let auditHead;
+    try {
+      auditHead = await readCanonicalSecureJson(
+        workflowPaths(storeRoot, entry.name).auditHead,
+        16 * 1024,
+        "WORKFLOW_AUDIT_CORRUPT",
+      );
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        fail(
+          "WORKFLOW_AUDIT_CORRUPT",
+          "workflow action audit artifact is missing",
+        );
+      }
+      throw error;
+    }
+    const recoveryPending =
+      auditHead?.next_sequence !== workflow.action_audit.next_sequence ||
+      auditHead?.last_event_sha256 !==
+        workflow.action_audit.last_event_sha256;
+    if (
+      recoveryPending ||
+      workflow.claims.some(
+        (claimEntry) => claimEntry.disposition !== "ACTIVE",
+      )
+    ) {
+      // Released ownership frees a claim key, and a ledger behind its audit
+      // cursor may be missing a claim committed to the audit log by a
+      // crashed mutation. Both are trusted only after the full locked load
+      // replays the audit chain; a ledger that cannot be proven fails the
+      // scan closed.
       workflow = await withWorkflowLock(
         storeRoot,
         entry.name,
@@ -801,7 +1081,9 @@ async function collectActiveClaims(storeRoot) {
 function validateClaimEntry(entry, name) {
   assertObject(entry, name);
   assertWorkflowId(entry.workflow_id);
-  if (!["LOCAL_BRANCH", "GITHUB_HEAD_REF"].includes(entry.kind)) {
+  if (
+    !["LOCAL_BRANCH", "GITHUB_HEAD_REF", "PULL_REQUEST"].includes(entry.kind)
+  ) {
     fail("WORKFLOW_CLAIMS_INVALID", `${name} kind is invalid`);
   }
   if (!DIGEST_RE.test(entry.canonical_key_sha256 ?? "")) {
@@ -1080,7 +1362,8 @@ function requireCancellationReserve(workflow) {
       canonical_key_sha256: entry.canonical_key_sha256,
       target: structuredClone(entry.target),
       workflow_revision: Number.MAX_SAFE_INTEGER,
-      present: false,
+      present: entry.kind === "PULL_REQUEST",
+      ...(entry.kind === "PULL_REQUEST" ? { open: false } : {}),
       observed_at: "9999-12-31T23:59:59.999Z",
     })),
   };
@@ -1426,13 +1709,13 @@ function validatePublicationTarget(target, topicBranch) {
   };
 }
 
-function claim(kind, key, workflowId) {
+function claim(kind, key, workflowId, createdRevision = 1) {
   return {
     workflow_id: workflowId,
     kind,
     canonical_key_sha256: sha256(canonicalJson(key)),
     target: structuredClone(key),
-    created_revision: 1,
+    created_revision: createdRevision,
     disposition: "ACTIVE",
     created_at: now(),
     released_at: null,
@@ -1505,23 +1788,35 @@ function nextAction(workflow) {
       ? "HUMAN_ARBITRATION"
       : "AWAIT_OPERATOR";
   }
+  const actionPhase = (planAction, statusActions) =>
+    workflow.active_action == null
+      ? planAction
+      : statusActions[workflow.active_action.status] ?? "INSPECT_WORKFLOW";
   const actions = {
     IMPLEMENTING: "COMMIT_HEAD",
     PREPARE_LOCAL_REVIEW: "PREPARE_LOCAL_REVIEW",
-    DISPATCH_CODEX_REVIEWER:
-      workflow.active_action == null
-        ? "PLAN_CODEX_TASK_DISPATCH"
-        : {
-            PLANNED: "CREATE_CODEX_REVIEWER_TASK",
-            EXECUTING: "RECONCILE_CODEX_REVIEWER_TASK",
-            OBSERVED: "COMPLETE_CODEX_TASK_DISPATCH",
-          }[workflow.active_action.status] ?? "INSPECT_WORKFLOW",
+    DISPATCH_CODEX_REVIEWER: actionPhase("PLAN_CODEX_TASK_DISPATCH", {
+      PLANNED: "CREATE_CODEX_REVIEWER_TASK",
+      EXECUTING: "RECONCILE_CODEX_REVIEWER_TASK",
+      OBSERVED: "COMPLETE_CODEX_TASK_DISPATCH",
+    }),
     WAIT_LOCAL_REVIEW: "WAIT_LOCAL_REVIEW",
     ADDRESS_LOCAL_FINDINGS: "ADDRESS_LOCAL_FINDINGS",
     PREPARE_REREVIEW: "PREPARE_REREVIEW",
     WAIT_LOCAL_REREVIEW: "WAIT_LOCAL_REREVIEW",
     FINALIZE_LOCAL_GATE: "FINALIZE_LOCAL_GATE",
-    LOCAL_GATE_PASSED: "PUBLISH_GATED_HEAD",
+    LOCAL_GATE_PASSED: "PLAN_PUSH",
+    PUSH_GATED_HEAD: actionPhase("INSPECT_WORKFLOW", {
+      PLANNED: "PUSH_TOPIC_BRANCH",
+      EXECUTING: "RECONCILE_PUSH",
+      OBSERVED: "COMPLETE_PUSH",
+    }),
+    ENSURE_DRAFT_PR: actionPhase("PLAN_DRAFT_PULL_REQUEST", {
+      PLANNED: "CREATE_DRAFT_PULL_REQUEST",
+      EXECUTING: "RECONCILE_DRAFT_PULL_REQUEST",
+      OBSERVED: "COMPLETE_DRAFT_PULL_REQUEST",
+    }),
+    START_PUBLICATION: "START_PUBLICATION",
   };
   return actions[workflow.phase] ?? "INSPECT_WORKFLOW";
 }
@@ -1908,66 +2203,67 @@ function dispatchFor(workflow, action) {
   return structuredClone(action.dispatch);
 }
 
-export async function planCodexTaskDispatch(
+async function planWorkflowAction(
   storeRoot,
   workflowId,
   expectedRevision,
-  reviewId,
+  kind,
+  { planPhases, invalidMessage, target },
 ) {
+  const spec = ACTION_KIND_SPECS[kind];
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
-    requireCapability(workflow, "CREATE_CODEX_REVIEWER_TASKS");
+    requireCapability(workflow, spec.capability);
     if (
-      workflow.phase !== "DISPATCH_CODEX_REVIEWER" ||
-      workflow.active_action != null ||
-      workflow.current_review?.review_id !== reviewId
+      !planPhases.includes(workflow.phase) ||
+      workflow.active_action != null
     ) {
-      fail(
-        "WORKFLOW_PHASE_INVALID",
-        "Codex task dispatch is not currently plannable",
-      );
+      fail("WORKFLOW_PHASE_INVALID", invalidMessage);
     }
+    const actionTarget = await target(workflow);
     const ownershipClaim = workflow.claims.find(
-      (entry) => entry.kind === "LOCAL_BRANCH",
+      (entry) => entry.kind === spec.claimKind,
     );
-    const actionId = codexTaskActionId(
+    const actionId = workflowActionId(
       workflow,
       workflow.revision,
-      reviewId,
+      kind,
+      spec.identityFacts(actionTarget),
     );
-    const correlationMarker = codexTaskCorrelationMarker(workflow, actionId);
     const action = {
       action_id: actionId,
-      kind: "CREATE_CODEX_REVIEWER_TASK",
+      kind,
       status: "PLANNED",
       planned_revision: workflow.revision,
       planned_at: now(),
       executing_at: null,
       observed_at: null,
       completed_at: null,
-      required_capability: "CREATE_CODEX_REVIEWER_TASKS",
+      required_capability: spec.capability,
       authorization_sha256:
         workflow.authorization.workflow_authorization_sha256,
-      target: {
-        review_id: reviewId,
-        reviewer_provider: "CODEX_TASK",
-      },
+      target: actionTarget,
       ownership_claim: {
         kind: ownershipClaim.kind,
         canonical_key_sha256: ownershipClaim.canonical_key_sha256,
       },
-      correlation_marker: correlationMarker,
+      correlation_marker:
+        spec.markerPrefix == null
+          ? null
+          : workflowCorrelationMarker(spec.markerPrefix, workflow, actionId),
       dispatch: null,
+      executing_proof: null,
       provider_response: null,
     };
-    action.dispatch = expectedDispatchFor(action);
+    action.dispatch = spec.dispatch == null ? null : spec.dispatch(action);
     const next = await saveActionMutation(
       paths,
       workflow,
       "ACTION_PLANNED",
       async (draft) => {
         draft.active_action = action;
+        draft.phase = spec.phase;
       },
     );
     return {
@@ -1978,21 +2274,157 @@ export async function planCodexTaskDispatch(
   });
 }
 
+export async function planCodexTaskDispatch(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  reviewId,
+) {
+  return planWorkflowAction(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    "CREATE_CODEX_REVIEWER_TASK",
+    {
+      planPhases: ["DISPATCH_CODEX_REVIEWER"],
+      invalidMessage: "Codex task dispatch is not currently plannable",
+      target: (workflow) => {
+        if (workflow.current_review?.review_id !== reviewId) {
+          fail(
+            "WORKFLOW_PHASE_INVALID",
+            "Codex task dispatch is not currently plannable",
+          );
+        }
+        return { review_id: reviewId, reviewer_provider: "CODEX_TASK" };
+      },
+    },
+  );
+}
+
+export async function planWorkflowPush(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+) {
+  return planWorkflowAction(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    "PUSH_TOPIC_BRANCH",
+    {
+      planPhases: ["LOCAL_GATE_PASSED"],
+      invalidMessage: "the gated head push is not currently plannable",
+      target: async (workflow) => {
+        // The clean checked-out HEAD must still equal the gated workflow
+        // head immediately before the push intent is persisted.
+        const repository = await repositoryIdentity(workflow.repository.path);
+        if (
+          repository.path !== workflow.repository.path ||
+          repository.git_common_dir !== workflow.repository.git_common_dir
+        ) {
+          fail("WORKFLOW_REPOSITORY_DRIFT", "repository identity changed");
+        }
+        requireCleanRepository(repository.path);
+        if (currentBranch(repository.path) !== workflow.topic_branch) {
+          fail("WORKFLOW_BRANCH_MISMATCH", "topic branch is not checked out");
+        }
+        if (currentHead(repository.path) !== workflow.current_head_sha) {
+          fail(
+            "WORKFLOW_HEAD_MISMATCH",
+            "HEAD does not equal the gated workflow head",
+          );
+        }
+        const authorized = workflow.authorization.publication_target;
+        // git push uses the push URL, which can differ from the fetch URL;
+        // multiple push URLs cannot be bound to one observation proof.
+        const pushUrls = runGit(repository.path, [
+          "remote",
+          "get-url",
+          "--push",
+          "--all",
+          authorized.push_remote,
+        ])
+          .stdout.split("\n")
+          .filter((line) => line !== "");
+        if (pushUrls.length !== 1) {
+          fail(
+            "WORKFLOW_ACTION_INVALID",
+            "the authorized remote must have exactly one push URL",
+          );
+        }
+        const remoteUrl = requireCredentialFreePushUrl(
+          pushUrls[0],
+          "push target remote_url",
+        );
+        return {
+          push_remote: authorized.push_remote,
+          remote_url: remoteUrl,
+          head_repository_id: authorized.head_repository_id,
+          head_branch: authorized.head_branch,
+          head_sha: workflow.current_head_sha,
+        };
+      },
+    },
+  );
+}
+
+export async function planDraftPullRequest(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  { creatorActorId, creatorActorType },
+) {
+  assertPositiveInteger(creatorActorId, "creator_actor_id");
+  if (!["User", "Bot"].includes(creatorActorType)) {
+    throw new TypeError("creator_actor_type must be User or Bot");
+  }
+  return planWorkflowAction(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    "CREATE_DRAFT_PULL_REQUEST",
+    {
+      planPhases: ["ENSURE_DRAFT_PR"],
+      invalidMessage: "the draft pull request is not currently plannable",
+      target: (workflow) => {
+        const authorized = workflow.authorization.publication_target;
+        return {
+          base_repository_id: authorized.base_repository_id,
+          base_branch: authorized.base_branch,
+          head_repository_id: authorized.head_repository_id,
+          head_branch: authorized.head_branch,
+          head_sha: workflow.current_head_sha,
+          expected_creator_actor_id: creatorActorId,
+          expected_creator_actor_type: creatorActorType,
+        };
+      },
+    },
+  );
+}
+
 export async function markWorkflowActionExecuting(
   storeRoot,
   workflowId,
   expectedRevision,
   actionId,
+  executingProof = null,
 ) {
   assertString(actionId, "action_id", { max: 1024 });
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
-    if (
-      workflow.active_action?.action_id !== actionId ||
-      workflow.active_action.status !== "PLANNED"
-    ) {
+    const action = workflow.active_action;
+    if (action?.action_id !== actionId || action.status !== "PLANNED") {
       fail("WORKFLOW_ACTION_STATE_INVALID", "action must be PLANNED");
+    }
+    const spec = ACTION_KIND_SPECS[action.kind];
+    if (spec.validateExecutingProof) {
+      spec.validateExecutingProof(action, executingProof);
+    } else if (executingProof != null) {
+      fail(
+        "WORKFLOW_ACTION_INVALID",
+        "this action kind does not take an executing proof",
+      );
     }
     return publicWorkflow(
       await saveActionMutation(
@@ -2002,6 +2434,46 @@ export async function markWorkflowActionExecuting(
         async (next) => {
           next.active_action.status = "EXECUTING";
           next.active_action.executing_at = now();
+          next.active_action.executing_proof =
+            executingProof == null ? null : structuredClone(executingProof);
+        },
+      ),
+    );
+  });
+}
+
+async function recordActionObservation(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  actionId,
+  kind,
+  buildResponse,
+) {
+  assertString(actionId, "action_id", { max: 1024 });
+  return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
+    requireRevision(workflow, expectedRevision);
+    requireActive(workflow);
+    const action = workflow.active_action;
+    if (action?.action_id !== actionId || action.status !== "EXECUTING") {
+      fail("WORKFLOW_ACTION_STATE_INVALID", "action must be EXECUTING");
+    }
+    if (action.kind !== kind) {
+      fail("WORKFLOW_ACTION_KIND_INVALID", "unsupported workflow action");
+    }
+    const response = buildResponse(workflow, action);
+    return publicWorkflow(
+      await saveActionMutation(
+        paths,
+        workflow,
+        "ACTION_OBSERVED",
+        async (next) => {
+          next.active_action.status = "OBSERVED";
+          next.active_action.observed_at = now();
+          next.active_action.provider_response = {
+            ...response,
+            observed_at: now(),
+          };
         },
       ),
     );
@@ -2015,7 +2487,6 @@ export async function recordCodexTaskObservation(
   actionId,
   { matchingTaskIds, taskId, title, prompt },
 ) {
-  assertString(actionId, "action_id", { max: 1024 });
   assertString(taskId, "task_id", { max: 4096 });
   assertString(title, "title", { max: 4096 });
   assertString(prompt, "prompt");
@@ -2029,39 +2500,231 @@ export async function recordCodexTaskObservation(
       "task reconciliation requires exactly one matching task",
     );
   }
-  return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
-    requireRevision(workflow, expectedRevision);
-    requireActive(workflow);
-    const action = workflow.active_action;
-    if (action?.action_id !== actionId || action.status !== "EXECUTING") {
-      fail("WORKFLOW_ACTION_STATE_INVALID", "action must be EXECUTING");
-    }
-    const dispatch = dispatchFor(workflow, action);
-    if (title !== dispatch.title || prompt !== dispatch.prompt) {
-      fail(
-        "WORKFLOW_TASK_MARKER_MISMATCH",
-        "task title and prompt must equal the server-issued dispatch payload",
-      );
-    }
-    return publicWorkflow(
-      await saveActionMutation(
-        paths,
-        workflow,
-        "ACTION_OBSERVED",
-        async (next) => {
-          next.active_action.status = "OBSERVED";
-          next.active_action.observed_at = now();
-          next.active_action.provider_response = {
-            task_id: taskId,
-            matching_task_ids: [taskId],
-            title_sha256: sha256(title),
-            prompt_sha256: sha256(prompt),
-            observed_at: now(),
-          };
-        },
-      ),
+  return recordActionObservation(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    actionId,
+    "CREATE_CODEX_REVIEWER_TASK",
+    (workflow, action) => {
+      const dispatch = dispatchFor(workflow, action);
+      if (title !== dispatch.title || prompt !== dispatch.prompt) {
+        fail(
+          "WORKFLOW_TASK_MARKER_MISMATCH",
+          "task title and prompt must equal the server-issued dispatch payload",
+        );
+      }
+      return {
+        task_id: taskId,
+        matching_task_ids: [taskId],
+        title_sha256: sha256(title),
+        prompt_sha256: sha256(prompt),
+      };
+    },
+  );
+}
+
+export async function recordPushObservation(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  actionId,
+  { remoteRefSha, remoteRepositoryId, remoteUrl },
+) {
+  assertSha(remoteRefSha, "remote_ref_sha");
+  assertPositiveInteger(remoteRepositoryId, "remote_repository_id");
+  requireCredentialFreePushUrl(remoteUrl, "remote_url");
+  return recordActionObservation(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    actionId,
+    "PUSH_TOPIC_BRANCH",
+    (workflow, action) => {
+      if (
+        remoteRefSha !== action.target.head_sha ||
+        remoteRepositoryId !== action.target.head_repository_id ||
+        remoteUrl !== action.target.remote_url
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "observed remote does not prove the authorized repository and pushed head",
+        );
+      }
+      return {
+        remote_ref_sha: remoteRefSha,
+        remote_repository_id: remoteRepositoryId,
+        remote_url: remoteUrl,
+      };
+    },
+  );
+}
+
+export async function recordDraftPullRequestObservation(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  actionId,
+  {
+    matchingPrNumbers,
+    prNumber,
+    repositoryId,
+    headRepositoryId,
+    baseBranch,
+    headBranch,
+    headSha,
+    draft,
+    bodyMarker,
+    creatorActorId,
+    creatorActorType,
+    url,
+  },
+) {
+  assertString(bodyMarker, "body_marker", { max: 4096 });
+  assertPositiveInteger(prNumber, "pr_number");
+  assertPositiveInteger(repositoryId, "repository_id");
+  assertPositiveInteger(headRepositoryId, "head_repository_id");
+  assertPositiveInteger(creatorActorId, "creator_actor_id");
+  assertString(baseBranch, "base_branch", { max: 1024 });
+  assertString(headBranch, "head_branch", { max: 1024 });
+  assertSha(headSha, "head_sha");
+  assertString(url, "url", { max: 4096 });
+  if (
+    !Array.isArray(matchingPrNumbers) ||
+    matchingPrNumbers.length !== 1 ||
+    matchingPrNumbers[0] !== prNumber
+  ) {
+    fail(
+      "WORKFLOW_PULL_REQUEST_AMBIGUOUS",
+      "pull-request reconciliation requires exactly one matching pull request",
     );
-  });
+  }
+  return recordActionObservation(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    actionId,
+    "CREATE_DRAFT_PULL_REQUEST",
+    () => ({
+      pr_number: prNumber,
+      matching_pr_numbers: [prNumber],
+      repository_id: repositoryId,
+      head_repository_id: headRepositoryId,
+      base_branch: baseBranch,
+      head_branch: headBranch,
+      head_sha: headSha,
+      draft,
+      body_marker: bodyMarker,
+      creator_actor_id: creatorActorId,
+      creator_actor_type: creatorActorType,
+      url,
+    }),
+  );
+}
+
+async function completeCodexTaskDispatch(storeRoot, workflow, paths, action) {
+  // The bound review must still be exactly the state that was bound before
+  // dispatch, and it must stay that way until ACTION_COMPLETED is
+  // persisted: the check and the completion commit share the review
+  // mutation lock, so a verdict can never slip in between them and predate
+  // the completed reviewer task.
+  return getReviewSnapshot(
+    storeRoot,
+    action.target.review_id,
+    async ({ summary }) => {
+      await requireReviewBinding(
+        storeRoot,
+        workflow,
+        action.target.review_id,
+      );
+      if (
+        summary.status !== "WAITING_FOR_REVIEW" ||
+        summary.state_version !== workflow.current_review.state_version
+      ) {
+        fail(
+          "WORKFLOW_REVIEW_TRANSITION_INVALID",
+          "local review changed before the reviewer task dispatch completed",
+          {
+            review_id: action.target.review_id,
+            bound_state_version: workflow.current_review.state_version,
+            observed_state_version: summary.state_version,
+            observed_status: summary.status,
+          },
+        );
+      }
+      return publicWorkflow(
+        await saveActionMutation(
+          paths,
+          workflow,
+          "ACTION_COMPLETED",
+          async (next) => {
+            next.reviewer_task = {
+              task_id: next.active_action.provider_response.task_id,
+              review_id: next.active_action.target.review_id,
+              reviewer_provider: "CODEX_TASK",
+              dispatch_marker: next.active_action.correlation_marker,
+              observed_at: next.active_action.provider_response.observed_at,
+            };
+            next.active_action.completed_at = now();
+            next.active_action = null;
+            next.phase = "WAIT_LOCAL_REVIEW";
+          },
+        ),
+      );
+    },
+  );
+}
+
+async function completeDraftPullRequest(storeRoot, workflow, paths, action) {
+  const response = action.provider_response;
+  const prClaim = claim(
+    "PULL_REQUEST",
+    {
+      repository_id: response.repository_id,
+      pr_number: response.pr_number,
+    },
+    workflow.workflow_id,
+    workflow.revision + 1,
+  );
+  const conflicting = (await collectActiveClaims(storeRoot)).find(
+    (existing) =>
+      existing.kind === prClaim.kind &&
+      existing.canonical_key_sha256 === prClaim.canonical_key_sha256 &&
+      existing.workflow_id !== workflow.workflow_id,
+  );
+  if (conflicting) {
+    fail(
+      "WORKFLOW_OWNERSHIP_CONFLICT",
+      `claim ${conflicting.kind} is owned by ${conflicting.workflow_id}`,
+      {
+        owner_workflow_id: conflicting.workflow_id,
+        claim_kind: conflicting.kind,
+        canonical_key_sha256: conflicting.canonical_key_sha256,
+      },
+    );
+  }
+  return publicWorkflow(
+    await saveActionMutation(
+      paths,
+      workflow,
+      "ACTION_COMPLETED",
+      async (next) => {
+        next.pull_request = {
+          repository_id: response.repository_id,
+          pr_number: response.pr_number,
+          base_branch: response.base_branch,
+          head_branch: response.head_branch,
+          url: response.url,
+        };
+        if (!next.claims.some((entry) => entry.kind === "PULL_REQUEST")) {
+          next.claims.push(structuredClone(prClaim));
+        }
+        next.active_action.completed_at = now();
+        next.active_action = null;
+        next.phase = "START_PUBLICATION";
+      },
+    ),
+  );
 }
 
 export async function completeWorkflowAction(
@@ -2071,67 +2734,60 @@ export async function completeWorkflowAction(
   actionId,
 ) {
   assertString(actionId, "action_id", { max: 1024 });
-  return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
+  // Peek at the action kind first: completing a pull-request creation adds a
+  // store-wide claim, and the claims lock must be acquired before the
+  // workflow lock to preserve the claims -> workflow -> review lock order
+  // that workflow start relies on.
+  const peeked = await readWorkflowRaw(workflowPaths(storeRoot, workflowId));
+  const peekedClaimsLock =
+    peeked.active_action?.kind === "CREATE_DRAFT_PULL_REQUEST";
+  const complete = async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
     const action = workflow.active_action;
     if (action?.action_id !== actionId || action.status !== "OBSERVED") {
       fail("WORKFLOW_ACTION_STATE_INVALID", "action must be OBSERVED");
     }
-    if (action.kind !== "CREATE_CODEX_REVIEWER_TASK") {
-      fail("WORKFLOW_ACTION_KIND_INVALID", "unsupported workflow action");
+    // The peek chose the lock nesting; the locked state must agree, or the
+    // claims lock this kind requires may not actually be held. A racing
+    // driver that guessed a future revision retries against fresh state.
+    if (
+      (action.kind === "CREATE_DRAFT_PULL_REQUEST") !== peekedClaimsLock
+    ) {
+      fail(
+        "WORKFLOW_ACTION_STATE_INVALID",
+        "the workflow changed while its completion locks were being acquired",
+        { retryable: true },
+      );
     }
-    // The bound review must still be exactly the state that was bound before
-    // dispatch, and it must stay that way until ACTION_COMPLETED is
-    // persisted: the check and the completion commit share the review
-    // mutation lock, so a verdict can never slip in between them and predate
-    // the completed reviewer task.
-    return getReviewSnapshot(
-      storeRoot,
-      action.target.review_id,
-      async ({ summary }) => {
-        await requireReviewBinding(
-          storeRoot,
+    if (action.kind === "CREATE_CODEX_REVIEWER_TASK") {
+      return completeCodexTaskDispatch(storeRoot, workflow, paths, action);
+    }
+    if (action.kind === "PUSH_TOPIC_BRANCH") {
+      return publicWorkflow(
+        await saveActionMutation(
+          paths,
           workflow,
-          action.target.review_id,
-        );
-        if (
-          summary.status !== "WAITING_FOR_REVIEW" ||
-          summary.state_version !== workflow.current_review.state_version
-        ) {
-          fail(
-            "WORKFLOW_REVIEW_TRANSITION_INVALID",
-            "local review changed before the reviewer task dispatch completed",
-            {
-              review_id: action.target.review_id,
-              bound_state_version: workflow.current_review.state_version,
-              observed_state_version: summary.state_version,
-              observed_status: summary.status,
-            },
-          );
-        }
-        return publicWorkflow(
-          await saveActionMutation(
-            paths,
-            workflow,
-            "ACTION_COMPLETED",
-            async (next) => {
-              next.reviewer_task = {
-                task_id: next.active_action.provider_response.task_id,
-                review_id: next.active_action.target.review_id,
-                reviewer_provider: "CODEX_TASK",
-                dispatch_marker: next.active_action.correlation_marker,
-                observed_at: next.active_action.provider_response.observed_at,
-              };
-              next.active_action.completed_at = now();
-              next.active_action = null;
-              next.phase = "WAIT_LOCAL_REVIEW";
-            },
-          ),
-        );
-      },
+          "ACTION_COMPLETED",
+          async (next) => {
+            next.active_action.completed_at = now();
+            next.active_action = null;
+            next.phase = "ENSURE_DRAFT_PR";
+          },
+        ),
+      );
+    }
+    if (action.kind === "CREATE_DRAFT_PULL_REQUEST") {
+      return completeDraftPullRequest(storeRoot, workflow, paths, action);
+    }
+    fail("WORKFLOW_ACTION_KIND_INVALID", "unsupported workflow action");
+  };
+  if (peeked.active_action?.kind === "CREATE_DRAFT_PULL_REQUEST") {
+    return withClaimsLock(storeRoot, async () =>
+      withWorkflowLock(storeRoot, workflowId, complete),
     );
-  });
+  }
+  return withWorkflowLock(storeRoot, workflowId, complete);
 }
 
 function findingFingerprint(summary) {
@@ -2510,10 +3166,19 @@ export async function releaseWorkflowClaims(
         );
         if (
           evidence == null ||
-          evidence.present !== false ||
           evidence.workflow_revision !== expectedRevision ||
           canonicalJson(evidence.target) !== canonicalJson(entry.target)
         ) {
+          return true;
+        }
+        // A branch or head ref must be proven absent. A GitHub pull request
+        // can never be deleted, so its claim is released by proving the
+        // exact pull request is no longer open.
+        if (entry.kind === "PULL_REQUEST") {
+          if (evidence.present !== true || evidence.open !== false) {
+            return true;
+          }
+        } else if (evidence.present !== false || "open" in evidence) {
           return true;
         }
         try {
@@ -2566,7 +3231,8 @@ export async function releaseWorkflowClaims(
               canonical_key_sha256: entry.canonical_key_sha256,
               target: structuredClone(entry.target),
               workflow_revision: evidence.workflow_revision,
-              present: false,
+              present: evidence.present,
+              ...(entry.kind === "PULL_REQUEST" ? { open: false } : {}),
               observed_at: evidence.observed_at,
             };
           }),

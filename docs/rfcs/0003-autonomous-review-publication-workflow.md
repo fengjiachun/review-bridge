@@ -383,7 +383,8 @@ Claims do not expire based on wall-clock time. A crash-resumed workflow can
 reacquire only its own claim. Cancellation or completion also does not silently
 release a branch or pull request that still exists; release or transfer
 requires an explicit operator action after a fresh external-state
-reconciliation. This prevents a stale workflow from resuming into objects that
+reconciliation that proves each branch and head ref absent and each bound
+pull request closed. This prevents a stale workflow from resuming into objects that
 another workflow has started to mutate.
 
 Under the store-wide claims lock, start reads every persisted workflow ledger,
@@ -1061,6 +1062,18 @@ The main risks and controls are:
   check, and thread-resolution proof carries the full head SHA.
 - **Duplicate external writes**: persist intent first, reconcile stable
   provider identities, and pause when absence or uniqueness cannot be proved.
+- **Diverted push target**: push-target integrity rests on the post-push
+  reconciliation, not on hardening the local `git push` invocation. The local
+  Git environment is trusted: a controller that can rewrite local Git
+  configuration or inject it through the environment already holds the gated
+  commit and can disclose it directly, so hardening the invocation defends
+  nothing it does not already control. A push diverted by such a rewrite
+  leaves the authorized remote without the gated commit, so the observation —
+  which reads the authorized remote and requires the gated SHA at the
+  authorized repository ID — fails and the workflow pauses rather than
+  completing. The push does still bind the immutable gated SHA and the pinned
+  URL from persisted intent so an advanced branch or a mistaken remote name
+  cannot substitute a different commit or destination.
 - **Cross-workflow interference**: atomically claim canonical local branches,
   GitHub head refs, and pull requests in a store-wide registry; never expire or
   steal a claim based only on time.
