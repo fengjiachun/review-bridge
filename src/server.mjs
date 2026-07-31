@@ -28,6 +28,7 @@ import {
   finalizePublicationGate,
   getPublication,
   getPublicationSummary,
+  readObservationFile,
   recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
@@ -88,13 +89,15 @@ const server = new McpServer(
     instructions:
       role === "author"
         ? "Create immutable local review tasks for an explicitly selected reviewer provider and finalize only CLEAN snapshots, or create an explicit remote-only publication authorization after direct operator approval."
-        : `Review immutable Codex snapshots bound to ${reviewerProvider}. For SUCCESSOR tasks, completely read the successor proof and exact delta, inspect relevant source, callers, contracts, and tests, and expand to the full patch whenever risk or uncertainty warrants it. For FULL tasks, completely read the full patch. Submit structured findings only after sufficient context is inspected.`,
+        : `Review immutable Codex snapshots bound to ${reviewerProvider}. For SUCCESSOR tasks the reviewed unit is the delta: completely read the successor proof and exact delta, then inspect callers, contracts, and tests with read_snapshot_file and search_snapshot. Read patch.diff only when the delta changes a cross-file contract, touches security or compatibility surfaces, or the proof itself fails to verify; a large delta is not by itself a reason. For FULL tasks read patch.diff through current_snapshot.patch_index, reading each file's byte range and skipping sections whose behavior the review does not depend on. Submit structured findings only after sufficient context is inspected.`,
   },
 );
 
+// Compact JSON on purpose: every byte here is a reviewer or author context
+// token, and pretty-printing buys nothing a model needs.
 function response(value) {
   return {
-    content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+    content: [{ type: "text", text: JSON.stringify(value) }],
   };
 }
 
@@ -500,7 +503,7 @@ if (role === "author") {
     {
       title: "Prepare local review",
       description:
-        "Capture an immutable Git snapshot, requirement, implementation scope, patch, test context, and explicit reviewer provider.",
+        "Capture an immutable Git snapshot, requirement, implementation scope, patch, test context, and explicit reviewer provider. Without parent_review_id the server selects a verifiable successor parent itself and records how it was selected; pass force_full_review to demand a full-patch review.",
       inputSchema: {
         repository_path: z.string(),
         base_ref: z.string(),
@@ -508,6 +511,7 @@ if (role === "author") {
         implementation_scope: z.string(),
         reviewer_provider: z.enum(REVIEWER_PROVIDERS),
         parent_review_id: z.string().optional(),
+        force_full_review: z.boolean().optional(),
       },
     },
     (input) =>
@@ -518,6 +522,7 @@ if (role === "author") {
         implementationScope: input.implementation_scope,
         reviewerProvider: input.reviewer_provider,
         parentReviewId: input.parent_review_id ?? null,
+        forceFullReview: input.force_full_review === true,
       }),
   );
 
@@ -771,18 +776,29 @@ if (role === "author") {
     {
       title: "Record atomic GitHub publication snapshot",
       description:
-        "Validate and persist one normalized GitHub observation covering pull-request identity, policy and checks, Codex evidence, and review threads.",
+        "Validate and persist one normalized GitHub observation covering pull-request identity, policy and checks, Codex evidence, and review threads. Pass observation_path with the collector's --out file; never retype the observation inline.",
       inputSchema: {
         review_id: z.string(),
         expected_revision: z.number().int().positive(),
-        observation: z.record(z.unknown()),
+        observation_path: z.string().optional(),
+        observation: z.record(z.unknown()).optional(),
       },
     },
-    (input) =>
-      recordGithubSnapshot(storeRoot, input.review_id, {
+    async (input) => {
+      if ((input.observation_path == null) === (input.observation == null)) {
+        throw new Error(
+          "provide exactly one of observation_path or observation",
+        );
+      }
+      const observation =
+        input.observation_path == null
+          ? input.observation
+          : await readObservationFile(input.observation_path);
+      return recordGithubSnapshot(storeRoot, input.review_id, {
         expectedRevision: input.expected_revision,
-        observation: input.observation,
-      }),
+        observation,
+      });
+    },
   );
 
   register(

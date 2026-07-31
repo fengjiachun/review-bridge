@@ -140,6 +140,13 @@ test("atomic writes are durable private replacements", async (t) => {
   await atomicWriteFile(file, '{"version":1}\n');
   assert.equal(await fsp.readFile(file, "utf8"), '{"version":1}\n');
   assert.equal((await fsp.stat(file)).mode & 0o777, 0o600);
+
+  // Replacing a file that was left world-readable must restore privacy: the
+  // rename installs a fresh 0600 file instead of writing through the old one.
+  await fsp.chmod(file, 0o644);
+  await atomicWriteFile(file, '{"version":2}\n');
+  assert.equal(await fsp.readFile(file, "utf8"), '{"version":2}\n');
+  assert.equal((await fsp.stat(file)).mode & 0o777, 0o600);
 });
 
 test("post-rename sync failures report an indeterminate write", async (t) => {

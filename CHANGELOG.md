@@ -1,5 +1,64 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `record_github_snapshot` accepts `observation_path`, and the packaged
+  collector accepts `--review-id` and `--out`, so a publication ledger and its
+  GitHub observation move between the store, the collector, and the ledger as
+  files instead of being retyped through the model.
+- `prepare_review` selects a successor parent itself when `parent_review_id` is
+  omitted, considering only gated tasks for the same repository and base SHA
+  whose gated head is a strict ancestor of the captured head, and still
+  requiring the full successor proof. `review_strategy.parent_selection`
+  reports `AUTOMATIC`, `EXPLICIT`, or `NONE`, and `force_full_review` demands a
+  full-patch review. An explicitly named parent must still match the
+  requirement exactly; server-side selection does not require it, because
+  authors reword requirements between rounds of the same work, and instead
+  records `parent_requirement` and `requirement_match` in the successor proof.
+  Candidates are matched on shared Git repository identity, so a parent gated
+  in one linked worktree is found from another, and ranked by ancestry
+  distance to the captured head rather than by gate recency, so gates landing
+  out of commit order cannot pull selection toward a farther parent. The collector's `--out` file
+  is replaced atomically through a fresh `0600` temp file, so reusing an
+  observation path never inherits looser permissions. With `--review-id` the
+  observation defaults into the private store beside the ledger, and an
+  explicit `--out` inside any Git worktree is refused, because an untracked
+  observation file would dirty the reviewed repository and fail
+  publication-gate verification.
+- `open_review` returns `patch_index`, the byte offset and length of each
+  file's section in `patch.diff`, so a reviewer can read the sections a review
+  depends on instead of the whole cumulative patch. The index is derived on
+  demand from the immutable patch the reviewer reads — never stored in or
+  trusted from the mutable ledger — is served only after the patch reproduces
+  the round's committed snapshot hash, covers every byte from offset zero, and
+  is null, requiring a whole-patch read, whenever those checks fail.
+  Finalizing the local gate likewise verifies the stored patch against its
+  snapshot commitment.
+  Past 400 files the index is
+  truncated but still spans the whole patch: a final `path: null` entry covers
+  the remainder, which reviewers must read in full. Snapshot capture forces
+  `core.quotePath=true` and header decoding is strict UTF-8, so a raw
+  non-UTF-8 filename byte can never produce a lossy but plausible path — such
+  sections stay `path: null` and are read in full. Quoted Git paths —
+  filenames with quotes, control bytes, or non-ASCII — are decoded, unquoted
+  headers are resolved by the equal-length structure of `a/X b/X` rather than
+  by searching for a separator a filename could legally contain, and any
+  section whose name still cannot be resolved — including renames — keeps
+  `path: null` and is read in full under the same rule. The index is advisory and is not part of the
+  snapshot commitment.
+
+### Changed
+
+- Reviewer instructions state decidable conditions for expanding a `SUCCESSOR`
+  review to the full patch, replacing the open-ended "whenever uncertainty
+  warrants it" that sent nearly every review back to reading everything.
+- `open_review` returns one compact descriptor per round plus the full current
+  snapshot, instead of every round in full alongside a duplicate copy of the
+  current one.
+- MCP responses are serialized without indentation.
+
 ## 0.4.3 - 2026-07-29
 
 ### Added

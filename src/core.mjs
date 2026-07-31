@@ -20,6 +20,8 @@ const MAX_OVERLAY_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT_FIELD = 200_000;
 const MAX_FINDINGS = 100;
 const MAX_READ_BYTES = 200_000;
+const MAX_PATCH_INDEX_ENTRIES = 400;
+const MAX_AUTOMATIC_PARENT_CANDIDATES = 3;
 
 function now() {
   return new Date().toISOString();
@@ -215,10 +217,219 @@ async function captureOverlay(repositoryPath, roundRoot, relativePath) {
   };
 }
 
+const DIFF_HEADER = Buffer.from("diff --git ");
+const DIFF_HEADER_FOLLOWERS = [
+  "index ",
+  "old mode ",
+  "new mode ",
+  "new file mode ",
+  "deleted file mode ",
+  "similarity index ",
+  "dissimilarity index ",
+  "copy from ",
+  "rename from ",
+  "--- ",
+  "Binary files ",
+  "GIT binary patch",
+];
+
+// Git quotes a path containing quotes, control bytes, or (by default) any
+// non-ASCII byte, C-style: `diff --git "a/\346\226\207" "b/\346\226\207"`.
+// The escapes are ASCII, so the header line itself always decodes as UTF-8.
+const QUOTED_PATH_ESCAPES = {
+  a: 0x07,
+  b: 0x08,
+  t: 0x09,
+  n: 0x0a,
+  v: 0x0b,
+  f: 0x0c,
+  r: 0x0d,
+  '"': 0x22,
+  "\\": 0x5c,
+};
+
+function decodeQuotedGitPath(token) {
+  const inner = token.slice(1, -1);
+  const bytes = [];
+  for (let index = 0; index < inner.length; index += 1) {
+    if (inner[index] !== "\\") {
+      bytes.push(inner.charCodeAt(index));
+      continue;
+    }
+    index += 1;
+    const escape = inner[index];
+    if (escape >= "0" && escape <= "7") {
+      let octal = escape;
+      while (
+        octal.length < 3 &&
+        inner[index + 1] >= "0" &&
+        inner[index + 1] <= "7"
+      ) {
+        index += 1;
+        octal += inner[index];
+      }
+      bytes.push(parseInt(octal, 8));
+    } else if (escape in QUOTED_PATH_ESCAPES) {
+      bytes.push(QUOTED_PATH_ESCAPES[escape]);
+    } else {
+      return null;
+    }
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(
+      Uint8Array.from(bytes),
+    );
+  } catch {
+    return null;
+  }
+}
+
+function diffHeaderPath(header) {
+  let candidate;
+  if (header.endsWith('"')) {
+    let start = -1;
+    for (let index = header.length - 2; index >= 0; index -= 1) {
+      if (header[index] !== '"') {
+        continue;
+      }
+      let backslashes = 0;
+      for (let j = index - 1; j >= 0 && header[j] === "\\"; j -= 1) {
+        backslashes += 1;
+      }
+      if (backslashes % 2 === 0) {
+        start = index;
+        break;
+      }
+    }
+    if (start < 1 || header[start - 1] !== " ") {
+      return null;
+    }
+    const decoded = decodeQuotedGitPath(header.slice(start));
+    if (decoded == null || !decoded.startsWith("b/")) {
+      return null;
+    }
+    candidate = decoded.slice(2);
+  } else {
+    // An unquoted header is `diff --git a/X b/X`, and a filename may legally
+    // contain ` b/` (`a/foo b/bar b/foo b/bar`), so searching for the
+    // separator is ambiguous. The two sides have equal length, which pins the
+    // split to exactly one position; verify it instead of guessing. Renames
+    // (`a/old b/new`) fail the check and stay path-null, which the reviewer
+    // instructions turn into a mandatory read.
+    const content = header.slice(DIFF_HEADER.length);
+    const pathLength = (content.length - 5) / 2;
+    if (
+      !Number.isInteger(pathLength) ||
+      pathLength < 1 ||
+      !content.startsWith("a/") ||
+      content.slice(2 + pathLength, 5 + pathLength) !== " b/" ||
+      content.slice(2, 2 + pathLength) !== content.slice(5 + pathLength)
+    ) {
+      return null;
+    }
+    candidate = content.slice(5 + pathLength);
+  }
+  if (candidate === "") {
+    return null;
+  }
+  try {
+    return safeRelativePath(candidate);
+  } catch {
+    return null;
+  }
+}
+
+// Byte offsets of every per-file section in patch.diff, so a reviewer can read
+// only the sections that matter instead of the whole cumulative patch. The
+// index is advisory: it is not part of the snapshot commitment, and a reader
+// that ignores it still sees the exact same bytes.
+export function buildPatchIndex(patch) {
+  const starts = [];
+  let cursor = 0;
+  while (cursor <= patch.length - DIFF_HEADER.length) {
+    const found = patch.indexOf(DIFF_HEADER, cursor);
+    if (found < 0) {
+      break;
+    }
+    cursor = found + DIFF_HEADER.length;
+    if (found !== 0 && patch[found - 1] !== 10) {
+      continue;
+    }
+    let lineEnd = patch.indexOf(10, found);
+    if (lineEnd < 0) {
+      lineEnd = patch.length;
+    }
+    let nextEnd = patch.indexOf(10, lineEnd + 1);
+    if (nextEnd < 0) {
+      nextEnd = patch.length;
+    }
+    const nextLine = patch.subarray(lineEnd + 1, nextEnd).toString("utf8");
+    if (!DIFF_HEADER_FOLLOWERS.some((prefix) => nextLine.startsWith(prefix))) {
+      continue;
+    }
+    // The header must decode fatally: with core.quotePath=false Git emits
+    // raw non-UTF-8 filename bytes, and a lossy decode would substitute
+    // U+FFFD and label the section with a plausible path that exists in no
+    // tree. Undecodable headers stay path-null, which is a mandatory read.
+    let header = null;
+    try {
+      header = new TextDecoder("utf-8", { fatal: true }).decode(
+        patch.subarray(found, lineEnd),
+      );
+    } catch {
+      // fall through with header = null
+    }
+    starts.push({
+      offset: found,
+      path: header == null ? null : diffHeaderPath(header),
+    });
+  }
+  const entries = starts.map((entry, position) => ({
+    path: entry.path,
+    offset: entry.offset,
+    bytes:
+      (position + 1 < starts.length ? starts[position + 1].offset : patch.length) -
+      entry.offset,
+  }));
+  // Coverage is contiguous from offset zero by construction: bytes before the
+  // first recognized section — a legitimate separator byte, or a corrupted
+  // header — get a leading path-null entry, which the reviewer instructions
+  // turn into a mandatory read. Without this, an unrecognized prefix would be
+  // the one range no index entry admits to.
+  const firstOffset = entries.length > 0 ? entries[0].offset : patch.length;
+  if (firstOffset > 0) {
+    entries.unshift({ path: null, offset: 0, bytes: firstOffset });
+  }
+  if (entries.length > MAX_PATCH_INDEX_ENTRIES) {
+    // Truncation must not cost coverage: the index always spans the whole
+    // patch, so a bounded ledger entry cannot hide the tail from a reviewer.
+    // Everything past the cap collapses into one final path-null entry.
+    const kept = entries.slice(0, MAX_PATCH_INDEX_ENTRIES);
+    const last = kept.at(-1);
+    const remainderOffset = last.offset + last.bytes;
+    kept.push({
+      path: null,
+      offset: remainderOffset,
+      bytes: patch.length - remainderOffset,
+    });
+    return { entries: kept, truncated: true };
+  }
+  return { entries, truncated: false };
+}
+
 function appendUntrackedDiff(repositoryPath, relativePath) {
   const output = runGit(
     repositoryPath,
-    ["diff", "--no-index", "--binary", "--", "/dev/null", relativePath],
+    [
+      "-c",
+      "core.quotePath=true",
+      "diff",
+      "--no-index",
+      "--binary",
+      "--",
+      "/dev/null",
+      relativePath,
+    ],
     { allowExitCodes: [0, 1] },
   );
   return Buffer.from(output);
@@ -246,6 +457,10 @@ async function buildSnapshot({
 
   const trackedPatch = Buffer.from(
     runGit(repository, [
+      // Quoting is forced so diff headers stay decodable UTF-8 for the patch
+      // index even when the repository sets core.quotePath=false.
+      "-c",
+      "core.quotePath=true",
       "diff",
       "--binary",
       "--full-index",
@@ -387,6 +602,10 @@ async function snapshotHashFromReviewRound(
   reviewId,
   review,
   round,
+  // Callers that already hold the patch bytes pass them in, so hashing and
+  // any later use of the content see the same read and cannot be split by a
+  // concurrent file swap.
+  preloadedPatch = null,
 ) {
   if (
     !Number.isInteger(round?.round) ||
@@ -399,12 +618,14 @@ async function snapshotHashFromReviewRound(
   ) {
     throw new Error("review round is malformed");
   }
-  const patch = await fsp.readFile(
-    path.join(
-      roundDirectory(storeRoot, reviewId, round.round),
-      "patch.diff",
-    ),
-  );
+  const patch =
+    preloadedPatch ??
+    (await fsp.readFile(
+      path.join(
+        roundDirectory(storeRoot, reviewId, round.round),
+        "patch.diff",
+      ),
+    ));
   if (patch.length !== round.patch_bytes) {
     throw new Error("review patch length does not match its ledger");
   }
@@ -478,6 +699,11 @@ async function buildSuccessorArtifacts({
   requirement,
   manifest,
   roundRoot,
+  // An author naming a parent is asserting a continuation, so a requirement
+  // mismatch there is an author error and fails closed. Server-side selection
+  // asserts nothing: it reports the parent's requirement instead, because the
+  // gate attests the reviewed tree, not the prose that motivated the review.
+  requireRequirementMatch = true,
 }) {
   const fullStrategy = (fallbackReason = null) => ({
     strategy: {
@@ -594,7 +820,7 @@ async function buildSuccessorArtifacts({
   if (parentRound.base_sha !== manifest.base_sha) {
     return fullStrategy("parent and successor must use the same base SHA");
   }
-  if (parent.requirement !== requirement) {
+  if (requireRequirementMatch && parent.requirement !== requirement) {
     return fullStrategy("parent and successor must use the same requirement");
   }
   if (
@@ -668,6 +894,8 @@ async function buildSuccessorArtifacts({
       version: 1,
       parent_review_id: parent.id,
       parent_reviewer_provider: parentReviewerProvider,
+      parent_requirement: parent.requirement,
+      requirement_match: parent.requirement === requirement,
       parent_snapshot_hash: parent.clean_snapshot_hash,
       parent_gate_sha256: sha256(gateBytes),
       base_sha: manifest.base_sha,
@@ -713,6 +941,7 @@ function publicReview(review) {
       mode: "FULL",
       parent_review_id: null,
       fallback_reason: null,
+      parent_selection: "NONE",
     },
     current_round: review.current_round,
     max_rounds: review.max_rounds,
@@ -770,6 +999,7 @@ function reviewSummary(review) {
       mode: "FULL",
       parent_review_id: null,
       fallback_reason: null,
+      parent_selection: "NONE",
     },
     current_snapshot:
       currentSnapshot == null
@@ -808,6 +1038,202 @@ function reviewSummary(review) {
   };
 }
 
+// Candidate parents for an unattended successor review. Selection is a filter,
+// not a guess: a candidate must already be LOCAL_GATE_PASSED for the same
+// repository, base SHA, and requirement, and its gated head must be a strict
+// ancestor of the head being captured. Every candidate is still put through the
+// full successor proof in buildSuccessorArtifacts before it is used.
+async function automaticParentCandidates(storeRoot, { manifest, requirement }) {
+  const reviewsRoot = path.join(storeRoot, "reviews");
+  let entries;
+  try {
+    entries = await fsp.readdir(reviewsRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  // Linked worktrees of one repository have distinct working-directory paths,
+  // so candidates are matched on the shared Git repository identity, the same
+  // comparison the successor proof itself uses.
+  let currentIdentity;
+  try {
+    currentIdentity = await repositoryIdentity(manifest.repository_path);
+  } catch {
+    return [];
+  }
+  const identityCache = new Map([[manifest.repository_path, currentIdentity]]);
+  const candidates = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    let review;
+    try {
+      review = await loadReview(storeRoot, entry.name);
+    } catch {
+      continue;
+    }
+    if (
+      review.status !== "LOCAL_GATE_PASSED" ||
+      !Array.isArray(review.rounds)
+    ) {
+      continue;
+    }
+    let identity = identityCache.get(review.repository_path);
+    if (identity === undefined) {
+      try {
+        identity = await repositoryIdentity(review.repository_path);
+      } catch {
+        identity = null;
+      }
+      identityCache.set(review.repository_path, identity);
+    }
+    if (identity == null || identity !== currentIdentity) {
+      continue;
+    }
+    const cleanRound = review.rounds.find(
+      (round) => round?.snapshot_hash === review.clean_snapshot_hash,
+    );
+    if (
+      !cleanRound ||
+      cleanRound.base_sha !== manifest.base_sha ||
+      cleanRound.head_sha === manifest.head_sha ||
+      cleanRound.worktree_clean !== true
+    ) {
+      continue;
+    }
+    const ancestry = spawnSync(
+      "git",
+      ["merge-base", "--is-ancestor", cleanRound.head_sha, manifest.head_sha],
+      {
+        cwd: manifest.repository_path,
+        encoding: "utf8",
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+      },
+    );
+    if (ancestry.error || ancestry.status !== 0) {
+      continue;
+    }
+    // Rank by how far the gated head is behind the current head. Gate
+    // chronology cannot stand in for this: gates land out of commit order
+    // across linked worktrees, and a farther parent means a delta that
+    // re-includes already-reviewed commits.
+    const distanceResult = spawnSync(
+      "git",
+      [
+        "rev-list",
+        "--count",
+        `${cleanRound.head_sha}..${manifest.head_sha}`,
+      ],
+      {
+        cwd: manifest.repository_path,
+        encoding: "utf8",
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+      },
+    );
+    const distance = Number(distanceResult.stdout?.trim());
+    if (
+      distanceResult.error ||
+      distanceResult.status !== 0 ||
+      !Number.isSafeInteger(distance)
+    ) {
+      continue;
+    }
+    // Candidates travel as their validated directory names, never as the
+    // ledger's internal id: a corrupted stored id would otherwise throw in
+    // the successor proof and abort preparation outright, instead of being
+    // rejected by the proof's own id-mismatch fallback.
+    candidates.push({ id: entry.name, review, distance });
+  }
+  // Prefer a parent gated for the same stated requirement, then the nearest
+  // gated ancestor — the smallest delta — with gate recency only as a tie
+  // break between equally near heads.
+  return candidates
+    .sort((a, b) => {
+      const aMatch = a.review.requirement === requirement ? 0 : 1;
+      const bMatch = b.review.requirement === requirement ? 0 : 1;
+      return (
+        aMatch - bMatch ||
+        a.distance - b.distance ||
+        String(b.review.updated_at ?? "").localeCompare(
+          String(a.review.updated_at ?? ""),
+        )
+      );
+    })
+    .slice(0, MAX_AUTOMATIC_PARENT_CANDIDATES)
+    .map((candidate) => candidate.id);
+}
+
+async function resolveReviewStrategy({
+  storeRoot,
+  parentReviewId,
+  forceFullReview,
+  repositoryPath,
+  requirement,
+  manifest,
+  roundRoot,
+}) {
+  if (forceFullReview) {
+    return {
+      strategy: {
+        mode: "FULL",
+        parent_review_id: null,
+        fallback_reason: "full review requested by the author",
+        parent_selection: "NONE",
+      },
+      successor: null,
+    };
+  }
+  if (parentReviewId != null) {
+    const explicit = await buildSuccessorArtifacts({
+      storeRoot,
+      parentReviewId,
+      repositoryPath,
+      requirement,
+      manifest,
+      roundRoot,
+    });
+    return {
+      ...explicit,
+      strategy: { ...explicit.strategy, parent_selection: "EXPLICIT" },
+    };
+  }
+  const candidates = await automaticParentCandidates(storeRoot, {
+    manifest,
+    requirement,
+  });
+  let lastFallbackReason = null;
+  for (const candidate of candidates) {
+    const result = await buildSuccessorArtifacts({
+      storeRoot,
+      parentReviewId: candidate,
+      repositoryPath,
+      requirement,
+      manifest,
+      roundRoot,
+      requireRequirementMatch: false,
+    });
+    if (result.strategy.mode === "SUCCESSOR") {
+      return {
+        ...result,
+        strategy: { ...result.strategy, parent_selection: "AUTOMATIC" },
+      };
+    }
+    lastFallbackReason = `${candidate}: ${result.strategy.fallback_reason}`;
+  }
+  return {
+    strategy: {
+      mode: "FULL",
+      parent_review_id: null,
+      fallback_reason:
+        lastFallbackReason == null
+          ? null
+          : `no verifiable parent (${lastFallbackReason})`,
+      parent_selection: "NONE",
+    },
+    successor: null,
+  };
+}
+
 export async function prepareReview(
   storeRoot,
   {
@@ -816,6 +1242,7 @@ export async function prepareReview(
     requirement,
     implementationScope,
     parentReviewId = null,
+    forceFullReview = false,
     reviewerProvider = "CLAUDE_DESKTOP",
   },
 ) {
@@ -839,9 +1266,10 @@ export async function prepareReview(
       roundRoot,
       writeFiles: true,
     });
-    const successorResult = await buildSuccessorArtifacts({
+    const successorResult = await resolveReviewStrategy({
       storeRoot,
       parentReviewId,
+      forceFullReview,
       repositoryPath: manifest.repository_path,
       requirement,
       manifest,
@@ -1067,6 +1495,7 @@ export async function exportHumanArbitration(
       mode: "FULL",
       parent_review_id: null,
       fallback_reason: null,
+      parent_selection: "NONE",
     },
     requirement: review.requirement,
     implementation_scope: review.implementation_scope,
@@ -1325,19 +1754,32 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
   });
   const successorResult =
     review.review_strategy?.mode === "SUCCESSOR"
-      ? await buildSuccessorArtifacts({
-          storeRoot,
-          parentReviewId: review.review_strategy.parent_review_id,
-          repositoryPath: manifest.repository_path,
-          requirement: review.requirement,
-          manifest,
-          roundRoot,
-        })
+      ? await (async () => {
+          const rebuilt = await buildSuccessorArtifacts({
+            storeRoot,
+            parentReviewId: review.review_strategy.parent_review_id,
+            repositoryPath: manifest.repository_path,
+            requirement: review.requirement,
+            manifest,
+            roundRoot,
+            requireRequirementMatch:
+              review.review_strategy.parent_selection !== "AUTOMATIC",
+          });
+          return {
+            ...rebuilt,
+            strategy: {
+              ...rebuilt.strategy,
+              parent_selection:
+                review.review_strategy.parent_selection ?? "EXPLICIT",
+            },
+          };
+        })()
       : {
           strategy: review.review_strategy ?? {
             mode: "FULL",
             parent_review_id: null,
             fallback_reason: null,
+            parent_selection: "NONE",
           },
           successor: null,
         };
@@ -1491,6 +1933,20 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
     throw new Error("clean snapshot is not present in the review ledger");
   }
   await verifySuccessorArtifacts(storeRoot, reviewId, cleanRound);
+  // The gate attests the snapshot the reviewer actually saw, so the stored
+  // patch must still reproduce the committed hash — not merely the right
+  // byte length — before the live worktree is compared against it.
+  const storedHash = await snapshotHashFromReviewRound(
+    storeRoot,
+    reviewId,
+    review,
+    cleanRound,
+  );
+  if (storedHash !== review.clean_snapshot_hash) {
+    throw new Error(
+      "stored review patch does not match its snapshot commitment",
+    );
+  }
   const { manifest } = await buildSnapshot({
     repositoryPath: review.repository_path,
     baseRef: review.base_ref,
@@ -1777,6 +2233,58 @@ export async function searchSnapshot(
   return results;
 }
 
+function roundDescriptor(round) {
+  return {
+    round: round.round,
+    base_sha: round.base_sha,
+    head_sha: round.head_sha,
+    snapshot_hash: round.snapshot_hash,
+    changed_file_count: round.changed_files.length,
+    deleted_file_count: round.deleted_files.length,
+    overlay_count: round.overlays.length,
+    patch_bytes: round.patch_bytes,
+    worktree_clean: round.worktree_clean,
+    successor:
+      round.successor == null
+        ? null
+        : {
+            parent_review_id: round.successor.parent_review_id,
+            delta_bytes: round.successor.delta_bytes,
+            changed_file_count: round.successor.changed_files.length,
+          },
+  };
+}
+
+// The index is always derived, on demand, from the same immutable patch.diff
+// the reviewer reads — never from the mutable review ledger. Deriving both
+// from one file makes it structurally impossible for a tampered index to hide
+// content the artifact read would return; a stored index would have to be
+// separately verified, and it sits outside the snapshot commitment. Before
+// the index is served, the patch bytes must also reproduce the round's
+// committed snapshot_hash — a same-length corruption would otherwise shift
+// which sections the index recognizes. Any failure yields no index at all,
+// and the reviewer instructions then require reading the whole patch.
+async function patchIndexForRound(storeRoot, reviewId, review, round) {
+  try {
+    const patch = await fsp.readFile(
+      path.join(roundDirectory(storeRoot, reviewId, round.round), "patch.diff"),
+    );
+    const snapshotHash = await snapshotHashFromReviewRound(
+      storeRoot,
+      reviewId,
+      review,
+      round,
+      patch,
+    );
+    if (snapshotHash !== round.snapshot_hash) {
+      return { entries: null, truncated: false };
+    }
+    return buildPatchIndex(patch);
+  } catch {
+    return { entries: null, truncated: false };
+  }
+}
+
 export async function openReview(
   storeRoot,
   reviewId,
@@ -1785,9 +2293,21 @@ export async function openReview(
   const review = await loadReview(storeRoot, reviewId);
   requireReviewerProvider(review, reviewerProvider);
   const current = findRound(review, review.current_round);
+  const patchIndex = await patchIndexForRound(
+    storeRoot,
+    review.id,
+    review,
+    current,
+  );
+  const { rounds, ...rest } = publicReview(review);
   return {
-    ...publicReview(review),
-    current_snapshot: current,
+    ...rest,
+    rounds: rounds.map(roundDescriptor),
+    current_snapshot: {
+      ...current,
+      patch_index: patchIndex.entries,
+      patch_index_truncated: patchIndex.truncated,
+    },
     artifacts: [
       ...(current.successor == null
         ? []

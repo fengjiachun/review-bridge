@@ -77,12 +77,22 @@ claim target, and the operator explicitly requests cleanup.
 4. If the user intends to publish the change, create a topic branch and commit
    the intended diff before review. Commit later fixes before rereview. This
    lets the local gate attest the exact commit that will become the PR head.
-5. If this task is a committed continuation of a prior
-   `LOCAL_GATE_PASSED` task for the same repository, immutable base SHA, and
-   requirement, pass that task as `parent_review_id`. The server uses
-   `SUCCESSOR` only when the parent gate, commit ancestry, and clean worktrees
-   verify; otherwise it records an explicit `FULL` fallback. Never choose a
-   parent merely because it is recent.
+5. Leave `parent_review_id` unset unless you have a specific parent in mind.
+   The server then selects one itself, considering only tasks that are already
+   `LOCAL_GATE_PASSED` for the same repository and immutable base SHA and whose
+   gated head is a strict ancestor of the head being captured; each candidate
+   still has to pass the full successor proof. It prefers a parent gated for
+   the same requirement, and when none exists it records the parent's
+   requirement and `requirement_match: false` in the proof so the reviewer
+   knows the gate was granted while reviewing for different work. Naming a
+   parent explicitly still requires the requirement to match exactly, because
+   there a mismatch means you picked the wrong parent. The
+   result reports `review_strategy.parent_selection` as `AUTOMATIC`,
+   `EXPLICIT`, or `NONE`. Pass `parent_review_id` to pin a specific parent, and
+   `force_full_review: true` to demand a full-patch review. Prefer letting a
+   verified `SUCCESSOR` stand: on a long-lived branch its delta is a small
+   fraction of the cumulative patch, and re-reviewing already-gated code costs
+   the reviewer far more context than it buys.
 6. Choose `reviewer_provider` explicitly:
    - `CLAUDE_DESKTOP` for a fresh Claude Desktop conversation.
    - `CODEX_TASK` for a newly created Codex task that is not a fork of the
@@ -100,10 +110,12 @@ claim target, and the operator explicitly requests cleanup.
    ID and a request to follow the packaged reviewer skill. A round-two
    rereview of the same ID may stay in that reviewer context.
 10. Require the reviewer to follow the returned strategy. For `SUCCESSOR`, it
-    must read `successor.json` and all of `successor.diff`, inspect changed
-    files plus relevant callers, contracts, and tests, and expand to
-    `patch.diff` whenever risk or uncertainty warrants it. For `FULL`, it must
-    read the entire `patch.diff`.
+    must read `successor.json` and all of `successor.diff` and inspect changed
+    files plus relevant callers, contracts, and tests; it expands to
+    `patch.diff` only for a cross-file contract change, a security or
+    compatibility surface, or a proof that fails to verify. For `FULL`, it
+    reads `patch.diff` through `current_snapshot.patch_index` and reports which
+    sections it skipped.
 11. Use `wait_for_review_state` with the recorded `state_version` to observe the
    transition without repeatedly loading the full ledger. It waits 25 seconds
    by default and accepts at most 30 seconds. A `timed_out` result is expected
@@ -216,10 +228,13 @@ For either mode:
    `local_gate_head_sha` input remains compatible only for older local-ledger
    callers.
 4. Call `start_publication`. If its immutable baseline contains any request,
-   call `get_publication`, supply that returned JSON to the packaged read-only
-   `../../scripts/collect-github-observation.mjs` helper resolved relative to
-   this SKILL, and call
-   `record_github_snapshot` with its output. Then call
+   run the packaged read-only `../../scripts/collect-github-observation.mjs`
+   helper resolved relative to this SKILL as `--review-id <review_id>`, and
+   call `record_github_snapshot` with the `observation_path` the helper prints.
+   The helper reads the ledger from the store and writes the observation into
+   the private store beside it — never into a repository worktree, where an
+   untracked observation would dirty the tree and fail gate verification — so
+   neither payload passes through this conversation. Then call
    `get_publication_summary`, present its complete
    `required_request_refs` and `required_ambiguous_results` sets to the human,
    and call `acknowledge_codex_review_ambiguity` only after direct approval of
@@ -242,20 +257,22 @@ For either mode:
    trigger-shaped Codex review request manually or outside this sequence. A
    crash between post and binding leaves an unbound request and must fail
    closed.
-6. Call `get_publication` and supply its returned JSON to the packaged
-   `../../scripts/collect-github-observation.mjs` helper resolved relative to
-   this SKILL. The helper uses the user's authenticated `gh` CLI in read-only
+6. Run the packaged `../../scripts/collect-github-observation.mjs` helper
+   resolved relative to this SKILL as `--review-id <review_id>`.
+   The helper uses the user's authenticated `gh` CLI in read-only
    mode to collect the PR and both base comparisons, applicable rules, two
    independent branch reads, classic protection when applicable, every
    check-run page using `filter=all`, every commit-status page, all three Codex
    feeds, and all review-thread pages. It
    canonicalizes GitHub timestamps to UTC milliseconds, preserves pagination
    proof, and fails closed when policy evidence is unavailable. Call
-   `record_github_snapshot` with its complete output, then use
-   `get_publication_summary` for the compact revision, blocker, exact
-   acknowledgement sets, gate state, and `next_action`. Use the full
-   `get_publication` result again only as the next collector input or for an
-   audit that needs the complete ledger.
+   `record_github_snapshot` with the `observation_path` the helper prints,
+   then use `get_publication_summary` for the compact revision, blocker,
+   exact acknowledgement sets, gate state, and `next_action`. Never paste an
+   observation or a ledger into a tool call or a shell heredoc: the helper
+   reads and writes those files itself, and retyping them costs more than every
+   other step of this workflow combined. Call `get_publication` only for an
+   audit that genuinely needs the complete ledger in the transcript.
 7. For adapter version 2, prefer a clean issue comment or findings review that
    echoes the exact current Review Bridge request ID. When the GitHub Codex App
    omits it, accept only the server-replayed fallback of exactly one recorded
@@ -280,8 +297,9 @@ For either mode:
     new local Review Bridge task in `LOCAL_GATE` mode or call
     `authorize_remote_publication` again in `REMOTE_ONLY` mode. A new commit
     invalidates this ledger and its prior GitHub Codex result.
-10. After `MERGE_READY`, use the packaged collector for one final fresh GitHub
-    observation and call `record_github_snapshot`, then call
+10. After `MERGE_READY`, run the packaged collector once more with
+    `--review-id <review_id>` for a final fresh GitHub observation and call
+    `record_github_snapshot` with the printed `observation_path`, then call
     `finalize_publication_gate`. Immediately before merge call `verify_publication_gate`;
     only `valid: true` authorizes the next operation. Merge with the returned full
     `head_sha` using a head-matching operation such as

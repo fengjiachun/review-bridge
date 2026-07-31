@@ -104,6 +104,45 @@ function parseJsonObject(content, code, message) {
   return value;
 }
 
+// Observations are collector output, not model output. Reading the collector's
+// file directly keeps a multi-megabyte payload out of the transcript entirely;
+// the ledger validates the same bytes either way.
+export async function readObservationFile(filePath) {
+  if (typeof filePath !== "string" || filePath.trim() === "") {
+    fail("INVALID_INPUT", "observation_path must be a non-empty string");
+  }
+  const resolved = path.resolve(filePath);
+  let stat;
+  try {
+    stat = await fsp.stat(resolved);
+  } catch (error) {
+    fail(
+      "OBSERVATION_FILE_UNREADABLE",
+      `cannot read observation file: ${error.message}`,
+      { path: resolved, retryable: false },
+    );
+  }
+  if (!stat.isFile()) {
+    fail("OBSERVATION_FILE_UNREADABLE", "observation_path is not a regular file", {
+      path: resolved,
+      retryable: false,
+    });
+  }
+  if (stat.size > MAX_OBSERVATION_BYTES) {
+    fail(
+      "OBSERVATION_FILE_TOO_LARGE",
+      `observation file exceeds ${MAX_OBSERVATION_BYTES} bytes`,
+      { path: resolved, bytes: stat.size, retryable: false },
+    );
+  }
+  const content = await fsp.readFile(resolved);
+  return parseJsonObject(
+    content,
+    "OBSERVATION_FILE_MALFORMED",
+    "observation file is not a JSON object",
+  );
+}
+
 function nowIso(clock) {
   return new Date(clock()).toISOString();
 }

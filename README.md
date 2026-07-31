@@ -216,9 +216,27 @@ task, not a fork of the author task. This prevents authoring history and
 unrelated reviews from consuming the new task's context window.
 
 When a committed change continues a prior `LOCAL_GATE_PASSED` task for the same
-repository, base SHA, and requirement, pass its ID as `parent_review_id`.
-Review Bridge verifies the parent gate, clean committed snapshots, and commit
-ancestry. A valid `SUCCESSOR` task includes:
+repository, base SHA, and requirement, that task is the parent. Leave
+`parent_review_id` unset and Review Bridge finds the parent itself: it considers
+only gated tasks for that repository and base SHA whose gated head is a strict
+ancestor of the head being captured, and every candidate still has to pass the
+full successor proof — the parent gate, clean committed snapshots, and commit
+ancestry. `review_strategy.parent_selection` records whether the parent was
+`AUTOMATIC`, `EXPLICIT`, or `NONE`. Pass `parent_review_id` to pin a parent, or
+`force_full_review: true` to require a full-patch review.
+
+Requirement text is treated differently in the two cases. Naming a parent is an
+assertion that the task continues it, so a requirement mismatch fails closed —
+it means the wrong parent was named. Server-side selection asserts nothing:
+requirements are free text that authors reword between rounds of the same work,
+so equality there would reject nearly every real continuation. Selection prefers
+a parent gated for the same requirement, and otherwise records the parent's
+requirement and `requirement_match: false` in the proof. A reviewer that sees
+`requirement_match: false` knows the parent's code was reviewed, but not with
+the current question in mind, and reads the gated code that question bears on
+rather than trusting the delta alone.
+
+A valid `SUCCESSOR` task includes:
 
 - `successor.json`, which binds the parent gate and snapshot, parent/current Git
   tree IDs, and delta hash;
@@ -226,11 +244,35 @@ ancestry. A valid `SUCCESSOR` task includes:
 - the normal full `patch.diff` and `manifest.json`, retained for expansion and
   final fail-closed snapshot verification.
 
-The reviewer must read the complete successor proof and delta, inspect the changed
-files plus relevant callers, contracts, and tests, and expand to the full patch
-whenever risk or uncertainty warrants it. If any successor precondition fails,
-the task records an explicit `FULL` fallback and the reviewer reviews the complete
-patch. The optimization changes context selection, not the final local gate.
+The reviewer must read the complete successor proof and delta and inspect the
+changed files plus relevant callers, contracts, and tests. It expands to the full
+patch only when the delta changes a contract used outside it, touches a security
+or compatibility surface, or the proof fails to verify; delta size alone is not a
+reason. If any successor precondition fails, the task records an explicit `FULL`
+fallback and the reviewer reviews the complete patch. The optimization changes
+context selection, not the final local gate.
+
+`patch.diff` is a cumulative base-to-head diff, so on a long-lived branch a
+`FULL` review re-reads code that earlier reviews already cleared. `open_review`
+therefore returns `patch_index` under `current_snapshot`: the byte offset and
+length of each file's section in `patch.diff`. A reviewer reads the sections
+the reviewed behavior depends on through `read_review_artifact` and reports
+which it skipped. The index always spans the entire patch: past 400 files it is
+truncated, `patch_index_truncated` is set, and one final `path: null` entry
+covers the whole remainder, which the reviewer must read in full.
+
+The index is never stored: it is derived on demand from the same immutable
+`patch.diff` the reviewer reads, so an index that disagrees with the served
+bytes cannot exist, and nothing in the mutable ledger can redirect what a
+reviewer skips. Before the index is served, the patch must reproduce the
+round's committed `snapshot_hash`; coverage is contiguous from offset zero, so
+bytes before the first recognized section land in a leading `path: null` entry
+rather than outside the index. If the patch cannot be read or fails these
+checks, `patch_index` is null and the reviewer reads the whole patch. The
+local gate independently refuses to finalize when the stored patch no longer
+matches its commitment. The index
+is advisory and is not part of the snapshot commitment; a reader that ignores
+it sees the same bytes.
 
 ## State machine
 
@@ -345,23 +387,32 @@ not access GitHub or return the full ledger. When `next_action` is
 `POST_AND_RECORD_CODEX_REVIEW_REQUEST`, post the returned
 `codex_review_request.body` unchanged and bind the post with its
 `codex_review_request.request_id` when present. Adapter-version-1 ledgers
-return the legacy exact body without an ID. For a fresh snapshot, pass the
-full JSON returned by `get_publication` to the packaged read-only collector:
+return the legacy exact body without an ID. For a fresh snapshot, run the
+packaged read-only collector against the review ID:
 
 ```bash
-node dist/review-bridge-v0.4.3/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs \
-  publication.json > observation.json
+node dist/review-bridge-v0.4.3/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id>
 ```
 
 Run that command from the repository root after `npm run build`. Inside an
 installed Codex plugin, the workflow skill resolves the same helper as
 `../../scripts/collect-github-observation.mjs` relative to its own `SKILL.md`.
-The collector reads the target from the ledger, uses the authenticated `gh`
-CLI, follows every required REST and GraphQL page, canonicalizes GitHub
+The collector reads the ledger from the store itself, uses the authenticated
+`gh` CLI, follows every required REST and GraphQL page, canonicalizes GitHub
 timestamps to UTC milliseconds, and fails closed when required policy evidence
-is unavailable. Pass its output to `record_github_snapshot`. Do not read
-`publication.json` directly from the private store; use the MCP tool response
-as the collector input.
+is unavailable. It writes the observation into the private store beside the
+ledger and prints only a receipt; pass the printed path to
+`record_github_snapshot` as `observation_path`. An explicit `--out` is refused
+inside any Git worktree, because an untracked observation file would dirty the
+reviewed repository and fail publication-gate verification.
+
+Neither the ledger nor the observation should be routed through the reviewing
+or authoring model. Both run to tens of thousands of tokens, and a model that
+retypes them pays for the same bytes twice — once to read them and again to
+emit them — while adding a transcription failure mode the file handoff does not
+have. The collector still accepts a ledger path or stdin, and
+`record_github_snapshot` still accepts an inline `observation`, for callers that
+have already loaded the data by other means.
 
 The packaged Codex plugin also includes
 `scripts/inspect-publication-audit.mjs <review_id>` for read-only, full-chain
