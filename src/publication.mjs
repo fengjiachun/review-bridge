@@ -3103,6 +3103,36 @@ function replayCorrelatedResultAssociations(ledger) {
   return replayed;
 }
 
+/**
+ * The runs that actually decide a requirement: at most one per kind, filtered
+ * to the pinned app when the requirement pins one, and the latest by start
+ * time then run ID. Both the status and the progress fingerprint select
+ * through here, so a run that cannot change the status cannot change the
+ * fingerprint either.
+ */
+function decidingRunsFor(requirement, runs) {
+  const byKind = new Map();
+  for (const kind of ["CHECK_RUN", "COMMIT_STATUS"]) {
+    let matches = runs.filter(
+      (run) => run.run_kind === kind && run.context === requirement.context,
+    );
+    if (kind === "CHECK_RUN" && requirement.app_binding === "PINNED") {
+      matches = matches.filter(
+        (run) => run.app_id === requirement.required_app_id,
+      );
+    }
+    if (matches.length > 0) {
+      matches.sort(
+        (left, right) =>
+          Date.parse(left.started_at) - Date.parse(right.started_at) ||
+          left.run_id - right.run_id,
+      );
+      byKind.set(kind, matches.at(-1));
+    }
+  }
+  return byKind;
+}
+
 function checkRequiredRuns(requiredChecks) {
   if (requiredChecks.collection.status !== "COMPLETE") {
     return "EVIDENCE_INCOMPLETE";
@@ -3130,23 +3160,7 @@ function checkRequiredRuns(requiredChecks) {
   }
   let pending = false;
   for (const requirement of requirements) {
-    const byKind = new Map();
-    for (const kind of ["CHECK_RUN", "COMMIT_STATUS"]) {
-      let matches = requiredChecks.runs.filter(
-        (run) => run.run_kind === kind && run.context === requirement.context,
-      );
-      if (kind === "CHECK_RUN" && requirement.app_binding === "PINNED") {
-        matches = matches.filter((run) => run.app_id === requirement.required_app_id);
-      }
-      if (matches.length > 0) {
-        matches.sort(
-          (left, right) =>
-            Date.parse(left.started_at) - Date.parse(right.started_at) ||
-            left.run_id - right.run_id,
-        );
-        byKind.set(kind, matches.at(-1));
-      }
-    }
+    const byKind = decidingRunsFor(requirement, requiredChecks.runs);
     if (requirement.app_binding === "PINNED" && !byKind.has("CHECK_RUN")) {
       pending = true;
       continue;
@@ -4784,23 +4798,21 @@ function specificBlockers(ledger, derived) {
     return [];
   }
   if (derived.status === "CHECKS_FAILED") {
-    // Only declared requirements decide the status, so only they may enter the
-    // fingerprint. Including every failing run would let one flaky non-required
-    // check change the digest on every attempt and silently disable the stall
-    // detection this feeds.
-    const required = new Set(
-      observation.required_checks.requirements.map(
-        (requirement) => requirement.context,
-      ),
-    );
+    // Select exactly what decided the status. Matching on context alone would
+    // also pull in another app's run under a pinned requirement and superseded
+    // reruns, and those can move the digest without moving the status -- which
+    // would let an unchanged required failure on the same tree slip past the
+    // stall detection this feeds.
     return [
       ...new Set(
-        observation.required_checks.runs
-          .filter(
-            (run) =>
-              required.has(run.context) &&
-              FAILING_CONCLUSIONS.has(run.conclusion),
-          )
+        observation.required_checks.requirements
+          .flatMap((requirement) => [
+            ...decidingRunsFor(
+              requirement,
+              observation.required_checks.runs,
+            ).values(),
+          ])
+          .filter((run) => FAILING_CONCLUSIONS.has(run.conclusion))
           .map(
             (run) => `check:${run.run_kind}:${run.context}:${run.conclusion}`,
           ),

@@ -2103,6 +2103,101 @@ test("the remote wait itself cannot record a later head", async (t) => {
   );
 });
 
+test("the check fingerprint follows the runs that decided the status", async (t) => {
+  // A pinned requirement is decided by the pinned app's latest run only. A
+  // failing run from another app, or a superseded earlier rerun, must not move
+  // the digest -- it cannot move the status, so letting it move the digest
+  // would let an unchanged required failure on the same tree evade the stall
+  // detection.
+  const build = async (extraRuns) => {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    const workflow = await startAutonomousWorkflow(
+      state.store,
+      workflowInput(state.repository, state.baseSha),
+    );
+    const headSha = await commit(state.repository, "export const value = 2;\n");
+    const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+      state,
+      workflow,
+      headSha,
+      "one",
+    );
+    await reachRemoteWait(
+      state,
+      atPublication,
+      reviewId,
+      headSha,
+      Date.now(),
+      (payload) => {
+        const collection = payload.required_checks.collection;
+        const collectedAt = collection.policy_sources[0].collected_at;
+        collection.policy_sources.push({
+          kind: "CLASSIC_BRANCH_PROTECTION",
+          endpoint: "GET /fixture/classic",
+          collected_at: collectedAt,
+          status: "COMPLETE",
+          result: "SUCCESS",
+        });
+        payload.required_checks.policy = "REQUIRED";
+        payload.required_checks.requirements = [
+          {
+            context: "ci",
+            app_binding: "PINNED",
+            required_app_id: 7,
+            binding_sources: [
+              {
+                kind: "CLASSIC_BRANCH_PROTECTION",
+                field: "required_status_checks.contexts",
+                raw_representation: "NULL",
+              },
+            ],
+          },
+        ];
+        const decisive = {
+          run_kind: "CHECK_RUN",
+          run_id: 900,
+          context: "ci",
+          app_id: 7,
+          app_id_source: "CHECK_RUN_APP_ID",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          started_at: collection.collected_at,
+          completed_at: collection.collected_at,
+          head_sha: payload.pull_request.head_sha,
+        };
+        payload.required_checks.runs = [decisive, ...extraRuns(decisive)];
+        const source = collection.run_sources.find(
+          (entry) => entry.kind === "CHECK_RUN",
+        );
+        source.item_count = payload.required_checks.runs.length;
+        source.reported_total_count = payload.required_checks.runs.length;
+        return payload;
+      },
+    );
+    return getAutonomousPreReady(state.store, reviewId);
+  };
+
+  const plain = await build(() => []);
+  // Another app failing the same context, plus an older superseded rerun of
+  // the pinned app. Neither decides the requirement.
+  const noisy = await build((decisive) => [
+    { ...decisive, run_id: 901, app_id: 8 },
+    {
+      ...decisive,
+      run_id: 899,
+      started_at: new Date(
+        Date.parse(decisive.started_at) - 60_000,
+      ).toISOString(),
+    },
+  ]);
+
+  assert.equal(plain.status, "CHECKS_FAILED");
+  assert.equal(noisy.status, "CHECKS_FAILED");
+  assert.deepEqual(noisy.blockers, plain.blockers);
+  assert.equal(noisy.blocker_sha256, plain.blocker_sha256);
+});
+
 test("the version 3 gate carries both digests and verifies them independently", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
