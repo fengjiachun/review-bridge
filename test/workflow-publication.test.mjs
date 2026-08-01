@@ -31,6 +31,7 @@ import {
   getAutonomousWorkflowSummary,
   listAutonomousWorkflows,
   markWorkflowActionExecuting,
+  pauseAutonomousWorkflow,
   planCodexTaskDispatch,
   planDraftPullRequest,
   planWorkflowPush,
@@ -1685,6 +1686,184 @@ test("projections reporting different statuses never share a blocker digest", as
   assert.notEqual(clean.stale.blocker_sha256, clean.fresh.blocker_sha256);
   assert.notEqual(clean.stale.blocker_sha256, narrowed.stale.blocker_sha256);
   assert.notEqual(narrowed.stale.blocker_sha256, narrowed.fresh.blocker_sha256);
+});
+
+test("a non-adjacent repeat is still no progress", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+
+  // Oscillate the tree between two states while the finding stays identical.
+  // Every attempt differs from the one immediately before it, so comparing
+  // only the last attempt never stalls -- but the third attempt returns to a
+  // tree already proven not to clear that finding.
+  const contents = [
+    "export const value = 2;\n",
+    "export const value = 3;\n",
+    "export const value = 2;\n",
+  ];
+  let carried = { workflow_id: workflow.workflow_id, revision: workflow.revision };
+  let advanced = null;
+  const trees = [];
+  for (const [index, content] of contents.entries()) {
+    const headSha = await commit(state.repository, content);
+    trees.push(
+      git(state.repository, "rev-parse", `${headSha}^{tree}`),
+    );
+    const published = await gateAndPublishHead(
+      state,
+      carried,
+      headSha,
+      `attempt-${index}`,
+    );
+    const { workflow: waiting } = await reachRemoteWait(
+      state,
+      published.workflow,
+      published.reviewId,
+      headSha,
+      Date.now(),
+      (payload) => findingsResult(payload),
+    );
+    advanced = await advanceRemoteWorkflow(
+      state.store,
+      workflow.workflow_id,
+      waiting.revision,
+    );
+    if (advanced.status === "PAUSED") {
+      break;
+    }
+    assert.equal(advanced.phase, "ADDRESS_REMOTE_FINDINGS");
+    // gateAndPublishHead records the next head itself from a repair phase.
+    carried = {
+      workflow_id: workflow.workflow_id,
+      revision: advanced.revision,
+    };
+  }
+  assert.equal(trees[0], trees[2], "the fixture must actually oscillate");
+  assert.equal(advanced.status, "PAUSED");
+  assert.equal(advanced.pause.reason_code, "NO_PROGRESS");
+
+  // The match must be against the first attempt, not the one immediately
+  // before -- that is the whole point. Two attempts preceded this stop, and
+  // the adjacent one had a different tree.
+  const evidence = JSON.parse(advanced.pause.evidence);
+  assert.equal(advanced.remote_attempts.length, 3);
+  assert.equal(evidence.previous_remote_attempt.number, 1);
+  assert.equal(evidence.previous_remote_attempt.tree_sha, trees[0]);
+  assert.equal(advanced.remote_attempts[1].tree_sha, trees[1]);
+  assert.notEqual(trees[1], trees[0]);
+});
+
+test("a required history rewrite cannot be resumed", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const recorded = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    headSha,
+  );
+  const paused = await pauseAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    recorded.revision,
+    {
+      reasonCode: "HISTORY_REWRITE_REQUIRED",
+      blockedAction: "UPDATE_FROM_BASE",
+      evidence: "the fresh base does not apply without rewriting history",
+    },
+  );
+  assert.equal(paused.status, "PAUSED");
+
+  // Every recorded head must descend from the last, so a rewritten head is
+  // rejected however the workflow resumes. Resuming would re-derive the same
+  // stop, so it must say that instead.
+  await assert.rejects(
+    resumeAutonomousWorkflow(
+      state.store,
+      workflow.workflow_id,
+      paused.revision,
+      { operatorLabel: "Test Operator", rationale: "rewrote the branch" },
+    ),
+    /WORKFLOW_RESUME_INVALID/,
+  );
+  const cancelled = await cancelAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    paused.revision,
+    { operatorLabel: "Test Operator", rationale: "restart the work" },
+  );
+  assert.equal(cancelled.status, "CANCELLED");
+});
+
+test("an update-required base gap repairs through a new gated head", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    Date.now(),
+    (payload) => {
+      payload.required_checks.strict_policy = {
+        required: true,
+        sources: [
+          {
+            kind: "CLASSIC_BRANCH_PROTECTION",
+            field: "required_status_checks.strict",
+            value: true,
+          },
+        ],
+      };
+      payload.required_checks.collection.policy_sources.push({
+        kind: "CLASSIC_BRANCH_PROTECTION",
+        endpoint: "GET /fixture/classic",
+        collected_at:
+          payload.required_checks.collection.policy_sources[0].collected_at,
+        status: "COMPLETE",
+        result: "SUCCESS",
+      });
+      payload.pull_request.base_head_comparison.status = "BEHIND";
+      return payload;
+    },
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(repairing.phase, "UPDATE_FROM_BASE");
+  assert.equal(repairing.remote_attempts.length, 1);
+
+  const updated = await commit(state.repository, "export const value = 4;\n");
+  const repaired = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    repairing.revision,
+    updated,
+  );
+  assert.equal(repaired.phase, "PREPARE_LOCAL_REVIEW");
+  assert.equal(repaired.current_publication, null);
 });
 
 test("the version 3 gate carries both digests and verifies them independently", async (t) => {

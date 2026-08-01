@@ -151,13 +151,16 @@ run: ready-state changes and thread resolution remain unavailable.
 13. The server pauses `GITHUB_REVIEW_AMBIGUOUS` on an ambiguous or unbound
     result, `SEMANTIC_CONFLICT` on a conflicting merge state,
     `PUBLICATION_INVALIDATED` when the pull request or head diverged from the
-    authorization, and `NO_PROGRESS` when an attempt repeats the same
-    normalized blockers with the same head or the same tree. Pause yourself
+    authorization, and `NO_PROGRESS` when an attempt's normalized blockers and
+    either its head or its tree match any earlier recorded attempt — not only
+    the one before it. Pause yourself
     with `REQUIRED_CHECK_UNACTIONABLE` when logs or required evidence are
     unavailable, the failure is external or administrative, a required secret
     or permission is missing, or the fix would exceed the recorded
-    requirement; with `SEMANTIC_CONFLICT` or `HISTORY_REWRITE_REQUIRED` when
-    merging the fresh base does not apply cleanly. Never waive, remove, or
+    requirement; with `SEMANTIC_CONFLICT` when merging the fresh base does not
+    apply cleanly, and with `HISTORY_REWRITE_REQUIRED` when it would need a
+    rewrite — that last one cannot be resumed, because every workflow head must
+    descend from the last, so it ends in cancellation. Never waive, remove, or
     rename a required check, and never rebase or force-push to resolve one.
 14. Stop this implementation at `PRE_READY`. Marking the pull request ready,
     the draft-gate exception, and automatic thread resolution remain

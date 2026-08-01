@@ -354,8 +354,10 @@ workflow.
 otherwise complete. It is the same evaluator as the manual status in the same
 fail-closed order, with the draft flag alone ignored, so a blocker can never
 pass there and fail here; the manual `PR_DRAFT` and `MARK_PULL_REQUEST_READY`
-behavior is unchanged. A repeated attempt with the same normalized blockers and
-either the same head or the same tree pauses `NO_PROGRESS`.
+behavior is unchanged. An attempt whose normalized blockers and either head or
+tree match *any* earlier recorded attempt pauses `NO_PROGRESS`, so an
+oscillating tree or an alternating blocker cannot walk around the check by
+never repeating adjacently.
 
 This release stops at `PRE_READY`. The pull request stays draft throughout, so
 marking it ready, the draft-gate exception, and evidence-backed thread

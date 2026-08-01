@@ -3178,12 +3178,19 @@ export async function advanceRemoteWorkflow(
       fail("WORKFLOW_REPOSITORY_DRIFT", "repository identity changed");
     }
     const tree = treeSha(repository.path, workflow.current_head_sha);
-    const previous = workflow.remote_attempts.at(-1) ?? null;
-    const stalled =
-      previous != null &&
-      previous.blocker_sha256 === projection.blocker_sha256 &&
-      (previous.head_sha === workflow.current_head_sha ||
-        previous.tree_sha === tree);
+    // Compare against every recorded attempt, not just the last one. A repeat
+    // does not have to be adjacent: a tree that oscillates between two states,
+    // or a blocker that alternates with another, would otherwise return to a
+    // position already proven not to clear it and never stall. The conjunct
+    // with head or tree is what keeps this from firing on real progress.
+    const repeated =
+      workflow.remote_attempts.find(
+        (attempt) =>
+          attempt.blocker_sha256 === projection.blocker_sha256 &&
+          (attempt.head_sha === workflow.current_head_sha ||
+            attempt.tree_sha === tree),
+      ) ?? null;
+    const stalled = repeated != null;
     if (stalled || pauseReason != null) {
       // Resume where the operator's remedy is actually possible. Returning to
       // WAIT_PUBLICATION would strand every pause whose fix is a new commit:
@@ -3230,7 +3237,7 @@ export async function advanceRemoteWorkflow(
                 head_sha: workflow.current_head_sha,
                 tree_sha: tree,
                 ...(stalled
-                  ? { previous_remote_attempt: previous }
+                  ? { previous_remote_attempt: repeated }
                   : {}),
               }),
               resume_phase: resumePhase,
@@ -3378,6 +3385,16 @@ export async function resumeAutonomousWorkflow(
       fail(
         "WORKFLOW_RESUME_INVALID",
         "human-required local review must use human arbitration",
+      );
+    }
+    // A history rewrite is the one remedy this workflow structurally cannot
+    // accept: every recorded head must be a descendant of the last, so a
+    // rewritten head is rejected however the workflow resumes. Say so instead
+    // of resuming into a phase that will re-derive the same stop.
+    if (workflow.pause?.reason_code === "HISTORY_REWRITE_REQUIRED") {
+      fail(
+        "WORKFLOW_RESUME_INVALID",
+        "a required history rewrite cannot be resumed: every workflow head must descend from the last, so this workflow must be cancelled and the work restarted",
       );
     }
     const resumedPhase = workflow.pause?.resume_phase;
