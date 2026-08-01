@@ -2109,7 +2109,7 @@ test("the check fingerprint follows the runs that decided the status", async (t)
   // the digest -- it cannot move the status, so letting it move the digest
   // would let an unchanged required failure on the same tree evade the stall
   // detection.
-  const build = async (extraRuns, extraRequirements = []) => {
+  const build = async (extraRuns, extraRequirements = [], { requiredAppId = 7 } = {}) => {
     const state = await fixture();
     t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
     const workflow = await startAutonomousWorkflow(
@@ -2144,7 +2144,7 @@ test("the check fingerprint follows the runs that decided the status", async (t)
           {
             context: "ci",
             app_binding: "PINNED",
-            required_app_id: 7,
+            required_app_id: requiredAppId,
             binding_sources: [
               {
                 kind: "CLASSIC_BRANCH_PROTECTION",
@@ -2159,7 +2159,7 @@ test("the check fingerprint follows the runs that decided the status", async (t)
           run_kind: "CHECK_RUN",
           run_id: 900,
           context: "ci",
-          app_id: 7,
+          app_id: requiredAppId,
           app_id_source: "CHECK_RUN_APP_ID",
           status: "COMPLETED",
           conclusion: "FAILURE",
@@ -2230,12 +2230,81 @@ test("the check fingerprint follows the runs that decided the status", async (t)
     ],
   );
 
+  // The same context failing under a different pinned app is a different
+  // actionable check, so it must not serialize to the same key.
+  const otherApp = await build(
+    (decisive) => [{ ...decisive, run_id: 903, app_id: 11 }],
+    [],
+    { requiredAppId: 11 },
+  );
+
   assert.equal(plain.status, "CHECKS_FAILED");
   assert.equal(noisy.status, "CHECKS_FAILED");
   assert.deepEqual(noisy.blockers, plain.blockers);
   assert.equal(noisy.blocker_sha256, plain.blocker_sha256);
   assert.deepEqual(withCommitStatus.blockers, plain.blockers);
   assert.equal(withCommitStatus.blocker_sha256, plain.blocker_sha256);
+  assert.equal(otherApp.status, "CHECKS_FAILED");
+  assert.notEqual(otherApp.blocker_sha256, plain.blocker_sha256);
+});
+
+test("a recovered required check returns the workflow to the wait", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => failingCheck(payload),
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+    { clock: () => at + 2_100 },
+  );
+  assert.equal(repairing.phase, "ADDRESS_CHECK_FAILURE");
+
+  // The check is re-run remotely and passes with no code change. The repair
+  // phases are only left by a new commit, so without re-evaluation here the
+  // workflow would have to invent an empty commit or be cancelled.
+  const laterAt = at + 3_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 3,
+      observation: draftObservation(state, headSha, {
+        at: laterAt,
+        requestId: 100,
+        requestAt: at + 1_000,
+      }),
+    },
+    { clock: () => laterAt + 10 },
+  );
+  const recovered = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    repairing.revision,
+    { clock: () => laterAt + 20 },
+  );
+  assert.equal(recovered.status, "ACTIVE");
+  assert.equal(recovered.phase, "PRE_READY");
+  assert.equal(recovered.current_head_sha, headSha);
 });
 
 test("the version 3 gate carries both digests and verifies them independently", async (t) => {

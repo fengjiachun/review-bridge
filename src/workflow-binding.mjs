@@ -57,6 +57,14 @@ export function authorizationDigest(authorization) {
  * This deliberately validates only the binding contract. The full workflow
  * ledger invariants stay in workflow.mjs and still run on every workflow-side
  * operation.
+ *
+ * That includes the committed action audit, which this reader does not check.
+ * The mutable facts returned here -- status, current head, bound pull request
+ * -- are therefore trusted only as far as the private store is: an actor who
+ * can canonically rewrite workflow.json could restore a cancelled workflow or
+ * roll its head back, and the same access rewrites the gate and the
+ * publication ledger directly. Recorded as an accepted boundary under
+ * "Edited workflow ledger" in RFC 0003 security considerations.
  */
 export async function readWorkflowBinding(storeRoot, workflowId) {
   const paths = workflowPaths(storeRoot, workflowId);

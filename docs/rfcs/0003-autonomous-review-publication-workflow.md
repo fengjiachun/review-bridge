@@ -1096,6 +1096,19 @@ The main risks and controls are:
   completing. The push does still bind the immutable gated SHA and the pinned
   URL from persisted intent so an advanced branch or a mistaken remote name
   cannot substitute a different commit or destination.
+- **Edited workflow ledger**: the publication side reads the workflow through a
+  narrow, lock-free binding reader rather than the full loader, so it validates
+  the binding contract and the authorization digest but not the committed
+  action audit. An actor who can canonically rewrite `workflow.json` can
+  therefore restore a cancelled workflow or roll its head back and make a
+  superseded publication actionable again, where the full loader's audit
+  binding would reject it. This is accepted rather than closed: that actor
+  already has write access to the private store, and the same access rewrites
+  the local gate, the publication ledger, and its audit directly. The narrow
+  read exists so the publication and workflow locks need no shared ordering,
+  and the authorization digest it does verify still binds the immutable scope.
+  Every mutable fact it returns — status, current head, bound pull request —
+  is therefore trusted only to the extent the store itself is.
 - **Cross-workflow interference**: atomically claim canonical local branches,
   GitHub head refs, and pull requests in a store-wide registry; never expire or
   steal a claim based only on time.

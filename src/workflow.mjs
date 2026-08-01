@@ -3125,7 +3125,16 @@ export async function advanceRemoteWorkflow(
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
-    if (workflow.phase !== "WAIT_PUBLICATION") {
+    // A repair phase may re-evaluate too. A required check can fail and then
+    // pass on a rerun with no code change, and the repair phases are only
+    // exited by a new commit -- so without this the workflow would have to
+    // invent an empty commit or be cancelled after an external or
+    // administrative failure clears, which is a path this stage explicitly
+    // supports.
+    if (
+      workflow.phase !== "WAIT_PUBLICATION" &&
+      !REMOTE_REPAIR_PHASES.includes(workflow.phase)
+    ) {
       fail(
         "WORKFLOW_PHASE_INVALID",
         `cannot advance a remote wait in phase ${workflow.phase}`,
@@ -3155,8 +3164,13 @@ export async function advanceRemoteWorkflow(
       // stage may touch (unresolved threads). Keep waiting and only refresh the
       // revision the workflow has observed.
       const reachedPreReady = projection.status === "READY_TO_MARK";
+      // Returning from a repair phase is itself progress, so it must persist
+      // even when the publication revision has not moved.
+      const recovered =
+        !reachedPreReady && workflow.phase !== "WAIT_PUBLICATION";
       if (
         !reachedPreReady &&
+        !recovered &&
         workflow.current_publication.awaiting_revision === projection.revision
       ) {
         // Nothing moved. Polling is the normal shape of this phase, so an idle

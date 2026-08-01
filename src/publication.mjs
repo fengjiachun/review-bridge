@@ -4808,17 +4808,27 @@ function specificBlockers(ledger, derived) {
     // stall detection this feeds.
     return [
       ...new Set(
-        observation.required_checks.requirements
-          .flatMap((requirement) => [
+        observation.required_checks.requirements.flatMap((requirement) =>
+          [
             ...decidingRunsFor(
               requirement,
               observation.required_checks.runs,
             ).values(),
-          ])
-          .filter((run) => FAILING_CONCLUSIONS.has(run.conclusion))
-          .map(
-            (run) => `check:${run.run_kind}:${run.context}:${run.conclusion}`,
-          ),
+          ]
+            .filter((run) => FAILING_CONCLUSIONS.has(run.conclusion))
+            // The pinned app is part of the identity: two requirements can
+            // share a context while pinning different apps, and a failure
+            // moving between them is a different actionable check, not the
+            // same one repeating. Rerun-specific IDs stay out.
+            .map(
+              (run) =>
+                `check:${run.run_kind}:${run.context}:${
+                  requirement.app_binding === "PINNED"
+                    ? `app${requirement.required_app_id}`
+                    : "unbound"
+                }:${run.conclusion}`,
+            ),
+        ),
       ),
     ].sort();
   }
