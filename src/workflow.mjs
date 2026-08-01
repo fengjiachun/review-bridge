@@ -3170,9 +3170,15 @@ export async function advanceRemoteWorkflow(
       // The blocker cleared without a new commit -- a rerun passed. Returning
       // to the wait is the transition that lets the workflow continue at all,
       // since a repair phase is otherwise left only by recording a new head.
+      //
+      // Expired evidence is not a cleared blocker, it is the absence of an
+      // answer, and it arrives from the clock alone. Leaving a repair phase on
+      // it would abandon a repair in progress after five minutes and strand
+      // the finished fix, because the wait cannot record a head.
+      const stale = projection.status === "EVIDENCE_STALE";
       const nextPhase = reachedPreReady
         ? "PRE_READY"
-        : fromWait
+        : fromWait || stale
           ? null
           : "WAIT_PUBLICATION";
       if (

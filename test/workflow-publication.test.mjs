@@ -2389,6 +2389,63 @@ test("a check recovering while something else is pending returns to the wait", a
   assert.equal(returned.remote_attempts.length, 1);
 });
 
+test("expired evidence does not abandon a repair in progress", async (t) => {
+  // Staleness arrives from the clock alone, so it is the absence of an answer
+  // rather than a cleared blocker. Leaving the repair phase on it would strand
+  // the finished fix: the wait cannot record a head, and coming back would be
+  // scored as a fresh departure that matches the attempt already recorded.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => failingCheck(payload),
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+    { clock: () => at + 2_100 },
+  );
+  assert.equal(repairing.phase, "ADDRESS_CHECK_FAILURE");
+
+  // The repair takes longer than the five-minute freshness window.
+  const stale = at + 20 * 60 * 1000;
+  const polled = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    repairing.revision,
+    { clock: () => stale },
+  );
+  assert.equal(polled.status, "ACTIVE");
+  assert.equal(polled.phase, "ADDRESS_CHECK_FAILURE");
+  assert.equal(polled.remote_attempts.length, 1);
+
+  // The finished fix is still recordable, which is the whole point.
+  const repaired = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    polled.revision,
+    await commit(state.repository, "export const value = 3;\n"),
+  );
+  assert.equal(repaired.phase, "PREPARE_LOCAL_REVIEW");
+});
+
 test("the version 3 gate carries both digests and verifies them independently", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
