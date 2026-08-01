@@ -1217,7 +1217,9 @@ test("expired evidence never routes the remote wait anywhere", async (t) => {
   assert.equal(projection.status, "EVIDENCE_STALE");
   // The blockers keep naming the underlying failure rather than being replaced
   // by the staleness; the reported status is carried by the digest.
-  assert.deepEqual(projection.blockers, ["check:CHECK_RUN:ci:FAILURE"]);
+  assert.deepEqual(projection.blockers, [
+    "check:CHECK_RUN:ci:unbound:FAILURE",
+  ]);
 
   // Leaving WAIT_PUBLICATION is one way, so acting on expired evidence would
   // force a pointless commit, local review, push, and publication.
