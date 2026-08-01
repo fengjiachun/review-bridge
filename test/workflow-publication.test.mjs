@@ -1944,6 +1944,80 @@ test("a superseded publication stops being actionable before the push", async (t
   assert.equal(historical.authorization.head_sha, headSha);
 });
 
+test("no phase that can record a later head coexists with a live gate", async (t) => {
+  // Why gate verification needs no workflow-head conflict of its own: a gate
+  // is minted only at MERGE_READY, and from there the workflow can only reach
+  // PRE_READY, which cannot record a head. Every mutator that could follow a
+  // gate revokes it first.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => {
+      payload.pull_request.is_draft = false;
+      return payload;
+    },
+  );
+  await finalizePublicationGate(
+    state.store,
+    reviewId,
+    { expectedRevision: 3 },
+    { clock: () => at + 3_000 },
+  );
+  assert.equal(
+    (await verifyPublicationGate(state.store, reviewId, {
+      clock: () => at + 3_100,
+    })).valid,
+    true,
+  );
+
+  // The wait cannot record a head, and the only phase it can reach from a
+  // ready projection cannot either.
+  await assert.rejects(
+    recordWorkflowHead(
+      state.store,
+      workflow.workflow_id,
+      waiting.revision,
+      await commit(state.repository, "export const value = 3;\n"),
+    ),
+    /WORKFLOW_PHASE_INVALID/,
+  );
+  git(state.repository, "checkout", "--detach", headSha);
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+    { clock: () => at + 3_150 },
+  );
+  assert.equal(preReady.phase, "PRE_READY");
+  assert.equal(preReady.current_head_sha, headSha);
+  await assert.rejects(
+    recordWorkflowHead(
+      state.store,
+      workflow.workflow_id,
+      preReady.revision,
+      state.baseSha,
+    ),
+    /WORKFLOW_PHASE_INVALID/,
+  );
+});
+
 test("the version 3 gate carries both digests and verifies them independently", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

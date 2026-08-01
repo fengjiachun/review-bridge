@@ -4558,6 +4558,12 @@ function assessPublicationGate(
   if (gate == null) {
     return { state: "ABSENT", reviewerProvider: null, expiresAt: null };
   }
+  // No workflow-head conflict is threaded in here on purpose. A gate can only
+  // be minted at MERGE_READY, every mutator that could follow one revokes it,
+  // and no phase that can record a later head coexists with a live gate -- so
+  // a gate cannot outlive its workflow head in the first place. Cancellation
+  // is different and is already covered: it makes the binding throw, and
+  // verification turns that into GATE_MISMATCH.
   const derived = derivePublication(ledger);
   const expectedExpiresAt =
     ledger.latest_observation == null ? null : expiresAtFor(ledger);
