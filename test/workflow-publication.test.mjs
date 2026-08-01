@@ -2109,7 +2109,7 @@ test("the check fingerprint follows the runs that decided the status", async (t)
   // the digest -- it cannot move the status, so letting it move the digest
   // would let an unchanged required failure on the same tree evade the stall
   // detection.
-  const build = async (extraRuns) => {
+  const build = async (extraRuns, extraRequirements = []) => {
     const state = await fixture();
     t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
     const workflow = await startAutonomousWorkflow(
@@ -2153,6 +2153,7 @@ test("the check fingerprint follows the runs that decided the status", async (t)
               },
             ],
           },
+          ...extraRequirements,
         ];
         const decisive = {
           run_kind: "CHECK_RUN",
@@ -2167,11 +2168,17 @@ test("the check fingerprint follows the runs that decided the status", async (t)
           head_sha: payload.pull_request.head_sha,
         };
         payload.required_checks.runs = [decisive, ...extraRuns(decisive)];
-        const source = collection.run_sources.find(
-          (entry) => entry.kind === "CHECK_RUN",
-        );
-        source.item_count = payload.required_checks.runs.length;
-        source.reported_total_count = payload.required_checks.runs.length;
+        for (const kind of ["CHECK_RUN", "COMMIT_STATUS"]) {
+          const source = collection.run_sources.find(
+            (entry) => entry.kind === kind,
+          );
+          const count = payload.required_checks.runs.filter(
+            (run) => run.run_kind === kind,
+          ).length;
+          source.item_count = count;
+          source.reported_total_count =
+            kind === "CHECK_RUN" ? count : null;
+        }
         return payload;
       },
     );
@@ -2191,11 +2198,44 @@ test("the check fingerprint follows the runs that decided the status", async (t)
       ).toISOString(),
     },
   ]);
+  // A second requirement pinned to an app that produced no check run, with a
+  // failing commit status on its context. checkRequiredRuns treats that
+  // requirement as pending and never looks at the commit status, so it decides
+  // nothing -- and must not enter the fingerprint either. The first
+  // requirement still supplies the actual CHECKS_FAILED.
+  const withCommitStatus = await build(
+    (decisive) => [
+      {
+        ...decisive,
+        run_kind: "COMMIT_STATUS",
+        run_id: 902,
+        context: "legacy-ci",
+        app_id: null,
+        app_id_source: "COMMIT_STATUS_UNAVAILABLE",
+      },
+    ],
+    [
+      {
+        context: "legacy-ci",
+        app_binding: "PINNED",
+        required_app_id: 9,
+        binding_sources: [
+          {
+            kind: "CLASSIC_BRANCH_PROTECTION",
+            field: "required_status_checks.contexts",
+            raw_representation: "NULL",
+          },
+        ],
+      },
+    ],
+  );
 
   assert.equal(plain.status, "CHECKS_FAILED");
   assert.equal(noisy.status, "CHECKS_FAILED");
   assert.deepEqual(noisy.blockers, plain.blockers);
   assert.equal(noisy.blocker_sha256, plain.blocker_sha256);
+  assert.deepEqual(withCommitStatus.blockers, plain.blockers);
+  assert.equal(withCommitStatus.blocker_sha256, plain.blocker_sha256);
 });
 
 test("the version 3 gate carries both digests and verifies them independently", async (t) => {

@@ -3130,6 +3130,13 @@ function decidingRunsFor(requirement, runs) {
       byKind.set(kind, matches.at(-1));
     }
   }
+  // A pinned requirement with no run from its app decides nothing at all: a
+  // commit status cannot stand in for the pinned check, so it is not a
+  // deciding run either. Keeping this rule inside the selection is what makes
+  // the two callers agree -- applied after the call it reached only one.
+  if (requirement.app_binding === "PINNED" && !byKind.has("CHECK_RUN")) {
+    return new Map();
+  }
   return byKind;
 }
 
@@ -3161,10 +3168,6 @@ function checkRequiredRuns(requiredChecks) {
   let pending = false;
   for (const requirement of requirements) {
     const byKind = decidingRunsFor(requirement, requiredChecks.runs);
-    if (requirement.app_binding === "PINNED" && !byKind.has("CHECK_RUN")) {
-      pending = true;
-      continue;
-    }
     if (byKind.size === 0) {
       pending = true;
       continue;
