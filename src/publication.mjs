@@ -4702,8 +4702,22 @@ export async function getPublicationSummary(
  * The exact blocking items behind a projection status, normalized so that two
  * attempts can be compared for progress. Titles, bodies, timestamps, run IDs,
  * and URLs are excluded: only identities that a fix has to change.
+ *
+ * A blocking status always yields at least one entry. An arm that narrows its
+ * items -- to declared requirements, or to results at the authorized head --
+ * can otherwise produce an empty set for a status that does block, leaving the
+ * operator with a repair phase and nothing to act on. The status-and-reason
+ * pair is the floor every other arm already falls through to.
  */
 function normalizedBlockers(ledger, derived) {
+  const specific = specificBlockers(ledger, derived);
+  if (specific.length > 0 || derived.status === "MERGE_READY") {
+    return specific;
+  }
+  return [`${derived.status}:${derived.blockingReason ?? ""}`];
+}
+
+function specificBlockers(ledger, derived) {
   const observation = ledger.latest_observation;
   if (derived.status === "MERGE_READY" || observation == null) {
     return [];
