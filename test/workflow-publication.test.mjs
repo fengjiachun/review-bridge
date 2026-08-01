@@ -2389,6 +2389,80 @@ test("a check recovering while something else is pending returns to the wait", a
   assert.equal(returned.remote_attempts.length, 1);
 });
 
+test("a status that masks the blocker does not abandon a repair", async (t) => {
+  // derivePublication reports a pending pull-request state before it looks at
+  // the required checks, so PR_STATE_PENDING says nothing about whether the
+  // red check cleared. Treating it as cleared abandons the repair and strands
+  // the finished fix, exactly as expired evidence did.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => failingCheck(payload),
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+    { clock: () => at + 2_100 },
+  );
+  assert.equal(repairing.phase, "ADDRESS_CHECK_FAILURE");
+
+  // Same red check, but the merge state is momentarily unknown.
+  const laterAt = at + 3_000;
+  const masked = failingCheck(
+    draftObservation(state, headSha, {
+      at: laterAt,
+      requestId: 100,
+      requestAt: at + 1_000,
+    }),
+  );
+  masked.pull_request.mergeable = "UNKNOWN";
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: 3, observation: masked },
+    { clock: () => laterAt + 10 },
+  );
+  assert.equal(
+    (await getAutonomousPreReady(state.store, reviewId, {
+      clock: () => laterAt + 20,
+    })).status,
+    "PR_STATE_PENDING",
+  );
+
+  const polled = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    repairing.revision,
+    { clock: () => laterAt + 30 },
+  );
+  assert.equal(polled.phase, "ADDRESS_CHECK_FAILURE");
+  const repaired = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    polled.revision,
+    await commit(state.repository, "export const value = 3;\n"),
+  );
+  assert.equal(repaired.phase, "PREPARE_LOCAL_REVIEW");
+});
+
 test("expired evidence does not abandon a repair in progress", async (t) => {
   // Staleness arrives from the clock alone, so it is the absence of an answer
   // rather than a cleared blocker. Leaving the repair phase on it would strand

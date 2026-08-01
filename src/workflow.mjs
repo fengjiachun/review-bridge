@@ -49,6 +49,25 @@ const HEAD_RECORDING_PHASES = Object.freeze([
   "ADDRESS_LOCAL_FINDINGS",
   ...REMOTE_REPAIR_PHASES,
 ]);
+/**
+ * Projection statuses that prove a repair blocker is gone rather than merely
+ * unreported. derivePublication returns each of these only after it has
+ * evaluated the strict-base gap, the required checks, and the Codex verdict,
+ * so reaching one means those gates were actually examined and none of them
+ * wants a repair. An allowlist rather than a denylist: a status this does not
+ * know about keeps the workflow in its repair phase, which is the safe
+ * direction, since the wait cannot record a head.
+ */
+const CLEARED_OF_REPAIR_STATUSES = Object.freeze(
+  new Set([
+    "CHECKS_PENDING",
+    "GITHUB_REVIEW_PENDING",
+    "GITHUB_REVIEW_NOT_REQUESTED",
+    // Only unresolved threads reach this arm as CHANGES_REQUIRED; the machine
+    // findings route to a repair phase instead.
+    "CHANGES_REQUIRED",
+  ]),
+);
 const MAX_LISTED_BLOCKERS = 50;
 const MAX_AUDIT_BYTES = 4 * 1024 * 1024;
 const MAX_AUDIT_EVENT_BYTES = 256 * 1024;
@@ -3171,14 +3190,16 @@ export async function advanceRemoteWorkflow(
       // to the wait is the transition that lets the workflow continue at all,
       // since a repair phase is otherwise left only by recording a new head.
       //
-      // Expired evidence is not a cleared blocker, it is the absence of an
-      // answer, and it arrives from the clock alone. Leaving a repair phase on
-      // it would abandon a repair in progress after five minutes and strand
-      // the finished fix, because the wait cannot record a head.
-      const stale = projection.status === "EVIDENCE_STALE";
+      // It takes positive evidence, not the mere absence of a routing status.
+      // derivePublication reports a pending state, an incomplete collection,
+      // or expired evidence before it ever evaluates the base gap, the
+      // required checks, or the Codex verdict, so any of those can mask a
+      // repair blocker that is still standing. Leaving the phase on one of
+      // them abandons a repair in progress and strands the finished fix,
+      // because the wait cannot record a head.
       const nextPhase = reachedPreReady
         ? "PRE_READY"
-        : fromWait || stale
+        : fromWait || !CLEARED_OF_REPAIR_STATUSES.has(projection.status)
           ? null
           : "WAIT_PUBLICATION";
       if (
