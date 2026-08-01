@@ -3159,18 +3159,24 @@ export async function advanceRemoteWorkflow(
     }
     const repairPhase = remoteRepairPhase(projection);
     const pauseReason = remotePauseReason(projection);
+    // An attempt begins when the workflow leaves the wait, so only that
+    // transition records one or tests it for a stall. Re-evaluating from
+    // inside a repair phase just re-reads the projection: the operator is
+    // still working on the same attempt, and polling must not manufacture
+    // repeats of it.
+    const fromWait = workflow.phase === "WAIT_PUBLICATION";
     if (repairPhase == null && pauseReason == null) {
-      // Still settling, or blocked on something no autonomous action of this
-      // stage may touch (unresolved threads). Keep waiting and only refresh the
-      // revision the workflow has observed.
       const reachedPreReady = projection.status === "READY_TO_MARK";
-      // Returning from a repair phase is itself progress, so it must persist
-      // even when the publication revision has not moved.
-      const recovered =
-        !reachedPreReady && workflow.phase !== "WAIT_PUBLICATION";
+      // The blocker cleared without a new commit -- a rerun passed. Returning
+      // to the wait is the transition that lets the workflow continue at all,
+      // since a repair phase is otherwise left only by recording a new head.
+      const nextPhase = reachedPreReady
+        ? "PRE_READY"
+        : fromWait
+          ? null
+          : "WAIT_PUBLICATION";
       if (
-        !reachedPreReady &&
-        !recovered &&
+        nextPhase == null &&
         workflow.current_publication.awaiting_revision === projection.revision
       ) {
         // Nothing moved. Polling is the normal shape of this phase, so an idle
@@ -3181,8 +3187,29 @@ export async function advanceRemoteWorkflow(
       return publicWorkflow(
         await saveMutation(paths, workflow, async (next) => {
           next.current_publication.awaiting_revision = projection.revision;
-          if (reachedPreReady) {
-            next.phase = "PRE_READY";
+          if (nextPhase != null) {
+            next.phase = nextPhase;
+          }
+        }),
+      );
+    }
+    if (!fromWait && pauseReason == null) {
+      // Already repairing and the blocker still stands. Move only if the
+      // projection now implies a different repair; otherwise this is an idle
+      // poll of an attempt already recorded.
+      const changedPhase =
+        repairPhase !== workflow.phase ? repairPhase : null;
+      if (
+        changedPhase == null &&
+        workflow.current_publication.awaiting_revision === projection.revision
+      ) {
+        return publicWorkflow(workflow);
+      }
+      return publicWorkflow(
+        await saveMutation(paths, workflow, async (next) => {
+          next.current_publication.awaiting_revision = projection.revision;
+          if (changedPhase != null) {
+            next.phase = changedPhase;
           }
         }),
       );

@@ -2309,6 +2309,86 @@ test("a recovered required check returns the workflow to the wait", async (t) =>
   assert.equal(recovered.current_head_sha, headSha);
 });
 
+test("a check recovering while something else is pending returns to the wait", async (t) => {
+  // The PRE_READY case above is the one path where a missing return-to-wait
+  // arm is invisible. When the check clears but the review has not answered,
+  // the workflow must go back to WAIT_PUBLICATION -- a repair phase is
+  // otherwise left only by recording a new head.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => failingCheck(payload),
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+    { clock: () => at + 2_100 },
+  );
+  assert.equal(repairing.phase, "ADDRESS_CHECK_FAILURE");
+  assert.equal(repairing.remote_attempts.length, 1);
+
+  // Polling the same publication revision from the repair phase must not
+  // manufacture a repeat of the attempt that is already recorded.
+  const polled = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    repairing.revision,
+    { clock: () => at + 2_200 },
+  );
+  assert.equal(polled.status, "ACTIVE");
+  assert.equal(polled.phase, "ADDRESS_CHECK_FAILURE");
+  assert.equal(polled.revision, repairing.revision);
+  assert.equal(polled.remote_attempts.length, 1);
+
+  // The check passes on a rerun, but an unresolved thread still blocks. That
+  // is a blocker no repair phase of this stage may act on, so the workflow
+  // belongs back in the wait rather than stuck in the repair phase.
+  const laterAt = at + 3_000;
+  const cleared = draftObservation(state, headSha, {
+    at: laterAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  cleared.review_threads.total_count = 1;
+  cleared.review_threads.unresolved_count = 1;
+  cleared.review_threads.threads = [
+    { id: "thread-1", is_resolved: false, is_outdated: false },
+  ];
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: 3, observation: cleared },
+    { clock: () => laterAt + 10 },
+  );
+  const returned = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    repairing.revision,
+    { clock: () => laterAt + 20 },
+  );
+  assert.equal(returned.status, "ACTIVE");
+  assert.equal(returned.phase, "WAIT_PUBLICATION");
+  assert.equal(returned.remote_attempts.length, 1);
+});
+
 test("the version 3 gate carries both digests and verifies them independently", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
