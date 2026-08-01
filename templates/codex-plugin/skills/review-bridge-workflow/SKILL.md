@@ -126,8 +126,19 @@ run: ready-state changes and thread resolution remain unavailable.
     otherwise complete. Never treat the manual summary's
     `next_action: MARK_PULL_REQUEST_READY` as that proof; it fires on
     `PR_DRAFT` alone, before any other invariant is evaluated. Keep waiting
-    while checks or review are still settling. Unresolved review threads block
-    and are operator work in this version, not an autonomous repair loop.
+    while checks or review are still settling. `EVIDENCE_STALE` means the
+    observation aged out: collect a fresh one rather than acting on it.
+    Unresolved review threads block and are operator work in this version, not
+    an autonomous repair loop. An idle poll that observes no change costs no
+    workflow revision, so waiting needs no backoff bookkeeping.
+
+    When the projection reports `GITHUB_REVIEW_NOT_REQUESTED` — which is what
+    an acknowledged ambiguity leaves behind — post the exact
+    `codex_review_request.body` it returns and immediately bind it with
+    `record_codex_review_request`. Take that body only from this projection
+    while the pull request is draft: the manual summary evaluates `PR_DRAFT`
+    before Codex status and so never offers it, and the version-2 request ID is
+    server-derived with no other source.
 12. `advance_remote_workflow` routes an actionable machine finding to
     `ADDRESS_REMOTE_FINDINGS`, a failed required check to
     `ADDRESS_CHECK_FAILURE`, and a strict-policy base gap to

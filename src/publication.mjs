@@ -4709,12 +4709,15 @@ export async function getPublicationSummary(
  * operator with a repair phase and nothing to act on. The status-and-reason
  * pair is the floor every other arm already falls through to.
  */
-function normalizedBlockers(ledger, derived) {
+function normalizedBlockers(ledger, derived, effective = derived) {
   const specific = specificBlockers(ledger, derived);
-  if (specific.length > 0 || derived.status === "MERGE_READY") {
+  if (specific.length > 0 || effective.status === "MERGE_READY") {
     return specific;
   }
-  return [`${derived.status}:${derived.blockingReason ?? ""}`];
+  // The floor is keyed on the status actually reported. A projection that
+  // renames the status -- stale evidence over an otherwise clean ledger --
+  // must not inherit the empty set that only a genuinely ready one may have.
+  return [`${effective.status}:${effective.blockingReason ?? ""}`];
 }
 
 function specificBlockers(ledger, derived) {
@@ -4824,7 +4827,10 @@ export async function getAutonomousPreReady(
           : derived.status;
       // The blockers still describe the underlying derived state, so two
       // different failures never share a digest just because both are stale.
-      const blockers = normalizedBlockers(ledger, derived);
+      const blockers = normalizedBlockers(ledger, derived, {
+        status: ready ? "MERGE_READY" : status,
+        blockingReason: ready ? null : blockingReason,
+      });
       return {
         review_id: ledger.review_id,
         revision: ledger.revision,
@@ -4834,6 +4840,15 @@ export async function getAutonomousPreReady(
         blocking_reason: ready ? null : blockingReason,
         blockers,
         blocker_sha256: sha256(canonicalJson(blockers)),
+        // The manual summary reaches PR_DRAFT before it evaluates Codex status,
+        // so it never offers this body while a pull request is draft -- and an
+        // autonomous run is draft for its whole life. Without it the workflow
+        // could acknowledge an ambiguity and then have no way to ask for the
+        // next review, because the version-2 request ID is server-derived and
+        // has no other source.
+        ...(status === "GITHUB_REVIEW_NOT_REQUESTED"
+          ? { codex_review_request: publicationRequest(ledger) }
+          : {}),
         head_sha: publicationAuthorization.head_sha,
         is_draft: ledger.latest_observation?.pull_request?.is_draft ?? null,
         latest_observed_at: ledger.latest_observation?.observed_at ?? null,
@@ -4875,6 +4890,7 @@ export async function recordCodexReviewRequest(
     const ledger = await loadPublicationFile(paths, reviewId);
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
+    await requireWorkflowBinding(storeRoot, ledger);
     const originalLedger = clone(ledger);
     const sourceAuthorization = await readBoundAuthorization(
       paths,
@@ -5104,6 +5120,7 @@ export async function acknowledgeCodexReviewAmbiguity(
     const ledger = await loadPublicationFile(paths, reviewId);
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
+    await requireWorkflowBinding(storeRoot, ledger);
     const originalLedger = clone(ledger);
     const sourceAuthorization = await readBoundAuthorization(
       paths,

@@ -3154,10 +3154,20 @@ export async function advanceRemoteWorkflow(
       // Still settling, or blocked on something no autonomous action of this
       // stage may touch (unresolved threads). Keep waiting and only refresh the
       // revision the workflow has observed.
+      const reachedPreReady = projection.status === "READY_TO_MARK";
+      if (
+        !reachedPreReady &&
+        workflow.current_publication.awaiting_revision === projection.revision
+      ) {
+        // Nothing moved. Polling is the normal shape of this phase, so an idle
+        // check must not spend a revision and an audit event: a long wait would
+        // otherwise fill the audit log on its own.
+        return publicWorkflow(workflow);
+      }
       return publicWorkflow(
         await saveMutation(paths, workflow, async (next) => {
           next.current_publication.awaiting_revision = projection.revision;
-          if (projection.status === "READY_TO_MARK") {
+          if (reachedPreReady) {
             next.phase = "PRE_READY";
           }
         }),

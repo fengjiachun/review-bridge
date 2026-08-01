@@ -10,6 +10,7 @@ import {
   submitInitialReview,
 } from "../src/core.mjs";
 import {
+  acknowledgeCodexReviewAmbiguity,
   finalizePublicationGate,
   getAutonomousPreReady,
   getPublication,
@@ -1213,6 +1214,9 @@ test("expired evidence never routes the remote wait anywhere", async (t) => {
     clock: () => stale,
   });
   assert.equal(projection.status, "EVIDENCE_STALE");
+  // Stale-but-otherwise-clean must not inherit the empty blocker set that only
+  // a genuinely ready projection may carry.
+  assert.notDeepEqual(projection.blockers, []);
 
   // Leaving WAIT_PUBLICATION is one way, so acting on expired evidence would
   // force a pointless commit, local review, push, and publication.
@@ -1295,9 +1299,32 @@ test("cancelling the workflow revokes the publication it authorized", async (t) 
     { operatorLabel: "Test Operator", rationale: "abandon this change" },
   );
 
-  // The kill switch has to revoke what it granted.
+  // The kill switch has to revoke what it granted -- every mutator, not just
+  // the ones that read the projection.
   await assert.rejects(
     getAutonomousPreReady(state.store, reviewId),
+    /WORKFLOW_CANCELLED/,
+  );
+  await assert.rejects(
+    recordCodexReviewRequest(state.store, reviewId, {
+      expectedRevision: 3,
+      commentId: 300,
+      url: `https://github.com/example/review-bridge/issues/${PR_NUMBER}#issuecomment-300`,
+      createdAt: iso(at + 3_000),
+      requestedHeadSha: headSha,
+    }),
+    /WORKFLOW_CANCELLED/,
+  );
+  await assert.rejects(
+    acknowledgeCodexReviewAmbiguity(state.store, reviewId, {
+      expectedRevision: 3,
+      headSha,
+      requestRefs: [],
+      ambiguousResults: [],
+      acknowledgement: "NO_FURTHER_RESULTS_EXPECTED",
+      operatorLabel: "Test Operator",
+      rationale: "should never be accepted after cancellation",
+    }),
     /WORKFLOW_CANCELLED/,
   );
   await assert.rejects(
@@ -1488,6 +1515,116 @@ test("a blocking status always yields at least one blocker", async (t) => {
     advanced.remote_attempts[0].blocker_sha256,
     sha256(canonicalJson([])),
   );
+});
+
+test("an acknowledged ambiguity can still ask for the next review", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => {
+      payload.codex_review.results[0].verdict = "UNKNOWN";
+      return payload;
+    },
+  );
+  const ambiguous = await getAutonomousPreReady(state.store, reviewId);
+  assert.equal(ambiguous.status, "GITHUB_REVIEW_UNKNOWN");
+
+  const summary = await getPublicationSummary(state.store, reviewId);
+  await acknowledgeCodexReviewAmbiguity(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: summary.revision,
+      headSha,
+      requestRefs: summary.required_request_refs,
+      ambiguousResults: summary.required_ambiguous_results,
+      acknowledgement: "NO_FURTHER_RESULTS_EXPECTED",
+      operatorLabel: "Test Operator",
+      rationale: "the ambiguous result was inspected by hand",
+    },
+    { clock: () => at + 3_000 },
+  );
+
+  // The manual summary reaches PR_DRAFT before Codex status, and this rollout
+  // is draft for its whole life, so it can never hand back the request body.
+  const manual = await getPublicationSummary(state.store, reviewId);
+  assert.equal(manual.status, "PR_DRAFT");
+  assert.equal(manual.codex_review_request, undefined);
+
+  // The autonomous projection must, or the workflow could acknowledge an
+  // ambiguity and then have no way to ask for another review.
+  const projection = await getAutonomousPreReady(state.store, reviewId);
+  assert.equal(projection.status, "GITHUB_REVIEW_NOT_REQUESTED");
+  assert.equal(typeof projection.codex_review_request.body, "string");
+  assert.match(projection.codex_review_request.body, /@codex review/);
+});
+
+test("an idle remote poll costs neither a revision nor an audit event", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    Date.now(),
+    (payload) => {
+      payload.codex_review.results = [];
+      return payload;
+    },
+  );
+  const first = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(first.phase, "WAIT_PUBLICATION");
+
+  const auditPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "action-audit.jsonl",
+  );
+  const before = (await fsp.stat(auditPath)).size;
+  for (let index = 0; index < 5; index += 1) {
+    const idle = await advanceRemoteWorkflow(
+      state.store,
+      workflow.workflow_id,
+      first.revision,
+    );
+    assert.equal(idle.revision, first.revision);
+    assert.equal(idle.phase, "WAIT_PUBLICATION");
+  }
+  assert.equal((await fsp.stat(auditPath)).size, before);
 });
 
 test("the version 3 gate carries both digests and verifies them independently", async (t) => {
