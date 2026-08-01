@@ -1944,11 +1944,96 @@ test("a superseded publication stops being actionable before the push", async (t
   assert.equal(historical.authorization.head_sha, headSha);
 });
 
-test("no phase that can record a later head coexists with a live gate", async (t) => {
-  // Why gate verification needs no workflow-head conflict of its own: a gate
-  // is minted only at MERGE_READY, and from there the workflow can only reach
-  // PRE_READY, which cannot record a head. Every mutator that could follow a
-  // gate revokes it first.
+test("a gate minted before supersession stops verifying after it", async (t) => {
+  // A gate CAN outlive its workflow head: the publication's MERGE_READY is
+  // independent of the workflow's phase. A failing required check moves the
+  // workflow into a repair phase while the publication stays bound at the same
+  // head; if that check later passes, the ledger returns to MERGE_READY and a
+  // gate can be minted while the workflow is already sitting in a phase that
+  // can record a later head.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => {
+      payload.pull_request.is_draft = false;
+      return failingCheck(payload);
+    },
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+    { clock: () => at + 2_100 },
+  );
+  assert.equal(repairing.phase, "ADDRESS_CHECK_FAILURE");
+  assert.equal(repairing.current_publication.review_id, reviewId);
+
+  // The check is re-run remotely and passes. The head has not moved, so this
+  // snapshot is accepted and the ledger returns to MERGE_READY.
+  const laterAt = at + 3_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 3,
+      observation: draftObservation(state, headSha, {
+        at: laterAt,
+        requestId: 100,
+        requestAt: at + 1_000,
+        isDraft: false,
+      }),
+    },
+    { clock: () => laterAt + 10 },
+  );
+  await finalizePublicationGate(
+    state.store,
+    reviewId,
+    { expectedRevision: 4 },
+    { clock: () => laterAt + 20 },
+  );
+  assert.equal(
+    (await verifyPublicationGate(state.store, reviewId, {
+      clock: () => laterAt + 30,
+    })).valid,
+    true,
+  );
+
+  // Now the repair lands. Refusing to mint a new gate is not enough: the one
+  // already minted must stop carrying authority for a head the workflow has
+  // replaced.
+  const repaired = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    repairing.revision,
+    await commit(state.repository, "export const value = 3;\n"),
+  );
+  assert.equal(repaired.current_publication, null);
+  git(state.repository, "checkout", "--detach", headSha);
+  const verified = await verifyPublicationGate(state.store, reviewId, {
+    clock: () => laterAt + 40,
+  });
+  assert.equal(verified.valid, false);
+  assert.equal(verified.reason, "GATE_MISMATCH");
+});
+
+test("the remote wait itself cannot record a later head", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(

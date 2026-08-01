@@ -4558,13 +4558,16 @@ function assessPublicationGate(
   if (gate == null) {
     return { state: "ABSENT", reviewerProvider: null, expiresAt: null };
   }
-  // No workflow-head conflict is threaded in here on purpose. A gate can only
-  // be minted at MERGE_READY, every mutator that could follow one revokes it,
-  // and no phase that can record a later head coexists with a live gate -- so
-  // a gate cannot outlive its workflow head in the first place. Cancellation
-  // is different and is already covered: it makes the binding throw, and
-  // verification turns that into GATE_MISMATCH.
-  const derived = derivePublication(ledger);
+  // The publication's MERGE_READY is independent of the workflow's phase: a
+  // failing check parks the workflow in a repair phase while the ledger stays
+  // bound at the same head, and if that check later passes a gate can be
+  // minted while the workflow is already somewhere that can record a later
+  // head. Refusing to mint a new gate is therefore not enough -- the conflict
+  // has to reach the status this assessment checks, or an already-minted gate
+  // keeps carrying authority for a head the workflow has replaced.
+  const derived = derivePublication(ledger, {
+    historyConflict: workflowHeadConflict(workflowBinding, ledger),
+  });
   const expectedExpiresAt =
     ledger.latest_observation == null ? null : expiresAtFor(ledger);
   const gateReviewerProvider =
