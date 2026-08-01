@@ -1214,9 +1214,9 @@ test("expired evidence never routes the remote wait anywhere", async (t) => {
     clock: () => stale,
   });
   assert.equal(projection.status, "EVIDENCE_STALE");
-  // Stale-but-otherwise-clean must not inherit the empty blocker set that only
-  // a genuinely ready projection may carry.
-  assert.notDeepEqual(projection.blockers, []);
+  // The blockers keep naming the underlying failure rather than being replaced
+  // by the staleness; the reported status is carried by the digest.
+  assert.deepEqual(projection.blockers, ["check:CHECK_RUN:ci:FAILURE"]);
 
   // Leaving WAIT_PUBLICATION is one way, so acting on expired evidence would
   // force a pointless commit, local review, push, and publication.
@@ -1625,6 +1625,66 @@ test("an idle remote poll costs neither a revision nor an audit event", async (t
     assert.equal(idle.phase, "WAIT_PUBLICATION");
   }
   assert.equal((await fsp.stat(auditPath)).size, before);
+});
+
+test("projections reporting different statuses never share a blocker digest", async (t) => {
+  // Both pairs below collided at some point while this floor was being
+  // patched: a stale-but-clean projection first matched a genuinely ready one,
+  // then matched an unrelated blocked one once staleness replaced the reason.
+  // The digest covers the reported status, so neither can recur however the
+  // item list narrows.
+  const build = async (mutate) => {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    const workflow = await startAutonomousWorkflow(
+      state.store,
+      workflowInput(state.repository, state.baseSha),
+    );
+    const headSha = await commit(state.repository, "export const value = 2;\n");
+    const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+      state,
+      workflow,
+      headSha,
+      "one",
+    );
+    const at = Date.now();
+    await reachRemoteWait(
+      state,
+      atPublication,
+      reviewId,
+      headSha,
+      at,
+      mutate,
+    );
+    return {
+      fresh: await getAutonomousPreReady(state.store, reviewId, {
+        clock: () => at + 3_000,
+      }),
+      stale: await getAutonomousPreReady(state.store, reviewId, {
+        clock: () => at + 20 * 60 * 1000,
+      }),
+    };
+  };
+
+  const clean = await build(null);
+  // A formal CHANGES_REQUESTED review with no attached comments narrows to
+  // nothing, so it relies on the same floor the clean case does.
+  const narrowed = await build((payload) => {
+    findingsResult(payload);
+    payload.codex_review.results[0].native_review_state = "CHANGES_REQUESTED";
+    payload.codex_review.results[0].attached_review_comments = [];
+    return payload;
+  });
+
+  assert.equal(clean.fresh.status, "READY_TO_MARK");
+  assert.equal(clean.stale.status, "EVIDENCE_STALE");
+  assert.equal(narrowed.stale.status, "EVIDENCE_STALE");
+  assert.deepEqual(clean.fresh.blockers, []);
+  assert.deepEqual(clean.stale.blockers, []);
+
+  assert.notEqual(clean.stale.blocker_sha256, clean.fresh.blocker_sha256);
+  assert.notEqual(clean.stale.blocker_sha256, narrowed.stale.blocker_sha256);
+  assert.notEqual(narrowed.stale.blocker_sha256, narrowed.fresh.blocker_sha256);
 });
 
 test("the version 3 gate carries both digests and verifies them independently", async (t) => {

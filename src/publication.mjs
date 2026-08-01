@@ -4709,15 +4709,27 @@ export async function getPublicationSummary(
  * operator with a repair phase and nothing to act on. The status-and-reason
  * pair is the floor every other arm already falls through to.
  */
-function normalizedBlockers(ledger, derived, effective = derived) {
+function normalizedBlockers(ledger, derived) {
   const specific = specificBlockers(ledger, derived);
-  if (specific.length > 0 || effective.status === "MERGE_READY") {
+  if (specific.length > 0 || derived.status === "MERGE_READY") {
     return specific;
   }
-  // The floor is keyed on the status actually reported. A projection that
-  // renames the status -- stale evidence over an otherwise clean ledger --
-  // must not inherit the empty set that only a genuinely ready one may have.
-  return [`${effective.status}:${effective.blockingReason ?? ""}`];
+  return [`${derived.status}:${derived.blockingReason ?? ""}`];
+}
+
+/**
+ * The comparison key for progress. It covers the reported status as well as
+ * the blocking items, so two projections that report different statuses can
+ * never share a key however their item lists narrow. Keeping the status out of
+ * it made the blocker list carry two jobs -- naming the items and
+ * distinguishing the states -- and balancing those against each other is what
+ * went wrong every time this was patched.
+ *
+ * It is strictly more discriminating than hashing the items alone: identical
+ * status and items still match, and a status change is a real change.
+ */
+function blockerDigest(status, blockers) {
+  return sha256(canonicalJson({ status, blockers }));
 }
 
 function specificBlockers(ledger, derived) {
@@ -4825,12 +4837,9 @@ export async function getAutonomousPreReady(
         : ready
           ? "READY_TO_MARK"
           : derived.status;
-      // The blockers still describe the underlying derived state, so two
-      // different failures never share a digest just because both are stale.
-      const blockers = normalizedBlockers(ledger, derived, {
-        status: ready ? "MERGE_READY" : status,
-        blockingReason: ready ? null : blockingReason,
-      });
+      // The blockers describe the underlying derived state; the reported
+      // status is carried by the digest rather than folded into this list.
+      const blockers = normalizedBlockers(ledger, derived);
       return {
         review_id: ledger.review_id,
         revision: ledger.revision,
@@ -4839,7 +4848,7 @@ export async function getAutonomousPreReady(
         status,
         blocking_reason: ready ? null : blockingReason,
         blockers,
-        blocker_sha256: sha256(canonicalJson(blockers)),
+        blocker_sha256: blockerDigest(status, blockers),
         // The manual summary reaches PR_DRAFT before it evaluates Codex status,
         // so it never offers this body while a pull request is draft -- and an
         // autonomous run is draft for its whole life. Without it the workflow
