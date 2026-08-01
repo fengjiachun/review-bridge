@@ -1500,7 +1500,12 @@ function authorizationForLedger(ledger) {
  *
  * Returns null for version 1 and 2, which never bind a workflow.
  */
-async function requireWorkflowBinding(storeRoot, ledger) {
+/**
+ * @param {boolean} mutating whether the caller is about to write. A mutator
+ * refuses a superseded publication outright; a read reports it as INVALIDATED
+ * through `workflowHeadConflict` so the ledger stays inspectable.
+ */
+async function requireWorkflowBinding(storeRoot, ledger, { mutating = false } = {}) {
   if (ledger.version !== 3) {
     return null;
   }
@@ -1550,7 +1555,37 @@ async function requireWorkflowBinding(storeRoot, ledger) {
       "publication pull request is not the workflow-owned pull request",
     );
   }
+  if (mutating && workflowHeadConflict(binding, ledger) != null) {
+    fail(
+      "PUBLICATION_SUPERSEDED",
+      "the workflow recorded a later head, so this publication can no longer be written to",
+    );
+  }
   return binding;
+}
+
+/**
+ * A publication is superseded the moment its workflow records a later head.
+ *
+ * The pull-request identity check in derivePublication only catches head drift
+ * from the pull-request side, which leaves the window between a repair commit
+ * and its push: the workflow has moved on and cleared its binding, but the pull
+ * request still carries the old head, so every other invariant still agrees and
+ * the abandoned ledger would keep projecting READY_TO_MARK and could still mint
+ * a gate for a head the workflow has replaced.
+ *
+ * Reads report this as INVALIDATED rather than throwing, so a superseded ledger
+ * stays inspectable; mutators refuse outright.
+ */
+function workflowHeadConflict(binding, ledger) {
+  if (binding == null) {
+    return null;
+  }
+  const authorization = authorizationForLedger(ledger);
+  if (binding.current_head_sha === authorization.head_sha) {
+    return null;
+  }
+  return "workflow head advanced past the publication authorization";
 }
 
 /**
@@ -4637,7 +4672,9 @@ export async function getPublicationSummary(
       const ledger = authorization.ledger;
       const workflowBinding = await requireWorkflowBinding(storeRoot, ledger);
       const publicationAuthorization = authorizationForLedger(ledger);
-      const derived = derivePublication(ledger);
+      const derived = derivePublication(ledger, {
+        historyConflict: workflowHeadConflict(workflowBinding, ledger),
+      });
       const gate = assessPublicationGate(
         ledger,
         publicationAuthorization,
@@ -4820,7 +4857,10 @@ export async function getAutonomousPreReady(
       }
       const binding = await requireWorkflowBinding(storeRoot, ledger);
       const publicationAuthorization = authorizationForLedger(ledger);
-      const derived = derivePublication(ledger, { ignoreDraft: true });
+      const derived = derivePublication(ledger, {
+        ignoreDraft: true,
+        historyConflict: workflowHeadConflict(binding, ledger),
+      });
       const evidenceStale =
         ledger.terminal == null &&
         ledger.latest_observation != null &&
@@ -4899,7 +4939,7 @@ export async function recordCodexReviewRequest(
     const ledger = await loadPublicationFile(paths, reviewId);
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
-    await requireWorkflowBinding(storeRoot, ledger);
+    await requireWorkflowBinding(storeRoot, ledger, { mutating: true });
     const originalLedger = clone(ledger);
     const sourceAuthorization = await readBoundAuthorization(
       paths,
@@ -5005,7 +5045,7 @@ export async function recordGithubSnapshot(
       reviewId,
       ledger,
     );
-    await requireWorkflowBinding(storeRoot, ledger);
+    await requireWorkflowBinding(storeRoot, ledger, { mutating: true });
     const validated = validateObservation(
       observation,
       ledger,
@@ -5129,7 +5169,7 @@ export async function acknowledgeCodexReviewAmbiguity(
     const ledger = await loadPublicationFile(paths, reviewId);
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
-    await requireWorkflowBinding(storeRoot, ledger);
+    await requireWorkflowBinding(storeRoot, ledger, { mutating: true });
     const originalLedger = clone(ledger);
     const sourceAuthorization = await readBoundAuthorization(
       paths,
@@ -5211,7 +5251,9 @@ export async function finalizePublicationGate(
     try {
       auditSession = await openAuditSession(paths, reviewId);
       const ledger = authorization.ledger;
-      const workflowBinding = await requireWorkflowBinding(storeRoot, ledger);
+      const workflowBinding = await requireWorkflowBinding(storeRoot, ledger, {
+        mutating: true,
+      });
       const publicationAuthorization = authorizationForLedger(ledger);
       requireRevision(ledger, expectedRevision);
       requireMutable(ledger);

@@ -1866,6 +1866,84 @@ test("an update-required base gap repairs through a new gated head", async (t) =
   assert.equal(repaired.current_publication, null);
 });
 
+test("a superseded publication stops being actionable before the push", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => findingsResult(payload),
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(repairing.phase, "ADDRESS_REMOTE_FINDINGS");
+
+  // Commit the repair but do not push. The workflow head has advanced and its
+  // binding is cleared, yet the pull request still carries the old head, so
+  // every pull-request-side invariant still agrees with the old ledger.
+  const repaired = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    repairing.revision,
+    await commit(state.repository, "export const value = 3;\n"),
+  );
+  assert.equal(repaired.current_publication, null);
+
+  // The abandoned ledger must not stay actionable in that window.
+  const projection = await getAutonomousPreReady(state.store, reviewId, {
+    clock: () => at + 3_000,
+  });
+  assert.equal(projection.status, "INVALIDATED");
+  const summary = await getPublicationSummary(state.store, reviewId, {
+    clock: () => at + 3_000,
+  });
+  assert.equal(summary.status, "INVALIDATED");
+
+  await assert.rejects(
+    recordGithubSnapshot(state.store, reviewId, {
+      expectedRevision: 3,
+      observation: draftObservation(state, headSha, {
+        at: at + 4_000,
+        requestId: 100,
+        requestAt: at + 1_000,
+      }),
+    }),
+    /PUBLICATION_SUPERSEDED/,
+  );
+
+  // Checking the superseded commit back out satisfies the local-gate
+  // repository check, which is the only thing that would otherwise stand
+  // between an abandoned ledger and a finalized gate.
+  git(state.repository, "checkout", "--detach", headSha);
+  assert.equal(git(state.repository, "rev-parse", "HEAD"), headSha);
+  await assert.rejects(
+    finalizePublicationGate(state.store, reviewId, { expectedRevision: 3 }),
+    /PUBLICATION_SUPERSEDED/,
+  );
+
+  // It stays inspectable for audit.
+  const historical = await getPublication(state.store, reviewId);
+  assert.equal(historical.authorization.head_sha, headSha);
+});
+
 test("the version 3 gate carries both digests and verifies them independently", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
