@@ -751,3 +751,37 @@ test("a deleted thread author reports an unknown actor rather than none", () => 
     login: null,
   });
 });
+
+test("a deleted author yields a thread recorded as incomplete, not a refusal", () => {
+  // The normalizer records an unknown actor and the ledger accepts it; these
+  // two halves have to compose, or the normalizer emits something that can
+  // never be stored.
+  const ghosted = threadWithProvenance();
+  ghosted.comments.nodes[0].author = null;
+  const observation = normalizeGithubObservation(
+    publication(),
+    rawWithThread(ghosted),
+  );
+  const thread = observation.review_threads.threads[0];
+  assert.equal(thread.comments[0].actor.id, null);
+  assert.equal(thread.provenance_complete, false);
+
+  const whole = normalizeGithubObservation(
+    publication(),
+    rawWithThread(threadWithProvenance()),
+  );
+  assert.equal(whole.review_threads.threads[0].provenance_complete, true);
+});
+
+test("a thread deeper than one comment page is recorded as incomplete", () => {
+  const deep = threadWithProvenance();
+  deep.comments.totalCount = 250;
+  deep.comments.pageInfo.hasNextPage = true;
+  const observation = normalizeGithubObservation(
+    publication(),
+    rawWithThread(deep),
+  );
+  const thread = observation.review_threads.threads[0];
+  assert.equal(thread.comments_pagination_complete, false);
+  assert.equal(thread.provenance_complete, false);
+});

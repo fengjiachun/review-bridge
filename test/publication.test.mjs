@@ -4539,27 +4539,19 @@ test("observations reach the ledger by path instead of through the caller", asyn
   });
 });
 
-test("thread provenance is rejected unless it is complete", async (t) => {
+test("incomplete thread provenance is recorded, not refused", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const startedAt = Date.now();
-  await start(state, startedAt);
   const observedAt = startedAt + 1_000;
-  const withThread = (mutate) => {
-    const value = observation({
-      at: observedAt,
-      baseSha: state.baseSha,
-      headSha: state.headSha,
-      requestId: null,
-      requestAt: startedAt,
-      withResult: false,
-    });
-    const thread = {
+  const thread = (mutate) => {
+    const value = {
       id: "PRRT_1",
       is_resolved: false,
       is_outdated: false,
       comment_count: 1,
       comments_pagination_complete: true,
+      provenance_complete: true,
       comments: [
         {
           id: "PRRC_1",
@@ -4571,70 +4563,85 @@ test("thread provenance is rejected unless it is complete", async (t) => {
             id: "PRR_1",
             database_id: 4833836859,
             state: "COMMENTED",
-            reviewed_head_sha: state.headSha,
+            reviewed_head_sha: null,
             actor: { id: 99, type: "Bot", login: "codex" },
           },
         },
       ],
     };
-    mutate(thread);
-    value.review_threads.total_count = 1;
-    value.review_threads.unresolved_count = 1;
-    value.review_threads.threads = [thread];
+    mutate(value);
     return value;
   };
-  const record = (mutate) =>
-    recordGithubSnapshot(
-      state.store,
-      state.reviewId,
-      { expectedRevision: 1, observation: withThread(mutate) },
-      { clock: () => observedAt + 10 },
-    );
-
-  // Complete provenance is accepted.
-  const accepted = await record(() => {});
-  assert.equal(accepted.latest_observation.review_threads.threads[0].comments.length, 1);
-
-  for (const [name, mutate] of [
-    ["incomplete comment pagination", (thread) => {
-      thread.comments_pagination_complete = false;
-    }],
-    ["a count that disagrees with the comments", (thread) => {
-      thread.comment_count = 2;
-    }],
-    ["a root comment with no attached review", (thread) => {
-      thread.comments[0].review = null;
-    }],
-    ["a root comment with no actor identity", (thread) => {
-      thread.comments[0].actor = { id: null, type: null, login: null };
-    }],
-    ["an empty comment sequence", (thread) => {
-      thread.comments = [];
-      thread.comment_count = 0;
-    }],
-  ]) {
+  const record = async (mutate) => {
     const next = await fixture();
     t.after(() => fsp.rm(next.root, { recursive: true, force: true }));
     await start(next, startedAt);
-    await assert.rejects(
-      recordGithubSnapshot(
-        next.store,
-        next.reviewId,
-        {
-          expectedRevision: 1,
-          observation: (() => {
-            const value = withThread(mutate);
-            value.pull_request.head_sha = next.headSha;
-            value.pull_request.base_head_comparison.head_sha = next.headSha;
-            value.pull_request.base_sha = next.baseSha;
-            value.pull_request.pr_reported_base_sha = next.baseSha;
-            return value;
-          })(),
-        },
-        { clock: () => observedAt + 10 },
-      ),
-      /INVALID_INPUT/,
-      name,
+    const value = observation({
+      at: observedAt,
+      baseSha: next.baseSha,
+      headSha: next.headSha,
+      requestId: null,
+      requestAt: startedAt,
+      withResult: false,
+    });
+    const built = thread(mutate);
+    value.review_threads.total_count = 1;
+    value.review_threads.unresolved_count = 1;
+    value.review_threads.threads = [built];
+    return recordGithubSnapshot(
+      next.store,
+      next.reviewId,
+      { expectedRevision: 1, observation: value },
+      { clock: () => observedAt + 10 },
     );
+  };
+
+  const complete = await record(() => {});
+  assert.equal(
+    complete.latest_observation.review_threads.threads[0].provenance_complete,
+    true,
+  );
+
+  // A thread the workflow cannot act on is still a real thread. Refusing the
+  // observation would stall the publication behind a fact no fix can change,
+  // so each of these is stored with the completeness it actually has.
+  for (const [name, mutate] of [
+    ["a thread deeper than one comment page", (value) => {
+      value.comments_pagination_complete = false;
+      value.provenance_complete = false;
+    }],
+    ["a count that disagrees with the comments", (value) => {
+      value.comment_count = 2;
+      value.provenance_complete = false;
+    }],
+    ["a root comment with no attached review", (value) => {
+      value.comments[0].review = null;
+      value.provenance_complete = false;
+    }],
+    ["a deleted root author", (value) => {
+      value.comments[0].actor = { id: null, type: null, login: null };
+      value.provenance_complete = false;
+    }],
+  ]) {
+    const recorded = await record(mutate);
+    const stored = recorded.latest_observation.review_threads.threads[0];
+    assert.equal(stored.provenance_complete, false, name);
+    assert.equal(recorded.latest_observation.review_threads.unresolved_count, 1, name);
   }
+
+  // What must not be storable is a completeness claim the evidence denies.
+  await assert.rejects(
+    record((value) => {
+      value.comments[0].review = null;
+    }),
+    /disagrees with its evidence/,
+    "a forged completeness claim",
+  );
+  await assert.rejects(
+    record((value) => {
+      delete value.comments;
+    }),
+    /requires the comments it summarizes/,
+    "a summary with no evidence behind it",
+  );
 });

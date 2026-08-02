@@ -555,6 +555,32 @@ function normalizedThreadActor(author) {
   };
 }
 
+/**
+ * Whether a thread's evidence is complete enough to decide anything from.
+ *
+ * Incompleteness is recorded, not rejected: a thread deeper than one comment
+ * page, or one whose author GitHub can no longer resolve to a numeric ID, is
+ * a real thread that simply cannot be acted on. Refusing the whole observation
+ * for it would stall the publication behind a fact no fix can change, so this
+ * is the flag a consumer checks before treating a thread as eligible.
+ *
+ * Derived from the evidence, never supplied: the ledger re-derives it and
+ * refuses a stored value that disagrees.
+ */
+export function threadProvenanceComplete(thread) {
+  const comments = thread.comments;
+  if (!Array.isArray(comments) || comments.length === 0) {
+    return false;
+  }
+  const root = comments[0];
+  return (
+    thread.comments_pagination_complete === true &&
+    thread.comment_count === comments.length &&
+    Number.isSafeInteger(root?.actor?.id) &&
+    root?.review != null
+  );
+}
+
 function normalizeThreads(publication, raw) {
   const target = object(publication.target, "publication.target");
   const pages = array(raw.review_threads?.pages, "review_threads.pages");
@@ -591,12 +617,7 @@ function normalizeThreads(publication, raw) {
       thread.comments.nodes,
       `review thread ${thread.id} comments`,
     );
-    return {
-      ...base,
-      comment_count: thread.comments?.totalCount ?? null,
-      comments_pagination_complete:
-        thread.comments?.pageInfo?.hasNextPage === false,
-      comments: comments.map((comment) => ({
+    const normalizedComments = comments.map((comment) => ({
         id: comment.id,
         database_id: comment.databaseId,
         created_at: canonicalTime(
@@ -621,7 +642,19 @@ function normalizeThreads(publication, raw) {
                   comment.pullRequestReview.author,
                 ),
               },
-      })),
+    }));
+    return {
+      ...base,
+      comment_count: thread.comments.totalCount ?? null,
+      comments_pagination_complete:
+        thread.comments.pageInfo?.hasNextPage === false,
+      comments: normalizedComments,
+      provenance_complete: threadProvenanceComplete({
+        comment_count: thread.comments.totalCount ?? null,
+        comments_pagination_complete:
+          thread.comments.pageInfo?.hasNextPage === false,
+        comments: normalizedComments,
+      }),
     };
   });
   return {
@@ -947,6 +980,7 @@ query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $endCursor) {
+        totalCount
         nodes {
           id
           isResolved

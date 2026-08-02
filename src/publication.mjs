@@ -8,6 +8,9 @@ import {
   isCodexRequestId,
 } from "./codex-request.mjs";
 import { loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
+// One derivation of thread completeness, shared with the normalizer that
+// records it. Two copies of this rule would be two things to keep in step.
+import { threadProvenanceComplete } from "./github-observation.mjs";
 import {
   atomicWriteCanonicalJson,
   canonicalJson,
@@ -1168,18 +1171,29 @@ function validateChecks(requiredChecks, pullRequest, target) {
  */
 function validateThreadProvenance(thread) {
   if (thread.comments === undefined) {
+    // No provenance was collected. A claim about it without the evidence
+    // behind it is exactly what must not be storable.
+    for (const field of [
+      "comment_count",
+      "comments_pagination_complete",
+      "provenance_complete",
+    ]) {
+      if (field in thread) {
+        fail(
+          "INVALID_INPUT",
+          `thread ${field} requires the comments it summarizes`,
+        );
+      }
+    }
     return;
   }
   const comments = assertArray(thread.comments, "thread.comments", 1_000);
-  if (comments.length === 0) {
-    fail("INVALID_INPUT", "thread provenance must include its comments");
+  if (thread.comments_pagination_complete !== undefined &&
+      typeof thread.comments_pagination_complete !== "boolean") {
+    fail("INVALID_INPUT", "thread comment pagination flag must be boolean");
   }
-  if (thread.comments_pagination_complete !== true) {
-    fail("INVALID_INPUT", "thread comment pagination is incomplete");
-  }
-  assertId(thread.comment_count, "thread.comment_count");
-  if (thread.comment_count !== comments.length) {
-    fail("INVALID_INPUT", "thread comment count disagrees with its comments");
+  if (thread.comment_count !== null) {
+    assertId(thread.comment_count, "thread.comment_count");
   }
   uniqueBy(comments, (comment) => comment.database_id, "thread comments");
   for (const comment of comments) {
@@ -1199,13 +1213,15 @@ function validateThreadProvenance(thread) {
       }
     }
   }
-  // The root comment is what binds a thread to a formal review, so a thread
-  // whose root carries no review or no actor identity is not replayable.
-  const root = comments[0];
-  if (root.review == null || !Number.isSafeInteger(root.actor?.id)) {
+  // Completeness is a recorded fact, not an admission requirement. A thread
+  // deeper than one comment page, or one whose author GitHub can no longer
+  // resolve, is still a real thread; refusing the whole observation for it
+  // would stall the publication behind something no fix can change. It is
+  // re-derived here so a caller cannot claim an eligibility it lacks.
+  if (thread.provenance_complete !== threadProvenanceComplete(thread)) {
     fail(
       "INVALID_INPUT",
-      "thread root must carry its actor identity and attached review",
+      "thread provenance completeness disagrees with its evidence",
     );
   }
 }

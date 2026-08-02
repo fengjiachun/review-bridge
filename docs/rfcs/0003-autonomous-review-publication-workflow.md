@@ -1491,6 +1491,11 @@ this RFC changes from `Accepted` to `Implemented`.
   node ID and no structural thread-to-review link, and would need one call per
   thread. Measured against the five real threads on pull request 23 of this
   repository.
+
+  One element is not in that query. The correlated workflow request is reached
+  by joining the recorded review ID against the Codex results already in the
+  observation, which carry the request correlation; the thread evidence
+  supplies the review ID and reviewed head that make the join possible.
 - Which predicate ends the pre-ready wait, given that a pending gate and a
   ready-only gate are observationally identical and elapsed time is not
   evidence?
