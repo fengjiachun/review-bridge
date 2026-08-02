@@ -172,6 +172,7 @@ function rawCollection() {
                       line: 12,
                     },
                   ],
+                  totalCount: 1,
                   pageInfo: { hasNextPage: false, endCursor: null },
                 },
               },
@@ -784,4 +785,45 @@ test("a thread deeper than one comment page is recorded as incomplete", () => {
   const thread = observation.review_threads.threads[0];
   assert.equal(thread.comments_pagination_complete, false);
   assert.equal(thread.provenance_complete, false);
+});
+
+test("a thread page count that omits a thread is refused", () => {
+  // Reaching the end of the cursor is only half the proof: a thread added or
+  // removed mid-walk can be omitted while the last page still reports no next
+  // page. Deriving the total from what was collected would always agree.
+  const dropped = rawCollection();
+  const connection =
+    dropped.review_threads.pages[0].data.repository.pullRequest.reviewThreads;
+  connection.totalCount = 2;
+  assert.throws(
+    () => normalizeGithubObservation(publication(), dropped),
+    /do not account for the reported total/,
+  );
+});
+
+test("a thread total that changes while paginating is refused", () => {
+  const shifting = rawCollection();
+  const first = shifting.review_threads.pages[0];
+  const second = structuredClone(first);
+  first.data.repository.pullRequest.reviewThreads.pageInfo = {
+    hasNextPage: true,
+    endCursor: "cursor",
+  };
+  second.data.repository.pullRequest.reviewThreads.totalCount = 2;
+  second.data.repository.pullRequest.reviewThreads.nodes = [];
+  shifting.review_threads.pages = [first, second];
+  assert.throws(
+    () => normalizeGithubObservation(publication(), shifting),
+    /total changed while paginating/,
+  );
+});
+
+test("a thread page with no reported total is refused", () => {
+  const untotalled = rawCollection();
+  delete untotalled.review_threads.pages[0].data.repository.pullRequest
+    .reviewThreads.totalCount;
+  assert.throws(
+    () => normalizeGithubObservation(publication(), untotalled),
+    /missing a reported total/,
+  );
 });

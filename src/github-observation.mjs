@@ -610,6 +610,30 @@ function normalizeThreads(publication, raw) {
   if (lastPageInfo?.hasNextPage !== false) {
     throw new Error("review-thread pagination is incomplete");
   }
+  // Reaching the end of the cursor is only half the proof. If a thread is
+  // added or removed while the connection is walked, the pages can omit one
+  // even though the final page reports no next page -- and deriving the total
+  // from what was collected would manufacture a count that always agrees.
+  // Compare the provider's own total instead, and require it to be stable
+  // across pages so a concurrent change is caught rather than averaged away.
+  const reportedTotals = pages.map((page, index) => {
+    const total =
+      page?.data?.repository?.pullRequest?.reviewThreads?.totalCount;
+    if (!Number.isSafeInteger(total) || total < 0) {
+      throw new Error(
+        `review_threads.pages[${index}] is missing a reported total`,
+      );
+    }
+    return total;
+  });
+  if (reportedTotals.some((total) => total !== reportedTotals[0])) {
+    throw new Error("review-thread total changed while paginating");
+  }
+  if (reportedTotals[0] !== threads.length) {
+    throw new Error(
+      "review-thread pages do not account for the reported total",
+    );
+  }
   const collectedAt = canonicalTime(
     raw.review_threads.collected_at,
     "review_threads.collected_at",
