@@ -1198,6 +1198,11 @@ function validateThreadProvenance(thread) {
   // Both identifiers, not just one. The node ID is what the later watermark
   // and resolution joins key on, so a duplicate there would leave the identity
   // this evidence exists to establish ambiguous.
+  //
+  // Database-ID uniqueness is also load-bearing for the ordering rule below:
+  // it is what makes (created_at, database_id) a total order, and so what
+  // makes the positional root a single determined comment. Removing it as
+  // redundant with the node ID would silently undo that.
   uniqueBy(comments, (comment) => comment.database_id, "thread comments");
   uniqueBy(comments, (comment) => comment.id, "thread comment node ids");
   // The root is comments[0], which is only meaningful if the sequence is

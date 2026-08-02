@@ -4861,3 +4861,60 @@ test("comments sharing a creation time are ordered by database id", async (t) =>
     /not in creation order/,
   );
 });
+
+test("comments sharing a creation time and database id are refused", async (t) => {
+  // Database-ID uniqueness is what makes the ordering key total, and so what
+  // determines the root. Without a case that turns on the duplicate itself,
+  // the check could be removed as redundant with the node ID and the root
+  // would silently become undetermined again.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 1_000;
+  const sameTime = iso(startedAt - 5_000);
+  const comment = (nodeId) => ({
+    id: nodeId,
+    database_id: 7,
+    created_at: sameTime,
+    updated_at: sameTime,
+    actor: { id: 99, type: "Bot", login: "codex" },
+    review: {
+      id: "PRR_1",
+      database_id: 4833836859,
+      state: "COMMENTED",
+      reviewed_head_sha: "c".repeat(40),
+      actor: { id: 99, type: "Bot", login: "codex" },
+    },
+  });
+  const value = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  value.review_threads.total_count = 1;
+  value.review_threads.unresolved_count = 1;
+  value.review_threads.threads = [
+    {
+      id: "PRRT_1",
+      is_resolved: false,
+      is_outdated: false,
+      comment_count: 2,
+      comments_pagination_complete: true,
+      provenance_complete: true,
+      comments: [comment("PRRC_A"), comment("PRRC_B")],
+    },
+  ];
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 1, observation: value },
+      { clock: () => observedAt + 10 },
+    ),
+    /thread comments/,
+  );
+});
