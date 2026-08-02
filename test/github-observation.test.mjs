@@ -827,3 +827,24 @@ test("a thread page with no reported total is refused", () => {
     /missing a reported total/,
   );
 });
+
+test("a repeated thread cannot stand in for a dropped one", () => {
+  // An insert and delete during the walk can repeat a thread across pages.
+  // Counting nodes would let that repeat match the provider's total while an
+  // unrelated thread was dropped.
+  const masked = rawCollection();
+  const first = masked.review_threads.pages[0];
+  const connection = first.data.repository.pullRequest.reviewThreads;
+  connection.totalCount = 2;
+  connection.pageInfo = { hasNextPage: true, endCursor: "cursor" };
+  const second = structuredClone(first);
+  second.data.repository.pullRequest.reviewThreads.pageInfo = {
+    hasNextPage: false,
+    endCursor: null,
+  };
+  masked.review_threads.pages = [first, second];
+  assert.throws(
+    () => normalizeGithubObservation(publication(), masked),
+    /do not account for the reported total/,
+  );
+});

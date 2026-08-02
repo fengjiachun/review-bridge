@@ -629,7 +629,11 @@ function normalizeThreads(publication, raw) {
   if (reportedTotals.some((total) => total !== reportedTotals[0])) {
     throw new Error("review-thread total changed while paginating");
   }
-  if (reportedTotals[0] !== threads.length) {
+  // Distinct threads, not collected nodes. A compensating insert and delete
+  // can repeat a thread across pages, which would let the node count match the
+  // provider's total while an unrelated thread was dropped.
+  const distinctThreads = new Set(threads.map((thread) => thread.id));
+  if (reportedTotals[0] !== distinctThreads.size) {
     throw new Error(
       "review-thread pages do not account for the reported total",
     );
