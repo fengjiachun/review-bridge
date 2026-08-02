@@ -19,7 +19,9 @@ import {
   StoreError,
   withStateLock,
 } from "./storage.mjs";
+import { readWorkflowBinding, WORKFLOW_ID_RE } from "./workflow-binding.mjs";
 
+const SUPPORTED_PUBLICATION_VERSIONS = [1, 2, 3];
 const MAX_PUBLICATION_BYTES = 10 * 1024 * 1024;
 const TERMINAL_RESERVE_BYTES = 64 * 1024;
 const MAX_OBSERVATION_BYTES = 6 * 1024 * 1024;
@@ -1489,6 +1491,179 @@ function authorizationForLedger(ledger) {
   };
 }
 
+/**
+ * Revalidate a version-3 ledger's workflow binding against the workflow ledger
+ * itself. Every caller runs this independently: start, snapshot recording, the
+ * autonomous projection, finalization, and gate verification each re-derive the
+ * digest from the workflow file rather than trusting an earlier check or the
+ * copy stored in the gate.
+ *
+ * Returns null for version 1 and 2, which never bind a workflow.
+ */
+/**
+ * @param {boolean} mutating whether the caller is about to write. A mutator
+ * refuses a superseded publication outright; a read reports it as INVALIDATED
+ * through `workflowHeadConflict` so the ledger stays inspectable.
+ */
+async function requireWorkflowBinding(storeRoot, ledger, { mutating = false } = {}) {
+  if (ledger.version !== 3) {
+    return null;
+  }
+  const binding = await readWorkflowBinding(storeRoot, ledger.workflow_id);
+  if (
+    binding.workflow_id !== ledger.workflow_id ||
+    binding.workflow_authorization_sha256 !==
+      ledger.workflow_authorization_sha256
+  ) {
+    fail(
+      "WORKFLOW_AUTHORIZATION_MISMATCH",
+      "publication workflow authorization does not match the workflow ledger",
+    );
+  }
+  // Cancellation is the operator's kill switch, so it has to revoke what it
+  // authorized: a cancelled workflow's publication must stop projecting,
+  // recording, finalizing, and verifying. A paused workflow is still live and
+  // stays readable. `get_publication` takes no binding, so the audit trail of
+  // a cancelled workflow remains readable either way.
+  if (binding.status === "CANCELLED") {
+    fail(
+      "WORKFLOW_CANCELLED",
+      "the workflow that authorized this publication was cancelled",
+    );
+  }
+  const authorized = binding.publication_target;
+  const target = ledger.target;
+  if (
+    authorized.base_repository_id !== target.repository_id ||
+    authorized.base_owner !== target.owner ||
+    authorized.base_repo !== target.repo ||
+    authorized.base_branch !== target.base_branch ||
+    authorized.head_branch !== target.head_branch
+  ) {
+    fail(
+      "WORKFLOW_AUTHORIZATION_MISMATCH",
+      "publication target does not match the authorized workflow publication target",
+    );
+  }
+  if (
+    binding.pull_request == null ||
+    binding.pull_request.repository_id !== target.repository_id ||
+    binding.pull_request.pr_number !== target.pr_number
+  ) {
+    fail(
+      "WORKFLOW_AUTHORIZATION_MISMATCH",
+      "publication pull request is not the workflow-owned pull request",
+    );
+  }
+  if (mutating && workflowHeadConflict(binding, ledger) != null) {
+    fail(
+      "PUBLICATION_SUPERSEDED",
+      "the workflow recorded a later head, so this publication can no longer be written to",
+    );
+  }
+  return binding;
+}
+
+/**
+ * A publication is superseded the moment its workflow records a later head.
+ *
+ * The pull-request identity check in derivePublication only catches head drift
+ * from the pull-request side, which leaves the window between a repair commit
+ * and its push: the workflow has moved on and cleared its binding, but the pull
+ * request still carries the old head, so every other invariant still agrees and
+ * the abandoned ledger would keep projecting READY_TO_MARK and could still mint
+ * a gate for a head the workflow has replaced.
+ *
+ * Reads report this as INVALIDATED rather than throwing, so a superseded ledger
+ * stays inspectable; mutators refuse outright.
+ */
+function workflowHeadConflict(binding, ledger) {
+  if (binding == null) {
+    return null;
+  }
+  const authorization = authorizationForLedger(ledger);
+  if (binding.current_head_sha === authorization.head_sha) {
+    return null;
+  }
+  return "workflow head advanced past the publication authorization";
+}
+
+/**
+ * Validate the workflow a new autonomous publication is about to bind. Start is
+ * the one site that also pins the workflow's revision, phase, and current head:
+ * later sites must stay readable after the workflow moves on, and report a
+ * stale ledger through the ordinary INVALIDATED decision instead of throwing.
+ */
+async function requireStartWorkflowBinding(
+  storeRoot,
+  workflowId,
+  {
+    expectedWorkflowRevision,
+    headSha,
+    repositoryId,
+    owner,
+    repo,
+    prNumber,
+    baseBranch,
+    headBranch,
+    authorizationMode,
+  },
+) {
+  if (authorizationMode !== "LOCAL_GATE") {
+    fail(
+      "INVALID_INPUT",
+      "an autonomous publication requires a LOCAL_GATE authorization",
+    );
+  }
+  const binding = await readWorkflowBinding(storeRoot, workflowId);
+  if (binding.revision !== expectedWorkflowRevision) {
+    fail("WORKFLOW_REVISION_CONFLICT", "workflow revision changed", {
+      expected: expectedWorkflowRevision,
+      actual: binding.revision,
+      retryable: true,
+    });
+  }
+  if (binding.status !== "ACTIVE") {
+    fail("WORKFLOW_NOT_ACTIVE", `workflow is ${binding.status}`);
+  }
+  if (binding.phase !== "START_PUBLICATION") {
+    fail(
+      "WORKFLOW_PHASE_INVALID",
+      `workflow phase ${binding.phase} cannot start a publication`,
+    );
+  }
+  if (binding.current_head_sha !== headSha) {
+    fail(
+      "WORKFLOW_HEAD_MISMATCH",
+      "publication authorization head is not the current workflow head",
+    );
+  }
+  const authorized = binding.publication_target;
+  if (
+    authorized.base_repository_id !== repositoryId ||
+    authorized.base_owner !== owner ||
+    authorized.base_repo !== repo ||
+    authorized.base_branch !== baseBranch ||
+    authorized.head_branch !== headBranch
+  ) {
+    fail(
+      "WORKFLOW_AUTHORIZATION_MISMATCH",
+      "publication target does not match the authorized workflow publication target",
+    );
+  }
+  if (
+    binding.pull_request == null ||
+    binding.pull_request.repository_id !== repositoryId ||
+    binding.pull_request.pr_number !== prNumber
+  ) {
+    fail(
+      "WORKFLOW_AUTHORIZATION_MISMATCH",
+      "publication pull request is not the workflow-owned pull request",
+    );
+  }
+  return binding;
+}
+
 function requireStoredReviewId(ledger, reviewId) {
   if (ledger.review_id !== reviewId) {
     fail(
@@ -1500,16 +1675,39 @@ function requireStoredReviewId(ledger, reviewId) {
 
 function validateStoredLedger(ledger) {
   assertObject(ledger, "publication");
-  if (![1, 2].includes(ledger.version)) {
+  if (!SUPPORTED_PUBLICATION_VERSIONS.includes(ledger.version)) {
     fail(
       "UNSUPPORTED_PUBLICATION_VERSION",
-      "only publication schema versions 1 and 2 are supported",
+      "only publication schema versions 1, 2, and 3 are supported",
     );
   }
   assertRevision(ledger.revision);
   publicationDirectory("/store", ledger.review_id);
   timestampMs(ledger.created_at, "publication.created_at");
   timestampMs(ledger.updated_at, "publication.updated_at");
+  if (ledger.version === 3) {
+    if (
+      typeof ledger.workflow_id !== "string" ||
+      !WORKFLOW_ID_RE.test(ledger.workflow_id)
+    ) {
+      fail(
+        "PUBLICATION_STORE_INVALID",
+        "version 3 publication workflow_id is invalid",
+      );
+    }
+    assertDigest(
+      ledger.workflow_authorization_sha256,
+      "publication.workflow_authorization_sha256",
+    );
+  } else if (
+    "workflow_id" in ledger ||
+    "workflow_authorization_sha256" in ledger
+  ) {
+    fail(
+      "PUBLICATION_STORE_INVALID",
+      "only a version 3 publication may bind an autonomous workflow",
+    );
+  }
   if (ledger.version === 1) {
     assertObject(ledger.local_gate, "publication.local_gate");
     assertSha(ledger.local_gate.head_sha, "publication.local_gate.head_sha");
@@ -2146,10 +2344,10 @@ async function openAuthorizationFiles(
       "PUBLICATION_STORE_INVALID",
       "publication.json is not a JSON object",
     );
-    if (![1, 2].includes(ledger.version)) {
+    if (!SUPPORTED_PUBLICATION_VERSIONS.includes(ledger.version)) {
       fail(
         "UNSUPPORTED_PUBLICATION_VERSION",
-        "only publication schema versions 1 and 2 are supported",
+        "only publication schema versions 1, 2, and 3 are supported",
       );
     }
     assertStoredCanonicalJsonBytes(
@@ -2266,10 +2464,10 @@ async function loadPublicationFile(
       "PUBLICATION_STORE_INVALID",
       "publication.json is not a JSON object",
     );
-    if (![1, 2].includes(ledger.version)) {
+    if (!SUPPORTED_PUBLICATION_VERSIONS.includes(ledger.version)) {
       fail(
         "UNSUPPORTED_PUBLICATION_VERSION",
-        "only publication schema versions 1 and 2 are supported",
+        "only publication schema versions 1, 2, and 3 are supported",
       );
     }
     assertStoredCanonicalJsonBytes(
@@ -2905,6 +3103,43 @@ function replayCorrelatedResultAssociations(ledger) {
   return replayed;
 }
 
+/**
+ * The runs that actually decide a requirement: at most one per kind, filtered
+ * to the pinned app when the requirement pins one, and the latest by start
+ * time then run ID. Both the status and the progress fingerprint select
+ * through here, so a run that cannot change the status cannot change the
+ * fingerprint either.
+ */
+function decidingRunsFor(requirement, runs) {
+  const byKind = new Map();
+  for (const kind of ["CHECK_RUN", "COMMIT_STATUS"]) {
+    let matches = runs.filter(
+      (run) => run.run_kind === kind && run.context === requirement.context,
+    );
+    if (kind === "CHECK_RUN" && requirement.app_binding === "PINNED") {
+      matches = matches.filter(
+        (run) => run.app_id === requirement.required_app_id,
+      );
+    }
+    if (matches.length > 0) {
+      matches.sort(
+        (left, right) =>
+          Date.parse(left.started_at) - Date.parse(right.started_at) ||
+          left.run_id - right.run_id,
+      );
+      byKind.set(kind, matches.at(-1));
+    }
+  }
+  // A pinned requirement with no run from its app decides nothing at all: a
+  // commit status cannot stand in for the pinned check, so it is not a
+  // deciding run either. Keeping this rule inside the selection is what makes
+  // the two callers agree -- applied after the call it reached only one.
+  if (requirement.app_binding === "PINNED" && !byKind.has("CHECK_RUN")) {
+    return new Map();
+  }
+  return byKind;
+}
+
 function checkRequiredRuns(requiredChecks) {
   if (requiredChecks.collection.status !== "COMPLETE") {
     return "EVIDENCE_INCOMPLETE";
@@ -2932,27 +3167,7 @@ function checkRequiredRuns(requiredChecks) {
   }
   let pending = false;
   for (const requirement of requirements) {
-    const byKind = new Map();
-    for (const kind of ["CHECK_RUN", "COMMIT_STATUS"]) {
-      let matches = requiredChecks.runs.filter(
-        (run) => run.run_kind === kind && run.context === requirement.context,
-      );
-      if (kind === "CHECK_RUN" && requirement.app_binding === "PINNED") {
-        matches = matches.filter((run) => run.app_id === requirement.required_app_id);
-      }
-      if (matches.length > 0) {
-        matches.sort(
-          (left, right) =>
-            Date.parse(left.started_at) - Date.parse(right.started_at) ||
-            left.run_id - right.run_id,
-        );
-        byKind.set(kind, matches.at(-1));
-      }
-    }
-    if (requirement.app_binding === "PINNED" && !byKind.has("CHECK_RUN")) {
-      pending = true;
-      continue;
-    }
+    const byKind = decidingRunsFor(requirement, requiredChecks.runs);
     if (byKind.size === 0) {
       pending = true;
       continue;
@@ -3209,7 +3424,10 @@ function publicationDecision(
   };
 }
 
-function derivePublication(ledger, { historyConflict = null, visibilityGrace = false } = {}) {
+function derivePublication(
+  ledger,
+  { historyConflict = null, visibilityGrace = false, ignoreDraft = false } = {},
+) {
   if (ledger.terminal != null) {
     return publicationDecision(
       ledger.terminal.status,
@@ -3303,7 +3521,7 @@ function derivePublication(ledger, { historyConflict = null, visibilityGrace = f
   if (historyConflict) {
     return publicationDecision("INVALIDATED", historyConflict, historyConflict);
   }
-  if (pullRequest.is_draft) {
+  if (pullRequest.is_draft && !ignoreDraft) {
     return publicationDecision("PR_DRAFT");
   }
   if (pullRequest.mergeable === "UNKNOWN") {
@@ -4166,6 +4384,8 @@ export async function startPublication(
     operatorLabel = null,
     rationale = null,
     baseline,
+    workflowId = null,
+    expectedWorkflowRevision = null,
   },
   { clock = Date.now } = {},
 ) {
@@ -4196,11 +4416,31 @@ export async function startPublication(
       assertString(operatorLabel, "operator_label", 500);
       assertString(rationale, "rationale", 20_000);
     }
+    if ((workflowId == null) !== (expectedWorkflowRevision == null)) {
+      fail(
+        "INVALID_INPUT",
+        "an autonomous publication requires both workflow_id and expected_workflow_revision",
+      );
+    }
     const sourceAuthorization = await readStartAuthorization(
       paths,
       reviewId,
       { verifyRepository: true },
     );
+    const workflowBinding =
+      workflowId == null
+        ? null
+        : await requireStartWorkflowBinding(storeRoot, workflowId, {
+            expectedWorkflowRevision,
+            headSha: sourceAuthorization.head_sha,
+            repositoryId,
+            owner,
+            repo,
+            prNumber,
+            baseBranch,
+            headBranch,
+            authorizationMode: sourceAuthorization.mode,
+          });
     const existing = await loadPublicationFile(paths, reviewId, {
       allowMissing: true,
     });
@@ -4240,11 +4480,18 @@ export async function startPublication(
       baselineIssuances,
     );
     const ledger = {
-      version: 2,
+      version: workflowBinding == null ? 2 : 3,
       revision: 1,
       review_id: reviewId,
       created_at: timestamp,
       updated_at: timestamp,
+      ...(workflowBinding == null
+        ? {}
+        : {
+            workflow_id: workflowBinding.workflow_id,
+            workflow_authorization_sha256:
+              workflowBinding.workflow_authorization_sha256,
+          }),
       authorization: {
         mode: sourceAuthorization.mode,
         head_sha: sourceAuthorization.head_sha,
@@ -4320,6 +4567,7 @@ function assessPublicationGate(
   gate,
   gateParseError,
   currentMs,
+  workflowBinding = null,
 ) {
   if (gateParseError) {
     return { state: "MALFORMED", reviewerProvider: null, expiresAt: null };
@@ -4327,7 +4575,16 @@ function assessPublicationGate(
   if (gate == null) {
     return { state: "ABSENT", reviewerProvider: null, expiresAt: null };
   }
-  const derived = derivePublication(ledger);
+  // The publication's MERGE_READY is independent of the workflow's phase: a
+  // failing check parks the workflow in a repair phase while the ledger stays
+  // bound at the same head, and if that check later passes a gate can be
+  // minted while the workflow is already somewhere that can record a later
+  // head. Refusing to mint a new gate is therefore not enough -- the conflict
+  // has to reach the status this assessment checks, or an already-minted gate
+  // keeps carrying authority for a head the workflow has replaced.
+  const derived = derivePublication(ledger, {
+    historyConflict: workflowHeadConflict(workflowBinding, ledger),
+  });
   const expectedExpiresAt =
     ledger.latest_observation == null ? null : expiresAtFor(ledger);
   const gateReviewerProvider =
@@ -4335,15 +4592,27 @@ function assessPublicationGate(
     (publicationAuthorization.mode === "LOCAL_GATE"
       ? "CLAUDE_DESKTOP"
       : null);
+  const workflowBindingMatches =
+    ledger.version !== 3
+      ? !("workflow_id" in gate) &&
+        !("workflow_authorization_sha256" in gate)
+      : workflowBinding != null &&
+        gate.workflow_id === ledger.workflow_id &&
+        gate.workflow_id === workflowBinding.workflow_id &&
+        gate.workflow_authorization_sha256 ===
+          ledger.workflow_authorization_sha256 &&
+        gate.workflow_authorization_sha256 ===
+          workflowBinding.workflow_authorization_sha256;
   const authorizationBindingMatches =
     ledger.version === 1
       ? gate.version === 1 &&
         gate.local_gate_sha256 === publicationAuthorization.source_sha256
-      : gate.version === 2 &&
+      : gate.version === ledger.version &&
         gate.authorization_mode === publicationAuthorization.mode &&
         gate.authorization_sha256 === publicationAuthorization.source_sha256;
   if (
     !authorizationBindingMatches ||
+    !workflowBindingMatches ||
     gate.review_id !== ledger.review_id ||
     gate.issuance_committed !== true ||
     gate.status !== "MERGE_READY" ||
@@ -4427,8 +4696,11 @@ export async function getPublicationSummary(
     const authorization = await openAuthorizationFiles(paths, reviewId);
     try {
       const ledger = authorization.ledger;
+      const workflowBinding = await requireWorkflowBinding(storeRoot, ledger);
       const publicationAuthorization = authorizationForLedger(ledger);
-      const derived = derivePublication(ledger);
+      const derived = derivePublication(ledger, {
+        historyConflict: workflowHeadConflict(workflowBinding, ledger),
+      });
       const gate = assessPublicationGate(
         ledger,
         publicationAuthorization,
@@ -4436,6 +4708,7 @@ export async function getPublicationSummary(
         authorization.publicationGate,
         authorization.gateParseError,
         currentMs,
+        workflowBinding,
       );
       const evidenceStale =
         ledger.terminal == null &&
@@ -4488,6 +4761,187 @@ export async function getPublicationSummary(
   });
 }
 
+/**
+ * The exact blocking items behind a projection status, normalized so that two
+ * attempts can be compared for progress. Titles, bodies, timestamps, run IDs,
+ * and URLs are excluded: only identities that a fix has to change.
+ *
+ * A blocking status always yields at least one entry. An arm that narrows its
+ * items -- to declared requirements, or to results at the authorized head --
+ * can otherwise produce an empty set for a status that does block, leaving the
+ * operator with a repair phase and nothing to act on. The status-and-reason
+ * pair is the floor every other arm already falls through to.
+ */
+function normalizedBlockers(ledger, derived) {
+  const specific = specificBlockers(ledger, derived);
+  if (specific.length > 0 || derived.status === "MERGE_READY") {
+    return specific;
+  }
+  return [`${derived.status}:${derived.blockingReason ?? ""}`];
+}
+
+/**
+ * The comparison key for progress. It covers the reported status as well as
+ * the blocking items, so two projections that report different statuses can
+ * never share a key however their item lists narrow. Keeping the status out of
+ * it made the blocker list carry two jobs -- naming the items and
+ * distinguishing the states -- and balancing those against each other is what
+ * went wrong every time this was patched.
+ *
+ * It is strictly more discriminating than hashing the items alone: identical
+ * status and items still match, and a status change is a real change.
+ */
+function blockerDigest(status, blockers) {
+  return sha256(canonicalJson({ status, blockers }));
+}
+
+function specificBlockers(ledger, derived) {
+  const observation = ledger.latest_observation;
+  if (derived.status === "MERGE_READY" || observation == null) {
+    return [];
+  }
+  if (derived.status === "CHECKS_FAILED") {
+    // Select exactly what decided the status. Matching on context alone would
+    // also pull in another app's run under a pinned requirement and superseded
+    // reruns, and those can move the digest without moving the status -- which
+    // would let an unchanged required failure on the same tree slip past the
+    // stall detection this feeds.
+    return [
+      ...new Set(
+        observation.required_checks.requirements.flatMap((requirement) =>
+          [
+            ...decidingRunsFor(
+              requirement,
+              observation.required_checks.runs,
+            ).values(),
+          ]
+            .filter((run) => FAILING_CONCLUSIONS.has(run.conclusion))
+            // The pinned app is part of the identity: two requirements can
+            // share a context while pinning different apps, and a failure
+            // moving between them is a different actionable check, not the
+            // same one repeating. Rerun-specific IDs stay out.
+            .map(
+              (run) =>
+                `check:${run.run_kind}:${run.context}:${
+                  requirement.app_binding === "PINNED"
+                    ? `app${requirement.required_app_id}`
+                    : "unbound"
+                }:${run.conclusion}`,
+            ),
+        ),
+      ),
+    ].sort();
+  }
+  if (
+    derived.status === "CHANGES_REQUIRED" &&
+    derived.blockingReason === "UNRESOLVED_REVIEW_THREADS"
+  ) {
+    return [`threads:${observation.review_threads.unresolved_count}`];
+  }
+  if (derived.status === "CHANGES_REQUIRED") {
+    // Every Codex round mints new comment IDs, so identity here is the comment
+    // body digest: a genuinely repeated finding hashes the same, a reworded or
+    // different one does not. Only results reviewing the authorized head
+    // count -- a result carried over from a dead head decides nothing, exactly
+    // as with the non-required check runs above.
+    const authorizedHead = authorizationForLedger(ledger).head_sha;
+    return [
+      ...new Set(
+        observation.codex_review.results
+          .filter(
+            (result) =>
+              result.verdict === "FINDINGS" &&
+              result.reviewed_head_sha === authorizedHead,
+          )
+          .flatMap((result) =>
+            (result.attached_review_comments ?? []).map(
+              (comment) => `finding:${comment.body_sha256}`,
+            ),
+          ),
+      ),
+    ].sort();
+  }
+  return [`${derived.status}:${derived.blockingReason ?? ""}`];
+}
+
+/**
+ * Pure projection for the autonomous workflow: every publication invariant in
+ * its normal fail-closed order, with the draft flag alone ignored.
+ *
+ * It shares one evaluator with the manual path, so a blocker can never pass
+ * here and fail there. `getPublicationSummary` keeps reporting `PR_DRAFT` and
+ * `MARK_PULL_REQUEST_READY` unchanged.
+ */
+export async function getAutonomousPreReady(
+  storeRoot,
+  reviewId,
+  { clock = Date.now } = {},
+) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    const currentMs = clock();
+    const authorization = await openAuthorizationFiles(paths, reviewId);
+    try {
+      const ledger = authorization.ledger;
+      if (ledger.version !== 3) {
+        fail(
+          "PUBLICATION_NOT_AUTONOMOUS",
+          "only a version 3 publication has an autonomous projection",
+        );
+      }
+      const binding = await requireWorkflowBinding(storeRoot, ledger);
+      const publicationAuthorization = authorizationForLedger(ledger);
+      const derived = derivePublication(ledger, {
+        ignoreDraft: true,
+        historyConflict: workflowHeadConflict(binding, ledger),
+      });
+      const evidenceStale =
+        ledger.terminal == null &&
+        ledger.latest_observation != null &&
+        currentMs > Date.parse(expiresAtFor(ledger));
+      const blockingReason = evidenceStale
+        ? "EVIDENCE_STALE"
+        : derived.blockingReason;
+      const ready = !evidenceStale && derived.status === "MERGE_READY";
+      // Staleness is its own status, not a note on another one. A consumer
+      // switching on `status` must never be able to act on expired evidence by
+      // forgetting to also read `blocking_reason`.
+      const status = evidenceStale
+        ? "EVIDENCE_STALE"
+        : ready
+          ? "READY_TO_MARK"
+          : derived.status;
+      // The blockers describe the underlying derived state; the reported
+      // status is carried by the digest rather than folded into this list.
+      const blockers = normalizedBlockers(ledger, derived);
+      return {
+        review_id: ledger.review_id,
+        revision: ledger.revision,
+        workflow_id: ledger.workflow_id,
+        workflow_revision: binding.revision,
+        status,
+        blocking_reason: ready ? null : blockingReason,
+        blockers,
+        blocker_sha256: blockerDigest(status, blockers),
+        // The manual summary reaches PR_DRAFT before it evaluates Codex status,
+        // so it never offers this body while a pull request is draft -- and an
+        // autonomous run is draft for its whole life. Without it the workflow
+        // could acknowledge an ambiguity and then have no way to ask for the
+        // next review, because the version-2 request ID is server-derived and
+        // has no other source.
+        ...(status === "GITHUB_REVIEW_NOT_REQUESTED"
+          ? { codex_review_request: publicationRequest(ledger) }
+          : {}),
+        head_sha: publicationAuthorization.head_sha,
+        is_draft: ledger.latest_observation?.pull_request?.is_draft ?? null,
+        latest_observed_at: ledger.latest_observation?.observed_at ?? null,
+      };
+    } finally {
+      await closeAuthorizationFiles(authorization);
+    }
+  });
+}
+
 export async function recordCodexReviewRequest(
   storeRoot,
   reviewId,
@@ -4519,6 +4973,7 @@ export async function recordCodexReviewRequest(
     const ledger = await loadPublicationFile(paths, reviewId);
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
+    await requireWorkflowBinding(storeRoot, ledger, { mutating: true });
     const originalLedger = clone(ledger);
     const sourceAuthorization = await readBoundAuthorization(
       paths,
@@ -4624,6 +5079,7 @@ export async function recordGithubSnapshot(
       reviewId,
       ledger,
     );
+    await requireWorkflowBinding(storeRoot, ledger, { mutating: true });
     const validated = validateObservation(
       observation,
       ledger,
@@ -4747,6 +5203,7 @@ export async function acknowledgeCodexReviewAmbiguity(
     const ledger = await loadPublicationFile(paths, reviewId);
     requireRevision(ledger, expectedRevision);
     requireMutable(ledger);
+    await requireWorkflowBinding(storeRoot, ledger, { mutating: true });
     const originalLedger = clone(ledger);
     const sourceAuthorization = await readBoundAuthorization(
       paths,
@@ -4828,6 +5285,9 @@ export async function finalizePublicationGate(
     try {
       auditSession = await openAuditSession(paths, reviewId);
       const ledger = authorization.ledger;
+      const workflowBinding = await requireWorkflowBinding(storeRoot, ledger, {
+        mutating: true,
+      });
       const publicationAuthorization = authorizationForLedger(ledger);
       requireRevision(ledger, expectedRevision);
       requireMutable(ledger);
@@ -4868,6 +5328,13 @@ export async function finalizePublicationGate(
               authorization_mode: publicationAuthorization.mode,
               authorization_sha256: publicationAuthorization.source_sha256,
             }),
+        ...(ledger.version === 3
+          ? {
+              workflow_id: workflowBinding.workflow_id,
+              workflow_authorization_sha256:
+                workflowBinding.workflow_authorization_sha256,
+            }
+          : {}),
         publication_revision: ledger.revision,
         github_observation_sha256: observationDigest,
         github_observed_at: ledger.latest_observation.observed_at,
@@ -4943,6 +5410,14 @@ export async function verifyPublicationGate(
             verifiedAt,
           );
         } else {
+          // A broken workflow binding is a gate mismatch, not a crash: the
+          // GATE_VERIFIED audit event must still record the failed check.
+          let workflowBinding = null;
+          try {
+            workflowBinding = await requireWorkflowBinding(storeRoot, ledger);
+          } catch {
+            workflowBinding = null;
+          }
           const gateAssessment = assessPublicationGate(
             ledger,
             publicationAuthorization,
@@ -4950,6 +5425,7 @@ export async function verifyPublicationGate(
             gate,
             false,
             currentMs,
+            workflowBinding,
           );
           if (gateAssessment.state === "INVALID") {
             response = verificationFailure("GATE_MISMATCH", verifiedAt);

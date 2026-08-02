@@ -303,7 +303,13 @@ IMPLEMENTING
   -> LOCAL_GATE_PASSED
   -> reconciled fast-forward push of the exact gated head
   -> marker-bound draft pull request, claimed store-wide
-  -> START_PUBLICATION
+  -> version-3 publication bound to the workflow authorization
+  -> WAIT_PUBLICATION
+       ├─ machine finding      -> ADDRESS_REMOTE_FINDINGS ─┐
+       ├─ required check fails -> ADDRESS_CHECK_FAILURE  ──┤-> COMMIT_HEAD
+       ├─ base gap             -> UPDATE_FROM_BASE       ──┘   -> new local review
+       ├─ ambiguity, conflict, invalidation, or no progress -> PAUSED_HUMAN
+       └─ every other invariant passes -> PRE_READY
 ```
 
 `start_autonomous_workflow` binds the immutable repository, base, requirement,
@@ -335,10 +341,29 @@ exactly-reconciled release proves each branch and head ref absent — and each
 bound pull request closed — with a fresh observation bound to the current
 workflow revision and canonical claim target.
 
-This release stops at `START_PUBLICATION`. Autonomous publication ledgers,
-remote review waiting and repair cycles, ready-state changes, and
-evidence-backed thread resolution ship in the later RFC 0003 implementation
-changes. The existing manual publication flow below remains unchanged.
+An autonomous publication is publication schema version 3: it keeps the
+version-2 `authorization` object and its `source_sha256` meaning unchanged and
+separately binds `workflow_id` and `workflow_authorization_sha256`, in both the
+ledger and `publication-gate.json`. Start, snapshot recording, the autonomous
+projection, finalization, and gate verification each revalidate both digests
+against the workflow ledger itself, and any mismatch fails closed. Version-1
+and version-2 ledgers keep their exact existing behavior and can never bind a
+workflow.
+
+`get_autonomous_pre_ready` is the only proof that a draft pull request is
+otherwise complete. It is the same evaluator as the manual status in the same
+fail-closed order, with the draft flag alone ignored, so a blocker can never
+pass there and fail here; the manual `PR_DRAFT` and `MARK_PULL_REQUEST_READY`
+behavior is unchanged. An attempt whose normalized blockers and either head or
+tree match *any* earlier recorded attempt pauses `NO_PROGRESS`, so an
+oscillating tree or an alternating blocker cannot walk around the check by
+never repeating adjacently.
+
+This release stops at `PRE_READY`. The pull request stays draft throughout, so
+marking it ready, the draft-gate exception, and evidence-backed thread
+resolution ship in the final RFC 0003 implementation change. Unresolved review
+threads block and remain operator work. The existing manual publication flow
+below remains unchanged.
 
 ## GitHub publication gate
 

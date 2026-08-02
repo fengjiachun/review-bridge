@@ -4,6 +4,7 @@ import { constants as fsConstants } from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { getReviewSnapshot } from "./core.mjs";
+import { getAutonomousPreReady } from "./publication.mjs";
 import {
   atomicWriteCanonicalJson,
   atomicWriteFile,
@@ -13,6 +14,13 @@ import {
   sha256,
   withStateLock,
 } from "./storage.mjs";
+import {
+  assertWorkflowId,
+  authorizationDigest,
+  MAX_WORKFLOW_BYTES,
+  workflowPaths,
+  WORKFLOW_ID_RE,
+} from "./workflow-binding.mjs";
 
 export const AUTONOMOUS_CAPABILITIES = Object.freeze([
   "EDIT_AND_TEST",
@@ -27,10 +35,21 @@ export const AUTONOMOUS_CAPABILITIES = Object.freeze([
   "UNRESOLVE_INVALIDATED_CODEX_THREADS",
 ]);
 
-const WORKFLOW_ID_RE = /^rbwf-[0-9TZ-]+-[a-f0-9]{8}$/;
 const SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
-const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
+// Phases whose exit is a new commit. The three remote repair phases rejoin the
+// existing local loop rather than getting a parallel one.
+const REMOTE_REPAIR_PHASES = Object.freeze([
+  "ADDRESS_REMOTE_FINDINGS",
+  "ADDRESS_CHECK_FAILURE",
+  "UPDATE_FROM_BASE",
+]);
+const HEAD_RECORDING_PHASES = Object.freeze([
+  "IMPLEMENTING",
+  "ADDRESS_LOCAL_FINDINGS",
+  ...REMOTE_REPAIR_PHASES,
+]);
+const MAX_LISTED_BLOCKERS = 50;
 const MAX_AUDIT_BYTES = 4 * 1024 * 1024;
 const MAX_AUDIT_EVENT_BYTES = 256 * 1024;
 const MAX_TERMINAL_AUDIT_EVENTS = 2;
@@ -82,13 +101,6 @@ function assertPositiveInteger(value, name) {
     throw new TypeError(`${name} must be a positive safe integer`);
   }
   return value;
-}
-
-function assertWorkflowId(workflowId) {
-  if (typeof workflowId !== "string" || !WORKFLOW_ID_RE.test(workflowId)) {
-    throw new TypeError("invalid workflow_id");
-  }
-  return workflowId;
 }
 
 function assertSha(value, name) {
@@ -324,6 +336,38 @@ const ACTION_KIND_SPECS = {
     },
   },
 };
+
+function validateCurrentPublication(workflow) {
+  if (workflow.current_publication == null) {
+    return;
+  }
+  const publication = assertObject(
+    workflow.current_publication,
+    "workflow.current_publication",
+  );
+  assertString(publication.review_id, "workflow.current_publication.review_id", {
+    max: 1024,
+  });
+  assertSha(publication.head_sha, "workflow.current_publication.head_sha");
+  assertPositiveInteger(
+    publication.bound_revision,
+    "workflow.current_publication.bound_revision",
+  );
+  assertPositiveInteger(
+    publication.awaiting_revision,
+    "workflow.current_publication.awaiting_revision",
+  );
+  assertTimestamp(
+    publication.bound_at,
+    "workflow.current_publication.bound_at",
+  );
+  if (publication.head_sha !== workflow.current_head_sha) {
+    fail(
+      "WORKFLOW_STATE_INVALID",
+      "the bound publication head is not the current workflow head",
+    );
+  }
+}
 
 function validateCurrentReview(workflow) {
   if (workflow.current_review == null) {
@@ -657,36 +701,9 @@ function requireAncestor(repositoryPath, ancestor, descendant) {
   }
 }
 
-function workflowDirectory(storeRoot, workflowId) {
-  assertWorkflowId(workflowId);
-  return path.join(storeRoot, "workflows", workflowId);
-}
-
-function workflowPaths(storeRoot, workflowId) {
-  const directory = workflowDirectory(storeRoot, workflowId);
-  return {
-    directory,
-    workflow: path.join(directory, "workflow.json"),
-    auditLog: path.join(directory, "action-audit.jsonl"),
-    auditHead: path.join(directory, "action-audit-head.json"),
-  };
-}
-
 function createWorkflowId() {
   const stamp = new Date().toISOString().replaceAll(":", "").replaceAll(".", "-");
   return `rbwf-${stamp}-${crypto.randomBytes(4).toString("hex")}`;
-}
-
-function authorizationPayload(authorization) {
-  const {
-    workflow_authorization_sha256: _workflowAuthorizationSha256,
-    ...payload
-  } = authorization;
-  return payload;
-}
-
-function authorizationDigest(authorization) {
-  return sha256(canonicalJson(authorizationPayload(authorization)));
 }
 
 function publicWorkflow(workflow) {
@@ -800,9 +817,25 @@ function validateWorkflow(workflow) {
   if (!["ACTIVE", "PAUSED", "CANCELLED"].includes(workflow.status)) {
     fail("WORKFLOW_STATE_INVALID", "workflow status is invalid");
   }
-  if (!Array.isArray(workflow.attempts) || !Array.isArray(workflow.claims)) {
+  if (
+    !Array.isArray(workflow.attempts) ||
+    !Array.isArray(workflow.claims) ||
+    !Array.isArray(workflow.remote_attempts)
+  ) {
     fail("WORKFLOW_STATE_INVALID", "workflow arrays are malformed");
   }
+  for (const attempt of workflow.remote_attempts) {
+    assertObject(attempt, "workflow.remote_attempts entry");
+    assertPositiveInteger(attempt.number, "remote attempt number");
+    assertSha(attempt.head_sha, "remote attempt head_sha");
+    assertSha(attempt.tree_sha, "remote attempt tree_sha");
+    if (!DIGEST_RE.test(attempt.blocker_sha256 ?? "")) {
+      fail("WORKFLOW_STATE_INVALID", "remote attempt blocker digest is invalid");
+    }
+    assertString(attempt.status, "remote attempt status", { max: 1024 });
+    assertTimestamp(attempt.at, "remote attempt at");
+  }
+  validateCurrentPublication(workflow);
   const claimKeys = new Set();
   for (const entry of workflow.claims) {
     validateClaimEntry(entry, "workflow claim");
@@ -944,13 +977,39 @@ function validateWorkflow(workflow) {
   return workflow;
 }
 
+/**
+ * Fields this change adds to an existing schema-version-1 ledger. A workflow
+ * written before it has neither key, so both are filled in on read and persist
+ * on the next mutation. Without this a released workflow could not even be
+ * cancelled, and because the store-wide claim scan validates every ledger, one
+ * such workflow would block starts on unrelated branches.
+ */
+const REMOTE_FIELD_DEFAULTS = Object.freeze({
+  remote_attempts: [],
+  current_publication: null,
+});
+
+function withRemoteFieldDefaults(workflow) {
+  if (workflow == null || typeof workflow !== "object") {
+    return workflow;
+  }
+  for (const [field, value] of Object.entries(REMOTE_FIELD_DEFAULTS)) {
+    if (workflow[field] === undefined) {
+      workflow[field] = structuredClone(value);
+    }
+  }
+  return workflow;
+}
+
 async function readWorkflowRaw(paths) {
   try {
     const workflow = validateWorkflow(
-      await readCanonicalSecureJson(
-        paths.workflow,
-        MAX_WORKFLOW_BYTES,
-        "WORKFLOW_STATE_INVALID",
+      withRemoteFieldDefaults(
+        await readCanonicalSecureJson(
+          paths.workflow,
+          MAX_WORKFLOW_BYTES,
+          "WORKFLOW_STATE_INVALID",
+        ),
       ),
     );
     if (workflow.workflow_id !== path.basename(paths.directory)) {
@@ -1283,9 +1342,11 @@ function auditedWorkflowState(workflow) {
     current_head_sha: workflow.current_head_sha,
     pull_request: workflow.pull_request,
     attempts: workflow.attempts,
+    remote_attempts: workflow.remote_attempts ?? [],
     active_action: workflow.active_action,
     reviewer_task: workflow.reviewer_task,
     current_review: workflow.current_review,
+    current_publication: workflow.current_publication ?? null,
     progress_fingerprint: workflow.progress_fingerprint,
     pause: workflow.pause,
     cancellation: workflow.cancellation,
@@ -1482,9 +1543,11 @@ function requireWorkflowAuditBinding(workflow, audit) {
     current_head_sha: null,
     pull_request: null,
     attempts: [],
+    remote_attempts: [],
     active_action: null,
     reviewer_task: null,
     current_review: null,
+    current_publication: null,
     progress_fingerprint: null,
     pause: null,
     cancellation: null,
@@ -1501,12 +1564,16 @@ function requireWorkflowAuditBinding(workflow, audit) {
     canonicalJson(workflow.pull_request) !==
       canonicalJson(lastState.pull_request) ||
     canonicalJson(workflow.attempts) !== canonicalJson(lastState.attempts) ||
+    canonicalJson(workflow.remote_attempts ?? []) !==
+      canonicalJson(lastState.remote_attempts ?? []) ||
     canonicalJson(workflow.active_action) !==
       canonicalJson(lastState.active_action) ||
     canonicalJson(workflow.reviewer_task) !==
       canonicalJson(lastState.reviewer_task) ||
     canonicalJson(workflow.current_review) !==
       canonicalJson(lastState.current_review) ||
+    canonicalJson(workflow.current_publication ?? null) !==
+      canonicalJson(lastState.current_publication ?? null) ||
     workflow.progress_fingerprint !== lastState.progress_fingerprint ||
     canonicalJson(workflow.pause) !== canonicalJson(lastState.pause) ||
     canonicalJson(workflow.cancellation) !==
@@ -1552,16 +1619,25 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "current_head_sha",
     "pull_request",
     "attempts",
+    "remote_attempts",
     "active_action",
     "reviewer_task",
     "current_review",
+    "current_publication",
     "progress_fingerprint",
     "pause",
     "cancellation",
     "claims",
     "claim_release",
   ]) {
-    recovered[field] = structuredClone(lastEvent.workflow_state[field]);
+    // An audit event committed before this change carries neither remote
+    // field, so recovery restores their defaults instead of undefined.
+    recovered[field] = structuredClone(
+      lastEvent.workflow_state[field] ??
+        (field in REMOTE_FIELD_DEFAULTS
+          ? REMOTE_FIELD_DEFAULTS[field]
+          : lastEvent.workflow_state[field]),
+    );
   }
   recovered.action_audit = {
     next_sequence: audit.head.next_sequence,
@@ -1817,6 +1893,11 @@ function nextAction(workflow) {
       OBSERVED: "COMPLETE_DRAFT_PULL_REQUEST",
     }),
     START_PUBLICATION: "START_PUBLICATION",
+    WAIT_PUBLICATION: "WAIT_PUBLICATION",
+    ADDRESS_REMOTE_FINDINGS: "ADDRESS_REMOTE_FINDINGS",
+    ADDRESS_CHECK_FAILURE: "ADDRESS_CHECK_FAILURE",
+    UPDATE_FROM_BASE: "UPDATE_FROM_BASE",
+    PRE_READY: "AWAIT_OPERATOR",
   };
   return actions[workflow.phase] ?? "INSPECT_WORKFLOW";
 }
@@ -1834,6 +1915,8 @@ function workflowSummary(workflow) {
     topic_branch: workflow.topic_branch,
     current_head_sha: workflow.current_head_sha,
     current_review: workflow.current_review,
+    current_publication: workflow.current_publication,
+    remote_attempts: workflow.remote_attempts,
     active_action:
       workflow.active_action == null
         ? null
@@ -1954,9 +2037,11 @@ export async function startAutonomousWorkflow(
     phase: "IMPLEMENTING",
     current_head_sha: null,
     current_review: null,
+    current_publication: null,
     reviewer_task: null,
     pull_request: null,
     attempts: [],
+    remote_attempts: [],
     claims: workflowClaims,
     active_action: null,
     progress_fingerprint: null,
@@ -2074,7 +2159,7 @@ export async function recordWorkflowHead(
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
     requireCapability(workflow, "CREATE_COMMITS");
-    if (!["IMPLEMENTING", "ADDRESS_LOCAL_FINDINGS"].includes(workflow.phase)) {
+    if (!HEAD_RECORDING_PHASES.includes(workflow.phase)) {
       fail(
         "WORKFLOW_PHASE_INVALID",
         `cannot record a head in phase ${workflow.phase}`,
@@ -2113,7 +2198,11 @@ export async function recordWorkflowHead(
           review_id: reviewId,
           recorded_at: now(),
         });
-        if (next.phase === "IMPLEMENTING") {
+        // A new head invalidates every piece of evidence bound to the old one.
+        // The publication ledger stays on disk as history but can no longer
+        // authorize this workflow; the repaired head starts a fresh cycle.
+        next.current_publication = null;
+        if (next.phase !== "ADDRESS_LOCAL_FINDINGS") {
           next.phase = "PREPARE_LOCAL_REVIEW";
         }
       }),
@@ -2191,6 +2280,10 @@ export async function bindWorkflowReview(
             snapshot_hash: summary.current_snapshot.snapshot_hash,
             head_sha: summary.current_snapshot.head_sha,
           };
+          // A repaired head binds a different review, and every review ID gets
+          // its own fresh reviewer task. Releasing the previous binding is what
+          // lets the next dispatch be planned at all.
+          next.reviewer_task = null;
           next.phase = "DISPATCH_CODEX_REVIEWER";
         }),
       );
@@ -2965,6 +3058,270 @@ export async function advanceLocalWorkflow(
   });
 }
 
+function treeSha(repositoryPath, headSha) {
+  return runGit(repositoryPath, ["rev-parse", `${headSha}^{tree}`]).stdout;
+}
+
+/**
+ * Bind the version-3 publication started for the current gated head and enter
+ * the remote wait. The workflow records only which publication and revision it
+ * is waiting on: the request generation, immediate binding, and unbound-request
+ * detection all stay in the publication ledger.
+ */
+export async function bindWorkflowPublication(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  reviewId,
+) {
+  assertString(reviewId, "review_id", { max: 1024 });
+  return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
+    requireRevision(workflow, expectedRevision);
+    requireActive(workflow);
+    requireCapability(workflow, "POST_CODEX_REVIEW_REQUESTS");
+    if (workflow.phase !== "START_PUBLICATION") {
+      fail(
+        "WORKFLOW_PHASE_INVALID",
+        `cannot bind a publication in phase ${workflow.phase}`,
+      );
+    }
+    const projection = await getAutonomousPreReady(storeRoot, reviewId);
+    if (
+      projection.workflow_id !== workflow.workflow_id ||
+      projection.head_sha !== workflow.current_head_sha
+    ) {
+      fail(
+        "WORKFLOW_PUBLICATION_MISMATCH",
+        "publication is not bound to this workflow and head",
+      );
+    }
+    return publicWorkflow(
+      await saveMutation(paths, workflow, async (next) => {
+        next.current_publication = {
+          review_id: reviewId,
+          head_sha: next.current_head_sha,
+          bound_revision: projection.revision,
+          awaiting_revision: projection.revision,
+          bound_at: now(),
+        };
+        next.phase = "WAIT_PUBLICATION";
+      }),
+    );
+  });
+}
+
+/**
+ * Read the bound publication's autonomous projection and take the one workflow
+ * transition it implies. Statuses that are simply not settled yet leave the
+ * workflow in WAIT_PUBLICATION; only a state that needs a new head, an operator
+ * decision, or the pre-ready stop changes the phase.
+ */
+export async function advanceRemoteWorkflow(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  { clock = Date.now } = {},
+) {
+  return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
+    requireRevision(workflow, expectedRevision);
+    requireActive(workflow);
+    if (workflow.phase !== "WAIT_PUBLICATION") {
+      fail(
+        "WORKFLOW_PHASE_INVALID",
+        `cannot advance a remote wait in phase ${workflow.phase}`,
+      );
+    }
+    if (workflow.current_publication == null) {
+      fail("WORKFLOW_STATE_INVALID", "the remote wait has no bound publication");
+    }
+    const reviewId = workflow.current_publication.review_id;
+    const projection = await getAutonomousPreReady(storeRoot, reviewId, {
+      clock,
+    });
+    if (
+      projection.workflow_id !== workflow.workflow_id ||
+      projection.review_id !== reviewId ||
+      projection.head_sha !== workflow.current_head_sha
+    ) {
+      fail(
+        "WORKFLOW_PUBLICATION_MISMATCH",
+        "publication is not bound to this workflow and head",
+      );
+    }
+    const repairPhase = remoteRepairPhase(projection);
+    const pauseReason = remotePauseReason(projection);
+    if (repairPhase == null && pauseReason == null) {
+      // Still settling, or blocked on something no autonomous action of this
+      // stage may touch (unresolved threads). Keep waiting and only refresh the
+      // revision the workflow has observed.
+      //
+      // A repair phase is left only by recording a new head. A required check
+      // that fails and then passes on a rerun with no code change therefore
+      // leaves the workflow in its repair phase; the operator commits a fix or
+      // cancels. Letting a repair phase re-evaluate instead was tried and
+      // withdrawn: every status this projection can report before it reaches
+      // the check and Codex gates masks a blocker that is still standing, so
+      // the release kept firing on unevaluated evidence.
+      const reachedPreReady = projection.status === "READY_TO_MARK";
+      if (
+        !reachedPreReady &&
+        workflow.current_publication.awaiting_revision === projection.revision
+      ) {
+        // Nothing moved. Polling is the normal shape of this phase, so an idle
+        // check must not spend a revision and an audit event: a long wait would
+        // otherwise fill the audit log on its own.
+        return publicWorkflow(workflow);
+      }
+      return publicWorkflow(
+        await saveMutation(paths, workflow, async (next) => {
+          next.current_publication.awaiting_revision = projection.revision;
+          if (reachedPreReady) {
+            next.phase = "PRE_READY";
+          }
+        }),
+      );
+    }
+    const repository = await repositoryIdentity(workflow.repository.path);
+    if (repository.git_common_dir !== workflow.repository.git_common_dir) {
+      fail("WORKFLOW_REPOSITORY_DRIFT", "repository identity changed");
+    }
+    const tree = treeSha(repository.path, workflow.current_head_sha);
+    // Compare against every recorded attempt, not just the last one. A repeat
+    // does not have to be adjacent: a tree that oscillates between two states,
+    // or a blocker that alternates with another, would otherwise return to a
+    // position already proven not to clear it and never stall. The conjunct
+    // with head or tree is what keeps this from firing on real progress.
+    const repeated =
+      workflow.remote_attempts.find(
+        (attempt) =>
+          attempt.blocker_sha256 === projection.blocker_sha256 &&
+          (attempt.head_sha === workflow.current_head_sha ||
+            attempt.tree_sha === tree),
+      ) ?? null;
+    const stalled = repeated != null;
+    if (stalled || pauseReason != null) {
+      // Resume where the operator's remedy is actually possible. Returning to
+      // WAIT_PUBLICATION would strand every pause whose fix is a new commit:
+      // record_workflow_head rejects that phase, so resume and advance would
+      // re-derive the same stop forever.
+      const resumePhase =
+        repairPhase ?? REMOTE_PAUSE_RESUME_PHASES[pauseReason] ?? "WAIT_PUBLICATION";
+      return publicWorkflow(
+        await saveActionMutation(
+          paths,
+          workflow,
+          "WORKFLOW_PAUSED",
+          async (next) => {
+            next.current_publication.awaiting_revision = projection.revision;
+            if (stalled) {
+              // Keep the attempt chain complete for the operator, and make the
+              // next comparison run against this stop rather than the attempt
+              // before it.
+              next.remote_attempts.push({
+                number: next.remote_attempts.length + 1,
+                head_sha: next.current_head_sha,
+                tree_sha: tree,
+                blocker_sha256: projection.blocker_sha256,
+                status: projection.status,
+                at: now(),
+              });
+            }
+            next.status = "PAUSED";
+            next.phase = "PAUSED_HUMAN";
+            next.pause = {
+              reason_code: pauseReason ?? "NO_PROGRESS",
+              blocked_action: "WAIT_PUBLICATION",
+              evidence: JSON.stringify({
+                review_id: reviewId,
+                publication_revision: projection.revision,
+                status: projection.status,
+                blocking_reason: projection.blocking_reason,
+                // The digest is the comparison key; the listed blockers are
+                // for the operator and are capped so a pathological blocker
+                // set cannot make the pause itself too large to persist.
+                blocker_sha256: projection.blocker_sha256,
+                blocker_count: projection.blockers.length,
+                blockers: projection.blockers.slice(0, MAX_LISTED_BLOCKERS),
+                head_sha: workflow.current_head_sha,
+                tree_sha: tree,
+                ...(stalled
+                  ? { previous_remote_attempt: repeated }
+                  : {}),
+              }),
+              resume_phase: resumePhase,
+              review_id: workflow.current_review?.review_id ?? null,
+              action_id: null,
+              paused_at: now(),
+            };
+          },
+        ),
+      );
+    }
+    return publicWorkflow(
+      await saveMutation(paths, workflow, async (next) => {
+        next.current_publication.awaiting_revision = projection.revision;
+        next.remote_attempts.push({
+          number: next.remote_attempts.length + 1,
+          head_sha: next.current_head_sha,
+          tree_sha: tree,
+          blocker_sha256: projection.blocker_sha256,
+          status: projection.status,
+          at: now(),
+        });
+        next.phase = repairPhase;
+      }),
+    );
+  });
+}
+
+function remoteRepairPhase(projection) {
+  if (
+    projection.status === "CHANGES_REQUIRED" &&
+    projection.blocking_reason === "CHANGES_REQUIRED"
+  ) {
+    return "ADDRESS_REMOTE_FINDINGS";
+  }
+  if (projection.status === "CHECKS_FAILED") {
+    return "ADDRESS_CHECK_FAILURE";
+  }
+  if (projection.status === "PR_UPDATE_REQUIRED") {
+    return "UPDATE_FROM_BASE";
+  }
+  return null;
+}
+
+/**
+ * Where each pause resumes, when the implied repair phase does not already
+ * decide it. A pause must never return to WAIT_PUBLICATION when its remedy is
+ * a new commit: that phase cannot record a head, so resume and advance would
+ * re-derive the identical stop forever.
+ *
+ * `SEMANTIC_CONFLICT` is cleared by merging the fresh base cleanly and
+ * committing. An invalidated publication is terminal, so the only remedy
+ * inside the workflow is a new head and a new publication; if the pull request
+ * itself is gone, the operator cancels instead. `GITHUB_REVIEW_AMBIGUOUS` is
+ * the one case whose remedy really is external — an acknowledgement and a
+ * fresh observation — so it returns to the wait.
+ */
+const REMOTE_PAUSE_RESUME_PHASES = Object.freeze({
+  SEMANTIC_CONFLICT: "UPDATE_FROM_BASE",
+  PUBLICATION_INVALIDATED: "IMPLEMENTING",
+  GITHUB_REVIEW_AMBIGUOUS: "WAIT_PUBLICATION",
+});
+
+function remotePauseReason(projection) {
+  if (projection.status === "GITHUB_REVIEW_UNKNOWN") {
+    return "GITHUB_REVIEW_AMBIGUOUS";
+  }
+  if (projection.status === "PR_CONFLICTING") {
+    return "SEMANTIC_CONFLICT";
+  }
+  if (["INVALIDATED", "CLOSED", "MERGED"].includes(projection.status)) {
+    return "PUBLICATION_INVALIDATED";
+  }
+  return null;
+}
+
 export async function pauseAutonomousWorkflow(
   storeRoot,
   workflowId,
@@ -2977,6 +3334,12 @@ export async function pauseAutonomousWorkflow(
     "AUTHORIZATION_REQUIRED",
     "PERMISSION_REQUIRED",
     "NO_PROGRESS",
+    // Remote-loop judgements the server cannot derive: whether a failing check
+    // is actionable at all, and whether merging the fresh base produced a
+    // semantic conflict or would need a history rewrite.
+    "REQUIRED_CHECK_UNACTIONABLE",
+    "SEMANTIC_CONFLICT",
+    "HISTORY_REWRITE_REQUIRED",
   ]);
   if (!allowedReasons.has(reasonCode)) {
     throw new TypeError("unsupported autonomous workflow pause reason");
@@ -3030,6 +3393,16 @@ export async function resumeAutonomousWorkflow(
       fail(
         "WORKFLOW_RESUME_INVALID",
         "human-required local review must use human arbitration",
+      );
+    }
+    // A history rewrite is the one remedy this workflow structurally cannot
+    // accept: every recorded head must be a descendant of the last, so a
+    // rewritten head is rejected however the workflow resumes. Say so instead
+    // of resuming into a phase that will re-derive the same stop.
+    if (workflow.pause?.reason_code === "HISTORY_REWRITE_REQUIRED") {
+      fail(
+        "WORKFLOW_RESUME_INVALID",
+        "a required history rewrite cannot be resumed: every workflow head must descend from the last, so this workflow must be cancelled and the work restarted",
       );
     }
     const resumedPhase = workflow.pause?.resume_phase;

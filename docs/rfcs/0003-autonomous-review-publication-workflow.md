@@ -656,6 +656,21 @@ workflows. The autonomous controller may mark ready only when
 ambiguous, incomplete, and unresolved-thread projections return their
 underlying blocker instead.
 
+The draft-gate rules below belong to rollout item 3. They exist only to answer
+when an early mark-ready is permitted, so until autonomous mark-ready ships the
+pull request stays draft for its whole life, neither draft-gate pause has a
+resume action, and neither is reachable.
+
+They are also not this repository's path. GitHub delivers `pull_request` events
+for draft pull requests, and a workflow without an explicit `draft == false`
+condition runs on them. Measured on pull request 22 of this repository, which
+was created draft and marked ready at `2026-07-31T19:16:59Z`: eight required
+`pull_request` check runs completed between `15:31Z` and `19:09Z`, and the
+pinned Codex actor submitted seven reviews between `15:36Z` and `18:26Z` —
+every one of them while the pull request was still draft. Neither gate is
+ready-only here, so the precondition for a draft gate never holds. The rules
+remain for repositories whose providers do gate on ready state.
+
 Some repositories start required checks or remote review only after a pull
 request leaves draft state. The server derives `DRAFT_GATE_DEADLOCK` only when
 fresh, complete provider-policy evidence unambiguously declares that every
@@ -672,6 +687,12 @@ started, the workflow pauses as `DRAFT_GATE_INDETERMINATE`, not
 `DRAFT_GATE_DEADLOCK`. The first implementation does not assume that GitHub
 exposes a generic ready-only policy source; a repository without one therefore
 uses the indeterminate path.
+
+That rule decides which pause applies once the workflow stops waiting. It does
+not decide when to stop. An ordinary pending gate and a gate that will never
+start while draft are observationally identical, and elapsed time is explicitly
+not evidence, so rollout item 3 must supply the predicate that ends the wait
+before either pause can be derived.
 
 Marking ready from either pause requires a new direct operator decision. For a
 proven deadlock, the server replays the exact provider-policy proof. For an
@@ -756,6 +777,20 @@ The workflow pauses when:
 - the same progress fingerprint recurs without a code or evidence change.
 
 The controller must not waive, remove, or rename a required check.
+
+A repair phase is left only by recording a new head. A check that fails and
+then passes on a rerun with no code change therefore leaves the workflow in
+that phase until the operator commits a fix or cancels it. Letting a repair
+phase re-evaluate its publication instead was implemented and withdrawn in
+rollout item 2: every status the projection can report before it reaches the
+required-check and Codex gates — a pending pull-request state, an incomplete
+collection, expired evidence, and a check still running — masks a blocker that
+is still standing, so each release rule tried fired on unevaluated evidence and
+stranded the finished fix, since the wait cannot record a head. A correct rule
+needs the projection to distinguish "this gate was evaluated and is clear" from
+"this gate was never reached", which it does not currently express. Rollout
+item 3 revisits this state machine for mark-ready and thread resolution and
+should carry that distinction.
 
 ### Base updates and conflicts
 
@@ -1007,8 +1042,9 @@ Pause reasons include:
 - `EXTERNAL_ACTION_INDETERMINATE`;
 - `WORKFLOW_OWNERSHIP_CONFLICT`;
 - `GITHUB_REVIEW_AMBIGUOUS`;
-- `DRAFT_GATE_DEADLOCK`;
-- `DRAFT_GATE_INDETERMINATE`;
+- `PUBLICATION_INVALIDATED`;
+- `DRAFT_GATE_DEADLOCK` (rollout item 3);
+- `DRAFT_GATE_INDETERMINATE` (rollout item 3);
 - `HUMAN_REVIEW_REQUIRED`;
 - `HUMAN_OR_UNKNOWN_THREAD`;
 - `THREAD_RESOLUTION_UNSAFE`;
@@ -1074,6 +1110,19 @@ The main risks and controls are:
   completing. The push does still bind the immutable gated SHA and the pinned
   URL from persisted intent so an advanced branch or a mistaken remote name
   cannot substitute a different commit or destination.
+- **Edited workflow ledger**: the publication side reads the workflow through a
+  narrow, lock-free binding reader rather than the full loader, so it validates
+  the binding contract and the authorization digest but not the committed
+  action audit. An actor who can canonically rewrite `workflow.json` can
+  therefore restore a cancelled workflow or roll its head back and make a
+  superseded publication actionable again, where the full loader's audit
+  binding would reject it. This is accepted rather than closed: that actor
+  already has write access to the private store, and the same access rewrites
+  the local gate, the publication ledger, and its audit directly. The narrow
+  read exists so the publication and workflow locks need no shared ordering,
+  and the authorization digest it does verify still binds the immutable scope.
+  Every mutable fact it returns — status, current head, bound pull request —
+  is therefore trusted only to the extent the store itself is.
 - **Cross-workflow interference**: atomically claim canonical local branches,
   GitHub head refs, and pull requests in a store-wide registry; never expire or
   steal a claim based only on time.
@@ -1270,8 +1319,9 @@ issued or credited.
   `autonomous_pre_ready.status == READY_TO_MARK`;
 - ready-only checks or review produce `DRAFT_GATE_DEADLOCK` only with complete,
   pinned provider-policy proof bound to their exact gate identities;
-- missing, pending, silent, or delayed evidence without that proof produces
-  `DRAFT_GATE_INDETERMINATE`, regardless of elapsed time;
+- once the wait-ending predicate holds, missing, pending, silent, or delayed
+  evidence without that proof produces `DRAFT_GATE_INDETERMINATE` rather than a
+  deadlock, regardless of elapsed time;
 - ordinary pending gates never produce a provider-verified deadlock exception;
 - an early mark-ready requires an exact head/PR/blocker-bound single-use
   `draft_gate_exception`; an indeterminate pause additionally requires exact
@@ -1401,6 +1451,16 @@ Implementation is split into three changes after this RFC is accepted:
    watermark and final-gate replay, ready-for-review transition, end-to-end
    recovery tests, and final packaging.
 
+The pull request stays draft for the whole of item 2, so everything that acts
+on ready state belongs to item 3: both draft-gate pauses, the provider-policy
+proof, the single-use `draft_gate_exception`, the mark-ready action, and
+`RETURN_PR_TO_DRAFT_FOR_REPAIR`, whose precondition is a ready pull request.
+Item 2 keeps the reachable pauses `GITHUB_REVIEW_AMBIGUOUS`,
+`PUBLICATION_INVALIDATED`, `REQUIRED_CHECK_UNACTIONABLE`, `SEMANTIC_CONFLICT`,
+`HISTORY_REWRITE_REQUIRED`, and `NO_PROGRESS`. Unresolved review threads block
+`MERGE_READY` throughout item 2 and stay operator work, since evidence-backed
+automatic resolution is item 3.
+
 Each change uses the existing Review Bridge local and GitHub review gates. The
 feature remains unavailable until the packaged workflow skill and server
 support the same workflow schema and transition set.
@@ -1420,5 +1480,8 @@ this RFC changes from `Accepted` to `Implemented`.
   budget in addition to mandatory no-progress detection?
 - Which GitHub API shape provides the smallest complete paginated thread,
   review, comment, and actor provenance proof?
+- Which predicate ends the pre-ready wait, given that a pending gate and a
+  ready-only gate are observationally identical and elapsed time is not
+  evidence?
 - Should a later version support repositories with automatic Codex review
   without requiring the existing direct quiescence acknowledgement?
