@@ -1160,6 +1160,56 @@ function validateChecks(requiredChecks, pullRequest, target) {
   }
 }
 
+/**
+ * A thread's provenance has to be complete enough to replay who wrote it and
+ * which formal review it belongs to, because that is what later decides
+ * whether the workflow may resolve it. Partial evidence is rejected rather
+ * than recorded, so an absent field can never read as an established fact.
+ */
+function validateThreadProvenance(thread) {
+  if (thread.comments === undefined) {
+    return;
+  }
+  const comments = assertArray(thread.comments, "thread.comments", 1_000);
+  if (comments.length === 0) {
+    fail("INVALID_INPUT", "thread provenance must include its comments");
+  }
+  if (thread.comments_pagination_complete !== true) {
+    fail("INVALID_INPUT", "thread comment pagination is incomplete");
+  }
+  assertId(thread.comment_count, "thread.comment_count");
+  if (thread.comment_count !== comments.length) {
+    fail("INVALID_INPUT", "thread comment count disagrees with its comments");
+  }
+  uniqueBy(comments, (comment) => comment.database_id, "thread comments");
+  for (const comment of comments) {
+    assertString(comment.id, "thread comment id", 255);
+    assertId(comment.database_id, "thread comment database_id");
+    timestampMs(comment.created_at, "thread comment created_at");
+    timestampMs(comment.updated_at, "thread comment updated_at");
+    assertObject(comment.actor, "thread comment actor");
+    if (comment.review !== null) {
+      const review = assertObject(comment.review, "thread comment review");
+      assertString(review.id, "thread review id", 255);
+      assertId(review.database_id, "thread review database_id");
+      assertString(review.state, "thread review state", 100);
+      assertObject(review.actor, "thread review actor");
+      if (review.reviewed_head_sha !== null) {
+        assertSha(review.reviewed_head_sha, "thread review reviewed_head_sha");
+      }
+    }
+  }
+  // The root comment is what binds a thread to a formal review, so a thread
+  // whose root carries no review or no actor identity is not replayable.
+  const root = comments[0];
+  if (root.review == null || !Number.isSafeInteger(root.actor?.id)) {
+    fail(
+      "INVALID_INPUT",
+      "thread root must carry its actor identity and attached review",
+    );
+  }
+}
+
 function validateThreads(reviewThreads) {
   const threads = assertArray(reviewThreads.threads ?? [], "review_threads.threads");
   uniqueBy(threads, (thread) => assertString(thread.id, "thread.id", 255), "threads");
@@ -1170,6 +1220,7 @@ function validateThreads(reviewThreads) {
     ) {
       fail("INVALID_INPUT", "thread resolution and outdated fields must be boolean");
     }
+    validateThreadProvenance(thread);
   }
   if (
     reviewThreads.total_count !== threads.length ||

@@ -653,3 +653,101 @@ test("GitHub observation normalization requires explicit check arrays", () => {
   assert.equal(observation.required_checks.policy, "NONE_CONFIGURED");
   assert.deepEqual(observation.required_checks.requirements, []);
 });
+
+// The provenance shape below mirrors what GitHub actually returns; it was
+// captured from the five real review threads on pull request 23 of this
+// repository rather than invented.
+function threadWithProvenance(overrides = {}) {
+  return {
+    id: "PRRT_1",
+    isResolved: false,
+    isOutdated: false,
+    path: "src/value.mjs",
+    line: 12,
+    comments: {
+      totalCount: 1,
+      pageInfo: { hasNextPage: false },
+      nodes: [
+        {
+          id: "PRRC_1",
+          databaseId: 3694779367,
+          createdAt: "2026-07-27T00:00:01Z",
+          updatedAt: "2026-07-27T00:00:01Z",
+          author: {
+            __typename: "Bot",
+            login: "chatgpt-codex-connector",
+            databaseId: 199175422,
+          },
+          pullRequestReview: {
+            id: "PRR_1",
+            databaseId: 4833836859,
+            state: "COMMENTED",
+            commit: { oid: headSha },
+            author: {
+              __typename: "Bot",
+              login: "chatgpt-codex-connector",
+              databaseId: 199175422,
+            },
+          },
+        },
+      ],
+    },
+    ...overrides,
+  };
+}
+
+function rawWithThread(thread) {
+  const value = rawCollection();
+  value.review_threads.pages[0].data.repository.pullRequest.reviewThreads.nodes =
+    [thread];
+  return value;
+}
+
+test("thread provenance carries actor identity and the attached review", () => {
+  const observation = normalizeGithubObservation(
+    publication(),
+    rawWithThread(threadWithProvenance()),
+  );
+  const thread = observation.review_threads.threads[0];
+  assert.equal(thread.comment_count, 1);
+  assert.equal(thread.comments_pagination_complete, true);
+  const root = thread.comments[0];
+  assert.equal(root.database_id, 3694779367);
+  assert.deepEqual(root.actor, {
+    id: 199175422,
+    type: "Bot",
+    login: "chatgpt-codex-connector",
+  });
+  assert.equal(root.review.database_id, 4833836859);
+  assert.equal(root.review.reviewed_head_sha, headSha);
+  assert.deepEqual(root.review.actor, root.actor);
+});
+
+test("a thread collected without provenance stays usable", () => {
+  // An older collector emits no comments. The normalizer must not invent the
+  // fields, so a consumer sees provenance as absent rather than as established.
+  const bare = threadWithProvenance();
+  delete bare.comments;
+  const observation = normalizeGithubObservation(
+    publication(),
+    rawWithThread(bare),
+  );
+  const thread = observation.review_threads.threads[0];
+  assert.equal(thread.id, "PRRT_1");
+  assert.equal("comments" in thread, false);
+  assert.equal("comment_count" in thread, false);
+});
+
+test("a deleted thread author reports an unknown actor rather than none", () => {
+  const ghosted = threadWithProvenance();
+  ghosted.comments.nodes[0].author = null;
+  const observation = normalizeGithubObservation(
+    publication(),
+    rawWithThread(ghosted),
+  );
+  assert.deepEqual(observation.review_threads.threads[0].comments[0].actor, {
+    id: null,
+    type: null,
+    login: null,
+  });
+});

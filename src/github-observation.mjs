@@ -539,6 +539,22 @@ function normalizeCodex(publication, raw) {
   });
 }
 
+/**
+ * A deleted account resolves to a null author in GraphQL. Report that as an
+ * explicit unknown actor rather than dropping the field, so the reviewer sees
+ * that provenance is missing instead of absent.
+ */
+function normalizedThreadActor(author) {
+  if (author == null) {
+    return { id: null, type: null, login: null };
+  }
+  return {
+    id: author.databaseId ?? null,
+    type: author.__typename ?? null,
+    login: author.login ?? null,
+  };
+}
+
 function normalizeThreads(publication, raw) {
   const target = object(publication.target, "publication.target");
   const pages = array(raw.review_threads?.pages, "review_threads.pages");
@@ -557,13 +573,57 @@ function normalizeThreads(publication, raw) {
     raw.review_threads.collected_at,
     "review_threads.collected_at",
   );
-  const normalized = threads.map((thread) => ({
-    id: thread.id,
-    is_resolved: thread.isResolved,
-    is_outdated: thread.isOutdated,
-    path: thread.path,
-    line: thread.line ?? null,
-  }));
+  const normalized = threads.map((thread) => {
+    const base = {
+      id: thread.id,
+      is_resolved: thread.isResolved,
+      is_outdated: thread.isOutdated,
+      path: thread.path,
+      line: thread.line ?? null,
+    };
+    // Provenance is emitted only when the collection carried it. The ledger
+    // validates it the same way -- present and complete, or absent -- so an
+    // older collector stays usable until a consumer actually requires it.
+    if (thread.comments == null) {
+      return base;
+    }
+    const comments = array(
+      thread.comments.nodes,
+      `review thread ${thread.id} comments`,
+    );
+    return {
+      ...base,
+      comment_count: thread.comments?.totalCount ?? null,
+      comments_pagination_complete:
+        thread.comments?.pageInfo?.hasNextPage === false,
+      comments: comments.map((comment) => ({
+        id: comment.id,
+        database_id: comment.databaseId,
+        created_at: canonicalTime(
+          comment.createdAt,
+          `review comment ${comment.databaseId} createdAt`,
+        ),
+        updated_at: canonicalTime(
+          comment.updatedAt,
+          `review comment ${comment.databaseId} updatedAt`,
+        ),
+        actor: normalizedThreadActor(comment.author),
+        review:
+          comment.pullRequestReview == null
+            ? null
+            : {
+                id: comment.pullRequestReview.id,
+                database_id: comment.pullRequestReview.databaseId,
+                state: comment.pullRequestReview.state,
+                reviewed_head_sha:
+                  comment.pullRequestReview.commit?.oid ?? null,
+                actor: normalizedThreadActor(
+                  comment.pullRequestReview.author,
+                ),
+              },
+      })),
+    };
+  });
   return {
     collection: {
       status: "COMPLETE",
@@ -872,12 +932,46 @@ export function collectClassicProtection(
   );
 }
 
+// One query carries the whole provenance proof: thread identity and state,
+// every comment with stable node and database IDs and numeric actor identity,
+// and the formal review each comment structurally belongs to together with the
+// head that review examined. REST exposes neither the thread node ID nor the
+// thread-to-review link, and would need a call per thread.
+//
+// Comments are fetched in one page and the proof records whether that was
+// complete; a thread deeper than the page fails closed rather than being
+// reported on partial evidence.
+const REVIEW_THREAD_COMMENT_PAGE = 100;
 const REVIEW_THREADS_QUERY = `
 query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $endCursor) {
-        nodes { id isResolved isOutdated path line }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          comments(first: ${REVIEW_THREAD_COMMENT_PAGE}) {
+            totalCount
+            pageInfo { hasNextPage }
+            nodes {
+              id
+              databaseId
+              createdAt
+              updatedAt
+              author { __typename login ... on Bot { databaseId } ... on User { databaseId } }
+              pullRequestReview {
+                id
+                databaseId
+                state
+                commit { oid }
+                author { __typename login ... on Bot { databaseId } ... on User { databaseId } }
+              }
+            }
+          }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }

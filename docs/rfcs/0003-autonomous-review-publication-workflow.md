@@ -1478,8 +1478,19 @@ this RFC changes from `Accepted` to `Implemented`.
   discovery across application restarts?
 - Should the first implementation expose an operator-configurable resource
   budget in addition to mandatory no-progress detection?
-- Which GitHub API shape provides the smallest complete paginated thread,
-  review, comment, and actor provenance proof?
+- ~~Which GitHub API shape provides the smallest complete paginated thread,
+  review, comment, and actor provenance proof?~~ Resolved: a single GraphQL
+  query on `pullRequest.reviewThreads` with nested `comments`. One request
+  returns every element this RFC requires — thread node ID, `isResolved`,
+  `isOutdated`, each comment's node and database ID with `createdAt` and
+  `updatedAt`, `author { __typename ... databaseId }` for the numeric actor ID
+  and type, and `pullRequestReview { databaseId author commit { oid } }` for
+  the structurally attached review, its author, and the head it reviewed — with
+  `pageInfo.hasNextPage` and `totalCount` at both the thread and comment levels
+  as the nested-pagination proof. REST cannot supply it: it exposes no thread
+  node ID and no structural thread-to-review link, and would need one call per
+  thread. Measured against the five real threads on pull request 23 of this
+  repository.
 - Which predicate ends the pre-ready wait, given that a pending gate and a
   ready-only gate are observationally identical and elapsed time is not
   evidence?

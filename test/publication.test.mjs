@@ -4538,3 +4538,103 @@ test("observations reach the ledger by path instead of through the caller", asyn
     return true;
   });
 });
+
+test("thread provenance is rejected unless it is complete", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 1_000;
+  const withThread = (mutate) => {
+    const value = observation({
+      at: observedAt,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: null,
+      requestAt: startedAt,
+      withResult: false,
+    });
+    const thread = {
+      id: "PRRT_1",
+      is_resolved: false,
+      is_outdated: false,
+      comment_count: 1,
+      comments_pagination_complete: true,
+      comments: [
+        {
+          id: "PRRC_1",
+          database_id: 3694779367,
+          created_at: iso(startedAt - 5_000),
+          updated_at: iso(startedAt - 5_000),
+          actor: { id: 99, type: "Bot", login: "codex" },
+          review: {
+            id: "PRR_1",
+            database_id: 4833836859,
+            state: "COMMENTED",
+            reviewed_head_sha: state.headSha,
+            actor: { id: 99, type: "Bot", login: "codex" },
+          },
+        },
+      ],
+    };
+    mutate(thread);
+    value.review_threads.total_count = 1;
+    value.review_threads.unresolved_count = 1;
+    value.review_threads.threads = [thread];
+    return value;
+  };
+  const record = (mutate) =>
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 1, observation: withThread(mutate) },
+      { clock: () => observedAt + 10 },
+    );
+
+  // Complete provenance is accepted.
+  const accepted = await record(() => {});
+  assert.equal(accepted.latest_observation.review_threads.threads[0].comments.length, 1);
+
+  for (const [name, mutate] of [
+    ["incomplete comment pagination", (thread) => {
+      thread.comments_pagination_complete = false;
+    }],
+    ["a count that disagrees with the comments", (thread) => {
+      thread.comment_count = 2;
+    }],
+    ["a root comment with no attached review", (thread) => {
+      thread.comments[0].review = null;
+    }],
+    ["a root comment with no actor identity", (thread) => {
+      thread.comments[0].actor = { id: null, type: null, login: null };
+    }],
+    ["an empty comment sequence", (thread) => {
+      thread.comments = [];
+      thread.comment_count = 0;
+    }],
+  ]) {
+    const next = await fixture();
+    t.after(() => fsp.rm(next.root, { recursive: true, force: true }));
+    await start(next, startedAt);
+    await assert.rejects(
+      recordGithubSnapshot(
+        next.store,
+        next.reviewId,
+        {
+          expectedRevision: 1,
+          observation: (() => {
+            const value = withThread(mutate);
+            value.pull_request.head_sha = next.headSha;
+            value.pull_request.base_head_comparison.head_sha = next.headSha;
+            value.pull_request.base_sha = next.baseSha;
+            value.pull_request.pr_reported_base_sha = next.baseSha;
+            return value;
+          })(),
+        },
+        { clock: () => observedAt + 10 },
+      ),
+      /INVALID_INPUT/,
+      name,
+    );
+  }
+});
