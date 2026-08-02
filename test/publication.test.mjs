@@ -4640,6 +4640,12 @@ test("incomplete thread provenance is recorded, not refused", async (t) => {
       value.comments[0].review.reviewed_head_sha = null;
       value.provenance_complete = false;
     }],
+    ["an impossible actor id", (value) => {
+      // Zero is not a GitHub actor. Accepting it would let the flag assert a
+      // numeric identity that does not exist.
+      value.comments[0].actor = { id: 0, type: "Bot", login: "codex" };
+      value.provenance_complete = false;
+    }],
   ]) {
     const recorded = await record(mutate);
     const stored = recorded.latest_observation.review_threads.threads[0];
@@ -4718,5 +4724,59 @@ test("thread comments must be recorded in creation order", async (t) => {
       { clock: () => observedAt + 10 },
     ),
     /not in creation order/,
+  );
+});
+
+test("duplicate comment node IDs are refused", async (t) => {
+  // The node ID is what the later watermark and resolution joins key on, so a
+  // duplicate leaves the identity this evidence exists to establish ambiguous.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 1_000;
+  const value = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  const comment = (databaseId) => ({
+    id: "PRRC_SAME",
+    database_id: databaseId,
+    created_at: iso(startedAt - 5_000),
+    updated_at: iso(startedAt - 5_000),
+    actor: { id: 99, type: "Bot", login: "codex" },
+    review: {
+      id: "PRR_1",
+      database_id: 4833836859,
+      state: "COMMENTED",
+      reviewed_head_sha: "c".repeat(40),
+      actor: { id: 99, type: "Bot", login: "codex" },
+    },
+  });
+  value.review_threads.total_count = 1;
+  value.review_threads.unresolved_count = 1;
+  value.review_threads.threads = [
+    {
+      id: "PRRT_1",
+      is_resolved: false,
+      is_outdated: false,
+      comment_count: 2,
+      comments_pagination_complete: true,
+      provenance_complete: true,
+      comments: [comment(1), comment(2)],
+    },
+  ];
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 1, observation: value },
+      { clock: () => observedAt + 10 },
+    ),
+    /thread comment node ids/,
   );
 });

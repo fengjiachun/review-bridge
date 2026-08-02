@@ -573,8 +573,12 @@ export function threadProvenanceComplete(thread) {
     return false;
   }
   const root = comments[0];
+  // A GitHub actor ID is a positive integer, matching assertId elsewhere. Zero
+  // and negatives are impossible identities, and accepting them would let the
+  // flag assert a numeric identity it does not have.
   const identified = (actor) =>
     Number.isSafeInteger(actor?.id) &&
+    actor.id > 0 &&
     typeof actor?.type === "string" &&
     actor.type !== "";
   return (

@@ -1195,7 +1195,11 @@ function validateThreadProvenance(thread) {
   if (thread.comment_count !== null) {
     assertId(thread.comment_count, "thread.comment_count");
   }
+  // Both identifiers, not just one. The node ID is what the later watermark
+  // and resolution joins key on, so a duplicate there would leave the identity
+  // this evidence exists to establish ambiguous.
   uniqueBy(comments, (comment) => comment.database_id, "thread comments");
+  uniqueBy(comments, (comment) => comment.id, "thread comment node ids");
   // The root is comments[0], which is only meaningful if the sequence is
   // ordered. GitHub returns thread comments oldest first, but nothing in the
   // recorded evidence says so, and the whole thread-to-review binding hangs
