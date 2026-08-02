@@ -573,11 +573,22 @@ export function threadProvenanceComplete(thread) {
     return false;
   }
   const root = comments[0];
+  const identified = (actor) =>
+    Number.isSafeInteger(actor?.id) &&
+    typeof actor?.type === "string" &&
+    actor.type !== "";
   return (
     thread.comments_pagination_complete === true &&
     thread.comment_count === comments.length &&
-    Number.isSafeInteger(root?.actor?.id) &&
-    root?.review != null
+    // Every participant, not just the root: a later comment from an actor
+    // GitHub can no longer resolve means the thread's participation is not
+    // fully known, which is what eligibility turns on.
+    comments.every((comment) => identified(comment.actor)) &&
+    root?.review != null &&
+    identified(root.review.actor) &&
+    // Without the head its review examined, a resolution has nothing to bind
+    // the thread to.
+    typeof root.review.reviewed_head_sha === "string"
   );
 }
 

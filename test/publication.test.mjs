@@ -4563,7 +4563,7 @@ test("incomplete thread provenance is recorded, not refused", async (t) => {
             id: "PRR_1",
             database_id: 4833836859,
             state: "COMMENTED",
-            reviewed_head_sha: null,
+            reviewed_head_sha: "c".repeat(40),
             actor: { id: 99, type: "Bot", login: "codex" },
           },
         },
@@ -4620,6 +4620,24 @@ test("incomplete thread provenance is recorded, not refused", async (t) => {
     }],
     ["a deleted root author", (value) => {
       value.comments[0].actor = { id: null, type: null, login: null };
+      value.provenance_complete = false;
+    }],
+    ["a later comment from a deleted author", (value) => {
+      value.comments.push({
+        ...value.comments[0],
+        id: "PRRC_2",
+        database_id: 3694779368,
+        actor: { id: null, type: null, login: null },
+      });
+      value.comment_count = 2;
+      value.provenance_complete = false;
+    }],
+    ["a review with no author identity", (value) => {
+      value.comments[0].review.actor = { id: null, type: null, login: null };
+      value.provenance_complete = false;
+    }],
+    ["a review with no reviewed head", (value) => {
+      value.comments[0].review.reviewed_head_sha = null;
       value.provenance_complete = false;
     }],
   ]) {
