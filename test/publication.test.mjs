@@ -4780,3 +4780,84 @@ test("duplicate comment node IDs are refused", async (t) => {
     /thread comment node ids/,
   );
 });
+
+test("comments sharing a creation time are ordered by database id", async (t) => {
+  // Creation time alone leaves either ordering acceptable for a colliding
+  // pair, and the root is positional, so a reordered observation could bind
+  // the thread to a reply's review.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 1_000;
+  const sameTime = iso(startedAt - 5_000);
+  const comment = (databaseId) => ({
+    id: `PRRC_${databaseId}`,
+    database_id: databaseId,
+    created_at: sameTime,
+    updated_at: sameTime,
+    actor: { id: 99, type: "Bot", login: "codex" },
+    review: {
+      id: `PRR_${databaseId}`,
+      database_id: 4833836859 + databaseId,
+      state: "COMMENTED",
+      reviewed_head_sha: "c".repeat(40),
+      actor: { id: 99, type: "Bot", login: "codex" },
+    },
+  });
+  const build = (comments) => {
+    const value = observation({
+      at: observedAt,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: null,
+      requestAt: startedAt,
+      withResult: false,
+    });
+    value.review_threads.total_count = 1;
+    value.review_threads.unresolved_count = 1;
+    value.review_threads.threads = [
+      {
+        id: "PRRT_1",
+        is_resolved: false,
+        is_outdated: false,
+        comment_count: comments.length,
+        comments_pagination_complete: true,
+        provenance_complete: true,
+        comments,
+      },
+    ];
+    return value;
+  };
+
+  // Equal timestamps are legitimate and must still be accepted in the
+  // determined order.
+  const accepted = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: build([comment(1), comment(2)]) },
+    { clock: () => observedAt + 10 },
+  );
+  assert.equal(
+    accepted.latest_observation.review_threads.threads[0].comments[0].database_id,
+    1,
+  );
+
+  const next = await fixture();
+  t.after(() => fsp.rm(next.root, { recursive: true, force: true }));
+  await start(next, startedAt);
+  const reordered = build([comment(2), comment(1)]);
+  reordered.pull_request.head_sha = next.headSha;
+  reordered.pull_request.base_head_comparison.head_sha = next.headSha;
+  reordered.pull_request.base_sha = next.baseSha;
+  reordered.pull_request.pr_reported_base_sha = next.baseSha;
+  await assert.rejects(
+    recordGithubSnapshot(
+      next.store,
+      next.reviewId,
+      { expectedRevision: 1, observation: reordered },
+      { clock: () => observedAt + 10 },
+    ),
+    /not in creation order/,
+  );
+});

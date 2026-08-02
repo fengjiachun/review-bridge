@@ -1204,13 +1204,23 @@ function validateThreadProvenance(thread) {
   // ordered. GitHub returns thread comments oldest first, but nothing in the
   // recorded evidence says so, and the whole thread-to-review binding hangs
   // off the first entry -- so require the order rather than assume it.
+  // Ordered by creation time, then by database ID. GitHub timestamps can
+  // collide, and creation time alone would leave either ordering acceptable
+  // for the colliding pair -- which would let a reordered observation put a
+  // reply first and bind the thread to the reply's review. The second key
+  // makes the order total, so the root is a single determined comment.
   let previous = null;
   for (const comment of comments) {
     const at = timestampMs(comment.created_at, "thread comment created_at");
-    if (previous !== null && at < previous) {
+    const key = [at, comment.database_id];
+    if (
+      previous !== null &&
+      (key[0] < previous[0] ||
+        (key[0] === previous[0] && key[1] < previous[1]))
+    ) {
       fail("INVALID_INPUT", "thread comments are not in creation order");
     }
-    previous = at;
+    previous = key;
   }
   for (const comment of comments) {
     assertString(comment.id, "thread comment id", 255);
