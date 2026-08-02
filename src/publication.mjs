@@ -1196,6 +1196,18 @@ function validateThreadProvenance(thread) {
     assertId(thread.comment_count, "thread.comment_count");
   }
   uniqueBy(comments, (comment) => comment.database_id, "thread comments");
+  // The root is comments[0], which is only meaningful if the sequence is
+  // ordered. GitHub returns thread comments oldest first, but nothing in the
+  // recorded evidence says so, and the whole thread-to-review binding hangs
+  // off the first entry -- so require the order rather than assume it.
+  let previous = null;
+  for (const comment of comments) {
+    const at = timestampMs(comment.created_at, "thread comment created_at");
+    if (previous !== null && at < previous) {
+      fail("INVALID_INPUT", "thread comments are not in creation order");
+    }
+    previous = at;
+  }
   for (const comment of comments) {
     assertString(comment.id, "thread comment id", 255);
     assertId(comment.database_id, "thread comment database_id");

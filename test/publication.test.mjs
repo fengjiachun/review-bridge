@@ -4645,3 +4645,60 @@ test("incomplete thread provenance is recorded, not refused", async (t) => {
     "a summary with no evidence behind it",
   );
 });
+
+test("thread comments must be recorded in creation order", async (t) => {
+  // The root binding is positional, so an unordered sequence would silently
+  // bind the thread to the wrong review.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 1_000;
+  const value = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  const comment = (databaseId, at) => ({
+    id: `PRRC_${databaseId}`,
+    database_id: databaseId,
+    created_at: iso(at),
+    updated_at: iso(at),
+    actor: { id: 99, type: "Bot", login: "codex" },
+    review: {
+      id: "PRR_1",
+      database_id: 4833836859,
+      state: "COMMENTED",
+      reviewed_head_sha: null,
+      actor: { id: 99, type: "Bot", login: "codex" },
+    },
+  });
+  value.review_threads.total_count = 1;
+  value.review_threads.unresolved_count = 1;
+  value.review_threads.threads = [
+    {
+      id: "PRRT_1",
+      is_resolved: false,
+      is_outdated: false,
+      comment_count: 2,
+      comments_pagination_complete: true,
+      provenance_complete: true,
+      comments: [
+        comment(2, startedAt - 1_000),
+        comment(1, startedAt - 5_000),
+      ],
+    },
+  ];
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 1, observation: value },
+      { clock: () => observedAt + 10 },
+    ),
+    /not in creation order/,
+  );
+});
