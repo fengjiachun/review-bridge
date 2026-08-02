@@ -149,14 +149,11 @@ run: ready-state changes and thread resolution remain unavailable.
     publication; the previous ledger stays on disk as history and can never
     authorize it. Prefer letting the successor strategy stand for that review.
 
-    A repair phase may also be left without a commit. Call
-    `advance_remote_workflow` from it after recording a fresh observation: if
-    the blocker cleared on its own — a required check that failed and then
-    passed on a rerun — the workflow returns to `WAIT_PUBLICATION`, and if
-    everything else is already satisfied it goes straight to `PRE_READY`. Only
-    the transition out of the wait records a repair attempt, so polling from a
-    repair phase never counts as a repeated attempt and never trips
-    `NO_PROGRESS`. Do not create an empty commit to escape a repair phase.
+    A repair phase is left only by recording a new head. If the blocker clears
+    on its own — a required check that failed and then passed on a rerun with
+    no code change — the workflow stays in its repair phase, and the operator
+    either commits a fix or cancels the workflow. Do not create an empty commit
+    to escape one. `advance_remote_workflow` accepts only `WAIT_PUBLICATION`.
 13. The server pauses `GITHUB_REVIEW_AMBIGUOUS` on an ambiguous or unbound
     result, `SEMANTIC_CONFLICT` on a conflicting merge state,
     `PUBLICATION_INVALIDATED` when the pull request or head diverged from the

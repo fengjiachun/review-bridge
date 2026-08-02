@@ -778,6 +778,20 @@ The workflow pauses when:
 
 The controller must not waive, remove, or rename a required check.
 
+A repair phase is left only by recording a new head. A check that fails and
+then passes on a rerun with no code change therefore leaves the workflow in
+that phase until the operator commits a fix or cancels it. Letting a repair
+phase re-evaluate its publication instead was implemented and withdrawn in
+rollout item 2: every status the projection can report before it reaches the
+required-check and Codex gates — a pending pull-request state, an incomplete
+collection, expired evidence, and a check still running — masks a blocker that
+is still standing, so each release rule tried fired on unevaluated evidence and
+stranded the finished fix, since the wait cannot record a head. A correct rule
+needs the projection to distinguish "this gate was evaluated and is clear" from
+"this gate was never reached", which it does not currently express. Rollout
+item 3 revisits this state machine for mark-ready and thread resolution and
+should carry that distinction.
+
 ### Base updates and conflicts
 
 If the target base advances while remaining compatible with the publication

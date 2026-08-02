@@ -49,25 +49,6 @@ const HEAD_RECORDING_PHASES = Object.freeze([
   "ADDRESS_LOCAL_FINDINGS",
   ...REMOTE_REPAIR_PHASES,
 ]);
-/**
- * Projection statuses that prove a repair blocker is gone rather than merely
- * unreported. derivePublication returns each of these only after it has
- * evaluated the strict-base gap, the required checks, and the Codex verdict,
- * so reaching one means those gates were actually examined and none of them
- * wants a repair. An allowlist rather than a denylist: a status this does not
- * know about keeps the workflow in its repair phase, which is the safe
- * direction, since the wait cannot record a head.
- */
-const CLEARED_OF_REPAIR_STATUSES = Object.freeze(
-  new Set([
-    "CHECKS_PENDING",
-    "GITHUB_REVIEW_PENDING",
-    "GITHUB_REVIEW_NOT_REQUESTED",
-    // Only unresolved threads reach this arm as CHANGES_REQUIRED; the machine
-    // findings route to a repair phase instead.
-    "CHANGES_REQUIRED",
-  ]),
-);
 const MAX_LISTED_BLOCKERS = 50;
 const MAX_AUDIT_BYTES = 4 * 1024 * 1024;
 const MAX_AUDIT_EVENT_BYTES = 256 * 1024;
@@ -3144,16 +3125,7 @@ export async function advanceRemoteWorkflow(
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
-    // A repair phase may re-evaluate too. A required check can fail and then
-    // pass on a rerun with no code change, and the repair phases are only
-    // exited by a new commit -- so without this the workflow would have to
-    // invent an empty commit or be cancelled after an external or
-    // administrative failure clears, which is a path this stage explicitly
-    // supports.
-    if (
-      workflow.phase !== "WAIT_PUBLICATION" &&
-      !REMOTE_REPAIR_PHASES.includes(workflow.phase)
-    ) {
+    if (workflow.phase !== "WAIT_PUBLICATION") {
       fail(
         "WORKFLOW_PHASE_INVALID",
         `cannot advance a remote wait in phase ${workflow.phase}`,
@@ -3178,32 +3150,21 @@ export async function advanceRemoteWorkflow(
     }
     const repairPhase = remoteRepairPhase(projection);
     const pauseReason = remotePauseReason(projection);
-    // An attempt begins when the workflow leaves the wait, so only that
-    // transition records one or tests it for a stall. Re-evaluating from
-    // inside a repair phase just re-reads the projection: the operator is
-    // still working on the same attempt, and polling must not manufacture
-    // repeats of it.
-    const fromWait = workflow.phase === "WAIT_PUBLICATION";
     if (repairPhase == null && pauseReason == null) {
-      const reachedPreReady = projection.status === "READY_TO_MARK";
-      // The blocker cleared without a new commit -- a rerun passed. Returning
-      // to the wait is the transition that lets the workflow continue at all,
-      // since a repair phase is otherwise left only by recording a new head.
+      // Still settling, or blocked on something no autonomous action of this
+      // stage may touch (unresolved threads). Keep waiting and only refresh the
+      // revision the workflow has observed.
       //
-      // It takes positive evidence, not the mere absence of a routing status.
-      // derivePublication reports a pending state, an incomplete collection,
-      // or expired evidence before it ever evaluates the base gap, the
-      // required checks, or the Codex verdict, so any of those can mask a
-      // repair blocker that is still standing. Leaving the phase on one of
-      // them abandons a repair in progress and strands the finished fix,
-      // because the wait cannot record a head.
-      const nextPhase = reachedPreReady
-        ? "PRE_READY"
-        : fromWait || !CLEARED_OF_REPAIR_STATUSES.has(projection.status)
-          ? null
-          : "WAIT_PUBLICATION";
+      // A repair phase is left only by recording a new head. A required check
+      // that fails and then passes on a rerun with no code change therefore
+      // leaves the workflow in its repair phase; the operator commits a fix or
+      // cancels. Letting a repair phase re-evaluate instead was tried and
+      // withdrawn: every status this projection can report before it reaches
+      // the check and Codex gates masks a blocker that is still standing, so
+      // the release kept firing on unevaluated evidence.
+      const reachedPreReady = projection.status === "READY_TO_MARK";
       if (
-        nextPhase == null &&
+        !reachedPreReady &&
         workflow.current_publication.awaiting_revision === projection.revision
       ) {
         // Nothing moved. Polling is the normal shape of this phase, so an idle
@@ -3214,29 +3175,8 @@ export async function advanceRemoteWorkflow(
       return publicWorkflow(
         await saveMutation(paths, workflow, async (next) => {
           next.current_publication.awaiting_revision = projection.revision;
-          if (nextPhase != null) {
-            next.phase = nextPhase;
-          }
-        }),
-      );
-    }
-    if (!fromWait && pauseReason == null) {
-      // Already repairing and the blocker still stands. Move only if the
-      // projection now implies a different repair; otherwise this is an idle
-      // poll of an attempt already recorded.
-      const changedPhase =
-        repairPhase !== workflow.phase ? repairPhase : null;
-      if (
-        changedPhase == null &&
-        workflow.current_publication.awaiting_revision === projection.revision
-      ) {
-        return publicWorkflow(workflow);
-      }
-      return publicWorkflow(
-        await saveMutation(paths, workflow, async (next) => {
-          next.current_publication.awaiting_revision = projection.revision;
-          if (changedPhase != null) {
-            next.phase = changedPhase;
+          if (reachedPreReady) {
+            next.phase = "PRE_READY";
           }
         }),
       );
