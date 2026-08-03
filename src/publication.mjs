@@ -920,7 +920,7 @@ function validateObservation(input, ledger, currentMs) {
   const baselineConflict = validateCodexPartitions(codexReview, ledger);
   validatePullRequest(pullRequest);
   validateChecks(requiredChecks, pullRequest, ledger.target);
-  validateThreads(reviewThreads);
+  validateThreads(reviewThreads, authorizationForLedger(ledger).head_sha);
   observation.recorded_at = new Date(currentMs).toISOString();
   return { observation, baselineConflict };
 }
@@ -1300,7 +1300,63 @@ function validateThreadProvenance(thread) {
   }
 }
 
-function validateThreads(reviewThreads) {
+function validateThreadAncestry(reviewThreads, gatedHeadSha) {
+  const entries = assertArray(
+    reviewThreads.ancestry ?? [],
+    "review_threads.ancestry",
+  );
+  uniqueBy(
+    entries,
+    (entry) => assertString(entry.finding_head_sha, "ancestry finding head", 40),
+    "thread ancestry entries",
+  );
+  const byHead = new Map();
+  for (const entry of entries) {
+    if (!/^[0-9a-f]{40}$/.test(entry.finding_head_sha ?? "")) {
+      fail("INVALID_INPUT", "ancestry finding head must be a full SHA");
+    }
+    assertEnum(
+      entry.status,
+      ["AHEAD", "IDENTICAL", "BEHIND", "DIVERGED", "UNKNOWN"],
+      "ancestry status",
+    );
+    // descends is a derivation, not a fact of its own: recompute it so a
+    // caller cannot assert descent alongside a status that denies it.
+    if (
+      entry.descends !==
+      (entry.status === "IDENTICAL" || entry.status === "AHEAD")
+    ) {
+      fail("INVALID_INPUT", "ancestry descent disagrees with its status");
+    }
+    assertString(entry.endpoint, "ancestry endpoint", 1024);
+    timestampMs(entry.collected_at, "ancestry collected_at");
+    byHead.set(entry.finding_head_sha, entry);
+  }
+  // Exactly the finding heads the threads reference, no more and no fewer. A
+  // missing head would let a thread escape the descent question; an extra one
+  // is evidence about nothing this observation contains. The gated head itself
+  // needs no comparison and must be omitted.
+  const referenced = new Set();
+  for (const thread of reviewThreads.threads ?? []) {
+    const head = thread.comments?.[0]?.review?.reviewed_head_sha;
+    if (typeof head === "string" && head !== gatedHeadSha) {
+      referenced.add(head);
+    }
+  }
+  for (const head of referenced) {
+    if (!byHead.has(head)) {
+      fail("INVALID_INPUT", "thread ancestry is missing a referenced finding head");
+    }
+  }
+  for (const head of byHead.keys()) {
+    if (!referenced.has(head)) {
+      fail("INVALID_INPUT", "thread ancestry covers a head no thread references");
+    }
+  }
+  return byHead;
+}
+
+function validateThreads(reviewThreads, gatedHeadSha) {
   const threads = assertArray(reviewThreads.threads ?? [], "review_threads.threads");
   uniqueBy(threads, (thread) => assertString(thread.id, "thread.id", 255), "threads");
   for (const thread of threads) {
@@ -1312,6 +1368,7 @@ function validateThreads(reviewThreads) {
     }
     validateThreadProvenance(thread);
   }
+  validateThreadAncestry(reviewThreads, gatedHeadSha);
   if (
     reviewThreads.total_count !== threads.length ||
     reviewThreads.unresolved_count !==

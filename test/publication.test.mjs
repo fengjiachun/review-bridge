@@ -4651,6 +4651,20 @@ test("incomplete thread provenance is recorded, not refused", async (t) => {
     value.review_threads.total_count = 1;
     value.review_threads.unresolved_count = 1;
     value.review_threads.threads = [built];
+    // Ancestry must cover exactly the finding heads the threads reference.
+    const findingHead = built.comments?.[0]?.review?.reviewed_head_sha;
+    value.review_threads.ancestry =
+      typeof findingHead === "string" && findingHead !== next.headSha
+        ? [
+            {
+              finding_head_sha: findingHead,
+              status: "AHEAD",
+              descends: true,
+              endpoint: `GET /repos/o/r/compare/${findingHead}...${next.headSha}`,
+              collected_at: iso(observedAt - 500),
+            },
+          ]
+        : [];
     return recordGithubSnapshot(
       next.store,
       next.reviewId,
@@ -4888,6 +4902,15 @@ test("comments sharing a creation time are ordered by database id", async (t) =>
         comments_pagination_complete: true,
         provenance_complete: true,
         comments,
+      },
+    ];
+    value.review_threads.ancestry = [
+      {
+        finding_head_sha: "c".repeat(40),
+        status: "AHEAD",
+        descends: true,
+        endpoint: `GET /repos/o/r/compare/${"c".repeat(40)}...${state.headSha}`,
+        collected_at: iso(observedAt - 500),
       },
     ];
     return value;
