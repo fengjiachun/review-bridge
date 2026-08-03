@@ -605,48 +605,48 @@ function normalizeThreads(publication, raw) {
       `review_threads.pages[${index}].nodes`,
     ),
   );
-  const lastPageInfo =
-    pages.at(-1)?.data?.repository?.pullRequest?.reviewThreads?.pageInfo;
-  if (lastPageInfo?.hasNextPage !== false) {
+  // Only an atomic read is accepted: one response, read at one instant.
+  //
+  // Counts can prove membership across a walk, but they cannot prove per-thread
+  // state, and nothing else can either. is_resolved is copied from whichever
+  // page carried the node, so a multi-page walk records state from as many
+  // instants as it has pages. Resolving or unresolving a thread between two
+  // pages leaves the reported total, the distinct identities and pageInfo all
+  // untouched -- there is no count for a rule to compare -- and the value read
+  // earlier is then recorded as established fact. That lands in the direction
+  // that matters: unresolved_count feeds the publication gate directly
+  // (publication.mjs, UNRESOLVED_REVIEW_THREADS), so a thread unresolved after
+  // its page was read records as resolved and the gate reads MERGE_READY.
+  //
+  // Refusing is the honest response rather than a conservative one. A walk
+  // cannot establish what it never observed at a single instant, so a pull
+  // request past one page of threads is not collectable until some later change
+  // brings evidence that survives interleaving -- agreement between two
+  // independent walks, or state carrying its own read time. Until then this
+  // fails closed and loudly instead of recording a state nobody observed.
+  if (pages.length !== 1) {
+    throw new Error(
+      pages.length === 0
+        ? "review-thread collection has no pages"
+        : "review-thread state cannot be established across multiple pages",
+    );
+  }
+  const connection = pages[0]?.data?.repository?.pullRequest?.reviewThreads;
+  if (connection?.pageInfo?.hasNextPage !== false) {
     throw new Error("review-thread pagination is incomplete");
   }
-  // Reaching the end of the cursor is only half the proof. If a thread is
-  // added or removed while the connection is walked, the pages can omit one
-  // even though the final page reports no next page -- and deriving the total
-  // from what was collected would manufacture a count that always agrees.
-  // Compare the provider's own total instead, and require it to be stable
-  // across pages.
-  //
-  // What this catches is a concurrent change that moves the count: any single
-  // creation or deletion during the walk makes one page disagree with another.
-  // What it does not catch is a compensating pair in the same inter-page gap,
-  // which leaves the count untouched. That residue is bounded and safe in the
-  // direction that matters. GitHub orders this connection by a keyset cursor
-  // over the root comment's creation time and database ID, both fixed at
-  // creation, so a thread that outlives the walk can never sort behind a
-  // cursor already passed and be skipped -- verified against the live API,
-  // though the cursor encoding is an implementation detail, not a contract.
-  // A compensating pair therefore yields a superset holding one thread that
-  // was deleted, never a subset missing a live one, so unresolved_count can
-  // only read high. Closing it needs evidence the counts do not carry.
-  const reportedTotals = pages.map((page, index) => {
-    const total =
-      page?.data?.repository?.pullRequest?.reviewThreads?.totalCount;
-    if (!Number.isSafeInteger(total) || total < 0) {
-      throw new Error(
-        `review_threads.pages[${index}] is missing a reported total`,
-      );
-    }
-    return total;
-  });
-  if (reportedTotals.some((total) => total !== reportedTotals[0])) {
-    throw new Error("review-thread total changed while paginating");
+  // With a single page the provider's total is the only completeness evidence
+  // there is, and deriving it from the collected nodes would manufacture a
+  // number that always agrees with itself.
+  const reportedTotal = connection?.totalCount;
+  if (!Number.isSafeInteger(reportedTotal) || reportedTotal < 0) {
+    throw new Error("review_threads.pages[0] is missing a reported total");
   }
-  // Distinct threads, not collected nodes. A compensating insert and delete
-  // can repeat a thread across pages, which would let the node count match the
-  // provider's total while an unrelated thread was dropped.
   const distinctThreads = new Set(threads.map((thread) => thread.id));
-  if (reportedTotals[0] !== distinctThreads.size) {
+  if (distinctThreads.size !== threads.length) {
+    throw new Error("review-thread page repeats a thread");
+  }
+  if (reportedTotal !== threads.length) {
     throw new Error(
       "review-thread pages do not account for the reported total",
     );
@@ -731,9 +731,10 @@ function normalizeThreads(publication, raw) {
         ),
       ],
     },
-    // The provider's number, not the collected length. The check above proves
-    // the two agree, so this is the same value recorded against its source.
-    total_count: reportedTotals[0],
+    // The provider's number, not the collected length. The check above forces
+    // the two to be identical, so this is attribution rather than behavior and
+    // no test can tell the two spellings apart.
+    total_count: reportedTotal,
     unresolved_count: normalized.filter((thread) => !thread.is_resolved).length,
     threads: normalized,
   };

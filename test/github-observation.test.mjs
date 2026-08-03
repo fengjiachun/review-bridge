@@ -801,20 +801,31 @@ test("a thread page count that omits a thread is refused", () => {
   );
 });
 
-test("a thread total that changes while paginating is refused", () => {
-  const shifting = rawCollection();
-  const first = shifting.review_threads.pages[0];
+test("a thread walked across pages is refused, state and all", () => {
+  // The hazard the single-page rule exists for. Counts prove membership, not
+  // state: a thread read as resolved on page one and unresolved before page
+  // two leaves the reported total, the identities and pageInfo all untouched,
+  // so no count rule can see it. Recorded, it reads as resolved and drives
+  // unresolved_count to zero, which is MERGE_READY on a live unresolved
+  // thread. Both pages here are internally consistent -- only the interleaving
+  // is wrong.
+  const interleaved = rawCollection();
+  const first = interleaved.review_threads.pages[0];
+  const connection = first.data.repository.pullRequest.reviewThreads;
+  const resolved = structuredClone(connection.nodes[0]);
+  resolved.id = "PRRT_second";
+  resolved.isResolved = true;
+  connection.totalCount = 2;
+  connection.nodes = [connection.nodes[0], resolved];
+  connection.pageInfo = { hasNextPage: true, endCursor: "cursor" };
   const second = structuredClone(first);
-  first.data.repository.pullRequest.reviewThreads.pageInfo = {
-    hasNextPage: true,
-    endCursor: "cursor",
-  };
-  second.data.repository.pullRequest.reviewThreads.totalCount = 2;
-  second.data.repository.pullRequest.reviewThreads.nodes = [];
-  shifting.review_threads.pages = [first, second];
+  const later = second.data.repository.pullRequest.reviewThreads;
+  later.nodes = [];
+  later.pageInfo = { hasNextPage: false, endCursor: null };
+  interleaved.review_threads.pages = [first, second];
   assert.throws(
-    () => normalizeGithubObservation(publication(), shifting),
-    /total changed while paginating/,
+    () => normalizeGithubObservation(publication(), interleaved),
+    /state cannot be established across multiple pages/,
   );
 });
 
@@ -828,24 +839,17 @@ test("a thread page with no reported total is refused", () => {
   );
 });
 
-test("a repeated thread cannot stand in for a dropped one", () => {
-  // An insert and delete during the walk can repeat a thread across pages.
-  // Counting nodes would let that repeat match the provider's total while an
-  // unrelated thread was dropped.
-  const masked = rawCollection();
-  const first = masked.review_threads.pages[0];
-  const connection = first.data.repository.pullRequest.reviewThreads;
+test("a page that repeats a thread is refused", () => {
+  // Distinct identities, not node count. A repeat would otherwise let the
+  // collected length match a provider total that covers one thread more.
+  const repeated = rawCollection();
+  const connection =
+    repeated.review_threads.pages[0].data.repository.pullRequest.reviewThreads;
   connection.totalCount = 2;
-  connection.pageInfo = { hasNextPage: true, endCursor: "cursor" };
-  const second = structuredClone(first);
-  second.data.repository.pullRequest.reviewThreads.pageInfo = {
-    hasNextPage: false,
-    endCursor: null,
-  };
-  masked.review_threads.pages = [first, second];
+  connection.nodes = [connection.nodes[0], structuredClone(connection.nodes[0])];
   assert.throws(
-    () => normalizeGithubObservation(publication(), masked),
-    /do not account for the reported total/,
+    () => normalizeGithubObservation(publication(), repeated),
+    /page repeats a thread/,
   );
 });
 
@@ -874,6 +878,6 @@ test("a collection with no pages at all is refused", () => {
   pageless.review_threads.pages = [];
   assert.throws(
     () => normalizeGithubObservation(publication(), pageless),
-    /review-thread pagination is incomplete/,
+    /review-thread collection has no pages/,
   );
 });

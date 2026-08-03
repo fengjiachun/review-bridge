@@ -1497,16 +1497,33 @@ this RFC changes from `Accepted` to `Implemented`.
   observation, which carry the request correlation; the thread evidence
   supplies the review ID and reviewed head that make the join possible.
 
-  The strength of that proof should be stated rather than assumed. Requiring
-  the provider's `totalCount` on every page, identical across pages, and equal
-  to the distinct threads collected rules out any concurrent change that moves
-  the count. It does not rule out a compensating creation and deletion inside
-  one inter-page gap. That residue is one-directional: the connection is
-  ordered by a keyset cursor over immutable creation keys, so a thread that
-  outlives the walk cannot be skipped, and the compensating case can only
-  record a thread that was since deleted — `unresolved_count` reads high, never
-  low, and the gate stays conservative. Detecting it at all needs evidence the
-  counts do not carry, so it is deliberately out of scope here.
+  The observation accepts only an atomic read: a single response, and so a
+  single instant. This is a real restriction — a pull request past one page of
+  review threads is not collectable — and it is worth being precise about why,
+  because the obvious weaker rules look sufficient and are not.
+
+  Counts can prove *membership* across a paginated walk. Requiring the
+  provider's `totalCount` on every page, identical across pages, and equal to
+  the distinct identities collected is in fact strong enough to make membership
+  exact rather than merely bounded: the connection is ordered by a keyset
+  cursor over immutable per-thread keys, so a thread outliving the walk cannot
+  sort behind a cursor already passed and be skipped, and any compensating
+  creation and deletion puts the new thread into the walk as well, pushing the
+  distinct count past the reported total and forcing a refusal.
+
+  What no count can prove is per-thread *state*. `isResolved` is read from
+  whichever page carried the node. Resolving or unresolving a thread between
+  two pages changes no total, no identity, and no `pageInfo`, so there is
+  nothing for a rule to compare, and the value read earlier is recorded as
+  established fact. That fails in the worst direction: `unresolved_count` feeds
+  the publication gate, so a thread unresolved after its page was read records
+  as resolved and the gate reads `MERGE_READY` over a live objection.
+
+  Refusing is therefore the honest answer rather than a conservative one — a
+  walk cannot establish what it never observed at one instant. Supporting
+  larger pull requests needs evidence that survives interleaving: agreement
+  between two independent walks, or state that carries its own read time. That
+  is deliberately left to a later change rather than approximated here.
 - Which predicate ends the pre-ready wait, given that a pending gate and a
   ready-only gate are observationally identical and elapsed time is not
   evidence?
