@@ -700,8 +700,8 @@ states, all of which withhold `MERGE_READY`, so a stale read of that field
 cannot be more permissive than the truth. Two directions are not closed, and
 are recorded here rather than argued away.
 
-A body edited mid-walk is recorded pre-edit, and that can run the permissive
-way: a Codex clean comment read before an edit that removes its marker is
+A body edited or deleted mid-walk is recorded as it was read, and that can run
+the permissive way: a Codex clean comment read before an edit that removes its marker is
 stored as clean, where the current body would leave the result set empty and
 derive `GITHUB_REVIEW_PENDING`. `codex_result_history` does not catch it,
 because that compares against previously recorded observations and a result
@@ -2538,11 +2538,12 @@ can operate from stale reads.
   identity comparison and cannot write a sticky terminal state.
 - An incomplete check, request, result, or thread collection derives
   `EVIDENCE_INCOMPLETE`; an empty list alone never proves absence.
-- Missing pagination for either the check-run or commit-status feed derives
-  `EVIDENCE_INCOMPLETE` before latest-attempt selection, and a complete feed of
-  one kind cannot cover the other. Two neighbouring conditions are rejected as
-  invalid input rather than derived: a feed reporting more than one page, and an
-  item-count or check-run reported-total mismatch.
+- A complete feed of one kind cannot cover the other. Once a run collection
+  claims `COMPLETE`, three conditions are rejected as invalid input rather than
+  derived: an unproven `pagination_complete`, a feed reporting more than one
+  page, and an item-count or check-run reported-total mismatch. The only route
+  to `EVIDENCE_INCOMPLETE` for these feeds is the collection not claiming
+  completeness in the first place, which the bullet above already covers.
 - A stale or future-dated top-level observation, parent collection, or
   independent source cannot be finalized.
 - A finalized gate expires at the earliest underlying five-minute evidence
