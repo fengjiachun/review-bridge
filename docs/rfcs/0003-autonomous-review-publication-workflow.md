@@ -866,12 +866,21 @@ only when all of these are true:
 
 `is_outdated` is useful evidence but is neither necessary nor sufficient.
 
-The first implementation of this section evaluates conditions 1, 2, and 4
-through 9 from recorded evidence and exposes the verdict per thread with a
-refusal reason, without performing any resolution. Condition 1 is checked
-against the workflow's recorded attempt heads; condition 2 against a
-`THREAD_ANCESTRY` comparison collected per distinct finding head, provider
-reported and required to cover exactly the heads the threads reference.
+The first implementation of this section derives a per-thread verdict with a
+refusal reason, without performing any resolution, and its coverage of the
+nine conditions is deliberately uneven. Conditions 1, 2, 7, 8 and 9 are
+evaluated per thread: 1 against the workflow's recorded attempt heads, 2
+against a `THREAD_ANCESTRY` comparison collected per distinct finding head,
+provider reported, required to cover exactly the heads the threads reference,
+with descent recomputed from the status; 7 over every comment and the review's
+own author; 8 over both the resolved flag and a `DISMISSED` review state; 9
+over the workflow's status. Condition 4 is structural rather than per thread:
+a version-3 publication cannot exist without a finalized local gate, and the
+plan is read under the same authorization files the gate verifies. Condition 6
+is enforced for the thread collection, whose absence refuses the whole plan;
+the freshness half of condition 5 and the completeness of the other
+collections are the gate's own rules and are not re-evaluated here — a plan
+is advisory and the gate re-derives everything before anything acts.
 Condition 3 has no data yet — the workflow ledger does not record which
 commits addressed a finding — so every thread ends at the refusal
 `FIX_NOT_RECORDED` and eligibility cannot yet be reached. That refusal is the

@@ -5109,6 +5109,27 @@ test("each missing piece of evidence refuses with its own reason", () => {
       eligibilityContext(),
     ],
     [
+      // A dismissed review was answered through a path this workflow does not
+      // own; resolving on top of it would launder that path into a workflow
+      // decision.
+      "REVIEW_DISMISSED",
+      eligibleThread({
+        comments: [
+          {
+            id: "PRRC_1",
+            actor: codex,
+            review: {
+              id: "PRR_1",
+              actor: codex,
+              state: "DISMISSED",
+              reviewed_head_sha: EARLIER_HEAD,
+            },
+          },
+        ],
+      }),
+      eligibilityContext(),
+    ],
+    [
       // Raised against the head the clean result examined: the same review
       // would have both raised it and not raised it.
       "RAISED_AGAINST_GATED_HEAD",
