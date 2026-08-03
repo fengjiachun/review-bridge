@@ -732,8 +732,10 @@ function normalizeThreads(publication, raw) {
       ],
     },
     // The provider's number, not the collected length. The check above forces
-    // the two to be identical, so this is attribution rather than behavior and
-    // no test can tell the two spellings apart.
+    // the two equal for every value GitHub can report, so this is attribution
+    // rather than behavior: no test over real inputs can separate the two
+    // spellings. (Object.is does separate them at -0, which passes the guards
+    // and serializes to "0" -- a distinction with nothing behind it.)
     total_count: reportedTotal,
     unresolved_count: normalized.filter((thread) => !thread.is_resolved).length,
     threads: normalized,
@@ -1117,21 +1119,25 @@ export function collectGithubObservation(publicationInput) {
   const pullRequestReviewComments = getPages(
     `${root}/pulls/${target.pr_number}/comments?per_page=100`,
   );
+  // One request, not a walk. Only a single page can be recorded, so paginating
+  // would spend GitHub traffic building pages that are refused on arrival --
+  // and would read as though multi-page collection were supported. A pull
+  // request past one page fails on this response's own hasNextPage instead.
   const reviewThreads = {
-    pages: runGh([
-      "api",
-      "graphql",
-      "--paginate",
-      "--slurp",
-      "-f",
-      `query=${REVIEW_THREADS_QUERY}`,
-      "-f",
-      `owner=${target.owner}`,
-      "-f",
-      `repo=${target.repo}`,
-      "-F",
-      `number=${target.pr_number}`,
-    ]),
+    pages: [
+      runGh([
+        "api",
+        "graphql",
+        "-f",
+        `query=${REVIEW_THREADS_QUERY}`,
+        "-f",
+        `owner=${target.owner}`,
+        "-f",
+        `repo=${target.repo}`,
+        "-F",
+        `number=${target.pr_number}`,
+      ]),
+    ],
     endpoint: `POST graphql:reviewThreads(${target.owner}/${target.repo}#${target.pr_number})`,
     collected_at: new Date().toISOString(),
   };

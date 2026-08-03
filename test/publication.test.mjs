@@ -3528,6 +3528,15 @@ test("observation validation rejects incomplete provenance and unsafe check bind
       },
     },
     {
+      // The observation arrives as caller-supplied JSON, so the collector's
+      // refusal to walk threads has to be restated here or it holds in only
+      // one of the two layers that claim it.
+      pattern: /must be a single atomic page/,
+      mutate(value) {
+        value.review_threads.collection.sources[0].page_count = 2;
+      },
+    },
+    {
       pattern: /CHECK_RUN collection counts are inconsistent/,
       mutate(value) {
         value.required_checks.collection.run_sources[0].item_count = 1;
