@@ -882,10 +882,12 @@ the freshness half of condition 5 and the completeness of the other
 collections are the gate's own rules and are not re-evaluated here — a plan
 is advisory and the gate re-derives everything before anything acts.
 Condition 3 has no data yet — the workflow ledger does not record which
-commits addressed a finding — so every thread ends at the refusal
-`FIX_NOT_RECORDED` and eligibility cannot yet be reached. That refusal is the
-seam the next change fills, and consumers must treat it as blocking rather
-than ignorable.
+commits addressed a finding — so the predicate terminates at the refusal
+`FIX_NOT_RECORDED` for any thread that survives every other condition, and
+eligibility cannot be reached by any input. A thread that fails an earlier
+condition reports that earlier reason instead; `FIX_NOT_RECORDED` is the
+floor, not the only answer. That refusal is the seam the next change fills,
+and consumers must treat it as blocking rather than ignorable.
 
 A thread is never eligible when it:
 
