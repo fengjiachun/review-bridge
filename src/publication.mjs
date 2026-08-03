@@ -853,9 +853,9 @@ function validateObservation(input, ledger, currentMs) {
     ["PULL_REQUEST_REVIEW_THREADS"],
     "review_threads.collection",
   );
-  // Threads are the one source whose per-item state, not just its membership,
-  // decides the gate, and state read across a walk is state from several
-  // instants. The collector refuses anything but a single page; the observation
+  // Threads are one of three sources whose per-item state, not just its
+  // membership, decides the gate -- the run kinds above are the others -- and
+  // state read across a walk is state from several instants. The collector refuses anything but a single page; the observation
   // arrives here as caller-supplied JSON, so the ledger has to say it too or
   // the invariant holds in only one of the two layers that state it.
   requireAtomicPage(

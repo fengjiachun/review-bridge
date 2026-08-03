@@ -44,6 +44,7 @@ function authorization(publication) {
 }
 
 const CHECK_RUN_PAGE_SIZE = 100;
+const ITEM_PAGE_SIZE = 100;
 
 function requireAtomicPages(pages, label) {
   if (pages.length !== 1) {
@@ -1006,6 +1007,34 @@ function get(endpoint) {
 // constant asserted from the shape of whatever was collected.
 const MAX_PAGES = 100;
 
+// A full page that still advertises a next page is the ceiling, and it is a
+// standing property of the commit rather than a collection that went wrong.
+// Separated from the request so the distinction is testable without a network.
+export function exceedsSinglePage(value, link) {
+  return (
+    linkHasNext(link) && Array.isArray(value) && value.length >= ITEM_PAGE_SIZE
+  );
+}
+
+// For a feed that must be read at one instant but reports no total, one
+// request plus a Link header that advertises no next page is the whole proof:
+// one response, one instant, nothing left behind.
+function getSinglePage(endpoint, label) {
+  const separator = endpoint.includes("?") ? "&" : "?";
+  const { value, link } = runGhWithHeaders([`${endpoint}${separator}page=1`]);
+  if (exceedsSinglePage(value, link)) {
+    throw new Error(
+      `commit has more than ${ITEM_PAGE_SIZE} ${label}; a single atomic page holds at most ${ITEM_PAGE_SIZE}`,
+    );
+  }
+  return {
+    pages: [value],
+    pagination_complete: !linkHasNext(link),
+    endpoint: `GET ${endpoint}`,
+    collected_at: new Date().toISOString(),
+  };
+}
+
 function getPages(endpoint) {
   const separator = endpoint.includes("?") ? "&" : "?";
   const pages = [];
@@ -1241,8 +1270,12 @@ export function collectGithubObservation(publicationInput) {
     endpoint: `GET ${checkRunsEndpoint}`,
     collected_at: new Date().toISOString(),
   };
-  const commitStatuses = getPages(
-    `${root}/commits/${authorizationValue.head_sha}/statuses?per_page=100`,
+  // One request, like the check runs and for the same reason: a deciding
+  // status's state is read per page, so a walk would read it at whichever
+  // instant its page landed on.
+  const commitStatuses = getSinglePage(
+    `${root}/commits/${authorizationValue.head_sha}/statuses?per_page=${ITEM_PAGE_SIZE}`,
+    "commit statuses",
   );
   const issueComments = getPages(
     `${root}/issues/${target.pr_number}/comments?per_page=100`,

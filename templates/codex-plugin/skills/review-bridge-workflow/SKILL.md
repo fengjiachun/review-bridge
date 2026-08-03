@@ -379,9 +379,10 @@ For either mode:
    resolved relative to this SKILL as `--review-id <review_id>`.
    The helper uses the user's authenticated `gh` CLI in read-only
    mode to collect the PR and both base comparisons, applicable rules, two
-   independent branch reads, classic protection when applicable, every
-   check-run page using `filter=all`, every commit-status page, all three Codex
-   feeds, and all review-thread pages. It
+   independent branch reads, classic protection when applicable, a single
+   page each of check runs using `filter=all`, commit statuses and review
+   threads -- their per-item state decides the gate, so it is read at one
+   instant or refused -- and all pages of the three Codex feeds. It
    canonicalizes GitHub timestamps to UTC milliseconds, preserves pagination
    proof, and fails closed when policy evidence is unavailable. Call
    `record_github_snapshot` with the `observation_path` the helper prints,

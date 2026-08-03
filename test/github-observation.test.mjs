@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { collectClassicProtection, linkHasNext, normalizeClassicProtectionResponse, normalizeGithubObservation, normalizeOauthAdminProofResponse, splitGhResponse } from "../src/github-observation.mjs";
+import { collectClassicProtection, exceedsSinglePage, linkHasNext, normalizeClassicProtectionResponse, normalizeGithubObservation, normalizeOauthAdminProofResponse, splitGhResponse } from "../src/github-observation.mjs";
 
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
@@ -1019,4 +1019,17 @@ test("a response head that is not understood is an error, not an absent Link", (
     /unreadable response head/,
   );
   assert.throws(() => splitGhResponse("[]", "probe"), /omitted response headers/);
+});
+
+test("a full status page still advertising more is the ceiling, not a short read", () => {
+  const full = Array.from({ length: 100 }, (unused, index) => ({ id: index }));
+  const short = full.slice(0, 99);
+  const more = '<https://api.github.com/x?page=2>; rel="next"';
+  const done = '<https://api.github.com/x?page=1>; rel="prev"';
+  // Full page plus a next page: more statuses exist than one instant can hold.
+  assert.equal(exceedsSinglePage(full, more), true);
+  // A short page cannot be hiding any, whatever the header says.
+  assert.equal(exceedsSinglePage(short, more), false);
+  // A full page that is genuinely the last one is fine.
+  assert.equal(exceedsSinglePage(full, done), false);
 });

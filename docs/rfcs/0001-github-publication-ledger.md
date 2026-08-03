@@ -2507,11 +2507,11 @@ can operate from stale reads.
   identity comparison and cannot write a sticky terminal state.
 - An incomplete check, request, result, or thread collection derives
   `EVIDENCE_INCOMPLETE`; an empty list alone never proves absence.
-- Missing pagination for either the check-run or commit-status feed, including
-  an item-count or check-run reported-total mismatch, derives
-  `EVIDENCE_INCOMPLETE` before latest-attempt selection. A complete feed of one
-  kind cannot cover the other. A feed reporting more than one page is a
-  different case and is rejected as invalid input, never derived.
+- Missing pagination for either the check-run or commit-status feed derives
+  `EVIDENCE_INCOMPLETE` before latest-attempt selection, and a complete feed of
+  one kind cannot cover the other. Two neighbouring conditions are rejected as
+  invalid input rather than derived: a feed reporting more than one page, and an
+  item-count or check-run reported-total mismatch.
 - A stale or future-dated top-level observation, parent collection, or
   independent source cannot be finalized.
 - A finalized gate expires at the earliest underlying five-minute evidence
