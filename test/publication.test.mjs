@@ -3506,6 +3506,37 @@ test("baseline snapshots use identity-set equality and reject caller classificat
   assert.equal((await getPublication(state.store, state.reviewId)).revision, 2);
 });
 
+test("a thread collection that admits incompleteness is still recordable", async (t) => {
+  // The single-page rule is gated on COMPLETE, and this is the boundary that
+  // gating draws. A collection claiming completeness with two pages is refused
+  // because the gate would decide from it; one that admits incompleteness is
+  // recorded and the gate declines to decide from it instead. Checking
+  // unconditionally would make this state unrecordable.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 1_000;
+  const partial = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  partial.review_threads.collection.status = "INCOMPLETE";
+  partial.review_threads.collection.sources[0].page_count = 2;
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: partial },
+    { clock: () => observedAt + 20 },
+  );
+  assert.equal(recorded.status, "EVIDENCE_INCOMPLETE");
+  assert.equal(recorded.revision, 2);
+});
+
 test("observation validation rejects incomplete provenance and unsafe check bindings", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -3525,6 +3556,16 @@ test("observation validation rejects incomplete provenance and unsafe check bind
       pattern: /must prove complete pagination/,
       mutate(value) {
         value.codex_review.collection.sources[0].pagination_complete = false;
+      },
+    },
+    {
+      // The observation arrives as caller-supplied JSON, so the collector's
+      // refusal to walk threads has to be restated here or it holds in only
+      // one of the two layers that claim it. Bound to collections claiming
+      // completeness; the incompleteness case above pins the other side.
+      pattern: /must be a single atomic page/,
+      mutate(value) {
+        value.review_threads.collection.sources[0].page_count = 2;
       },
     },
     {
@@ -4537,4 +4578,384 @@ test("observations reach the ledger by path instead of through the caller", asyn
     assert.equal(error.code, "OBSERVATION_FILE_TOO_LARGE");
     return true;
   });
+});
+
+test("incomplete thread provenance is recorded, not refused", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const observedAt = startedAt + 1_000;
+  const thread = (mutate) => {
+    const value = {
+      id: "PRRT_1",
+      is_resolved: false,
+      is_outdated: false,
+      comment_count: 1,
+      comments_pagination_complete: true,
+      provenance_complete: true,
+      comments: [
+        {
+          id: "PRRC_1",
+          database_id: 3694779367,
+          created_at: iso(startedAt - 5_000),
+          updated_at: iso(startedAt - 5_000),
+          actor: { id: 99, type: "Bot", login: "codex" },
+          review: {
+            id: "PRR_1",
+            database_id: 4833836859,
+            state: "COMMENTED",
+            reviewed_head_sha: "c".repeat(40),
+            actor: { id: 99, type: "Bot", login: "codex" },
+          },
+        },
+      ],
+    };
+    mutate(value);
+    return value;
+  };
+  const record = async (mutate) => {
+    const next = await fixture();
+    t.after(() => fsp.rm(next.root, { recursive: true, force: true }));
+    await start(next, startedAt);
+    const value = observation({
+      at: observedAt,
+      baseSha: next.baseSha,
+      headSha: next.headSha,
+      requestId: null,
+      requestAt: startedAt,
+      withResult: false,
+    });
+    const built = thread(mutate);
+    value.review_threads.total_count = 1;
+    value.review_threads.unresolved_count = 1;
+    value.review_threads.threads = [built];
+    return recordGithubSnapshot(
+      next.store,
+      next.reviewId,
+      { expectedRevision: 1, observation: value },
+      { clock: () => observedAt + 10 },
+    );
+  };
+
+  const complete = await record(() => {});
+  assert.equal(
+    complete.latest_observation.review_threads.threads[0].provenance_complete,
+    true,
+  );
+
+  // A thread the workflow cannot act on is still a real thread. Refusing the
+  // observation would stall the publication behind a fact no fix can change,
+  // so each of these is stored with the completeness it actually has.
+  for (const [name, mutate] of [
+    ["a thread deeper than one comment page", (value) => {
+      value.comments_pagination_complete = false;
+      value.provenance_complete = false;
+    }],
+    ["a count that disagrees with the comments", (value) => {
+      value.comment_count = 2;
+      value.provenance_complete = false;
+    }],
+    ["a root comment with no attached review", (value) => {
+      value.comments[0].review = null;
+      value.provenance_complete = false;
+    }],
+    ["a deleted root author", (value) => {
+      value.comments[0].actor = { id: null, type: null, login: null };
+      value.provenance_complete = false;
+    }],
+    ["a later comment from a deleted author", (value) => {
+      value.comments.push({
+        ...value.comments[0],
+        id: "PRRC_2",
+        database_id: 3694779368,
+        actor: { id: null, type: null, login: null },
+      });
+      value.comment_count = 2;
+      value.provenance_complete = false;
+    }],
+    ["a review with no author identity", (value) => {
+      value.comments[0].review.actor = { id: null, type: null, login: null };
+      value.provenance_complete = false;
+    }],
+    ["a review with no reviewed head", (value) => {
+      value.comments[0].review.reviewed_head_sha = null;
+      value.provenance_complete = false;
+    }],
+    ["an impossible actor id", (value) => {
+      // Zero is not a GitHub actor. Accepting it would let the flag assert a
+      // numeric identity that does not exist.
+      value.comments[0].actor = { id: 0, type: "Bot", login: "codex" };
+      value.provenance_complete = false;
+    }],
+  ]) {
+    const recorded = await record(mutate);
+    const stored = recorded.latest_observation.review_threads.threads[0];
+    assert.equal(stored.provenance_complete, false, name);
+    assert.equal(recorded.latest_observation.review_threads.unresolved_count, 1, name);
+  }
+
+  // What must not be storable is a completeness claim the evidence denies.
+  await assert.rejects(
+    record((value) => {
+      value.comments[0].review = null;
+    }),
+    /disagrees with its evidence/,
+    "a forged completeness claim",
+  );
+  await assert.rejects(
+    record((value) => {
+      delete value.comments;
+    }),
+    /requires the comments it summarizes/,
+    "a summary with no evidence behind it",
+  );
+});
+
+test("thread comments must be recorded in creation order", async (t) => {
+  // The root binding is positional, so an unordered sequence would silently
+  // bind the thread to the wrong review.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 1_000;
+  const value = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  const comment = (databaseId, at) => ({
+    id: `PRRC_${databaseId}`,
+    database_id: databaseId,
+    created_at: iso(at),
+    updated_at: iso(at),
+    actor: { id: 99, type: "Bot", login: "codex" },
+    review: {
+      id: "PRR_1",
+      database_id: 4833836859,
+      state: "COMMENTED",
+      reviewed_head_sha: null,
+      actor: { id: 99, type: "Bot", login: "codex" },
+    },
+  });
+  value.review_threads.total_count = 1;
+  value.review_threads.unresolved_count = 1;
+  value.review_threads.threads = [
+    {
+      id: "PRRT_1",
+      is_resolved: false,
+      is_outdated: false,
+      comment_count: 2,
+      comments_pagination_complete: true,
+      provenance_complete: true,
+      comments: [
+        comment(2, startedAt - 1_000),
+        comment(1, startedAt - 5_000),
+      ],
+    },
+  ];
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 1, observation: value },
+      { clock: () => observedAt + 10 },
+    ),
+    /not in creation order/,
+  );
+});
+
+test("duplicate comment node IDs are refused", async (t) => {
+  // The node ID is what the later watermark and resolution joins key on, so a
+  // duplicate leaves the identity this evidence exists to establish ambiguous.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 1_000;
+  const value = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  const comment = (databaseId) => ({
+    id: "PRRC_SAME",
+    database_id: databaseId,
+    created_at: iso(startedAt - 5_000),
+    updated_at: iso(startedAt - 5_000),
+    actor: { id: 99, type: "Bot", login: "codex" },
+    review: {
+      id: "PRR_1",
+      database_id: 4833836859,
+      state: "COMMENTED",
+      reviewed_head_sha: "c".repeat(40),
+      actor: { id: 99, type: "Bot", login: "codex" },
+    },
+  });
+  value.review_threads.total_count = 1;
+  value.review_threads.unresolved_count = 1;
+  value.review_threads.threads = [
+    {
+      id: "PRRT_1",
+      is_resolved: false,
+      is_outdated: false,
+      comment_count: 2,
+      comments_pagination_complete: true,
+      provenance_complete: true,
+      comments: [comment(1), comment(2)],
+    },
+  ];
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 1, observation: value },
+      { clock: () => observedAt + 10 },
+    ),
+    /thread comment node ids/,
+  );
+});
+
+test("comments sharing a creation time are ordered by database id", async (t) => {
+  // Creation time alone leaves either ordering acceptable for a colliding
+  // pair, and the root is positional, so a reordered observation could bind
+  // the thread to a reply's review.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 1_000;
+  const sameTime = iso(startedAt - 5_000);
+  const comment = (databaseId) => ({
+    id: `PRRC_${databaseId}`,
+    database_id: databaseId,
+    created_at: sameTime,
+    updated_at: sameTime,
+    actor: { id: 99, type: "Bot", login: "codex" },
+    review: {
+      id: `PRR_${databaseId}`,
+      database_id: 4833836859 + databaseId,
+      state: "COMMENTED",
+      reviewed_head_sha: "c".repeat(40),
+      actor: { id: 99, type: "Bot", login: "codex" },
+    },
+  });
+  const build = (comments) => {
+    const value = observation({
+      at: observedAt,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: null,
+      requestAt: startedAt,
+      withResult: false,
+    });
+    value.review_threads.total_count = 1;
+    value.review_threads.unresolved_count = 1;
+    value.review_threads.threads = [
+      {
+        id: "PRRT_1",
+        is_resolved: false,
+        is_outdated: false,
+        comment_count: comments.length,
+        comments_pagination_complete: true,
+        provenance_complete: true,
+        comments,
+      },
+    ];
+    return value;
+  };
+
+  // Equal timestamps are legitimate and must still be accepted in the
+  // determined order.
+  const accepted = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: build([comment(1), comment(2)]) },
+    { clock: () => observedAt + 10 },
+  );
+  assert.equal(
+    accepted.latest_observation.review_threads.threads[0].comments[0].database_id,
+    1,
+  );
+
+  const next = await fixture();
+  t.after(() => fsp.rm(next.root, { recursive: true, force: true }));
+  await start(next, startedAt);
+  const reordered = build([comment(2), comment(1)]);
+  reordered.pull_request.head_sha = next.headSha;
+  reordered.pull_request.base_head_comparison.head_sha = next.headSha;
+  reordered.pull_request.base_sha = next.baseSha;
+  reordered.pull_request.pr_reported_base_sha = next.baseSha;
+  await assert.rejects(
+    recordGithubSnapshot(
+      next.store,
+      next.reviewId,
+      { expectedRevision: 1, observation: reordered },
+      { clock: () => observedAt + 10 },
+    ),
+    /not in creation order/,
+  );
+});
+
+test("comments sharing a creation time and database id are refused", async (t) => {
+  // Database-ID uniqueness is what makes the ordering key total, and so what
+  // determines the root. Without a case that turns on the duplicate itself,
+  // the check could be removed as redundant with the node ID and the root
+  // would silently become undetermined again.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 1_000;
+  const sameTime = iso(startedAt - 5_000);
+  const comment = (nodeId) => ({
+    id: nodeId,
+    database_id: 7,
+    created_at: sameTime,
+    updated_at: sameTime,
+    actor: { id: 99, type: "Bot", login: "codex" },
+    review: {
+      id: "PRR_1",
+      database_id: 4833836859,
+      state: "COMMENTED",
+      reviewed_head_sha: "c".repeat(40),
+      actor: { id: 99, type: "Bot", login: "codex" },
+    },
+  });
+  const value = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  value.review_threads.total_count = 1;
+  value.review_threads.unresolved_count = 1;
+  value.review_threads.threads = [
+    {
+      id: "PRRT_1",
+      is_resolved: false,
+      is_outdated: false,
+      comment_count: 2,
+      comments_pagination_complete: true,
+      provenance_complete: true,
+      comments: [comment("PRRC_A"), comment("PRRC_B")],
+    },
+  ];
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 1, observation: value },
+      { clock: () => observedAt + 10 },
+    ),
+    /thread comments/,
+  );
 });

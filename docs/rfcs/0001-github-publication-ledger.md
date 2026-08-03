@@ -1076,9 +1076,11 @@ GitHub's pre-merge value may describe a test merge. Only `is_merged: true`
 together with `state: "CLOSED"`, `merged_at`, and `merge_commit_sha` is merge
 evidence.
 
-Thread collection reads the complete paginated `reviewThreads` connection. It
-records every normalized thread, not only unresolved threads, and the server
-requires:
+Thread collection reads the `reviewThreads` connection in a single request and
+refuses anything larger. A thread's resolved state decides the publication gate,
+and state gathered across a walk is state from several instants, so only an
+atomic read can establish it (see RFC 0003). It records every normalized thread,
+not only unresolved threads, and the server requires:
 
 ```text
 total_count == threads.length
@@ -1102,7 +1104,7 @@ the same time:
   against the immutable publication-start baseline;
 - every candidate Codex result needed to partition the immutable baseline and
   replay the active epoch with unclosed source-only baseline requests;
-- the complete paginated review-thread collection and resolution counts; and
+- the single-page review-thread collection and resolution counts; and
 - the observation timestamp.
 
 `observed_at` is captured immediately after the final GitHub response. Every

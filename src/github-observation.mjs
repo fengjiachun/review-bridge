@@ -539,6 +539,63 @@ function normalizeCodex(publication, raw) {
   });
 }
 
+/**
+ * A deleted account resolves to a null author in GraphQL. Report that as an
+ * explicit unknown actor rather than dropping the field, so the reviewer sees
+ * that provenance is missing instead of absent.
+ */
+function normalizedThreadActor(author) {
+  if (author == null) {
+    return { id: null, type: null, login: null };
+  }
+  return {
+    id: author.databaseId ?? null,
+    type: author.__typename ?? null,
+    login: author.login ?? null,
+  };
+}
+
+/**
+ * Whether a thread's evidence is complete enough to decide anything from.
+ *
+ * Incompleteness is recorded, not rejected: a thread deeper than one comment
+ * page, or one whose author GitHub can no longer resolve to a numeric ID, is
+ * a real thread that simply cannot be acted on. Refusing the whole observation
+ * for it would stall the publication behind a fact no fix can change, so this
+ * is the flag a consumer checks before treating a thread as eligible.
+ *
+ * Derived from the evidence, never supplied: the ledger re-derives it and
+ * refuses a stored value that disagrees.
+ */
+export function threadProvenanceComplete(thread) {
+  const comments = thread.comments;
+  if (!Array.isArray(comments) || comments.length === 0) {
+    return false;
+  }
+  const root = comments[0];
+  // A GitHub actor ID is a positive integer, matching assertId elsewhere. Zero
+  // and negatives are impossible identities, and accepting them would let the
+  // flag assert a numeric identity it does not have.
+  const identified = (actor) =>
+    Number.isSafeInteger(actor?.id) &&
+    actor.id > 0 &&
+    typeof actor?.type === "string" &&
+    actor.type !== "";
+  return (
+    thread.comments_pagination_complete === true &&
+    thread.comment_count === comments.length &&
+    // Every participant, not just the root: a later comment from an actor
+    // GitHub can no longer resolve means the thread's participation is not
+    // fully known, which is what eligibility turns on.
+    comments.every((comment) => identified(comment.actor)) &&
+    root?.review != null &&
+    identified(root.review.actor) &&
+    // Without the head its review examined, a resolution has nothing to bind
+    // the thread to.
+    typeof root.review.reviewed_head_sha === "string"
+  );
+}
+
 function normalizeThreads(publication, raw) {
   const target = object(publication.target, "publication.target");
   const pages = array(raw.review_threads?.pages, "review_threads.pages");
@@ -548,22 +605,114 @@ function normalizeThreads(publication, raw) {
       `review_threads.pages[${index}].nodes`,
     ),
   );
-  const lastPageInfo =
-    pages.at(-1)?.data?.repository?.pullRequest?.reviewThreads?.pageInfo;
-  if (lastPageInfo?.hasNextPage !== false) {
+  // Only an atomic read is accepted: one response, read at one instant.
+  //
+  // Counts can prove membership across a walk, but they cannot prove per-thread
+  // state, and nothing else can either. is_resolved is copied from whichever
+  // page carried the node, so a multi-page walk records state from as many
+  // instants as it has pages. Resolving or unresolving a thread between two
+  // pages leaves the reported total, the distinct identities and pageInfo all
+  // untouched -- there is no count for a rule to compare -- and the value read
+  // earlier is then recorded as established fact. That lands in the direction
+  // that matters: unresolved_count feeds the publication gate directly
+  // (publication.mjs, UNRESOLVED_REVIEW_THREADS), so a thread unresolved after
+  // its page was read records as resolved and the gate reads MERGE_READY.
+  //
+  // Refusing is the honest response rather than a conservative one. A walk
+  // cannot establish what it never observed at a single instant, so a pull
+  // request past one page of threads is not collectable until some later change
+  // brings evidence that survives interleaving -- agreement between two
+  // independent walks, or state carrying its own read time. Until then this
+  // fails closed and loudly instead of recording a state nobody observed.
+  if (pages.length !== 1) {
+    throw new Error(
+      pages.length === 0
+        ? "review-thread collection has no pages"
+        : "review-thread state cannot be established across multiple pages",
+    );
+  }
+  const connection = pages[0]?.data?.repository?.pullRequest?.reviewThreads;
+  if (connection?.pageInfo?.hasNextPage !== false) {
     throw new Error("review-thread pagination is incomplete");
+  }
+  // With a single page the provider's total is the only completeness evidence
+  // there is, and deriving it from the collected nodes would manufacture a
+  // number that always agrees with itself.
+  const reportedTotal = connection?.totalCount;
+  if (!Number.isSafeInteger(reportedTotal) || reportedTotal < 0) {
+    throw new Error("review_threads.pages[0] is missing a reported total");
+  }
+  const distinctThreads = new Set(threads.map((thread) => thread.id));
+  if (distinctThreads.size !== threads.length) {
+    throw new Error("review-thread page repeats a thread");
+  }
+  if (reportedTotal !== threads.length) {
+    throw new Error(
+      "review-thread pages do not account for the reported total",
+    );
   }
   const collectedAt = canonicalTime(
     raw.review_threads.collected_at,
     "review_threads.collected_at",
   );
-  const normalized = threads.map((thread) => ({
-    id: thread.id,
-    is_resolved: thread.isResolved,
-    is_outdated: thread.isOutdated,
-    path: thread.path,
-    line: thread.line ?? null,
-  }));
+  const normalized = threads.map((thread) => {
+    const base = {
+      id: thread.id,
+      is_resolved: thread.isResolved,
+      is_outdated: thread.isOutdated,
+      path: thread.path,
+      line: thread.line ?? null,
+    };
+    // Provenance is emitted only when the collection carried it. The ledger
+    // validates it the same way -- present and complete, or absent -- so an
+    // older collector stays usable until a consumer actually requires it.
+    if (thread.comments == null) {
+      return base;
+    }
+    const comments = array(
+      thread.comments.nodes,
+      `review thread ${thread.id} comments`,
+    );
+    const normalizedComments = comments.map((comment) => ({
+        id: comment.id,
+        database_id: comment.databaseId,
+        created_at: canonicalTime(
+          comment.createdAt,
+          `review comment ${comment.databaseId} createdAt`,
+        ),
+        updated_at: canonicalTime(
+          comment.updatedAt,
+          `review comment ${comment.databaseId} updatedAt`,
+        ),
+        actor: normalizedThreadActor(comment.author),
+        review:
+          comment.pullRequestReview == null
+            ? null
+            : {
+                id: comment.pullRequestReview.id,
+                database_id: comment.pullRequestReview.databaseId,
+                state: comment.pullRequestReview.state,
+                reviewed_head_sha:
+                  comment.pullRequestReview.commit?.oid ?? null,
+                actor: normalizedThreadActor(
+                  comment.pullRequestReview.author,
+                ),
+              },
+    }));
+    return {
+      ...base,
+      comment_count: thread.comments.totalCount ?? null,
+      comments_pagination_complete:
+        thread.comments.pageInfo?.hasNextPage === false,
+      comments: normalizedComments,
+      provenance_complete: threadProvenanceComplete({
+        comment_count: thread.comments.totalCount ?? null,
+        comments_pagination_complete:
+          thread.comments.pageInfo?.hasNextPage === false,
+        comments: normalizedComments,
+      }),
+    };
+  });
   return {
     collection: {
       status: "COMPLETE",
@@ -582,7 +731,12 @@ function normalizeThreads(publication, raw) {
         ),
       ],
     },
-    total_count: normalized.length,
+    // The provider's number, not the collected length. The check above forces
+    // the two equal for every value GitHub can report, so this is attribution
+    // rather than behavior: no test over real inputs can separate the two
+    // spellings. (Object.is does separate them at -0, which passes the guards
+    // and serializes to "0" -- a distinction with nothing behind it.)
+    total_count: reportedTotal,
     unresolved_count: normalized.filter((thread) => !thread.is_resolved).length,
     threads: normalized,
   };
@@ -872,12 +1026,47 @@ export function collectClassicProtection(
   );
 }
 
+// One query carries the whole provenance proof: thread identity and state,
+// every comment with stable node and database IDs and numeric actor identity,
+// and the formal review each comment structurally belongs to together with the
+// head that review examined. REST exposes neither the thread node ID nor the
+// thread-to-review link, and would need a call per thread.
+//
+// Comments are fetched in one page and the proof records whether that was
+// complete; a thread deeper than the page fails closed rather than being
+// reported on partial evidence.
+const REVIEW_THREAD_COMMENT_PAGE = 100;
 const REVIEW_THREADS_QUERY = `
 query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $endCursor) {
-        nodes { id isResolved isOutdated path line }
+        totalCount
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          comments(first: ${REVIEW_THREAD_COMMENT_PAGE}) {
+            totalCount
+            pageInfo { hasNextPage }
+            nodes {
+              id
+              databaseId
+              createdAt
+              updatedAt
+              author { __typename login ... on Bot { databaseId } ... on User { databaseId } }
+              pullRequestReview {
+                id
+                databaseId
+                state
+                commit { oid }
+                author { __typename login ... on Bot { databaseId } ... on User { databaseId } }
+              }
+            }
+          }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -930,21 +1119,25 @@ export function collectGithubObservation(publicationInput) {
   const pullRequestReviewComments = getPages(
     `${root}/pulls/${target.pr_number}/comments?per_page=100`,
   );
+  // One request, not a walk. Only a single page can be recorded, so paginating
+  // would spend GitHub traffic building pages that are refused on arrival --
+  // and would read as though multi-page collection were supported. A pull
+  // request past one page fails on this response's own hasNextPage instead.
   const reviewThreads = {
-    pages: runGh([
-      "api",
-      "graphql",
-      "--paginate",
-      "--slurp",
-      "-f",
-      `query=${REVIEW_THREADS_QUERY}`,
-      "-f",
-      `owner=${target.owner}`,
-      "-f",
-      `repo=${target.repo}`,
-      "-F",
-      `number=${target.pr_number}`,
-    ]),
+    pages: [
+      runGh([
+        "api",
+        "graphql",
+        "-f",
+        `query=${REVIEW_THREADS_QUERY}`,
+        "-f",
+        `owner=${target.owner}`,
+        "-f",
+        `repo=${target.repo}`,
+        "-F",
+        `number=${target.pr_number}`,
+      ]),
+    ],
     endpoint: `POST graphql:reviewThreads(${target.owner}/${target.repo}#${target.pr_number})`,
     collected_at: new Date().toISOString(),
   };

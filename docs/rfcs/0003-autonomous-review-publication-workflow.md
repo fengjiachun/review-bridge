@@ -1478,8 +1478,59 @@ this RFC changes from `Accepted` to `Implemented`.
   discovery across application restarts?
 - Should the first implementation expose an operator-configurable resource
   budget in addition to mandatory no-progress detection?
-- Which GitHub API shape provides the smallest complete paginated thread,
-  review, comment, and actor provenance proof?
+- ~~Which GitHub API shape provides the smallest complete paginated thread,
+  review, comment, and actor provenance proof?~~ Resolved: a single GraphQL
+  query on `pullRequest.reviewThreads` with nested `comments`. One request
+  returns every element this RFC requires — thread node ID, `isResolved`,
+  `isOutdated`, each comment's node and database ID with `createdAt` and
+  `updatedAt`, `author { __typename ... databaseId }` for the numeric actor ID
+  and type, and `pullRequestReview { databaseId author commit { oid } }` for
+  the structurally attached review, its author, and the head it reviewed — with
+  `pageInfo.hasNextPage` and `totalCount` at both the thread and comment levels
+  as the nested-pagination proof. REST cannot supply it: it exposes no thread
+  node ID and no structural thread-to-review link, and would need one call per
+  thread. Measured against the five real threads on pull request 23 of this
+  repository.
+
+  One element is not in that query. The correlated workflow request is reached
+  by joining the recorded review ID against the Codex results already in the
+  observation, which carry the request correlation; the thread evidence
+  supplies the review ID and reviewed head that make the join possible.
+
+  A thread collection that claims completeness must be an atomic read: a single
+  response, and so a single instant. The collector produces nothing else, and
+  the ledger requires it of the observation, which arrives as caller-supplied
+  JSON. A collection that instead admits incompleteness may carry anything and
+  is still recorded — it claims no evidence, and the gate returns
+  `EVIDENCE_INCOMPLETE` for it without reading `unresolved_count`. So the rule
+  binds exactly the collections something is decided from.
+
+  This is a real restriction — a pull request past one page of review threads
+  is not collectable — and it is worth being precise about why, because the
+  obvious weaker rules look sufficient and are not.
+
+  Counts can prove *membership* across a paginated walk. Requiring the
+  provider's `totalCount` on every page, identical across pages, and equal to
+  the distinct identities collected is in fact strong enough to make membership
+  exact rather than merely bounded: the connection is ordered by a keyset
+  cursor over immutable per-thread keys, so a thread outliving the walk cannot
+  sort behind a cursor already passed and be skipped, and any compensating
+  creation and deletion puts the new thread into the walk as well, pushing the
+  distinct count past the reported total and forcing a refusal.
+
+  What no count can prove is per-thread *state*. `isResolved` is read from
+  whichever page carried the node. Resolving or unresolving a thread between
+  two pages changes no total, no identity, and no `pageInfo`, so there is
+  nothing for a rule to compare, and the value read earlier is recorded as
+  established fact. That fails in the worst direction: `unresolved_count` feeds
+  the publication gate, so a thread unresolved after its page was read records
+  as resolved and the gate reads `MERGE_READY` over a live objection.
+
+  Refusing is therefore the honest answer rather than a conservative one — a
+  walk cannot establish what it never observed at one instant. Supporting
+  larger pull requests needs evidence that survives interleaving: agreement
+  between two independent walks, or state that carries its own read time. That
+  is deliberately left to a later change rather than approximated here.
 - Which predicate ends the pre-ready wait, given that a pending gate and a
   ready-only gate are observationally identical and elapsed time is not
   evidence?

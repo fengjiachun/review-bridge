@@ -172,6 +172,7 @@ function rawCollection() {
                       line: 12,
                     },
                   ],
+                  totalCount: 1,
                   pageInfo: { hasNextPage: false, endCursor: null },
                 },
               },
@@ -652,4 +653,228 @@ test("GitHub observation normalization requires explicit check arrays", () => {
   );
   assert.equal(observation.required_checks.policy, "NONE_CONFIGURED");
   assert.deepEqual(observation.required_checks.requirements, []);
+});
+
+// The provenance shape below mirrors what GitHub actually returns; it was
+// captured from the five real review threads on pull request 23 of this
+// repository rather than invented.
+function threadWithProvenance(overrides = {}) {
+  return {
+    id: "PRRT_1",
+    isResolved: false,
+    isOutdated: false,
+    path: "src/value.mjs",
+    line: 12,
+    comments: {
+      totalCount: 1,
+      pageInfo: { hasNextPage: false },
+      nodes: [
+        {
+          id: "PRRC_1",
+          databaseId: 3694779367,
+          createdAt: "2026-07-27T00:00:01Z",
+          updatedAt: "2026-07-27T00:00:01Z",
+          author: {
+            __typename: "Bot",
+            login: "chatgpt-codex-connector",
+            databaseId: 199175422,
+          },
+          pullRequestReview: {
+            id: "PRR_1",
+            databaseId: 4833836859,
+            state: "COMMENTED",
+            commit: { oid: headSha },
+            author: {
+              __typename: "Bot",
+              login: "chatgpt-codex-connector",
+              databaseId: 199175422,
+            },
+          },
+        },
+      ],
+    },
+    ...overrides,
+  };
+}
+
+function rawWithThread(thread) {
+  const value = rawCollection();
+  value.review_threads.pages[0].data.repository.pullRequest.reviewThreads.nodes =
+    [thread];
+  return value;
+}
+
+test("thread provenance carries actor identity and the attached review", () => {
+  const observation = normalizeGithubObservation(
+    publication(),
+    rawWithThread(threadWithProvenance()),
+  );
+  const thread = observation.review_threads.threads[0];
+  assert.equal(thread.comment_count, 1);
+  assert.equal(thread.comments_pagination_complete, true);
+  const root = thread.comments[0];
+  assert.equal(root.database_id, 3694779367);
+  assert.deepEqual(root.actor, {
+    id: 199175422,
+    type: "Bot",
+    login: "chatgpt-codex-connector",
+  });
+  assert.equal(root.review.database_id, 4833836859);
+  assert.equal(root.review.reviewed_head_sha, headSha);
+  assert.deepEqual(root.review.actor, root.actor);
+});
+
+test("a thread collected without provenance stays usable", () => {
+  // An older collector emits no comments. The normalizer must not invent the
+  // fields, so a consumer sees provenance as absent rather than as established.
+  const bare = threadWithProvenance();
+  delete bare.comments;
+  const observation = normalizeGithubObservation(
+    publication(),
+    rawWithThread(bare),
+  );
+  const thread = observation.review_threads.threads[0];
+  assert.equal(thread.id, "PRRT_1");
+  assert.equal("comments" in thread, false);
+  assert.equal("comment_count" in thread, false);
+});
+
+test("a deleted thread author reports an unknown actor rather than none", () => {
+  const ghosted = threadWithProvenance();
+  ghosted.comments.nodes[0].author = null;
+  const observation = normalizeGithubObservation(
+    publication(),
+    rawWithThread(ghosted),
+  );
+  assert.deepEqual(observation.review_threads.threads[0].comments[0].actor, {
+    id: null,
+    type: null,
+    login: null,
+  });
+});
+
+test("a deleted author yields a thread recorded as incomplete, not a refusal", () => {
+  // The normalizer records an unknown actor and the ledger accepts it; these
+  // two halves have to compose, or the normalizer emits something that can
+  // never be stored.
+  const ghosted = threadWithProvenance();
+  ghosted.comments.nodes[0].author = null;
+  const observation = normalizeGithubObservation(
+    publication(),
+    rawWithThread(ghosted),
+  );
+  const thread = observation.review_threads.threads[0];
+  assert.equal(thread.comments[0].actor.id, null);
+  assert.equal(thread.provenance_complete, false);
+
+  const whole = normalizeGithubObservation(
+    publication(),
+    rawWithThread(threadWithProvenance()),
+  );
+  assert.equal(whole.review_threads.threads[0].provenance_complete, true);
+});
+
+test("a thread deeper than one comment page is recorded as incomplete", () => {
+  const deep = threadWithProvenance();
+  deep.comments.totalCount = 250;
+  deep.comments.pageInfo.hasNextPage = true;
+  const observation = normalizeGithubObservation(
+    publication(),
+    rawWithThread(deep),
+  );
+  const thread = observation.review_threads.threads[0];
+  assert.equal(thread.comments_pagination_complete, false);
+  assert.equal(thread.provenance_complete, false);
+});
+
+test("a thread page count that omits a thread is refused", () => {
+  // Reaching the end of the cursor is only half the proof: a thread added or
+  // removed mid-walk can be omitted while the last page still reports no next
+  // page. Deriving the total from what was collected would always agree.
+  const dropped = rawCollection();
+  const connection =
+    dropped.review_threads.pages[0].data.repository.pullRequest.reviewThreads;
+  connection.totalCount = 2;
+  assert.throws(
+    () => normalizeGithubObservation(publication(), dropped),
+    /do not account for the reported total/,
+  );
+});
+
+test("a thread walked across pages is refused, state and all", () => {
+  // The hazard the single-page rule exists for. Counts prove membership, not
+  // state: a thread read as resolved on page one and unresolved before page
+  // two leaves the reported total, the identities and pageInfo all untouched,
+  // so no count rule can see it. Recorded, it reads as resolved and drives
+  // unresolved_count to zero, which is MERGE_READY on a live unresolved
+  // thread. Both pages here are internally consistent -- only the interleaving
+  // is wrong.
+  const interleaved = rawCollection();
+  const first = interleaved.review_threads.pages[0];
+  const connection = first.data.repository.pullRequest.reviewThreads;
+  const resolved = structuredClone(connection.nodes[0]);
+  resolved.id = "PRRT_second";
+  resolved.isResolved = true;
+  connection.totalCount = 2;
+  connection.nodes = [connection.nodes[0], resolved];
+  connection.pageInfo = { hasNextPage: true, endCursor: "cursor" };
+  const second = structuredClone(first);
+  const later = second.data.repository.pullRequest.reviewThreads;
+  later.nodes = [];
+  later.pageInfo = { hasNextPage: false, endCursor: null };
+  interleaved.review_threads.pages = [first, second];
+  assert.throws(
+    () => normalizeGithubObservation(publication(), interleaved),
+    /state cannot be established across multiple pages/,
+  );
+});
+
+test("a thread page with no reported total is refused", () => {
+  const untotalled = rawCollection();
+  delete untotalled.review_threads.pages[0].data.repository.pullRequest
+    .reviewThreads.totalCount;
+  assert.throws(
+    () => normalizeGithubObservation(publication(), untotalled),
+    /missing a reported total/,
+  );
+});
+
+test("a page that repeats a thread is refused", () => {
+  // Distinct identities, not node count. A repeat would otherwise let the
+  // collected length match a provider total that covers one thread more.
+  const repeated = rawCollection();
+  const connection =
+    repeated.review_threads.pages[0].data.repository.pullRequest.reviewThreads;
+  connection.totalCount = 2;
+  connection.nodes = [connection.nodes[0], structuredClone(connection.nodes[0])];
+  assert.throws(
+    () => normalizeGithubObservation(publication(), repeated),
+    /page repeats a thread/,
+  );
+});
+
+test("a pull request with no threads at all is still collectable", () => {
+  // The count rules must not turn an honestly empty connection into a refusal:
+  // one page, a reported total of zero, no nodes.
+  const empty = rawCollection();
+  const connection =
+    empty.review_threads.pages[0].data.repository.pullRequest.reviewThreads;
+  connection.totalCount = 0;
+  connection.nodes = [];
+  const normalized = normalizeGithubObservation(publication(), empty);
+  assert.equal(normalized.review_threads.total_count, 0);
+  assert.equal(normalized.review_threads.unresolved_count, 0);
+  assert.deepEqual(normalized.review_threads.threads, []);
+  assert.equal(normalized.review_threads.collection.sources[0].page_count, 1);
+});
+
+test("a collection with no pages at all is refused", () => {
+  // Distinct from the empty pull request above: no page means nothing ever
+  // reported that the walk finished, so there is no proof to read.
+  const pageless = rawCollection();
+  pageless.review_threads.pages = [];
+  assert.throws(
+    () => normalizeGithubObservation(publication(), pageless),
+    /review-thread collection has no pages/,
+  );
 });

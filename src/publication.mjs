@@ -8,6 +8,9 @@ import {
   isCodexRequestId,
 } from "./codex-request.mjs";
 import { loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
+// One derivation of thread completeness, shared with the normalizer that
+// records it. Two copies of this rule would be two things to keep in step.
+import { threadProvenanceComplete } from "./github-observation.mjs";
 import {
   atomicWriteCanonicalJson,
   canonicalJson,
@@ -474,6 +477,24 @@ function requireSourceKinds(collection, expected, name) {
   }
 }
 
+function requireAtomicPage(collection, kind, name) {
+  // Gated on COMPLETE like its two neighbours, and for the same reason: a
+  // collection that does not claim completeness is not claiming evidence. The
+  // gate returns EVIDENCE_INCOMPLETE for such a thread collection before it
+  // ever reads unresolved_count, so nothing it records can decide anything.
+  // Checking unconditionally would instead make an openly incomplete
+  // collection unrecordable, which is a state the schema deliberately allows.
+  if (collection.status !== "COMPLETE") {
+    return;
+  }
+  const source = (collection.sources ?? []).find(
+    (entry) => entry.kind === kind,
+  );
+  if (source?.page_count !== 1) {
+    fail("INVALID_INPUT", `${name}.${kind} must be a single atomic page`);
+  }
+}
+
 function requireCompletePagination(collection, kinds, name) {
   if (collection.status !== "COMPLETE") {
     return;
@@ -818,6 +839,16 @@ function validateObservation(input, ledger, currentMs) {
     ["PULL_REQUEST_REVIEW_THREADS"],
     "review_threads.collection",
   );
+  // Threads are the one source whose per-item state, not just its membership,
+  // decides the gate, and state read across a walk is state from several
+  // instants. The collector refuses anything but a single page; the observation
+  // arrives here as caller-supplied JSON, so the ledger has to say it too or
+  // the invariant holds in only one of the two layers that state it.
+  requireAtomicPage(
+    reviewThreads.collection,
+    "PULL_REQUEST_REVIEW_THREADS",
+    "review_threads.collection",
+  );
   requireSourceKinds(
     reviewThreads.collection,
     ["PULL_REQUEST_REVIEW_THREADS"],
@@ -1160,6 +1191,100 @@ function validateChecks(requiredChecks, pullRequest, target) {
   }
 }
 
+/**
+ * A thread's provenance has to be complete enough to replay who wrote it and
+ * which formal review it belongs to, because that is what later decides
+ * whether the workflow may resolve it. Partial evidence is rejected rather
+ * than recorded, so an absent field can never read as an established fact.
+ */
+function validateThreadProvenance(thread) {
+  if (thread.comments === undefined) {
+    // No provenance was collected. A claim about it without the evidence
+    // behind it is exactly what must not be storable.
+    for (const field of [
+      "comment_count",
+      "comments_pagination_complete",
+      "provenance_complete",
+    ]) {
+      if (field in thread) {
+        fail(
+          "INVALID_INPUT",
+          `thread ${field} requires the comments it summarizes`,
+        );
+      }
+    }
+    return;
+  }
+  const comments = assertArray(thread.comments, "thread.comments", 1_000);
+  if (thread.comments_pagination_complete !== undefined &&
+      typeof thread.comments_pagination_complete !== "boolean") {
+    fail("INVALID_INPUT", "thread comment pagination flag must be boolean");
+  }
+  if (thread.comment_count !== null) {
+    assertId(thread.comment_count, "thread.comment_count");
+  }
+  // Both identifiers, not just one. The node ID is what the later watermark
+  // and resolution joins key on, so a duplicate there would leave the identity
+  // this evidence exists to establish ambiguous.
+  //
+  // Database-ID uniqueness is also load-bearing for the ordering rule below:
+  // it is what makes (created_at, database_id) a total order, and so what
+  // makes the positional root a single determined comment. Removing it as
+  // redundant with the node ID would silently undo that.
+  uniqueBy(comments, (comment) => comment.database_id, "thread comments");
+  uniqueBy(comments, (comment) => comment.id, "thread comment node ids");
+  // The root is comments[0], which is only meaningful if the sequence is
+  // ordered. GitHub returns thread comments oldest first, but nothing in the
+  // recorded evidence says so, and the whole thread-to-review binding hangs
+  // off the first entry -- so require the order rather than assume it.
+  // Ordered by creation time, then by database ID. GitHub timestamps can
+  // collide, and creation time alone would leave either ordering acceptable
+  // for the colliding pair -- which would let a reordered observation put a
+  // reply first and bind the thread to the reply's review. The second key
+  // makes the order total, so the root is a single determined comment.
+  let previous = null;
+  for (const comment of comments) {
+    const at = timestampMs(comment.created_at, "thread comment created_at");
+    const key = [at, comment.database_id];
+    if (
+      previous !== null &&
+      (key[0] < previous[0] ||
+        (key[0] === previous[0] && key[1] < previous[1]))
+    ) {
+      fail("INVALID_INPUT", "thread comments are not in creation order");
+    }
+    previous = key;
+  }
+  for (const comment of comments) {
+    assertString(comment.id, "thread comment id", 255);
+    assertId(comment.database_id, "thread comment database_id");
+    timestampMs(comment.created_at, "thread comment created_at");
+    timestampMs(comment.updated_at, "thread comment updated_at");
+    assertObject(comment.actor, "thread comment actor");
+    if (comment.review !== null) {
+      const review = assertObject(comment.review, "thread comment review");
+      assertString(review.id, "thread review id", 255);
+      assertId(review.database_id, "thread review database_id");
+      assertString(review.state, "thread review state", 100);
+      assertObject(review.actor, "thread review actor");
+      if (review.reviewed_head_sha !== null) {
+        assertSha(review.reviewed_head_sha, "thread review reviewed_head_sha");
+      }
+    }
+  }
+  // Completeness is a recorded fact, not an admission requirement. A thread
+  // deeper than one comment page, or one whose author GitHub can no longer
+  // resolve, is still a real thread; refusing the whole observation for it
+  // would stall the publication behind something no fix can change. It is
+  // re-derived here so a caller cannot claim an eligibility it lacks.
+  if (thread.provenance_complete !== threadProvenanceComplete(thread)) {
+    fail(
+      "INVALID_INPUT",
+      "thread provenance completeness disagrees with its evidence",
+    );
+  }
+}
+
 function validateThreads(reviewThreads) {
   const threads = assertArray(reviewThreads.threads ?? [], "review_threads.threads");
   uniqueBy(threads, (thread) => assertString(thread.id, "thread.id", 255), "threads");
@@ -1170,6 +1295,7 @@ function validateThreads(reviewThreads) {
     ) {
       fail("INVALID_INPUT", "thread resolution and outdated fields must be boolean");
     }
+    validateThreadProvenance(thread);
   }
   if (
     reviewThreads.total_count !== threads.length ||
