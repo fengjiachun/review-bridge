@@ -487,9 +487,11 @@ function requireAtomicPage(collection, kind, name) {
   if (collection.status !== "COMPLETE") {
     return;
   }
-  const source = (collection.sources ?? []).find(
-    (entry) => entry.kind === kind,
-  );
+  const source = [
+    ...(collection.sources ?? []),
+    ...(collection.policy_sources ?? []),
+    ...(collection.run_sources ?? []),
+  ].find((entry) => entry.kind === kind);
   if (source?.page_count !== 1) {
     fail("INVALID_INPUT", `${name}.${kind} must be a single atomic page`);
   }
@@ -817,6 +819,15 @@ function validateObservation(input, ledger, currentMs) {
   requireCompletePagination(
     requiredChecks.collection,
     ["APPLICABLE_RULES", "CHECK_RUN", "COMMIT_STATUS"],
+    "required_checks.collection",
+  );
+  // A check run's conclusion decides the gate, so like the review threads it
+  // cannot be assembled from several instants. The collector issues one
+  // request; the observation arrives as caller-supplied JSON, so the rule has
+  // to hold here too.
+  requireAtomicPage(
+    requiredChecks.collection,
+    "CHECK_RUN",
     "required_checks.collection",
   );
   requireSourceKinds(

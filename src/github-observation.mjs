@@ -45,6 +45,12 @@ function authorization(publication) {
 
 function itemPages(entry, name) {
   const pages = array(entry?.pages, `${name}.pages`);
+  // These endpoints report no total, so exhaustion is only ever established by
+  // the terminal Link header the collector recorded. Refusing here keeps an
+  // unproven walk from being stored as a complete one.
+  if (entry?.pagination_complete !== true) {
+    throw new Error(`${name} did not prove it reached the last page`);
+  }
   return {
     pages,
     items: pages.flatMap((page, index) =>
@@ -389,13 +395,32 @@ function normalizeRuns(publication, raw) {
   const checkRuns = checkPages.flatMap((page, index) =>
     array(page?.check_runs, `check_runs.pages[${index}].check_runs`),
   );
+  // Only an atomic read, for the reason the review threads are: a check run's
+  // conclusion decides the gate, and a walk reads each page at its own instant.
+  // A run recorded from page one keeps that page's conclusion, so a re-run that
+  // fails after page one was read is stored as whatever it was before. That
+  // lands fail-open rather than fail-closed: decidingRunsFor takes the latest
+  // run per context, so losing or staling the newest failure lets an earlier
+  // success decide. Unlike the review threads this connection is walked by
+  // offset, where a compensating create and delete can also drop a run outright
+  // without repeating one, so no count rule could close it either.
+  if (checkPages.length !== 1) {
+    throw new Error(
+      checkPages.length === 0
+        ? "check-run collection has no pages"
+        : "check-run state cannot be established across multiple pages",
+    );
+  }
   const reportedTotal = checkPages[0]?.total_count;
-  if (
-    !Number.isSafeInteger(reportedTotal) ||
-    reportedTotal < 0 ||
-    reportedTotal !== checkRuns.length
-  ) {
-    throw new Error("check-run pagination is incomplete or inconsistent");
+  if (!Number.isSafeInteger(reportedTotal) || reportedTotal < 0) {
+    throw new Error("check_runs.pages[0] is missing a reported total");
+  }
+  const distinctRuns = new Set(checkRuns.map((run) => run.id));
+  if (distinctRuns.size !== checkRuns.length) {
+    throw new Error("check-run page repeats a run");
+  }
+  if (reportedTotal !== checkRuns.length) {
+    throw new Error("check-run pages do not account for the reported total");
   }
   const statusPage = itemPages(raw.commit_statuses, "commit_statuses");
   const runs = checkRuns.map((run) => {
@@ -888,6 +913,39 @@ function runGh(args) {
   return JSON.parse(result.stdout);
 }
 
+// The body alone cannot say whether a list endpoint has more pages: a full page
+// and a final page look identical, and these endpoints report no total. GitHub
+// answers that in the Link header, which is the only evidence of exhaustion
+// there is, so the transport has to keep it rather than parse the body away.
+function runGhWithHeaders(args) {
+  const result = spawnSync("gh", ["api", "-i", ...args], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `gh api -i ${args.join(" ")} failed: ${result.stderr.trim() || result.stdout.trim()}`,
+    );
+  }
+  const separator = result.stdout.search(/\r?\n\r?\n/);
+  if (separator < 0) {
+    throw new Error(`gh api -i ${args.join(" ")} returned no response body`);
+  }
+  const head = result.stdout.slice(0, separator);
+  const body = result.stdout.slice(separator).replace(/^\r?\n\r?\n/, "");
+  const link =
+    head
+      .split(/\r?\n/)
+      .find((line) => /^link:/i.test(line))
+      ?.slice("link:".length)
+      .trim() ?? "";
+  return { value: JSON.parse(body), link };
+}
+
+export function linkHasNext(link) {
+  return /;\s*rel="next"/.test(link);
+}
+
 function get(endpoint) {
   return {
     value: runGh(["api", endpoint]),
@@ -896,9 +954,26 @@ function get(endpoint) {
   };
 }
 
+// Pages are walked explicitly rather than with --paginate so the terminal Link
+// state reaches the observation. Without it `pagination_complete` would be a
+// constant asserted from the shape of whatever was collected.
+const MAX_PAGES = 100;
+
 function getPages(endpoint) {
+  const separator = endpoint.includes("?") ? "&" : "?";
+  const pages = [];
+  let complete = false;
+  for (let page = 1; page <= MAX_PAGES; page += 1) {
+    const { value, link } = runGhWithHeaders([`${endpoint}${separator}page=${page}`]);
+    pages.push(value);
+    if (!linkHasNext(link)) {
+      complete = true;
+      break;
+    }
+  }
   return {
-    pages: runGh(["api", "--paginate", "--slurp", endpoint]),
+    pages,
+    pagination_complete: complete,
     endpoint: `GET ${endpoint}`,
     collected_at: new Date().toISOString(),
   };
@@ -1104,9 +1179,15 @@ export function collectGithubObservation(publicationInput) {
         root,
       )
     : null;
-  const checkRuns = getPages(
-    `${root}/commits/${authorizationValue.head_sha}/check-runs?filter=all&per_page=100`,
-  );
+  // One request, not a walk: only a single page can be recorded, and this
+  // endpoint reports its own total, so completeness is provable from the one
+  // response without the Link header the list feeds depend on.
+  const checkRunsEndpoint = `${root}/commits/${authorizationValue.head_sha}/check-runs?filter=all&per_page=100`;
+  const checkRuns = {
+    pages: [runGh(["api", checkRunsEndpoint])],
+    endpoint: `GET ${checkRunsEndpoint}`,
+    collected_at: new Date().toISOString(),
+  };
   const commitStatuses = getPages(
     `${root}/commits/${authorizationValue.head_sha}/statuses?per_page=100`,
   );

@@ -1,12 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import {
-  collectClassicProtection,
-  normalizeClassicProtectionResponse,
-  normalizeGithubObservation,
-  normalizeOauthAdminProofResponse,
-} from "../src/github-observation.mjs";
+import { collectClassicProtection, linkHasNext, normalizeClassicProtectionResponse, normalizeGithubObservation, normalizeOauthAdminProofResponse } from "../src/github-observation.mjs";
 
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
@@ -21,8 +16,10 @@ function collected(value, at) {
   return { value, collected_at: at };
 }
 
-function pages(value, at) {
-  return { pages: value, collected_at: at };
+function pages(value, at, paginationComplete = true) {
+  // The collector records the terminal Link state; a fixture that omits it is
+  // refused, so the default here mirrors a walk that reached the last page.
+  return { pages: value, collected_at: at, pagination_complete: paginationComplete };
 }
 
 function publication() {
@@ -305,7 +302,7 @@ test("GitHub observation normalization requires an explicit check-run total", ()
     raw.check_runs.pages = [page];
     assert.throws(
       () => normalizeGithubObservation(publication(), raw),
-      /check-run pagination is incomplete or inconsistent/,
+      /check_runs\.pages\[0\] is missing a reported total/,
       label,
     );
   }
@@ -876,5 +873,84 @@ test("a collection with no pages at all is refused", () => {
   assert.throws(
     () => normalizeGithubObservation(publication(), pageless),
     /review-thread collection has no pages/,
+  );
+});
+
+test("check runs walked across pages are refused, state and all", () => {
+  // The same hazard the review threads have, reached through a different
+  // field. A run read as successful on page one keeps that conclusion even if
+  // it re-runs and fails before page two, and decidingRunsFor takes the latest
+  // run per context -- so a stale success can decide a context that is now
+  // failing. Both pages here are internally consistent; only the interleaving
+  // is wrong.
+  const interleaved = rawCollection();
+  const first = { total_count: 2, check_runs: [] };
+  const second = { total_count: 2, check_runs: [] };
+  interleaved.check_runs.pages = [first, second];
+  assert.throws(
+    () => normalizeGithubObservation(publication(), interleaved),
+    /check-run state cannot be established across multiple pages/,
+  );
+});
+
+test("a check-run page that repeats a run is refused", () => {
+  const repeated = rawCollection();
+  const page = repeated.check_runs.pages[0];
+  page.total_count = 2;
+  page.check_runs = [page.check_runs[0], structuredClone(page.check_runs[0])];
+  assert.throws(
+    () => normalizeGithubObservation(publication(), repeated),
+    /check-run page repeats a run/,
+  );
+});
+
+test("a check-run page that omits a run is refused", () => {
+  const dropped = rawCollection();
+  dropped.check_runs.pages[0].total_count =
+    dropped.check_runs.pages[0].check_runs.length + 1;
+  assert.throws(
+    () => normalizeGithubObservation(publication(), dropped),
+    /do not account for the reported total/,
+  );
+});
+
+test("a list feed that never proved it reached the last page is refused", () => {
+  // These endpoints report no total, so the terminal Link state the collector
+  // recorded is the only evidence of exhaustion there is. Without it the walk
+  // is unproven, whatever it happened to collect.
+  const unproven = rawCollection();
+  delete unproven.issue_comments.pagination_complete;
+  assert.throws(
+    () => normalizeGithubObservation(publication(), unproven),
+    /issue_comments did not prove it reached the last page/,
+  );
+});
+
+test("a list feed that stopped mid-walk is refused", () => {
+  const truncated = rawCollection();
+  truncated.applicable_rules.pagination_complete = false;
+  assert.throws(
+    () => normalizeGithubObservation(publication(), truncated),
+    /applicable_rules did not prove it reached the last page/,
+  );
+});
+
+test("the Link header decides whether a walk has reached the last page", () => {
+  // Real header values from the GitHub REST API. A full page and a final page
+  // are identical in the body, so this parse is the whole proof of exhaustion.
+  const full =
+    '<https://api.github.com/repositories/1/issues/24/comments?per_page=2&page=2>; rel="next", ' +
+    '<https://api.github.com/repositories/1/issues/24/comments?per_page=2&page=3>; rel="last"';
+  const last =
+    '<https://api.github.com/repositories/1/issues/24/comments?per_page=2&page=1>; rel="prev", ' +
+    '<https://api.github.com/repositories/1/issues/24/comments?per_page=2&page=1>; rel="first"';
+  assert.equal(linkHasNext(full), true);
+  assert.equal(linkHasNext(last), false);
+  // No Link header at all means a single unpaginated response, not a next page.
+  assert.equal(linkHasNext(""), false);
+  // "next" must be the relation, not an accident of the URL it points at.
+  assert.equal(
+    linkHasNext('<https://api.github.com/next/page?rel=next>; rel="last"'),
+    false,
   );
 });

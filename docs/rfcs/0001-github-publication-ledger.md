@@ -666,7 +666,18 @@ Empty arrays never imply that collection succeeded. Each evidence class carries
 independent GitHub endpoint or GraphQL connection used to produce it. Every
 source records its endpoint, endpoint-specific outcome, and
 response-completion `collected_at`; paginated sources also record
-`pagination_complete` and a positive `page_count`. The parent
+`pagination_complete` and a positive `page_count`. `pagination_complete` is
+evidence, never an assertion, and where it comes from depends on what the
+endpoint offers. Feeds returning a bare list expose no total, so the only proof
+of exhaustion is the absence of a `Link` header advertising `rel="next"` on the
+last response, which the collector records and the server requires. Check runs
+instead report their own `total_count`, and are read atomically: a single
+response whose reported total equals the distinct runs it carries. That is not
+symmetry for its own sake — a check run's conclusion decides the gate, and a
+walk reads each page at its own instant, so a run re-run after its page was
+read would be stored with the conclusion it no longer has. Because
+`decidingRunsFor` takes the latest run for a context, such a staleness resolves
+in favour of merging. The parent
 `collection.collected_at` must equal the maximum source time, while every
 source time independently participates in freshness and
 atomic-window validation. Reusing a cached response preserves its original
