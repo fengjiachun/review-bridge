@@ -5454,4 +5454,17 @@ test("ledger ancestry exactness and honesty are each load-bearing", async (t) =>
     }),
     /descent disagrees with its status/,
   );
+  // Each comparison read participates in time validation on its own: a
+  // too-old compare must not ride in under the summary source's fresher
+  // time. Here it lands before the ledger's creation, which is the nearest
+  // reachable violation in this fixture; removing the per-entry loop accepts
+  // this input, so the rejection is the loop's and nothing else's.
+  await assert.rejects(
+    record((value) => {
+      value.review_threads.ancestry[0].collected_at = iso(
+        observedAt - 6 * 60_000,
+      );
+    }),
+    /predates publication creation/,
+  );
 });
