@@ -3550,7 +3550,13 @@ export function threadResolutionEligibility(ledger, thread, context) {
   if (!context.cleanForGatedHead) {
     return refuse("NO_CLEAN_RESULT_FOR_GATED_HEAD");
   }
-  return { eligible: true, reason: null };
+  // RFC 0003 eligibility condition 3: the workflow must record the finding as
+  // addressed by one or more commits. The workflow ledger does not carry that
+  // record yet, so every thread refuses here -- deliberately last, so the
+  // refusals above stay diagnostic. This is the seam the next change fills,
+  // and until it does, eligible can never be true; a reader downstream must
+  // not learn to treat this reason as ignorable.
+  return refuse("FIX_NOT_RECORDED");
 }
 
 function codexStatus(ledger) {

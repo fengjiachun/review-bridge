@@ -1404,7 +1404,30 @@ export function collectGithubObservation(publicationInput) {
     endpoint: `POST graphql:reviewThreads(${target.owner}/${target.repo}#${target.pr_number})`,
     collected_at: new Date().toISOString(),
   };
+  // One compare per distinct finding head among the threads just read. Done
+  // after the thread read so the set is exactly what the observation will
+  // reference -- collecting from any other source could disagree with it.
+  const findingHeads = [
+    ...new Set(
+      (reviewThreads.pages[0]?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [])
+        .map((node) => node?.comments?.nodes?.[0]?.pullRequestReview?.commit?.oid)
+        .filter(
+          (sha) =>
+            typeof sha === "string" && sha !== authorizationValue.head_sha,
+        ),
+    ),
+  ].sort();
+  const threadAncestry = findingHeads.map((head) => {
+    const endpoint = `${root}/compare/${head}...${authorizationValue.head_sha}`;
+    return {
+      finding_head_sha: head,
+      value: runGh(["api", endpoint]),
+      endpoint: `GET ${endpoint}`,
+      collected_at: new Date().toISOString(),
+    };
+  });
   return normalizeGithubObservation(publication, {
+    thread_ancestry: threadAncestry,
     pull_request: pullRequest,
     pull_base_branch: pullBaseBranch,
     base_head_comparison: baseHeadComparison,

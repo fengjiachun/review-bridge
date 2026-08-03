@@ -5052,13 +5052,17 @@ function eligibleThread(overrides = {}) {
   };
 }
 
-test("a Codex thread answered by a clean result on the gated head may be resolved", () => {
+test("full evidence still refuses until an addressed-by record exists", () => {
+  // Every other condition holds here. RFC 0003's condition 3 -- the workflow
+  // records the finding as addressed by commits -- has no data yet, so the
+  // predicate must end at that refusal rather than at eligible. When the next
+  // change adds the record, this is the test it rewrites.
   const verdict = threadResolutionEligibility(
     eligibilityLedger(),
     eligibleThread(),
     eligibilityContext(),
   );
-  assert.deepEqual(verdict, { eligible: true, reason: null });
+  assert.deepEqual(verdict, { eligible: false, reason: "FIX_NOT_RECORDED" });
 });
 
 test("each missing piece of evidence refuses with its own reason", () => {
@@ -5174,12 +5178,12 @@ test("an outdated diff hunk is not evidence that a finding was addressed", () =>
     ),
     { eligible: false, reason: "NO_CLEAN_RESULT_FOR_GATED_HEAD" },
   );
-  assert.equal(
+  assert.deepEqual(
     threadResolutionEligibility(
       eligibilityLedger(),
       outdated,
       eligibilityContext(),
-    ).eligible,
-    true,
+    ),
+    { eligible: false, reason: "FIX_NOT_RECORDED" },
   );
 });

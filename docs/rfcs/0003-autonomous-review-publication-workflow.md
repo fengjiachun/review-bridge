@@ -866,6 +866,18 @@ only when all of these are true:
 
 `is_outdated` is useful evidence but is neither necessary nor sufficient.
 
+The first implementation of this section evaluates conditions 1, 2, and 4
+through 9 from recorded evidence and exposes the verdict per thread with a
+refusal reason, without performing any resolution. Condition 1 is checked
+against the workflow's recorded attempt heads; condition 2 against a
+`THREAD_ANCESTRY` comparison collected per distinct finding head, provider
+reported and required to cover exactly the heads the threads reference.
+Condition 3 has no data yet — the workflow ledger does not record which
+commits addressed a finding — so every thread ends at the refusal
+`FIX_NOT_RECORDED` and eligibility cannot yet be reached. That refusal is the
+seam the next change fills, and consumers must treat it as blocking rather
+than ignorable.
+
 A thread is never eligible when it:
 
 - was created by a human or unknown actor;
