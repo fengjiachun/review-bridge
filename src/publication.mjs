@@ -477,6 +477,24 @@ function requireSourceKinds(collection, expected, name) {
   }
 }
 
+function requireAtomicPage(collection, kind, name) {
+  // Gated on COMPLETE like its two neighbours, and for the same reason: a
+  // collection that does not claim completeness is not claiming evidence. The
+  // gate returns EVIDENCE_INCOMPLETE for such a thread collection before it
+  // ever reads unresolved_count, so nothing it records can decide anything.
+  // Checking unconditionally would instead make an openly incomplete
+  // collection unrecordable, which is a state the schema deliberately allows.
+  if (collection.status !== "COMPLETE") {
+    return;
+  }
+  const source = (collection.sources ?? []).find(
+    (entry) => entry.kind === kind,
+  );
+  if (source?.page_count !== 1) {
+    fail("INVALID_INPUT", `${name}.${kind} must be a single atomic page`);
+  }
+}
+
 function requireCompletePagination(collection, kinds, name) {
   if (collection.status !== "COMPLETE") {
     return;
@@ -819,6 +837,16 @@ function validateObservation(input, ledger, currentMs) {
   requireCompletePagination(
     reviewThreads.collection,
     ["PULL_REQUEST_REVIEW_THREADS"],
+    "review_threads.collection",
+  );
+  // Threads are the one source whose per-item state, not just its membership,
+  // decides the gate, and state read across a walk is state from several
+  // instants. The collector refuses anything but a single page; the observation
+  // arrives here as caller-supplied JSON, so the ledger has to say it too or
+  // the invariant holds in only one of the two layers that state it.
+  requireAtomicPage(
+    reviewThreads.collection,
+    "PULL_REQUEST_REVIEW_THREADS",
     "review_threads.collection",
   );
   requireSourceKinds(

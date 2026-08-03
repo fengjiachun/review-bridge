@@ -3506,6 +3506,37 @@ test("baseline snapshots use identity-set equality and reject caller classificat
   assert.equal((await getPublication(state.store, state.reviewId)).revision, 2);
 });
 
+test("a thread collection that admits incompleteness is still recordable", async (t) => {
+  // The single-page rule is gated on COMPLETE, and this is the boundary that
+  // gating draws. A collection claiming completeness with two pages is refused
+  // because the gate would decide from it; one that admits incompleteness is
+  // recorded and the gate declines to decide from it instead. Checking
+  // unconditionally would make this state unrecordable.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 1_000;
+  const partial = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  partial.review_threads.collection.status = "INCOMPLETE";
+  partial.review_threads.collection.sources[0].page_count = 2;
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: partial },
+    { clock: () => observedAt + 20 },
+  );
+  assert.equal(recorded.status, "EVIDENCE_INCOMPLETE");
+  assert.equal(recorded.revision, 2);
+});
+
 test("observation validation rejects incomplete provenance and unsafe check bindings", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

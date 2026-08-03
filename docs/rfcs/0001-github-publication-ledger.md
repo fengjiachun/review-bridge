@@ -1104,7 +1104,7 @@ the same time:
   against the immutable publication-start baseline;
 - every candidate Codex result needed to partition the immutable baseline and
   replay the active epoch with unclosed source-only baseline requests;
-- the complete paginated review-thread collection and resolution counts; and
+- the single-page review-thread collection and resolution counts; and
 - the observation timestamp.
 
 `observed_at` is captured immediately after the final GitHub response. Every
