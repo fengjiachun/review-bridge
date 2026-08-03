@@ -3487,7 +3487,10 @@ function activeCorrelation(ledger) {
 // hunk a thread was anchored to no longer exists, which is evidence the code
 // moved, not evidence the finding was addressed -- a line can be displaced by
 // an unrelated edit. It is the most tempting shortcut here and the wrong one.
-export function threadResolutionEligibility(ledger, thread, cleanForGatedHead) {
+// context: { cleanForGatedHead, ancestryByHead, workflow }, where workflow is
+// the reading of the bound workflow ledger (readWorkflowBinding) or null when
+// the publication is not workflow-bound.
+export function threadResolutionEligibility(ledger, thread, context) {
   const authorization = authorizationForLedger(ledger);
   const codexActor = ledger.target.codex_actor;
   const refuse = (reason) => ({ eligible: false, reason });
@@ -3520,7 +3523,31 @@ export function threadResolutionEligibility(ledger, thread, cleanForGatedHead) {
   if (review.reviewed_head_sha === authorization.head_sha) {
     return refuse("RAISED_AGAINST_GATED_HEAD");
   }
-  if (!cleanForGatedHead) {
+
+  // The finding must belong to this workflow's own line of work: a head this
+  // workflow published and recorded. A thread from any other history -- an
+  // operator's manual push, another workflow, a foreign PR -- is not ours to
+  // answer, whatever else the evidence says.
+  const workflow = context.workflow;
+  if (workflow === null) {
+    return refuse("WORKFLOW_NOT_BOUND");
+  }
+  if (workflow.status !== "ACTIVE") {
+    return refuse("WORKFLOW_NOT_ACTIVE");
+  }
+  if (!workflow.attempt_head_shas.includes(review.reviewed_head_sha)) {
+    return refuse("FINDING_HEAD_NOT_OURS");
+  }
+
+  // The gated head must still descend from the finding head. A force-push
+  // that discarded the fix leaves the finding unanswered however clean the
+  // new head is about its own contents.
+  const ancestry = context.ancestryByHead.get(review.reviewed_head_sha);
+  if (ancestry?.descends !== true) {
+    return refuse("DESCENT_UNPROVEN");
+  }
+
+  if (!context.cleanForGatedHead) {
     return refuse("NO_CLEAN_RESULT_FOR_GATED_HEAD");
   }
   return { eligible: true, reason: null };
@@ -5148,16 +5175,31 @@ export async function getThreadResolutionPlan(storeRoot, reviewId) {
         );
       }
       const cleanForGatedHead = codexStatus(ledger) === null;
+      // A v3 publication is workflow-bound; the binding is read lock-free, the
+      // same way the gate itself revalidates it. Anything else plans with no
+      // workflow, and every thread refuses on that.
+      const workflow =
+        ledger.version === 3
+          ? await readWorkflowBinding(storeRoot, ledger.workflow_id)
+          : null;
+      const ancestryByHead = new Map(
+        (observation.review_threads.ancestry ?? []).map((entry) => [
+          entry.finding_head_sha,
+          entry,
+        ]),
+      );
+      const context = { cleanForGatedHead, ancestryByHead, workflow };
       return {
         review_id: reviewId,
         head_sha: authorizationForLedger(ledger).head_sha,
         clean_for_gated_head: cleanForGatedHead,
+        workflow_id: workflow?.workflow_id ?? null,
         threads: observation.review_threads.threads.map((thread) => ({
           thread_id: thread.id,
           path: thread.path,
           line: thread.line,
           is_resolved: thread.is_resolved,
-          ...threadResolutionEligibility(ledger, thread, cleanForGatedHead),
+          ...threadResolutionEligibility(ledger, thread, context),
         })),
       };
     } finally {

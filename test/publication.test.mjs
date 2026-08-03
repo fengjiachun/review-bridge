@@ -5016,6 +5016,24 @@ function eligibilityLedger() {
   };
 }
 
+function eligibilityContext(overrides = {}) {
+  return {
+    cleanForGatedHead: true,
+    ancestryByHead: new Map([
+      [
+        EARLIER_HEAD,
+        { finding_head_sha: EARLIER_HEAD, status: "AHEAD", descends: true },
+      ],
+    ]),
+    workflow: {
+      workflow_id: "wf-1",
+      status: "ACTIVE",
+      attempt_head_shas: [EARLIER_HEAD, GATED_HEAD],
+    },
+    ...overrides,
+  };
+}
+
 function eligibleThread(overrides = {}) {
   const codex = { id: 199175422, type: "Bot", login: "chatgpt-codex-connector" };
   return {
@@ -5038,7 +5056,7 @@ test("a Codex thread answered by a clean result on the gated head may be resolve
   const verdict = threadResolutionEligibility(
     eligibilityLedger(),
     eligibleThread(),
-    true,
+    eligibilityContext(),
   );
   assert.deepEqual(verdict, { eligible: true, reason: null });
 });
@@ -5046,9 +5064,19 @@ test("a Codex thread answered by a clean result on the gated head may be resolve
 test("each missing piece of evidence refuses with its own reason", () => {
   const codex = { id: 199175422, type: "Bot", login: "chatgpt-codex-connector" };
   const human = { id: 5, type: "User", login: "jeremyhi" };
+  const withReviewHead = (head) =>
+    eligibleThread({
+      comments: [
+        {
+          id: "PRRC_1",
+          actor: codex,
+          review: { id: "PRR_1", actor: codex, reviewed_head_sha: head },
+        },
+      ],
+    });
   const cases = [
-    ["PROVENANCE_INCOMPLETE", eligibleThread({ provenance_complete: false }), true],
-    ["ALREADY_RESOLVED", eligibleThread({ is_resolved: true }), true],
+    ["PROVENANCE_INCOMPLETE", eligibleThread({ provenance_complete: false }), eligibilityContext()],
+    ["ALREADY_RESOLVED", eligibleThread({ is_resolved: true }), eligibilityContext()],
     [
       // A human reply is a participant this workflow was never authorized to
       // answer for, whoever opened the thread.
@@ -5059,7 +5087,7 @@ test("each missing piece of evidence refuses with its own reason", () => {
           { id: "PRRC_2", actor: human, review: null },
         ],
       }),
-      true,
+      eligibilityContext(),
     ],
     [
       // The review itself must be Codex's, not merely the comment's author.
@@ -5073,28 +5101,60 @@ test("each missing piece of evidence refuses with its own reason", () => {
           },
         ],
       }),
-      true,
+      eligibilityContext(),
     ],
     [
       // Raised against the head the clean result examined: the same review
       // would have both raised it and not raised it.
       "RAISED_AGAINST_GATED_HEAD",
-      eligibleThread({
-        comments: [
-          {
-            id: "PRRC_1",
-            actor: codex,
-            review: { id: "PRR_1", actor: codex, reviewed_head_sha: GATED_HEAD },
-          },
-        ],
-      }),
-      true,
+      withReviewHead(GATED_HEAD),
+      eligibilityContext(),
     ],
-    ["NO_CLEAN_RESULT_FOR_GATED_HEAD", eligibleThread(), false],
+    ["WORKFLOW_NOT_BOUND", eligibleThread(), eligibilityContext({ workflow: null })],
+    [
+      "WORKFLOW_NOT_ACTIVE",
+      eligibleThread(),
+      eligibilityContext({
+        workflow: { workflow_id: "wf-1", status: "PAUSED", attempt_head_shas: [EARLIER_HEAD] },
+      }),
+    ],
+    [
+      // A finding from a head this workflow never published is not ours to
+      // answer, whatever else the evidence says.
+      "FINDING_HEAD_NOT_OURS",
+      eligibleThread(),
+      eligibilityContext({
+        workflow: { workflow_id: "wf-1", status: "ACTIVE", attempt_head_shas: [GATED_HEAD] },
+      }),
+    ],
+    [
+      // A force-push that discarded the fix leaves the finding unanswered
+      // however clean the new head is about its own contents.
+      "DESCENT_UNPROVEN",
+      eligibleThread(),
+      eligibilityContext({
+        ancestryByHead: new Map([
+          [
+            EARLIER_HEAD,
+            { finding_head_sha: EARLIER_HEAD, status: "DIVERGED", descends: false },
+          ],
+        ]),
+      }),
+    ],
+    [
+      "DESCENT_UNPROVEN",
+      eligibleThread(),
+      eligibilityContext({ ancestryByHead: new Map() }),
+    ],
+    [
+      "NO_CLEAN_RESULT_FOR_GATED_HEAD",
+      eligibleThread(),
+      eligibilityContext({ cleanForGatedHead: false }),
+    ],
   ];
-  for (const [reason, thread, clean] of cases) {
+  for (const [reason, thread, context] of cases) {
     assert.deepEqual(
-      threadResolutionEligibility(eligibilityLedger(), thread, clean),
+      threadResolutionEligibility(eligibilityLedger(), thread, context),
       { eligible: false, reason },
       reason,
     );
@@ -5107,11 +5167,19 @@ test("an outdated diff hunk is not evidence that a finding was addressed", () =>
   // stand in for the clean result.
   const outdated = eligibleThread({ is_outdated: true });
   assert.deepEqual(
-    threadResolutionEligibility(eligibilityLedger(), outdated, false),
+    threadResolutionEligibility(
+      eligibilityLedger(),
+      outdated,
+      eligibilityContext({ cleanForGatedHead: false }),
+    ),
     { eligible: false, reason: "NO_CLEAN_RESULT_FOR_GATED_HEAD" },
   );
   assert.equal(
-    threadResolutionEligibility(eligibilityLedger(), outdated, true).eligible,
+    threadResolutionEligibility(
+      eligibilityLedger(),
+      outdated,
+      eligibilityContext(),
+    ).eligible,
     true,
   );
 });
