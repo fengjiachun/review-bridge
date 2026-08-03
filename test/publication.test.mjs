@@ -5029,8 +5029,11 @@ function eligibilityContext(overrides = {}) {
     workflow: {
       workflow_id: "wf-1",
       status: "ACTIVE",
+      current_head_sha: GATED_HEAD,
       attempt_head_shas: [EARLIER_HEAD, GATED_HEAD],
     },
+    publicationTerminal: false,
+    recordedReviewIds: new Set([4833836859]),
     ...overrides,
   };
 }
@@ -5046,7 +5049,12 @@ function eligibleThread(overrides = {}) {
       {
         id: "PRRC_1",
         actor: codex,
-        review: { id: "PRR_1", actor: codex, reviewed_head_sha: EARLIER_HEAD },
+        review: {
+          id: "PRR_1",
+          database_id: 4833836859,
+          actor: codex,
+          reviewed_head_sha: EARLIER_HEAD,
+        },
       },
     ],
     ...overrides,
@@ -5075,7 +5083,12 @@ test("each missing piece of evidence refuses with its own reason", () => {
         {
           id: "PRRC_1",
           actor: codex,
-          review: { id: "PRR_1", actor: codex, reviewed_head_sha: head },
+          review: {
+            id: "PRR_1",
+            database_id: 4833836859,
+            actor: codex,
+            reviewed_head_sha: head,
+          },
         },
       ],
     });
@@ -5141,7 +5154,12 @@ test("each missing piece of evidence refuses with its own reason", () => {
       "WORKFLOW_NOT_ACTIVE",
       eligibleThread(),
       eligibilityContext({
-        workflow: { workflow_id: "wf-1", status: "PAUSED", attempt_head_shas: [EARLIER_HEAD] },
+        workflow: {
+          workflow_id: "wf-1",
+          status: "PAUSED",
+          current_head_sha: GATED_HEAD,
+          attempt_head_shas: [EARLIER_HEAD],
+        },
       }),
     ],
     [
@@ -5150,7 +5168,12 @@ test("each missing piece of evidence refuses with its own reason", () => {
       "FINDING_HEAD_NOT_OURS",
       eligibleThread(),
       eligibilityContext({
-        workflow: { workflow_id: "wf-1", status: "ACTIVE", attempt_head_shas: [GATED_HEAD] },
+        workflow: {
+          workflow_id: "wf-1",
+          status: "ACTIVE",
+          current_head_sha: GATED_HEAD,
+          attempt_head_shas: [GATED_HEAD],
+        },
       }),
     ],
     [
@@ -5176,6 +5199,34 @@ test("each missing piece of evidence refuses with its own reason", () => {
       "NO_CLEAN_RESULT_FOR_GATED_HEAD",
       eligibleThread(),
       eligibilityContext({ cleanForGatedHead: false }),
+    ],
+    [
+      // A terminal publication decides nothing further.
+      "PUBLICATION_TERMINAL",
+      eligibleThread(),
+      eligibilityContext({ publicationTerminal: true }),
+    ],
+    [
+      // The workflow has already moved past this publication's head: a plan
+      // built on it would be a plan for a publication that no longer exists.
+      "PUBLICATION_SUPERSEDED",
+      eligibleThread(),
+      eligibilityContext({
+        workflow: {
+          workflow_id: "wf-1",
+          status: "ACTIVE",
+          current_head_sha: "e".repeat(40),
+          attempt_head_shas: [EARLIER_HEAD, GATED_HEAD],
+        },
+      }),
+    ],
+    [
+      // Actor identity alone does not tie the finding to our review cycle:
+      // an unsolicited Codex review against one of our heads passes every
+      // other check, and must fail the structural link.
+      "RESULT_NOT_CORRELATED",
+      eligibleThread(),
+      eligibilityContext({ recordedReviewIds: new Set() }),
     ],
   ];
   for (const [reason, thread, context] of cases) {

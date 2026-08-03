@@ -883,6 +883,14 @@ function validateObservation(input, ledger, currentMs) {
   for (const [name, collection] of collections) {
     allTimes.push(...sourceTimes(collection, name));
   }
+  // Every ancestry comparison read, not merely the summary source's latest:
+  // one stale compare would otherwise ride in under a fresh sibling, and
+  // eligibility would trust its descends value.
+  for (const entry of reviewThreads.ancestry ?? []) {
+    allTimes.push(
+      timestampMs(entry.collected_at, "review_threads.ancestry collected_at"),
+    );
+  }
   validateFreshTimes(allTimes, ledger.created_at, currentMs, "GitHub observation");
   if (observedMs < Math.max(...allTimes.slice(1))) {
     fail("INVALID_INPUT", "observation.observed_at must not precede a collection");
@@ -3542,8 +3550,26 @@ export function threadResolutionEligibility(ledger, thread, context) {
   if (workflow.status !== "ACTIVE") {
     return refuse("WORKFLOW_NOT_ACTIVE");
   }
+  // An ACTIVE workflow is not enough: a publication that has reached a
+  // terminal state, or whose head the workflow has already moved past,
+  // decides nothing further, and a plan built on it would be a plan for a
+  // publication that no longer exists.
+  if (context.publicationTerminal) {
+    return refuse("PUBLICATION_TERMINAL");
+  }
+  if (workflow.current_head_sha !== authorization.head_sha) {
+    return refuse("PUBLICATION_SUPERSEDED");
+  }
   if (!workflow.attempt_head_shas.includes(review.reviewed_head_sha)) {
     return refuse("FINDING_HEAD_NOT_OURS");
+  }
+  // Actor identity alone does not tie the finding to this workflow's own
+  // review cycle: Codex can post an unsolicited review against one of our
+  // heads, and its threads would pass every check above. The root review must
+  // be a result this publication actually recorded -- the structural link the
+  // RFC requires between the thread and the correlated Codex review.
+  if (!context.recordedReviewIds.has(review.database_id)) {
+    return refuse("RESULT_NOT_CORRELATED");
   }
 
   // The gated head must still descend from the finding head. A force-push
@@ -5188,20 +5214,37 @@ export async function getThreadResolutionPlan(storeRoot, reviewId) {
         );
       }
       const cleanForGatedHead = codexStatus(ledger) === null;
-      // A v3 publication is workflow-bound; the binding is read lock-free, the
-      // same way the gate itself revalidates it. Anything else plans with no
-      // workflow, and every thread refuses on that.
-      const workflow =
-        ledger.version === 3
-          ? await readWorkflowBinding(storeRoot, ledger.workflow_id)
-          : null;
+      // The same revalidation the gate performs -- digest, target and pull
+      // request comparisons included. Reading the workflow file directly would
+      // trust a restored or swapped workflow whose authorization no longer
+      // matches this publication, and report its heads as ours.
+      const workflow = await requireWorkflowBinding(storeRoot, ledger, {
+        mutating: false,
+      });
       const ancestryByHead = new Map(
         (observation.review_threads.ancestry ?? []).map((entry) => [
           entry.finding_head_sha,
           entry,
         ]),
       );
-      const context = { cleanForGatedHead, ancestryByHead, workflow };
+      // Every PULL_REQUEST_REVIEW result this publication has recorded, from
+      // the monotonic history and the current observation both: history alone
+      // would miss a result first seen in the observation being planned from.
+      const recordedReviewIds = new Set(
+        [
+          ...ledger.codex_result_history,
+          ...observation.codex_review.results,
+        ]
+          .filter((entry) => entry.resource_kind === "PULL_REQUEST_REVIEW")
+          .map((entry) => entry.result_id),
+      );
+      const context = {
+        cleanForGatedHead,
+        ancestryByHead,
+        workflow,
+        publicationTerminal: ledger.terminal != null,
+        recordedReviewIds,
+      };
       return {
         review_id: reviewId,
         head_sha: authorizationForLedger(ledger).head_sha,
