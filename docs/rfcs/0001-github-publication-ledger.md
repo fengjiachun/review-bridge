@@ -693,13 +693,24 @@ endpoint reports no total, so a walk has nothing against which to notice a row
 it never saw; whether it could depends on the feed's ordering, and reading one
 page removes the dependency rather than resting on it.
 
-This is not the same as saying per-item state decides the gate, which is also
-true of the walked Codex feeds. Those are safe to walk for a different reason:
-they are append-only in ascending order, so an item added during the walk lands
-after the cursor rather than shifting what came before, and their one in-place
-mutation — a review being dismissed, or leaving `PENDING` — moves between
-states that all withhold `MERGE_READY`. A stale record of one of those is more
-conservative than the truth, never less.
+The Codex feeds are still walked, and it is worth being exact about why, since
+per-item state decides the gate there too. One direction is closed: a review's
+own state only ever moves between `PENDING`, `DISMISSED` and the submitted
+states, all of which withhold `MERGE_READY`, so a stale read of that field
+cannot be more permissive than the truth. Two directions are not closed, and
+are recorded here rather than argued away.
+
+A body edited mid-walk is recorded pre-edit, and that can run the permissive
+way: a Codex clean comment read before an edit that removes its marker is
+stored as clean, where the current body would leave the result set empty and
+derive `GITHUB_REVIEW_PENDING`. `codex_result_history` does not catch it,
+because that compares against previously recorded observations and a result
+first seen during a walk enters history already carrying the stale value. The
+offset-drop limit above applies here as well, these feeds having no total
+either. Both remain open, and the reason these feeds are walked rather than
+read atomically is a practical one — a pull request may hold more than a page
+of comments, where more than a page of check runs or review threads is rare
+enough to refuse.
 
 A check run's single page is proven by the `total_count` the endpoint reports;
 a commit status's and a review thread's by the terminal `Link` state and the

@@ -383,7 +383,8 @@ For either mode:
    page each of check runs using `filter=all`, commit statuses and review
    threads -- a selection that prefers the newest evidence decides from them, so
    they are read at one instant or refused -- and all pages of the three Codex
-   feeds, which are append-only in ascending order. It
+   feeds, which are walked because a pull request may hold more than a page of
+   them. It
    canonicalizes GitHub timestamps to UTC milliseconds, preserves pagination
    proof, and fails closed when policy evidence is unavailable. Call
    `record_github_snapshot` with the `observation_path` the helper prints,
