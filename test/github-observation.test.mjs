@@ -848,3 +848,32 @@ test("a repeated thread cannot stand in for a dropped one", () => {
     /do not account for the reported total/,
   );
 });
+
+test("a pull request with no threads at all is still collectable", () => {
+  // The count rules must not turn an honestly empty connection into a refusal:
+  // one page, a reported total of zero, no nodes.
+  const empty = rawCollection();
+  const connection =
+    empty.review_threads.pages[0].data.repository.pullRequest.reviewThreads;
+  connection.totalCount = 0;
+  connection.nodes = [];
+  const normalized = normalizeGithubObservation(publication(), empty);
+  assert.equal(normalized.review_threads.total_count, 0);
+  assert.equal(normalized.review_threads.unresolved_count, 0);
+  assert.deepEqual(normalized.review_threads.threads, []);
+  assert.equal(
+    normalized.review_threads.collection.sources[0].pagination_complete,
+    true,
+  );
+});
+
+test("a collection with no pages at all is refused", () => {
+  // Distinct from the empty pull request above: no page means nothing ever
+  // reported that the walk finished, so there is no proof to read.
+  const pageless = rawCollection();
+  pageless.review_threads.pages = [];
+  assert.throws(
+    () => normalizeGithubObservation(publication(), pageless),
+    /review-thread pagination is incomplete/,
+  );
+});

@@ -615,7 +615,20 @@ function normalizeThreads(publication, raw) {
   // even though the final page reports no next page -- and deriving the total
   // from what was collected would manufacture a count that always agrees.
   // Compare the provider's own total instead, and require it to be stable
-  // across pages so a concurrent change is caught rather than averaged away.
+  // across pages.
+  //
+  // What this catches is a concurrent change that moves the count: any single
+  // creation or deletion during the walk makes one page disagree with another.
+  // What it does not catch is a compensating pair in the same inter-page gap,
+  // which leaves the count untouched. That residue is bounded and safe in the
+  // direction that matters. GitHub orders this connection by a keyset cursor
+  // over the root comment's creation time and database ID, both fixed at
+  // creation, so a thread that outlives the walk can never sort behind a
+  // cursor already passed and be skipped -- verified against the live API,
+  // though the cursor encoding is an implementation detail, not a contract.
+  // A compensating pair therefore yields a superset holding one thread that
+  // was deleted, never a subset missing a live one, so unresolved_count can
+  // only read high. Closing it needs evidence the counts do not carry.
   const reportedTotals = pages.map((page, index) => {
     const total =
       page?.data?.repository?.pullRequest?.reviewThreads?.totalCount;
@@ -718,7 +731,9 @@ function normalizeThreads(publication, raw) {
         ),
       ],
     },
-    total_count: normalized.length,
+    // The provider's number, not the collected length. The check above proves
+    // the two agree, so this is the same value recorded against its source.
+    total_count: reportedTotals[0],
     unresolved_count: normalized.filter((thread) => !thread.is_resolved).length,
     threads: normalized,
   };

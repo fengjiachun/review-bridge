@@ -1496,6 +1496,17 @@ this RFC changes from `Accepted` to `Implemented`.
   by joining the recorded review ID against the Codex results already in the
   observation, which carry the request correlation; the thread evidence
   supplies the review ID and reviewed head that make the join possible.
+
+  The strength of that proof should be stated rather than assumed. Requiring
+  the provider's `totalCount` on every page, identical across pages, and equal
+  to the distinct threads collected rules out any concurrent change that moves
+  the count. It does not rule out a compensating creation and deletion inside
+  one inter-page gap. That residue is one-directional: the connection is
+  ordered by a keyset cursor over immutable creation keys, so a thread that
+  outlives the walk cannot be skipped, and the compensating case can only
+  record a thread that was since deleted — `unresolved_count` reads high, never
+  low, and the gate stays conservative. Detecting it at all needs evidence the
+  counts do not carry, so it is deliberately out of scope here.
 - Which predicate ends the pre-ready wait, given that a pending gate and a
   ready-only gate are observationally identical and elapsed time is not
   evidence?
