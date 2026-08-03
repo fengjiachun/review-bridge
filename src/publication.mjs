@@ -3415,6 +3415,60 @@ function activeCorrelation(ledger) {
   };
 }
 
+// Whether the recorded evidence permits the workflow to resolve a thread by
+// itself. Pure derivation over one observation and the ledger's correlation:
+// deciding to act is this function's business, acting is not.
+//
+// The discharge is the correlated CLEAN result on the gated head. Codex read
+// the current code and raised nothing, so a finding still true of that code
+// would have been raised again. This is why an older thread may be resolved,
+// and it is worth being precise about what that costs: nothing beyond what
+// merging already costs, since the same CLEAN is what allows the merge at all.
+// An eligible thread is one the workflow has already been told is answered.
+//
+// is_outdated deliberately does not appear below. GitHub sets it when the diff
+// hunk a thread was anchored to no longer exists, which is evidence the code
+// moved, not evidence the finding was addressed -- a line can be displaced by
+// an unrelated edit. It is the most tempting shortcut here and the wrong one.
+export function threadResolutionEligibility(ledger, thread, cleanForGatedHead) {
+  const authorization = authorizationForLedger(ledger);
+  const codexActor = ledger.target.codex_actor;
+  const refuse = (reason) => ({ eligible: false, reason });
+
+  // Without complete provenance the thread cannot be replayed at all, so
+  // nothing below it could be established rather than assumed.
+  if (thread.provenance_complete !== true) {
+    return refuse("PROVENANCE_INCOMPLETE");
+  }
+  if (thread.is_resolved === true) {
+    return refuse("ALREADY_RESOLVED");
+  }
+
+  const isCodex = (actor) =>
+    actor?.id === codexActor.id && actor?.type === codexActor.type;
+  // Every comment, not merely the first. A human reply is a participant whose
+  // objection this workflow was never authorized to dismiss, and it does not
+  // stop being one because a bot opened the thread.
+  if (!thread.comments.every((comment) => isCodex(comment.actor))) {
+    return refuse("NOT_CODEX_AUTHORED");
+  }
+  const review = thread.comments[0].review;
+  if (!isCodex(review.actor)) {
+    return refuse("NOT_CODEX_AUTHORED");
+  }
+
+  // A thread raised against the very head the CLEAN examined would mean the
+  // same review both raised and did not raise it. That is a contradiction in
+  // the evidence rather than a discharge, so it refuses instead of resolving.
+  if (review.reviewed_head_sha === authorization.head_sha) {
+    return refuse("RAISED_AGAINST_GATED_HEAD");
+  }
+  if (!cleanForGatedHead) {
+    return refuse("NO_CLEAN_RESULT_FOR_GATED_HEAD");
+  }
+  return { eligible: true, reason: null };
+}
+
 function codexStatus(ledger) {
   const observation = ledger.latest_observation;
   const authorization = authorizationForLedger(ledger);
@@ -5013,6 +5067,48 @@ function specificBlockers(ledger, derived) {
  * here and fail there. `getPublicationSummary` keeps reporting `PR_DRAFT` and
  * `MARK_PULL_REQUEST_READY` unchanged.
  */
+// The plan every thread produces, eligible or not. A refusal reason per thread
+// is the point rather than a filtered list: an operator asking why a pull
+// request will not merge needs the thread that refused and the word for why.
+export async function getThreadResolutionPlan(storeRoot, reviewId) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    const authorization = await openAuthorizationFiles(paths, reviewId);
+    try {
+      const ledger = authorization.ledger;
+      const observation = ledger.latest_observation;
+      // One condition from the caller's side: there is no complete thread
+      // evidence to plan from. The gate treats an incomplete collection as
+      // establishing nothing, and a plan derived from it would be a list of
+      // decisions about threads that may not be all of them.
+      if (
+        observation == null ||
+        observation.review_threads.collection.status !== "COMPLETE"
+      ) {
+        fail(
+          "PUBLICATION_THREAD_EVIDENCE_MISSING",
+          "no complete review-thread collection has been recorded",
+        );
+      }
+      const cleanForGatedHead = codexStatus(ledger) === null;
+      return {
+        review_id: reviewId,
+        head_sha: authorizationForLedger(ledger).head_sha,
+        clean_for_gated_head: cleanForGatedHead,
+        threads: observation.review_threads.threads.map((thread) => ({
+          thread_id: thread.id,
+          path: thread.path,
+          line: thread.line,
+          is_resolved: thread.is_resolved,
+          ...threadResolutionEligibility(ledger, thread, cleanForGatedHead),
+        })),
+      };
+    } finally {
+      await authorization.close();
+    }
+  });
+}
+
 export async function getAutonomousPreReady(
   storeRoot,
   reviewId,

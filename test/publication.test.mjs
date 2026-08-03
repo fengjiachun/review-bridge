@@ -22,6 +22,7 @@ import {
   recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
+  threadResolutionEligibility,
   verifyPublicationGate,
 } from "../src/publication.mjs";
 import { adaptCodexEvidence } from "../src/github-adapter.mjs";
@@ -4978,5 +4979,116 @@ test("comments sharing a creation time and database id are refused", async (t) =
       { clock: () => observedAt + 10 },
     ),
     /thread comments/,
+  );
+});
+
+const GATED_HEAD = "a".repeat(40);
+const EARLIER_HEAD = "b".repeat(40);
+
+function eligibilityLedger() {
+  return {
+    version: 3,
+    authorization: { mode: "LOCAL_GATE", head_sha: GATED_HEAD, base_sha: "c".repeat(40) },
+    target: { codex_actor: { id: 199175422, type: "Bot" } },
+  };
+}
+
+function eligibleThread(overrides = {}) {
+  const codex = { id: 199175422, type: "Bot", login: "chatgpt-codex-connector" };
+  return {
+    id: "PRRT_1",
+    is_resolved: false,
+    is_outdated: false,
+    provenance_complete: true,
+    comments: [
+      {
+        id: "PRRC_1",
+        actor: codex,
+        review: { id: "PRR_1", actor: codex, reviewed_head_sha: EARLIER_HEAD },
+      },
+    ],
+    ...overrides,
+  };
+}
+
+test("a Codex thread answered by a clean result on the gated head may be resolved", () => {
+  const verdict = threadResolutionEligibility(
+    eligibilityLedger(),
+    eligibleThread(),
+    true,
+  );
+  assert.deepEqual(verdict, { eligible: true, reason: null });
+});
+
+test("each missing piece of evidence refuses with its own reason", () => {
+  const codex = { id: 199175422, type: "Bot", login: "chatgpt-codex-connector" };
+  const human = { id: 5, type: "User", login: "jeremyhi" };
+  const cases = [
+    ["PROVENANCE_INCOMPLETE", eligibleThread({ provenance_complete: false }), true],
+    ["ALREADY_RESOLVED", eligibleThread({ is_resolved: true }), true],
+    [
+      // A human reply is a participant this workflow was never authorized to
+      // answer for, whoever opened the thread.
+      "NOT_CODEX_AUTHORED",
+      eligibleThread({
+        comments: [
+          eligibleThread().comments[0],
+          { id: "PRRC_2", actor: human, review: null },
+        ],
+      }),
+      true,
+    ],
+    [
+      // The review itself must be Codex's, not merely the comment's author.
+      "NOT_CODEX_AUTHORED",
+      eligibleThread({
+        comments: [
+          {
+            id: "PRRC_1",
+            actor: codex,
+            review: { id: "PRR_1", actor: human, reviewed_head_sha: EARLIER_HEAD },
+          },
+        ],
+      }),
+      true,
+    ],
+    [
+      // Raised against the head the clean result examined: the same review
+      // would have both raised it and not raised it.
+      "RAISED_AGAINST_GATED_HEAD",
+      eligibleThread({
+        comments: [
+          {
+            id: "PRRC_1",
+            actor: codex,
+            review: { id: "PRR_1", actor: codex, reviewed_head_sha: GATED_HEAD },
+          },
+        ],
+      }),
+      true,
+    ],
+    ["NO_CLEAN_RESULT_FOR_GATED_HEAD", eligibleThread(), false],
+  ];
+  for (const [reason, thread, clean] of cases) {
+    assert.deepEqual(
+      threadResolutionEligibility(eligibilityLedger(), thread, clean),
+      { eligible: false, reason },
+      reason,
+    );
+  }
+});
+
+test("an outdated diff hunk is not evidence that a finding was addressed", () => {
+  // is_outdated says the code moved, not that the finding was answered -- an
+  // unrelated edit displaces the hunk just as well as a fix does. It must not
+  // stand in for the clean result.
+  const outdated = eligibleThread({ is_outdated: true });
+  assert.deepEqual(
+    threadResolutionEligibility(eligibilityLedger(), outdated, false),
+    { eligible: false, reason: "NO_CLEAN_RESULT_FOR_GATED_HEAD" },
+  );
+  assert.equal(
+    threadResolutionEligibility(eligibilityLedger(), outdated, true).eligible,
+    true,
   );
 });
