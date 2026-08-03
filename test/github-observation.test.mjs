@@ -865,10 +865,7 @@ test("a pull request with no threads at all is still collectable", () => {
   assert.equal(normalized.review_threads.total_count, 0);
   assert.equal(normalized.review_threads.unresolved_count, 0);
   assert.deepEqual(normalized.review_threads.threads, []);
-  assert.equal(
-    normalized.review_threads.collection.sources[0].pagination_complete,
-    true,
-  );
+  assert.equal(normalized.review_threads.collection.sources[0].page_count, 1);
 });
 
 test("a collection with no pages at all is refused", () => {
