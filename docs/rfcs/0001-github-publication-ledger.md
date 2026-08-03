@@ -679,14 +679,31 @@ carry no total against which to notice. And at the ledger boundary the flag
 remains a caller assertion — the observation arrives as caller-supplied JSON,
 so the server can require the boolean to be true but cannot re-derive it.
 
-Check runs and commit statuses are different because their per-item state
-decides the gate. Each is read atomically, as a single response, and more than
-one page is refused. A walk reads each page at its own instant, so a run
-re-run after its page was read would be stored with the conclusion it no longer
-has, and because `decidingRunsFor` takes the latest run for a context — making
-no distinction between the two kinds — such a staleness resolves in favour of
-merging. A check run's single page is proven by the `total_count` the endpoint
-reports; a commit status's by the same terminal `Link` state as the list feeds. The parent
+Check runs, commit statuses and review threads are read atomically instead:
+a single response, with more than one page refused. All three reach a decision
+through a selection that prefers the newest evidence — `decidingRunsFor` takes
+the latest run for a context, and `unresolved_count` counts what is currently
+open — so anything that hides the newest objection resolves in favour of
+merging. Each hides it differently, and no count sees any of them. A check run
+is mutable in place, since the Checks API updates status and conclusion on the
+same id, so a run read as successful and failed before the next page is
+recorded successful with every count intact. A review thread's resolved flag
+mutates the same way. A commit status is immutable per posting, but that
+endpoint reports no total, so a walk has nothing against which to notice a row
+it never saw; whether it could depends on the feed's ordering, and reading one
+page removes the dependency rather than resting on it.
+
+This is not the same as saying per-item state decides the gate, which is also
+true of the walked Codex feeds. Those are safe to walk for a different reason:
+they are append-only in ascending order, so an item added during the walk lands
+after the cursor rather than shifting what came before, and their one in-place
+mutation — a review being dismissed, or leaving `PENDING` — moves between
+states that all withhold `MERGE_READY`. A stale record of one of those is more
+conservative than the truth, never less.
+
+A check run's single page is proven by the `total_count` the endpoint reports;
+a commit status's and a review thread's by the terminal `Link` state and the
+connection's own `totalCount` respectively. The parent
 `collection.collected_at` must equal the maximum source time, while every
 source time independently participates in freshness and
 atomic-window validation. Reusing a cached response preserves its original
@@ -879,11 +896,14 @@ when their item count is zero. The check-run entry also records GitHub's
 non-negative `total_count` as `reported_total_count` and requires it to equal
 `item_count`; the commit-status entry uses null because that endpoint exposes
 no total count, and proves its single page instead by the absence of a `Link`
-header advertising a next page. Because `per_page` caps at 100 while
-`total_count` reports the whole commit, a head commit carrying more than 100
-check runs cannot be collected at all. That ceiling is an accepted cost of
-reading the feed atomically, and the refusal names it rather than reporting a
-count mismatch. An absent, failed, or unknown source makes required-check
+header advertising a next page. Reading atomically puts a ceiling of 100 on
+both feeds, and a head commit exceeding either cannot be collected at all. For
+check runs the ceiling shows as a reported `total_count` above the page size;
+for statuses, as a full page that still advertises a next one. The status
+ceiling is the more reachable of the two, since that endpoint returns one row
+per posting rather than one per context. Both are an accepted cost of reading
+at a single instant, and both refusals name the ceiling rather than reporting a
+count mismatch or a short read. An absent, failed, or unknown source makes required-check
 evidence incomplete; completeness of one kind never substitutes for the
 other.
 

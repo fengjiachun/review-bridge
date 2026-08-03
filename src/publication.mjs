@@ -853,9 +853,10 @@ function validateObservation(input, ledger, currentMs) {
     ["PULL_REQUEST_REVIEW_THREADS"],
     "review_threads.collection",
   );
-  // Threads are one of three sources whose per-item state, not just its
-  // membership, decides the gate -- the run kinds above are the others -- and
-  // state read across a walk is state from several instants. The collector refuses anything but a single page; the observation
+  // A thread's resolved flag mutates in place, so unresolving one between two
+  // pages changes no total, no identity and no pageInfo, and the value read
+  // earlier is recorded as fact -- the same shape as a check run updated after
+  // its page was read, and equally invisible to a count. The collector refuses anything but a single page; the observation
   // arrives here as caller-supplied JSON, so the ledger has to say it too or
   // the invariant holds in only one of the two layers that state it.
   requireAtomicPage(

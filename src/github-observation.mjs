@@ -408,21 +408,22 @@ function normalizeRuns(publication, raw) {
   const checkRuns = checkPages.flatMap((page, index) =>
     array(page?.check_runs, `check_runs.pages[${index}].check_runs`),
   );
-  // Only an atomic read, for the reason the review threads are: the state that
-  // decides the gate is read per page, and a walk reads each page at its own
-  // instant. A run recorded from page one keeps that page's conclusion, so a
-  // re-run that fails after page one was read is stored as whatever it was
-  // before. That lands fail-open rather than fail-closed: decidingRunsFor takes
-  // the latest run per context, so losing or staling the newest failure lets an
-  // earlier success decide. Unlike the review threads this connection is walked
-  // by offset, where a compensating create and delete can also drop a run
-  // outright without repeating one, so no count rule could close it either.
+  // Only an atomic read. Both run kinds reach the gate through decidingRunsFor,
+  // which takes the latest run for a context, so anything that makes the newest
+  // failure invisible lets an earlier success decide -- and each kind has its
+  // own way of doing that, neither of which a count rule can see.
   //
-  // The same argument binds commit statuses below, without qualification:
-  // decidingRunsFor makes no distinction between the two kinds, and a deciding
-  // status drives CHECKS_FAILED and CHECKS_PENDING exactly as a run does. They
-  // differ only in what proves a single page complete -- a run total the
-  // endpoint reports, against a terminal Link header for the statuses.
+  // A check run is mutable in place: the Checks API updates status and
+  // conclusion on the same id, which is how a re-run usually reports. So a run
+  // read as successful on page one and failed before page two is recorded
+  // successful, with the identity count and the reported total both unchanged.
+  //
+  // A commit status is instead immutable -- each posting is its own row -- but
+  // that endpoint reports no total, so a walk has nothing against which to
+  // notice a row it never saw. Whether it can miss one depends on the feed's
+  // ordering, which this repository cannot verify because no commit here
+  // carries a status. Reading one page removes the dependency on that unknown
+  // rather than resting on it.
   requireAtomicPages(checkPages, "check-run");
   const reportedTotal = checkPages[0]?.total_count;
   if (!Number.isSafeInteger(reportedTotal) || reportedTotal < 0) {
