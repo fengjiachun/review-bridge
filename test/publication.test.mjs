@@ -5524,3 +5524,76 @@ test("an unknown review-state spelling fails closed at the ledger", async (t) =>
     /thread review state/,
   );
 });
+
+test("a stale ancestry read expires the stored evidence on its own", async (t) => {
+  // The summary source carries only the latest compare time, so without the
+  // per-entry times in observationTimes a comparison near the age limit would
+  // stay alive until its freshest sibling expires -- and its descends value
+  // would be trusted for the whole window.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 100_000;
+  const value = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  const codex = { id: 99, type: "Bot", login: "codex" };
+  value.review_threads.total_count = 1;
+  value.review_threads.unresolved_count = 1;
+  value.review_threads.threads = [
+    {
+      id: "PRRT_1",
+      is_resolved: false,
+      is_outdated: false,
+      comment_count: 1,
+      comments_pagination_complete: true,
+      provenance_complete: true,
+      comments: [
+        {
+          id: "PRRC_1",
+          database_id: 3694779367,
+          created_at: iso(startedAt - 5_000),
+          updated_at: iso(startedAt - 5_000),
+          actor: codex,
+          review: {
+            id: "PRR_1",
+            database_id: 4833836859,
+            state: "COMMENTED",
+            reviewed_head_sha: "c".repeat(40),
+            actor: codex,
+          },
+        },
+      ],
+    },
+  ];
+  // The compare is 90 seconds older than every other read.
+  value.review_threads.ancestry = [
+    {
+      finding_head_sha: "c".repeat(40),
+      status: "AHEAD",
+      descends: true,
+      endpoint: `GET /repos/o/r/compare/${"c".repeat(40)}...${state.headSha}`,
+      collected_at: iso(observedAt - 90_000),
+    },
+  ];
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: value },
+    { clock: () => observedAt + 10 },
+  );
+  // Four minutes after the compare was read: the compare is past the five
+  // minute limit only if its own time participates. The freshest sources are
+  // not, so a summary keyed to them would still call the evidence live.
+  const probeAt = observedAt - 90_000 + 5 * 60_000 + 1_000;
+  const summary = await getPublicationSummary(state.store, state.reviewId, {
+    clock: () => probeAt,
+  });
+  assert.equal(summary.blocking_reason, "EVIDENCE_STALE");
+});
