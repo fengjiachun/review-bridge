@@ -5033,7 +5033,6 @@ function eligibilityContext(overrides = {}) {
       attempt_head_shas: [EARLIER_HEAD, GATED_HEAD],
     },
     publicationTerminal: false,
-    recordedReviewIds: new Set([4833836859]),
     ...overrides,
   };
 }
@@ -5219,14 +5218,6 @@ test("each missing piece of evidence refuses with its own reason", () => {
           attempt_head_shas: [EARLIER_HEAD, GATED_HEAD],
         },
       }),
-    ],
-    [
-      // Actor identity alone does not tie the finding to our review cycle:
-      // an unsolicited Codex review against one of our heads passes every
-      // other check, and must fail the structural link.
-      "RESULT_NOT_CORRELATED",
-      eligibleThread(),
-      eligibilityContext({ recordedReviewIds: new Set() }),
     ],
   ];
   for (const [reason, thread, context] of cases) {

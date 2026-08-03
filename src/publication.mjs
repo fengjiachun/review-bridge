@@ -3563,14 +3563,7 @@ export function threadResolutionEligibility(ledger, thread, context) {
   if (!workflow.attempt_head_shas.includes(review.reviewed_head_sha)) {
     return refuse("FINDING_HEAD_NOT_OURS");
   }
-  // Actor identity alone does not tie the finding to this workflow's own
-  // review cycle: Codex can post an unsolicited review against one of our
-  // heads, and its threads would pass every check above. The root review must
-  // be a result this publication actually recorded -- the structural link the
-  // RFC requires between the thread and the correlated Codex review.
-  if (!context.recordedReviewIds.has(review.database_id)) {
-    return refuse("RESULT_NOT_CORRELATED");
-  }
+
 
   // The gated head must still descend from the finding head. A force-push
   // that discarded the fix leaves the finding unanswered however clean the
@@ -3589,6 +3582,18 @@ export function threadResolutionEligibility(ledger, thread, context) {
   // refusals above stay diagnostic. This is the seam the next change fills,
   // and until it does, eligible can never be true; a reader downstream must
   // not learn to treat this reason as ignorable.
+  //
+  // The same record is where structural linkage belongs -- the RFC's
+  // never-eligible rule that a thread must tie to the correlated Codex
+  // review, not merely to the Codex actor. The correlated FINDINGS result for
+  // an earlier head lives in that head's own publication ledger, which this
+  // publication does not hold: each attempt starts a fresh one whose baseline
+  // swallows earlier reviews as pre-existing. Membership in this ledger's
+  // recorded results can therefore never express "correlated", only
+  // "observed", and a check built on it refuses every genuine cycle while
+  // admitting an unsolicited in-window review. The addressed-by record must
+  // instead name the finding review it answers, carrying the link across
+  // publications; until it exists, this refusal is what stands in front.
   return refuse("FIX_NOT_RECORDED");
 }
 
@@ -5227,23 +5232,11 @@ export async function getThreadResolutionPlan(storeRoot, reviewId) {
           entry,
         ]),
       );
-      // Every PULL_REQUEST_REVIEW result this publication has recorded, from
-      // the monotonic history and the current observation both: history alone
-      // would miss a result first seen in the observation being planned from.
-      const recordedReviewIds = new Set(
-        [
-          ...ledger.codex_result_history,
-          ...observation.codex_review.results,
-        ]
-          .filter((entry) => entry.resource_kind === "PULL_REQUEST_REVIEW")
-          .map((entry) => entry.result_id),
-      );
       const context = {
         cleanForGatedHead,
         ancestryByHead,
         workflow,
         publicationTerminal: ledger.terminal != null,
-        recordedReviewIds,
       };
       return {
         review_id: reviewId,

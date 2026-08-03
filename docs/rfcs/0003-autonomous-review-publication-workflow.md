@@ -889,6 +889,18 @@ condition reports that earlier reason instead; `FIX_NOT_RECORDED` is the
 floor, not the only answer. That refusal is the seam the next change fills,
 and consumers must treat it as blocking rather than ignorable.
 
+The never-eligible rule that a thread must link structurally to the
+correlated Codex review — not merely to the Codex actor — waits behind the
+same seam, and deliberately so. The correlated `FINDINGS` result for an
+earlier head lives in that head's own publication ledger, which the current
+publication does not hold: each attempt starts a fresh ledger whose baseline
+absorbs earlier reviews as pre-existing. Membership in the current ledger's
+recorded results can therefore only ever mean observed, not correlated — a
+check built on it refuses every genuine finding-fix-resolve cycle while still
+admitting an unsolicited in-window review. The addressed-by record must name
+the finding review it answers, carrying the link across publications; that
+is the structural link, and nothing available earlier can substitute for it.
+
 A thread is never eligible when it:
 
 - was created by a human or unknown actor;
