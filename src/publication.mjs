@@ -1288,7 +1288,14 @@ function validateThreadProvenance(thread) {
       const review = assertObject(comment.review, "thread comment review");
       assertString(review.id, "thread review id", 255);
       assertId(review.database_id, "thread review database_id");
-      assertString(review.state, "thread review state", 100);
+      // GitHub's normalized enum, exactly: the eligibility predicate compares
+      // against DISMISSED, so an unknown spelling must fail closed here rather
+      // than slide past the unsupported-dismissal guard as a plain string.
+      assertEnum(
+        review.state,
+        ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"],
+        "thread review state",
+      );
       assertObject(review.actor, "thread review actor");
       if (review.reviewed_head_sha !== null) {
         assertSha(review.reviewed_head_sha, "thread review reviewed_head_sha");
@@ -4596,6 +4603,14 @@ function observationTimes(observation) {
     ["review_threads.collection", observation.review_threads.collection],
   ]) {
     times.push(...sourceTimes(collection, name));
+  }
+  // Each ancestry read on its own, exactly as at ingest: the summary source
+  // carries only the latest, so without these a comparison near the age limit
+  // stays alive until its freshest sibling expires.
+  for (const entry of observation.review_threads.ancestry ?? []) {
+    times.push(
+      timestampMs(entry.collected_at, "review_threads.ancestry collected_at"),
+    );
   }
   return times;
 }

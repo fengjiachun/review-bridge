@@ -1420,11 +1420,23 @@ export function collectGithubObservation(publicationInput) {
     // force-push. That is an answer about this one thread -- descent cannot be
     // proven -- not a reason to make the whole publication unobservable, so it
     // records UNKNOWN and the thread refuses on unproven descent downstream.
+    // Only that answer, though: authentication, rate limiting, connectivity
+    // and server errors are infrastructure failures that must abort the run,
+    // or a broken gh would quietly turn every descent proof into UNKNOWN and
+    // label the collection a success. The status line decides which is which.
     let value;
-    try {
-      value = runGh(["api", endpoint]);
-    } catch {
+    const result = spawnSync("gh", ["api", "-i", endpoint], {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    if (result.status === 0) {
+      value = JSON.parse(splitGhResponse(result.stdout, `GET ${endpoint}`).body);
+    } else if (/^HTTP\/[0-9.]+ 404 /m.test(result.stdout)) {
       value = { status: "unknown" };
+    } else {
+      throw new Error(
+        `gh api ${endpoint} failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
     }
     return {
       finding_head_sha: head,
