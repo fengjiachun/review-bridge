@@ -152,11 +152,24 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
     ) {
       fail("WORKFLOW_STATE_INVALID", "workflow head is invalid");
     }
+    // Every head this workflow has published, oldest first. A thread's finding
+    // head must be one of them: that is what ties the finding to this workflow
+    // and this pull request rather than to some other line of work that
+    // happens to share a SHA prefix.
+    const attempts = Array.isArray(workflow.remote_attempts)
+      ? workflow.remote_attempts
+      : [];
+    for (const attempt of attempts) {
+      if (!SHA_RE.test(attempt?.head_sha ?? "")) {
+        fail("WORKFLOW_STATE_INVALID", "remote attempt head is invalid");
+      }
+    }
     return {
       workflow_id: workflow.workflow_id,
       revision: workflow.revision,
       status: workflow.status,
       phase: workflow.phase,
+      attempt_head_shas: attempts.map((attempt) => attempt.head_sha),
       base_sha: workflow.base_sha,
       topic_branch: workflow.topic_branch,
       current_head_sha: workflow.current_head_sha,

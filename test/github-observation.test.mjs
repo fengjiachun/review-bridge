@@ -1033,3 +1033,64 @@ test("a full status page still advertising more is the ceiling, not a short read
   // A full page that is genuinely the last one is fine.
   assert.equal(exceedsSinglePage(full, done), false);
 });
+
+test("the normalizer requires a compare for every referenced finding head", () => {
+  // A thread whose review examined an earlier head cannot be normalized
+  // without the compare that answers the descent question for that head.
+  const earlier = "9".repeat(40);
+  const thread = threadWithProvenance();
+  thread.comments.nodes[0].pullRequestReview.commit = { oid: earlier };
+  const raw = rawWithThread(thread);
+  assert.throws(
+    () => normalizeGithubObservation(publication(), raw),
+    /thread_ancestry must be an array/,
+  );
+  raw.thread_ancestry = [];
+  assert.throws(
+    () => normalizeGithubObservation(publication(), raw),
+    /missing finding head/,
+  );
+  raw.thread_ancestry = [
+    {
+      finding_head_sha: earlier,
+      value: { status: "ahead" },
+      collected_at: "2026-07-27T00:00:09Z",
+    },
+  ];
+  const normalized = normalizeGithubObservation(publication(), raw);
+  assert.deepEqual(
+    normalized.review_threads.ancestry.map((entry) => ({
+      head: entry.finding_head_sha,
+      status: entry.status,
+      descends: entry.descends,
+    })),
+    [{ head: earlier, status: "AHEAD", descends: true }],
+  );
+});
+
+test("the normalizer derives descent from the provider status alone", () => {
+  const earlier = "9".repeat(40);
+  const thread = threadWithProvenance();
+  thread.comments.nodes[0].pullRequestReview.commit = { oid: earlier };
+  for (const [status, descends] of [
+    ["identical", true],
+    ["behind", false],
+    ["diverged", false],
+    ["unknown", false],
+  ]) {
+    const raw = rawWithThread(structuredClone(thread));
+    raw.thread_ancestry = [
+      {
+        finding_head_sha: earlier,
+        value: { status },
+        collected_at: "2026-07-27T00:00:09Z",
+      },
+    ];
+    const normalized = normalizeGithubObservation(publication(), raw);
+    assert.equal(
+      normalized.review_threads.ancestry[0].descends,
+      descends,
+      status,
+    );
+  }
+});

@@ -883,6 +883,14 @@ function validateObservation(input, ledger, currentMs) {
   for (const [name, collection] of collections) {
     allTimes.push(...sourceTimes(collection, name));
   }
+  // Every ancestry comparison read, not merely the summary source's latest:
+  // one stale compare would otherwise ride in under a fresh sibling, and
+  // eligibility would trust its descends value.
+  for (const entry of reviewThreads.ancestry ?? []) {
+    allTimes.push(
+      timestampMs(entry.collected_at, "review_threads.ancestry collected_at"),
+    );
+  }
   validateFreshTimes(allTimes, ledger.created_at, currentMs, "GitHub observation");
   if (observedMs < Math.max(...allTimes.slice(1))) {
     fail("INVALID_INPUT", "observation.observed_at must not precede a collection");
@@ -920,7 +928,7 @@ function validateObservation(input, ledger, currentMs) {
   const baselineConflict = validateCodexPartitions(codexReview, ledger);
   validatePullRequest(pullRequest);
   validateChecks(requiredChecks, pullRequest, ledger.target);
-  validateThreads(reviewThreads);
+  validateThreads(reviewThreads, authorizationForLedger(ledger).head_sha);
   observation.recorded_at = new Date(currentMs).toISOString();
   return { observation, baselineConflict };
 }
@@ -1280,7 +1288,14 @@ function validateThreadProvenance(thread) {
       const review = assertObject(comment.review, "thread comment review");
       assertString(review.id, "thread review id", 255);
       assertId(review.database_id, "thread review database_id");
-      assertString(review.state, "thread review state", 100);
+      // GitHub's normalized enum, exactly: the eligibility predicate compares
+      // against DISMISSED, so an unknown spelling must fail closed here rather
+      // than slide past the unsupported-dismissal guard as a plain string.
+      assertEnum(
+        review.state,
+        ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"],
+        "thread review state",
+      );
       assertObject(review.actor, "thread review actor");
       if (review.reviewed_head_sha !== null) {
         assertSha(review.reviewed_head_sha, "thread review reviewed_head_sha");
@@ -1300,7 +1315,63 @@ function validateThreadProvenance(thread) {
   }
 }
 
-function validateThreads(reviewThreads) {
+function validateThreadAncestry(reviewThreads, gatedHeadSha) {
+  const entries = assertArray(
+    reviewThreads.ancestry ?? [],
+    "review_threads.ancestry",
+  );
+  uniqueBy(
+    entries,
+    (entry) => assertString(entry.finding_head_sha, "ancestry finding head", 40),
+    "thread ancestry entries",
+  );
+  const byHead = new Map();
+  for (const entry of entries) {
+    if (!/^[0-9a-f]{40}$/.test(entry.finding_head_sha ?? "")) {
+      fail("INVALID_INPUT", "ancestry finding head must be a full SHA");
+    }
+    assertEnum(
+      entry.status,
+      ["AHEAD", "IDENTICAL", "BEHIND", "DIVERGED", "UNKNOWN"],
+      "ancestry status",
+    );
+    // descends is a derivation, not a fact of its own: recompute it so a
+    // caller cannot assert descent alongside a status that denies it.
+    if (
+      entry.descends !==
+      (entry.status === "IDENTICAL" || entry.status === "AHEAD")
+    ) {
+      fail("INVALID_INPUT", "ancestry descent disagrees with its status");
+    }
+    assertString(entry.endpoint, "ancestry endpoint", 1024);
+    timestampMs(entry.collected_at, "ancestry collected_at");
+    byHead.set(entry.finding_head_sha, entry);
+  }
+  // Exactly the finding heads the threads reference, no more and no fewer. A
+  // missing head would let a thread escape the descent question; an extra one
+  // is evidence about nothing this observation contains. The gated head itself
+  // needs no comparison and must be omitted.
+  const referenced = new Set();
+  for (const thread of reviewThreads.threads ?? []) {
+    const head = thread.comments?.[0]?.review?.reviewed_head_sha;
+    if (typeof head === "string" && head !== gatedHeadSha) {
+      referenced.add(head);
+    }
+  }
+  for (const head of referenced) {
+    if (!byHead.has(head)) {
+      fail("INVALID_INPUT", "thread ancestry is missing a referenced finding head");
+    }
+  }
+  for (const head of byHead.keys()) {
+    if (!referenced.has(head)) {
+      fail("INVALID_INPUT", "thread ancestry covers a head no thread references");
+    }
+  }
+  return byHead;
+}
+
+function validateThreads(reviewThreads, gatedHeadSha) {
   const threads = assertArray(reviewThreads.threads ?? [], "review_threads.threads");
   uniqueBy(threads, (thread) => assertString(thread.id, "thread.id", 255), "threads");
   for (const thread of threads) {
@@ -1312,6 +1383,7 @@ function validateThreads(reviewThreads) {
     }
     validateThreadProvenance(thread);
   }
+  validateThreadAncestry(reviewThreads, gatedHeadSha);
   if (
     reviewThreads.total_count !== threads.length ||
     reviewThreads.unresolved_count !==
@@ -3415,6 +3487,123 @@ function activeCorrelation(ledger) {
   };
 }
 
+// Whether the recorded evidence permits the workflow to resolve a thread by
+// itself. Pure derivation over one observation and the ledger's correlation:
+// deciding to act is this function's business, acting is not.
+//
+// The discharge is the correlated CLEAN result on the gated head. Codex read
+// the current code and raised nothing, so a finding still true of that code
+// would have been raised again. This is why an older thread may be resolved,
+// and it is worth being precise about what that costs: nothing beyond what
+// merging already costs, since the same CLEAN is what allows the merge at all.
+// An eligible thread is one the workflow has already been told is answered.
+//
+// is_outdated deliberately does not appear below. GitHub sets it when the diff
+// hunk a thread was anchored to no longer exists, which is evidence the code
+// moved, not evidence the finding was addressed -- a line can be displaced by
+// an unrelated edit. It is the most tempting shortcut here and the wrong one.
+// context: { cleanForGatedHead, ancestryByHead, workflow }, where workflow is
+// the reading of the bound workflow ledger (readWorkflowBinding) or null when
+// the publication is not workflow-bound.
+export function threadResolutionEligibility(ledger, thread, context) {
+  const authorization = authorizationForLedger(ledger);
+  const codexActor = ledger.target.codex_actor;
+  const refuse = (reason) => ({ eligible: false, reason });
+
+  // Without complete provenance the thread cannot be replayed at all, so
+  // nothing below it could be established rather than assumed.
+  if (thread.provenance_complete !== true) {
+    return refuse("PROVENANCE_INCOMPLETE");
+  }
+  if (thread.is_resolved === true) {
+    return refuse("ALREADY_RESOLVED");
+  }
+
+  const isCodex = (actor) =>
+    actor?.id === codexActor.id && actor?.type === codexActor.type;
+  // Every comment, not merely the first. A human reply is a participant whose
+  // objection this workflow was never authorized to dismiss, and it does not
+  // stop being one because a bot opened the thread.
+  if (!thread.comments.every((comment) => isCodex(comment.actor))) {
+    return refuse("NOT_CODEX_AUTHORED");
+  }
+  const review = thread.comments[0].review;
+  if (!isCodex(review.actor)) {
+    return refuse("NOT_CODEX_AUTHORED");
+  }
+
+  // RFC condition 8's second clause: a finding whose review was dismissed has
+  // been answered through a path this workflow does not own, and resolving on
+  // top of a dismissal would launder that path into a workflow decision.
+  if (review.state === "DISMISSED") {
+    return refuse("REVIEW_DISMISSED");
+  }
+
+  // A thread raised against the very head the CLEAN examined would mean the
+  // same review both raised and did not raise it. That is a contradiction in
+  // the evidence rather than a discharge, so it refuses instead of resolving.
+  if (review.reviewed_head_sha === authorization.head_sha) {
+    return refuse("RAISED_AGAINST_GATED_HEAD");
+  }
+
+  // The finding must belong to this workflow's own line of work: a head this
+  // workflow published and recorded. A thread from any other history -- an
+  // operator's manual push, another workflow, a foreign PR -- is not ours to
+  // answer, whatever else the evidence says.
+  const workflow = context.workflow;
+  if (workflow === null) {
+    return refuse("WORKFLOW_NOT_BOUND");
+  }
+  if (workflow.status !== "ACTIVE") {
+    return refuse("WORKFLOW_NOT_ACTIVE");
+  }
+  // An ACTIVE workflow is not enough: a publication that has reached a
+  // terminal state, or whose head the workflow has already moved past,
+  // decides nothing further, and a plan built on it would be a plan for a
+  // publication that no longer exists.
+  if (context.publicationTerminal) {
+    return refuse("PUBLICATION_TERMINAL");
+  }
+  if (workflow.current_head_sha !== authorization.head_sha) {
+    return refuse("PUBLICATION_SUPERSEDED");
+  }
+  if (!workflow.attempt_head_shas.includes(review.reviewed_head_sha)) {
+    return refuse("FINDING_HEAD_NOT_OURS");
+  }
+
+
+  // The gated head must still descend from the finding head. A force-push
+  // that discarded the fix leaves the finding unanswered however clean the
+  // new head is about its own contents.
+  const ancestry = context.ancestryByHead.get(review.reviewed_head_sha);
+  if (ancestry?.descends !== true) {
+    return refuse("DESCENT_UNPROVEN");
+  }
+
+  if (!context.cleanForGatedHead) {
+    return refuse("NO_CLEAN_RESULT_FOR_GATED_HEAD");
+  }
+  // RFC 0003 eligibility condition 3: the workflow must record the finding as
+  // addressed by one or more commits. The workflow ledger does not carry that
+  // record yet, so every thread refuses here -- deliberately last, so the
+  // refusals above stay diagnostic. This is the seam the next change fills,
+  // and until it does, eligible can never be true; a reader downstream must
+  // not learn to treat this reason as ignorable.
+  //
+  // The same record is where structural linkage belongs -- the RFC's
+  // never-eligible rule that a thread must tie to the correlated Codex
+  // review, not merely to the Codex actor. The correlated FINDINGS result for
+  // an earlier head lives in that head's own publication ledger, which this
+  // publication does not hold: each attempt starts a fresh one whose baseline
+  // swallows earlier reviews as pre-existing. Membership in this ledger's
+  // recorded results can therefore never express "correlated", only
+  // "observed", and a check built on it refuses every genuine cycle while
+  // admitting an unsolicited in-window review. The addressed-by record must
+  // instead name the finding review it answers, carrying the link across
+  // publications; until it exists, this refusal is what stands in front.
+  return refuse("FIX_NOT_RECORDED");
+}
+
 function codexStatus(ledger) {
   const observation = ledger.latest_observation;
   const authorization = authorizationForLedger(ledger);
@@ -4415,6 +4604,14 @@ function observationTimes(observation) {
   ]) {
     times.push(...sourceTimes(collection, name));
   }
+  // Each ancestry read on its own, exactly as at ingest: the summary source
+  // carries only the latest, so without these a comparison near the age limit
+  // stays alive until its freshest sibling expires.
+  for (const entry of observation.review_threads.ancestry ?? []) {
+    times.push(
+      timestampMs(entry.collected_at, "review_threads.ancestry collected_at"),
+    );
+  }
   return times;
 }
 
@@ -5013,6 +5210,68 @@ function specificBlockers(ledger, derived) {
  * here and fail there. `getPublicationSummary` keeps reporting `PR_DRAFT` and
  * `MARK_PULL_REQUEST_READY` unchanged.
  */
+// The plan every thread produces, eligible or not. A refusal reason per thread
+// is the point rather than a filtered list: an operator asking why a pull
+// request will not merge needs the thread that refused and the word for why.
+export async function getThreadResolutionPlan(storeRoot, reviewId) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    const authorization = await openAuthorizationFiles(paths, reviewId);
+    try {
+      const ledger = authorization.ledger;
+      const observation = ledger.latest_observation;
+      // One condition from the caller's side: there is no complete thread
+      // evidence to plan from. The gate treats an incomplete collection as
+      // establishing nothing, and a plan derived from it would be a list of
+      // decisions about threads that may not be all of them.
+      if (
+        observation == null ||
+        observation.review_threads.collection.status !== "COMPLETE"
+      ) {
+        fail(
+          "PUBLICATION_THREAD_EVIDENCE_MISSING",
+          "no complete review-thread collection has been recorded",
+        );
+      }
+      const cleanForGatedHead = codexStatus(ledger) === null;
+      // The same revalidation the gate performs -- digest, target and pull
+      // request comparisons included. Reading the workflow file directly would
+      // trust a restored or swapped workflow whose authorization no longer
+      // matches this publication, and report its heads as ours.
+      const workflow = await requireWorkflowBinding(storeRoot, ledger, {
+        mutating: false,
+      });
+      const ancestryByHead = new Map(
+        (observation.review_threads.ancestry ?? []).map((entry) => [
+          entry.finding_head_sha,
+          entry,
+        ]),
+      );
+      const context = {
+        cleanForGatedHead,
+        ancestryByHead,
+        workflow,
+        publicationTerminal: ledger.terminal != null,
+      };
+      return {
+        review_id: reviewId,
+        head_sha: authorizationForLedger(ledger).head_sha,
+        clean_for_gated_head: cleanForGatedHead,
+        workflow_id: workflow?.workflow_id ?? null,
+        threads: observation.review_threads.threads.map((thread) => ({
+          thread_id: thread.id,
+          path: thread.path,
+          line: thread.line,
+          is_resolved: thread.is_resolved,
+          ...threadResolutionEligibility(ledger, thread, context),
+        })),
+      };
+    } finally {
+      await closeAuthorizationFiles(authorization);
+    }
+  });
+}
+
 export async function getAutonomousPreReady(
   storeRoot,
   reviewId,
