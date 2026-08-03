@@ -644,6 +644,101 @@ export function threadProvenanceComplete(thread) {
   );
 }
 
+function withThreadAncestry(publication, raw) {
+  const normalized = normalizeThreads(publication, raw);
+  const ancestry = normalizeThreadAncestry(
+    publication,
+    raw,
+    normalized.threads,
+  );
+  normalized.collection.sources.push(...ancestry.sources);
+  if (ancestry.sources.length > 0) {
+    normalized.collection.collected_at = latestTime([
+      normalized.collection.collected_at,
+      ...ancestry.sources.map((source) => source.collected_at),
+    ]);
+  }
+  return { ...normalized, ancestry: ancestry.entries };
+}
+
+// Ancestry proof for each distinct finding head among the recorded threads.
+// A thread raised against an earlier head may only be resolved if the gated
+// head still descends from that head -- a force-push that discarded the fix
+// must read as unproven, not as ancient history. The proof is one compare per
+// distinct finding head, provider-reported, and refused when absent for any
+// head a thread actually references.
+function normalizeThreadAncestry(publication, raw, threads) {
+  const authorizationValue = authorization(publication);
+  const target = object(publication.target, "publication.target");
+  const findingHeads = [
+    ...new Set(
+      threads
+        .map((thread) => thread.comments?.[0]?.review?.reviewed_head_sha)
+        .filter(
+          (sha) =>
+            typeof sha === "string" && sha !== authorizationValue.head_sha,
+        ),
+    ),
+  ].sort();
+  if (findingHeads.length === 0) {
+    return { entries: [], sources: [] };
+  }
+  const rawEntries = array(raw.thread_ancestry, "thread_ancestry");
+  const byHead = new Map();
+  for (const [index, entryValue] of rawEntries.entries()) {
+    const entry = object(entryValue, `thread_ancestry[${index}]`);
+    const head = entry.finding_head_sha;
+    if (!/^[0-9a-f]{40}$/.test(head ?? "")) {
+      throw new Error(`thread_ancestry[${index}] finding head is invalid`);
+    }
+    if (byHead.has(head)) {
+      throw new Error(`thread_ancestry repeats finding head ${head}`);
+    }
+    byHead.set(head, entry);
+  }
+  const entries = [];
+  const sources = [];
+  for (const head of findingHeads) {
+    const entry = byHead.get(head);
+    if (entry == null) {
+      throw new Error(`thread_ancestry is missing finding head ${head}`);
+    }
+    const comparison = object(entry.value, "thread_ancestry value");
+    const at = canonicalTime(
+      entry.collected_at,
+      "thread_ancestry collected_at",
+    );
+    // GitHub compare base...head: "behind" or "identical" from the finding
+    // head's viewpoint means every finding-head commit is reachable from the
+    // gated head, i.e. the gated head descends from it.
+    const status = compareStatus(comparison.status);
+    entries.push({
+      finding_head_sha: head,
+      status,
+      // Compare base...head reads from the finding head's viewpoint, so
+      // IDENTICAL or AHEAD means every finding-head commit is reachable from
+      // the gated head -- the gated head descends from it.
+      descends: status === "IDENTICAL" || status === "AHEAD",
+      endpoint:
+        entry.endpoint ??
+        `GET /repos/${target.owner}/${target.repo}/compare/${head}...${authorizationValue.head_sha}`,
+      collected_at: at,
+    });
+  }
+  // One summary source: requireSourceKinds holds kinds unique, so the per-head
+  // detail lives on the entries, each carrying its own endpoint and read time
+  // for the ledger's freshness rules.
+  sources.push(
+    completeSource(
+      "THREAD_ANCESTRY",
+      `GET /repos/${target.owner}/${target.repo}/compare/{finding}...${authorizationValue.head_sha}`,
+      latestTime(entries.map((entry) => entry.collected_at)),
+      { result: "SUCCESS", comparison_count: entries.length },
+    ),
+  );
+  return { entries, sources };
+}
+
 function normalizeThreads(publication, raw) {
   const target = object(publication.target, "publication.target");
   const pages = array(raw.review_threads?.pages, "review_threads.pages");
@@ -919,7 +1014,7 @@ export function normalizeGithubObservation(publicationInput, rawInput) {
       runs: runEvidence.runs,
     },
     codex_review: normalizeCodex(publication, raw),
-    review_threads: normalizeThreads(publication, raw),
+    review_threads: withThreadAncestry(publication, raw),
   };
 }
 
