@@ -1,12 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import {
-  collectClassicProtection,
-  normalizeClassicProtectionResponse,
-  normalizeGithubObservation,
-  normalizeOauthAdminProofResponse,
-} from "../src/github-observation.mjs";
+import { collectClassicProtection, exceedsSinglePage, linkHasNext, normalizeClassicProtectionResponse, normalizeGithubObservation, normalizeOauthAdminProofResponse, splitGhResponse } from "../src/github-observation.mjs";
 
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
@@ -21,8 +16,10 @@ function collected(value, at) {
   return { value, collected_at: at };
 }
 
-function pages(value, at) {
-  return { pages: value, collected_at: at };
+function pages(value, at, paginationComplete = true) {
+  // The collector records the terminal Link state; a fixture that omits it is
+  // refused, so the default here mirrors a walk that reached the last page.
+  return { pages: value, collected_at: at, pagination_complete: paginationComplete };
 }
 
 function publication() {
@@ -305,7 +302,7 @@ test("GitHub observation normalization requires an explicit check-run total", ()
     raw.check_runs.pages = [page];
     assert.throws(
       () => normalizeGithubObservation(publication(), raw),
-      /check-run pagination is incomplete or inconsistent/,
+      /check_runs\.pages\[0\] is missing a reported total/,
       label,
     );
   }
@@ -877,4 +874,162 @@ test("a collection with no pages at all is refused", () => {
     () => normalizeGithubObservation(publication(), pageless),
     /review-thread collection has no pages/,
   );
+});
+
+test("check runs walked across pages are refused, state and all", () => {
+  // The same hazard the review threads have, reached through a different
+  // field. A run read as successful on page one keeps that conclusion even if
+  // it re-runs and fails before page two, and decidingRunsFor takes the latest
+  // run per context -- so a stale success can decide a context that is now
+  // failing.
+  //
+  // Both pages are individually and jointly consistent: one distinct run each
+  // against a reported total of two. That matters, because a fixture the old
+  // rule already rejected would make this test pass on a message change rather
+  // than on the behaviour. This input was accepted before and is refused now.
+  const interleaved = rawCollection();
+  const first = interleaved.check_runs.pages[0];
+  const later = structuredClone(first);
+  first.total_count = 2;
+  later.total_count = 2;
+  later.check_runs[0].id = 9002;
+  later.check_runs[0].name = "lint";
+  interleaved.check_runs.pages = [first, later];
+  assert.throws(
+    () => normalizeGithubObservation(publication(), interleaved),
+    /check-run state cannot be established across multiple pages/,
+  );
+});
+
+test("commit statuses walked across pages are refused too", () => {
+  // decidingRunsFor makes no distinction between the two kinds, and a deciding
+  // status drives CHECKS_FAILED and CHECKS_PENDING exactly as a run does, so
+  // the atomic-read argument binds statuses without qualification.
+  const walked = rawCollection();
+  walked.commit_statuses.pages = [[], []];
+  assert.throws(
+    () => normalizeGithubObservation(publication(), walked),
+    /commit-status state cannot be established across multiple pages/,
+  );
+});
+
+test("a commit with more check runs than one page holds says so", () => {
+  // The generic count mismatch gives the operator nothing to act on: this is a
+  // standing property of the commit, not a bookkeeping slip or a race.
+  const overflowing = rawCollection();
+  const page = overflowing.check_runs.pages[0];
+  const template = page.check_runs[0];
+  page.check_runs = Array.from({ length: 100 }, (unused, index) => ({
+    ...structuredClone(template),
+    id: 9001 + index,
+    name: `check-${index}`,
+  }));
+  page.total_count = 137;
+  assert.throws(
+    () => normalizeGithubObservation(publication(), overflowing),
+    /commit has 137 check runs; a single atomic page holds at most 100/,
+  );
+});
+
+test("a check-run page that repeats a run is refused", () => {
+  const repeated = rawCollection();
+  const page = repeated.check_runs.pages[0];
+  page.total_count = 2;
+  page.check_runs = [page.check_runs[0], structuredClone(page.check_runs[0])];
+  assert.throws(
+    () => normalizeGithubObservation(publication(), repeated),
+    /check-run page repeats a run/,
+  );
+});
+
+test("a check-run page that omits a run is refused", () => {
+  const dropped = rawCollection();
+  dropped.check_runs.pages[0].total_count =
+    dropped.check_runs.pages[0].check_runs.length + 1;
+  assert.throws(
+    () => normalizeGithubObservation(publication(), dropped),
+    /do not account for the reported total/,
+  );
+});
+
+test("a list feed that never proved it reached the last page is refused", () => {
+  // These endpoints report no total, so the terminal Link state the collector
+  // recorded is the only evidence of exhaustion there is. Without it the walk
+  // is unproven, whatever it happened to collect.
+  const unproven = rawCollection();
+  delete unproven.issue_comments.pagination_complete;
+  assert.throws(
+    () => normalizeGithubObservation(publication(), unproven),
+    /issue_comments did not prove it reached the last page/,
+  );
+});
+
+test("a list feed that stopped mid-walk is refused", () => {
+  const truncated = rawCollection();
+  truncated.applicable_rules.pagination_complete = false;
+  assert.throws(
+    () => normalizeGithubObservation(publication(), truncated),
+    /applicable_rules did not prove it reached the last page/,
+  );
+});
+
+test("the Link header decides whether a walk has reached the last page", () => {
+  // Real header values from the GitHub REST API. A full page and a final page
+  // are identical in the body, so this parse is the whole proof of exhaustion.
+  const full =
+    '<https://api.github.com/repositories/1/issues/24/comments?per_page=2&page=2>; rel="next", ' +
+    '<https://api.github.com/repositories/1/issues/24/comments?per_page=2&page=3>; rel="last"';
+  const last =
+    '<https://api.github.com/repositories/1/issues/24/comments?per_page=2&page=1>; rel="prev", ' +
+    '<https://api.github.com/repositories/1/issues/24/comments?per_page=2&page=1>; rel="first"';
+  assert.equal(linkHasNext(full), true);
+  assert.equal(linkHasNext(last), false);
+  // No Link header at all means a single unpaginated response, not a next page.
+  assert.equal(linkHasNext(""), false);
+  // "next" must be the relation, not an accident of the URL it points at.
+  assert.equal(
+    linkHasNext('<https://api.github.com/next/page?rel=next>; rel="last"'),
+    false,
+  );
+});
+
+test("the response split finds the header boundary in real gh output", () => {
+  // Captured from `gh api -i`: the status line ends with \n while the headers
+  // that follow end with \r\n, and a blank \r\n precedes the body. Locating
+  // that boundary is the part with real risk; linkHasNext only reads what this
+  // hands it.
+  const captured =
+    "HTTP/2.0 200 OK\n" +
+    "Content-Type: application/json; charset=utf-8\r\n" +
+    'Link: <https://api.github.com/x?page=2>; rel="next"\r\n' +
+    "\r\n" +
+    '[{"id":1}]';
+  const { headers, body } = splitGhResponse(captured, "probe");
+  assert.equal(JSON.parse(body)[0].id, 1);
+  assert.match(headers, /^HTTP\/2\.0 200 OK/);
+  assert.equal(headers.includes('rel="next"'), true);
+});
+
+test("a response head that is not understood is an error, not an absent Link", () => {
+  // The one direction that would record an unproven walk as complete: a head
+  // the parser cannot read looks exactly like GitHub saying there is no next
+  // page. Forced colour makes gh emit precisely this.
+  assert.throws(
+    () => splitGhResponse("\u001b[0;36mLink\u001b[0m: <x>; rel=\"next\"\r\n\r\n[]", "probe"),
+    /unreadable response head/,
+  );
+  assert.throws(() => splitGhResponse("[]", "probe"), /omitted response headers/);
+});
+
+test("a full status page still advertising more is the ceiling, not a short read", () => {
+  const full = Array.from({ length: 100 }, (unused, index) => ({ id: index }));
+  const short = full.slice(0, 99);
+  const more = '<https://api.github.com/x?page=2>; rel="next"';
+  const done = '<https://api.github.com/x?page=1>; rel="prev"';
+  // Full page plus a next page: more statuses exist than one instant can hold.
+  assert.equal(exceedsSinglePage(full, more), true);
+  // A short page cannot be hiding any, whatever the header says.
+  assert.equal(exceedsSinglePage(short, more), false);
+  // A full page that is genuinely the last one is fine.
+  assert.equal(exceedsSinglePage(full, done), false);
 });

@@ -666,7 +666,55 @@ Empty arrays never imply that collection succeeded. Each evidence class carries
 independent GitHub endpoint or GraphQL connection used to produce it. Every
 source records its endpoint, endpoint-specific outcome, and
 response-completion `collected_at`; paginated sources also record
-`pagination_complete` and a positive `page_count`. The parent
+`pagination_complete` and a positive `page_count`. What that flag rests on
+differs by endpoint, and so does how much the server can check.
+
+Feeds returning a bare list expose no total, so the collector's only proof of
+exhaustion is the absence of a `Link` header advertising `rel="next"` on the
+last response. Two limits are worth stating rather than leaving to be
+rediscovered. That header proves the walk reached the last page, not that every
+item was seen: the feed is walked by offset, so a deletion and an insertion
+between two requests can drop an item without repeating one, and these feeds
+carry no total against which to notice. And at the ledger boundary the flag
+remains a caller assertion — the observation arrives as caller-supplied JSON,
+so the server can require the boolean to be true but cannot re-derive it.
+
+Check runs, commit statuses and review threads are read atomically instead:
+a single response, with more than one page refused. All three reach a decision
+through a selection that prefers the newest evidence — `decidingRunsFor` takes
+the latest run for a context, and `unresolved_count` counts what is currently
+open — so anything that hides the newest objection resolves in favour of
+merging. Each hides it differently, and no count sees any of them. A check run
+is mutable in place, since the Checks API updates status and conclusion on the
+same id, so a run read as successful and failed before the next page is
+recorded successful with every count intact. A review thread's resolved flag
+mutates the same way. A commit status is immutable per posting, but that
+endpoint reports no total, so a walk has nothing against which to notice a row
+it never saw; whether it could depends on the feed's ordering, and reading one
+page removes the dependency rather than resting on it.
+
+The Codex feeds are still walked, and it is worth being exact about why, since
+per-item state decides the gate there too. One direction is closed: a review's
+own state only ever moves between `PENDING`, `DISMISSED` and the submitted
+states, all of which withhold `MERGE_READY`, so a stale read of that field
+cannot be more permissive than the truth. Two directions are not closed, and
+are recorded here rather than argued away.
+
+A body edited or deleted mid-walk is recorded as it was read, and that can run
+the permissive way: a Codex clean comment read before an edit that removes its marker is
+stored as clean, where the current body would leave the result set empty and
+derive `GITHUB_REVIEW_PENDING`. `codex_result_history` does not catch it,
+because that compares against previously recorded observations and a result
+first seen during a walk enters history already carrying the stale value. The
+offset-drop limit above applies here as well, these feeds having no total
+either. Both remain open, and the reason these feeds are walked rather than
+read atomically is a practical one — a pull request may hold more than a page
+of comments, where more than a page of check runs or review threads is rare
+enough to refuse.
+
+A check run's single page is proven by the `total_count` the endpoint reports;
+a commit status's and a review thread's by the terminal `Link` state and the
+connection's own `totalCount` respectively. The parent
 `collection.collected_at` must equal the maximum source time, while every
 source time independently participates in freshness and
 atomic-window validation. Reusing a cached response preserves its original
@@ -837,7 +885,10 @@ Required-check policy discovery reads both:
   `GET /repos/{owner}/{repo}/branches/{branch}` and
   `GET /repos/{owner}/{repo}/branches/{branch}/protection`.
 
-Run discovery independently collects every page from:
+Run discovery reads each feed in a single request, and refuses more than one
+page of either. Both carry state that decides the gate, and a walk reads each
+page at its own instant, so a run or status that changes after its page was
+read is stored with a value it no longer has. The two endpoints are:
 
 - `GET /repos/{owner}/{repo}/commits/{head}/check-runs?filter=all`; and
 - `GET /repos/{owner}/{repo}/commits/{head}/statuses`.
@@ -847,14 +898,25 @@ cannot prove complete attempt ordering. Each `run_kind` has a separate
 `run_sources` entry with its endpoint, status, collection time, pagination
 flag, page count, item count, and endpoint-provided total count when available.
 `COMPLETE` requires
-`pagination_complete: true`, a positive `page_count`, and `item_count` equal to
-the number of normalized runs of that kind. Both entries are mandatory even
+`pagination_complete: true`, a `page_count` of exactly one, and `item_count`
+equal to the number of normalized runs of that kind. A source recording more
+than one page is refused as invalid input rather than derived as incomplete
+evidence: it is not a collection that fell short, but one whose per-run state
+was never observed at a single instant. Both entries are mandatory even
 when their item count is zero. The check-run entry also records GitHub's
 non-negative `total_count` as `reported_total_count` and requires it to equal
 `item_count`; the commit-status entry uses null because that endpoint exposes
-no total count. An absent, failed, unknown, or partially paginated source makes
-required-check evidence incomplete; completeness of one kind never substitutes
-for the other.
+no total count, and proves its single page instead by the absence of a `Link`
+header advertising a next page. Reading atomically puts a ceiling of 100 on
+both feeds, and a head commit exceeding either cannot be collected at all. For
+check runs the ceiling shows as a reported `total_count` above the page size;
+for statuses, as a full page that still advertises a next one. The status
+ceiling is the more reachable of the two, since that endpoint returns one row
+per posting rather than one per context. Both are an accepted cost of reading
+at a single instant, and both refusals name the ceiling rather than reporting a
+count mismatch or a short read. An absent, failed, or unknown source makes required-check
+evidence incomplete; completeness of one kind never substitutes for the
+other.
 
 The required-check keys are the union of both successful policy reads. A key is
 the exact tuple `(context, app_binding, required_app_id)`. Duplicate instances
@@ -2476,10 +2538,12 @@ can operate from stale reads.
   identity comparison and cannot write a sticky terminal state.
 - An incomplete check, request, result, or thread collection derives
   `EVIDENCE_INCOMPLETE`; an empty list alone never proves absence.
-- Missing or partial pagination for either the check-run or commit-status feed,
-  including an item-count or check-run reported-total mismatch, derives
-  `EVIDENCE_INCOMPLETE` before latest-attempt selection. A complete feed of one
-  kind cannot cover the other.
+- A complete feed of one kind cannot cover the other. Once a run collection
+  claims `COMPLETE`, three conditions are rejected as invalid input rather than
+  derived: an unproven `pagination_complete`, a feed reporting more than one
+  page, and an item-count or check-run reported-total mismatch. The only route
+  to `EVIDENCE_INCOMPLETE` for these feeds is the collection not claiming
+  completeness in the first place, which the bullet above already covers.
 - A stale or future-dated top-level observation, parent collection, or
   independent source cannot be finalized.
 - A finalized gate expires at the earliest underlying five-minute evidence

@@ -487,9 +487,11 @@ function requireAtomicPage(collection, kind, name) {
   if (collection.status !== "COMPLETE") {
     return;
   }
-  const source = (collection.sources ?? []).find(
-    (entry) => entry.kind === kind,
-  );
+  const source = [
+    ...(collection.sources ?? []),
+    ...(collection.policy_sources ?? []),
+    ...(collection.run_sources ?? []),
+  ].find((entry) => entry.kind === kind);
   if (source?.page_count !== 1) {
     fail("INVALID_INPUT", `${name}.${kind} must be a single atomic page`);
   }
@@ -819,6 +821,18 @@ function validateObservation(input, ledger, currentMs) {
     ["APPLICABLE_RULES", "CHECK_RUN", "COMMIT_STATUS"],
     "required_checks.collection",
   );
+  // Both run kinds carry state that decides the gate, so like the review
+  // threads neither can be assembled from several instants. decidingRunsFor
+  // makes no distinction between them, so neither does this. The collector
+  // issues one request each; the observation arrives as caller-supplied JSON,
+  // so the rule has to hold here too.
+  for (const kind of ["CHECK_RUN", "COMMIT_STATUS"]) {
+    requireAtomicPage(
+      requiredChecks.collection,
+      kind,
+      "required_checks.collection",
+    );
+  }
   requireSourceKinds(
     requiredChecks.collection,
     ["APPLICABLE_RULES", "BRANCH_METADATA", "CHECK_RUN", "COMMIT_STATUS"],
@@ -839,9 +853,10 @@ function validateObservation(input, ledger, currentMs) {
     ["PULL_REQUEST_REVIEW_THREADS"],
     "review_threads.collection",
   );
-  // Threads are the one source whose per-item state, not just its membership,
-  // decides the gate, and state read across a walk is state from several
-  // instants. The collector refuses anything but a single page; the observation
+  // A thread's resolved flag mutates in place, so unresolving one between two
+  // pages changes no total, no identity and no pageInfo, and the value read
+  // earlier is recorded as fact -- the same shape as a check run updated after
+  // its page was read, and equally invisible to a count. The collector refuses anything but a single page; the observation
   // arrives here as caller-supplied JSON, so the ledger has to say it too or
   // the invariant holds in only one of the two layers that state it.
   requireAtomicPage(

@@ -43,8 +43,27 @@ function authorization(publication) {
   };
 }
 
+const CHECK_RUN_PAGE_SIZE = 100;
+const ITEM_PAGE_SIZE = 100;
+
+function requireAtomicPages(pages, label) {
+  if (pages.length !== 1) {
+    throw new Error(
+      pages.length === 0
+        ? `${label} collection has no pages`
+        : `${label} state cannot be established across multiple pages`,
+    );
+  }
+}
+
 function itemPages(entry, name) {
   const pages = array(entry?.pages, `${name}.pages`);
+  // These endpoints report no total, so exhaustion is only ever established by
+  // the terminal Link header the collector recorded. Refusing here keeps an
+  // unproven walk from being stored as a complete one.
+  if (entry?.pagination_complete !== true) {
+    throw new Error(`${name} did not prove it reached the last page`);
+  }
   return {
     pages,
     items: pages.flatMap((page, index) =>
@@ -389,15 +408,44 @@ function normalizeRuns(publication, raw) {
   const checkRuns = checkPages.flatMap((page, index) =>
     array(page?.check_runs, `check_runs.pages[${index}].check_runs`),
   );
+  // Only an atomic read. Both run kinds reach the gate through decidingRunsFor,
+  // which takes the latest run for a context, so anything that makes the newest
+  // failure invisible lets an earlier success decide -- and each kind has its
+  // own way of doing that, neither of which a count rule can see.
+  //
+  // A check run is mutable in place: the Checks API updates status and
+  // conclusion on the same id, which is how a re-run usually reports. So a run
+  // read as successful on page one and failed before page two is recorded
+  // successful, with the identity count and the reported total both unchanged.
+  //
+  // A commit status is instead immutable -- each posting is its own row -- but
+  // that endpoint reports no total, so a walk has nothing against which to
+  // notice a row it never saw. Whether it can miss one depends on the feed's
+  // ordering, which this repository cannot verify because no commit here
+  // carries a status. Reading one page removes the dependency on that unknown
+  // rather than resting on it.
+  requireAtomicPages(checkPages, "check-run");
   const reportedTotal = checkPages[0]?.total_count;
-  if (
-    !Number.isSafeInteger(reportedTotal) ||
-    reportedTotal < 0 ||
-    reportedTotal !== checkRuns.length
-  ) {
-    throw new Error("check-run pagination is incomplete or inconsistent");
+  if (!Number.isSafeInteger(reportedTotal) || reportedTotal < 0) {
+    throw new Error("check_runs.pages[0] is missing a reported total");
+  }
+  const distinctRuns = new Set(checkRuns.map((run) => run.id));
+  if (distinctRuns.size !== checkRuns.length) {
+    throw new Error("check-run page repeats a run");
+  }
+  if (reportedTotal !== checkRuns.length) {
+    // A commit with more runs than one page holds is a standing condition, not
+    // a bookkeeping slip, and the operator has no way to act on the generic
+    // message. Name the ceiling so the cause is legible.
+    if (checkRuns.length === CHECK_RUN_PAGE_SIZE && reportedTotal > checkRuns.length) {
+      throw new Error(
+        `commit has ${reportedTotal} check runs; a single atomic page holds at most ${CHECK_RUN_PAGE_SIZE}`,
+      );
+    }
+    throw new Error("check-run pages do not account for the reported total");
   }
   const statusPage = itemPages(raw.commit_statuses, "commit_statuses");
+  requireAtomicPages(statusPage.pages, "commit-status");
   const runs = checkRuns.map((run) => {
     const status = String(run.status).toUpperCase();
     const completed = status === "COMPLETED";
@@ -888,6 +936,65 @@ function runGh(args) {
   return JSON.parse(result.stdout);
 }
 
+// The body alone cannot say whether a list endpoint has more pages: a full page
+// and a final page look identical, and these endpoints report no total. GitHub
+// answers that in the Link header, which is the only evidence of exhaustion
+// there is, so the transport has to keep it rather than parse the body away.
+function runGhWithHeaders(args) {
+  const result = spawnSync("gh", ["api", "-i", ...args], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `gh api -i ${args.join(" ")} failed: ${result.stderr.trim() || result.stdout.trim()}`,
+    );
+  }
+  const { headers, body } = splitGhResponse(
+    result.stdout,
+    `gh api -i ${args.join(" ")}`,
+  );
+  return { value: JSON.parse(body), link: headerValue(headers, "link") };
+}
+
+// Shared with the OAuth administration proof: both read a `gh api --include`
+// response, and locating the boundary is the part worth having in one place.
+export function splitGhResponse(stdout, label) {
+  const separator = String(stdout).match(/\r?\n\r?\n/);
+  if (separator?.index == null) {
+    throw new Error(`${label} omitted response headers`);
+  }
+  const headers = String(stdout).slice(0, separator.index);
+  // A head that does not begin with a status line was not understood, and an
+  // unread header must never pass for one GitHub did not send. Without this the
+  // absence of a Link line is indistinguishable from a parse that failed --
+  // the one direction that records an unproven walk as complete.
+  if (!/^HTTP\/[0-9.]+ [0-9]{3}/.test(headers)) {
+    throw new Error(`${label} returned an unreadable response head`);
+  }
+  return {
+    headers,
+    body: String(stdout).slice(separator.index + separator[0].length),
+  };
+}
+
+function headerValue(headers, name) {
+  const prefix = new RegExp(`^${name}:`, "i");
+  return (
+    headers
+      .split(/\r?\n/)
+      .find((line) => prefix.test(line))
+      ?.slice(name.length + 1)
+      .trim() ?? ""
+  );
+}
+
+// RFC 8288 allows the relation unquoted; api.github.com always quotes it, but
+// GHES and intermediaries are not bound by that.
+export function linkHasNext(link) {
+  return /;\s*rel\s*=\s*"?next"?(\s*[,;]|\s*$)/i.test(link);
+}
+
 function get(endpoint) {
   return {
     value: runGh(["api", endpoint]),
@@ -896,9 +1003,62 @@ function get(endpoint) {
   };
 }
 
-function getPages(endpoint) {
+// Pages are walked explicitly rather than with --paginate so the terminal Link
+// state reaches the observation. Without it `pagination_complete` would be a
+// constant asserted from the shape of whatever was collected.
+const MAX_PAGES = 100;
+
+// A full page that still advertises a next page is the ceiling, and it is a
+// standing property of the commit rather than a collection that went wrong.
+// Separated from the request so the distinction is testable without a network.
+export function exceedsSinglePage(value, link) {
+  return (
+    linkHasNext(link) && Array.isArray(value) && value.length >= ITEM_PAGE_SIZE
+  );
+}
+
+// For a feed that must be read at one instant but reports no total, one
+// request plus a Link header that advertises no next page is the whole proof:
+// one response, one instant, nothing left behind.
+function getSinglePage(endpoint, label) {
+  const separator = endpoint.includes("?") ? "&" : "?";
+  const { value, link } = runGhWithHeaders([`${endpoint}${separator}page=1`]);
+  if (exceedsSinglePage(value, link)) {
+    throw new Error(
+      `commit has more than ${ITEM_PAGE_SIZE} ${label}; a single atomic page holds at most ${ITEM_PAGE_SIZE}`,
+    );
+  }
   return {
-    pages: runGh(["api", "--paginate", "--slurp", endpoint]),
+    pages: [value],
+    pagination_complete: !linkHasNext(link),
+    endpoint: `GET ${endpoint}`,
+    collected_at: new Date().toISOString(),
+  };
+}
+
+function getPages(endpoint) {
+  const separator = endpoint.includes("?") ? "&" : "?";
+  const pages = [];
+  let complete = false;
+  for (let page = 1; page <= MAX_PAGES; page += 1) {
+    const { value, link } = runGhWithHeaders([`${endpoint}${separator}page=${page}`]);
+    pages.push(value);
+    if (!linkHasNext(link)) {
+      complete = true;
+      break;
+    }
+  }
+  // Falling out of the loop still advertising a next page is a distinct
+  // condition from a response that failed to prove itself, and the generic
+  // refusal downstream cannot tell the operator which happened.
+  if (!complete) {
+    throw new Error(
+      `GET ${endpoint} still advertised more pages after ${MAX_PAGES} requests`,
+    );
+  }
+  return {
+    pages,
+    pagination_complete: complete,
     endpoint: `GET ${endpoint}`,
     collected_at: new Date().toISOString(),
   };
@@ -944,12 +1104,10 @@ export function normalizeOauthAdminProofResponse(
       }`,
     );
   }
-  const separator = result.stdout.match(/\r?\n\r?\n/);
-  if (separator?.index == null) {
-    throw new Error("GitHub OAuth administration proof omitted response headers");
-  }
-  const headers = result.stdout.slice(0, separator.index);
-  const body = result.stdout.slice(separator.index + separator[0].length);
+  const { headers, body } = splitGhResponse(
+    result.stdout,
+    "GitHub OAuth administration proof",
+  );
   const scopeHeader = headers
     .split(/\r?\n/)
     .find((line) => /^x-oauth-scopes:/i.test(line));
@@ -1104,11 +1262,21 @@ export function collectGithubObservation(publicationInput) {
         root,
       )
     : null;
-  const checkRuns = getPages(
-    `${root}/commits/${authorizationValue.head_sha}/check-runs?filter=all&per_page=100`,
-  );
-  const commitStatuses = getPages(
-    `${root}/commits/${authorizationValue.head_sha}/statuses?per_page=100`,
+  // One request, not a walk: only a single page can be recorded, and this
+  // endpoint reports its own total, so completeness is provable from the one
+  // response without the Link header the list feeds depend on.
+  const checkRunsEndpoint = `${root}/commits/${authorizationValue.head_sha}/check-runs?filter=all&per_page=100`;
+  const checkRuns = {
+    pages: [runGh(["api", checkRunsEndpoint])],
+    endpoint: `GET ${checkRunsEndpoint}`,
+    collected_at: new Date().toISOString(),
+  };
+  // One request, like the check runs and for the same reason: a deciding
+  // status's state is read per page, so a walk would read it at whichever
+  // instant its page landed on.
+  const commitStatuses = getSinglePage(
+    `${root}/commits/${authorizationValue.head_sha}/statuses?per_page=${ITEM_PAGE_SIZE}`,
+    "commit statuses",
   );
   const issueComments = getPages(
     `${root}/issues/${target.pr_number}/comments?per_page=100`,
