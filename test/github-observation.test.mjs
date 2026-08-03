@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { collectClassicProtection, linkHasNext, normalizeClassicProtectionResponse, normalizeGithubObservation, normalizeOauthAdminProofResponse } from "../src/github-observation.mjs";
+import { collectClassicProtection, linkHasNext, normalizeClassicProtectionResponse, normalizeGithubObservation, normalizeOauthAdminProofResponse, splitGhResponse } from "../src/github-observation.mjs";
 
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
@@ -881,15 +881,53 @@ test("check runs walked across pages are refused, state and all", () => {
   // field. A run read as successful on page one keeps that conclusion even if
   // it re-runs and fails before page two, and decidingRunsFor takes the latest
   // run per context -- so a stale success can decide a context that is now
-  // failing. Both pages here are internally consistent; only the interleaving
-  // is wrong.
+  // failing.
+  //
+  // Both pages are individually and jointly consistent: one distinct run each
+  // against a reported total of two. That matters, because a fixture the old
+  // rule already rejected would make this test pass on a message change rather
+  // than on the behaviour. This input was accepted before and is refused now.
   const interleaved = rawCollection();
-  const first = { total_count: 2, check_runs: [] };
-  const second = { total_count: 2, check_runs: [] };
-  interleaved.check_runs.pages = [first, second];
+  const first = interleaved.check_runs.pages[0];
+  const later = structuredClone(first);
+  first.total_count = 2;
+  later.total_count = 2;
+  later.check_runs[0].id = 9002;
+  later.check_runs[0].name = "lint";
+  interleaved.check_runs.pages = [first, later];
   assert.throws(
     () => normalizeGithubObservation(publication(), interleaved),
     /check-run state cannot be established across multiple pages/,
+  );
+});
+
+test("commit statuses walked across pages are refused too", () => {
+  // decidingRunsFor makes no distinction between the two kinds, and a deciding
+  // status drives CHECKS_FAILED and CHECKS_PENDING exactly as a run does, so
+  // the atomic-read argument binds statuses without qualification.
+  const walked = rawCollection();
+  walked.commit_statuses.pages = [[], []];
+  assert.throws(
+    () => normalizeGithubObservation(publication(), walked),
+    /commit-status state cannot be established across multiple pages/,
+  );
+});
+
+test("a commit with more check runs than one page holds says so", () => {
+  // The generic count mismatch gives the operator nothing to act on: this is a
+  // standing property of the commit, not a bookkeeping slip or a race.
+  const overflowing = rawCollection();
+  const page = overflowing.check_runs.pages[0];
+  const template = page.check_runs[0];
+  page.check_runs = Array.from({ length: 100 }, (unused, index) => ({
+    ...structuredClone(template),
+    id: 9001 + index,
+    name: `check-${index}`,
+  }));
+  page.total_count = 137;
+  assert.throws(
+    () => normalizeGithubObservation(publication(), overflowing),
+    /commit has 137 check runs; a single atomic page holds at most 100/,
   );
 });
 
@@ -953,4 +991,32 @@ test("the Link header decides whether a walk has reached the last page", () => {
     linkHasNext('<https://api.github.com/next/page?rel=next>; rel="last"'),
     false,
   );
+});
+
+test("the response split finds the header boundary in real gh output", () => {
+  // Captured from `gh api -i`: the status line ends with \n while the headers
+  // that follow end with \r\n, and a blank \r\n precedes the body. Locating
+  // that boundary is the part with real risk; linkHasNext only reads what this
+  // hands it.
+  const captured =
+    "HTTP/2.0 200 OK\n" +
+    "Content-Type: application/json; charset=utf-8\r\n" +
+    'Link: <https://api.github.com/x?page=2>; rel="next"\r\n' +
+    "\r\n" +
+    '[{"id":1}]';
+  const { headers, body } = splitGhResponse(captured, "probe");
+  assert.equal(JSON.parse(body)[0].id, 1);
+  assert.match(headers, /^HTTP\/2\.0 200 OK/);
+  assert.equal(headers.includes('rel="next"'), true);
+});
+
+test("a response head that is not understood is an error, not an absent Link", () => {
+  // The one direction that would record an unproven walk as complete: a head
+  // the parser cannot read looks exactly like GitHub saying there is no next
+  // page. Forced colour makes gh emit precisely this.
+  assert.throws(
+    () => splitGhResponse("\u001b[0;36mLink\u001b[0m: <x>; rel=\"next\"\r\n\r\n[]", "probe"),
+    /unreadable response head/,
+  );
+  assert.throws(() => splitGhResponse("[]", "probe"), /omitted response headers/);
 });

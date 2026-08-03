@@ -821,15 +821,18 @@ function validateObservation(input, ledger, currentMs) {
     ["APPLICABLE_RULES", "CHECK_RUN", "COMMIT_STATUS"],
     "required_checks.collection",
   );
-  // A check run's conclusion decides the gate, so like the review threads it
-  // cannot be assembled from several instants. The collector issues one
-  // request; the observation arrives as caller-supplied JSON, so the rule has
-  // to hold here too.
-  requireAtomicPage(
-    requiredChecks.collection,
-    "CHECK_RUN",
-    "required_checks.collection",
-  );
+  // Both run kinds carry state that decides the gate, so like the review
+  // threads neither can be assembled from several instants. decidingRunsFor
+  // makes no distinction between them, so neither does this. The collector
+  // issues one request each; the observation arrives as caller-supplied JSON,
+  // so the rule has to hold here too.
+  for (const kind of ["CHECK_RUN", "COMMIT_STATUS"]) {
+    requireAtomicPage(
+      requiredChecks.collection,
+      kind,
+      "required_checks.collection",
+    );
+  }
   requireSourceKinds(
     requiredChecks.collection,
     ["APPLICABLE_RULES", "BRANCH_METADATA", "CHECK_RUN", "COMMIT_STATUS"],

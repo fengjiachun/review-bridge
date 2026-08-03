@@ -43,6 +43,18 @@ function authorization(publication) {
   };
 }
 
+const CHECK_RUN_PAGE_SIZE = 100;
+
+function requireAtomicPages(pages, label) {
+  if (pages.length !== 1) {
+    throw new Error(
+      pages.length === 0
+        ? `${label} collection has no pages`
+        : `${label} state cannot be established across multiple pages`,
+    );
+  }
+}
+
 function itemPages(entry, name) {
   const pages = array(entry?.pages, `${name}.pages`);
   // These endpoints report no total, so exhaustion is only ever established by
@@ -395,22 +407,22 @@ function normalizeRuns(publication, raw) {
   const checkRuns = checkPages.flatMap((page, index) =>
     array(page?.check_runs, `check_runs.pages[${index}].check_runs`),
   );
-  // Only an atomic read, for the reason the review threads are: a check run's
-  // conclusion decides the gate, and a walk reads each page at its own instant.
-  // A run recorded from page one keeps that page's conclusion, so a re-run that
-  // fails after page one was read is stored as whatever it was before. That
-  // lands fail-open rather than fail-closed: decidingRunsFor takes the latest
-  // run per context, so losing or staling the newest failure lets an earlier
-  // success decide. Unlike the review threads this connection is walked by
-  // offset, where a compensating create and delete can also drop a run outright
-  // without repeating one, so no count rule could close it either.
-  if (checkPages.length !== 1) {
-    throw new Error(
-      checkPages.length === 0
-        ? "check-run collection has no pages"
-        : "check-run state cannot be established across multiple pages",
-    );
-  }
+  // Only an atomic read, for the reason the review threads are: the state that
+  // decides the gate is read per page, and a walk reads each page at its own
+  // instant. A run recorded from page one keeps that page's conclusion, so a
+  // re-run that fails after page one was read is stored as whatever it was
+  // before. That lands fail-open rather than fail-closed: decidingRunsFor takes
+  // the latest run per context, so losing or staling the newest failure lets an
+  // earlier success decide. Unlike the review threads this connection is walked
+  // by offset, where a compensating create and delete can also drop a run
+  // outright without repeating one, so no count rule could close it either.
+  //
+  // The same argument binds commit statuses below, without qualification:
+  // decidingRunsFor makes no distinction between the two kinds, and a deciding
+  // status drives CHECKS_FAILED and CHECKS_PENDING exactly as a run does. They
+  // differ only in what proves a single page complete -- a run total the
+  // endpoint reports, against a terminal Link header for the statuses.
+  requireAtomicPages(checkPages, "check-run");
   const reportedTotal = checkPages[0]?.total_count;
   if (!Number.isSafeInteger(reportedTotal) || reportedTotal < 0) {
     throw new Error("check_runs.pages[0] is missing a reported total");
@@ -420,9 +432,18 @@ function normalizeRuns(publication, raw) {
     throw new Error("check-run page repeats a run");
   }
   if (reportedTotal !== checkRuns.length) {
+    // A commit with more runs than one page holds is a standing condition, not
+    // a bookkeeping slip, and the operator has no way to act on the generic
+    // message. Name the ceiling so the cause is legible.
+    if (checkRuns.length === CHECK_RUN_PAGE_SIZE && reportedTotal > checkRuns.length) {
+      throw new Error(
+        `commit has ${reportedTotal} check runs; a single atomic page holds at most ${CHECK_RUN_PAGE_SIZE}`,
+      );
+    }
     throw new Error("check-run pages do not account for the reported total");
   }
   const statusPage = itemPages(raw.commit_statuses, "commit_statuses");
+  requireAtomicPages(statusPage.pages, "commit-status");
   const runs = checkRuns.map((run) => {
     const status = String(run.status).toUpperCase();
     const completed = status === "COMPLETED";
@@ -927,23 +948,49 @@ function runGhWithHeaders(args) {
       `gh api -i ${args.join(" ")} failed: ${result.stderr.trim() || result.stdout.trim()}`,
     );
   }
-  const separator = result.stdout.search(/\r?\n\r?\n/);
-  if (separator < 0) {
-    throw new Error(`gh api -i ${args.join(" ")} returned no response body`);
-  }
-  const head = result.stdout.slice(0, separator);
-  const body = result.stdout.slice(separator).replace(/^\r?\n\r?\n/, "");
-  const link =
-    head
-      .split(/\r?\n/)
-      .find((line) => /^link:/i.test(line))
-      ?.slice("link:".length)
-      .trim() ?? "";
-  return { value: JSON.parse(body), link };
+  const { headers, body } = splitGhResponse(
+    result.stdout,
+    `gh api -i ${args.join(" ")}`,
+  );
+  return { value: JSON.parse(body), link: headerValue(headers, "link") };
 }
 
+// Shared with the OAuth administration proof: both read a `gh api --include`
+// response, and locating the boundary is the part worth having in one place.
+export function splitGhResponse(stdout, label) {
+  const separator = String(stdout).match(/\r?\n\r?\n/);
+  if (separator?.index == null) {
+    throw new Error(`${label} omitted response headers`);
+  }
+  const headers = String(stdout).slice(0, separator.index);
+  // A head that does not begin with a status line was not understood, and an
+  // unread header must never pass for one GitHub did not send. Without this the
+  // absence of a Link line is indistinguishable from a parse that failed --
+  // the one direction that records an unproven walk as complete.
+  if (!/^HTTP\/[0-9.]+ [0-9]{3}/.test(headers)) {
+    throw new Error(`${label} returned an unreadable response head`);
+  }
+  return {
+    headers,
+    body: String(stdout).slice(separator.index + separator[0].length),
+  };
+}
+
+function headerValue(headers, name) {
+  const prefix = new RegExp(`^${name}:`, "i");
+  return (
+    headers
+      .split(/\r?\n/)
+      .find((line) => prefix.test(line))
+      ?.slice(name.length + 1)
+      .trim() ?? ""
+  );
+}
+
+// RFC 8288 allows the relation unquoted; api.github.com always quotes it, but
+// GHES and intermediaries are not bound by that.
 export function linkHasNext(link) {
-  return /;\s*rel="next"/.test(link);
+  return /;\s*rel\s*=\s*"?next"?(\s*[,;]|\s*$)/i.test(link);
 }
 
 function get(endpoint) {
@@ -970,6 +1017,14 @@ function getPages(endpoint) {
       complete = true;
       break;
     }
+  }
+  // Falling out of the loop still advertising a next page is a distinct
+  // condition from a response that failed to prove itself, and the generic
+  // refusal downstream cannot tell the operator which happened.
+  if (!complete) {
+    throw new Error(
+      `GET ${endpoint} still advertised more pages after ${MAX_PAGES} requests`,
+    );
   }
   return {
     pages,
@@ -1019,12 +1074,10 @@ export function normalizeOauthAdminProofResponse(
       }`,
     );
   }
-  const separator = result.stdout.match(/\r?\n\r?\n/);
-  if (separator?.index == null) {
-    throw new Error("GitHub OAuth administration proof omitted response headers");
-  }
-  const headers = result.stdout.slice(0, separator.index);
-  const body = result.stdout.slice(separator.index + separator[0].length);
+  const { headers, body } = splitGhResponse(
+    result.stdout,
+    "GitHub OAuth administration proof",
+  );
   const scopeHeader = headers
     .split(/\r?\n/)
     .find((line) => /^x-oauth-scopes:/i.test(line));

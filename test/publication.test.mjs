@@ -3580,6 +3580,16 @@ test("observation validation rejects incomplete provenance and unsafe check bind
       },
     },
     {
+      // decidingRunsFor treats the two kinds alike, so the rule must too.
+      pattern: /COMMIT_STATUS must be a single atomic page/,
+      mutate(value) {
+        const source = value.required_checks.collection.run_sources.find(
+          (entry) => entry.kind === "COMMIT_STATUS",
+        );
+        source.page_count = 2;
+      },
+    },
+    {
       pattern: /CHECK_RUN collection counts are inconsistent/,
       mutate(value) {
         value.required_checks.collection.run_sources[0].item_count = 1;
