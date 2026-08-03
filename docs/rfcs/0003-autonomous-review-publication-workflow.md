@@ -1497,10 +1497,17 @@ this RFC changes from `Accepted` to `Implemented`.
   observation, which carry the request correlation; the thread evidence
   supplies the review ID and reviewed head that make the join possible.
 
-  The observation accepts only an atomic read: a single response, and so a
-  single instant. This is a real restriction — a pull request past one page of
-  review threads is not collectable — and it is worth being precise about why,
-  because the obvious weaker rules look sufficient and are not.
+  A thread collection that claims completeness must be an atomic read: a single
+  response, and so a single instant. The collector produces nothing else, and
+  the ledger requires it of the observation, which arrives as caller-supplied
+  JSON. A collection that instead admits incompleteness may carry anything and
+  is still recorded — it claims no evidence, and the gate returns
+  `EVIDENCE_INCOMPLETE` for it without reading `unresolved_count`. So the rule
+  binds exactly the collections something is decided from.
+
+  This is a real restriction — a pull request past one page of review threads
+  is not collectable — and it is worth being precise about why, because the
+  obvious weaker rules look sufficient and are not.
 
   Counts can prove *membership* across a paginated walk. Requiring the
   provider's `totalCount` on every page, identical across pages, and equal to

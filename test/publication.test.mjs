@@ -3561,7 +3561,8 @@ test("observation validation rejects incomplete provenance and unsafe check bind
     {
       // The observation arrives as caller-supplied JSON, so the collector's
       // refusal to walk threads has to be restated here or it holds in only
-      // one of the two layers that claim it.
+      // one of the two layers that claim it. Bound to collections claiming
+      // completeness; the incompleteness case above pins the other side.
       pattern: /must be a single atomic page/,
       mutate(value) {
         value.review_threads.collection.sources[0].page_count = 2;
