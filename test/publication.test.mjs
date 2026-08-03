@@ -5223,7 +5223,31 @@ test("the resolution plan surfaces per-thread verdicts and refuses without evide
     (error) => error.code === "PUBLICATION_THREAD_EVIDENCE_MISSING",
   );
 
-  const observedAt = startedAt + 1_000;
+  // An openly incomplete collection is recordable by design, and the plan must
+  // refuse it through the same code -- this pins the second half of the
+  // disjunction, which the first half cannot reach.
+  const incompleteAt = startedAt + 1_500;
+  const partial = observation({
+    at: incompleteAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  partial.review_threads.collection.status = "INCOMPLETE";
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: partial },
+    { clock: () => incompleteAt + 10 },
+  );
+  await assert.rejects(
+    getThreadResolutionPlan(state.store, state.reviewId),
+    (error) => error.code === "PUBLICATION_THREAD_EVIDENCE_MISSING",
+  );
+
+  const observedAt = startedAt + 2_000;
   const value = observation({
     at: observedAt,
     baseSha: state.baseSha,
@@ -5273,7 +5297,7 @@ test("the resolution plan surfaces per-thread verdicts and refuses without evide
   await recordGithubSnapshot(
     state.store,
     state.reviewId,
-    { expectedRevision: 1, observation: value },
+    { expectedRevision: 2, observation: value },
     { clock: () => observedAt + 10 },
   );
 
