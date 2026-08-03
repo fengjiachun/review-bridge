@@ -3517,6 +3517,13 @@ export function threadResolutionEligibility(ledger, thread, context) {
     return refuse("NOT_CODEX_AUTHORED");
   }
 
+  // RFC condition 8's second clause: a finding whose review was dismissed has
+  // been answered through a path this workflow does not own, and resolving on
+  // top of a dismissal would launder that path into a workflow decision.
+  if (review.state === "DISMISSED") {
+    return refuse("REVIEW_DISMISSED");
+  }
+
   // A thread raised against the very head the CLEAN examined would mean the
   // same review both raised and did not raise it. That is a contradiction in
   // the evidence rather than a discharge, so it refuses instead of resolving.
@@ -5209,7 +5216,7 @@ export async function getThreadResolutionPlan(storeRoot, reviewId) {
         })),
       };
     } finally {
-      await authorization.close();
+      await closeAuthorizationFiles(authorization);
     }
   });
 }

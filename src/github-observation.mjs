@@ -708,9 +708,6 @@ function normalizeThreadAncestry(publication, raw, threads) {
       entry.collected_at,
       "thread_ancestry collected_at",
     );
-    // GitHub compare base...head: "behind" or "identical" from the finding
-    // head's viewpoint means every finding-head commit is reachable from the
-    // gated head, i.e. the gated head descends from it.
     const status = compareStatus(comparison.status);
     entries.push({
       finding_head_sha: head,
@@ -1419,9 +1416,19 @@ export function collectGithubObservation(publicationInput) {
   ].sort();
   const threadAncestry = findingHeads.map((head) => {
     const endpoint = `${root}/compare/${head}...${authorizationValue.head_sha}`;
+    // A compare can 404 when the finding head was garbage-collected after a
+    // force-push. That is an answer about this one thread -- descent cannot be
+    // proven -- not a reason to make the whole publication unobservable, so it
+    // records UNKNOWN and the thread refuses on unproven descent downstream.
+    let value;
+    try {
+      value = runGh(["api", endpoint]);
+    } catch {
+      value = { status: "unknown" };
+    }
     return {
       finding_head_sha: head,
-      value: runGh(["api", endpoint]),
+      value,
       endpoint: `GET ${endpoint}`,
       collected_at: new Date().toISOString(),
     };

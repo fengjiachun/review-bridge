@@ -16,6 +16,7 @@ import {
   finalizePublicationGate,
   getPublication,
   getPublicationSummary,
+  getThreadResolutionPlan,
   inspectPublicationAudit,
   publicationConstants,
   readObservationFile,
@@ -5185,5 +5186,176 @@ test("an outdated diff hunk is not evidence that a finding was addressed", () =>
       eligibilityContext(),
     ),
     { eligible: false, reason: "FIX_NOT_RECORDED" },
+  );
+});
+
+test("the resolution plan surfaces per-thread verdicts and refuses without evidence", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+
+  // Before any observation: the mandated refusal, not an empty plan. An
+  // absent collection establishes nothing, so it plans nothing.
+  await start(state, startedAt);
+  await assert.rejects(
+    getThreadResolutionPlan(state.store, state.reviewId),
+    (error) => error.code === "PUBLICATION_THREAD_EVIDENCE_MISSING",
+  );
+
+  const observedAt = startedAt + 1_000;
+  const value = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  const codex = { id: 99, type: "Bot", login: "codex" };
+  value.review_threads.total_count = 1;
+  value.review_threads.unresolved_count = 1;
+  value.review_threads.threads = [
+    {
+      id: "PRRT_1",
+      is_resolved: false,
+      is_outdated: false,
+      comment_count: 1,
+      comments_pagination_complete: true,
+      provenance_complete: true,
+      comments: [
+        {
+          id: "PRRC_1",
+          database_id: 3694779367,
+          created_at: iso(startedAt - 5_000),
+          updated_at: iso(startedAt - 5_000),
+          actor: codex,
+          review: {
+            id: "PRR_1",
+            database_id: 4833836859,
+            state: "COMMENTED",
+            reviewed_head_sha: "c".repeat(40),
+            actor: codex,
+          },
+        },
+      ],
+    },
+  ];
+  value.review_threads.ancestry = [
+    {
+      finding_head_sha: "c".repeat(40),
+      status: "AHEAD",
+      descends: true,
+      endpoint: `GET /repos/o/r/compare/${"c".repeat(40)}...${state.headSha}`,
+      collected_at: iso(observedAt - 500),
+    },
+  ];
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: value },
+    { clock: () => observedAt + 10 },
+  );
+
+  // A v1 publication has no workflow binding, so the plan must carry the
+  // thread with a workflow refusal rather than pretend eligibility.
+  const plan = await getThreadResolutionPlan(state.store, state.reviewId);
+  assert.equal(plan.review_id, state.reviewId);
+  assert.equal(plan.threads.length, 1);
+  assert.equal(plan.threads[0].thread_id, "PRRT_1");
+  assert.equal(plan.threads[0].eligible, false);
+  assert.equal(plan.threads[0].reason, "WORKFLOW_NOT_BOUND");
+});
+
+test("ledger ancestry exactness and honesty are each load-bearing", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 1_000;
+  const build = (mutate) => {
+    const value = observation({
+      at: observedAt,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: null,
+      requestAt: startedAt,
+      withResult: false,
+    });
+    const codex = { id: 99, type: "Bot", login: "codex" };
+    value.review_threads.total_count = 1;
+    value.review_threads.unresolved_count = 1;
+    value.review_threads.threads = [
+      {
+        id: "PRRT_1",
+        is_resolved: false,
+        is_outdated: false,
+        comment_count: 1,
+        comments_pagination_complete: true,
+        provenance_complete: true,
+        comments: [
+          {
+            id: "PRRC_1",
+            database_id: 3694779367,
+            created_at: iso(startedAt - 5_000),
+            updated_at: iso(startedAt - 5_000),
+            actor: codex,
+            review: {
+              id: "PRR_1",
+              database_id: 4833836859,
+              state: "COMMENTED",
+              reviewed_head_sha: "c".repeat(40),
+              actor: codex,
+            },
+          },
+        ],
+      },
+    ];
+    value.review_threads.ancestry = [
+      {
+        finding_head_sha: "c".repeat(40),
+        status: "AHEAD",
+        descends: true,
+        endpoint: `GET /repos/o/r/compare/${"c".repeat(40)}...${state.headSha}`,
+        collected_at: iso(observedAt - 500),
+      },
+    ];
+    mutate(value);
+    return value;
+  };
+  const record = (mutate) =>
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 1, observation: build(mutate) },
+      { clock: () => observedAt + 10 },
+    );
+
+  // A referenced finding head with no compare escapes the descent question.
+  await assert.rejects(
+    record((value) => {
+      value.review_threads.ancestry = [];
+    }),
+    /missing a referenced finding head/,
+  );
+  // A compare for a head no thread references is evidence about nothing.
+  await assert.rejects(
+    record((value) => {
+      value.review_threads.ancestry.push({
+        finding_head_sha: "d".repeat(40),
+        status: "AHEAD",
+        descends: true,
+        endpoint: `GET /repos/o/r/compare/${"d".repeat(40)}...${state.headSha}`,
+        collected_at: iso(observedAt - 500),
+      });
+    }),
+    /covers a head no thread references/,
+  );
+  // descends is a derivation: asserting it beside a status that denies it is
+  // a caller lying about its own evidence.
+  await assert.rejects(
+    record((value) => {
+      value.review_threads.ancestry[0].status = "DIVERGED";
+    }),
+    /descent disagrees with its status/,
   );
 });
