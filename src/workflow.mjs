@@ -6,6 +6,7 @@ import path from "node:path";
 import { getReviewSnapshot } from "./core.mjs";
 import {
   getAutonomousPreReady,
+  getPublication,
   getPublicationFindingsReview,
   getThreadResolutionPlan,
 } from "./publication.mjs";
@@ -2179,11 +2180,22 @@ function nextAction(workflow) {
     }),
     START_PUBLICATION: "START_PUBLICATION",
     WAIT_PUBLICATION: "WAIT_PUBLICATION",
-    RESOLVE_CODEX_THREADS: actionPhase("PLAN_THREAD_REPLY", {
-      PLANNED: "REPLY_TO_CODEX_THREAD",
-      EXECUTING: "RECONCILE_THREAD_REPLY",
-      OBSERVED: "COMPLETE_THREAD_REPLY",
-    }),
+    RESOLVE_CODEX_THREADS:
+      workflow.active_action == null
+        ? "PLAN_THREAD_ACTION"
+        : ({
+            REPLY_TO_CODEX_THREAD: {
+              PLANNED: "REPLY_TO_CODEX_THREAD",
+              EXECUTING: "RECONCILE_THREAD_REPLY",
+              OBSERVED: "COMPLETE_THREAD_REPLY",
+            },
+            RESOLVE_REVIEW_THREAD: {
+              PLANNED: "RESOLVE_REVIEW_THREAD",
+              EXECUTING: "RECONCILE_THREAD_RESOLUTION",
+              OBSERVED: "COMPLETE_THREAD_RESOLUTION",
+            },
+          }[workflow.active_action.kind]?.[workflow.active_action.status] ??
+          "INSPECT_WORKFLOW"),
     ADDRESS_REMOTE_FINDINGS: "ADDRESS_REMOTE_FINDINGS",
     ADDRESS_CHECK_FAILURE: "ADDRESS_CHECK_FAILURE",
     UPDATE_FROM_BASE: "UPDATE_FROM_BASE",
@@ -2997,6 +3009,18 @@ export async function planThreadResolution(
             { thread_id: threadId, reason: entry?.reason ?? "THREAD_UNKNOWN" },
           );
         }
+        // The intent must bind the reply-inclusive watermark. An observation
+        // recorded before the reply still derives an eligible thread, but a
+        // record bound to it would be invalidated by the very snapshot that
+        // shows the workflow's own reply -- a permanent stop on a correct
+        // resolution. Refuse until a fresh observation contains the reply.
+        if (!entry.comment_database_ids.includes(reply.comment_id)) {
+          fail(
+            "WORKFLOW_THREAD_REPLY_NOT_OBSERVED",
+            "the recorded observation does not contain the workflow's reply yet",
+            { thread_id: threadId, reply_comment_id: reply.comment_id },
+          );
+        }
         return {
           review_id: workflow.current_publication.review_id,
           thread_id: threadId,
@@ -3471,6 +3495,30 @@ export async function completeWorkflowAction(
       return completeDraftPullRequest(storeRoot, workflow, paths, action);
     }
     if (action.kind === "RESOLVE_REVIEW_THREAD") {
+      if (action.provider_response.outcome === "RESOLVED") {
+        // The server-owned record must exist before the action may close.
+        // Completing without it would let the next snapshot -- which shows
+        // the thread resolved -- make the record permanently uncreatable,
+        // and the gate's invalidation re-check would have nothing to hold a
+        // later objection against. The record creation is idempotent for
+        // this action, so a crashed driver repeats it and then completes.
+        const ledger = await getPublication(
+          storeRoot,
+          action.target.review_id,
+        );
+        const record = (ledger.automatic_resolutions ?? []).find(
+          (entry) =>
+            entry.thread_id === action.target.thread_id &&
+            entry.action_id === action.action_id,
+        );
+        if (record == null) {
+          fail(
+            "WORKFLOW_RESOLUTION_RECORD_MISSING",
+            "a resolved outcome completes only after its automatic-resolution record is stored",
+            { review_id: action.target.review_id, retryable: true },
+          );
+        }
+      }
       return publicWorkflow(
         await saveActionMutation(
           paths,

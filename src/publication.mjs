@@ -5508,6 +5508,12 @@ export async function getThreadResolutionPlan(storeRoot, reviewId) {
             line: thread.line,
             is_resolved: thread.is_resolved,
             ...verdict,
+            // The comments behind the watermark, by database ID: what lets a
+            // caller require its recorded reply to be inside the watermark
+            // it is about to bind, rather than one observation behind it.
+            comment_database_ids: thread.comments.map(
+              (comment) => comment.database_id,
+            ),
             thread_watermark: watermark,
             eligibility_sha256: sha256(
               canonicalJson({
@@ -5937,6 +5943,19 @@ export async function recordAutomaticResolution(
       fail(
         "INVALID_INPUT",
         "the resolution must follow the workflow's own recorded reply",
+      );
+    }
+    // And the reply must be inside the watermark this record binds: a record
+    // over a pre-reply observation would be invalidated by the workflow's
+    // own next snapshot.
+    if (
+      !thread.comments.some(
+        (comment) => comment.database_id === replyCommentId,
+      )
+    ) {
+      fail(
+        "INVALID_INPUT",
+        "the recorded observation does not contain the workflow's reply",
       );
     }
     const recordedAt = new Date(currentMs).toISOString();

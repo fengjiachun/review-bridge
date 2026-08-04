@@ -1116,6 +1116,16 @@ test("an addressed finding's thread becomes eligible in the next publication's p
   assert.equal(reply.head_sha, secondHead);
   assert.equal(reply.publication_review_id, second.reviewId);
 
+  // The resolution intent must bind a reply-inclusive watermark: while the
+  // latest observation still predates the reply, planning refuses rather
+  // than binding a watermark the workflow's own next snapshot would break.
+  await assert.rejects(
+    planThreadResolution(state.store, workflow.workflow_id, replied.revision, {
+      threadId: "PRRT_1",
+    }),
+    (error) => error.code === "WORKFLOW_THREAD_REPLY_NOT_OBSERVED",
+  );
+
   // A fresh observation carries the reply as a thread comment by the human
   // operator account. Condition 7 admits exactly that recorded comment, so
   // the thread stays eligible; the same comment unrecorded would refuse.
@@ -1295,6 +1305,19 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       resolvedById: 555,
       resolvedByType: "User",
     },
+  );
+
+  // A RESOLVED outcome cannot complete before its server-owned record
+  // exists: completing first would let the next snapshot make the record
+  // permanently uncreatable, leaving the gate nothing to re-check.
+  await assert.rejects(
+    completeWorkflowAction(
+      state.store,
+      workflow.workflow_id,
+      resolutionObserved.revision,
+      resolutionPlanned.action.action_id,
+    ),
+    (error) => error.code === "WORKFLOW_RESOLUTION_RECORD_MISSING",
   );
 
   // The record creation recomputes every claim; a digest or watermark that
