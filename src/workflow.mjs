@@ -342,6 +342,93 @@ const ACTION_KIND_SPECS = {
       }
     },
   },
+  RESOLVE_REVIEW_THREAD: {
+    // The second half: resolve the exact thread the recorded reply answered.
+    // The intent binds the reply-inclusive watermark; the executing proof is
+    // the immediately preceding unresolved read; the response is the
+    // post-read attesting the transition -- resolvedBy must be this action's
+    // own actor, because GitHub's mutation succeeds identically on an
+    // already-resolved thread and cannot attest it alone.
+    capability: "RESOLVE_ELIGIBLE_CODEX_THREADS",
+    phase: "RESOLVE_CODEX_THREADS",
+    claimKind: "PULL_REQUEST",
+    markerPrefix: null,
+    identityFacts(target) {
+      return {
+        thread_id: target.thread_id,
+        thread_watermark: target.thread_watermark,
+      };
+    },
+    validateTarget(workflow, target) {
+      const reply = (workflow.thread_replies ?? []).find(
+        (entry) => entry.thread_id === target.thread_id,
+      );
+      if (
+        workflow.current_publication == null ||
+        target.review_id !== workflow.current_publication.review_id ||
+        target.head_sha !== workflow.current_head_sha ||
+        typeof target.thread_id !== "string" ||
+        target.thread_id === "" ||
+        !DIGEST_RE.test(target.thread_watermark ?? "") ||
+        !DIGEST_RE.test(target.eligibility_sha256 ?? "") ||
+        reply == null ||
+        target.reply_comment_id !== reply.comment_id ||
+        target.expected_actor_id !== reply.actor.id ||
+        target.expected_actor_type !== reply.actor.type
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "thread-resolution target does not match the bound publication, head, and recorded reply",
+        );
+      }
+    },
+    dispatch: null,
+    validateExecutingProof(action, proof) {
+      // The pre-read, immediately before the provider call. An already
+      // resolved thread is a legal proof -- it forbids the mutation and
+      // forces the OBSERVED_PRE_RESOLVED outcome downstream.
+      if (
+        proof == null ||
+        proof.thread_id !== action.target.thread_id ||
+        typeof proof.is_resolved !== "boolean" ||
+        (proof.is_resolved === false &&
+          proof.thread_watermark !== action.target.thread_watermark)
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "the resolution pre-read must bind the exact thread and watermark",
+        );
+      }
+    },
+    validateResponse(action, response) {
+      if (response.outcome === "OBSERVED_PRE_RESOLVED") {
+        // No mutation was issued; the only claim is that the thread was
+        // found resolved. Ownership is exactly what this outcome refuses.
+        if (
+          response.thread_id !== action.target.thread_id ||
+          response.is_resolved !== true ||
+          action.executing_proof?.is_resolved !== true
+        ) {
+          fail(
+            "WORKFLOW_ACTION_INVALID",
+            "a pre-resolved outcome requires the pre-read that found it resolved",
+          );
+        }
+        return;
+      }
+      if (
+        response.outcome !== "RESOLVED" ||
+        action.executing_proof?.is_resolved !== false ||
+        response.thread_id !== action.target.thread_id ||
+        response.is_resolved !== true ||
+        response.thread_watermark !== action.target.thread_watermark ||
+        response.resolved_by_id !== action.target.expected_actor_id ||
+        response.resolved_by_type !== action.target.expected_actor_type
+      ) {
+        fail("WORKFLOW_ACTION_INVALID", "active action response is invalid");
+      }
+    },
+  },
   CREATE_DRAFT_PULL_REQUEST: {
     capability: "CREATE_OR_UPDATE_DRAFT_PR",
     phase: "ENSURE_DRAFT_PR",
@@ -896,7 +983,8 @@ function validateWorkflow(workflow) {
     !Array.isArray(workflow.claims) ||
     !Array.isArray(workflow.remote_attempts) ||
     !Array.isArray(workflow.addressed_findings) ||
-    !Array.isArray(workflow.thread_replies)
+    !Array.isArray(workflow.thread_replies) ||
+    !Array.isArray(workflow.thread_resolutions)
   ) {
     fail("WORKFLOW_STATE_INVALID", "workflow arrays are malformed");
   }
@@ -977,6 +1065,42 @@ function validateWorkflow(workflow) {
       fail("WORKFLOW_STATE_INVALID", "thread-reply watermark is invalid");
     }
     assertTimestamp(reply.recorded_at, "thread-reply recorded_at");
+  }
+  const resolvedThreads = new Set();
+  for (const [index, resolution] of workflow.thread_resolutions.entries()) {
+    assertObject(resolution, "workflow.thread_resolutions entry");
+    if (resolution.number !== index + 1) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "thread-resolution numbers must be sequential",
+      );
+    }
+    assertString(resolution.thread_id, "thread-resolution thread_id", {
+      max: 1024,
+    });
+    if (resolvedThreads.has(resolution.thread_id)) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "a thread can carry only one recorded resolution outcome",
+      );
+    }
+    resolvedThreads.add(resolution.thread_id);
+    if (!["RESOLVED", "OBSERVED_PRE_RESOLVED"].includes(resolution.outcome)) {
+      fail("WORKFLOW_STATE_INVALID", "thread-resolution outcome is invalid");
+    }
+    assertString(resolution.action_id, "thread-resolution action_id", {
+      max: 1024,
+    });
+    if (!DIGEST_RE.test(resolution.thread_watermark ?? "")) {
+      fail("WORKFLOW_STATE_INVALID", "thread-resolution watermark is invalid");
+    }
+    assertSha(resolution.head_sha, "thread-resolution head_sha");
+    assertString(
+      resolution.publication_review_id,
+      "thread-resolution review_id",
+      { max: 1024 },
+    );
+    assertTimestamp(resolution.recorded_at, "thread-resolution recorded_at");
   }
   validateCurrentPublication(workflow);
   const claimKeys = new Set();
@@ -1132,6 +1256,7 @@ const REMOTE_FIELD_DEFAULTS = Object.freeze({
   current_publication: null,
   addressed_findings: [],
   thread_replies: [],
+  thread_resolutions: [],
 });
 
 function withRemoteFieldDefaults(workflow) {
@@ -1490,6 +1615,7 @@ function auditedWorkflowState(workflow) {
     remote_attempts: workflow.remote_attempts ?? [],
     addressed_findings: workflow.addressed_findings ?? [],
     thread_replies: workflow.thread_replies ?? [],
+    thread_resolutions: workflow.thread_resolutions ?? [],
     active_action: workflow.active_action,
     reviewer_task: workflow.reviewer_task,
     current_review: workflow.current_review,
@@ -1693,6 +1819,7 @@ function requireWorkflowAuditBinding(workflow, audit) {
     remote_attempts: [],
     addressed_findings: [],
     thread_replies: [],
+    thread_resolutions: [],
     active_action: null,
     reviewer_task: null,
     current_review: null,
@@ -1719,6 +1846,8 @@ function requireWorkflowAuditBinding(workflow, audit) {
       canonicalJson(lastState.addressed_findings ?? []) ||
     canonicalJson(workflow.thread_replies ?? []) !==
       canonicalJson(lastState.thread_replies ?? []) ||
+    canonicalJson(workflow.thread_resolutions ?? []) !==
+      canonicalJson(lastState.thread_resolutions ?? []) ||
     canonicalJson(workflow.active_action) !==
       canonicalJson(lastState.active_action) ||
     canonicalJson(workflow.reviewer_task) !==
@@ -1775,6 +1904,7 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "remote_attempts",
     "addressed_findings",
     "thread_replies",
+    "thread_resolutions",
     "active_action",
     "reviewer_task",
     "current_review",
@@ -2079,6 +2209,7 @@ function workflowSummary(workflow) {
     remote_attempts: workflow.remote_attempts,
     addressed_findings: workflow.addressed_findings,
     thread_replies: workflow.thread_replies,
+    thread_resolutions: workflow.thread_resolutions,
     active_action:
       workflow.active_action == null
         ? null
@@ -2206,6 +2337,7 @@ export async function startAutonomousWorkflow(
     remote_attempts: [],
     addressed_findings: [],
     thread_replies: [],
+    thread_resolutions: [],
     claims: workflowClaims,
     active_action: null,
     progress_fingerprint: null,
@@ -2799,6 +2931,87 @@ export async function planThreadReply(
   );
 }
 
+export async function planThreadResolution(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  { threadId },
+) {
+  assertString(threadId, "thread_id", { max: 1024 });
+  return planWorkflowAction(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    "RESOLVE_REVIEW_THREAD",
+    {
+      planPhases: ["RESOLVE_CODEX_THREADS"],
+      invalidMessage: "a thread resolution is not currently plannable",
+      target: async (workflow) => {
+        if (workflow.current_publication == null) {
+          fail(
+            "WORKFLOW_STATE_INVALID",
+            "thread resolution has no bound publication",
+          );
+        }
+        const reply = workflow.thread_replies.find(
+          (entry) => entry.thread_id === threadId,
+        );
+        if (reply == null) {
+          fail(
+            "WORKFLOW_THREAD_NOT_ANSWERED",
+            "a resolution must follow the workflow's recorded reply",
+            { thread_id: threadId },
+          );
+        }
+        if (
+          workflow.thread_resolutions.some(
+            (entry) => entry.thread_id === threadId,
+          )
+        ) {
+          fail(
+            "WORKFLOW_THREAD_ALREADY_RESOLVED",
+            "this thread already carries a recorded resolution outcome",
+            { thread_id: threadId },
+          );
+        }
+        const plan = await getThreadResolutionPlan(
+          storeRoot,
+          workflow.current_publication.review_id,
+        );
+        if (
+          plan.workflow_id !== workflow.workflow_id ||
+          plan.head_sha !== workflow.current_head_sha
+        ) {
+          fail(
+            "WORKFLOW_PUBLICATION_MISMATCH",
+            "publication is not bound to this workflow and head",
+          );
+        }
+        const entry = plan.threads.find(
+          (thread) => thread.thread_id === threadId,
+        );
+        if (entry == null || entry.eligible !== true) {
+          fail(
+            "WORKFLOW_THREAD_NOT_ELIGIBLE",
+            "the thread is not eligible for automatic resolution",
+            { thread_id: threadId, reason: entry?.reason ?? "THREAD_UNKNOWN" },
+          );
+        }
+        return {
+          review_id: workflow.current_publication.review_id,
+          thread_id: threadId,
+          thread_watermark: entry.thread_watermark,
+          eligibility_sha256: entry.eligibility_sha256,
+          head_sha: workflow.current_head_sha,
+          expected_actor_id: reply.actor.id,
+          expected_actor_type: reply.actor.type,
+          reply_comment_id: reply.comment_id,
+        };
+      },
+    },
+  );
+}
+
 export async function markWorkflowActionExecuting(
   storeRoot,
   workflowId,
@@ -2966,6 +3179,38 @@ export async function recordThreadReplyObservation(
         body_sha256: sha256(body),
       };
     },
+  );
+}
+
+export async function recordThreadResolutionObservation(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  actionId,
+  { outcome, threadId, isResolved, threadWatermark, resolvedById, resolvedByType },
+) {
+  assertString(threadId, "thread_id", { max: 1024 });
+  if (!["RESOLVED", "OBSERVED_PRE_RESOLVED"].includes(outcome)) {
+    throw new TypeError("outcome must be RESOLVED or OBSERVED_PRE_RESOLVED");
+  }
+  return recordActionObservation(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    actionId,
+    "RESOLVE_REVIEW_THREAD",
+    () => ({
+      outcome,
+      thread_id: threadId,
+      is_resolved: isResolved,
+      ...(outcome === "RESOLVED"
+        ? {
+            thread_watermark: threadWatermark,
+            resolved_by_id: resolvedById,
+            resolved_by_type: resolvedByType,
+          }
+        : {}),
+    }),
   );
 }
 
@@ -3224,6 +3469,29 @@ export async function completeWorkflowAction(
     }
     if (action.kind === "CREATE_DRAFT_PULL_REQUEST") {
       return completeDraftPullRequest(storeRoot, workflow, paths, action);
+    }
+    if (action.kind === "RESOLVE_REVIEW_THREAD") {
+      return publicWorkflow(
+        await saveActionMutation(
+          paths,
+          workflow,
+          "ACTION_COMPLETED",
+          async (next) => {
+            next.active_action.completed_at = now();
+            next.thread_resolutions.push({
+              number: next.thread_resolutions.length + 1,
+              thread_id: action.target.thread_id,
+              outcome: action.provider_response.outcome,
+              action_id: action.action_id,
+              thread_watermark: action.target.thread_watermark,
+              head_sha: action.target.head_sha,
+              publication_review_id: action.target.review_id,
+              recorded_at: now(),
+            });
+            next.active_action = null;
+          },
+        ),
+      );
     }
     if (action.kind === "REPLY_TO_CODEX_THREAD") {
       return publicWorkflow(

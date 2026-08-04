@@ -16,6 +16,7 @@ import {
   getPublication,
   getPublicationSummary,
   getThreadResolutionPlan,
+  recordAutomaticResolution,
   recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
@@ -36,11 +37,13 @@ import {
   planCodexTaskDispatch,
   planDraftPullRequest,
   planThreadReply,
+  planThreadResolution,
   planWorkflowPush,
   recordCodexTaskObservation,
   recordDraftPullRequestObservation,
   recordPushObservation,
   recordThreadReplyObservation,
+  recordThreadResolutionObservation,
   recordWorkflowHead,
   resumeAutonomousWorkflow,
   startAutonomousWorkflow,
@@ -1210,6 +1213,182 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     eligible: false,
     reason: "NOT_CODEX_AUTHORED",
   });
+
+  // Back on the true observation, the resolution half runs: intent bound to
+  // the reply-inclusive watermark, unresolved pre-read, resolved post-read
+  // attributed to the workflow's own actor, server-owned record, and a
+  // fresh resolved snapshot that reaches the pre-ready projection.
+  const resolveAt = unrecordedAt + 10_000;
+  const resolveObservation = structuredClone(repliedObservation);
+  resolveObservation.observed_at = iso(resolveAt);
+  await recordGithubSnapshot(
+    state.store,
+    second.reviewId,
+    { expectedRevision: 5, observation: resolveObservation },
+    { clock: () => resolveAt + 10 },
+  );
+  const resolvePlan = await getThreadResolutionPlan(
+    state.store,
+    second.reviewId,
+  );
+  assert.equal(resolvePlan.threads[0].eligible, true);
+  const watermark = resolvePlan.threads[0].thread_watermark;
+
+  const resolutionPlanned = await planThreadResolution(
+    state.store,
+    workflow.workflow_id,
+    replied.revision,
+    { threadId: "PRRT_1" },
+  );
+  assert.deepEqual(resolutionPlanned.action.target, {
+    review_id: second.reviewId,
+    thread_id: "PRRT_1",
+    thread_watermark: watermark,
+    eligibility_sha256: resolvePlan.threads[0].eligibility_sha256,
+    head_sha: secondHead,
+    expected_actor_id: 555,
+    expected_actor_type: "User",
+    reply_comment_id: 901,
+  });
+  const resolutionExecuting = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    resolutionPlanned.workflow.revision,
+    resolutionPlanned.action.action_id,
+    {
+      thread_id: "PRRT_1",
+      is_resolved: false,
+      thread_watermark: watermark,
+    },
+  );
+  const resolutionObserved = await recordThreadResolutionObservation(
+    state.store,
+    workflow.workflow_id,
+    resolutionExecuting.revision,
+    resolutionPlanned.action.action_id,
+    {
+      outcome: "RESOLVED",
+      threadId: "PRRT_1",
+      isResolved: true,
+      threadWatermark: watermark,
+      resolvedById: 555,
+      resolvedByType: "User",
+    },
+  );
+
+  const withRecord = await recordAutomaticResolution(
+    state.store,
+    second.reviewId,
+    {
+      expectedRevision: 6,
+      workflowId: workflow.workflow_id,
+      actionId: resolutionPlanned.action.action_id,
+      threadId: "PRRT_1",
+      threadWatermark: watermark,
+      eligibilitySha256: resolvePlan.threads[0].eligibility_sha256,
+      replyCommentId: 901,
+      actorId: 555,
+      actorType: "User",
+      preReadObservedAt: iso(resolveAt + 1_000),
+      postReadObservedAt: iso(resolveAt + 2_000),
+      resolvedById: 555,
+      resolvedByType: "User",
+    },
+    { clock: () => resolveAt + 3_000 },
+  );
+  assert.equal(withRecord.automatic_resolutions.length, 1);
+  assert.equal(withRecord.automatic_resolutions[0].thread_id, "PRRT_1");
+  assert.equal(withRecord.automatic_resolutions[0].thread_watermark, watermark);
+  // The mutation invalidated whatever was observed before it.
+  assert.equal(withRecord.latest_observation, null);
+
+  // Recovery re-running the same action's record creation is a no-op; a
+  // different action claiming the same thread conflicts.
+  const repeated = await recordAutomaticResolution(
+    state.store,
+    second.reviewId,
+    {
+      expectedRevision: withRecord.revision,
+      workflowId: workflow.workflow_id,
+      actionId: resolutionPlanned.action.action_id,
+      threadId: "PRRT_1",
+      threadWatermark: watermark,
+      eligibilitySha256: resolvePlan.threads[0].eligibility_sha256,
+      replyCommentId: 901,
+      actorId: 555,
+      actorType: "User",
+      preReadObservedAt: iso(resolveAt + 1_000),
+      postReadObservedAt: iso(resolveAt + 2_000),
+      resolvedById: 555,
+      resolvedByType: "User",
+    },
+    { clock: () => resolveAt + 4_000 },
+  );
+  assert.equal(repeated.revision, withRecord.revision);
+  assert.equal(repeated.automatic_resolutions.length, 1);
+
+  const resolved = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    resolutionObserved.revision,
+    resolutionPlanned.action.action_id,
+  );
+  assert.equal(resolved.thread_resolutions.length, 1);
+  assert.equal(resolved.thread_resolutions[0].outcome, "RESOLVED");
+
+  // The fresh post-resolution snapshot shows the same watermark resolved,
+  // and the autonomous projection reaches READY_TO_MARK through the record
+  // revalidation.
+  const doneAt = resolveAt + 20_000;
+  const doneObservation = structuredClone(repliedObservation);
+  doneObservation.observed_at = iso(doneAt);
+  doneObservation.review_threads.threads[0].is_resolved = true;
+  doneObservation.review_threads.unresolved_count = 0;
+  await recordGithubSnapshot(
+    state.store,
+    second.reviewId,
+    { expectedRevision: withRecord.revision, observation: doneObservation },
+    { clock: () => doneAt + 10 },
+  );
+  const preReady = await getAutonomousPreReady(state.store, second.reviewId, {
+    clock: () => doneAt + 20,
+  });
+  assert.equal(preReady.status, "READY_TO_MARK");
+  const readyWorkflow = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    resolved.revision,
+  );
+  assert.equal(readyWorkflow.phase, "PRE_READY");
+
+  // Any later watermark change -- here a new Codex follow-up -- invalidates
+  // the record even though GitHub still reports the thread resolved.
+  const movedAt = doneAt + 10_000;
+  const movedObservation = structuredClone(doneObservation);
+  movedObservation.observed_at = iso(movedAt);
+  const movedThread = movedObservation.review_threads.threads[0];
+  movedThread.comment_count = 3;
+  movedThread.comments.push({
+    id: "PRRC_3",
+    database_id: 903,
+    created_at: iso(movedAt - 1_000),
+    updated_at: iso(movedAt - 1_000),
+    actor: codex,
+    review: null,
+  });
+  await recordGithubSnapshot(
+    state.store,
+    second.reviewId,
+    { expectedRevision: withRecord.revision + 1, observation: movedObservation },
+    { clock: () => movedAt + 10 },
+  );
+  const invalidated = await getAutonomousPreReady(
+    state.store,
+    second.reviewId,
+    { clock: () => movedAt + 20 },
+  );
+  assert.equal(invalidated.status, "CHANGES_REQUIRED");
+  assert.equal(invalidated.blocking_reason, "THREAD_RESOLUTION_INVALIDATED");
 });
 
 test("a repair head cannot be recorded when the publication no longer names a findings review", async (t) => {

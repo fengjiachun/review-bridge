@@ -1912,9 +1912,84 @@ function validateStoredLedger(ledger) {
       ledger.workflow_authorization_sha256,
       "publication.workflow_authorization_sha256",
     );
+    // A version-3 ledger written before automatic resolution has no array;
+    // it reads as none recorded, exactly like an empty one.
+    const resolutions = ledger.automatic_resolutions ?? [];
+    if (!Array.isArray(resolutions)) {
+      fail(
+        "PUBLICATION_STORE_INVALID",
+        "publication.automatic_resolutions is malformed",
+      );
+    }
+    const resolvedThreads = new Set();
+    for (const [index, record] of resolutions.entries()) {
+      assertObject(record, "automatic-resolution record");
+      if (record.number !== index + 1) {
+        fail(
+          "PUBLICATION_STORE_INVALID",
+          "automatic-resolution numbers must be sequential",
+        );
+      }
+      assertString(record.action_id, "automatic-resolution action_id", 1024);
+      assertString(record.thread_id, "automatic-resolution thread_id", 1024);
+      if (resolvedThreads.has(record.thread_id)) {
+        fail(
+          "PUBLICATION_STORE_INVALID",
+          "a thread can carry only one automatic-resolution record",
+        );
+      }
+      resolvedThreads.add(record.thread_id);
+      assertDigest(
+        record.thread_watermark,
+        "automatic-resolution thread_watermark",
+      );
+      assertDigest(
+        record.eligibility_sha256,
+        "automatic-resolution eligibility_sha256",
+      );
+      assertSha(record.head_sha, "automatic-resolution head_sha");
+      assertObject(record.actor, "automatic-resolution actor");
+      assertId(record.actor.id, "automatic-resolution actor id");
+      assertString(record.actor.type, "automatic-resolution actor type", 100);
+      assertId(record.reply_comment_id, "automatic-resolution reply_comment_id");
+      const preRead = assertObject(
+        record.pre_read,
+        "automatic-resolution pre_read",
+      );
+      timestampMs(preRead.observed_at, "automatic-resolution pre_read observed_at");
+      const postRead = assertObject(
+        record.post_read,
+        "automatic-resolution post_read",
+      );
+      timestampMs(
+        postRead.observed_at,
+        "automatic-resolution post_read observed_at",
+      );
+      const resolvedBy = assertObject(
+        postRead.resolved_by,
+        "automatic-resolution resolved_by",
+      );
+      // The record is only ever the proven shape: an unresolved pre-read, a
+      // resolved post-read on the same watermark, and the workflow's own
+      // actor as the resolver. Any other combination is not storable.
+      if (
+        preRead.is_resolved !== false ||
+        postRead.is_resolved !== true ||
+        resolvedBy.id !== record.actor.id ||
+        resolvedBy.type !== record.actor.type
+      ) {
+        fail(
+          "PUBLICATION_STORE_INVALID",
+          "automatic-resolution record does not prove an owned transition",
+        );
+      }
+      timestampMs(record.recorded_at, "automatic-resolution recorded_at");
+      assertRevision(record.recorded_revision);
+    }
   } else if (
     "workflow_id" in ledger ||
-    "workflow_authorization_sha256" in ledger
+    "workflow_authorization_sha256" in ledger ||
+    "automatic_resolutions" in ledger
   ) {
     fail(
       "PUBLICATION_STORE_INVALID",
@@ -2187,6 +2262,7 @@ function validateStoredLedger(ledger) {
         "CODEX_REVIEW_REQUEST_RECORDED",
         "GITHUB_SNAPSHOT_RECORDED",
         "CODEX_REVIEW_AMBIGUITY_ACKNOWLEDGED",
+        "AUTOMATIC_RESOLUTION_RECORDED",
       ],
       "publication history event",
     );
@@ -2198,7 +2274,13 @@ function validateStoredLedger(ledger) {
     if (event.head_sha !== publicationAuthorization.head_sha) {
       fail("PUBLICATION_STORE_INVALID", "publication history head changed");
     }
-    if (event.event === "CODEX_REVIEW_REQUEST_RECORDED") {
+    // Both mutating events clear the observation: a posted request and a
+    // resolved thread each change the pull request out from under whatever
+    // was observed before them.
+    if (
+      event.event === "CODEX_REVIEW_REQUEST_RECORDED" ||
+      event.event === "AUTOMATIC_RESOLUTION_RECORDED"
+    ) {
       if (event.cleared_observation_sha256 !== null) {
         assertDigest(
           event.cleared_observation_sha256,
@@ -2209,6 +2291,14 @@ function validateStoredLedger(ledger) {
       fail(
         "PUBLICATION_STORE_INVALID",
         "only request-recorded history may carry cleared_observation_sha256",
+      );
+    }
+    if (event.event === "AUTOMATIC_RESOLUTION_RECORDED") {
+      assertString(event.thread_id, "resolution history thread_id", 1024);
+    } else if ("thread_id" in event) {
+      fail(
+        "PUBLICATION_STORE_INVALID",
+        "only resolution-recorded history may carry thread_id",
       );
     }
   }
@@ -3550,6 +3640,17 @@ export function threadResolutionEligibility(ledger, thread, context) {
   if (thread.is_resolved === true) {
     return refuse("ALREADY_RESOLVED");
   }
+  // A thread this workflow already resolved once cannot become eligible
+  // again by being unresolved: whoever undid the resolution is a participant
+  // contesting it, and re-resolving would start a war with them. The
+  // invalidated record independently blocks the gate; the operator decides.
+  if (
+    (ledger.automatic_resolutions ?? []).some(
+      (record) => record.thread_id === thread.id,
+    )
+  ) {
+    return refuse("THREAD_PREVIOUSLY_RESOLVED");
+  }
 
   const isCodex = (actor) =>
     actor?.id === codexActor.id && actor?.type === codexActor.type;
@@ -3963,6 +4064,18 @@ function derivePublication(
   if (codex) {
     return publicationDecision(codex);
   }
+  // Every automatic-resolution record must still be true of the current
+  // observation before anything else about threads is concluded. A record
+  // whose thread moved -- new comments, unresolved again, or no longer
+  // verifiable -- blocks with its own reason rather than letting the
+  // unresolved count absorb it: the workflow must not treat a contested
+  // resolution as merely one more thread to resolve.
+  if (invalidatedAutomaticResolution(ledger) != null) {
+    return publicationDecision(
+      "CHANGES_REQUIRED",
+      "THREAD_RESOLUTION_INVALIDATED",
+    );
+  }
   if (observation.review_threads.unresolved_count > 0) {
     return publicationDecision(
       "CHANGES_REQUIRED",
@@ -3970,6 +4083,37 @@ function derivePublication(
     );
   }
   return publicationDecision("MERGE_READY");
+}
+
+// The first automatic-resolution record the current observation no longer
+// supports, or null when every record still holds. A resolved thread proves
+// nothing about who resolved it, so the record's exact watermark is the whole
+// claim: the thread it bound, unchanged, now resolved. Anything else --
+// thread gone, provenance no longer complete, watermark moved, or resolution
+// undone -- invalidates the record.
+function invalidatedAutomaticResolution(ledger) {
+  const records = ledger.automatic_resolutions ?? [];
+  if (records.length === 0) {
+    return null;
+  }
+  const threads = new Map(
+    ledger.latest_observation.review_threads.threads.map((thread) => [
+      thread.id,
+      thread,
+    ]),
+  );
+  for (const record of records) {
+    const thread = threads.get(record.thread_id);
+    if (
+      thread == null ||
+      thread.provenance_complete !== true ||
+      thread.is_resolved !== true ||
+      threadWatermark(thread) !== record.thread_watermark
+    ) {
+      return record;
+    }
+  }
+  return null;
 }
 
 export function derivePublicationStatus(ledger) {
@@ -4908,6 +5052,7 @@ export async function startPublication(
             workflow_id: workflowBinding.workflow_id,
             workflow_authorization_sha256:
               workflowBinding.workflow_authorization_sha256,
+            automatic_resolutions: [],
           }),
       authorization: {
         mode: sourceAuthorization.mode,
@@ -5599,6 +5744,232 @@ export async function recordCodexReviewRequest(
       revision: nextRevision,
       status: "PR_PENDING",
       head_sha: sourceAuthorization.head_sha,
+      cleared_observation_sha256: clearedObservationSha256,
+    });
+    const storedLedger = capacityTerminal(originalLedger, ledger);
+    assertLedgerSize(storedLedger);
+    await revokeGate(paths);
+    await saveLedger(paths, storedLedger);
+    return storedLedger;
+  });
+}
+
+/**
+ * The server-owned proof that this workflow performed one thread's
+ * unresolved-to-resolved transition. Created only from the three pieces the
+ * RFC names -- the unresolved pre-read, the accepted mutation, and the
+ * resolved post-read with `resolvedBy` naming the workflow's own actor --
+ * all bound to one unchanged comment watermark, revalidated here against the
+ * recorded observation and eligibility before anything is stored. A caller
+ * cannot manufacture the record: every claim is recomputed from the ledger's
+ * own evidence and refused on the first disagreement.
+ *
+ * Recording clears the observation: the mutation just changed the pull
+ * request, so whatever was observed before it no longer describes the
+ * remote state, and every later conclusion must come from a fresh snapshot.
+ */
+export async function recordAutomaticResolution(
+  storeRoot,
+  reviewId,
+  {
+    expectedRevision,
+    workflowId,
+    actionId,
+    threadId,
+    threadWatermark: expectedWatermark,
+    eligibilitySha256,
+    replyCommentId,
+    actorId,
+    actorType,
+    preReadObservedAt,
+    postReadObservedAt,
+    resolvedById,
+    resolvedByType,
+  },
+  { clock = Date.now } = {},
+) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    const currentMs = clock();
+    assertRevision(expectedRevision);
+    assertString(actionId, "action_id", 1024);
+    assertString(threadId, "thread_id", 1024);
+    assertDigest(expectedWatermark, "thread_watermark");
+    assertDigest(eligibilitySha256, "eligibility_sha256");
+    assertId(replyCommentId, "reply_comment_id");
+    assertId(actorId, "actor_id");
+    assertString(actorType, "actor_type", 100);
+    const preMs = timestampMs(preReadObservedAt, "pre_read_observed_at");
+    const postMs = timestampMs(postReadObservedAt, "post_read_observed_at");
+    if (
+      postMs < preMs ||
+      currentMs - postMs > MAX_AGE_MS ||
+      postMs - currentMs > MAX_FUTURE_MS
+    ) {
+      fail(
+        "EVIDENCE_STALE",
+        "the resolution reads must be ordered and the post-read fresh",
+      );
+    }
+    if (resolvedById !== actorId || resolvedByType !== actorType) {
+      fail(
+        "INVALID_INPUT",
+        "the post-read resolver must be the action's own authenticated actor",
+      );
+    }
+    const ledger = await loadPublicationFile(paths, reviewId);
+    requireRevision(ledger, expectedRevision);
+    requireMutable(ledger);
+    if (ledger.version !== 3) {
+      fail(
+        "PUBLICATION_NOT_AUTONOMOUS",
+        "only a workflow-bound publication records automatic resolutions",
+      );
+    }
+    const originalLedger = clone(ledger);
+    const sourceAuthorization = await readBoundAuthorization(
+      paths,
+      reviewId,
+      ledger,
+    );
+    const binding = await requireWorkflowBinding(storeRoot, ledger, {
+      mutating: true,
+    });
+    if (workflowId !== ledger.workflow_id) {
+      fail(
+        "INVALID_INPUT",
+        "the resolution record must name the bound workflow",
+      );
+    }
+    const existing = (ledger.automatic_resolutions ?? []).find(
+      (record) => record.thread_id === threadId,
+    );
+    if (existing != null) {
+      // Recovery re-running a crashed record creation is the one legitimate
+      // repeat, and it is a no-op; a different action claiming the same
+      // thread is a conflict.
+      if (existing.action_id === actionId) {
+        return clone(ledger);
+      }
+      fail(
+        "PUBLICATION_HISTORY_CONFLICT",
+        "the thread already carries an automatic-resolution record",
+      );
+    }
+    const observation = ledger.latest_observation;
+    if (
+      observation == null ||
+      observation.review_threads.collection.status !== "COMPLETE"
+    ) {
+      fail(
+        "PUBLICATION_THREAD_EVIDENCE_MISSING",
+        "no complete review-thread collection has been recorded",
+      );
+    }
+    const thread = observation.review_threads.threads.find(
+      (entry) => entry.id === threadId,
+    );
+    if (thread == null) {
+      fail("INVALID_INPUT", "the thread is not part of the recorded observation");
+    }
+    if (thread.is_resolved !== false) {
+      fail(
+        "INVALID_INPUT",
+        "the recorded observation must still show the thread unresolved",
+      );
+    }
+    const watermark = threadWatermark(thread);
+    if (watermark !== expectedWatermark) {
+      fail(
+        "PUBLICATION_THREAD_WATERMARK_MISMATCH",
+        "the thread watermark does not match the recorded observation",
+      );
+    }
+    // The same eligibility the plan derives, recomputed at record time under
+    // the same locks -- including the digest, so the record can only bind
+    // the evidence the intent actually read.
+    const context = {
+      cleanForGatedHead: codexStatus(ledger) === null,
+      ancestryByHead: new Map(
+        (observation.review_threads.ancestry ?? []).map((entry) => [
+          entry.finding_head_sha,
+          entry,
+        ]),
+      ),
+      workflow: binding,
+      publicationTerminal: ledger.terminal != null,
+    };
+    const verdict = threadResolutionEligibility(ledger, thread, context);
+    if (verdict.eligible !== true) {
+      fail(
+        "PUBLICATION_THREAD_NOT_ELIGIBLE",
+        "the thread is not eligible for automatic resolution",
+        { reason: verdict.reason },
+      );
+    }
+    const expectedEligibility = sha256(
+      canonicalJson({
+        thread_id: threadId,
+        thread_watermark: watermark,
+        head_sha: sourceAuthorization.head_sha,
+        workflow_id: ledger.workflow_id,
+        observation_sha256: canonicalDigest(observation),
+      }),
+    );
+    if (eligibilitySha256 !== expectedEligibility) {
+      fail(
+        "INVALID_INPUT",
+        "the eligibility digest does not match the recorded evidence",
+      );
+    }
+    const reply = binding.thread_replies.find(
+      (entry) => entry.thread_id === threadId,
+    );
+    if (
+      reply == null ||
+      reply.comment_id !== replyCommentId ||
+      reply.actor.id !== actorId ||
+      reply.actor.type !== actorType
+    ) {
+      fail(
+        "INVALID_INPUT",
+        "the resolution must follow the workflow's own recorded reply",
+      );
+    }
+    const recordedAt = new Date(currentMs).toISOString();
+    const nextRevision = ledger.revision + 1;
+    const clearedObservationSha256 = canonicalDigest(observation);
+    ledger.automatic_resolutions = [
+      ...(ledger.automatic_resolutions ?? []),
+      {
+        number: (ledger.automatic_resolutions ?? []).length + 1,
+        action_id: actionId,
+        thread_id: threadId,
+        thread_watermark: watermark,
+        eligibility_sha256: eligibilitySha256,
+        head_sha: sourceAuthorization.head_sha,
+        actor: { id: actorId, type: actorType },
+        reply_comment_id: replyCommentId,
+        pre_read: { observed_at: preReadObservedAt, is_resolved: false },
+        post_read: {
+          observed_at: postReadObservedAt,
+          is_resolved: true,
+          resolved_by: { id: resolvedById, type: resolvedByType },
+        },
+        recorded_at: recordedAt,
+        recorded_revision: nextRevision,
+      },
+    ];
+    ledger.latest_observation = null;
+    ledger.revision = nextRevision;
+    ledger.updated_at = recordedAt;
+    ledger.history.push({
+      at: recordedAt,
+      event: "AUTOMATIC_RESOLUTION_RECORDED",
+      revision: nextRevision,
+      status: ledger.status,
+      head_sha: sourceAuthorization.head_sha,
+      thread_id: threadId,
       cleared_observation_sha256: clearedObservationSha256,
     });
     const storedLedger = capacityTerminal(originalLedger, ledger);
