@@ -887,8 +887,9 @@ written when the workflow records a repair head in its remote-findings phase:
 the server reads the bound publication and takes the deciding correlated
 findings review from the same selection that derived `CHANGES_REQUIRED`, at
 the same publication revision the workflow observed when its projection
-entered the repair phase. The workflow and publication locks are never held
-together, so that revision equality is the atomicity substitute: an identity
+entered the repair phase. The publication lock is released before the
+workflow mutation persists, so revision equality is the atomicity
+substitute: an identity
 read across an intervening snapshot — one that could have withdrawn or
 replaced the correlated result — refuses the head recording instead of
 being recorded as though it were the blocking evidence. The record can
