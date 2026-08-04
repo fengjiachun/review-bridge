@@ -881,25 +881,36 @@ is enforced for the thread collection, whose absence refuses the whole plan;
 the freshness half of condition 5 and the completeness of the other
 collections are the gate's own rules and are not re-evaluated here — a plan
 is advisory and the gate re-derives everything before anything acts.
-Condition 3 has no data yet — the workflow ledger does not record which
-commits addressed a finding — so the predicate terminates at the refusal
-`FIX_NOT_RECORDED` for any thread that survives every other condition, and
-eligibility cannot be reached by any input. A thread that fails an earlier
-condition reports that earlier reason instead; `FIX_NOT_RECORDED` is the
-floor, not the only answer. That refusal is the seam the next change fills,
-and consumers must treat it as blocking rather than ignorable.
 
-The never-eligible rule that a thread must link structurally to the
-correlated Codex review — not merely to the Codex actor — waits behind the
-same seam, and deliberately so. The correlated `FINDINGS` result for an
-earlier head lives in that head's own publication ledger, which the current
-publication does not hold: each attempt starts a fresh ledger whose baseline
-absorbs earlier reviews as pre-existing. Membership in the current ledger's
-recorded results can therefore only ever mean observed, not correlated — a
-check built on it refuses every genuine finding-fix-resolve cycle while still
-admitting an unsolicited in-window review. The addressed-by record must name
-the finding review it answers, carrying the link across publications; that
-is the structural link, and nothing available earlier can substitute for it.
+Condition 3 is evaluated against the workflow's addressed-by records. One is
+written when the workflow records a repair head in its remote-findings phase:
+the server reads the bound publication and takes the deciding correlated
+findings review from the same selection that derived `CHANGES_REQUIRED`, so
+the record can only name the review that actually blocked — a caller cannot
+supply or substitute the identity, and a repair head cannot be recorded at
+all while the publication's evidence no longer decides a findings review.
+The record names that review by result ID and reviewed head and lists the
+commits the repair introduced, oldest first. A thread satisfies condition 3
+when a record names its root review — same review ID, same reviewed head —
+and carries at least one commit; a thread whose root review no record names
+refuses with `FIX_NOT_RECORDED`. A thread that fails an earlier condition
+reports that earlier reason instead; `FIX_NOT_RECORDED` is the floor, not
+the only answer, and consumers must treat it as blocking rather than
+ignorable.
+
+The addressed-by record is also how a thread links structurally to the
+correlated Codex review — not merely to the Codex actor. The correlated
+`FINDINGS` result for an earlier head lives in that head's own publication
+ledger, which the current publication does not hold: each attempt starts a
+fresh ledger whose baseline absorbs earlier reviews as pre-existing.
+Membership in the current ledger's recorded results can therefore only ever
+mean observed, not correlated — a check built on it refuses every genuine
+finding-fix-resolve cycle while still admitting an unsolicited in-window
+review. The addressed-by record names the finding review it answers,
+carrying the link across publications; that is the structural link, and
+nothing available earlier can substitute for it. An unsolicited review —
+in-window or not — was never the deciding result of a blocked publication,
+so no record can name it and its threads stay refused.
 
 A thread is never eligible when it:
 

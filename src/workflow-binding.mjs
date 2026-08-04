@@ -164,12 +164,39 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
         fail("WORKFLOW_STATE_INVALID", "remote attempt head is invalid");
       }
     }
+    // Every finding review this workflow has recorded as addressed, and the
+    // commits that addressed it. The eligibility predicate joins a thread's
+    // root review against these, so the identity fields are validated to the
+    // same shape the observation records for that review.
+    const addressedFindings = Array.isArray(workflow.addressed_findings)
+      ? workflow.addressed_findings
+      : [];
+    for (const record of addressedFindings) {
+      const findingsReview = record?.findings_review;
+      if (
+        !Number.isSafeInteger(findingsReview?.result_id) ||
+        findingsReview.result_id < 1 ||
+        !SHA_RE.test(findingsReview.reviewed_head_sha ?? "") ||
+        !Array.isArray(record.addressed_by) ||
+        record.addressed_by.length === 0 ||
+        record.addressed_by.some((sha) => !SHA_RE.test(sha ?? ""))
+      ) {
+        fail("WORKFLOW_STATE_INVALID", "addressed-finding record is invalid");
+      }
+    }
     return {
       workflow_id: workflow.workflow_id,
       revision: workflow.revision,
       status: workflow.status,
       phase: workflow.phase,
       attempt_head_shas: attempts.map((attempt) => attempt.head_sha),
+      addressed_findings: addressedFindings.map((record) => ({
+        findings_review: {
+          result_id: record.findings_review.result_id,
+          reviewed_head_sha: record.findings_review.reviewed_head_sha,
+        },
+        addressed_by: [...record.addressed_by],
+      })),
       base_sha: workflow.base_sha,
       topic_branch: workflow.topic_branch,
       current_head_sha: workflow.current_head_sha,

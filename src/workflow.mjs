@@ -4,7 +4,10 @@ import { constants as fsConstants } from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { getReviewSnapshot } from "./core.mjs";
-import { getAutonomousPreReady } from "./publication.mjs";
+import {
+  getAutonomousPreReady,
+  getPublicationFindingsReview,
+} from "./publication.mjs";
 import {
   atomicWriteCanonicalJson,
   atomicWriteFile,
@@ -820,7 +823,8 @@ function validateWorkflow(workflow) {
   if (
     !Array.isArray(workflow.attempts) ||
     !Array.isArray(workflow.claims) ||
-    !Array.isArray(workflow.remote_attempts)
+    !Array.isArray(workflow.remote_attempts) ||
+    !Array.isArray(workflow.addressed_findings)
   ) {
     fail("WORKFLOW_STATE_INVALID", "workflow arrays are malformed");
   }
@@ -834,6 +838,40 @@ function validateWorkflow(workflow) {
     }
     assertString(attempt.status, "remote attempt status", { max: 1024 });
     assertTimestamp(attempt.at, "remote attempt at");
+  }
+  for (const [index, record] of workflow.addressed_findings.entries()) {
+    assertObject(record, "workflow.addressed_findings entry");
+    if (record.number !== index + 1) {
+      fail("WORKFLOW_STATE_INVALID", "addressed-finding numbers must be sequential");
+    }
+    assertString(record.publication_review_id, "addressed-finding review_id", {
+      max: 1024,
+    });
+    const findingsReview = assertObject(
+      record.findings_review,
+      "addressed-finding findings_review",
+    );
+    assertPositiveInteger(
+      findingsReview.result_id,
+      "addressed-finding result_id",
+    );
+    assertSha(
+      findingsReview.reviewed_head_sha,
+      "addressed-finding reviewed_head_sha",
+    );
+    if (
+      !Array.isArray(record.addressed_by) ||
+      record.addressed_by.length === 0
+    ) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "an addressed finding must name at least one commit",
+      );
+    }
+    for (const sha of record.addressed_by) {
+      assertSha(sha, "addressed-finding commit");
+    }
+    assertTimestamp(record.recorded_at, "addressed-finding recorded_at");
   }
   validateCurrentPublication(workflow);
   const claimKeys = new Set();
@@ -978,15 +1016,16 @@ function validateWorkflow(workflow) {
 }
 
 /**
- * Fields this change adds to an existing schema-version-1 ledger. A workflow
- * written before it has neither key, so both are filled in on read and persist
- * on the next mutation. Without this a released workflow could not even be
+ * Fields added to an existing schema-version-1 ledger after its first
+ * release. A workflow written before them lacks the keys, so they are filled
+ * in on read and persist on the next mutation. Without this a released workflow could not even be
  * cancelled, and because the store-wide claim scan validates every ledger, one
  * such workflow would block starts on unrelated branches.
  */
 const REMOTE_FIELD_DEFAULTS = Object.freeze({
   remote_attempts: [],
   current_publication: null,
+  addressed_findings: [],
 });
 
 function withRemoteFieldDefaults(workflow) {
@@ -1343,6 +1382,7 @@ function auditedWorkflowState(workflow) {
     pull_request: workflow.pull_request,
     attempts: workflow.attempts,
     remote_attempts: workflow.remote_attempts ?? [],
+    addressed_findings: workflow.addressed_findings ?? [],
     active_action: workflow.active_action,
     reviewer_task: workflow.reviewer_task,
     current_review: workflow.current_review,
@@ -1544,6 +1584,7 @@ function requireWorkflowAuditBinding(workflow, audit) {
     pull_request: null,
     attempts: [],
     remote_attempts: [],
+    addressed_findings: [],
     active_action: null,
     reviewer_task: null,
     current_review: null,
@@ -1566,6 +1607,8 @@ function requireWorkflowAuditBinding(workflow, audit) {
     canonicalJson(workflow.attempts) !== canonicalJson(lastState.attempts) ||
     canonicalJson(workflow.remote_attempts ?? []) !==
       canonicalJson(lastState.remote_attempts ?? []) ||
+    canonicalJson(workflow.addressed_findings ?? []) !==
+      canonicalJson(lastState.addressed_findings ?? []) ||
     canonicalJson(workflow.active_action) !==
       canonicalJson(lastState.active_action) ||
     canonicalJson(workflow.reviewer_task) !==
@@ -1620,6 +1663,7 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "pull_request",
     "attempts",
     "remote_attempts",
+    "addressed_findings",
     "active_action",
     "reviewer_task",
     "current_review",
@@ -1630,8 +1674,8 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "claims",
     "claim_release",
   ]) {
-    // An audit event committed before this change carries neither remote
-    // field, so recovery restores their defaults instead of undefined.
+    // An audit event committed before the remote fields existed carries none
+    // of them, so recovery restores their defaults instead of undefined.
     recovered[field] = structuredClone(
       lastEvent.workflow_state[field] ??
         (field in REMOTE_FIELD_DEFAULTS
@@ -1917,6 +1961,7 @@ function workflowSummary(workflow) {
     current_review: workflow.current_review,
     current_publication: workflow.current_publication,
     remote_attempts: workflow.remote_attempts,
+    addressed_findings: workflow.addressed_findings,
     active_action:
       workflow.active_action == null
         ? null
@@ -2042,6 +2087,7 @@ export async function startAutonomousWorkflow(
     pull_request: null,
     attempts: [],
     remote_attempts: [],
+    addressed_findings: [],
     claims: workflowClaims,
     active_action: null,
     progress_fingerprint: null,
@@ -2185,12 +2231,64 @@ export async function recordWorkflowHead(
       fail("WORKFLOW_NO_PROGRESS", "new committed head must change");
     }
     requireAncestor(repository.path, previousHead, headSha);
+    // A head recorded to answer remote findings must say which finding review
+    // it answers -- RFC 0003 eligibility condition 3, and the only link that
+    // survives into the next publication, whose baseline absorbs this review
+    // as pre-existing. The identity is read from the bound publication rather
+    // than taken from the caller, so the record can only name the review
+    // whose correlated result actually blocked.
+    let addressedFinding = null;
+    if (workflow.phase === "ADDRESS_REMOTE_FINDINGS") {
+      if (workflow.current_publication == null) {
+        fail(
+          "WORKFLOW_STATE_INVALID",
+          "the remote repair has no bound publication",
+        );
+      }
+      const findings = await getPublicationFindingsReview(
+        storeRoot,
+        workflow.current_publication.review_id,
+      );
+      if (
+        findings.workflow_id !== workflow.workflow_id ||
+        findings.head_sha !== workflow.current_head_sha ||
+        findings.findings_review == null
+      ) {
+        fail(
+          "WORKFLOW_FINDINGS_UNIDENTIFIED",
+          "the bound publication does not currently name a correlated findings review for the repaired head",
+          { review_id: workflow.current_publication.review_id },
+        );
+      }
+      addressedFinding = {
+        publication_review_id: workflow.current_publication.review_id,
+        findings_review: findings.findings_review,
+        // Every commit this repair introduced, oldest first. The head alone
+        // would also be true, but the record's words are "addressed by one or
+        // more commits", and the range previousHead..headSha is exactly the
+        // set this workflow created to answer the finding.
+        addressed_by: runGit(repository.path, [
+          "rev-list",
+          "--reverse",
+          `${previousHead}..${headSha}`,
+        ])
+          .stdout.split("\n")
+          .filter((line) => line !== ""),
+      };
+    }
     return publicWorkflow(
       await saveMutation(paths, workflow, async (next) => {
         const reviewId =
           next.phase === "ADDRESS_LOCAL_FINDINGS"
             ? next.current_review?.review_id ?? null
             : null;
+        if (addressedFinding != null) {
+          next.addressed_findings.push({
+            number: next.addressed_findings.length + 1,
+            ...addressedFinding,
+            recorded_at: now(),
+          });
+        }
         next.current_head_sha = headSha;
         next.attempts.push({
           number: next.attempts.length + 1,
