@@ -1261,6 +1261,27 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       thread_watermark: watermark,
     },
   );
+  // A response attributing the transition to anyone but the action's own
+  // actor never becomes an observation -- refused before anything persists,
+  // so the true post-read can still be recorded at the same revision.
+  await assert.rejects(
+    recordThreadResolutionObservation(
+      state.store,
+      workflow.workflow_id,
+      resolutionExecuting.revision,
+      resolutionPlanned.action.action_id,
+      {
+        outcome: "RESOLVED",
+        threadId: "PRRT_1",
+        isResolved: true,
+        threadWatermark: watermark,
+        resolvedById: 999,
+        resolvedByType: "User",
+      },
+    ),
+    (error) => error.code === "WORKFLOW_ACTION_INVALID",
+  );
+
   const resolutionObserved = await recordThreadResolutionObservation(
     state.store,
     workflow.workflow_id,
@@ -1274,6 +1295,52 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       resolvedById: 555,
       resolvedByType: "User",
     },
+  );
+
+  // The record creation recomputes every claim; a digest or watermark that
+  // does not match the ledger's own evidence is refused, whoever sends it.
+  const recordInput = (overrides) => ({
+    expectedRevision: 6,
+    workflowId: workflow.workflow_id,
+    actionId: resolutionPlanned.action.action_id,
+    threadId: "PRRT_1",
+    threadWatermark: watermark,
+    eligibilitySha256: resolvePlan.threads[0].eligibility_sha256,
+    replyCommentId: 901,
+    actorId: 555,
+    actorType: "User",
+    preReadObservedAt: iso(resolveAt + 1_000),
+    postReadObservedAt: iso(resolveAt + 2_000),
+    resolvedById: 555,
+    resolvedByType: "User",
+    ...overrides,
+  });
+  await assert.rejects(
+    recordAutomaticResolution(
+      state.store,
+      second.reviewId,
+      recordInput({ eligibilitySha256: "0".repeat(64) }),
+      { clock: () => resolveAt + 2_500 },
+    ),
+    (error) => error.code === "INVALID_INPUT",
+  );
+  await assert.rejects(
+    recordAutomaticResolution(
+      state.store,
+      second.reviewId,
+      recordInput({ threadWatermark: "1".repeat(64) }),
+      { clock: () => resolveAt + 2_500 },
+    ),
+    (error) => error.code === "PUBLICATION_THREAD_WATERMARK_MISMATCH",
+  );
+  await assert.rejects(
+    recordAutomaticResolution(
+      state.store,
+      second.reviewId,
+      recordInput({ resolvedById: 999 }),
+      { clock: () => resolveAt + 2_500 },
+    ),
+    (error) => error.code === "INVALID_INPUT",
   );
 
   const withRecord = await recordAutomaticResolution(
