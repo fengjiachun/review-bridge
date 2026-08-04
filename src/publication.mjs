@@ -5317,6 +5317,12 @@ export async function getPublicationFindingsReview(storeRoot, reviewId) {
         ledger.latest_observation == null ? null : codexDecision(ledger);
       return {
         review_id: reviewId,
+        // The revision this identity was derived from. The caller binds it to
+        // the revision it observed when the evidence blocked, so an identity
+        // read across an intervening snapshot cannot be recorded as though it
+        // were the blocking one -- the two locks cannot be held together, and
+        // this binding is what stands in for that atomicity.
+        revision: ledger.revision,
         workflow_id: ledger.workflow_id ?? null,
         head_sha: authorizationForLedger(ledger).head_sha,
         findings_review: decision?.findingsReview ?? null,

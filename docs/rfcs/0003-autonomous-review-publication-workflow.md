@@ -885,10 +885,17 @@ is advisory and the gate re-derives everything before anything acts.
 Condition 3 is evaluated against the workflow's addressed-by records. One is
 written when the workflow records a repair head in its remote-findings phase:
 the server reads the bound publication and takes the deciding correlated
-findings review from the same selection that derived `CHANGES_REQUIRED`, so
-the record can only name the review that actually blocked — a caller cannot
+findings review from the same selection that derived `CHANGES_REQUIRED`, at
+the same publication revision the workflow observed when its projection
+entered the repair phase. The workflow and publication locks are never held
+together, so that revision equality is the atomicity substitute: an identity
+read across an intervening snapshot — one that could have withdrawn or
+replaced the correlated result — refuses the head recording instead of
+being recorded as though it were the blocking evidence. The record can
+therefore only name the review that actually blocked — a caller cannot
 supply or substitute the identity, and a repair head cannot be recorded at
-all while the publication's evidence no longer decides a findings review.
+all while the publication's evidence no longer decides a findings review at
+that revision.
 The record names that review by result ID and reviewed head and lists the
 commits the repair introduced, oldest first. A thread satisfies condition 3
 when a record names its root review — same review ID, same reviewed head —

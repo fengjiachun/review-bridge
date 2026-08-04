@@ -847,6 +847,10 @@ function validateWorkflow(workflow) {
     assertString(record.publication_review_id, "addressed-finding review_id", {
       max: 1024,
     });
+    assertPositiveInteger(
+      record.publication_revision,
+      "addressed-finding publication_revision",
+    );
     const findingsReview = assertObject(
       record.findings_review,
       "addressed-finding findings_review",
@@ -2249,19 +2253,29 @@ export async function recordWorkflowHead(
         storeRoot,
         workflow.current_publication.review_id,
       );
+      // The identity must come from the same publication revision whose
+      // projection sent this workflow into the repair phase -- the revision
+      // advanceRemoteWorkflow recorded as awaiting_revision in the mutation
+      // that set the phase. The publication lock is released before this
+      // workflow mutation persists, so revision equality is what proves no
+      // snapshot slid between the blocking evidence and the record: an
+      // identity read across such a snapshot could name a review the
+      // publication no longer supports.
       if (
         findings.workflow_id !== workflow.workflow_id ||
         findings.head_sha !== workflow.current_head_sha ||
+        findings.revision !== workflow.current_publication.awaiting_revision ||
         findings.findings_review == null
       ) {
         fail(
           "WORKFLOW_FINDINGS_UNIDENTIFIED",
-          "the bound publication does not currently name a correlated findings review for the repaired head",
+          "the bound publication does not name a correlated findings review at the revision that entered the repair phase",
           { review_id: workflow.current_publication.review_id },
         );
       }
       addressedFinding = {
         publication_review_id: workflow.current_publication.review_id,
+        publication_revision: findings.revision,
         findings_review: findings.findings_review,
         // Every commit this repair introduced, oldest first. The head alone
         // would also be true, but the record's words are "addressed by one or
