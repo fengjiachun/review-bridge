@@ -5089,7 +5089,7 @@ test("an addressed-by record naming the thread's review completes eligibility", 
       eligibleThread(),
       contextWithRecord(addressedRecord()),
     ),
-    { eligible: true },
+    { eligible: true, addressed_by: [GATED_HEAD] },
   );
 });
 
@@ -5307,7 +5307,7 @@ test("an outdated diff hunk is not evidence that a finding was addressed", () =>
       outdated,
       contextWithRecord(addressedRecord()),
     ),
-    { eligible: true },
+    { eligible: true, addressed_by: [GATED_HEAD] },
   );
 });
 

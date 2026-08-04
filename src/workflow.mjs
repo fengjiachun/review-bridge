@@ -7,6 +7,7 @@ import { getReviewSnapshot } from "./core.mjs";
 import {
   getAutonomousPreReady,
   getPublicationFindingsReview,
+  getThreadResolutionPlan,
 } from "./publication.mjs";
 import {
   atomicWriteCanonicalJson,
@@ -268,6 +269,76 @@ const ACTION_KIND_SPECS = {
           "WORKFLOW_ACTION_INVALID",
           "observed remote does not prove the authorized repository and pushed head",
         );
+      }
+    },
+  },
+  REPLY_TO_CODEX_THREAD: {
+    // The first half of a resolution: answer the finding thread with one
+    // marker comment naming the addressed-by commits. Rides the resolve
+    // capability -- a reply exists only on the way to resolving.
+    capability: "RESOLVE_ELIGIBLE_CODEX_THREADS",
+    phase: "RESOLVE_CODEX_THREADS",
+    claimKind: "PULL_REQUEST",
+    markerPrefix: "rbwf-reply-",
+    identityFacts(target) {
+      return {
+        thread_id: target.thread_id,
+        thread_watermark: target.thread_watermark,
+      };
+    },
+    validateTarget(workflow, target) {
+      if (
+        workflow.current_publication == null ||
+        target.review_id !== workflow.current_publication.review_id ||
+        target.head_sha !== workflow.current_head_sha ||
+        typeof target.thread_id !== "string" ||
+        target.thread_id === "" ||
+        !DIGEST_RE.test(target.thread_watermark ?? "") ||
+        !DIGEST_RE.test(target.eligibility_sha256 ?? "") ||
+        !Number.isSafeInteger(target.expected_actor_id) ||
+        target.expected_actor_id < 1 ||
+        !["User", "Bot"].includes(target.expected_actor_type) ||
+        !Array.isArray(target.addressed_by) ||
+        target.addressed_by.length === 0 ||
+        target.addressed_by.some((sha) => !SHA_RE.test(sha ?? ""))
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "thread-reply target does not match the bound publication, head, and eligibility evidence",
+        );
+      }
+    },
+    dispatch(action) {
+      const marker = action.correlation_marker;
+      // The body is server-composed and immutable: the observation must match
+      // it exactly, so a reply can never say more than the record it answers.
+      return {
+        marker,
+        body_marker: `<!-- ${marker} -->`,
+        body: [
+          `Fixed in ${action.target.addressed_by
+            .map((sha) => sha.slice(0, 10))
+            .join(", ")}.`,
+          "",
+          `<!-- ${marker} -->`,
+        ].join("\n"),
+      };
+    },
+    validateResponse(action, response) {
+      assertPositiveInteger(
+        response.comment_id,
+        "workflow.active_action.provider_response.comment_id",
+      );
+      if (
+        !Array.isArray(response.matching_comment_ids) ||
+        response.matching_comment_ids.length !== 1 ||
+        response.matching_comment_ids[0] !== response.comment_id ||
+        response.thread_id !== action.target.thread_id ||
+        response.actor_id !== action.target.expected_actor_id ||
+        response.actor_type !== action.target.expected_actor_type ||
+        response.body_sha256 !== sha256(action.dispatch.body)
+      ) {
+        fail("WORKFLOW_ACTION_INVALID", "active action response is invalid");
       }
     },
   },
@@ -824,7 +895,8 @@ function validateWorkflow(workflow) {
     !Array.isArray(workflow.attempts) ||
     !Array.isArray(workflow.claims) ||
     !Array.isArray(workflow.remote_attempts) ||
-    !Array.isArray(workflow.addressed_findings)
+    !Array.isArray(workflow.addressed_findings) ||
+    !Array.isArray(workflow.thread_replies)
   ) {
     fail("WORKFLOW_STATE_INVALID", "workflow arrays are malformed");
   }
@@ -876,6 +948,35 @@ function validateWorkflow(workflow) {
       assertSha(sha, "addressed-finding commit");
     }
     assertTimestamp(record.recorded_at, "addressed-finding recorded_at");
+  }
+  const repliedThreads = new Set();
+  for (const [index, reply] of workflow.thread_replies.entries()) {
+    assertObject(reply, "workflow.thread_replies entry");
+    if (reply.number !== index + 1) {
+      fail("WORKFLOW_STATE_INVALID", "thread-reply numbers must be sequential");
+    }
+    assertString(reply.thread_id, "thread-reply thread_id", { max: 1024 });
+    // One reply per thread: the eligibility exception admits "the recorded
+    // reply", singular, and a second would mean an action was double-run.
+    if (repliedThreads.has(reply.thread_id)) {
+      fail("WORKFLOW_STATE_INVALID", "a thread can carry only one recorded reply");
+    }
+    repliedThreads.add(reply.thread_id);
+    assertPositiveInteger(reply.comment_id, "thread-reply comment_id");
+    assertObject(reply.actor, "thread-reply actor");
+    assertPositiveInteger(reply.actor.id, "thread-reply actor id");
+    if (!["User", "Bot"].includes(reply.actor.type)) {
+      fail("WORKFLOW_STATE_INVALID", "thread-reply actor type is invalid");
+    }
+    assertString(reply.marker, "thread-reply marker", { max: 1024 });
+    assertSha(reply.head_sha, "thread-reply head_sha");
+    assertString(reply.publication_review_id, "thread-reply review_id", {
+      max: 1024,
+    });
+    if (!DIGEST_RE.test(reply.thread_watermark ?? "")) {
+      fail("WORKFLOW_STATE_INVALID", "thread-reply watermark is invalid");
+    }
+    assertTimestamp(reply.recorded_at, "thread-reply recorded_at");
   }
   validateCurrentPublication(workflow);
   const claimKeys = new Set();
@@ -1030,6 +1131,7 @@ const REMOTE_FIELD_DEFAULTS = Object.freeze({
   remote_attempts: [],
   current_publication: null,
   addressed_findings: [],
+  thread_replies: [],
 });
 
 function withRemoteFieldDefaults(workflow) {
@@ -1387,6 +1489,7 @@ function auditedWorkflowState(workflow) {
     attempts: workflow.attempts,
     remote_attempts: workflow.remote_attempts ?? [],
     addressed_findings: workflow.addressed_findings ?? [],
+    thread_replies: workflow.thread_replies ?? [],
     active_action: workflow.active_action,
     reviewer_task: workflow.reviewer_task,
     current_review: workflow.current_review,
@@ -1589,6 +1692,7 @@ function requireWorkflowAuditBinding(workflow, audit) {
     attempts: [],
     remote_attempts: [],
     addressed_findings: [],
+    thread_replies: [],
     active_action: null,
     reviewer_task: null,
     current_review: null,
@@ -1613,6 +1717,8 @@ function requireWorkflowAuditBinding(workflow, audit) {
       canonicalJson(lastState.remote_attempts ?? []) ||
     canonicalJson(workflow.addressed_findings ?? []) !==
       canonicalJson(lastState.addressed_findings ?? []) ||
+    canonicalJson(workflow.thread_replies ?? []) !==
+      canonicalJson(lastState.thread_replies ?? []) ||
     canonicalJson(workflow.active_action) !==
       canonicalJson(lastState.active_action) ||
     canonicalJson(workflow.reviewer_task) !==
@@ -1668,6 +1774,7 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "attempts",
     "remote_attempts",
     "addressed_findings",
+    "thread_replies",
     "active_action",
     "reviewer_task",
     "current_review",
@@ -1942,6 +2049,11 @@ function nextAction(workflow) {
     }),
     START_PUBLICATION: "START_PUBLICATION",
     WAIT_PUBLICATION: "WAIT_PUBLICATION",
+    RESOLVE_CODEX_THREADS: actionPhase("PLAN_THREAD_REPLY", {
+      PLANNED: "REPLY_TO_CODEX_THREAD",
+      EXECUTING: "RECONCILE_THREAD_REPLY",
+      OBSERVED: "COMPLETE_THREAD_REPLY",
+    }),
     ADDRESS_REMOTE_FINDINGS: "ADDRESS_REMOTE_FINDINGS",
     ADDRESS_CHECK_FAILURE: "ADDRESS_CHECK_FAILURE",
     UPDATE_FROM_BASE: "UPDATE_FROM_BASE",
@@ -1966,6 +2078,7 @@ function workflowSummary(workflow) {
     current_publication: workflow.current_publication,
     remote_attempts: workflow.remote_attempts,
     addressed_findings: workflow.addressed_findings,
+    thread_replies: workflow.thread_replies,
     active_action:
       workflow.active_action == null
         ? null
@@ -2092,6 +2205,7 @@ export async function startAutonomousWorkflow(
     attempts: [],
     remote_attempts: [],
     addressed_findings: [],
+    thread_replies: [],
     claims: workflowClaims,
     active_action: null,
     progress_fingerprint: null,
@@ -2607,6 +2721,84 @@ export async function planDraftPullRequest(
   );
 }
 
+export async function planThreadReply(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  { threadId, actorId, actorType },
+) {
+  assertString(threadId, "thread_id", { max: 1024 });
+  assertPositiveInteger(actorId, "actor_id");
+  if (!["User", "Bot"].includes(actorType)) {
+    throw new TypeError("actor_type must be User or Bot");
+  }
+  return planWorkflowAction(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    "REPLY_TO_CODEX_THREAD",
+    {
+      planPhases: ["RESOLVE_CODEX_THREADS"],
+      invalidMessage: "a thread reply is not currently plannable",
+      target: async (workflow) => {
+        if (workflow.current_publication == null) {
+          fail(
+            "WORKFLOW_STATE_INVALID",
+            "thread resolution has no bound publication",
+          );
+        }
+        if (
+          workflow.thread_replies.some(
+            (reply) => reply.thread_id === threadId,
+          )
+        ) {
+          fail(
+            "WORKFLOW_THREAD_ALREADY_ANSWERED",
+            "this thread already carries the workflow's recorded reply",
+            { thread_id: threadId },
+          );
+        }
+        // The eligibility evidence is read fresh under the publication lock
+        // and bound into the intent: thread watermark, digest, and the
+        // addressed-by commits the reply body will name.
+        const plan = await getThreadResolutionPlan(
+          storeRoot,
+          workflow.current_publication.review_id,
+        );
+        if (
+          plan.workflow_id !== workflow.workflow_id ||
+          plan.head_sha !== workflow.current_head_sha
+        ) {
+          fail(
+            "WORKFLOW_PUBLICATION_MISMATCH",
+            "publication is not bound to this workflow and head",
+          );
+        }
+        const entry = plan.threads.find(
+          (thread) => thread.thread_id === threadId,
+        );
+        if (entry == null || entry.eligible !== true) {
+          fail(
+            "WORKFLOW_THREAD_NOT_ELIGIBLE",
+            "the thread is not eligible for automatic resolution",
+            { thread_id: threadId, reason: entry?.reason ?? "THREAD_UNKNOWN" },
+          );
+        }
+        return {
+          review_id: workflow.current_publication.review_id,
+          thread_id: threadId,
+          thread_watermark: entry.thread_watermark,
+          eligibility_sha256: entry.eligibility_sha256,
+          head_sha: workflow.current_head_sha,
+          expected_actor_id: actorId,
+          expected_actor_type: actorType,
+          addressed_by: entry.addressed_by,
+        };
+      },
+    },
+  );
+}
+
 export async function markWorkflowActionExecuting(
   storeRoot,
   workflowId,
@@ -2724,6 +2916,54 @@ export async function recordCodexTaskObservation(
         matching_task_ids: [taskId],
         title_sha256: sha256(title),
         prompt_sha256: sha256(prompt),
+      };
+    },
+  );
+}
+
+export async function recordThreadReplyObservation(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  actionId,
+  { matchingCommentIds, commentId, threadId, actorId, actorType, body },
+) {
+  assertPositiveInteger(commentId, "comment_id");
+  assertString(threadId, "thread_id", { max: 1024 });
+  assertPositiveInteger(actorId, "actor_id");
+  assertString(actorType, "actor_type", { max: 100 });
+  assertString(body, "body", { max: 65_536 });
+  if (
+    !Array.isArray(matchingCommentIds) ||
+    matchingCommentIds.length !== 1 ||
+    matchingCommentIds[0] !== commentId
+  ) {
+    fail(
+      "WORKFLOW_THREAD_REPLY_AMBIGUOUS",
+      "reply reconciliation requires exactly one marker comment in the thread",
+    );
+  }
+  return recordActionObservation(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    actionId,
+    "REPLY_TO_CODEX_THREAD",
+    (workflow, action) => {
+      const dispatch = dispatchFor(workflow, action);
+      if (body !== dispatch.body) {
+        fail(
+          "WORKFLOW_THREAD_REPLY_MISMATCH",
+          "the observed comment body must equal the server-issued reply body",
+        );
+      }
+      return {
+        comment_id: commentId,
+        matching_comment_ids: [commentId],
+        thread_id: threadId,
+        actor_id: actorId,
+        actor_type: actorType,
+        body_sha256: sha256(body),
       };
     },
   );
@@ -2985,6 +3225,37 @@ export async function completeWorkflowAction(
     if (action.kind === "CREATE_DRAFT_PULL_REQUEST") {
       return completeDraftPullRequest(storeRoot, workflow, paths, action);
     }
+    if (action.kind === "REPLY_TO_CODEX_THREAD") {
+      return publicWorkflow(
+        await saveActionMutation(
+          paths,
+          workflow,
+          "ACTION_COMPLETED",
+          async (next) => {
+            next.active_action.completed_at = now();
+            // The record the eligibility exception admits: exactly this
+            // comment, in exactly this thread, by exactly this actor. The
+            // phase stays put -- the second half of the resolution still
+            // has to happen here.
+            next.thread_replies.push({
+              number: next.thread_replies.length + 1,
+              thread_id: action.target.thread_id,
+              comment_id: action.provider_response.comment_id,
+              actor: {
+                id: action.target.expected_actor_id,
+                type: action.target.expected_actor_type,
+              },
+              marker: action.correlation_marker,
+              head_sha: action.target.head_sha,
+              publication_review_id: action.target.review_id,
+              thread_watermark: action.target.thread_watermark,
+              recorded_at: now(),
+            });
+            next.active_action = null;
+          },
+        ),
+      );
+    }
     fail("WORKFLOW_ACTION_KIND_INVALID", "unsupported workflow action");
   };
   if (peeked.active_action?.kind === "CREATE_DRAFT_PULL_REQUEST") {
@@ -3237,10 +3508,18 @@ export async function advanceRemoteWorkflow(
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
-    if (workflow.phase !== "WAIT_PUBLICATION") {
+    if (
+      !["WAIT_PUBLICATION", "RESOLVE_CODEX_THREADS"].includes(workflow.phase)
+    ) {
       fail(
         "WORKFLOW_PHASE_INVALID",
         `cannot advance a remote wait in phase ${workflow.phase}`,
+      );
+    }
+    if (workflow.active_action != null) {
+      fail(
+        "WORKFLOW_PHASE_INVALID",
+        "cannot advance a remote wait while a thread action is active",
       );
     }
     if (workflow.current_publication == null) {
@@ -3275,8 +3554,26 @@ export async function advanceRemoteWorkflow(
       // the check and Codex gates masks a blocker that is still standing, so
       // the release kept firing on unevaluated evidence.
       const reachedPreReady = projection.status === "READY_TO_MARK";
+      // Unresolved threads are no longer only an operator's problem: when at
+      // least one is eligible, the workflow moves to the thread-resolution
+      // phase and acts. With none eligible it keeps waiting exactly as
+      // before -- and a workflow already in the resolution phase whose
+      // blocker moved on returns to the wait rather than keeping a phase
+      // whose work no longer exists.
+      let desiredPhase = "WAIT_PUBLICATION";
+      if (reachedPreReady) {
+        desiredPhase = "PRE_READY";
+      } else if (
+        projection.status === "CHANGES_REQUIRED" &&
+        projection.blocking_reason === "UNRESOLVED_REVIEW_THREADS"
+      ) {
+        const plan = await getThreadResolutionPlan(storeRoot, reviewId);
+        if (plan.threads.some((thread) => thread.eligible)) {
+          desiredPhase = "RESOLVE_CODEX_THREADS";
+        }
+      }
       if (
-        !reachedPreReady &&
+        desiredPhase === workflow.phase &&
         workflow.current_publication.awaiting_revision === projection.revision
       ) {
         // Nothing moved. Polling is the normal shape of this phase, so an idle
@@ -3287,9 +3584,7 @@ export async function advanceRemoteWorkflow(
       return publicWorkflow(
         await saveMutation(paths, workflow, async (next) => {
           next.current_publication.awaiting_revision = projection.revision;
-          if (reachedPreReady) {
-            next.phase = "PRE_READY";
-          }
+          next.phase = desiredPhase;
         }),
       );
     }

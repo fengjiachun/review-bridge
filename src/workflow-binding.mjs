@@ -184,6 +184,28 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
         fail("WORKFLOW_STATE_INVALID", "addressed-finding record is invalid");
       }
     }
+    // Replies this workflow has posted into finding threads, each recorded by
+    // a completed reply action. The eligibility predicate admits a non-Codex
+    // comment only when it matches one of these exactly -- thread, comment
+    // database ID, and authenticated actor -- so the validated shape here is
+    // the whole exception surface.
+    const threadReplies = Array.isArray(workflow.thread_replies)
+      ? workflow.thread_replies
+      : [];
+    for (const reply of threadReplies) {
+      if (
+        typeof reply?.thread_id !== "string" ||
+        reply.thread_id === "" ||
+        !Number.isSafeInteger(reply?.comment_id) ||
+        reply.comment_id < 1 ||
+        !Number.isSafeInteger(reply?.actor?.id) ||
+        reply.actor.id < 1 ||
+        typeof reply?.actor?.type !== "string" ||
+        reply.actor.type === ""
+      ) {
+        fail("WORKFLOW_STATE_INVALID", "thread-reply record is invalid");
+      }
+    }
     return {
       workflow_id: workflow.workflow_id,
       revision: workflow.revision,
@@ -196,6 +218,11 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
           reviewed_head_sha: record.findings_review.reviewed_head_sha,
         },
         addressed_by: [...record.addressed_by],
+      })),
+      thread_replies: threadReplies.map((reply) => ({
+        thread_id: reply.thread_id,
+        comment_id: reply.comment_id,
+        actor: { id: reply.actor.id, type: reply.actor.type },
       })),
       base_sha: workflow.base_sha,
       topic_branch: workflow.topic_branch,

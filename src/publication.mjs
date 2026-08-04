@@ -3487,6 +3487,37 @@ function activeCorrelation(ledger) {
   };
 }
 
+// The exact comment sequence a thread eligibility or resolution proof binds.
+// RFC 0003: "Eligibility and resolution audit entries bind that exact
+// watermark, not merely the thread ID or its latest timestamp." Comment
+// edits move updated_at, so an edited body invalidates the watermark even
+// though bodies themselves are not stored. The resolved flag deliberately
+// stays out: the resolution sequence reads it separately, before and after
+// the mutation, against one unchanged comment watermark.
+export function threadWatermark(thread) {
+  if (thread.provenance_complete !== true) {
+    fail(
+      "INVALID_INPUT",
+      "a thread watermark requires complete thread provenance",
+    );
+  }
+  return sha256(
+    canonicalJson({
+      thread_id: thread.id,
+      comments: thread.comments.map((comment) => ({
+        id: comment.id,
+        database_id: comment.database_id,
+        created_at: comment.created_at,
+        updated_at: comment.updated_at,
+        actor: {
+          id: comment.actor.id ?? null,
+          type: comment.actor.type ?? null,
+        },
+      })),
+    }),
+  );
+}
+
 // Whether the recorded evidence permits the workflow to resolve a thread by
 // itself. Pure derivation over one observation and the ledger's correlation:
 // deciding to act is this function's business, acting is not.
@@ -3525,7 +3556,30 @@ export function threadResolutionEligibility(ledger, thread, context) {
   // Every comment, not merely the first. A human reply is a participant whose
   // objection this workflow was never authorized to dismiss, and it does not
   // stop being one because a bot opened the thread.
-  if (!thread.comments.every((comment) => isCodex(comment.actor))) {
+  //
+  // RFC condition 7's sole exception: the workflow's own recorded reply --
+  // the exact comment a completed reply action for this same thread recorded
+  // by database ID and authenticated actor. Matching the recorded identity is
+  // what separates it from any other comment by the same human account: an
+  // operator writing in the thread by hand is a participant, not a step of
+  // this workflow, and still refuses. Never the root -- a reply answers the
+  // finding, it cannot be the finding.
+  const replies = context.workflow?.thread_replies ?? [];
+  const isRecordedReply = (comment, index) =>
+    index > 0 &&
+    replies.some(
+      (reply) =>
+        reply.thread_id === thread.id &&
+        reply.comment_id === comment.database_id &&
+        reply.actor.id === comment.actor?.id &&
+        reply.actor.type === comment.actor?.type,
+    );
+  if (
+    !thread.comments.every(
+      (comment, index) =>
+        isCodex(comment.actor) || isRecordedReply(comment, index),
+    )
+  ) {
     return refuse("NOT_CODEX_AUTHORED");
   }
   const review = thread.comments[0].review;
@@ -3598,16 +3652,18 @@ export function threadResolutionEligibility(ledger, thread, context) {
   // names that review by ID and reviewed head. A thread rooted in any other
   // review -- an unsolicited in-window one included -- matches no record and
   // refuses here.
-  const addressed = workflow.addressed_findings.some(
+  const addressed = workflow.addressed_findings.find(
     (record) =>
       record.findings_review.result_id === review.database_id &&
       record.findings_review.reviewed_head_sha === review.reviewed_head_sha &&
       record.addressed_by.length > 0,
   );
-  if (!addressed) {
+  if (addressed == null) {
     return refuse("FIX_NOT_RECORDED");
   }
-  return { eligible: true };
+  // The commits travel with the verdict: they are what the reply action
+  // names, so the reply can never claim more than the record it answers.
+  return { eligible: true, addressed_by: [...addressed.addressed_by] };
 }
 
 // The full Codex verdict for the gated head: the status codexStatus reports,
@@ -5276,18 +5332,49 @@ export async function getThreadResolutionPlan(storeRoot, reviewId) {
         workflow,
         publicationTerminal: ledger.terminal != null,
       };
+      const headSha = authorizationForLedger(ledger).head_sha;
+      const observationSha256 = canonicalDigest(observation);
       return {
         review_id: reviewId,
-        head_sha: authorizationForLedger(ledger).head_sha,
+        head_sha: headSha,
         clean_for_gated_head: cleanForGatedHead,
         workflow_id: workflow?.workflow_id ?? null,
-        threads: observation.review_threads.threads.map((thread) => ({
-          thread_id: thread.id,
-          path: thread.path,
-          line: thread.line,
-          is_resolved: thread.is_resolved,
-          ...threadResolutionEligibility(ledger, thread, context),
-        })),
+        observation_sha256: observationSha256,
+        threads: observation.review_threads.threads.map((thread) => {
+          const verdict = threadResolutionEligibility(ledger, thread, context);
+          if (!verdict.eligible) {
+            return {
+              thread_id: thread.id,
+              path: thread.path,
+              line: thread.line,
+              is_resolved: thread.is_resolved,
+              ...verdict,
+            };
+          }
+          // What an eligible verdict is worth acting on: the exact comment
+          // sequence it was derived over, and one digest binding that
+          // sequence to this head, workflow, and observation. A resolution
+          // intent carries these, and the gate later refuses any action
+          // whose watermark the live thread no longer matches.
+          const watermark = threadWatermark(thread);
+          return {
+            thread_id: thread.id,
+            path: thread.path,
+            line: thread.line,
+            is_resolved: thread.is_resolved,
+            ...verdict,
+            thread_watermark: watermark,
+            eligibility_sha256: sha256(
+              canonicalJson({
+                thread_id: thread.id,
+                thread_watermark: watermark,
+                head_sha: headSha,
+                workflow_id: workflow.workflow_id,
+                observation_sha256: observationSha256,
+              }),
+            ),
+          };
+        }),
       };
     } finally {
       await closeAuthorizationFiles(authorization);
