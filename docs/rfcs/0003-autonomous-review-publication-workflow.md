@@ -505,7 +505,10 @@ recorded its result. Therefore recovery always reconciles first:
   provider response attests that this action performed the transition, and the
   post-read proves the same watermark is now resolved. A crash after provider
   acceptance but before that response is recorded cannot claim ownership from
-  the resolved state alone. Repeat a resolve only while the original
+  the resolved state alone. Once the response is recorded, the record is made
+  from the action alone and creating it is always still possible: a recovery
+  that observes the pull request first -- and so sees the thread it resolved
+  as resolved -- must not lose the ability to record what it did. Repeat a resolve only while the original
   eligibility proof remains valid for the current head. Repeat an unresolve
   only while the server still reports that this workflow's proven resolution
   record is invalid, the `UNRESOLVE_INVALIDATED_CODEX_THREADS` capability is
@@ -977,10 +980,14 @@ For each eligible thread, the controller:
 7. immediately re-reads the exact thread, requiring the same comment
    watermark, an observed resolved state, and a `resolvedBy` actor equal to
    the authenticated actor the action's intent recorded;
-8. creates the server-owned automatic-resolution record only from the
-   unresolved pre-read, transition-attesting response, and resolved
-   post-read, the server revalidating the eligibility, watermark, and reply
-   against its own recorded evidence before storing;
+8. creates the server-owned automatic-resolution record only from that
+   action's own durable evidence -- the intent the server bound in step 3,
+   the unresolved pre-read of step 5, and the transition-attesting response
+   and resolved post-read of steps 6 and 7 -- naming the action and nothing
+   else, so the record stays creatable however long recovery takes and
+   whatever the workflow observes in the meantime. Eligibility is decided in
+   steps 2, 3, and 5, where refusing still prevents the mutation; refusing
+   after it would only destroy the record step 10 needs;
 9. collects and records a new complete GitHub publication snapshot; and
 10. requires the publication server to revalidate the automatic-resolution
     record and watermark before any pre-ready or final gate can pass.

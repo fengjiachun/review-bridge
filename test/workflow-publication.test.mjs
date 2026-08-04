@@ -1320,80 +1320,92 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     (error) => error.code === "WORKFLOW_RESOLUTION_RECORD_MISSING",
   );
 
-  // The record creation recomputes every claim; a digest or watermark that
-  // does not match the ledger's own evidence is refused, whoever sends it.
-  const recordInput = (overrides) => ({
-    expectedRevision: 6,
-    workflowId: workflow.workflow_id,
-    actionId: resolutionPlanned.action.action_id,
-    threadId: "PRRT_1",
-    threadWatermark: watermark,
-    eligibilitySha256: resolvePlan.threads[0].eligibility_sha256,
-    replyCommentId: 901,
-    actorId: 555,
-    actorType: "User",
-    preReadObservedAt: iso(resolveAt + 1_000),
-    postReadObservedAt: iso(resolveAt + 2_000),
-    resolvedById: 555,
-    resolvedByType: "User",
-    ...overrides,
-  });
-  await assert.rejects(
-    recordAutomaticResolution(
-      state.store,
-      second.reviewId,
-      recordInput({ eligibilitySha256: "0".repeat(64) }),
-      { clock: () => resolveAt + 2_500 },
-    ),
-    (error) => error.code === "INVALID_INPUT",
+  // An outcome that claims no transition owns nothing to record: the same
+  // action reporting OBSERVED_PRE_RESOLVED is not resolution evidence.
+  const observedWorkflow = JSON.parse(
+    await fsp.readFile(workflowPath, "utf8"),
   );
+  const preResolved = structuredClone(observedWorkflow);
+  preResolved.active_action.provider_response.outcome =
+    "OBSERVED_PRE_RESOLVED";
+  await atomicWriteCanonicalJson(workflowPath, preResolved);
   await assert.rejects(
     recordAutomaticResolution(
       state.store,
       second.reviewId,
-      recordInput({ threadWatermark: "1".repeat(64) }),
+      {
+        expectedRevision: 6,
+        workflowId: workflow.workflow_id,
+        actionId: resolutionPlanned.action.action_id,
+      },
       { clock: () => resolveAt + 2_500 },
     ),
-    (error) => error.code === "PUBLICATION_THREAD_WATERMARK_MISMATCH",
+    (error) => error.code === "WORKFLOW_RESOLUTION_ACTION_MISSING",
   );
+  await atomicWriteCanonicalJson(workflowPath, observedWorkflow);
+
+  // The record binds the action's own evidence, so only the action can be
+  // named: an unknown action has nothing to record.
   await assert.rejects(
     recordAutomaticResolution(
       state.store,
       second.reviewId,
-      recordInput({ resolvedById: 999 }),
+      {
+        expectedRevision: 6,
+        workflowId: workflow.workflow_id,
+        actionId: `${resolutionPlanned.action.action_id}-other`,
+      },
       { clock: () => resolveAt + 2_500 },
     ),
-    (error) => error.code === "INVALID_INPUT",
+    (error) => error.code === "WORKFLOW_RESOLUTION_ACTION_MISSING",
+  );
+  // Recovery is free to observe before it records. The mutation already
+  // happened, so the fresh snapshot shows the thread resolved -- and the
+  // record, made from the action's evidence rather than that snapshot, is
+  // still creatable. Nothing about this sequence may wedge the workflow.
+  const recoveryAt = resolveAt + 5_000;
+  const recoveryObservation = structuredClone(repliedObservation);
+  recoveryObservation.observed_at = iso(recoveryAt);
+  recoveryObservation.review_threads.threads[0].is_resolved = true;
+  recoveryObservation.review_threads.unresolved_count = 0;
+  const afterRecovery = await recordGithubSnapshot(
+    state.store,
+    second.reviewId,
+    { expectedRevision: 6, observation: recoveryObservation },
+    { clock: () => recoveryAt + 10 },
   );
 
   const withRecord = await recordAutomaticResolution(
     state.store,
     second.reviewId,
     {
-      expectedRevision: 6,
+      expectedRevision: afterRecovery.revision,
       workflowId: workflow.workflow_id,
       actionId: resolutionPlanned.action.action_id,
-      threadId: "PRRT_1",
-      threadWatermark: watermark,
-      eligibilitySha256: resolvePlan.threads[0].eligibility_sha256,
-      replyCommentId: 901,
-      actorId: 555,
-      actorType: "User",
-      preReadObservedAt: iso(resolveAt + 1_000),
-      postReadObservedAt: iso(resolveAt + 2_000),
-      resolvedById: 555,
-      resolvedByType: "User",
     },
     { clock: () => resolveAt + 3_000 },
   );
   assert.equal(withRecord.automatic_resolutions.length, 1);
-  assert.equal(withRecord.automatic_resolutions[0].thread_id, "PRRT_1");
-  assert.equal(withRecord.automatic_resolutions[0].thread_watermark, watermark);
+  const resolutionRecord = withRecord.automatic_resolutions[0];
+  assert.equal(resolutionRecord.thread_id, "PRRT_1");
+  // Every binding is the intent's, not the snapshot the recovery recorded.
+  assert.equal(resolutionRecord.thread_watermark, watermark);
+  assert.equal(
+    resolutionRecord.eligibility_sha256,
+    resolvePlan.threads[0].eligibility_sha256,
+  );
+  assert.equal(resolutionRecord.reply_comment_id, 901);
+  assert.deepEqual(resolutionRecord.actor, { id: 555, type: "User" });
+  assert.equal(resolutionRecord.pre_read.is_resolved, false);
+  assert.deepEqual(resolutionRecord.post_read.resolved_by, {
+    id: 555,
+    type: "User",
+  });
   // The mutation invalidated whatever was observed before it.
   assert.equal(withRecord.latest_observation, null);
 
-  // Recovery re-running the same action's record creation is a no-op; a
-  // different action claiming the same thread conflicts.
+  // Recovery re-running the same action's record creation is a no-op, and
+  // stays one after the action itself is gone.
   const repeated = await recordAutomaticResolution(
     state.store,
     second.reviewId,
@@ -1401,16 +1413,6 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       expectedRevision: withRecord.revision,
       workflowId: workflow.workflow_id,
       actionId: resolutionPlanned.action.action_id,
-      threadId: "PRRT_1",
-      threadWatermark: watermark,
-      eligibilitySha256: resolvePlan.threads[0].eligibility_sha256,
-      replyCommentId: 901,
-      actorId: 555,
-      actorType: "User",
-      preReadObservedAt: iso(resolveAt + 1_000),
-      postReadObservedAt: iso(resolveAt + 2_000),
-      resolvedById: 555,
-      resolvedByType: "User",
     },
     { clock: () => resolveAt + 4_000 },
   );
@@ -1425,6 +1427,17 @@ test("an addressed finding's thread becomes eligible in the next publication's p
   );
   assert.equal(resolved.thread_resolutions.length, 1);
   assert.equal(resolved.thread_resolutions[0].outcome, "RESOLVED");
+  const afterCompletion = await recordAutomaticResolution(
+    state.store,
+    second.reviewId,
+    {
+      expectedRevision: withRecord.revision,
+      workflowId: workflow.workflow_id,
+      actionId: resolutionPlanned.action.action_id,
+    },
+    { clock: () => resolveAt + 5_000 },
+  );
+  assert.equal(afterCompletion.revision, withRecord.revision);
 
   // The fresh post-resolution snapshot shows the same watermark resolved,
   // and the autonomous projection reaches READY_TO_MARK through the record
