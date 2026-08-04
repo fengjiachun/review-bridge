@@ -3503,8 +3503,9 @@ function activeCorrelation(ledger) {
 // moved, not evidence the finding was addressed -- a line can be displaced by
 // an unrelated edit. It is the most tempting shortcut here and the wrong one.
 // context: { cleanForGatedHead, ancestryByHead, workflow }, where workflow is
-// the reading of the bound workflow ledger (readWorkflowBinding) or null when
-// the publication is not workflow-bound.
+// the reading of the bound workflow ledger (readWorkflowBinding) -- attempt
+// heads and addressed-finding records included -- or null when the
+// publication is not workflow-bound.
 export function threadResolutionEligibility(ledger, thread, context) {
   const authorization = authorizationForLedger(ledger);
   const codexActor = ledger.target.codex_actor;
@@ -3584,27 +3585,38 @@ export function threadResolutionEligibility(ledger, thread, context) {
     return refuse("NO_CLEAN_RESULT_FOR_GATED_HEAD");
   }
   // RFC 0003 eligibility condition 3: the workflow must record the finding as
-  // addressed by one or more commits. The workflow ledger does not carry that
-  // record yet, so every thread refuses here -- deliberately last, so the
-  // refusals above stay diagnostic. This is the seam the next change fills,
-  // and until it does, eligible can never be true; a reader downstream must
-  // not learn to treat this reason as ignorable.
-  //
-  // The same record is where structural linkage belongs -- the RFC's
-  // never-eligible rule that a thread must tie to the correlated Codex
-  // review, not merely to the Codex actor. The correlated FINDINGS result for
-  // an earlier head lives in that head's own publication ledger, which this
-  // publication does not hold: each attempt starts a fresh one whose baseline
-  // swallows earlier reviews as pre-existing. Membership in this ledger's
-  // recorded results can therefore never express "correlated", only
-  // "observed", and a check built on it refuses every genuine cycle while
-  // admitting an unsolicited in-window review. The addressed-by record must
-  // instead name the finding review it answers, carrying the link across
-  // publications; until it exists, this refusal is what stands in front.
-  return refuse("FIX_NOT_RECORDED");
+  // addressed by one or more commits. The addressed-by record is also the
+  // structural link the RFC's never-eligible rule demands -- a thread must
+  // tie to the correlated Codex review, not merely to the Codex actor. The
+  // correlated FINDINGS result for an earlier head lives in that head's own
+  // publication ledger, which this publication does not hold: each attempt
+  // starts a fresh one whose baseline swallows earlier reviews as
+  // pre-existing, so membership in this ledger's recorded results can only
+  // ever express "observed". The record carries the link across publications
+  // instead: it is server-derived when the repair head is recorded, from the
+  // very review whose correlated result blocked that publication, and it
+  // names that review by ID and reviewed head. A thread rooted in any other
+  // review -- an unsolicited in-window one included -- matches no record and
+  // refuses here.
+  const addressed = workflow.addressed_findings.some(
+    (record) =>
+      record.findings_review.result_id === review.database_id &&
+      record.findings_review.reviewed_head_sha === review.reviewed_head_sha &&
+      record.addressed_by.length > 0,
+  );
+  if (!addressed) {
+    return refuse("FIX_NOT_RECORDED");
+  }
+  return { eligible: true };
 }
 
-function codexStatus(ledger) {
+// The full Codex verdict for the gated head: the status codexStatus reports,
+// plus the deciding formal review whenever that status is CHANGES_REQUIRED.
+// The identity travels into the workflow's addressed-by record, so it must
+// come from the same selection that decided the status -- a parallel lookup
+// could name a different review than the one that blocked.
+function codexDecision(ledger) {
+  const status = (value) => ({ status: value, findingsReview: null });
   const observation = ledger.latest_observation;
   const authorization = authorizationForLedger(ledger);
   const correlation = activeCorrelation(ledger);
@@ -3613,10 +3625,10 @@ function codexStatus(ledger) {
     correlation.openUnbound.length > 0 ||
     correlation.ambiguousResults.length > 0
   ) {
-    return "GITHUB_REVIEW_UNKNOWN";
+    return status("GITHUB_REVIEW_UNKNOWN");
   }
   if (correlation.recognized.length === 0) {
-    return "GITHUB_REVIEW_NOT_REQUESTED";
+    return status("GITHUB_REVIEW_NOT_REQUESTED");
   }
   const latest = [...correlation.recognized].sort(
     (left, right) =>
@@ -3640,10 +3652,10 @@ function codexStatus(ledger) {
     },
   );
   if (results.length === 0) {
-    return "GITHUB_REVIEW_PENDING";
+    return status("GITHUB_REVIEW_PENDING");
   }
   if (results.length !== 1) {
-    return "GITHUB_REVIEW_UNKNOWN";
+    return status("GITHUB_REVIEW_UNKNOWN");
   }
   const result = results[0];
   const resultReplay = correlation.replayed.get(
@@ -3672,20 +3684,27 @@ function codexStatus(ledger) {
         ),
     );
   if (earlierUnanswered) {
-    return "GITHUB_REVIEW_UNKNOWN";
+    return status("GITHUB_REVIEW_UNKNOWN");
   }
   if (result.actor.id !== ledger.target.codex_actor.id || result.actor.type !== "Bot") {
-    return "GITHUB_REVIEW_UNKNOWN";
+    return status("GITHUB_REVIEW_UNKNOWN");
   }
+  const changesRequired = () => ({
+    status: "CHANGES_REQUIRED",
+    findingsReview: {
+      result_id: result.result_id,
+      reviewed_head_sha: result.reviewed_head_sha,
+    },
+  });
   if (
     result.resource_kind === "PULL_REQUEST_REVIEW" &&
     result.native_review_state === "CHANGES_REQUESTED" &&
     result.reviewed_head_sha === authorization.head_sha
   ) {
-    return "CHANGES_REQUIRED";
+    return changesRequired();
   }
   if (result.native_review_state === "DISMISSED") {
-    return "GITHUB_REVIEW_UNKNOWN";
+    return status("GITHUB_REVIEW_UNKNOWN");
   }
   if (
     result.format ===
@@ -3706,9 +3725,9 @@ function codexStatus(ledger) {
       !/^[0-9a-f]{10,40}$/.test(result.commit_binding?.prefix ?? "") ||
       !authorization.head_sha.startsWith(result.commit_binding.prefix)
     ) {
-      return "GITHUB_REVIEW_UNKNOWN";
+      return status("GITHUB_REVIEW_UNKNOWN");
     }
-    return null;
+    return status(null);
   }
   if (
     result.format ===
@@ -3735,11 +3754,15 @@ function codexStatus(ledger) {
           comment.commit_id !== result.reviewed_head_sha,
       )
     ) {
-      return "GITHUB_REVIEW_UNKNOWN";
+      return status("GITHUB_REVIEW_UNKNOWN");
     }
-    return "CHANGES_REQUIRED";
+    return changesRequired();
   }
-  return "GITHUB_REVIEW_UNKNOWN";
+  return status("GITHUB_REVIEW_UNKNOWN");
+}
+
+function codexStatus(ledger) {
+  return codexDecision(ledger).status;
 }
 
 function publicationDecision(
@@ -5265,6 +5288,45 @@ export async function getThreadResolutionPlan(storeRoot, reviewId) {
           is_resolved: thread.is_resolved,
           ...threadResolutionEligibility(ledger, thread, context),
         })),
+      };
+    } finally {
+      await closeAuthorizationFiles(authorization);
+    }
+  });
+}
+
+/**
+ * The correlated Codex findings review this publication currently holds
+ * against its gated head, or null when its recorded evidence decides no such
+ * review. This is what the workflow's addressed-by record names: the identity
+ * comes from the same selection that derived CHANGES_REQUIRED, so the record
+ * can only ever name the review that actually blocked.
+ *
+ * Deliberately not a projection: no staleness clock. The question is
+ * historical -- which finding was this repair answering -- and the answer
+ * must not disappear because the repair took longer than the evidence
+ * freshness window.
+ */
+export async function getPublicationFindingsReview(storeRoot, reviewId) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    const authorization = await openAuthorizationFiles(paths, reviewId);
+    try {
+      const ledger = authorization.ledger;
+      const decision =
+        ledger.latest_observation == null ? null : codexDecision(ledger);
+      return {
+        review_id: reviewId,
+        // The revision this identity was derived from. The caller binds it to
+        // the revision it observed when the evidence blocked, so an identity
+        // read across an intervening snapshot cannot be recorded as though it
+        // were the blocking one -- this lock is released before the caller's
+        // own mutation persists, and the binding stands in for the atomicity
+        // the two separate writes lack.
+        revision: ledger.revision,
+        workflow_id: ledger.workflow_id ?? null,
+        head_sha: authorizationForLedger(ledger).head_sha,
+        findings_review: decision?.findingsReview ?? null,
       };
     } finally {
       await closeAuthorizationFiles(authorization);

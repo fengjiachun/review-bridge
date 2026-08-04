@@ -5031,10 +5031,28 @@ function eligibilityContext(overrides = {}) {
       status: "ACTIVE",
       current_head_sha: GATED_HEAD,
       attempt_head_shas: [EARLIER_HEAD, GATED_HEAD],
+      addressed_findings: [],
     },
     publicationTerminal: false,
     ...overrides,
   };
+}
+
+function addressedRecord(overrides = {}) {
+  return {
+    findings_review: {
+      result_id: 4833836859,
+      reviewed_head_sha: EARLIER_HEAD,
+      ...(overrides.findings_review ?? {}),
+    },
+    addressed_by: overrides.addressed_by ?? [GATED_HEAD],
+  };
+}
+
+function contextWithRecord(...records) {
+  const context = eligibilityContext();
+  context.workflow.addressed_findings = records;
+  return context;
 }
 
 function eligibleThread(overrides = {}) {
@@ -5060,17 +5078,48 @@ function eligibleThread(overrides = {}) {
   };
 }
 
-test("full evidence still refuses until an addressed-by record exists", () => {
-  // Every other condition holds here. RFC 0003's condition 3 -- the workflow
-  // records the finding as addressed by commits -- has no data yet, so the
-  // predicate must end at that refusal rather than at eligible. When the next
-  // change adds the record, this is the test it rewrites.
-  const verdict = threadResolutionEligibility(
-    eligibilityLedger(),
-    eligibleThread(),
-    eligibilityContext(),
+test("an addressed-by record naming the thread's review completes eligibility", () => {
+  // RFC 0003 condition 3: with every other condition held, an addressed-by
+  // record that names the thread's root review by ID and reviewed head is
+  // what turns the verdict eligible. This is the first input for which
+  // eligible is reachable at all.
+  assert.deepEqual(
+    threadResolutionEligibility(
+      eligibilityLedger(),
+      eligibleThread(),
+      contextWithRecord(addressedRecord()),
+    ),
+    { eligible: true },
   );
-  assert.deepEqual(verdict, { eligible: false, reason: "FIX_NOT_RECORDED" });
+});
+
+test("a record that does not name the thread's review still refuses", () => {
+  // The record is the structural link to the correlated Codex review. A
+  // record for another review, another head, or without a commit is not that
+  // link, so each of these must land on the same refusal as no record at all.
+  const cases = [
+    ["no record", eligibilityContext()],
+    [
+      "different review",
+      contextWithRecord(
+        addressedRecord({ findings_review: { result_id: 999 } }),
+      ),
+    ],
+    [
+      "different reviewed head",
+      contextWithRecord(
+        addressedRecord({ findings_review: { reviewed_head_sha: "d".repeat(40) } }),
+      ),
+    ],
+    ["no commits", contextWithRecord(addressedRecord({ addressed_by: [] }))],
+  ];
+  for (const [name, context] of cases) {
+    assert.deepEqual(
+      threadResolutionEligibility(eligibilityLedger(), eligibleThread(), context),
+      { eligible: false, reason: "FIX_NOT_RECORDED" },
+      name,
+    );
+  }
 });
 
 test("each missing piece of evidence refuses with its own reason", () => {
@@ -5249,6 +5298,16 @@ test("an outdated diff hunk is not evidence that a finding was addressed", () =>
       eligibilityContext(),
     ),
     { eligible: false, reason: "FIX_NOT_RECORDED" },
+  );
+  // Nor is it necessary: with the real evidence in place the flag adds
+  // nothing, so an outdated thread is eligible on the same terms as any other.
+  assert.deepEqual(
+    threadResolutionEligibility(
+      eligibilityLedger(),
+      outdated,
+      contextWithRecord(addressedRecord()),
+    ),
+    { eligible: true },
   );
 });
 

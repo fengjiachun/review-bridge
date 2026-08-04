@@ -15,6 +15,7 @@ import {
   getAutonomousPreReady,
   getPublication,
   getPublicationSummary,
+  getThreadResolutionPlan,
   recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
@@ -906,6 +907,271 @@ test("a remote finding returns through a new gated head and a new publication", 
   const historical = await getPublication(state.store, first.reviewId);
   assert.equal(historical.version, 3);
   assert.notEqual(historical.authorization.head_sha, secondHead);
+});
+
+test("an addressed finding's thread becomes eligible in the next publication's plan", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const firstHead = await commit(state.repository, "export const value = 2;\n");
+  const first = await gateAndPublishHead(state, workflow, firstHead, "one");
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    first.workflow,
+    first.reviewId,
+    firstHead,
+    Date.now(),
+    (payload) => findingsResult(payload),
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(repairing.phase, "ADDRESS_REMOTE_FINDINGS");
+
+  // Recording the repair head writes the addressed-by record, derived from
+  // the bound publication's own correlated findings review rather than from
+  // any caller-supplied identity.
+  const secondHead = await commit(state.repository, "export const value = 3;\n");
+  const repaired = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    repairing.revision,
+    secondHead,
+  );
+  assert.equal(repaired.addressed_findings.length, 1);
+  const record = repaired.addressed_findings[0];
+  assert.equal(record.number, 1);
+  assert.equal(record.publication_review_id, first.reviewId);
+  // The revision the repair-phase projection was derived from: start (1),
+  // request (2), snapshot (3). Binding it is what makes "the review that
+  // blocked" exact rather than approximate.
+  assert.equal(record.publication_revision, 3);
+  assert.deepEqual(record.findings_review, {
+    result_id: 101,
+    reviewed_head_sha: firstHead,
+  });
+  assert.deepEqual(record.addressed_by, [secondHead]);
+
+  // The next publication observes the still-unresolved thread rooted in that
+  // review, with a clean result for the repaired head and provider ancestry.
+  const second = await gateAndPublishHead(
+    state,
+    { workflow_id: workflow.workflow_id, revision: repaired.revision },
+    secondHead,
+    "two",
+  );
+  const threadAt = Date.now();
+  const codex = {
+    id: CODEX_ACTOR_ID,
+    type: "Bot",
+    login: "chatgpt-codex-connector[bot]",
+  };
+  await reachRemoteWait(
+    state,
+    second.workflow,
+    second.reviewId,
+    secondHead,
+    threadAt,
+    (payload) => {
+      payload.review_threads.total_count = 1;
+      payload.review_threads.unresolved_count = 1;
+      payload.review_threads.threads = [
+        {
+          id: "PRRT_1",
+          is_resolved: false,
+          is_outdated: false,
+          path: null,
+          line: null,
+          comment_count: 1,
+          comments_pagination_complete: true,
+          provenance_complete: true,
+          comments: [
+            {
+              id: "PRRC_1",
+              database_id: 900,
+              created_at: iso(threadAt - 5_000),
+              updated_at: iso(threadAt - 5_000),
+              actor: codex,
+              review: {
+                id: "PRR_1",
+                database_id: 101,
+                state: "COMMENTED",
+                reviewed_head_sha: firstHead,
+                actor: codex,
+              },
+            },
+          ],
+        },
+      ];
+      payload.review_threads.ancestry = [
+        {
+          finding_head_sha: firstHead,
+          status: "AHEAD",
+          descends: true,
+          endpoint: `GET /repos/example/review-bridge/compare/${firstHead}...${secondHead}`,
+          collected_at: iso(threadAt + 1_600),
+        },
+      ];
+      return payload;
+    },
+  );
+
+  const plan = await getThreadResolutionPlan(state.store, second.reviewId);
+  assert.equal(plan.workflow_id, workflow.workflow_id);
+  assert.equal(plan.head_sha, secondHead);
+  assert.deepEqual(plan.threads, [
+    {
+      thread_id: "PRRT_1",
+      path: null,
+      line: null,
+      is_resolved: false,
+      eligible: true,
+    },
+  ]);
+
+  // The lock-free binding read validates the records it hands the predicate.
+  // A canonically rewritten ledger whose record drops its commits must fail
+  // the read, not reach the eligibility join as evidence.
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const tampered = structuredClone(stored);
+  tampered.addressed_findings[0].addressed_by = [];
+  await atomicWriteCanonicalJson(workflowPath, tampered);
+  await assert.rejects(
+    getThreadResolutionPlan(state.store, second.reviewId),
+    (error) => error.code === "WORKFLOW_STATE_INVALID",
+  );
+  await atomicWriteCanonicalJson(workflowPath, stored);
+});
+
+test("a repair head cannot be recorded when the publication no longer names a findings review", async (t) => {
+  // The addressed-by record is server-derived from the bound publication. If
+  // a fresh observation has withdrawn the correlated findings result, there
+  // is no review the record could truthfully name, so the head recording
+  // fails closed instead of writing a record without its link.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const firstHead = await commit(state.repository, "export const value = 2;\n");
+  const first = await gateAndPublishHead(state, workflow, firstHead, "one");
+  const startedAt = Date.now();
+  const { workflow: waiting, observedAt } = await reachRemoteWait(
+    state,
+    first.workflow,
+    first.reviewId,
+    firstHead,
+    startedAt,
+    (payload) => findingsResult(payload),
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(repairing.phase, "ADDRESS_REMOTE_FINDINGS");
+
+  // A newer snapshot without any result: the publication's evidence now
+  // decides GITHUB_REVIEW_PENDING rather than a findings review.
+  const laterAt = observedAt + 5_000;
+  await recordGithubSnapshot(
+    state.store,
+    first.reviewId,
+    {
+      expectedRevision: 3,
+      observation: draftObservation(state, firstHead, {
+        at: laterAt,
+        requestId: 100,
+        requestAt: startedAt + 1_000,
+        withResult: false,
+      }),
+    },
+    { clock: () => laterAt + 10 },
+  );
+
+  const secondHead = await commit(state.repository, "export const value = 3;\n");
+  await assert.rejects(
+    recordWorkflowHead(
+      state.store,
+      workflow.workflow_id,
+      repairing.revision,
+      secondHead,
+    ),
+    (error) => error.code === "WORKFLOW_FINDINGS_UNIDENTIFIED",
+  );
+});
+
+test("a snapshot recorded after entering repair refuses the head even with the same findings", async (t) => {
+  // The Codex-raised race: the publication lock is released before the
+  // workflow mutation persists, so an intervening snapshot could withdraw or
+  // replace the correlated result between the blocking projection and the
+  // record. Revision binding closes it: even a snapshot that carries the
+  // identical findings review moves the revision past the one that entered
+  // the repair phase, and the head recording must refuse rather than record
+  // an identity read across it.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const firstHead = await commit(state.repository, "export const value = 2;\n");
+  const first = await gateAndPublishHead(state, workflow, firstHead, "one");
+  const startedAt = Date.now();
+  const { workflow: waiting, observedAt } = await reachRemoteWait(
+    state,
+    first.workflow,
+    first.reviewId,
+    firstHead,
+    startedAt,
+    (payload) => findingsResult(payload),
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(repairing.phase, "ADDRESS_REMOTE_FINDINGS");
+
+  const laterAt = observedAt + 5_000;
+  await recordGithubSnapshot(
+    state.store,
+    first.reviewId,
+    {
+      expectedRevision: 3,
+      observation: findingsResult(
+        draftObservation(state, firstHead, {
+          at: laterAt,
+          requestId: 100,
+          requestAt: startedAt + 1_000,
+        }),
+      ),
+    },
+    { clock: () => laterAt + 10 },
+  );
+
+  const secondHead = await commit(state.repository, "export const value = 3;\n");
+  await assert.rejects(
+    recordWorkflowHead(
+      state.store,
+      workflow.workflow_id,
+      repairing.revision,
+      secondHead,
+    ),
+    (error) => error.code === "WORKFLOW_FINDINGS_UNIDENTIFIED",
+  );
 });
 
 test("a repeated blocker without a tree change pauses NO_PROGRESS", async (t) => {
