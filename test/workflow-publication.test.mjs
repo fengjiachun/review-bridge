@@ -1029,6 +1029,25 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       eligible: true,
     },
   ]);
+
+  // The lock-free binding read validates the records it hands the predicate.
+  // A canonically rewritten ledger whose record drops its commits must fail
+  // the read, not reach the eligibility join as evidence.
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const tampered = structuredClone(stored);
+  tampered.addressed_findings[0].addressed_by = [];
+  await atomicWriteCanonicalJson(workflowPath, tampered);
+  await assert.rejects(
+    getThreadResolutionPlan(state.store, second.reviewId),
+    (error) => error.code === "WORKFLOW_STATE_INVALID",
+  );
+  await atomicWriteCanonicalJson(workflowPath, stored);
 });
 
 test("a repair head cannot be recorded when the publication no longer names a findings review", async (t) => {
