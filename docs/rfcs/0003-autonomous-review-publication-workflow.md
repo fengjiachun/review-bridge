@@ -959,11 +959,14 @@ For each eligible thread, the controller:
    recorded reply; the eligibility of step 1 is re-derived over the new
    watermark and must hold again, with the recorded reply as condition 7's
    sole admitted non-Codex comment;
-3. persists a `RESOLVE_REVIEW_THREAD` action intent;
+3. persists a `RESOLVE_REVIEW_THREAD` action intent, at whose creation the
+   server revalidates the head, provenance, eligibility, and exact watermark
+   and binds them into the intent's target;
 4. immediately re-reads the pull request head and the exact thread with
    complete nested comment pagination;
-5. asks the server to revalidate the head, provenance, eligibility, and exact
-   watermark at the action's expected revision;
+5. records that unresolved pre-read, bound to the intent's exact watermark,
+   as the action's executing proof — the last check before the provider
+   call;
 6. resolves the exact GitHub thread ID and durably records a provider response
    whose pinned semantics attest an unresolved-to-resolved transition by this
    action — GitHub's `resolveReviewThread` alone cannot: it succeeds
@@ -975,7 +978,9 @@ For each eligible thread, the controller:
    watermark, an observed resolved state, and a `resolvedBy` actor equal to
    the authenticated actor the action's intent recorded;
 8. creates the server-owned automatic-resolution record only from the
-   unresolved pre-read, transition-attesting response, and resolved post-read;
+   unresolved pre-read, transition-attesting response, and resolved
+   post-read, the server revalidating the eligibility, watermark, and reply
+   against its own recorded evidence before storing;
 9. collects and records a new complete GitHub publication snapshot; and
 10. requires the publication server to revalidate the automatic-resolution
     record and watermark before any pre-ready or final gate can pass.

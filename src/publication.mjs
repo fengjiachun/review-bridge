@@ -5761,8 +5761,11 @@ export async function recordCodexReviewRequest(
  * resolved post-read with `resolvedBy` naming the workflow's own actor --
  * all bound to one unchanged comment watermark, revalidated here against the
  * recorded observation and eligibility before anything is stored. A caller
- * cannot manufacture the record: every claim is recomputed from the ledger's
- * own evidence and refused on the first disagreement.
+ * cannot manufacture the record's bindings: thread, watermark, eligibility,
+ * digest, reply, and resolver are each recomputed from the ledger's own
+ * evidence and refused on the first disagreement. The read timestamps are
+ * the caller's provider evidence, held only to ordering and freshness --
+ * like every observation here, they attest what the provider returned.
  *
  * Recording clears the observation: the mutation just changed the pull
  * request, so whatever was observed before it no longer describes the
