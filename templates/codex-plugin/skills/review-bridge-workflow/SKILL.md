@@ -14,9 +14,12 @@ remote-only GitHub publication.
 The schema-version-1 autonomous workflow is opt-in and currently advances
 through the local `CODEX_TASK` gate, the reconciled push of the gated head,
 the marker-bound draft pull request, the version-3 publication ledger, the
-remote wait, and the three repair loops that return a new head to local
-review. It stops at `PRE_READY`. The pull request stays draft for the whole
-run: ready-state changes and thread resolution remain unavailable.
+remote wait, the three repair loops that return a new head to local review,
+the reply-then-resolve closure of eligible Codex finding threads, and the
+mark-ready that takes the cleared pull request out of draft. It stops at
+`POST_READY`: returning a ready pull request to draft, the draft-gate
+exception, and the terminal projection remain unavailable, so anything that
+blocks after the pull request is ready is operator work.
 
 1. Obtain direct operator authorization for the exact repository path,
    operator-selected base ref and resolved full base SHA, requirement,
@@ -128,9 +131,13 @@ run: ready-state changes and thread resolution remain unavailable.
     `PR_DRAFT` alone, before any other invariant is evaluated. Keep waiting
     while checks or review are still settling. `EVIDENCE_STALE` means the
     observation aged out: collect a fresh one rather than acting on it.
-    Unresolved review threads block and are operator work in this version, not
-    an autonomous repair loop. An idle poll that observes no change costs no
-    workflow revision, so waiting needs no backoff bookkeeping.
+    Unresolved review threads no longer stop the run outright: when
+    `get_thread_resolution_plan` reports at least one eligible thread the
+    workflow enters `RESOLVE_CODEX_THREADS`, where each thread is answered
+    with `plan_thread_reply` and then closed with `plan_thread_resolution`.
+    Threads the plan refuses stay operator work. An idle poll that observes no
+    change costs no workflow revision, so waiting needs no backoff
+    bookkeeping.
 
     When the projection reports `GITHUB_REVIEW_NOT_REQUESTED` — which is what
     an acknowledged ambiguity leaves behind — post the exact
@@ -168,10 +175,15 @@ run: ready-state changes and thread resolution remain unavailable.
     rewrite — that last one cannot be resumed, because every workflow head must
     descend from the last, so it ends in cancellation. Never waive, remove, or
     rename a required check, and never rebase or force-push to resolve one.
-14. Stop this implementation at `PRE_READY`. Marking the pull request ready,
-    the draft-gate exception, and automatic thread resolution remain
-    unavailable until the later skill update ships. Continue manually only
-    after a fresh operator instruction.
+14. At `PRE_READY`, call `plan_mark_pull_request_ready`. It refuses unless the
+    publication's own projection is `READY_TO_MARK` on this exact head, and it
+    pins that clearance into the intent. Read the live pull request
+    immediately before the call and pass it as the executing proof; if that
+    pre-read already shows it out of draft on this head, issue no mutation and
+    reconcile with `OBSERVED_ALREADY_READY`. Then stop at `POST_READY`: the
+    draft-gate exception, the return to draft, and the terminal projection
+    remain unavailable until the later skill update ships. Continue manually
+    only after a fresh operator instruction.
 
 Every mutation uses the exact current workflow revision. On `WORKFLOW_BUSY`,
 `WORKFLOW_CLAIMS_BUSY`, `LOCK_OWNERSHIP_LOST`, or an indeterminate store write,

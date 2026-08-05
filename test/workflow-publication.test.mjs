@@ -36,11 +36,13 @@ import {
   pauseAutonomousWorkflow,
   planCodexTaskDispatch,
   planDraftPullRequest,
+  planMarkPullRequestReady,
   planThreadReply,
   planThreadResolution,
   planWorkflowPush,
   recordCodexTaskObservation,
   recordDraftPullRequestObservation,
+  recordMarkReadyObservation,
   recordPushObservation,
   recordThreadReplyObservation,
   recordThreadResolutionObservation,
@@ -773,7 +775,7 @@ test("the remote wait routes each blocker to its repair phase or pause", async (
       name: "clean and pre-ready",
       mutate: null,
       phase: "PRE_READY",
-      nextAction: "AWAIT_OPERATOR",
+      nextAction: "PLAN_MARK_PR_READY",
     },
     {
       name: "unresolved thread keeps waiting",
@@ -3060,4 +3062,298 @@ test("the remote wait rejects a publication bound to another head", async (t) =>
     ),
     /WORKFLOW_PHASE_INVALID/,
   );
+});
+
+test("a cleared draft pull request marks itself ready and then stops", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+  );
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(preReady.phase, "PRE_READY");
+
+  const planned = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    preReady.revision,
+  );
+  const projection = await getAutonomousPreReady(state.store, reviewId);
+  // The intent carries the clearance itself, not a promise that one existed.
+  assert.deepEqual(planned.action.target, {
+    review_id: reviewId,
+    repository_id: REPOSITORY_ID,
+    pr_number: PR_NUMBER,
+    base_branch: "main",
+    head_branch: TOPIC_BRANCH,
+    head_sha: headSha,
+    publication_revision: projection.revision,
+    blocker_sha256: projection.blocker_sha256,
+  });
+
+  // The pre-read is the last check before the call, and it binds the exact
+  // pull request and head: a drifted head never becomes an executing proof.
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      state.store,
+      workflow.workflow_id,
+      planned.workflow.revision,
+      planned.action.action_id,
+      {
+        repository_id: REPOSITORY_ID,
+        pr_number: PR_NUMBER,
+        base_branch: "main",
+        head_branch: TOPIC_BRANCH,
+        head_sha: "9".repeat(40),
+        is_draft: true,
+      },
+    ),
+    (error) => error.code === "WORKFLOW_ACTION_INVALID",
+  );
+
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    planned.workflow.revision,
+    planned.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      base_branch: "main",
+      head_branch: TOPIC_BRANCH,
+      head_sha: headSha,
+      is_draft: true,
+    },
+  );
+
+  const observe = (overrides) =>
+    recordMarkReadyObservation(
+      state.store,
+      workflow.workflow_id,
+      executing.revision,
+      planned.action.action_id,
+      {
+        outcome: "MARKED_READY",
+        repositoryId: REPOSITORY_ID,
+        prNumber: PR_NUMBER,
+        baseBranch: "main",
+        headBranch: TOPIC_BRANCH,
+        headSha,
+        isDraft: false,
+        ...overrides,
+      },
+    );
+  // A pull request still draft after the call is not a reconciled mark-ready,
+  // and a pre-read that found it draft cannot report it was already ready.
+  await assert.rejects(
+    observe({ isDraft: true }),
+    (error) => error.code === "WORKFLOW_ACTION_INVALID",
+  );
+  await assert.rejects(
+    observe({ outcome: "OBSERVED_ALREADY_READY" }),
+    (error) => error.code === "WORKFLOW_ACTION_INVALID",
+  );
+
+  const observed = await observe({});
+  const ready = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    observed.revision,
+    planned.action.action_id,
+  );
+  assert.equal(ready.phase, "POST_READY");
+  assert.equal(
+    (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
+      .next_action,
+    "AWAIT_OPERATOR",
+  );
+  assert.equal(ready.ready_marks.length, 1);
+  assert.deepEqual(
+    { ...ready.ready_marks[0], recorded_at: null },
+    {
+      number: 1,
+      outcome: "MARKED_READY",
+      action_id: planned.action.action_id,
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      head_sha: headSha,
+      publication_review_id: reviewId,
+      publication_revision: projection.revision,
+      blocker_sha256: projection.blocker_sha256,
+      recorded_at: null,
+    },
+  );
+
+  // The pull request is out of draft, so no repair phase may run: this stage
+  // cannot return it to draft, and advancing anyway would let the workflow
+  // rewrite an exposed head.
+  await assert.rejects(
+    advanceRemoteWorkflow(state.store, workflow.workflow_id, ready.revision),
+    (error) => error.code === "WORKFLOW_PHASE_INVALID",
+  );
+});
+
+test("a blocked publication is never plannable for mark-ready", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+  );
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(preReady.phase, "PRE_READY");
+
+  // The clearance is re-read at plan time, so a blocker that lands after the
+  // workflow reached the pre-ready stop refuses the intent rather than
+  // riding the earlier projection.
+  const blockedAt = at + 10_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 3,
+      observation: failingCheck(
+        draftObservation(state, headSha, {
+          at: blockedAt,
+          requestId: 100,
+          requestAt: at + 1_000,
+        }),
+      ),
+    },
+    { clock: () => blockedAt + 10 },
+  );
+  await assert.rejects(
+    planMarkPullRequestReady(
+      state.store,
+      workflow.workflow_id,
+      preReady.revision,
+    ),
+    (error) =>
+      error.code === "WORKFLOW_PUBLICATION_NOT_READY" &&
+      error.details.blocking_reason === "CHECKS_FAILED",
+  );
+});
+
+test("a pull request found already ready reconciles without claiming it", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+  );
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  const planned = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    preReady.revision,
+  );
+  // Recovery after a crash between the call and its record: the pre-read
+  // finds this exact head already ready, which is the reconciled completion.
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    planned.workflow.revision,
+    planned.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      base_branch: "main",
+      head_branch: TOPIC_BRANCH,
+      head_sha: headSha,
+      is_draft: false,
+    },
+  );
+  const observation = {
+    outcome: "OBSERVED_ALREADY_READY",
+    repositoryId: REPOSITORY_ID,
+    prNumber: PR_NUMBER,
+    baseBranch: "main",
+    headBranch: TOPIC_BRANCH,
+    headSha,
+    isDraft: false,
+  };
+  // The outcome follows the pre-read, so this one cannot claim the mutation.
+  await assert.rejects(
+    recordMarkReadyObservation(
+      state.store,
+      workflow.workflow_id,
+      executing.revision,
+      planned.action.action_id,
+      { ...observation, outcome: "MARKED_READY" },
+    ),
+    (error) => error.code === "WORKFLOW_ACTION_INVALID",
+  );
+  const observed = await recordMarkReadyObservation(
+    state.store,
+    workflow.workflow_id,
+    executing.revision,
+    planned.action.action_id,
+    observation,
+  );
+  const ready = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    observed.revision,
+    planned.action.action_id,
+  );
+  assert.equal(ready.phase, "POST_READY");
+  assert.equal(ready.ready_marks[0].outcome, "OBSERVED_ALREADY_READY");
 });

@@ -671,9 +671,12 @@ ambiguous, incomplete, and unresolved-thread projections return their
 underlying blocker instead.
 
 The draft-gate rules below belong to rollout item 3. They exist only to answer
-when an early mark-ready is permitted, so until autonomous mark-ready ships the
-pull request stays draft for its whole life, neither draft-gate pause has a
-resume action, and neither is reachable.
+when an *early* mark-ready is permitted. Autonomous mark-ready now ships, but
+only on that `READY_TO_MARK` clearance: the implemented action reads the
+projection under the publication's own lock, pins its revision and blocker
+digest into the intent, and has no path that waives a blocker. So neither
+draft-gate pause has a resume action and neither is reachable, exactly as
+before.
 
 They are also not this repository's path. GitHub delivers `pull_request` events
 for draft pull requests, and a workflow without an explicit `draft == false`

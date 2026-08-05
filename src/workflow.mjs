@@ -497,6 +497,83 @@ const ACTION_KIND_SPECS = {
       });
     },
   },
+  MARK_PR_READY: {
+    // The last external write of the autonomous run: take the workflow's own
+    // draft pull request out of draft on the exact head the publication
+    // cleared. The intent binds that clearance -- publication revision and
+    // blocker digest -- so a pull request that stopped being ready between
+    // planning and the call cannot be marked on a stale proof.
+    capability: "MARK_PR_READY",
+    phase: "PRE_READY",
+    claimKind: "PULL_REQUEST",
+    markerPrefix: null,
+    identityFacts(target) {
+      return { pr_number: target.pr_number, head_sha: target.head_sha };
+    },
+    validateTarget(workflow, target) {
+      const authorized = workflow.authorization.publication_target;
+      const pullRequest = workflow.pull_request;
+      if (
+        workflow.current_publication == null ||
+        target.review_id !== workflow.current_publication.review_id ||
+        target.head_sha !== workflow.current_head_sha ||
+        pullRequest == null ||
+        target.repository_id !== pullRequest.repository_id ||
+        target.pr_number !== pullRequest.pr_number ||
+        target.base_branch !== authorized.base_branch ||
+        target.head_branch !== authorized.head_branch ||
+        target.repository_id !== authorized.base_repository_id ||
+        !Number.isSafeInteger(target.publication_revision) ||
+        target.publication_revision < 1 ||
+        !DIGEST_RE.test(target.blocker_sha256 ?? "")
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "mark-ready target does not match the workflow-owned pull request, head, and clearance",
+        );
+      }
+    },
+    dispatch: null,
+    validateExecutingProof(action, proof) {
+      // The identity read immediately before the call. A pull request already
+      // out of draft is a legal proof -- on this exact head it is the
+      // reconciled completion, and it forbids claiming the mutation.
+      if (
+        proof == null ||
+        proof.repository_id !== action.target.repository_id ||
+        proof.pr_number !== action.target.pr_number ||
+        proof.base_branch !== action.target.base_branch ||
+        proof.head_branch !== action.target.head_branch ||
+        proof.head_sha !== action.target.head_sha ||
+        typeof proof.is_draft !== "boolean"
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "the mark-ready pre-read must bind the exact pull request and head",
+        );
+      }
+    },
+    validateResponse(action, response) {
+      if (
+        !["MARKED_READY", "OBSERVED_ALREADY_READY"].includes(
+          response.outcome,
+        ) ||
+        response.repository_id !== action.target.repository_id ||
+        response.pr_number !== action.target.pr_number ||
+        response.base_branch !== action.target.base_branch ||
+        response.head_branch !== action.target.head_branch ||
+        response.head_sha !== action.target.head_sha ||
+        response.is_draft !== false ||
+        // Which outcome is true is decided by the pre-read, not by the
+        // caller: a driver that found the pull request already ready never
+        // issued the mutation.
+        (response.outcome === "MARKED_READY") !==
+          (action.executing_proof?.is_draft === true)
+      ) {
+        fail("WORKFLOW_ACTION_INVALID", "active action response is invalid");
+      }
+    },
+  },
 };
 
 function validateCurrentPublication(workflow) {
@@ -985,7 +1062,8 @@ function validateWorkflow(workflow) {
     !Array.isArray(workflow.remote_attempts) ||
     !Array.isArray(workflow.addressed_findings) ||
     !Array.isArray(workflow.thread_replies) ||
-    !Array.isArray(workflow.thread_resolutions)
+    !Array.isArray(workflow.thread_resolutions) ||
+    !Array.isArray(workflow.ready_marks)
   ) {
     fail("WORKFLOW_STATE_INVALID", "workflow arrays are malformed");
   }
@@ -1102,6 +1180,30 @@ function validateWorkflow(workflow) {
       { max: 1024 },
     );
     assertTimestamp(resolution.recorded_at, "thread-resolution recorded_at");
+  }
+  for (const [index, mark] of workflow.ready_marks.entries()) {
+    assertObject(mark, "workflow.ready_marks entry");
+    if (mark.number !== index + 1) {
+      fail("WORKFLOW_STATE_INVALID", "ready-mark numbers must be sequential");
+    }
+    if (!["MARKED_READY", "OBSERVED_ALREADY_READY"].includes(mark.outcome)) {
+      fail("WORKFLOW_STATE_INVALID", "ready-mark outcome is invalid");
+    }
+    assertString(mark.action_id, "ready-mark action_id", { max: 1024 });
+    assertPositiveInteger(mark.repository_id, "ready-mark repository_id");
+    assertPositiveInteger(mark.pr_number, "ready-mark pr_number");
+    assertSha(mark.head_sha, "ready-mark head_sha");
+    assertString(mark.publication_review_id, "ready-mark review_id", {
+      max: 1024,
+    });
+    assertPositiveInteger(
+      mark.publication_revision,
+      "ready-mark publication_revision",
+    );
+    if (!DIGEST_RE.test(mark.blocker_sha256 ?? "")) {
+      fail("WORKFLOW_STATE_INVALID", "ready-mark blocker digest is invalid");
+    }
+    assertTimestamp(mark.recorded_at, "ready-mark recorded_at");
   }
   validateCurrentPublication(workflow);
   const claimKeys = new Set();
@@ -1258,6 +1360,7 @@ const REMOTE_FIELD_DEFAULTS = Object.freeze({
   addressed_findings: [],
   thread_replies: [],
   thread_resolutions: [],
+  ready_marks: [],
 });
 
 function withRemoteFieldDefaults(workflow) {
@@ -1617,6 +1720,7 @@ function auditedWorkflowState(workflow) {
     addressed_findings: workflow.addressed_findings ?? [],
     thread_replies: workflow.thread_replies ?? [],
     thread_resolutions: workflow.thread_resolutions ?? [],
+    ready_marks: workflow.ready_marks ?? [],
     active_action: workflow.active_action,
     reviewer_task: workflow.reviewer_task,
     current_review: workflow.current_review,
@@ -1821,6 +1925,7 @@ function requireWorkflowAuditBinding(workflow, audit) {
     addressed_findings: [],
     thread_replies: [],
     thread_resolutions: [],
+    ready_marks: [],
     active_action: null,
     reviewer_task: null,
     current_review: null,
@@ -1849,6 +1954,8 @@ function requireWorkflowAuditBinding(workflow, audit) {
       canonicalJson(lastState.thread_replies ?? []) ||
     canonicalJson(workflow.thread_resolutions ?? []) !==
       canonicalJson(lastState.thread_resolutions ?? []) ||
+    canonicalJson(workflow.ready_marks ?? []) !==
+      canonicalJson(lastState.ready_marks ?? []) ||
     canonicalJson(workflow.active_action) !==
       canonicalJson(lastState.active_action) ||
     canonicalJson(workflow.reviewer_task) !==
@@ -1906,6 +2013,7 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "addressed_findings",
     "thread_replies",
     "thread_resolutions",
+    "ready_marks",
     "active_action",
     "reviewer_task",
     "current_review",
@@ -2199,7 +2307,12 @@ function nextAction(workflow) {
     ADDRESS_REMOTE_FINDINGS: "ADDRESS_REMOTE_FINDINGS",
     ADDRESS_CHECK_FAILURE: "ADDRESS_CHECK_FAILURE",
     UPDATE_FROM_BASE: "UPDATE_FROM_BASE",
-    PRE_READY: "AWAIT_OPERATOR",
+    PRE_READY: actionPhase("PLAN_MARK_PR_READY", {
+      PLANNED: "MARK_PR_READY",
+      EXECUTING: "RECONCILE_MARK_PR_READY",
+      OBSERVED: "COMPLETE_MARK_PR_READY",
+    }),
+    POST_READY: "AWAIT_OPERATOR",
   };
   return actions[workflow.phase] ?? "INSPECT_WORKFLOW";
 }
@@ -2222,6 +2335,7 @@ function workflowSummary(workflow) {
     addressed_findings: workflow.addressed_findings,
     thread_replies: workflow.thread_replies,
     thread_resolutions: workflow.thread_resolutions,
+    ready_marks: workflow.ready_marks,
     active_action:
       workflow.active_action == null
         ? null
@@ -2350,6 +2464,7 @@ export async function startAutonomousWorkflow(
     addressed_findings: [],
     thread_replies: [],
     thread_resolutions: [],
+    ready_marks: [],
     claims: workflowClaims,
     active_action: null,
     progress_fingerprint: null,
@@ -2865,6 +2980,69 @@ export async function planDraftPullRequest(
   );
 }
 
+/**
+ * Plan the mark-ready that ends the autonomous run. The clearance is read
+ * here, under the publication's own lock, and pinned into the intent: the
+ * projection's revision and blocker digest travel with the action, so what
+ * the driver executes is the clearance the server derived rather than
+ * whatever the publication happens to say when the call lands.
+ */
+export async function planMarkPullRequestReady(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+) {
+  return planWorkflowAction(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    "MARK_PR_READY",
+    {
+      planPhases: ["PRE_READY"],
+      invalidMessage: "the mark-ready is not currently plannable",
+      target: async (workflow) => {
+        if (workflow.current_publication == null || workflow.pull_request == null) {
+          fail(
+            "WORKFLOW_STATE_INVALID",
+            "mark-ready has no bound publication and pull request",
+          );
+        }
+        const reviewId = workflow.current_publication.review_id;
+        const preReady = await getAutonomousPreReady(storeRoot, reviewId);
+        if (
+          preReady.workflow_id !== workflow.workflow_id ||
+          preReady.head_sha !== workflow.current_head_sha
+        ) {
+          fail(
+            "WORKFLOW_PUBLICATION_MISMATCH",
+            "publication is not bound to this workflow and head",
+          );
+        }
+        if (preReady.status !== "READY_TO_MARK") {
+          fail(
+            "WORKFLOW_PUBLICATION_NOT_READY",
+            "the publication has not cleared the pull request for review",
+            {
+              status: preReady.status,
+              blocking_reason: preReady.blocking_reason,
+            },
+          );
+        }
+        return {
+          review_id: reviewId,
+          repository_id: workflow.pull_request.repository_id,
+          pr_number: workflow.pull_request.pr_number,
+          base_branch: workflow.pull_request.base_branch,
+          head_branch: workflow.pull_request.head_branch,
+          head_sha: workflow.current_head_sha,
+          publication_revision: preReady.revision,
+          blocker_sha256: preReady.blocker_sha256,
+        };
+      },
+    },
+  );
+}
+
 export async function planThreadReply(
   storeRoot,
   workflowId,
@@ -3238,6 +3416,45 @@ export async function recordThreadResolutionObservation(
   );
 }
 
+export async function recordMarkReadyObservation(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  actionId,
+  {
+    outcome,
+    repositoryId,
+    prNumber,
+    baseBranch,
+    headBranch,
+    headSha,
+    isDraft,
+  },
+) {
+  if (!["MARKED_READY", "OBSERVED_ALREADY_READY"].includes(outcome)) {
+    throw new TypeError("outcome must be MARKED_READY or OBSERVED_ALREADY_READY");
+  }
+  assertPositiveInteger(repositoryId, "repository_id");
+  assertPositiveInteger(prNumber, "pr_number");
+  assertSha(headSha, "head_sha");
+  return recordActionObservation(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    actionId,
+    "MARK_PR_READY",
+    () => ({
+      outcome,
+      repository_id: repositoryId,
+      pr_number: prNumber,
+      base_branch: baseBranch,
+      head_branch: headBranch,
+      head_sha: headSha,
+      is_draft: isDraft,
+    }),
+  );
+}
+
 export async function recordPushObservation(
   storeRoot,
   workflowId,
@@ -3511,7 +3728,12 @@ export async function completeWorkflowAction(
             entry.thread_id === action.target.thread_id &&
             entry.action_id === action.action_id,
         );
-        if (record == null) {
+        // A terminal publication can no longer be written to, so the record
+        // is not merely late -- it is uncreatable. Holding the action open
+        // for it would strand the workflow on a publication that is already
+        // closed, merged, or invalidated, and the record would have nothing
+        // left to protect: no gate of a terminal publication can pass.
+        if (record == null && ledger.terminal == null) {
           fail(
             "WORKFLOW_RESOLUTION_RECORD_MISSING",
             "a resolved outcome completes only after its automatic-resolution record is stored",
@@ -3537,6 +3759,36 @@ export async function completeWorkflowAction(
               recorded_at: now(),
             });
             next.active_action = null;
+          },
+        ),
+      );
+    }
+    if (action.kind === "MARK_PR_READY") {
+      return publicWorkflow(
+        await saveActionMutation(
+          paths,
+          workflow,
+          "ACTION_COMPLETED",
+          async (next) => {
+            next.active_action.completed_at = now();
+            next.ready_marks.push({
+              number: next.ready_marks.length + 1,
+              outcome: action.provider_response.outcome,
+              action_id: action.action_id,
+              repository_id: action.target.repository_id,
+              pr_number: action.target.pr_number,
+              head_sha: action.target.head_sha,
+              publication_review_id: action.target.review_id,
+              publication_revision: action.target.publication_revision,
+              blocker_sha256: action.target.blocker_sha256,
+              recorded_at: now(),
+            });
+            next.active_action = null;
+            // The pull request is out of draft, so no repair phase may run
+            // until it is returned to draft -- which this rollout stage
+            // cannot do. The workflow stops advancing here and the terminal
+            // projection is the operator's.
+            next.phase = "POST_READY";
           },
         ),
       );

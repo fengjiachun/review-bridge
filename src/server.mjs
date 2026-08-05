@@ -52,11 +52,13 @@ import {
   pauseAutonomousWorkflow,
   planCodexTaskDispatch,
   planDraftPullRequest,
+  planMarkPullRequestReady,
   planThreadReply,
   planThreadResolution,
   planWorkflowPush,
   recordCodexTaskObservation,
   recordDraftPullRequestObservation,
+  recordMarkReadyObservation,
   recordPushObservation,
   recordThreadReplyObservation,
   recordThreadResolutionObservation,
@@ -483,7 +485,7 @@ if (role === "author") {
     {
       title: "Mark workflow action executing",
       description:
-        "Durably record EXECUTING immediately before the planned external write; a push additionally requires the pinned URL resolved to the authorized repository ID, and a thread resolution requires the immediately preceding thread pre-read (thread ID, resolved flag, and -- while unresolved -- the exact comment watermark).",
+        "Durably record EXECUTING immediately before the planned external write; a push additionally requires the pinned URL resolved to the authorized repository ID, a thread resolution requires the immediately preceding thread pre-read (thread ID, resolved flag, and -- while unresolved -- the exact comment watermark), and a mark-ready requires the immediately preceding pull-request pre-read (repository, number, both branches, head SHA, and draft flag).",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
@@ -493,6 +495,12 @@ if (role === "author") {
         thread_id: z.string().optional(),
         is_resolved: z.boolean().optional(),
         thread_watermark: z.string().optional(),
+        pr_repository_id: z.number().int().positive().optional(),
+        pr_number: z.number().int().positive().optional(),
+        base_branch: z.string().optional(),
+        head_branch: z.string().optional(),
+        head_sha: z.string().optional(),
+        is_draft: z.boolean().optional(),
       },
     },
     (input) =>
@@ -509,12 +517,77 @@ if (role === "author") {
                 ? {}
                 : { thread_watermark: input.thread_watermark }),
             }
-          : input.resolved_repository_id == null && input.resolved_url == null
-            ? null
-            : {
-                resolved_repository_id: input.resolved_repository_id,
-                resolved_url: input.resolved_url,
-              },
+          : input.pr_number != null
+            ? {
+                repository_id: input.pr_repository_id,
+                pr_number: input.pr_number,
+                base_branch: input.base_branch,
+                head_branch: input.head_branch,
+                head_sha: input.head_sha,
+                is_draft: input.is_draft,
+              }
+            : input.resolved_repository_id == null && input.resolved_url == null
+              ? null
+              : {
+                  resolved_repository_id: input.resolved_repository_id,
+                  resolved_url: input.resolved_url,
+                },
+      ),
+  );
+
+  register(
+    "plan_mark_pull_request_ready",
+    {
+      title: "Plan mark pull request ready",
+      description:
+        "Persist the MARK_PR_READY intent for the workflow-owned pull request. Refuses unless the bound publication's autonomous projection is READY_TO_MARK on this exact head, and pins that projection's revision and blocker digest into the intent.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+      },
+    },
+    (input) =>
+      planMarkPullRequestReady(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+      ),
+  );
+
+  register(
+    "record_mark_ready_observation",
+    {
+      title: "Record mark-ready observation",
+      description:
+        "Reconcile the pull request after the mark-ready call: the same repository, number, branches, and head, now out of draft. MARKED_READY requires a draft pre-read; a pull request the pre-read already found ready records OBSERVED_ALREADY_READY.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+        outcome: z.enum(["MARKED_READY", "OBSERVED_ALREADY_READY"]),
+        repository_id: z.number().int().positive(),
+        pr_number: z.number().int().positive(),
+        base_branch: z.string(),
+        head_branch: z.string(),
+        head_sha: z.string(),
+        is_draft: z.boolean(),
+      },
+    },
+    (input) =>
+      recordMarkReadyObservation(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
+        {
+          outcome: input.outcome,
+          repositoryId: input.repository_id,
+          prNumber: input.pr_number,
+          baseBranch: input.base_branch,
+          headBranch: input.head_branch,
+          headSha: input.head_sha,
+          isDraft: input.is_draft,
+        },
       ),
   );
 
