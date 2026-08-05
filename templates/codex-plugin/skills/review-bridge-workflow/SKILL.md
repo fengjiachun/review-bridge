@@ -184,7 +184,10 @@ blocks after the pull request is ready is operator work.
     repair ends in a new head pushed to that pull request, and one reviewers
     can already see must not receive it. The remedy is outside the workflow
     — someone returns it to draft — so resuming re-enters the wait, which
-    re-derives the stop while it is still visible. A cleared publication is
+    re-derives the stop while it is still visible. `record_workflow_head`
+    refuses on the same evidence with `WORKFLOW_PULL_REQUEST_EXPOSED`, so a
+    repair already under way when someone marks the pull request ready
+    cannot finish onto it either. A cleared publication is
     unaffected: it reaches the pre-ready stop, where an already-ready pull
     request reconciles `OBSERVED_ALREADY_READY` without claiming a mutation.
     The server also pauses `GITHUB_REVIEW_AMBIGUOUS` on an ambiguous or
