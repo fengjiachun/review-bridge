@@ -215,9 +215,15 @@ blocks after the pull request is ready is operator work.
     One pre-read keeps the intent instead: one that found the pull request
     already out of draft. The repair phases the wait routes into push new
     commits, and a pull request that is already visible for review must not
-    receive them, so that intent is held rather than dropped. Wait for the
-    publication to clear the head again and reconcile
-    `OBSERVED_ALREADY_READY`, or pause for the operator.
+    receive them, so that intent is held rather than dropped. If the
+    regression clears on its own — a check that passes on a rerun, a review
+    that lands — the checkpoint passes and you reconcile
+    `OBSERVED_ALREADY_READY`. If it needs a new head instead, this release
+    cannot get there: the held action blocks head recording exactly as
+    intended, so the hold is permanent. Pause
+    `EXTERNAL_ACTION_INDETERMINATE` and hand it to the operator, with the
+    same cancellation cost as the other deferred case. Both wait for the
+    return-to-draft action.
 
     The checkpoint runs once, before the one call this action makes. If you
     crash after it, reconcile by reading the pull request. Found ready,

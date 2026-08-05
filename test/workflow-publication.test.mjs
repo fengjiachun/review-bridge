@@ -3172,9 +3172,16 @@ test("a cleared draft pull request marks itself ready and then stops", async (t)
   // The pre-read is the last check before the call, and it binds the exact
   // pull request and head: a drifted head never becomes an executing proof,
   // and neither does a reading that never looked at the draft state.
+  // Every field the pre-read binds, one at a time: with the stored target
+  // untouched, this validator is the only thing that can object to any of
+  // them.
   for (const drifted of [
     { head_sha: "9".repeat(40) },
     { is_draft: null },
+    { repository_id: REPOSITORY_ID + 1 },
+    { pr_number: PR_NUMBER + 1 },
+    { base_branch: "release" },
+    { head_branch: "other-topic" },
   ]) {
     await assert.rejects(
       markWorkflowActionExecuting(

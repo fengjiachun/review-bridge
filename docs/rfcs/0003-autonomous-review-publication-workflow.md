@@ -531,7 +531,11 @@ recorded its result. Therefore recovery always reconciles first:
   request: a pre-read that found it already out of draft keeps the intent,
   because the wait's repair phases push new commits and a pull request
   already visible for review must not receive them. The pre-read is trusted
-  for the claim that keeps an intent, never for the one that destroys it. Retryable failures of the read itself drop nothing. The pre-ready
+  for the claim that keeps an intent, never for the one that destroys it.
+  A regression that clears on its own frees that intent; one whose remedy is
+  a new head does not, because the held action blocks head recording, and
+  the hold is then as permanent as the executing case above and ends the
+  same way -- with the operator, until the return-to-draft action ships. Retryable failures of the read itself drop nothing. The pre-ready
   stop itself remains advanceable whenever no action is in flight, so a
   clearance that moves before anything is planned routes onward like any
   other change rather than stranding the run.
