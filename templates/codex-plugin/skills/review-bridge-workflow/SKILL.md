@@ -182,16 +182,25 @@ blocks after the pull request is ready is operator work.
     pre-read already shows it out of draft on this head, issue no mutation and
     reconcile with `OBSERVED_ALREADY_READY`.
 
-    That checkpoint re-reads the clearance. If the publication regressed since
-    planning, it refuses with `WORKFLOW_PUBLICATION_NOT_READY` and drops the
-    planned intent — the response says so in `details.action_abandoned` — and
-    the workflow is back in `WAIT_PUBLICATION` at the revision the error
-    reports, where the ordinary routing owns the new blocker. Recovering from
-    a crash after the checkpoint, call it again with a freshly read pre-read
-    before re-issuing the provider call: the clearance is checked again, and
-    the outcome is decided by the reading you just took rather than by one
-    from before the crash. An action already executing is never dropped, so a
-    refusal there leaves it for you to reconcile.
+    That checkpoint re-reads the clearance. If the publication regressed
+    before the first call, it refuses with `WORKFLOW_PUBLICATION_NOT_READY`
+    and drops the planned intent — the response says so in
+    `details.action_abandoned` — and the workflow is back in
+    `WAIT_PUBLICATION` at the revision the error reports, where the ordinary
+    routing owns the new blocker. Lock contention and every other failure of
+    the read itself are retryable and never drop anything.
+
+    Recovering from a crash after the checkpoint, call it again with a freshly
+    read pre-read before re-issuing the provider call: the clearance is
+    checked again and the outcome follows the reading you just took. An
+    executing intent is never dropped, whatever that pre-read says — a
+    timeout or a lagging read reports the pull request still draft while the
+    call lands, and GitHub attests no actor for a draft transition, so the
+    intent stays as the record of what to reconcile. If the clearance does not
+    come back, pause `EXTERNAL_ACTION_INDETERMINATE`. Reconciling a pull
+    request you find already ready, report `OBSERVED_ALREADY_READY`: it claims
+    nothing and is always available, while `MARKED_READY` requires a pre-read
+    that found the pull request draft.
 
     Then stop at `POST_READY`: the draft-gate exception, the return to draft,
     and the terminal projection remain unavailable until the later skill

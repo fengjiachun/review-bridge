@@ -517,11 +517,6 @@ const ACTION_KIND_SPECS = {
     // wrong", and destroying a durable intent over a busy lock would be a
     // far worse bug than the stop it was meant to prevent.
     abandonOnCode: "WORKFLOW_PUBLICATION_NOT_READY",
-    // An executing intent may be dropped only when the pre-read proves the
-    // provider call never landed: the pull request is still draft on this
-    // head, so there is nothing to reconcile. A pull request already out of
-    // draft keeps its intent, whoever marked it.
-    abandonableFromExecuting: (proof) => proof?.is_draft === true,
     claimKind: "PULL_REQUEST",
     markerPrefix: null,
     identityFacts(target) {
@@ -604,11 +599,15 @@ const ACTION_KIND_SPECS = {
         response.head_branch !== action.target.head_branch ||
         response.head_sha !== action.target.head_sha ||
         response.is_draft !== false ||
-        // Which outcome is true is decided by the pre-read, not by the
-        // caller: a driver that found the pull request already ready never
-        // issued the mutation.
-        (response.outcome === "MARKED_READY") !==
-          (action.executing_proof?.is_draft === true)
+        // Only the claim that this action performed the transition is bound
+        // to the pre-read: a driver whose pre-read found the pull request
+        // already ready never issued the mutation and may not claim it.
+        // Claiming nothing needs no permission -- and a driver whose
+        // checkpoint was refused after its pre-read went stale must always
+        // be able to report what it now sees rather than choose between a
+        // false claim and cancelling the workflow.
+        (response.outcome === "MARKED_READY" &&
+          action.executing_proof?.is_draft !== true)
       ) {
         fail("WORKFLOW_ACTION_INVALID", "active action response is invalid");
       }
@@ -3319,14 +3318,21 @@ export async function markWorkflowActionExecuting(
       } catch (error) {
         // Dropping the intent is right only when the evidence says the
         // intent is wrong and nothing external happened. Before the first
-        // call that is structural -- PLANNED means exactly that. On a
-        // re-entry it has to be proven, and the pre-read is the proof.
-        const refused = error?.code === spec.abandonOnCode;
-        const droppable =
-          refused &&
-          (!reentry ||
-            spec.abandonableFromExecuting?.(executingProof) === true);
-        if (!droppable) {
+        // call, that is structural: PLANNED means exactly that.
+        //
+        // Once the action is executing it cannot be established at all. A
+        // pre-read reporting the pull request still draft was tried as the
+        // proof and is not one: a client-side timeout or a lagging read
+        // returns exactly that while the call lands, and dropping there
+        // would leave no record that this workflow marked the pull request
+        // ready, then let a repair phase push a new head to a pull request
+        // that is no longer draft. GitHub attests no actor for a draft
+        // transition, so nothing else can settle it either. An executing
+        // intent therefore survives every refusal: it is the only record of
+        // what has to be reconciled, and a driver that cannot reconcile it
+        // pauses EXTERNAL_ACTION_INDETERMINATE, which is what that pause is
+        // for.
+        if (error?.code !== spec.abandonOnCode || reentry) {
           throw error;
         }
         // Leaving a refused intent in place is what would turn this into a

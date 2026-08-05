@@ -527,9 +527,15 @@ recorded its result. Therefore recovery always reconciles first:
   planned intent and returns the workflow to the publication wait — nothing
   external has happened, and leaving a refused intent in a phase that can
   neither advance nor record a head would leave cancellation as its only
-  exit. A refusal after the action is executing never drops it: the call may
-  already have landed, and that intent is the only record of what has to be
-  reconciled.
+  exit. A refusal once the action is executing never drops it. Whether the
+  call landed cannot be established: a timeout or a lagging read reports the
+  pull request still draft while the mutation applies, and this provider
+  attests no actor for a draft transition. The intent therefore remains the
+  record of what has to be reconciled, and a driver that cannot reconcile it
+  pauses as an indeterminate external action. Reconciliation may always
+  report an already-ready pull request, which claims nothing; only the claim
+  that this action performed the transition requires a pre-read that found
+  the pull request draft.
 - **Return to draft for repair**: read the exact pull request and head. Treat an
   already-draft pull request as reconciled completion. Repeat the mutation only
   while the same workflow-owned pull request remains ready on the same head,

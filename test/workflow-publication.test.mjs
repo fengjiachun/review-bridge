@@ -3202,14 +3202,9 @@ test("a cleared draft pull request marks itself ready and then stops", async (t)
         ...overrides,
       },
     );
-  // A pull request still draft after the call is not a reconciled mark-ready,
-  // and a pre-read that found it draft cannot report it was already ready.
+  // A pull request still draft after the call is not a reconciled mark-ready.
   await assert.rejects(
     observe({ isDraft: true }),
-    (error) => error.code === "WORKFLOW_ACTION_INVALID",
-  );
-  await assert.rejects(
-    observe({ outcome: "OBSERVED_ALREADY_READY" }),
     (error) => error.code === "WORKFLOW_ACTION_INVALID",
   );
 
@@ -3533,10 +3528,11 @@ test("a clearance that regresses after planning stops the mark-ready", async (t)
   );
   assert.equal(executing.active_action.status, "EXECUTING");
 
-  // The same refusal on an executing action, when the pre-read proves the
-  // provider call never landed -- still draft, on this head -- drops it too.
-  // Keeping it would strand the workflow just as surely as keeping a refused
-  // PLANNED one, and there is nothing left to reconcile.
+  // The same refusal on an executing action never drops it. A pre-read
+  // reporting the pull request still draft is not proof the call did not
+  // land -- a timeout or a lagging read says exactly that while it does --
+  // and GitHub attests no actor for a draft transition, so nothing can
+  // settle it. The intent survives as the record of what to reconcile.
   const regressedAt = clearedAt + 10_000;
   await recordGithubSnapshot(
     state.store,
@@ -3553,31 +3549,102 @@ test("a clearance that regresses after planning stops the mark-ready", async (t)
     },
     { clock: () => regressedAt + 10 },
   );
+  const stillDraftProof = {
+    repository_id: REPOSITORY_ID,
+    pr_number: PR_NUMBER,
+    base_branch: "main",
+    head_branch: TOPIC_BRANCH,
+    head_sha: headSha,
+    is_draft: true,
+  };
   await assert.rejects(
     markWorkflowActionExecuting(
       state.store,
       workflow.workflow_id,
       executing.revision,
       replanned.action.action_id,
-      {
-        repository_id: REPOSITORY_ID,
-        pr_number: PR_NUMBER,
-        base_branch: "main",
-        head_branch: TOPIC_BRANCH,
-        head_sha: headSha,
-        is_draft: true,
-      },
+      stillDraftProof,
     ),
     (error) =>
       error.code === "WORKFLOW_PUBLICATION_NOT_READY" &&
-      error.details.action_abandoned === replanned.action.action_id,
+      error.details.action_abandoned === undefined,
   );
-  const droppedAgain = await getAutonomousWorkflow(
+  const surviving = await getAutonomousWorkflow(
     state.store,
     workflow.workflow_id,
   );
-  assert.equal(droppedAgain.active_action, null);
-  assert.equal(droppedAgain.phase, "WAIT_PUBLICATION");
+  assert.equal(surviving.active_action.status, "EXECUTING");
+
+  // Its exit is the pause that exists for exactly this: an external write
+  // whose outcome the driver cannot establish.
+  const paused = await pauseAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    surviving.revision,
+    {
+      reasonCode: "EXTERNAL_ACTION_INDETERMINATE",
+      blockedAction: "MARK_PR_READY",
+      evidence: "the clearance regressed while the mark-ready call was in flight",
+    },
+  );
+  assert.equal(paused.phase, "PAUSED_HUMAN");
+
+  // And once the publication clears again the operator resumes into the same
+  // checkpoint, which now passes: recovery re-stamps the pre-read and the
+  // outcome follows the reading that preceded the surviving call.
+  const recoveredAt = regressedAt + 10_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 6,
+      observation: draftObservation(state, headSha, {
+        at: recoveredAt,
+        requestId: 100,
+        requestAt: at + 1_000,
+      }),
+    },
+    { clock: () => recoveredAt + 10 },
+  );
+  const resumed = await resumeAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    paused.revision,
+    {
+      operatorLabel: "jeremy",
+      rationale: "the pull request is still draft and the checks pass again",
+    },
+  );
+  assert.equal(resumed.phase, "PRE_READY");
+  assert.equal(resumed.active_action.status, "EXECUTING");
+
+  // The operator's reconciliation found the pull request already ready. The
+  // stored pre-read is stale -- it says draft -- but claiming nothing needs
+  // no permission, so the honest report is available without a re-entry and
+  // without choosing between a false claim and cancelling the workflow.
+  const observed = await recordMarkReadyObservation(
+    state.store,
+    workflow.workflow_id,
+    resumed.revision,
+    replanned.action.action_id,
+    {
+      outcome: "OBSERVED_ALREADY_READY",
+      repositoryId: REPOSITORY_ID,
+      prNumber: PR_NUMBER,
+      baseBranch: "main",
+      headBranch: TOPIC_BRANCH,
+      headSha,
+      isDraft: false,
+    },
+  );
+  const ready = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    observed.revision,
+    replanned.action.action_id,
+  );
+  assert.equal(ready.phase, "POST_READY");
+  assert.equal(ready.ready_marks[0].outcome, "OBSERVED_ALREADY_READY");
 });
 
 test("a resolution whose publication went terminal still closes its action", async (t) => {
