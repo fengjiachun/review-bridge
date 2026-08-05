@@ -81,7 +81,7 @@ const argv = process.argv.slice(2);
 const role = parseOption(argv, "role");
 if (!["author", "reviewer"].includes(role)) {
   console.error(
-    "usage: node server.mjs --role author|reviewer [--reviewer-provider CLAUDE_DESKTOP|CODEX_TASK]",
+    "usage: node server.mjs --role author|reviewer [--reviewer-provider CLAUDE_DESKTOP|CODEX_TASK|HERMES]",
   );
   process.exit(2);
 }
@@ -89,7 +89,7 @@ const reviewerProvider =
   role === "reviewer" ? parseOption(argv, "reviewer-provider") : null;
 if (role === "reviewer" && !REVIEWER_PROVIDERS.includes(reviewerProvider)) {
   console.error(
-    "reviewer role requires --reviewer-provider CLAUDE_DESKTOP|CODEX_TASK",
+    "reviewer role requires --reviewer-provider CLAUDE_DESKTOP|CODEX_TASK|HERMES",
   );
   process.exit(2);
 }

@@ -11,6 +11,7 @@ const outputRoot = process.env.REVIEW_BRIDGE_OUTPUT_ROOT
 const codexMarketplace = path.join(outputRoot, "codex-marketplace");
 const codexPlugin = path.join(codexMarketplace, "plugins", "review-bridge");
 const claudeSource = path.join(outputRoot, "claude-extension-source");
+const hermesIntegration = path.join(outputRoot, "hermes-integration");
 const mcpbOutput = path.join(outputRoot, "review-bridge-reviewer-v0.5.0.mcpb");
 const dxtOutput = path.join(outputRoot, "review-bridge-reviewer-v0.5.0.dxt");
 const sourceOutput = path.join(outputRoot, "review-bridge-source-v0.5.0.zip");
@@ -134,6 +135,18 @@ await fsp.cp(
 await fsp.copyFile(path.join(projectRoot, "LICENSE"), path.join(claudeSource, "LICENSE"));
 await copyServer(claudeSource);
 await installRuntime(claudeSource);
+
+// Hermes profile integration: reviewer/author MCP config snippets, the
+// Review Bridge-owned reviewer skill, and install/upgrade/isolation docs,
+// packaged with the same server runtime the other consumers get.
+await fsp.cp(
+  path.join(projectRoot, "templates", "hermes"),
+  hermesIntegration,
+  { recursive: true },
+);
+await fsp.copyFile(path.join(projectRoot, "LICENSE"), path.join(hermesIntegration, "LICENSE"));
+await copyServer(hermesIntegration);
+await installRuntime(hermesIntegration);
 
 const mcpbCli = path.join(projectRoot, "node_modules", ".bin", "mcpb");
 run(mcpbCli, ["validate", claudeSource], projectRoot);

@@ -7,8 +7,24 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import {
+  parseHermesMcpSnippet,
+  renderAndValidateHermesServerConfig,
+} from "./hermes-config.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const releaseVersion = "0.5.0";
+const releasePathPlaceholder = "__REVIEW_BRIDGE_RELEASE_PATH__";
+const storePlaceholder = "__REVIEW_BRIDGE_HOME__";
+const reviewerToolNames = [
+  "list_pending_reviews",
+  "open_review",
+  "read_review_artifact",
+  "read_snapshot_file",
+  "search_snapshot",
+  "submit_rereview",
+  "submit_review",
+];
 const outputRoot = process.env.REVIEW_BRIDGE_OUTPUT_ROOT
   ? path.resolve(process.env.REVIEW_BRIDGE_OUTPUT_ROOT)
   : path.join(projectRoot, "dist", "review-bridge-v0.5.0");
@@ -17,6 +33,8 @@ const pluginRoot = path.join(marketplaceRoot, "plugins", "review-bridge");
 const authorServer = path.join(pluginRoot, "server", "server.mjs");
 const reviewerRoot = path.join(outputRoot, "claude-extension-source");
 const reviewerServer = path.join(reviewerRoot, "server", "server.mjs");
+const hermesIntegration = path.join(outputRoot, "hermes-integration");
+const hermesServer = path.join(hermesIntegration, "server", "server.mjs");
 const mcpb = path.join(outputRoot, "review-bridge-reviewer-v0.5.0.mcpb");
 const dxt = path.join(outputRoot, "review-bridge-reviewer-v0.5.0.dxt");
 const sourceArchive = path.join(outputRoot, "review-bridge-source-v0.5.0.zip");
@@ -35,6 +53,34 @@ async function readJson(filePath) {
   return JSON.parse(await fsp.readFile(filePath, "utf8"));
 }
 
+function scalarValues(value) {
+  if (Array.isArray(value)) return value.flatMap(scalarValues);
+  if (value && typeof value === "object") {
+    return Object.values(value).flatMap(scalarValues);
+  }
+  return [String(value)];
+}
+
+async function connectHermesConfig(serverConfig, store) {
+  const rendered = renderAndValidateHermesServerConfig(serverConfig, {
+    releasePath: hermesIntegration,
+    reviewBridgeHome: store,
+  });
+  assert.equal(rendered.args[0], hermesServer);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: rendered.args,
+    env: { ...process.env, ...rendered.env },
+    stderr: "pipe",
+  });
+  const client = new Client({
+    name: "review-bridge-hermes-build-verifier",
+    version: releaseVersion,
+  });
+  await client.connect(transport);
+  return client;
+}
+
 async function connect(serverPath, role, store, reviewerProvider = null) {
   const args = [serverPath, "--role", role];
   if (role === "reviewer") {
@@ -46,7 +92,10 @@ async function connect(serverPath, role, store, reviewerProvider = null) {
     env: { ...process.env, REVIEW_BRIDGE_HOME: store },
     stderr: "pipe",
   });
-  const client = new Client({ name: "review-bridge-verifier", version: "0.5.0" });
+  const client = new Client({
+    name: "review-bridge-verifier",
+    version: releaseVersion,
+  });
   await client.connect(transport);
   return client;
 }
@@ -285,6 +334,15 @@ function publicationObservation({ at, baseSha, headSha, requestAt }) {
   };
 }
 
+const rootPackage = await readJson(path.join(projectRoot, "package.json"));
+assert.equal(rootPackage.version, releaseVersion);
+if (!process.env.REVIEW_BRIDGE_OUTPUT_ROOT) {
+  assert.equal(
+    outputRoot,
+    path.join(projectRoot, "dist", `review-bridge-v${releaseVersion}`),
+  );
+}
+
 const marketplace = await readJson(
   path.join(marketplaceRoot, ".agents", "plugins", "marketplace.json"),
 );
@@ -293,7 +351,7 @@ assert.equal(marketplace.plugins[0].source.path, "./plugins/review-bridge");
 
 const plugin = await readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
 assert.equal(plugin.name, "review-bridge");
-assert.equal(plugin.version, "0.5.0");
+assert.equal(plugin.version, releaseVersion);
 assert.equal(plugin.mcpServers, "./.mcp.json");
 const workflowSkillPath = path.join(
   pluginRoot,
@@ -543,7 +601,7 @@ assert.match(reviewerSkill, /Treat every actionable finding as blocking/);
 
 const extension = await readJson(path.join(reviewerRoot, "manifest.json"));
 assert.equal(extension.manifest_version, "0.3");
-assert.equal(extension.version, "0.5.0");
+assert.equal(extension.version, releaseVersion);
 assert.equal(extension.server.entry_point, "server/server.mjs");
 assert.deepEqual(extension.server.mcp_config.args.slice(-2), [
   "--reviewer-provider",
@@ -568,6 +626,138 @@ assert.match(
   reviewInstructions,
   /For every review strategy, inspect relevant source beyond the patch with\s+`read_snapshot_file` and `search_snapshot`/,
 );
+
+// Hermes profile integration artifact.
+const hermesRuntimePackage = await readJson(
+  path.join(hermesIntegration, "package.json"),
+);
+assert.equal(hermesRuntimePackage.version, releaseVersion);
+const hermesReviewerConfig = await fsp.readFile(
+  path.join(hermesIntegration, "mcp", "reviewer.config.yaml"),
+  "utf8",
+);
+const parsedHermesReviewer = parseHermesMcpSnippet(hermesReviewerConfig);
+assert.deepEqual(Object.keys(parsedHermesReviewer), ["mcp_servers"]);
+assert.deepEqual(Object.keys(parsedHermesReviewer.mcp_servers), [
+  "review-bridge-reviewer",
+]);
+const hermesReviewerServer =
+  parsedHermesReviewer.mcp_servers["review-bridge-reviewer"];
+assert.deepEqual(Object.keys(hermesReviewerServer).sort(), [
+  "args",
+  "command",
+  "connect_timeout",
+  "enabled",
+  "env",
+  "timeout",
+  "tools",
+]);
+assert.equal(hermesReviewerServer.command, "node");
+assert.deepEqual(hermesReviewerServer.args, [
+  `${releasePathPlaceholder}/server/server.mjs`,
+  "--role",
+  "reviewer",
+  "--reviewer-provider",
+  "HERMES",
+]);
+assert.deepEqual(hermesReviewerServer.env, {
+  REVIEW_BRIDGE_HOME: storePlaceholder,
+});
+assert.equal(hermesReviewerServer.enabled, true);
+assert.equal(hermesReviewerServer.timeout, 300);
+assert.equal(hermesReviewerServer.connect_timeout, 60);
+assert.deepEqual(Object.keys(hermesReviewerServer.tools).sort(), [
+  "include",
+  "prompts",
+  "resources",
+]);
+assert.deepEqual(
+  hermesReviewerServer.tools.include.slice().sort(),
+  reviewerToolNames,
+);
+assert.equal(hermesReviewerServer.tools.resources, false);
+assert.equal(hermesReviewerServer.tools.prompts, false);
+assert.equal("cwd" in hermesReviewerServer, false);
+const hermesAuthorConfig = await fsp.readFile(
+  path.join(hermesIntegration, "mcp", "author.config.yaml"),
+  "utf8",
+);
+const parsedHermesAuthor = parseHermesMcpSnippet(hermesAuthorConfig);
+assert.deepEqual(Object.keys(parsedHermesAuthor), ["mcp_servers"]);
+assert.deepEqual(Object.keys(parsedHermesAuthor.mcp_servers), [
+  "review-bridge-author",
+]);
+const hermesAuthorServer = parsedHermesAuthor.mcp_servers["review-bridge-author"];
+assert.deepEqual(Object.keys(hermesAuthorServer).sort(), [
+  "args",
+  "command",
+  "connect_timeout",
+  "enabled",
+  "env",
+  "timeout",
+]);
+assert.equal(hermesAuthorServer.command, "node");
+assert.deepEqual(hermesAuthorServer.args, [
+  `${releasePathPlaceholder}/server/server.mjs`,
+  "--role",
+  "author",
+]);
+assert.deepEqual(hermesAuthorServer.env, {
+  REVIEW_BRIDGE_HOME: storePlaceholder,
+});
+assert.equal(hermesAuthorServer.enabled, true);
+assert.equal(hermesAuthorServer.timeout, 300);
+assert.equal(hermesAuthorServer.connect_timeout, 60);
+assert.equal("cwd" in hermesAuthorServer, false);
+assert.equal("tools" in hermesAuthorServer, false);
+const hermesConfigValues = scalarValues([
+  parsedHermesReviewer,
+  parsedHermesAuthor,
+]).join("\n");
+assert.doesNotMatch(hermesConfigValues, /\$\(|`|\$\{/);
+assert.doesNotMatch(
+  hermesConfigValues,
+  /github_pat_|ghp_|GITHUB_TOKEN|GH_TOKEN|Bearer\s+\S/i,
+);
+const hermesSkill = await fsp.readFile(
+  path.join(
+    hermesIntegration,
+    "skills",
+    "review-bridge-reviewer",
+    "SKILL.md",
+  ),
+  "utf8",
+);
+assert.match(hermesSkill, /fresh Hermes reviewer/i);
+assert.match(hermesSkill, /reviewer_provider:\s*HERMES/);
+assert.match(hermesSkill, /successor\.json/);
+assert.match(hermesSkill, /successor\.diff/);
+assert.match(hermesSkill, /patch\.diff/);
+assert.match(hermesSkill, /patch_index/);
+assert.match(hermesSkill, /reviewer-scoped/i);
+assert.match(hermesSkill, /submit tools update the review\s+ledger/is);
+assert.doesNotMatch(hermesSkill, /read-only Review Bridge reviewer tools/i);
+assert.doesNotMatch(hermesSkill, /\bprepare_review\b|\bstart_publication\b/);
+const hermesReadme = await fsp.readFile(
+  path.join(hermesIntegration, "README.md"),
+  "utf8",
+);
+assert.match(hermesReadme, /separate profiles/i);
+assert.match(hermesReadme, /profile-scoped/i);
+assert.match(hermesReadme, /auto-injects?\s+every selected/i);
+assert.match(hermesReadme, /REVIEW_BRIDGE_HOME/);
+assert.match(hermesReadme, /absolute path/i);
+assert.match(hermesReadme, /__REVIEW_BRIDGE_RELEASE_PATH__/);
+assert.match(hermesReadme, /v0\.5\.0/);
+assert.match(hermesReadme, /upgrade/i);
+assert.match(hermesReadme, /CODEX_TASK/);
+assert.match(hermesReadme, /provenance/i);
+assert.match(hermesReadme, /not cryptographic/i);
+assert.match(
+  hermesReadme,
+  /Remote GitHub Codex publication is performed by the author\/publication side/,
+);
+assert.ok(await fsp.stat(hermesServer));
 
 const [mcpbBytes, dxtBytes] = await Promise.all([fsp.readFile(mcpb), fsp.readFile(dxt)]);
 assert.equal(
@@ -668,6 +858,11 @@ try {
     "reviewer",
     store,
     "CODEX_TASK",
+  );
+  const hermesAuthor = await connectHermesConfig(hermesAuthorServer, store);
+  const hermesReviewer = await connectHermesConfig(
+    hermesReviewerServer,
+    store,
   );
   try {
     const prepared = await call(author, "prepare_review", {
@@ -951,8 +1146,57 @@ try {
     });
     assert.equal(successorGate.gate.head_sha, successorHeadSha);
     assert.equal(successorGate.gate.reviewer_provider, "CODEX_TASK");
+
+    // Packaged HERMES reviewer: a HERMES-bound review is visible and openable
+    // only to the HERMES reviewer process, and the reviewer exposes only the
+    // reviewer tool set.
+    const [hermesTools, hermesAuthorTools, codexAuthorTools] = await Promise.all([
+      hermesReviewer.listTools(),
+      hermesAuthor.listTools(),
+      author.listTools(),
+    ]);
+    assert.deepEqual(
+      hermesTools.tools.map((tool) => tool.name).sort(),
+      reviewerToolNames,
+    );
+    assert.deepEqual(
+      hermesAuthorTools.tools.map((tool) => tool.name).sort(),
+      codexAuthorTools.tools.map((tool) => tool.name).sort(),
+    );
+    for (const tool of reviewerToolNames) {
+      assert.equal(
+        hermesAuthorTools.tools.some((candidate) => candidate.name === tool),
+        false,
+      );
+    }
+    const hermesReview = await call(hermesAuthor, "prepare_review", {
+      repository_path: repository,
+      base_ref: baseSha,
+      requirement: "Change the exported value to 2.",
+      implementation_scope: "Update value.js and add a focused test.",
+      reviewer_provider: "HERMES",
+    });
+    assert.equal(hermesReview.reviewer_provider, "HERMES");
+    await assert.rejects(
+      call(reviewer, "open_review", { review_id: hermesReview.id }),
+      /reviewer provider mismatch/,
+    );
+    const hermesOpened = await call(hermesReviewer, "open_review", {
+      review_id: hermesReview.id,
+    });
+    assert.equal(hermesOpened.current_snapshot.changed_files[0], "value.js");
+    await call(hermesReviewer, "submit_review", {
+      review_id: hermesReview.id,
+      findings: [],
+    });
+    const hermesGate = await call(hermesAuthor, "finalize_local_gate", {
+      review_id: hermesReview.id,
+    });
+    assert.equal(hermesGate.gate.reviewer_provider, "HERMES");
   } finally {
     await Promise.all([
+      hermesReviewer.close(),
+      hermesAuthor.close(),
       codexReviewer.close(),
       reviewer.close(),
       author.close(),
@@ -963,5 +1207,5 @@ try {
 }
 
 process.stdout.write(
-  "Packaged Codex author, Codex reviewer, and Claude clients completed full, successor, local publication, and remote-only publication flows.\n",
+  "Packaged Codex author, Codex reviewer, Claude, and Hermes clients completed full, successor, local publication, remote-only publication, and Hermes role-isolation flows.\n",
 );

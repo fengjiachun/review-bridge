@@ -12,6 +12,7 @@ import {
   getReview,
   getReviewSnapshot,
   getReviewSummary,
+  listReviews,
   openReview,
   prepareRereview,
   prepareReview,
@@ -155,8 +156,98 @@ test("review preparation rejects unknown reviewer providers", async (t) => {
       implementationScope: "Reject unsupported providers.",
       reviewerProvider: "OTHER",
     }),
-    /reviewer_provider must be CLAUDE_DESKTOP or CODEX_TASK/,
+    /reviewer_provider must be CLAUDE_DESKTOP, CODEX_TASK, or HERMES/,
   );
+});
+
+test("HERMES reviews bind one reviewer provider through the local gate", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "export function divide(a, b) {\n  if (b === 0) return null;\n  return a / b;\n}\n",
+  );
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "handle zero divisor");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Return null when dividing by zero.",
+    implementationScope: "Guard the zero-divisor case.",
+    reviewerProvider: "HERMES",
+  });
+
+  assert.equal(prepared.reviewer_provider, "HERMES");
+  assert.equal(
+    (await getReviewSummary(store, prepared.id)).action_required,
+    "REVIEWER_INITIAL_REVIEW",
+  );
+  assert.deepEqual(
+    (await listReviews(store, null, "HERMES")).map((review) => review.id),
+    [prepared.id],
+  );
+  await assert.rejects(
+    openReview(store, prepared.id, "CLAUDE_DESKTOP"),
+    /reviewer provider mismatch/,
+  );
+  await assert.rejects(
+    openReview(store, prepared.id, "CODEX_TASK"),
+    /reviewer provider mismatch/,
+  );
+  await assert.rejects(
+    readReviewArtifact(
+      store,
+      prepared.id,
+      1,
+      "patch.diff",
+      0,
+      65_536,
+      "CLAUDE_DESKTOP",
+    ),
+    /reviewer provider mismatch/,
+  );
+  await assert.rejects(
+    readSnapshotFile(
+      store,
+      prepared.id,
+      1,
+      "app.js",
+      0,
+      65_536,
+      "CODEX_TASK",
+    ),
+    /reviewer provider mismatch/,
+  );
+  await assert.rejects(
+    searchSnapshot(
+      store,
+      prepared.id,
+      1,
+      "divide",
+      null,
+      100,
+      "CLAUDE_DESKTOP",
+    ),
+    /reviewer provider mismatch/,
+  );
+  assert.equal(
+    (await openReview(store, prepared.id, "HERMES")).id,
+    prepared.id,
+  );
+  await assert.rejects(
+    submitInitialReview(store, prepared.id, [], "CLAUDE_DESKTOP"),
+    /reviewer provider mismatch/,
+  );
+  await assert.rejects(
+    submitInitialReview(store, prepared.id, [], "CODEX_TASK"),
+    /reviewer provider mismatch/,
+  );
+  await submitInitialReview(store, prepared.id, [], "HERMES");
+  const finalized = await finalizeLocalGate(store, prepared.id);
+  assert.equal(finalized.gate.reviewer_provider, "HERMES");
 });
 
 test("legacy review records default their reviewer provider to Claude", async (t) => {

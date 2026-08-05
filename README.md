@@ -6,16 +6,16 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey.svg)](#platform-support)
 
 A manually triggered code-review handoff between a Codex author and an
-explicitly bound reviewer: Claude Desktop, a fresh Codex task, or GitHub Codex
-in remote-only publication mode.
+explicitly bound reviewer: Claude Desktop, a fresh Codex task, a Hermes
+profile, or GitHub Codex in remote-only publication mode.
 
 A local review runs like this:
 
 1. You finish a change in a Codex task and ask it to prepare a review. Review
    Bridge captures an **immutable snapshot** of the diff and the changed files.
-2. You open a **fresh reviewer context** — a new Claude Desktop conversation or
-   a brand-new Codex task — which gets read-only tools over that snapshot and
-   submits structured findings.
+2. You open a **fresh reviewer context** — a new Claude Desktop conversation,
+   a brand-new Codex task, or an isolated Hermes reviewer profile/context —
+   which inspects the immutable snapshot and submits structured findings.
 3. If the reviewer submits no findings, the review is already `CLEAN` and you
    finalize it. Otherwise you go back to the author task, **answer every
    finding**, and prepare round two.
@@ -29,6 +29,7 @@ endorsed by, or sponsored by OpenAI or Anthropic.
 
 - [Platform support](#platform-support)
 - [Install](#install)
+- [Hermes reviewer profile](#hermes-reviewer-profile)
 - [Use](#use)
 - [Successor reviews](#successor-reviews)
 - [State machine](#state-machine)
@@ -52,22 +53,24 @@ The GitHub publication collector also requires an authenticated
 
 ## Install
 
-The two halves install differently:
+The client integrations install differently:
 
 | Component | Source |
 | --- | --- |
 | Claude Desktop reviewer extension | Prebuilt `.mcpb` on the [latest release](https://github.com/fengjiachun/review-bridge/releases/latest) |
 | Codex plugin (author + `CODEX_TASK` reviewer) | Build from a clone at the same release tag — the marketplace directory is not published as a release asset |
+| Hermes reviewer and author profiles | `hermes-integration/` inside the same build output — see [Hermes reviewer profile](#hermes-reviewer-profile) |
 
 Install every process that shares a store from the same Review Bridge build. Do
 not mix a locking-enabled build with artifacts from an earlier release; earlier
 processes do not participate in the locking protocol.
 
-Because the two halves come from different places, **pin them to the same
-release tag**: install the extension from a release, then build the Codex plugin
-from a checkout of that same tag. Building from an arbitrary `main` checkout can
-pair a newer author process with an older reviewer extension against one store.
-The version examples below use `v0.5.0`; substitute the release you installed.
+Because the integrations come from different places, **pin every participant
+to the same release tag**: install the extension from a release, then build the
+Codex plugin and Hermes integration from a checkout of that same tag. Building
+from an arbitrary `main` checkout can pair a newer author process with an older
+reviewer against one store. The version examples below use `v0.5.0`; substitute
+the exact release you installed.
 
 ### Claude Desktop extension
 
@@ -123,6 +126,38 @@ to build from a working tree with any modified or untracked file, and it runs
 clone at a release tag satisfies both. See [Develop](#develop) for the full
 build and verification loop.
 
+### Hermes reviewer profile
+
+Hermes is a supported local reviewer provider. The build output contains
+`hermes-integration/`, which packages the same server runtime plus:
+
+- `mcp/reviewer.config.yaml` — a reviewer-only Hermes MCP config snippet.
+- `mcp/author.config.yaml` — a separate author-only Hermes MCP config snippet.
+- `skills/review-bridge-reviewer/SKILL.md` — the Review Bridge-owned Hermes
+  reviewer skill.
+- `README.md` — install, upgrade, and profile-isolation instructions.
+
+Hermes auto-injects every tool from a configured MCP server into the profile
+that references it, so **author and reviewer MUST live in separate Hermes
+profiles**: the reviewer profile receives only the reviewer server and skill,
+and the author profile receives only the author server. Never add the
+author/publication server to the reviewer profile, and never add a reviewer
+provider binding to the author profile.
+
+Run `npm run verify:build`, then render `__REVIEW_BRIDGE_RELEASE_PATH__` to the
+absolute, versioned `review-bridge-v0.5.0/hermes-integration` directory and
+`__REVIEW_BRIDGE_HOME__` to one explicit absolute shared store. Merge each
+snippet's server entry into only its matching profile's top-level `mcp_servers`
+mapping.
+All participants share that one `REVIEW_BRIDGE_HOME` and one exact Review
+Bridge version. The packaged `hermes-integration/README.md` gives the complete
+install, profile tool checks, and atomic upgrade procedure.
+
+`HERMES` records configured reviewer provenance; it is not cryptographic model
+identity. Autonomous local task creation remains `CODEX_TASK`-only. After a
+local HERMES gate passes, remote GitHub Codex publication remains an
+author/publication-side operation.
+
 ### Build output
 
 `npm run build` writes everything under `dist/review-bridge-v0.5.0/`:
@@ -132,6 +167,10 @@ build and verification loop.
 - `review-bridge-reviewer-v0.5.0.mcpb` — MCP Bundle for Claude Desktop.
 - `review-bridge-reviewer-v0.5.0.dxt` — compatibility copy of the same bundle.
 - `claude-extension-source/` — inspectable source of the Claude extension.
+- `hermes-integration/` — Hermes profile MCP config snippets (separate author
+  and reviewer), the Review Bridge-owned Hermes reviewer skill, and
+  install/upgrade/isolation documentation, with the same packaged server
+  runtime.
 - `review-bridge-source-v0.5.0.zip` — source archive of the built commit, for
   inspection and provenance. It carries no Git metadata, so it cannot be used to
   run the build itself.
@@ -183,6 +222,17 @@ use the equivalent request:
 > List pending Review Bridge tasks and deeply review `<review_id>`. Follow its
 > review strategy, inspect the required artifacts and relevant snapshot files,
 > then submit structured findings.
+
+For a `HERMES` review, use the dedicated reviewer profile and start a fresh,
+independent context that has no authoring history for the change:
+
+> Independently review Review Bridge task `<review_id>` using the packaged
+> Hermes reviewer skill. Require `reviewer_provider: HERMES`, follow the review
+> strategy, and submit every actionable finding.
+
+Configured Hermes MCP tools are profile-scoped and auto-injected, so this
+reviewer context is independent only when its profile contains the
+reviewer-only MCP server and no Review Bridge author/publication server.
 
 If the reviewer submitted no findings, the review is already `CLEAN` and its
 next action is `FINALIZE_LOCAL_GATE`; there is nothing to answer and

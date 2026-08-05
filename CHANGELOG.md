@@ -4,6 +4,11 @@
 
 ### Added
 
+- `HERMES` local reviewer provenance and a self-contained
+  `hermes-integration/` build artifact with separate author-only and
+  reviewer-only MCP snippets, an exact seven-tool reviewer allowlist, a
+  Review Bridge-owned FULL/SUCCESSOR reviewer skill, shared-store/version
+  pinning, and install, verification, isolation, and upgrade guidance.
 - An opt-in autonomous local workflow (RFC 0003 PR1): a schema-version-1
   workflow ledger binds immutable authorization, store-wide ownership claims,
   marker-reconciled Codex reviewer task dispatch, and crash recovery, and

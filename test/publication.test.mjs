@@ -55,7 +55,7 @@ function git(cwd, ...args) {
 }
 
 
-async function fixture() {
+async function fixture(reviewerProvider = "CLAUDE_DESKTOP") {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-publication-"));
   const repository = path.join(root, "repo");
   const store = path.join(root, "store");
@@ -77,8 +77,9 @@ async function fixture() {
     baseRef: baseSha,
     requirement: "Change the exported value.",
     implementationScope: "Update value.js.",
+    reviewerProvider,
   });
-  await submitInitialReview(store, review.id, []);
+  await submitInitialReview(store, review.id, [], reviewerProvider);
   await finalizeLocalGate(store, review.id);
   return { root, repository, store, reviewId: review.id, baseSha, headSha };
 }
@@ -1240,6 +1241,63 @@ test("publication ledger reaches a fresh audited merge gate", async (t) => {
     "GATE_VERIFIED",
   ]);
   assert.equal(events[1].previous_event_sha256, digest(audit.trim().split("\n")[0]));
+});
+
+test("HERMES local gates propagate through publication surfaces", async (t) => {
+  const state = await fixture("HERMES");
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const created = await start(state, startedAt);
+  assert.equal(created.status, "PR_PENDING");
+  assert.equal(created.revision, 1);
+  assert.equal(created.authorization.reviewer_provider, "HERMES");
+
+  const requestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(requestAt),
+      requestedHeadSha: state.headSha,
+    },
+    { clock: () => requestAt + 10 },
+  );
+
+  const observedAt = startedAt + 2_000;
+  const ready = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 2,
+      observation: observation({
+        at: observedAt,
+        baseSha: state.baseSha,
+        headSha: state.headSha,
+        requestId: 100,
+        requestAt,
+      }),
+    },
+    { clock: () => observedAt + 10 },
+  );
+  assert.equal(ready.status, "MERGE_READY");
+
+  const gate = await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  assert.equal(gate.issuance_committed, true);
+  assert.equal(gate.reviewer_provider, "HERMES");
+
+  const verified = await verifyPublicationGate(state.store, state.reviewId, {
+    clock: () => observedAt + 30,
+  });
+  assert.equal(verified.valid, true);
+  assert.equal(verified.reviewer_provider, "HERMES");
 });
 
 test("request binding canonicalizes GitHub second-precision timestamps", async (t) => {
