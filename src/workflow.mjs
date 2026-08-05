@@ -500,9 +500,12 @@ const ACTION_KIND_SPECS = {
   MARK_PR_READY: {
     // The last external write of the autonomous run: take the workflow's own
     // draft pull request out of draft on the exact head the publication
-    // cleared. The intent binds that clearance -- publication revision and
-    // blocker digest -- so a pull request that stopped being ready between
-    // planning and the call cannot be marked on a stale proof.
+    // cleared. The intent records which observation cleared it, and
+    // `revalidate` asks the publication again immediately before the call.
+    // The question there is only whether this head is still cleared -- a
+    // later observation that clears it again is exactly the state this
+    // action wants, so the recorded revision is provenance, not an equality
+    // the publication has to keep satisfying.
     capability: "MARK_PR_READY",
     phase: "PRE_READY",
     claimKind: "PULL_REQUEST",
@@ -524,8 +527,7 @@ const ACTION_KIND_SPECS = {
         target.head_branch !== authorized.head_branch ||
         target.repository_id !== authorized.base_repository_id ||
         !Number.isSafeInteger(target.publication_revision) ||
-        target.publication_revision < 1 ||
-        !DIGEST_RE.test(target.blocker_sha256 ?? "")
+        target.publication_revision < 1
       ) {
         fail(
           "WORKFLOW_ACTION_INVALID",
@@ -534,6 +536,27 @@ const ACTION_KIND_SPECS = {
       }
     },
     dispatch: null,
+    async revalidate(storeRoot, action) {
+      // Only the clearance is re-read. The identity behind it cannot move
+      // while this action is active: recording a head drops the publication
+      // binding, and no head can be recorded from PRE_READY with an action
+      // in flight -- so the plan-time identity check is still the current
+      // one, and repeating it here would be a check no state can fail.
+      const preReady = await getAutonomousPreReady(
+        storeRoot,
+        action.target.review_id,
+      );
+      if (preReady.status !== "READY_TO_MARK") {
+        fail(
+          "WORKFLOW_PUBLICATION_NOT_READY",
+          "the publication no longer clears this pull request for review",
+          {
+            status: preReady.status,
+            blocking_reason: preReady.blocking_reason,
+          },
+        );
+      }
+    },
     validateExecutingProof(action, proof) {
       // The identity read immediately before the call. A pull request already
       // out of draft is a legal proof -- on this exact head it is the
@@ -1200,9 +1223,6 @@ function validateWorkflow(workflow) {
       mark.publication_revision,
       "ready-mark publication_revision",
     );
-    if (!DIGEST_RE.test(mark.blocker_sha256 ?? "")) {
-      fail("WORKFLOW_STATE_INVALID", "ready-mark blocker digest is invalid");
-    }
     assertTimestamp(mark.recorded_at, "ready-mark recorded_at");
   }
   validateCurrentPublication(workflow);
@@ -3036,7 +3056,6 @@ export async function planMarkPullRequestReady(
           head_branch: workflow.pull_request.head_branch,
           head_sha: workflow.current_head_sha,
           publication_revision: preReady.revision,
-          blocker_sha256: preReady.blocker_sha256,
         };
       },
     },
@@ -3237,6 +3256,13 @@ export async function markWorkflowActionExecuting(
         "WORKFLOW_ACTION_INVALID",
         "this action kind does not take an executing proof",
       );
+    }
+    // Some intents are only as good as evidence that lives outside the
+    // workflow ledger and can move under them between planning and the call.
+    // This is the last durable point before the external write, so it is
+    // where that evidence has to be read again.
+    if (spec.revalidate) {
+      await spec.revalidate(storeRoot, action);
     }
     return publicWorkflow(
       await saveActionMutation(
@@ -3780,7 +3806,6 @@ export async function completeWorkflowAction(
               head_sha: action.target.head_sha,
               publication_review_id: action.target.review_id,
               publication_revision: action.target.publication_revision,
-              blocker_sha256: action.target.blocker_sha256,
               recorded_at: now(),
             });
             next.active_action = null;

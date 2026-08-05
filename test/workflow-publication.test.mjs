@@ -916,7 +916,14 @@ test("a remote finding returns through a new gated head and a new publication", 
   assert.notEqual(historical.authorization.head_sha, secondHead);
 });
 
-test("an addressed finding's thread becomes eligible in the next publication's plan", async (t) => {
+/**
+ * Drive a workflow to an observed, workflow-owned thread resolution: a
+ * finding thread answered by the workflow's own recorded reply, resolved
+ * on a re-read watermark, with the action OBSERVED and its publication
+ * record not yet created. Both the eligibility walk and the completion
+ * rules start from exactly this state, so it is built once.
+ */
+async function reachObservedThreadResolution(t) {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(
@@ -1308,6 +1315,38 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       resolvedByType: "User",
     },
   );
+  return {
+    state,
+    workflow,
+    first,
+    second,
+    codex,
+    record,
+    workflowPath,
+    repliedObservation,
+    resolveAt,
+    resolvePlan,
+    watermark,
+    resolutionPlanned,
+    resolutionObserved,
+  };
+}
+
+test("an addressed finding's thread becomes eligible in the next publication's plan", async (t) => {
+  const {
+    state,
+    workflow,
+    second,
+    codex,
+    workflowPath,
+    repliedObservation,
+    resolveAt,
+    resolvePlan,
+    watermark,
+    resolutionPlanned,
+    resolutionObserved,
+  } = await reachObservedThreadResolution(t);
+  const reviewId = second.reviewId;
 
   // A RESOLVED outcome cannot complete before its server-owned record
   // exists: completing first would let the next snapshot make the record
@@ -3108,7 +3147,6 @@ test("a cleared draft pull request marks itself ready and then stops", async (t)
     head_branch: TOPIC_BRANCH,
     head_sha: headSha,
     publication_revision: projection.revision,
-    blocker_sha256: projection.blocker_sha256,
   });
 
   // The pre-read is the last check before the call, and it binds the exact
@@ -3199,7 +3237,6 @@ test("a cleared draft pull request marks itself ready and then stops", async (t)
       head_sha: headSha,
       publication_review_id: reviewId,
       publication_revision: projection.revision,
-      blocker_sha256: projection.blocker_sha256,
       recorded_at: null,
     },
   );
@@ -3356,4 +3393,162 @@ test("a pull request found already ready reconciles without claiming it", async 
   );
   assert.equal(ready.phase, "POST_READY");
   assert.equal(ready.ready_marks[0].outcome, "OBSERVED_ALREADY_READY");
+});
+
+test("a clearance that regresses after planning stops the mark-ready", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+  );
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  const planned = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    preReady.revision,
+  );
+
+  // The intent was planned on a clearance that has since regressed: a
+  // required check now fails. The pre-read is honest and the pull request is
+  // still the right one, so nothing about the action itself is wrong -- only
+  // the evidence it was planned on. Marking ready anyway would expose a head
+  // with a failing check, and POST_READY has no route to the repair phase.
+  const blockedAt = at + 10_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 3,
+      observation: failingCheck(
+        draftObservation(state, headSha, {
+          at: blockedAt,
+          requestId: 100,
+          requestAt: at + 1_000,
+        }),
+      ),
+    },
+    { clock: () => blockedAt + 10 },
+  );
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      state.store,
+      workflow.workflow_id,
+      planned.workflow.revision,
+      planned.action.action_id,
+      {
+        repository_id: REPOSITORY_ID,
+        pr_number: PR_NUMBER,
+        base_branch: "main",
+        head_branch: TOPIC_BRANCH,
+        head_sha: headSha,
+        is_draft: true,
+      },
+    ),
+    (error) =>
+      error.code === "WORKFLOW_PUBLICATION_NOT_READY" &&
+      error.details.blocking_reason === "CHECKS_FAILED",
+  );
+
+  // A fresh observation that clears the same head again is the state this
+  // action was always waiting for: a new publication revision is not itself
+  // a reason to refuse.
+  const clearedAt = blockedAt + 10_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 4,
+      observation: draftObservation(state, headSha, {
+        at: clearedAt,
+        requestId: 100,
+        requestAt: at + 1_000,
+      }),
+    },
+    { clock: () => clearedAt + 10 },
+  );
+  const cleared = await getAutonomousPreReady(state.store, reviewId);
+  assert.equal(cleared.status, "READY_TO_MARK");
+  assert.notEqual(cleared.revision, planned.action.target.publication_revision);
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    planned.workflow.revision,
+    planned.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      base_branch: "main",
+      head_branch: TOPIC_BRANCH,
+      head_sha: headSha,
+      is_draft: true,
+    },
+  );
+  assert.equal(executing.active_action.status, "EXECUTING");
+});
+
+test("a resolution whose publication went terminal still closes its action", async (t) => {
+  const { state, workflow, second, repliedObservation, resolveAt, resolutionPlanned, resolutionObserved } =
+    await reachObservedThreadResolution(t);
+
+  // The mutation landed, and then the pull request closed. A terminal ledger
+  // refuses every write, so the resolution record can never be created --
+  // not late, uncreatable.
+  const closedAt = resolveAt + 5_000;
+  const closedObservation = structuredClone(repliedObservation);
+  closedObservation.observed_at = iso(closedAt);
+  closedObservation.pull_request.state = "CLOSED";
+  const closed = await recordGithubSnapshot(
+    state.store,
+    second.reviewId,
+    { expectedRevision: 6, observation: closedObservation },
+    { clock: () => closedAt + 10 },
+  );
+  assert.equal(closed.terminal.status, "CLOSED");
+  await assert.rejects(
+    recordAutomaticResolution(
+      state.store,
+      second.reviewId,
+      {
+        expectedRevision: closed.revision,
+        workflowId: workflow.workflow_id,
+        actionId: resolutionPlanned.action.action_id,
+      },
+      { clock: () => closedAt + 3_000 },
+    ),
+    (error) => error.code === "PUBLICATION_TERMINAL",
+  );
+
+  // Holding the action open for a record that cannot exist would strand the
+  // workflow on a dead publication with no exit but cancellation. Nothing is
+  // lost by closing it: no gate of a terminal publication can pass, so the
+  // record has nothing left to protect.
+  const resolved = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    resolutionObserved.revision,
+    resolutionPlanned.action.action_id,
+  );
+  assert.equal(resolved.thread_resolutions.length, 1);
+  assert.equal(resolved.thread_resolutions[0].outcome, "RESOLVED");
+  assert.equal(resolved.active_action, null);
 });
