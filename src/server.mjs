@@ -29,7 +29,9 @@ import {
   getAutonomousPreReady,
   getPublication,
   getPublicationSummary,
+  getThreadResolutionPlan,
   readObservationFile,
+  recordAutomaticResolution,
   recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
@@ -50,10 +52,14 @@ import {
   pauseAutonomousWorkflow,
   planCodexTaskDispatch,
   planDraftPullRequest,
+  planThreadReply,
+  planThreadResolution,
   planWorkflowPush,
   recordCodexTaskObservation,
   recordDraftPullRequestObservation,
   recordPushObservation,
+  recordThreadReplyObservation,
+  recordThreadResolutionObservation,
   recordWorkflowHead,
   releaseWorkflowClaims,
   resumeAutonomousWorkflow,
@@ -477,13 +483,16 @@ if (role === "author") {
     {
       title: "Mark workflow action executing",
       description:
-        "Durably record EXECUTING immediately before the planned external write; a push additionally requires the pinned URL resolved to the authorized repository ID.",
+        "Durably record EXECUTING immediately before the planned external write; a push additionally requires the pinned URL resolved to the authorized repository ID, and a thread resolution requires the immediately preceding thread pre-read (thread ID, resolved flag, and -- while unresolved -- the exact comment watermark).",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
         action_id: z.string(),
         resolved_repository_id: z.number().int().positive().optional(),
         resolved_url: z.string().optional(),
+        thread_id: z.string().optional(),
+        is_resolved: z.boolean().optional(),
+        thread_watermark: z.string().optional(),
       },
     },
     (input) =>
@@ -492,12 +501,176 @@ if (role === "author") {
         input.workflow_id,
         input.expected_revision,
         input.action_id,
-        input.resolved_repository_id == null && input.resolved_url == null
-          ? null
-          : {
-              resolved_repository_id: input.resolved_repository_id,
-              resolved_url: input.resolved_url,
-            },
+        input.thread_id != null
+          ? {
+              thread_id: input.thread_id,
+              is_resolved: input.is_resolved,
+              ...(input.thread_watermark == null
+                ? {}
+                : { thread_watermark: input.thread_watermark }),
+            }
+          : input.resolved_repository_id == null && input.resolved_url == null
+            ? null
+            : {
+                resolved_repository_id: input.resolved_repository_id,
+                resolved_url: input.resolved_url,
+              },
+      ),
+  );
+
+  register(
+    "get_thread_resolution_plan",
+    {
+      title: "Get thread resolution plan",
+      description:
+        "Per-thread eligibility verdicts for the publication's recorded observation: refusal reasons for ineligible threads; addressed-by commits, comment IDs, exact comment watermark, and eligibility digest for eligible ones. Advisory -- every action revalidates.",
+      inputSchema: {
+        review_id: z.string(),
+      },
+    },
+    (input) => getThreadResolutionPlan(storeRoot, input.review_id),
+  );
+
+  register(
+    "plan_thread_reply",
+    {
+      title: "Plan thread reply",
+      description:
+        "Persist a single REPLY_TO_CODEX_THREAD intent for an eligible finding thread and return the server-composed reply body naming the addressed-by commits with its correlation marker. The posted comment must equal it exactly.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        thread_id: z.string(),
+        actor_id: z.number().int().positive(),
+        actor_type: z.enum(["User", "Bot"]),
+      },
+    },
+    (input) =>
+      planThreadReply(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        {
+          threadId: input.thread_id,
+          actorId: input.actor_id,
+          actorType: input.actor_type,
+        },
+      ),
+  );
+
+  register(
+    "record_thread_reply_observation",
+    {
+      title: "Record thread reply observation",
+      description:
+        "Reconcile exactly one marker comment in the exact thread by the pinned actor whose body equals the server-issued reply payload.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+        matching_comment_ids: z.array(z.number().int().positive()),
+        comment_id: z.number().int().positive(),
+        thread_id: z.string(),
+        actor_id: z.number().int().positive(),
+        actor_type: z.string(),
+        body: z.string(),
+      },
+    },
+    (input) =>
+      recordThreadReplyObservation(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
+        {
+          matchingCommentIds: input.matching_comment_ids,
+          commentId: input.comment_id,
+          threadId: input.thread_id,
+          actorId: input.actor_id,
+          actorType: input.actor_type,
+          body: input.body,
+        },
+      ),
+  );
+
+  register(
+    "plan_thread_resolution",
+    {
+      title: "Plan thread resolution",
+      description:
+        "Persist a single RESOLVE_REVIEW_THREAD intent for a replied, still-eligible thread, binding the reply-inclusive comment watermark and eligibility digest the resolution must hold.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        thread_id: z.string(),
+      },
+    },
+    (input) =>
+      planThreadResolution(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        { threadId: input.thread_id },
+      ),
+  );
+
+  register(
+    "record_thread_resolution_observation",
+    {
+      title: "Record thread resolution observation",
+      description:
+        "Record the post-read after the resolve mutation: RESOLVED requires the unchanged watermark and resolvedBy equal to the action's own actor; OBSERVED_PRE_RESOLVED records a thread found already resolved, with no ownership.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+        outcome: z.enum(["RESOLVED", "OBSERVED_PRE_RESOLVED"]),
+        thread_id: z.string(),
+        is_resolved: z.boolean(),
+        thread_watermark: z.string().optional(),
+        resolved_by_id: z.number().int().positive().optional(),
+        resolved_by_type: z.string().optional(),
+      },
+    },
+    (input) =>
+      recordThreadResolutionObservation(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
+        {
+          outcome: input.outcome,
+          threadId: input.thread_id,
+          isResolved: input.is_resolved,
+          threadWatermark: input.thread_watermark,
+          resolvedById: input.resolved_by_id,
+          resolvedByType: input.resolved_by_type,
+        },
+      ),
+  );
+
+  register(
+    "record_automatic_resolution",
+    {
+      title: "Record automatic resolution",
+      description:
+        "Store the server-owned proof that this workflow performed the thread's unresolved-to-resolved transition. Every binding is taken from the named action's own observed evidence, so this stays recordable after a crash; the observation is cleared because the mutation outdated it. Idempotent for the same action.",
+      inputSchema: {
+        review_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        workflow_id: z.string(),
+        action_id: z.string(),
+      },
+    },
+    (input) =>
+      recordAutomaticResolution(
+        storeRoot,
+        input.review_id,
+        {
+          expectedRevision: input.expected_revision,
+          workflowId: input.workflow_id,
+          actionId: input.action_id,
+        },
       ),
   );
 

@@ -184,6 +184,96 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
         fail("WORKFLOW_STATE_INVALID", "addressed-finding record is invalid");
       }
     }
+    // Replies this workflow has posted into finding threads, each recorded by
+    // a completed reply action. The eligibility predicate admits a non-Codex
+    // comment only when it matches one of these exactly -- thread, comment
+    // database ID, and authenticated actor -- so the validated shape here is
+    // the whole exception surface.
+    const threadReplies = Array.isArray(workflow.thread_replies)
+      ? workflow.thread_replies
+      : [];
+    for (const reply of threadReplies) {
+      if (
+        typeof reply?.thread_id !== "string" ||
+        reply.thread_id === "" ||
+        !Number.isSafeInteger(reply?.comment_id) ||
+        reply.comment_id < 1 ||
+        !Number.isSafeInteger(reply?.actor?.id) ||
+        reply.actor.id < 1 ||
+        typeof reply?.actor?.type !== "string" ||
+        reply.actor.type === ""
+      ) {
+        fail("WORKFLOW_STATE_INVALID", "thread-reply record is invalid");
+      }
+    }
+    // The one in-flight action a publication is allowed to read: a thread
+    // resolution this workflow has already observed as its own transition.
+    // Everything the automatic-resolution record binds is pinned here by the
+    // server -- the intent's eligibility digest and watermark, the reply it
+    // followed, and the two read timestamps the action is literally made of.
+    // The record is therefore made from evidence nothing can replace, which
+    // is what keeps it creatable after a crash: a recovering driver may take
+    // a fresh snapshot -- showing the thread it just resolved as resolved --
+    // without making its own resolution unrecordable.
+    const action = workflow.active_action;
+    let activeResolution = null;
+    if (
+      action?.kind === "RESOLVE_REVIEW_THREAD" &&
+      action.status === "OBSERVED" &&
+      action.provider_response?.outcome === "RESOLVED"
+    ) {
+      const target = action.target;
+      const response = action.provider_response;
+      if (
+        typeof action.action_id !== "string" ||
+        action.action_id === "" ||
+        typeof target?.review_id !== "string" ||
+        target.review_id === "" ||
+        typeof target.thread_id !== "string" ||
+        target.thread_id === "" ||
+        !DIGEST_RE.test(target.thread_watermark ?? "") ||
+        !DIGEST_RE.test(target.eligibility_sha256 ?? "") ||
+        !SHA_RE.test(target.head_sha ?? "") ||
+        !Number.isSafeInteger(target.reply_comment_id) ||
+        target.reply_comment_id < 1 ||
+        !Number.isSafeInteger(target.expected_actor_id) ||
+        target.expected_actor_id < 1 ||
+        typeof target.expected_actor_type !== "string" ||
+        target.expected_actor_type === "" ||
+        // The transition this record claims: an unresolved pre-read, and a
+        // post-read on the same watermark attributing the resolve to the
+        // action's own actor.
+        action.executing_proof?.thread_id !== target.thread_id ||
+        action.executing_proof.is_resolved !== false ||
+        action.executing_proof.thread_watermark !== target.thread_watermark ||
+        response.thread_id !== target.thread_id ||
+        response.is_resolved !== true ||
+        response.thread_watermark !== target.thread_watermark ||
+        response.resolved_by_id !== target.expected_actor_id ||
+        response.resolved_by_type !== target.expected_actor_type ||
+        typeof action.executing_at !== "string" ||
+        action.executing_at === "" ||
+        typeof response.observed_at !== "string" ||
+        response.observed_at === ""
+      ) {
+        fail("WORKFLOW_STATE_INVALID", "resolution-action evidence is invalid");
+      }
+      activeResolution = {
+        action_id: action.action_id,
+        review_id: target.review_id,
+        thread_id: target.thread_id,
+        thread_watermark: target.thread_watermark,
+        eligibility_sha256: target.eligibility_sha256,
+        head_sha: target.head_sha,
+        reply_comment_id: target.reply_comment_id,
+        actor: {
+          id: target.expected_actor_id,
+          type: target.expected_actor_type,
+        },
+        pre_read_observed_at: action.executing_at,
+        post_read_observed_at: response.observed_at,
+      };
+    }
     return {
       workflow_id: workflow.workflow_id,
       revision: workflow.revision,
@@ -197,6 +287,12 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
         },
         addressed_by: [...record.addressed_by],
       })),
+      thread_replies: threadReplies.map((reply) => ({
+        thread_id: reply.thread_id,
+        comment_id: reply.comment_id,
+        actor: { id: reply.actor.id, type: reply.actor.type },
+      })),
+      active_resolution: activeResolution,
       base_sha: workflow.base_sha,
       topic_branch: workflow.topic_branch,
       current_head_sha: workflow.current_head_sha,

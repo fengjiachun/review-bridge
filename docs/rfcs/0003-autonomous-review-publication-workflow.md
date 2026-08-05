@@ -486,6 +486,17 @@ recorded its result. Therefore recovery always reconciles first:
 - **GitHub Codex review request**: retain the publication ledger's exact body,
   request ID, immediate binding, unbound-request detection, and ambiguity
   rules. The workflow ledger references that action rather than weakening it.
+- **Thread reply**: before resolving an eligible thread, the workflow answers
+  it with exactly one reply comment naming the addressed-by commits. The
+  intent carries a server-generated correlation marker bound to the workflow
+  ID, action ID, thread ID, and head; the posted body embeds the marker, and
+  the response records the provider comment ID and the authenticated actor's
+  numeric identity. Recovery queries the exact thread with complete nested
+  comment pagination and binds exactly one marker comment by that actor: an
+  already-present marker comment completes reconciliation without another
+  write; zero matches after an indeterminate post, or multiple matches,
+  pauses. The reply is authorized by `RESOLVE_ELIGIBLE_CODEX_THREADS` — it
+  exists only as the first half of a resolution.
 - **Thread resolution or compensating unresolve**: query the exact thread ID.
   If a resolution action finds the thread already resolved, complete it with
   outcome `OBSERVED_PRE_RESOLVED`; do not create a workflow-owned
@@ -494,7 +505,10 @@ recorded its result. Therefore recovery always reconciles first:
   provider response attests that this action performed the transition, and the
   post-read proves the same watermark is now resolved. A crash after provider
   acceptance but before that response is recorded cannot claim ownership from
-  the resolved state alone. Repeat a resolve only while the original
+  the resolved state alone. Once the response is recorded, the record is made
+  from the action alone and creating it is always still possible: a recovery
+  that observes the pull request first -- and so sees the thread it resolved
+  as resolved -- must not lose the ability to record what it did. Repeat a resolve only while the original
   eligibility proof remains valid for the current head. Repeat an unresolve
   only while the server still reports that this workflow's proven resolution
   record is invalid, the `UNRESOLVE_INVALIDATED_CODEX_THREADS` capability is
@@ -859,7 +873,11 @@ only when all of these are true:
 4. the current head has a finalized `LOCAL_GATE_PASSED`;
 5. the current head has a fresh, correlated GitHub Codex `CLEAN` result;
 6. the current publication observation is complete;
-7. no human or unknown actor has added any comment after the Codex root finding;
+7. no human or unknown actor has added any comment after the Codex root
+   finding, with one exception: the workflow's own recorded reply, accepted
+   only as the exact comment ID a completed reply action of this same
+   workflow and thread recorded, posted by the authenticated actor that
+   action recorded;
 8. the thread is still unresolved and has not been dismissed through another
    unsupported path; and
 9. the workflow is not paused, invalidated, closed, or merged.
@@ -925,7 +943,8 @@ A thread is never eligible when it:
 - was created by a human or unknown actor;
 - cannot be linked structurally to the correlated Codex review;
 - belongs to another pull request or workflow;
-- contains any later human or unknown-actor participation;
+- contains any later human or unknown-actor participation beyond the
+  workflow's own recorded reply;
 - concerns the current head's `FINDINGS` result;
 - is covered only by a local reviewer verdict without a current remote
   `CLEAN`; or
@@ -937,21 +956,41 @@ For each eligible thread, the controller:
 
 1. obtains the server-derived eligibility record, thread watermark, and
    evidence digest;
-2. persists a `RESOLVE_REVIEW_THREAD` action intent;
-3. immediately re-reads the pull request head and the exact thread with
+2. answers the thread through the reply action above — one marker comment
+   naming the addressed-by commits — and then collects and records a fresh
+   complete observation whose thread watermark now includes exactly that
+   recorded reply; the eligibility of step 1 is re-derived over the new
+   watermark and must hold again, with the recorded reply as condition 7's
+   sole admitted non-Codex comment;
+3. persists a `RESOLVE_REVIEW_THREAD` action intent, at whose creation the
+   server revalidates the head, provenance, eligibility, and exact watermark
+   and binds them into the intent's target;
+4. immediately re-reads the pull request head and the exact thread with
    complete nested comment pagination;
-4. asks the server to revalidate the head, provenance, eligibility, and exact
-   watermark at the action's expected revision;
-5. resolves the exact GitHub thread ID and durably records a provider response
+5. records that unresolved pre-read, bound to the intent's exact watermark,
+   as the action's executing proof — the last check before the provider
+   call;
+6. resolves the exact GitHub thread ID and durably records a provider response
    whose pinned semantics attest an unresolved-to-resolved transition by this
-   action;
-6. immediately re-reads the exact thread, requiring the same comment watermark
-   and an observed resolved state;
-7. creates the server-owned automatic-resolution record only from the
-   unresolved pre-read, transition-attesting response, and resolved post-read;
-8. collects and records a new complete GitHub publication snapshot; and
-9. requires the publication server to revalidate the automatic-resolution
-   record and watermark before any pre-ready or final gate can pass.
+   action — GitHub's `resolveReviewThread` alone cannot: it succeeds
+   identically on an already-resolved thread, so the attestation is the
+   accepted mutation together with the post-read of step 7 reporting
+   `resolvedBy` as the action's authenticated actor on the unchanged
+   watermark;
+7. immediately re-reads the exact thread, requiring the same comment
+   watermark, an observed resolved state, and a `resolvedBy` actor equal to
+   the authenticated actor the action's intent recorded;
+8. creates the server-owned automatic-resolution record only from that
+   action's own durable evidence -- the intent the server bound in step 3,
+   the unresolved pre-read of step 5, and the transition-attesting response
+   and resolved post-read of steps 6 and 7 -- naming the action and nothing
+   else, so the record stays creatable however long recovery takes and
+   whatever the workflow observes in the meantime. Eligibility is decided in
+   steps 2, 3, and 5, where refusing still prevents the mutation; refusing
+   after it would only destroy the record step 10 needs;
+9. collects and records a new complete GitHub publication snapshot; and
+10. requires the publication server to revalidate the automatic-resolution
+    record and watermark before any pre-ready or final gate can pass.
 
 The server does not call GitHub. The workflow audit stores stable IDs, head,
 source review and result references, local gate reference, evidence digest,
@@ -962,12 +1001,16 @@ in the publication ledger.
 An already-resolved observation never proves who performed the mutation. If
 the thread becomes resolved before the provider call, or recovery observes it
 resolved without a durably recorded transition-attesting response, the action
-records `OBSERVED_PRE_RESOLVED` and no automatic-resolution record. The
-resolved thread is no longer a publication blocker, but this workflow can
-never perform a compensating unresolve on it. A provider whose response cannot
+records `OBSERVED_PRE_RESOLVED` and no automatic-resolution record. A
+`resolvedBy` naming the workflow's own actor does not lift this rule: after a
+crash it cannot date the transition to this action instance rather than an
+operator's manual click, so recovery still refuses ownership. The resolved
+thread is no longer a publication blocker, but this workflow can never
+perform a compensating unresolve on it. A provider whose response cannot
 distinguish an applied transition from an idempotent read of an
 already-resolved thread is not eligible for automatic resolution in the first
-implementation.
+implementation; GitHub distinguishes through the `resolvedBy` post-read, and
+a provider without an equivalent attribution signal does not qualify.
 
 The publication gate still requires `unresolved_count == 0` from the fresh
 post-resolution observation. A successful mutation response by itself is not

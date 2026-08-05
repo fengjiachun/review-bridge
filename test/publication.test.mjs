@@ -5089,7 +5089,7 @@ test("an addressed-by record naming the thread's review completes eligibility", 
       eligibleThread(),
       contextWithRecord(addressedRecord()),
     ),
-    { eligible: true },
+    { eligible: true, addressed_by: [GATED_HEAD] },
   );
 });
 
@@ -5278,6 +5278,85 @@ test("each missing piece of evidence refuses with its own reason", () => {
   }
 });
 
+test("the reply exception admits exactly the recorded comment and nothing else", () => {
+  const operator = { id: 555, type: "User", login: "operator" };
+  const withReply = (databaseId, actor = operator) =>
+    eligibleThread({
+      comments: [
+        eligibleThread().comments[0],
+        { id: "PRRC_2", database_id: databaseId, actor, review: null },
+      ],
+    });
+  const recorded = (overrides = {}) => {
+    const context = contextWithRecord(addressedRecord());
+    context.workflow.thread_replies = [
+      {
+        thread_id: "PRRT_1",
+        comment_id: 901,
+        actor: { id: 555, type: "User" },
+        ...overrides,
+      },
+    ];
+    return context;
+  };
+  // The recorded reply completes: same thread, same comment, same actor.
+  assert.deepEqual(
+    threadResolutionEligibility(eligibilityLedger(), withReply(901), recorded()),
+    { eligible: true, addressed_by: [GATED_HEAD] },
+  );
+  const cases = [
+    ["comment not recorded", withReply(902), recorded()],
+    [
+      "recorded for another thread",
+      withReply(901),
+      recorded({ thread_id: "PRRT_OTHER" }),
+    ],
+    [
+      "another actor on the recorded id",
+      withReply(901, { id: 556, type: "User", login: "someone" }),
+      recorded(),
+    ],
+    [
+      // Never the root: a reply answers the finding, it cannot be the
+      // finding. A root that matches a reply record is a forgery, not a
+      // reply.
+      "recorded id in root position",
+      eligibleThread({
+        comments: [
+          {
+            ...eligibleThread().comments[0],
+            database_id: 901,
+            actor: operator,
+          },
+        ],
+      }),
+      recorded(),
+    ],
+  ];
+  for (const [name, thread, context] of cases) {
+    assert.deepEqual(
+      threadResolutionEligibility(eligibilityLedger(), thread, context),
+      { eligible: false, reason: "NOT_CODEX_AUTHORED" },
+      name,
+    );
+  }
+});
+
+test("a thread this workflow already resolved once never becomes eligible again", () => {
+  const ledger = {
+    ...eligibilityLedger(),
+    automatic_resolutions: [{ thread_id: "PRRT_1" }],
+  };
+  assert.deepEqual(
+    threadResolutionEligibility(
+      ledger,
+      eligibleThread(),
+      contextWithRecord(addressedRecord()),
+    ),
+    { eligible: false, reason: "THREAD_PREVIOUSLY_RESOLVED" },
+  );
+});
+
 test("an outdated diff hunk is not evidence that a finding was addressed", () => {
   // is_outdated says the code moved, not that the finding was answered -- an
   // unrelated edit displaces the hunk just as well as a fix does. It must not
@@ -5307,7 +5386,7 @@ test("an outdated diff hunk is not evidence that a finding was addressed", () =>
       outdated,
       contextWithRecord(addressedRecord()),
     ),
-    { eligible: true },
+    { eligible: true, addressed_by: [GATED_HEAD] },
   );
 });
 
