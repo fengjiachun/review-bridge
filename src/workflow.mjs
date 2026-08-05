@@ -2677,6 +2677,25 @@ export async function recordWorkflowHead(
       fail("WORKFLOW_NO_PROGRESS", "new committed head must change");
     }
     requireAncestor(repository.path, previousHead, headSha);
+    // The head this records is the head that gets pushed to the bound pull
+    // request, so the rule that stops a repair from starting on a visible
+    // pull request has to hold here too: the pull request may have been
+    // marked ready after the repair began, and the phase check alone would
+    // never notice. The binding is still held here, which is what makes the
+    // draft flag readable at all -- recording clears it.
+    if (workflow.current_publication != null) {
+      const projection = await getAutonomousPreReady(
+        storeRoot,
+        workflow.current_publication.review_id,
+      );
+      if (projection.is_draft === false) {
+        fail(
+          "WORKFLOW_PULL_REQUEST_EXPOSED",
+          "the bound pull request is no longer a draft: a new head cannot be recorded for it until it is returned to draft",
+          { review_id: workflow.current_publication.review_id },
+        );
+      }
+    }
     // A head recorded to answer remote findings must say which finding review
     // it answers -- RFC 0003 eligibility condition 3, and the only link that
     // survives into the next publication, whose baseline absorbs this review

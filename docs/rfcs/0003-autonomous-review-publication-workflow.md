@@ -568,9 +568,16 @@ A blocker that would enter a repair phase while the pull request is already
 out of draft pauses instead. Every repair ends in a new head pushed to that
 pull request, and one already visible for review must not receive it; this
 release cannot return it to draft, so an operator decides. The pause resumes
-into the wait, which re-derives it while the pull request is still visible. A
-publication that clears is unaffected and still reaches the mark-ready stop,
-where an already-ready pull request reconciles without claiming a mutation.
+into the wait, which re-derives it while the pull request is still visible.
+
+Entering the repair is not the only moment that matters: a pull request
+marked ready after the repair began would otherwise be pushed to anyway, so
+recording a head refuses on the same evidence while the publication binding
+that carries it is still held. Returning the pull request to draft is what
+releases both, and the observation that proves it revokes any gate minted
+while it was visible. A publication that clears is unaffected and still
+reaches the mark-ready stop, where an already-ready pull request reconciles
+without claiming a mutation.
 
 - **Return to draft for repair**: read the exact pull request and head. Treat an
   already-draft pull request as reconciled completion. Repeat the mutation only

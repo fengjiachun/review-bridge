@@ -2695,7 +2695,7 @@ test("a superseded publication stops being actionable before the push", async (t
   assert.equal(historical.authorization.head_sha, headSha);
 });
 
-test("a gate minted before supersession stops verifying after it", async (t) => {
+test("a gate cannot outlive the workflow head that could replace it", async (t) => {
   // A gate CAN outlive its workflow head: the publication's MERGE_READY is
   // independent of the workflow's phase. A failing required check moves the
   // workflow into a repair phase while the publication stays bound at the same
@@ -2766,22 +2766,56 @@ test("a gate minted before supersession stops verifying after it", async (t) => 
     true,
   );
 
-  // Now the repair lands. Refusing to mint a new gate is not enough: the one
-  // already minted must stop carrying authority for a head the workflow has
-  // replaced.
+  // A gate can only be minted for a pull request out of draft, and a head
+  // can only be recorded for one that is not: the repair would push onto
+  // something reviewers can already see. So the gate cannot outlive its
+  // workflow head by this route at all -- the head simply cannot move while
+  // it stands.
+  const replacement = await commit(state.repository, "export const value = 3;\n");
+  await assert.rejects(
+    recordWorkflowHead(
+      state.store,
+      workflow.workflow_id,
+      repairing.revision,
+      replacement,
+    ),
+    (error) => error.code === "WORKFLOW_PULL_REQUEST_EXPOSED",
+  );
+
+  // Returning it to draft is the remedy, and that observation revokes the
+  // gate on its way past: by the time the head can move, the gate it would
+  // have outlived is already gone.
+  const repairedAt = laterAt + 3_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 4,
+      observation: draftObservation(state, headSha, {
+        at: repairedAt,
+        requestId: 100,
+        requestAt: at + 1_000,
+      }),
+    },
+    { clock: () => repairedAt + 10 },
+  );
+  const revoked = await verifyPublicationGate(state.store, reviewId, {
+    clock: () => repairedAt + 20,
+  });
+  assert.equal(revoked.valid, false);
+
   const repaired = await recordWorkflowHead(
     state.store,
     workflow.workflow_id,
     repairing.revision,
-    await commit(state.repository, "export const value = 3;\n"),
+    replacement,
   );
   assert.equal(repaired.current_publication, null);
   git(state.repository, "checkout", "--detach", headSha);
   const verified = await verifyPublicationGate(state.store, reviewId, {
-    clock: () => laterAt + 40,
+    clock: () => repairedAt + 30,
   });
   assert.equal(verified.valid, false);
-  assert.equal(verified.reason, "GATE_MISMATCH");
 });
 
 test("the remote wait itself cannot record a later head", async (t) => {
