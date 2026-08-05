@@ -4236,7 +4236,19 @@ export async function advanceRemoteWorkflow(
       );
     }
     const repairPhase = remoteRepairPhase(projection);
-    const pauseReason = remotePauseReason(projection);
+    // Every repair phase is left by recording a new head, which is pushed to
+    // this pull request. A pull request already out of draft is visible for
+    // review, and this release cannot return it to draft, so the repair must
+    // not start: the workflow stops and an operator decides. Only repair is
+    // blocked -- a cleared publication still reaches the pre-ready stop,
+    // where an already-ready pull request reconciles without claiming a
+    // mutation. The projection ignores the draft flag when deriving status,
+    // so this is the one place that reads it.
+    const exposed =
+      repairPhase != null && projection.is_draft === false
+        ? "PULL_REQUEST_EXPOSED"
+        : null;
+    const pauseReason = remotePauseReason(projection) ?? exposed;
     if (repairPhase == null && pauseReason == null) {
       // Still settling, or blocked on something no autonomous action of this
       // stage may touch (unresolved threads). Keep waiting and only refresh the
@@ -4303,12 +4315,16 @@ export async function advanceRemoteWorkflow(
       ) ?? null;
     const stalled = repeated != null;
     if (stalled || pauseReason != null) {
-      // Resume where the operator's remedy is actually possible. Returning to
-      // WAIT_PUBLICATION would strand every pause whose fix is a new commit:
-      // record_workflow_head rejects that phase, so resume and advance would
-      // re-derive the same stop forever.
+      // Resume where the operator's remedy is actually possible. A reason
+      // that names its own resume phase wins, because that mapping exists
+      // exactly for remedies the repair phase would bypass -- an exposed
+      // pull request must re-derive from the wait rather than resume into
+      // the repair it just refused. Otherwise resume into the repair phase:
+      // returning to WAIT_PUBLICATION would strand every pause whose fix is
+      // a new commit, since record_workflow_head rejects that phase and
+      // resume then re-derives the same stop forever.
       const resumePhase =
-        repairPhase ?? REMOTE_PAUSE_RESUME_PHASES[pauseReason] ?? "WAIT_PUBLICATION";
+        REMOTE_PAUSE_RESUME_PHASES[pauseReason] ?? repairPhase ?? "WAIT_PUBLICATION";
       return publicWorkflow(
         await saveActionMutation(
           paths,
@@ -4410,6 +4426,10 @@ const REMOTE_PAUSE_RESUME_PHASES = Object.freeze({
   SEMANTIC_CONFLICT: "UPDATE_FROM_BASE",
   PUBLICATION_INVALIDATED: "IMPLEMENTING",
   GITHUB_REVIEW_AMBIGUOUS: "WAIT_PUBLICATION",
+  // The remedy is outside the workflow -- someone returns the pull request
+  // to draft -- so resuming re-enters the wait, which re-derives this stop
+  // if the pull request is still visible.
+  PULL_REQUEST_EXPOSED: "WAIT_PUBLICATION",
 });
 
 function remotePauseReason(projection) {

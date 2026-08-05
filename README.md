@@ -309,6 +309,8 @@ IMPLEMENTING
        ├─ required check fails -> ADDRESS_CHECK_FAILURE  ──┤-> COMMIT_HEAD
        ├─ base gap             -> UPDATE_FROM_BASE       ──┘   -> new local review
        ├─ ambiguity, conflict, invalidation, or no progress -> PAUSED_HUMAN
+       ├─ any repair while the pull request is already out of draft
+       │    -> PAUSED_HUMAN (no repair pushes onto a visible pull request)
        ├─ eligible Codex finding thread -> RESOLVE_CODEX_THREADS
        │    -> recorded reply -> proven resolution -> back to WAIT_PUBLICATION
        │    (a publication that goes terminal mid-resolution closes the

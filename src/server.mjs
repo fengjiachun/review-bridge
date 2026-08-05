@@ -540,7 +540,7 @@ if (role === "author") {
     {
       title: "Plan mark pull request ready",
       description:
-        "Persist the MARK_PR_READY intent for the workflow-owned pull request. Refuses unless the bound publication's autonomous projection is READY_TO_MARK on this exact head; that refusal changes nothing, so advance the workflow and let it route the new blocker. The clearance is read once more immediately before the call, and a publication that regressed by then refuses there and drops the planned intent. There is no second check after that: a controller re-issuing the call after a crash re-reads the projection itself.",
+        "Persist the MARK_PR_READY intent for the workflow-owned pull request. Refuses unless the bound publication's autonomous projection is READY_TO_MARK on this exact head; that refusal changes nothing, so advance the workflow and let it route the new blocker. The clearance is read once more immediately before the call, and a publication that regressed by then refuses there and drops the planned intent -- unless the pre-read found the pull request already out of draft, which holds the intent instead so no repair phase can push onto a pull request that is already visible. There is no second check after that: a controller re-issuing the call after a crash re-reads the projection itself.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),

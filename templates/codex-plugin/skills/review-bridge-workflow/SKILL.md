@@ -138,9 +138,11 @@ blocks after the pull request is ready is operator work.
     watermark, then close it with `plan_thread_resolution`. After the resolve
     call is observed, call `record_automatic_resolution` before
     `complete_workflow_action`: the server-owned record is what the
-    completion requires. The one exception is a publication that has gone
-    terminal — the pull request merged, closed, or the head diverged — while
-    the resolution was in flight. That ledger accepts no write, so
+    completion requires. Two outcomes need no record. An
+    `OBSERVED_PRE_RESOLVED` resolution claims nothing, so there is nothing to
+    record and the action closes on its own. The other is a publication that
+    has gone terminal — the pull request merged, closed, or the head diverged
+    — while the resolution was in flight. That ledger accepts no write, so
     `record_automatic_resolution` fails `PUBLICATION_TERMINAL` and the
     completion stops requiring it; complete the action, after which the
     remote wait pauses `PUBLICATION_INVALIDATED` like any other terminal
@@ -177,8 +179,16 @@ blocks after the pull request is ready is operator work.
     flight: it is how the thread loop returns to the wait and how the
     pre-ready stop reacts to a clearance that moved. It refuses every repair
     phase and `POST_READY`.
-13. The server pauses `GITHUB_REVIEW_AMBIGUOUS` on an ambiguous or unbound
-    result, `SEMANTIC_CONFLICT` on a conflicting merge state,
+13. The server pauses `PULL_REQUEST_EXPOSED` when a blocker would route into
+    a repair phase while the pull request is already out of draft: every
+    repair ends in a new head pushed to that pull request, and one reviewers
+    can already see must not receive it. The remedy is outside the workflow
+    — someone returns it to draft — so resuming re-enters the wait, which
+    re-derives the stop while it is still visible. A cleared publication is
+    unaffected: it reaches the pre-ready stop, where an already-ready pull
+    request reconciles `OBSERVED_ALREADY_READY` without claiming a mutation.
+    The server also pauses `GITHUB_REVIEW_AMBIGUOUS` on an ambiguous or
+    unbound result, `SEMANTIC_CONFLICT` on a conflicting merge state,
     `PUBLICATION_INVALIDATED` when the pull request or head diverged from the
     authorization, and `NO_PROGRESS` when an attempt's normalized blockers and
     either its head or its tree match any earlier recorded attempt — not only

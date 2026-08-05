@@ -534,8 +534,9 @@ recorded its result. Therefore recovery always reconciles first:
   for the claim that keeps an intent, never for the one that destroys it.
   A regression that clears on its own frees that intent; one whose remedy is
   a new head does not, because the held action blocks head recording, and
-  the hold is then as permanent as the executing case above and ends the
-  same way -- with the operator, until the return-to-draft action ships. Retryable failures of the read itself drop nothing. The pre-ready
+  the hold is then permanent. It is the first of the two states this release
+  defers; the second is described below, and both end the same way -- with
+  the operator, until the return-to-draft action ships. Retryable failures of the read itself drop nothing. The pre-ready
   stop itself remains advanceable whenever no action is in flight, so a
   clearance that moves before anything is planned routes onward like any
   other change rather than stranding the run.
@@ -562,6 +563,14 @@ recorded its result. Therefore recovery always reconciles first:
   pull request to draft, which is a later action. Until that ships, such a
   crash is an operator matter: the workflow pauses as an indeterminate
   external action and may have to be cancelled.
+
+A blocker that would enter a repair phase while the pull request is already
+out of draft pauses instead. Every repair ends in a new head pushed to that
+pull request, and one already visible for review must not receive it; this
+release cannot return it to draft, so an operator decides. The pause resumes
+into the wait, which re-derives it while the pull request is still visible. A
+publication that clears is unaffected and still reaches the mark-ready stop,
+where an already-ready pull request reconciles without claiming a mutation.
 
 - **Return to draft for repair**: read the exact pull request and head. Treat an
   already-draft pull request as reconciled completion. Repeat the mutation only
