@@ -551,8 +551,10 @@ recorded its result. Therefore recovery always reconciles first:
   marked ready while a blocker stands" is server-enforced on the first
   attempt and contract-enforced on a recovery.
 
-  One case has no in-protocol exit in this first implementation: still
-  draft, with a clearance that no longer permits the call. Whether the
+  This is the second of the two cases with no in-protocol exit in this
+  first implementation -- the other is the held intent above, and both end
+  the same way. Here the action is executing, the pull request is still
+  draft, and the clearance no longer permits the call. Whether the
   earlier call landed cannot be established -- a timeout or a lagging read
   reports a draft pull request while the mutation applies, and this provider
   attests no actor for a draft transition -- so the action can neither be

@@ -243,9 +243,11 @@ blocks after the pull request is ready is operator work.
     Pause `EXTERNAL_ACTION_INDETERMINATE` instead.
     Do not plan around a second checkpoint; there is none, and this release
     cannot decide who marked a pull request ready (GitHub attests no actor
-    for a draft transition) nor return a ready pull request to draft. Only
-    one case is unreconcilable here: still draft *and* the publication has
-    regressed so that issuing the call is no longer allowed. Pause
+    for a draft transition) nor return a ready pull request to draft. This is
+    the second unreconcilable case, alongside the held intent above: the
+    action is executing, the pull request is still draft, *and* the
+    publication has regressed so that issuing the call is no longer
+    allowed. Pause
     `EXTERNAL_ACTION_INDETERMINATE` and hand that one to the operator, who
     may have to cancel the workflow. Say plainly what that costs: cancellation
     retains the claims, and releasing them needs the bound pull request
