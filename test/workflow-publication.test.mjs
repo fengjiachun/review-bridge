@@ -3152,24 +3152,31 @@ test("a cleared draft pull request marks itself ready and then stops", async (t)
   });
 
   // The pre-read is the last check before the call, and it binds the exact
-  // pull request and head: a drifted head never becomes an executing proof.
-  await assert.rejects(
-    markWorkflowActionExecuting(
-      state.store,
-      workflow.workflow_id,
-      planned.workflow.revision,
-      planned.action.action_id,
-      {
-        repository_id: REPOSITORY_ID,
-        pr_number: PR_NUMBER,
-        base_branch: "main",
-        head_branch: TOPIC_BRANCH,
-        head_sha: "9".repeat(40),
-        is_draft: true,
-      },
-    ),
-    (error) => error.code === "WORKFLOW_ACTION_INVALID",
-  );
+  // pull request and head: a drifted head never becomes an executing proof,
+  // and neither does a reading that never looked at the draft state.
+  for (const drifted of [
+    { head_sha: "9".repeat(40) },
+    { is_draft: null },
+  ]) {
+    await assert.rejects(
+      markWorkflowActionExecuting(
+        state.store,
+        workflow.workflow_id,
+        planned.workflow.revision,
+        planned.action.action_id,
+        {
+          repository_id: REPOSITORY_ID,
+          pr_number: PR_NUMBER,
+          base_branch: "main",
+          head_branch: TOPIC_BRANCH,
+          head_sha: headSha,
+          is_draft: true,
+          ...drifted,
+        },
+      ),
+      (error) => error.code === "WORKFLOW_ACTION_INVALID",
+    );
+  }
 
   const executing = await markWorkflowActionExecuting(
     state.store,
@@ -3772,6 +3779,27 @@ test("the ready record names the clearance the checkpoint read", async (t) => {
     executing.active_action.cleared_publication_revision,
     refreshed.revision,
   );
+
+  // The whole target is validated on every load against the workflow's own
+  // publication, pull request, and authorization -- not only the parts the
+  // action ID digest or the executing proof happen to cover. A target
+  // pointing at another publication is refused even though every other
+  // recorded field still agrees.
+  const targetPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const storedTarget = JSON.parse(await fsp.readFile(targetPath, "utf8"));
+  const repointed = structuredClone(storedTarget);
+  repointed.active_action.target.review_id = `${reviewId}-other`;
+  await atomicWriteCanonicalJson(targetPath, repointed);
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, workflow.workflow_id),
+    (error) => error.code === "WORKFLOW_ACTION_INVALID",
+  );
+  await atomicWriteCanonicalJson(targetPath, storedTarget);
 
   // The clearance the checkpoint accepted is part of the action from here
   // on, because the completed record names it: a ledger missing it is

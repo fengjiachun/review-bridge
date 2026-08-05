@@ -532,16 +532,20 @@ recorded its result. Therefore recovery always reconciles first:
 
   That checkpoint runs once, before the single call the action makes. A
   driver that crashes after it reconciles by reading the pull request, and
-  the pre-read it already recorded decides what it may claim: found draft
-  before the call, a now-ready pull request completes `MARKED_READY`. This
-  first implementation deliberately stops there. Whether a call landed
-  cannot be established when the pull request is still draft -- a timeout or
-  a lagging read reports exactly that while the mutation applies, and this
-  provider attests no actor for a draft transition -- and an action that
-  cannot be reconciled has no in-protocol exit until a ready pull request
-  can be returned to draft. Until that action ships, such a crash is an
-  operator matter: the workflow pauses as an indeterminate external action
-  and may have to be cancelled.
+  the pre-read it already recorded decides what it may claim: having found
+  the pull request draft before the call, it completes `MARKED_READY` once
+  the pull request is ready. A pull request still draft is simply called
+  again, which is safe whether or not an earlier attempt landed.
+
+  One case has no in-protocol exit in this first implementation: still
+  draft, with a clearance that no longer permits the call. Whether the
+  earlier call landed cannot be established -- a timeout or a lagging read
+  reports a draft pull request while the mutation applies, and this provider
+  attests no actor for a draft transition -- so the action can neither be
+  claimed nor abandoned. Recovering it requires returning a possibly ready
+  pull request to draft, which is a later action. Until that ships, such a
+  crash is an operator matter: the workflow pauses as an indeterminate
+  external action and may have to be cancelled.
 
 - **Return to draft for repair**: read the exact pull request and head. Treat an
   already-draft pull request as reconciled completion. Repeat the mutation only

@@ -133,9 +133,14 @@ blocks after the pull request is ready is operator work.
     observation aged out: collect a fresh one rather than acting on it.
     Unresolved review threads no longer stop the run outright: when
     `get_thread_resolution_plan` reports at least one eligible thread the
-    workflow enters `RESOLVE_CODEX_THREADS`, where each thread is answered
-    with `plan_thread_reply` and then closed with `plan_thread_resolution`.
-    Threads the plan refuses stay operator work. An idle poll that observes no
+    workflow enters `RESOLVE_CODEX_THREADS`. Answer the thread with
+    `plan_thread_reply`, record a fresh observation so the reply is in the
+    watermark, then close it with `plan_thread_resolution`. After the resolve
+    call is observed, call `record_automatic_resolution` before
+    `complete_workflow_action`: the server-owned record is what the
+    completion requires, and without it the action cannot close. Then
+    `advance_remote_workflow` returns the workflow to the wait. Threads the
+    plan refuses stay operator work. An idle poll that observes no
     change costs no workflow revision, so waiting needs no backoff
     bookkeeping.
 
@@ -160,7 +165,10 @@ blocks after the pull request is ready is operator work.
     on its own — a required check that failed and then passed on a rerun with
     no code change — the workflow stays in its repair phase, and the operator
     either commits a fix or cancels the workflow. Do not create an empty commit
-    to escape one. `advance_remote_workflow` accepts only `WAIT_PUBLICATION`.
+    to escape one. `advance_remote_workflow` accepts `WAIT_PUBLICATION` and
+    `RESOLVE_CODEX_THREADS`, and nothing else: it is how the thread loop
+    returns to the wait, and it refuses every repair phase, `PRE_READY`, and
+    `POST_READY`.
 13. The server pauses `GITHUB_REVIEW_AMBIGUOUS` on an ambiguous or unbound
     result, `SEMANTIC_CONFLICT` on a conflicting merge state,
     `PUBLICATION_INVALIDATED` when the pull request or head diverged from the
@@ -193,8 +201,10 @@ blocks after the pull request is ready is operator work.
     The checkpoint runs once, before the one call this action makes. If you
     crash after it, reconcile by reading the pull request. Found ready,
     record `MARKED_READY` — your own pre-read proved it was draft before this
-    action's call. Found still draft, the call did not land: issue it and
-    reconcile normally, which is the ordinary case and needs nothing special.
+    action's call. Found still draft, issue the call and reconcile normally — the
+    ordinary case, and safe whether or not an earlier attempt landed, since
+    the pull request ends ready either way and your recorded pre-read is what
+    decides the outcome you may claim.
     Do not plan around a second checkpoint; there is none, and this release
     cannot decide who marked a pull request ready (GitHub attests no actor
     for a draft transition) nor return a ready pull request to draft. Only
