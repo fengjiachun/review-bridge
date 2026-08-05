@@ -559,7 +559,7 @@ if (role === "author") {
     {
       title: "Record mark-ready observation",
       description:
-        "Reconcile the pull request after the mark-ready call: the same repository, number, branches, and head, now out of draft. MARKED_READY requires a draft pre-read; a pull request the pre-read already found ready records OBSERVED_ALREADY_READY.",
+        "Reconcile the pull request after the mark-ready call: the same repository, number, branches, and head, now out of draft. The outcome follows the recorded pre-read, both ways: one that found the pull request draft reconciles MARKED_READY, and one that found it already ready reconciles OBSERVED_ALREADY_READY and claims no mutation.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),

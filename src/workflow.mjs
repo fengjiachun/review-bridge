@@ -501,7 +501,13 @@ const ACTION_KIND_SPECS = {
     // The last external write of the autonomous run: take the workflow's own
     // draft pull request out of draft on the exact head the publication
     // cleared. The intent records which observation cleared it, and
-    // `revalidate` asks the publication again immediately before the call.
+    // `revalidate` asks the publication again immediately before the call --
+    // once. A driver that crashes after that checkpoint reconciles what it
+    // did by observing the pull request; it does not get a second
+    // checkpoint, because nothing can tell it whether its call landed
+    // (GitHub attests no actor for a draft transition), and this stage has
+    // no way to return a ready pull request to draft. That recovery lands
+    // with the action that can.
     // The question there is only whether this head is still cleared -- a
     // later observation that clears it again is exactly the state this
     // action wants, so the recorded revision is provenance, not an equality
@@ -599,15 +605,12 @@ const ACTION_KIND_SPECS = {
         response.head_branch !== action.target.head_branch ||
         response.head_sha !== action.target.head_sha ||
         response.is_draft !== false ||
-        // Only the claim that this action performed the transition is bound
-        // to the pre-read: a driver whose pre-read found the pull request
-        // already ready never issued the mutation and may not claim it.
-        // Claiming nothing needs no permission -- and a driver whose
-        // checkpoint was refused after its pre-read went stale must always
-        // be able to report what it now sees rather than choose between a
-        // false claim and cancelling the workflow.
-        (response.outcome === "MARKED_READY" &&
-          action.executing_proof?.is_draft !== true)
+        // Which outcome is true is decided by the pre-read, not by the
+        // caller: a driver that found the pull request already ready never
+        // issued the mutation, and one that found it draft did issue the
+        // call this action is reconciling.
+        (response.outcome === "MARKED_READY") !==
+          (action.executing_proof?.is_draft === true)
       ) {
         fail("WORKFLOW_ACTION_INVALID", "active action response is invalid");
       }
@@ -3280,25 +3283,10 @@ export async function markWorkflowActionExecuting(
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
     const action = workflow.active_action;
-    const spec =
-      action == null ? null : ACTION_KIND_SPECS[action.kind];
-    // A kind that re-reads external evidence here may run this checkpoint
-    // again on an action already EXECUTING. Recovery re-enters the external
-    // write, so the checkpoint that guards that write has to be re-enterable
-    // too -- otherwise the guard holds exactly once, for the driver that did
-    // not crash, and the stored pre-read decides an outcome nobody re-read.
-    const reentry = spec?.revalidate != null && action?.status === "EXECUTING";
-    if (
-      action?.action_id !== actionId ||
-      (action.status !== "PLANNED" && !reentry)
-    ) {
-      fail(
-        "WORKFLOW_ACTION_STATE_INVALID",
-        spec?.revalidate == null
-          ? "action must be PLANNED"
-          : "action must be PLANNED or EXECUTING",
-      );
+    if (action?.action_id !== actionId || action.status !== "PLANNED") {
+      fail("WORKFLOW_ACTION_STATE_INVALID", "action must be PLANNED");
     }
+    const spec = ACTION_KIND_SPECS[action.kind];
     if (spec.validateExecutingProof) {
       spec.validateExecutingProof(action, executingProof);
     } else if (executingProof != null) {
@@ -3316,23 +3304,10 @@ export async function markWorkflowActionExecuting(
       try {
         clearedRevision = await spec.revalidate(storeRoot, action);
       } catch (error) {
-        // Dropping the intent is right only when the evidence says the
-        // intent is wrong and nothing external happened. Before the first
-        // call, that is structural: PLANNED means exactly that.
-        //
-        // Once the action is executing it cannot be established at all. A
-        // pre-read reporting the pull request still draft was tried as the
-        // proof and is not one: a client-side timeout or a lagging read
-        // returns exactly that while the call lands, and dropping there
-        // would leave no record that this workflow marked the pull request
-        // ready, then let a repair phase push a new head to a pull request
-        // that is no longer draft. GitHub attests no actor for a draft
-        // transition, so nothing else can settle it either. An executing
-        // intent therefore survives every refusal: it is the only record of
-        // what has to be reconciled, and a driver that cannot reconcile it
-        // pauses EXTERNAL_ACTION_INDETERMINATE, which is what that pause is
-        // for.
-        if (error?.code !== spec.abandonOnCode || reentry) {
+        // Only the checkpoint's own refusal drops an intent, and only
+        // before the external write: PLANNED is what makes "nothing has
+        // happened yet" structural rather than something a caller asserts.
+        if (error?.code !== spec.abandonOnCode) {
           throw error;
         }
         // Leaving a refused intent in place is what would turn this into a
@@ -3375,12 +3350,6 @@ export async function markWorkflowActionExecuting(
             executingProof == null ? null : structuredClone(executingProof);
           if (clearedRevision != null) {
             next.active_action.cleared_publication_revision = clearedRevision;
-          }
-          if (reentry) {
-            // The re-stamp spends a revision while the action stays at the
-            // same status, which is exactly what this offset accounts for.
-            next.active_action.revision_offset =
-              (next.active_action.revision_offset ?? 0) + 1;
           }
         },
       ),

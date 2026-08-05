@@ -520,22 +520,25 @@ recorded its result. Therefore recovery always reconciles first:
   state completes reconciliation only for that exact head; any identity or
   head drift pauses without issuing or crediting the mutation. The server
   re-reads its own clearance at that same point and refuses a publication
-  that regressed since planning. Because recovery re-enters the provider
-  call, it re-enters this checkpoint: the pre-read is taken again and the
-  clearance checked again, so the recorded outcome follows the reading that
-  preceded the surviving call. A refusal before the first call drops the
-  planned intent and returns the workflow to the publication wait — nothing
-  external has happened, and leaving a refused intent in a phase that can
-  neither advance nor record a head would leave cancellation as its only
-  exit. A refusal once the action is executing never drops it. Whether the
-  call landed cannot be established: a timeout or a lagging read reports the
-  pull request still draft while the mutation applies, and this provider
-  attests no actor for a draft transition. The intent therefore remains the
-  record of what has to be reconciled, and a driver that cannot reconcile it
-  pauses as an indeterminate external action. Reconciliation may always
-  report an already-ready pull request, which claims nothing; only the claim
-  that this action performed the transition requires a pre-read that found
-  the pull request draft.
+  that regressed since planning. A refusal there drops the planned intent
+  and returns the workflow to the publication wait: nothing external has
+  happened, and leaving a refused intent in a phase that can neither advance
+  nor record a head would leave cancellation as its only exit. Retryable
+  failures of the read itself drop nothing.
+
+  That checkpoint runs once, before the single call the action makes. A
+  driver that crashes after it reconciles by reading the pull request, and
+  the pre-read it already recorded decides what it may claim: found draft
+  before the call, a now-ready pull request completes `MARKED_READY`. This
+  first implementation deliberately stops there. Whether a call landed
+  cannot be established when the pull request is still draft -- a timeout or
+  a lagging read reports exactly that while the mutation applies, and this
+  provider attests no actor for a draft transition -- and an action that
+  cannot be reconciled has no in-protocol exit until a ready pull request
+  can be returned to draft. Until that action ships, such a crash is an
+  operator matter: the workflow pauses as an indeterminate external action
+  and may have to be cancelled.
+
 - **Return to draft for repair**: read the exact pull request and head. Treat an
   already-draft pull request as reconciled completion. Repeat the mutation only
   while the same workflow-owned pull request remains ready on the same head,
