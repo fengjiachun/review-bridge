@@ -512,6 +512,16 @@ const ACTION_KIND_SPECS = {
     // wait, which re-derives the publication's own next step -- a repair
     // phase for whatever regressed, or this same stop once it clears again.
     abandonPhase: "WAIT_PUBLICATION",
+    // Only this refusal drops an intent. Lock contention and every other
+    // failure of the read itself mean "ask again", not "this intent is
+    // wrong", and destroying a durable intent over a busy lock would be a
+    // far worse bug than the stop it was meant to prevent.
+    abandonOnCode: "WORKFLOW_PUBLICATION_NOT_READY",
+    // An executing intent may be dropped only when the pre-read proves the
+    // provider call never landed: the pull request is still draft on this
+    // head, so there is nothing to reconcile. A pull request already out of
+    // draft keeps its intent, whoever marked it.
+    abandonableFromExecuting: (proof) => proof?.is_draft === true,
     claimKind: "PULL_REQUEST",
     markerPrefix: null,
     identityFacts(target) {
@@ -809,10 +819,23 @@ function validateActiveAction(workflow) {
       "workflow.active_action.executing_at",
     );
   }
-  if (action.cleared_publication_revision != null) {
-    assertPositiveInteger(
-      action.cleared_publication_revision,
-      "workflow.active_action.cleared_publication_revision",
+  // The clearance the pre-write checkpoint accepted. A kind that has that
+  // checkpoint carries it from EXECUTING onward -- the completed record
+  // names it -- and no other action may carry one at all.
+  if (spec.revalidate != null && action.status !== "PLANNED") {
+    if (
+      !Number.isSafeInteger(action.cleared_publication_revision) ||
+      action.cleared_publication_revision < 1
+    ) {
+      fail(
+        "WORKFLOW_ACTION_INVALID",
+        "an executed action of this kind must record the clearance it was checked against",
+      );
+    }
+  } else if (action.cleared_publication_revision != null) {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      "this action kind does not record a cleared publication revision",
     );
   }
   if (
@@ -3294,19 +3317,23 @@ export async function markWorkflowActionExecuting(
       try {
         clearedRevision = await spec.revalidate(storeRoot, action);
       } catch (error) {
-        if (reentry) {
-          // The external write may already have happened. Dropping the
-          // intent here would discard the record of an action that is still
-          // in flight, so the refusal stands on its own and the driver
-          // reconciles what it did.
+        // Dropping the intent is right only when the evidence says the
+        // intent is wrong and nothing external happened. Before the first
+        // call that is structural -- PLANNED means exactly that. On a
+        // re-entry it has to be proven, and the pre-read is the proof.
+        const refused = error?.code === spec.abandonOnCode;
+        const droppable =
+          refused &&
+          (!reentry ||
+            spec.abandonableFromExecuting?.(executingProof) === true);
+        if (!droppable) {
           throw error;
         }
-        // Nothing external has happened yet -- that is what PLANNED means --
-        // so the intent is simply dropped. Leaving it in place is what would
-        // turn this refusal into a stop with no exit: its phase can neither
-        // advance, record a head, nor plan again while an action is active,
-        // so cancelling the whole workflow would be the only way out of a
-        // guard that is working exactly as intended.
+        // Leaving a refused intent in place is what would turn this into a
+        // stop with no exit: its phase can neither advance, record a head,
+        // nor plan again while an action is active, so cancelling the whole
+        // workflow would be the only way out of a guard that is working
+        // exactly as intended.
         const discarded = await saveActionMutation(
           paths,
           workflow,
