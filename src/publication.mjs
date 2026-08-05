@@ -5624,8 +5624,9 @@ export async function getAutonomousPreReady(
         blockers,
         blocker_sha256: blockerDigest(status, blockers),
         // The manual summary reaches PR_DRAFT before it evaluates Codex status,
-        // so it never offers this body while a pull request is draft -- and an
-        // autonomous run is draft for its whole life. Without it the workflow
+        // so it never offers this body while a pull request is draft -- which
+        // is the whole time an autonomous run needs it, since the run asks for
+        // review long before it marks anything ready. Without it the workflow
         // could acknowledge an ambiguity and then have no way to ask for the
         // next review, because the version-2 request ID is server-derived and
         // has no other source.

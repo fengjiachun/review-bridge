@@ -497,6 +497,136 @@ const ACTION_KIND_SPECS = {
       });
     },
   },
+  MARK_PR_READY: {
+    // The last external write of the autonomous run: take the workflow's own
+    // draft pull request out of draft on the exact head the publication
+    // cleared. The intent records which observation cleared it, and
+    // `revalidate` asks the publication again immediately before the call --
+    // once. A driver that crashes after that checkpoint reconciles what it
+    // did by observing the pull request; it does not get a second
+    // checkpoint, because nothing can tell it whether its call landed
+    // (GitHub attests no actor for a draft transition), and this stage has
+    // no way to return a ready pull request to draft. That recovery lands
+    // with the action that can.
+    //
+    // The checkpoint asks only whether this head is still cleared: a later
+    // observation that clears it again is exactly the state this action
+    // wants, so the revision the plan recorded is provenance rather than an
+    // equality the publication has to keep satisfying. The completed record
+    // names the revision the checkpoint accepted.
+    capability: "MARK_PR_READY",
+    phase: "PRE_READY",
+    // Where a refused pre-write checkpoint leaves the workflow: back in the
+    // wait, which re-derives the publication's own next step -- a repair
+    // phase for whatever regressed, or this same stop once it clears again.
+    abandonPhase: "WAIT_PUBLICATION",
+    // Only this refusal drops an intent. Lock contention and every other
+    // failure of the read itself mean "ask again", not "this intent is
+    // wrong", and destroying a durable intent over a busy lock would be a
+    // far worse bug than the stop it was meant to prevent.
+    abandonOnCode: "WORKFLOW_PUBLICATION_NOT_READY",
+    // "Nothing external has happened" is true of this action's own call
+    // while it is planned. It is not true of the pull request: the pre-read
+    // may have found it already out of draft, marked by an earlier attempt
+    // or by someone else. Dropping the intent there would discard the only
+    // record of that and return the workflow to a wait whose repair phases
+    // push new commits -- onto a pull request that is already visible for
+    // review. The proof is trusted only for the claim that keeps the intent,
+    // never for the one that destroys it.
+    abandonableProof: (proof) => proof?.is_draft === true,
+    claimKind: "PULL_REQUEST",
+    markerPrefix: null,
+    identityFacts(target) {
+      return { pr_number: target.pr_number, head_sha: target.head_sha };
+    },
+    validateTarget(workflow, target) {
+      const authorized = workflow.authorization.publication_target;
+      const pullRequest = workflow.pull_request;
+      if (
+        workflow.current_publication == null ||
+        target.review_id !== workflow.current_publication.review_id ||
+        target.head_sha !== workflow.current_head_sha ||
+        pullRequest == null ||
+        target.repository_id !== pullRequest.repository_id ||
+        target.pr_number !== pullRequest.pr_number ||
+        target.base_branch !== authorized.base_branch ||
+        target.head_branch !== authorized.head_branch ||
+        target.repository_id !== authorized.base_repository_id ||
+        !Number.isSafeInteger(target.publication_revision) ||
+        target.publication_revision < 1
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "mark-ready target does not match the workflow-owned pull request, head, and clearance",
+        );
+      }
+    },
+    dispatch: null,
+    async revalidate(storeRoot, action) {
+      // Only the clearance is re-read. The identity behind it cannot move
+      // while this action is active: recording a head drops the publication
+      // binding, and no head can be recorded from PRE_READY with an action
+      // in flight -- so the plan-time identity check is still the current
+      // one, and repeating it here would be a check no state can fail.
+      const preReady = await getAutonomousPreReady(
+        storeRoot,
+        action.target.review_id,
+      );
+      if (preReady.status !== "READY_TO_MARK") {
+        fail(
+          "WORKFLOW_PUBLICATION_NOT_READY",
+          "the publication no longer clears this pull request for review",
+          {
+            status: preReady.status,
+            blocking_reason: preReady.blocking_reason,
+          },
+        );
+      }
+      // The clearance that actually authorizes the write, which after a
+      // regress-and-clear is not the one the plan read.
+      return preReady.revision;
+    },
+    validateExecutingProof(action, proof) {
+      // The identity read immediately before the call. A pull request already
+      // out of draft is a legal proof -- on this exact head it is the
+      // reconciled completion, and it forbids claiming the mutation.
+      if (
+        proof == null ||
+        proof.repository_id !== action.target.repository_id ||
+        proof.pr_number !== action.target.pr_number ||
+        proof.base_branch !== action.target.base_branch ||
+        proof.head_branch !== action.target.head_branch ||
+        proof.head_sha !== action.target.head_sha ||
+        typeof proof.is_draft !== "boolean"
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "the mark-ready pre-read must bind the exact pull request and head",
+        );
+      }
+    },
+    validateResponse(action, response) {
+      if (
+        !["MARKED_READY", "OBSERVED_ALREADY_READY"].includes(
+          response.outcome,
+        ) ||
+        response.repository_id !== action.target.repository_id ||
+        response.pr_number !== action.target.pr_number ||
+        response.base_branch !== action.target.base_branch ||
+        response.head_branch !== action.target.head_branch ||
+        response.head_sha !== action.target.head_sha ||
+        response.is_draft !== false ||
+        // Which outcome is true is decided by the pre-read, not by the
+        // caller: a driver that found the pull request already ready never
+        // issued the mutation, and one that found it draft did issue the
+        // call this action is reconciling.
+        (response.outcome === "MARKED_READY") !==
+          (action.executing_proof?.is_draft === true)
+      ) {
+        fail("WORKFLOW_ACTION_INVALID", "active action response is invalid");
+      }
+    },
+  },
 };
 
 function validateCurrentPublication(workflow) {
@@ -700,6 +830,25 @@ function validateActiveAction(workflow) {
     assertTimestamp(
       action.executing_at,
       "workflow.active_action.executing_at",
+    );
+  }
+  // The clearance the pre-write checkpoint accepted. A kind that has that
+  // checkpoint carries it from EXECUTING onward -- the completed record
+  // names it -- and no other action may carry one at all.
+  if (spec.revalidate != null && action.status !== "PLANNED") {
+    if (
+      !Number.isSafeInteger(action.cleared_publication_revision) ||
+      action.cleared_publication_revision < 1
+    ) {
+      fail(
+        "WORKFLOW_ACTION_INVALID",
+        "an executed action of this kind must record the clearance it was checked against",
+      );
+    }
+  } else if (action.cleared_publication_revision != null) {
+    fail(
+      "WORKFLOW_ACTION_INVALID",
+      "this action kind does not record a cleared publication revision",
     );
   }
   if (
@@ -985,7 +1134,8 @@ function validateWorkflow(workflow) {
     !Array.isArray(workflow.remote_attempts) ||
     !Array.isArray(workflow.addressed_findings) ||
     !Array.isArray(workflow.thread_replies) ||
-    !Array.isArray(workflow.thread_resolutions)
+    !Array.isArray(workflow.thread_resolutions) ||
+    !Array.isArray(workflow.ready_marks)
   ) {
     fail("WORKFLOW_STATE_INVALID", "workflow arrays are malformed");
   }
@@ -1102,6 +1252,27 @@ function validateWorkflow(workflow) {
       { max: 1024 },
     );
     assertTimestamp(resolution.recorded_at, "thread-resolution recorded_at");
+  }
+  for (const [index, mark] of workflow.ready_marks.entries()) {
+    assertObject(mark, "workflow.ready_marks entry");
+    if (mark.number !== index + 1) {
+      fail("WORKFLOW_STATE_INVALID", "ready-mark numbers must be sequential");
+    }
+    if (!["MARKED_READY", "OBSERVED_ALREADY_READY"].includes(mark.outcome)) {
+      fail("WORKFLOW_STATE_INVALID", "ready-mark outcome is invalid");
+    }
+    assertString(mark.action_id, "ready-mark action_id", { max: 1024 });
+    assertPositiveInteger(mark.repository_id, "ready-mark repository_id");
+    assertPositiveInteger(mark.pr_number, "ready-mark pr_number");
+    assertSha(mark.head_sha, "ready-mark head_sha");
+    assertString(mark.publication_review_id, "ready-mark review_id", {
+      max: 1024,
+    });
+    assertPositiveInteger(
+      mark.publication_revision,
+      "ready-mark publication_revision",
+    );
+    assertTimestamp(mark.recorded_at, "ready-mark recorded_at");
   }
   validateCurrentPublication(workflow);
   const claimKeys = new Set();
@@ -1258,6 +1429,7 @@ const REMOTE_FIELD_DEFAULTS = Object.freeze({
   addressed_findings: [],
   thread_replies: [],
   thread_resolutions: [],
+  ready_marks: [],
 });
 
 function withRemoteFieldDefaults(workflow) {
@@ -1617,6 +1789,7 @@ function auditedWorkflowState(workflow) {
     addressed_findings: workflow.addressed_findings ?? [],
     thread_replies: workflow.thread_replies ?? [],
     thread_resolutions: workflow.thread_resolutions ?? [],
+    ready_marks: workflow.ready_marks ?? [],
     active_action: workflow.active_action,
     reviewer_task: workflow.reviewer_task,
     current_review: workflow.current_review,
@@ -1821,6 +1994,7 @@ function requireWorkflowAuditBinding(workflow, audit) {
     addressed_findings: [],
     thread_replies: [],
     thread_resolutions: [],
+    ready_marks: [],
     active_action: null,
     reviewer_task: null,
     current_review: null,
@@ -1849,6 +2023,8 @@ function requireWorkflowAuditBinding(workflow, audit) {
       canonicalJson(lastState.thread_replies ?? []) ||
     canonicalJson(workflow.thread_resolutions ?? []) !==
       canonicalJson(lastState.thread_resolutions ?? []) ||
+    canonicalJson(workflow.ready_marks ?? []) !==
+      canonicalJson(lastState.ready_marks ?? []) ||
     canonicalJson(workflow.active_action) !==
       canonicalJson(lastState.active_action) ||
     canonicalJson(workflow.reviewer_task) !==
@@ -1906,6 +2082,7 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "addressed_findings",
     "thread_replies",
     "thread_resolutions",
+    "ready_marks",
     "active_action",
     "reviewer_task",
     "current_review",
@@ -2199,7 +2376,12 @@ function nextAction(workflow) {
     ADDRESS_REMOTE_FINDINGS: "ADDRESS_REMOTE_FINDINGS",
     ADDRESS_CHECK_FAILURE: "ADDRESS_CHECK_FAILURE",
     UPDATE_FROM_BASE: "UPDATE_FROM_BASE",
-    PRE_READY: "AWAIT_OPERATOR",
+    PRE_READY: actionPhase("PLAN_MARK_PR_READY", {
+      PLANNED: "MARK_PR_READY",
+      EXECUTING: "RECONCILE_MARK_PR_READY",
+      OBSERVED: "COMPLETE_MARK_PR_READY",
+    }),
+    POST_READY: "AWAIT_OPERATOR",
   };
   return actions[workflow.phase] ?? "INSPECT_WORKFLOW";
 }
@@ -2222,6 +2404,7 @@ function workflowSummary(workflow) {
     addressed_findings: workflow.addressed_findings,
     thread_replies: workflow.thread_replies,
     thread_resolutions: workflow.thread_resolutions,
+    ready_marks: workflow.ready_marks,
     active_action:
       workflow.active_action == null
         ? null
@@ -2350,6 +2533,7 @@ export async function startAutonomousWorkflow(
     addressed_findings: [],
     thread_replies: [],
     thread_resolutions: [],
+    ready_marks: [],
     claims: workflowClaims,
     active_action: null,
     progress_fingerprint: null,
@@ -2493,6 +2677,25 @@ export async function recordWorkflowHead(
       fail("WORKFLOW_NO_PROGRESS", "new committed head must change");
     }
     requireAncestor(repository.path, previousHead, headSha);
+    // The head this records is the head that gets pushed to the bound pull
+    // request, so the rule that stops a repair from starting on a visible
+    // pull request has to hold here too: the pull request may have been
+    // marked ready after the repair began, and the phase check alone would
+    // never notice. The binding is still held here, which is what makes the
+    // draft flag readable at all -- recording clears it.
+    if (workflow.current_publication != null) {
+      const projection = await getAutonomousPreReady(
+        storeRoot,
+        workflow.current_publication.review_id,
+      );
+      if (projection.is_draft === false) {
+        fail(
+          "WORKFLOW_PULL_REQUEST_EXPOSED",
+          "the bound pull request is no longer a draft: a new head cannot be recorded for it until it is returned to draft",
+          { review_id: workflow.current_publication.review_id },
+        );
+      }
+    }
     // A head recorded to answer remote findings must say which finding review
     // it answers -- RFC 0003 eligibility condition 3, and the only link that
     // survives into the next publication, whose baseline absorbs this review
@@ -2865,6 +3068,68 @@ export async function planDraftPullRequest(
   );
 }
 
+/**
+ * Plan the mark-ready that ends the autonomous run. Planning refuses unless
+ * the publication clears this exact head, and records which observation
+ * cleared it. That record is provenance, not authority: the clearance is
+ * read again at the pre-write checkpoint, and it is that later reading the
+ * completed record names.
+ */
+export async function planMarkPullRequestReady(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+) {
+  return planWorkflowAction(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    "MARK_PR_READY",
+    {
+      planPhases: ["PRE_READY"],
+      invalidMessage: "the mark-ready is not currently plannable",
+      target: async (workflow) => {
+        if (workflow.current_publication == null || workflow.pull_request == null) {
+          fail(
+            "WORKFLOW_STATE_INVALID",
+            "mark-ready has no bound publication and pull request",
+          );
+        }
+        const reviewId = workflow.current_publication.review_id;
+        const preReady = await getAutonomousPreReady(storeRoot, reviewId);
+        if (
+          preReady.workflow_id !== workflow.workflow_id ||
+          preReady.head_sha !== workflow.current_head_sha
+        ) {
+          fail(
+            "WORKFLOW_PUBLICATION_MISMATCH",
+            "publication is not bound to this workflow and head",
+          );
+        }
+        if (preReady.status !== "READY_TO_MARK") {
+          fail(
+            "WORKFLOW_PUBLICATION_NOT_READY",
+            "the publication has not cleared the pull request for review",
+            {
+              status: preReady.status,
+              blocking_reason: preReady.blocking_reason,
+            },
+          );
+        }
+        return {
+          review_id: reviewId,
+          repository_id: workflow.pull_request.repository_id,
+          pr_number: workflow.pull_request.pr_number,
+          base_branch: workflow.pull_request.base_branch,
+          head_branch: workflow.pull_request.head_branch,
+          head_sha: workflow.current_head_sha,
+          publication_revision: preReady.revision,
+        };
+      },
+    },
+  );
+}
+
 export async function planThreadReply(
   storeRoot,
   workflowId,
@@ -3060,6 +3325,55 @@ export async function markWorkflowActionExecuting(
         "this action kind does not take an executing proof",
       );
     }
+    // Some intents are only as good as evidence that lives outside the
+    // workflow ledger and can move under them between planning and the call.
+    // This is the last durable point before the external write, so it is
+    // where that evidence has to be read again.
+    let clearedRevision = null;
+    if (spec.revalidate) {
+      try {
+        clearedRevision = await spec.revalidate(storeRoot, action);
+      } catch (error) {
+        // Only the checkpoint's own refusal drops an intent, and only
+        // before the external write: PLANNED is what makes "nothing has
+        // happened yet" structural rather than something a caller asserts.
+        // A kind may still refuse to be dropped on the evidence in front of
+        // it -- see MARK_PR_READY, where an already-ready pull request means
+        // the repair loop must not have the workflow back.
+        if (
+          error?.code !== spec.abandonOnCode ||
+          spec.abandonableProof?.(executingProof) === false
+        ) {
+          throw error;
+        }
+        // Leaving a refused intent in place is what would turn this into a
+        // stop with no exit: its phase can neither advance, record a head,
+        // nor plan again while an action is active, so cancelling the whole
+        // workflow would be the only way out of a guard that is working
+        // exactly as intended.
+        const discarded = await saveActionMutation(
+          paths,
+          workflow,
+          "ACTION_ABANDONED",
+          async (next) => {
+            next.active_action = null;
+            next.phase = spec.abandonPhase;
+          },
+          {
+            abandoned_action_id: action.action_id,
+            abandoned_kind: action.kind,
+            reason_code: error?.code ?? null,
+          },
+        );
+        error.details = {
+          ...(error?.details ?? {}),
+          action_abandoned: action.action_id,
+          workflow_revision: discarded.revision,
+          phase: discarded.phase,
+        };
+        throw error;
+      }
+    }
     return publicWorkflow(
       await saveActionMutation(
         paths,
@@ -3070,6 +3384,9 @@ export async function markWorkflowActionExecuting(
           next.active_action.executing_at = now();
           next.active_action.executing_proof =
             executingProof == null ? null : structuredClone(executingProof);
+          if (clearedRevision != null) {
+            next.active_action.cleared_publication_revision = clearedRevision;
+          }
         },
       ),
     );
@@ -3234,6 +3551,45 @@ export async function recordThreadResolutionObservation(
             resolved_by_type: resolvedByType,
           }
         : {}),
+    }),
+  );
+}
+
+export async function recordMarkReadyObservation(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  actionId,
+  {
+    outcome,
+    repositoryId,
+    prNumber,
+    baseBranch,
+    headBranch,
+    headSha,
+    isDraft,
+  },
+) {
+  if (!["MARKED_READY", "OBSERVED_ALREADY_READY"].includes(outcome)) {
+    throw new TypeError("outcome must be MARKED_READY or OBSERVED_ALREADY_READY");
+  }
+  assertPositiveInteger(repositoryId, "repository_id");
+  assertPositiveInteger(prNumber, "pr_number");
+  assertSha(headSha, "head_sha");
+  return recordActionObservation(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    actionId,
+    "MARK_PR_READY",
+    () => ({
+      outcome,
+      repository_id: repositoryId,
+      pr_number: prNumber,
+      base_branch: baseBranch,
+      head_branch: headBranch,
+      head_sha: headSha,
+      is_draft: isDraft,
     }),
   );
 }
@@ -3511,7 +3867,12 @@ export async function completeWorkflowAction(
             entry.thread_id === action.target.thread_id &&
             entry.action_id === action.action_id,
         );
-        if (record == null) {
+        // A terminal publication can no longer be written to, so the record
+        // is not merely late -- it is uncreatable. Holding the action open
+        // for it would strand the workflow on a publication that is already
+        // closed, merged, or invalidated, and the record would have nothing
+        // left to protect: no gate of a terminal publication can pass.
+        if (record == null && ledger.terminal == null) {
           fail(
             "WORKFLOW_RESOLUTION_RECORD_MISSING",
             "a resolved outcome completes only after its automatic-resolution record is stored",
@@ -3537,6 +3898,35 @@ export async function completeWorkflowAction(
               recorded_at: now(),
             });
             next.active_action = null;
+          },
+        ),
+      );
+    }
+    if (action.kind === "MARK_PR_READY") {
+      return publicWorkflow(
+        await saveActionMutation(
+          paths,
+          workflow,
+          "ACTION_COMPLETED",
+          async (next) => {
+            next.active_action.completed_at = now();
+            next.ready_marks.push({
+              number: next.ready_marks.length + 1,
+              outcome: action.provider_response.outcome,
+              action_id: action.action_id,
+              repository_id: action.target.repository_id,
+              pr_number: action.target.pr_number,
+              head_sha: action.target.head_sha,
+              publication_review_id: action.target.review_id,
+              publication_revision: action.cleared_publication_revision,
+              recorded_at: now(),
+            });
+            next.active_action = null;
+            // The pull request is out of draft, so no repair phase may run
+            // until it is returned to draft -- which this rollout stage
+            // cannot do. The workflow stops advancing here and the terminal
+            // projection is the operator's.
+            next.phase = "POST_READY";
           },
         ),
       );
@@ -3824,8 +4214,17 @@ export async function advanceRemoteWorkflow(
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
+    // PRE_READY is advanceable for the same reason the other two are: with
+    // no action in flight it is a wait, and what it waits on can move. A
+    // clearance that regresses before anything is planned would otherwise
+    // strand a healthy run -- planning refuses without changing state, and
+    // this phase can neither record a head nor be resumed into anything
+    // else -- leaving cancellation as the only exit from a projection that
+    // simply changed its mind.
     if (
-      !["WAIT_PUBLICATION", "RESOLVE_CODEX_THREADS"].includes(workflow.phase)
+      !["WAIT_PUBLICATION", "RESOLVE_CODEX_THREADS", "PRE_READY"].includes(
+        workflow.phase,
+      )
     ) {
       fail(
         "WORKFLOW_PHASE_INVALID",
@@ -3835,7 +4234,7 @@ export async function advanceRemoteWorkflow(
     if (workflow.active_action != null) {
       fail(
         "WORKFLOW_PHASE_INVALID",
-        "cannot advance a remote wait while a thread action is active",
+        "cannot advance a remote wait while an action is active",
       );
     }
     if (workflow.current_publication == null) {
@@ -3856,7 +4255,19 @@ export async function advanceRemoteWorkflow(
       );
     }
     const repairPhase = remoteRepairPhase(projection);
-    const pauseReason = remotePauseReason(projection);
+    // Every repair phase is left by recording a new head, which is pushed to
+    // this pull request. A pull request already out of draft is visible for
+    // review, and this release cannot return it to draft, so the repair must
+    // not start: the workflow stops and an operator decides. Only repair is
+    // blocked -- a cleared publication still reaches the pre-ready stop,
+    // where an already-ready pull request reconciles without claiming a
+    // mutation. The projection ignores the draft flag when deriving status,
+    // so this is the one place that reads it.
+    const exposed =
+      repairPhase != null && projection.is_draft === false
+        ? "PULL_REQUEST_EXPOSED"
+        : null;
+    const pauseReason = remotePauseReason(projection) ?? exposed;
     if (repairPhase == null && pauseReason == null) {
       // Still settling, or blocked on something no autonomous action of this
       // stage may touch (unresolved threads). Keep waiting and only refresh the
@@ -3923,12 +4334,16 @@ export async function advanceRemoteWorkflow(
       ) ?? null;
     const stalled = repeated != null;
     if (stalled || pauseReason != null) {
-      // Resume where the operator's remedy is actually possible. Returning to
-      // WAIT_PUBLICATION would strand every pause whose fix is a new commit:
-      // record_workflow_head rejects that phase, so resume and advance would
-      // re-derive the same stop forever.
+      // Resume where the operator's remedy is actually possible. A reason
+      // that names its own resume phase wins, because that mapping exists
+      // exactly for remedies the repair phase would bypass -- an exposed
+      // pull request must re-derive from the wait rather than resume into
+      // the repair it just refused. Otherwise resume into the repair phase:
+      // returning to WAIT_PUBLICATION would strand every pause whose fix is
+      // a new commit, since record_workflow_head rejects that phase and
+      // resume then re-derives the same stop forever.
       const resumePhase =
-        repairPhase ?? REMOTE_PAUSE_RESUME_PHASES[pauseReason] ?? "WAIT_PUBLICATION";
+        REMOTE_PAUSE_RESUME_PHASES[pauseReason] ?? repairPhase ?? "WAIT_PUBLICATION";
       return publicWorkflow(
         await saveActionMutation(
           paths,
@@ -4030,6 +4445,10 @@ const REMOTE_PAUSE_RESUME_PHASES = Object.freeze({
   SEMANTIC_CONFLICT: "UPDATE_FROM_BASE",
   PUBLICATION_INVALIDATED: "IMPLEMENTING",
   GITHUB_REVIEW_AMBIGUOUS: "WAIT_PUBLICATION",
+  // The remedy is outside the workflow -- someone returns the pull request
+  // to draft -- so resuming re-enters the wait, which re-derives this stop
+  // if the pull request is still visible.
+  PULL_REQUEST_EXPOSED: "WAIT_PUBLICATION",
 });
 
 function remotePauseReason(projection) {

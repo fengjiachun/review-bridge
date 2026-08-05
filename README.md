@@ -309,7 +309,15 @@ IMPLEMENTING
        ├─ required check fails -> ADDRESS_CHECK_FAILURE  ──┤-> COMMIT_HEAD
        ├─ base gap             -> UPDATE_FROM_BASE       ──┘   -> new local review
        ├─ ambiguity, conflict, invalidation, or no progress -> PAUSED_HUMAN
+       ├─ any repair while the pull request is already out of draft
+       │    -> PAUSED_HUMAN, and recording a head refuses on the same
+       │       evidence, so no repair reaches a visible pull request
+       ├─ eligible Codex finding thread -> RESOLVE_CODEX_THREADS
+       │    -> recorded reply -> proven resolution -> back to WAIT_PUBLICATION
+       │    (a publication that goes terminal mid-resolution closes the
+       │     action without a record and pauses instead)
        └─ every other invariant passes -> PRE_READY
+            -> MARK_PR_READY on the re-read clearance -> POST_READY
 ```
 
 `start_autonomous_workflow` binds the immutable repository, base, requirement,
@@ -317,7 +325,8 @@ topic branch, publication target, complete capability set, and authorization
 digest. Store-wide claims admit only one active or paused owner for the local
 branch, the GitHub head ref, and — once a draft pull request is bound — the
 exact pull request. Every external action (reviewer task dispatch, gated-head
-push, draft pull-request creation) persists
+push, draft pull-request creation, thread reply, thread resolution,
+mark-ready) persists
 `PLANNED -> EXECUTING -> OBSERVED -> COMPLETED` in a digest-chained action
 audit and recover one committed crash-tail event before another mutation.
 The complete marker-bound task title and prompt remain in the active action and
@@ -359,11 +368,19 @@ tree match *any* earlier recorded attempt pauses `NO_PROGRESS`, so an
 oscillating tree or an alternating blocker cannot walk around the check by
 never repeating adjacently.
 
-This release stops at `PRE_READY`. The pull request stays draft throughout, so
-marking it ready, the draft-gate exception, and evidence-backed thread
-resolution ship in the final RFC 0003 implementation change. Unresolved review
-threads block and remain operator work. The existing manual publication flow
-below remains unchanged.
+This release closes eligible Codex finding threads with a recorded reply and a
+server-owned resolution proof, and marks the cleared pull request ready: the
+mark-ready intent records which observation cleared the head, and the
+clearance is read again immediately before the call, so a publication that
+regresses after planning refuses the write rather than exposing a head with a
+standing blocker. That checkpoint runs once, before the single call the
+action makes; a controller re-issuing the call after a crash re-reads the
+clearance itself, and a crash it cannot reconcile is an operator matter. The run then stops at `POST_READY`. Returning a ready pull
+request to draft, the draft-gate exception, the compensating unresolve, and
+the post-ready terminal projection ship in the final RFC 0003 implementation
+change, so anything that blocks after the pull request is ready remains
+operator work. Threads the eligibility plan refuses also remain operator work.
+The existing manual publication flow below remains unchanged.
 
 ## GitHub publication gate
 

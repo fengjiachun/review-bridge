@@ -506,9 +506,13 @@ recorded its result. Therefore recovery always reconciles first:
   post-read proves the same watermark is now resolved. A crash after provider
   acceptance but before that response is recorded cannot claim ownership from
   the resolved state alone. Once the response is recorded, the record is made
-  from the action alone and creating it is always still possible: a recovery
-  that observes the pull request first -- and so sees the thread it resolved
-  as resolved -- must not lose the ability to record what it did. Repeat a resolve only while the original
+  from the action alone, so a recovery that observes the pull request first
+  -- and so sees the thread it resolved as resolved -- does not lose the
+  ability to record what it did. A publication driven terminal is the one
+  state that ends this: it accepts no write at all, so the record becomes
+  uncreatable rather than late. The action completes without it there, which
+  costs nothing, because no gate of a terminal publication can pass and the
+  record has nothing left to protect. Repeat a resolve only while the original
   eligibility proof remains valid for the current head. Repeat an unresolve
   only while the server still reports that this workflow's proven resolution
   record is invalid, the `UNRESOLVE_INVALIDATED_CODEX_THREADS` capability is
@@ -518,7 +522,63 @@ recorded its result. Therefore recovery always reconciles first:
   head branches, full head SHA, and draft state. They must equal the
   action-bound workflow-owned pull request and gated head. An already-ready
   state completes reconciliation only for that exact head; any identity or
-  head drift pauses without issuing or crediting the mutation.
+  head drift pauses without issuing or crediting the mutation. The server
+  re-reads its own clearance at that same point and refuses a publication
+  that regressed since planning. A refusal there drops the planned intent
+  and returns the workflow to the publication wait: nothing external has
+  happened, and a refused intent left in place would block the phase that
+  holds it. That reasoning covers the action's own call, not the pull
+  request: a pre-read that found it already out of draft keeps the intent,
+  because the wait's repair phases push new commits and a pull request
+  already visible for review must not receive them. The pre-read is trusted
+  for the claim that keeps an intent, never for the one that destroys it.
+  A regression that clears on its own frees that intent; one whose remedy is
+  a new head does not, because the held action blocks head recording, and
+  the hold is then permanent. It is the first of the two states this release
+  defers; the second is described below, and both end the same way -- with
+  the operator, until the return-to-draft action ships. Retryable failures of the read itself drop nothing. The pre-ready
+  stop itself remains advanceable whenever no action is in flight, so a
+  clearance that moves before anything is planned routes onward like any
+  other change rather than stranding the run.
+
+  That checkpoint runs once, before the single call the action makes. A
+  driver that crashes after it reconciles by reading the pull request. What
+  it may then claim is decided by the pre-read it already recorded: having
+  found the pull request draft before the call, it completes `MARKED_READY`
+  once the pull request is ready. A pull request it finds still draft is called
+  again, which is safe whether or not an earlier attempt landed -- but only
+  while the clearance still holds, and on that path the controller enforces
+  that. The server checkpoint does not run a second time, so "no head is
+  marked ready while a blocker stands" is server-enforced on the first
+  attempt and contract-enforced on a recovery.
+
+  This is the second of the two cases with no in-protocol exit in this
+  first implementation -- the other is the held intent above, and both end
+  the same way. Here the action is executing, the pull request is still
+  draft, and the clearance no longer permits the call. Whether the
+  earlier call landed cannot be established -- a timeout or a lagging read
+  reports a draft pull request while the mutation applies, and this provider
+  attests no actor for a draft transition -- so the action can neither be
+  claimed nor abandoned. Recovering it requires returning a possibly ready
+  pull request to draft, which is a later action. Until that ships, such a
+  crash is an operator matter: the workflow pauses as an indeterminate
+  external action and may have to be cancelled.
+
+A blocker that would enter a repair phase while the pull request is already
+out of draft pauses instead. Every repair ends in a new head pushed to that
+pull request, and one already visible for review must not receive it; this
+release cannot return it to draft, so an operator decides. The pause resumes
+into the wait, which re-derives it while the pull request is still visible.
+
+Entering the repair is not the only moment that matters: a pull request
+marked ready after the repair began would otherwise be pushed to anyway, so
+recording a head refuses on the same evidence while the publication binding
+that carries it is still held. Returning the pull request to draft is what
+releases both, and the observation that proves it revokes any gate minted
+while it was visible. A publication that clears is unaffected and still
+reaches the mark-ready stop, where an already-ready pull request reconciles
+without claiming a mutation.
+
 - **Return to draft for repair**: read the exact pull request and head. Treat an
   already-draft pull request as reconciled completion. Repeat the mutation only
   while the same workflow-owned pull request remains ready on the same head,
@@ -671,9 +731,12 @@ ambiguous, incomplete, and unresolved-thread projections return their
 underlying blocker instead.
 
 The draft-gate rules below belong to rollout item 3. They exist only to answer
-when an early mark-ready is permitted, so until autonomous mark-ready ships the
-pull request stays draft for its whole life, neither draft-gate pause has a
-resume action, and neither is reachable.
+when an *early* mark-ready is permitted. Autonomous mark-ready now ships, but
+only on that `READY_TO_MARK` clearance: the implemented action reads the
+projection under the publication's own lock at planning and again at its
+pre-write checkpoint, records which observation cleared the head, and has no
+path that waives a blocker. So neither draft-gate pause has a resume action
+and neither is reachable, exactly as before.
 
 They are also not this repository's path. GitHub delivers `pull_request` events
 for draft pull requests, and a workflow without an explicit `draft == false`

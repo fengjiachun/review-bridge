@@ -14,9 +14,12 @@ remote-only GitHub publication.
 The schema-version-1 autonomous workflow is opt-in and currently advances
 through the local `CODEX_TASK` gate, the reconciled push of the gated head,
 the marker-bound draft pull request, the version-3 publication ledger, the
-remote wait, and the three repair loops that return a new head to local
-review. It stops at `PRE_READY`. The pull request stays draft for the whole
-run: ready-state changes and thread resolution remain unavailable.
+remote wait, the three repair loops that return a new head to local review,
+the reply-then-resolve closure of eligible Codex finding threads, and the
+mark-ready that takes the cleared pull request out of draft. It stops at
+`POST_READY`: returning a ready pull request to draft, the draft-gate
+exception, and the terminal projection remain unavailable, so anything that
+blocks after the pull request is ready is operator work.
 
 1. Obtain direct operator authorization for the exact repository path,
    operator-selected base ref and resolved full base SHA, requirement,
@@ -128,9 +131,27 @@ run: ready-state changes and thread resolution remain unavailable.
     `PR_DRAFT` alone, before any other invariant is evaluated. Keep waiting
     while checks or review are still settling. `EVIDENCE_STALE` means the
     observation aged out: collect a fresh one rather than acting on it.
-    Unresolved review threads block and are operator work in this version, not
-    an autonomous repair loop. An idle poll that observes no change costs no
-    workflow revision, so waiting needs no backoff bookkeeping.
+    Unresolved review threads no longer stop the run outright: when
+    `get_thread_resolution_plan` reports at least one eligible thread the
+    workflow enters `RESOLVE_CODEX_THREADS`. Answer the thread with
+    `plan_thread_reply`, record a fresh observation so the reply is in the
+    watermark, then close it with `plan_thread_resolution`. After the resolve
+    call is observed, call `record_automatic_resolution` before
+    `complete_workflow_action`: the server-owned record is what the
+    completion requires. Two outcomes need no record. An
+    `OBSERVED_PRE_RESOLVED` resolution claims nothing, so there is nothing to
+    record and the action closes on its own. The other is a publication that
+    has gone terminal — the pull request merged, closed, or the head diverged
+    — while the resolution was in flight. That ledger accepts no write, so
+    `record_automatic_resolution` fails `PUBLICATION_TERMINAL` and the
+    completion stops requiring it; complete the action, after which the
+    remote wait pauses `PUBLICATION_INVALIDATED` like any other terminal
+    publication — a resume from there re-enters `IMPLEMENTING` for a new
+    head. Otherwise `advance_remote_workflow` returns the
+    workflow to the wait. Threads the
+    plan refuses stay operator work. An idle poll that observes no
+    change costs no workflow revision, so waiting needs no backoff
+    bookkeeping.
 
     When the projection reports `GITHUB_REVIEW_NOT_REQUESTED` — which is what
     an acknowledged ambiguity leaves behind — post the exact
@@ -153,9 +174,24 @@ run: ready-state changes and thread resolution remain unavailable.
     on its own — a required check that failed and then passed on a rerun with
     no code change — the workflow stays in its repair phase, and the operator
     either commits a fix or cancels the workflow. Do not create an empty commit
-    to escape one. `advance_remote_workflow` accepts only `WAIT_PUBLICATION`.
-13. The server pauses `GITHUB_REVIEW_AMBIGUOUS` on an ambiguous or unbound
-    result, `SEMANTIC_CONFLICT` on a conflicting merge state,
+    to escape one. `advance_remote_workflow` accepts `WAIT_PUBLICATION`,
+    `RESOLVE_CODEX_THREADS`, and `PRE_READY`, and only with no action in
+    flight: it is how the thread loop returns to the wait and how the
+    pre-ready stop reacts to a clearance that moved. It refuses every repair
+    phase and `POST_READY`.
+13. The server pauses `PULL_REQUEST_EXPOSED` when a blocker would route into
+    a repair phase while the pull request is already out of draft: every
+    repair ends in a new head pushed to that pull request, and one reviewers
+    can already see must not receive it. The remedy is outside the workflow
+    — someone returns it to draft — so resuming re-enters the wait, which
+    re-derives the stop while it is still visible. `record_workflow_head`
+    refuses on the same evidence with `WORKFLOW_PULL_REQUEST_EXPOSED`, so a
+    repair already under way when someone marks the pull request ready
+    cannot finish onto it either. A cleared publication is
+    unaffected: it reaches the pre-ready stop, where an already-ready pull
+    request reconciles `OBSERVED_ALREADY_READY` without claiming a mutation.
+    The server also pauses `GITHUB_REVIEW_AMBIGUOUS` on an ambiguous or
+    unbound result, `SEMANTIC_CONFLICT` on a conflicting merge state,
     `PUBLICATION_INVALIDATED` when the pull request or head diverged from the
     authorization, and `NO_PROGRESS` when an attempt's normalized blockers and
     either its head or its tree match any earlier recorded attempt — not only
@@ -168,10 +204,72 @@ run: ready-state changes and thread resolution remain unavailable.
     rewrite — that last one cannot be resumed, because every workflow head must
     descend from the last, so it ends in cancellation. Never waive, remove, or
     rename a required check, and never rebase or force-push to resolve one.
-14. Stop this implementation at `PRE_READY`. Marking the pull request ready,
-    the draft-gate exception, and automatic thread resolution remain
-    unavailable until the later skill update ships. Continue manually only
-    after a fresh operator instruction.
+14. At `PRE_READY`, call `plan_mark_pull_request_ready`. It refuses unless the
+    publication's own projection is `READY_TO_MARK` on this exact head, and it
+    records which observation cleared it. A refusal here changes nothing —
+    the clearance simply moved between the advance and this call — so call
+    `advance_remote_workflow` and let it route the new blocker. Where that
+    lands is the blocker's business, not this step's: a machine finding, a
+    failed check, or a base gap enters a repair phase you leave only by
+    recording a new head, exactly as step 12 describes, while something that
+    settles on its own returns to this stop. Read the live pull request
+    immediately before the call and pass it as the executing proof; if that
+    pre-read already shows it out of draft on this head, issue no mutation and
+    reconcile with `OBSERVED_ALREADY_READY`.
+
+    That checkpoint re-reads the clearance. If the publication regressed
+    since planning, it refuses with `WORKFLOW_PUBLICATION_NOT_READY` and
+    drops the planned intent — the response says so in
+    `details.action_abandoned` — leaving the workflow in `WAIT_PUBLICATION`
+    at the revision the error reports, where the ordinary routing owns the
+    new blocker. Lock contention and every other failure of the read itself
+    are retryable and drop nothing.
+
+    One pre-read keeps the intent instead: one that found the pull request
+    already out of draft. The repair phases the wait routes into push new
+    commits, and a pull request that is already visible for review must not
+    receive them, so that intent is held rather than dropped. If the
+    regression clears on its own — a check that passes on a rerun, a review
+    that lands — the checkpoint passes and you reconcile
+    `OBSERVED_ALREADY_READY`. If it needs a new head instead, this release
+    cannot get there: the held action blocks head recording exactly as
+    intended, so the hold is permanent. Pause
+    `EXTERNAL_ACTION_INDETERMINATE` and hand it to the operator, with the
+    same cancellation cost as the other deferred case. Both wait for the
+    return-to-draft action.
+
+    The checkpoint runs once, before the one call this action makes. If you
+    crash after it, reconcile by reading the pull request. Found ready,
+    record `MARKED_READY` — your own pre-read proved it was draft before this
+    action's call. Reconcile either outcome with
+    `record_mark_ready_observation` and close the action with
+    `complete_workflow_action`, which is what sets `POST_READY`.
+
+    Found still draft, read `get_autonomous_pre_ready` again before
+    re-issuing: there is no second server checkpoint, so on this path you are
+    the one enforcing it. Re-issue only while it still reports
+    `READY_TO_MARK` on this exact head — that call is safe whether or not an
+    earlier attempt landed, since the pull request ends ready either way and
+    your recorded pre-read decides the outcome you may claim. If the
+    clearance regressed, do not call: marking ready there would expose a head
+    with a standing blocker into `POST_READY`, which has no repair route.
+    Pause `EXTERNAL_ACTION_INDETERMINATE` instead.
+    Do not plan around a second checkpoint; there is none, and this release
+    cannot decide who marked a pull request ready (GitHub attests no actor
+    for a draft transition) nor return a ready pull request to draft. This is
+    the second unreconcilable case, alongside the held intent above: the
+    action is executing, the pull request is still draft, *and* the
+    publication has regressed so that issuing the call is no longer
+    allowed. Pause
+    `EXTERNAL_ACTION_INDETERMINATE` and hand that one to the operator, who
+    may have to cancel the workflow. Say plainly what that costs: cancellation
+    retains the claims, and releasing them needs the bound pull request
+    proven closed, so a healthy draft pull request would have to be closed to
+    free the claim. The recovery ships with the return-to-draft action.
+
+    Then stop at `POST_READY`: the draft-gate exception, the return to draft,
+    and the terminal projection remain unavailable until the later skill
+    update ships. Continue manually only after a fresh operator instruction.
 
 Every mutation uses the exact current workflow revision. On `WORKFLOW_BUSY`,
 `WORKFLOW_CLAIMS_BUSY`, `LOCK_OWNERSHIP_LOST`, or an indeterminate store write,
@@ -427,10 +525,11 @@ For either mode:
     `gh pr merge --match-head-commit <head_sha>`. Never reuse a finalize result,
     direct file read, cached verification, or older revision.
 
-The ten publication tools are `authorize_remote_publication`,
+The twelve publication tools are `authorize_remote_publication`,
 `start_publication`, `get_publication`, `get_publication_summary`,
-`get_autonomous_pre_ready`, `record_codex_review_request`,
-`record_github_snapshot`, `acknowledge_codex_review_ambiguity`,
+`get_autonomous_pre_ready`, `get_thread_resolution_plan`,
+`record_codex_review_request`, `record_github_snapshot`,
+`record_automatic_resolution`, `acknowledge_codex_review_ambiguity`,
 `finalize_publication_gate`, and `verify_publication_gate`. Keep their
 revision ordering explicit and retry `PUBLICATION_BUSY` or `REVIEW_BUSY` only
 after rereading current state. `get_autonomous_pre_ready` exists only for a
