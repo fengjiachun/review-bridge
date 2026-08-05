@@ -508,10 +508,12 @@ const ACTION_KIND_SPECS = {
     // (GitHub attests no actor for a draft transition), and this stage has
     // no way to return a ready pull request to draft. That recovery lands
     // with the action that can.
-    // The question there is only whether this head is still cleared -- a
-    // later observation that clears it again is exactly the state this
-    // action wants, so the recorded revision is provenance, not an equality
-    // the publication has to keep satisfying.
+    //
+    // The checkpoint asks only whether this head is still cleared: a later
+    // observation that clears it again is exactly the state this action
+    // wants, so the revision the plan recorded is provenance rather than an
+    // equality the publication has to keep satisfying. The completed record
+    // names the revision the checkpoint accepted.
     capability: "MARK_PR_READY",
     phase: "PRE_READY",
     // Where a refused pre-write checkpoint leaves the workflow: back in the

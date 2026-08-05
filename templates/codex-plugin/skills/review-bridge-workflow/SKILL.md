@@ -191,16 +191,20 @@ blocks after the pull request is ready is operator work.
     are retryable and drop nothing.
 
     The checkpoint runs once, before the one call this action makes. If you
-    crash after it, reconcile by reading the pull request: found ready,
+    crash after it, reconcile by reading the pull request. Found ready,
     record `MARKED_READY` — your own pre-read proved it was draft before this
-    action's call. Do not plan around a second checkpoint; there is none, and
-    this release cannot decide who marked a pull request ready (GitHub
-    attests no actor for a draft transition) nor return a ready pull request
-    to draft. If you crash there and the pull request is still draft while
-    the publication has regressed, the action cannot be reconciled inside
-    this release: pause `EXTERNAL_ACTION_INDETERMINATE` and hand it to the
-    operator, who may have to cancel the workflow. That recovery ships with
-    the return-to-draft action.
+    action's call. Found still draft, the call did not land: issue it and
+    reconcile normally, which is the ordinary case and needs nothing special.
+    Do not plan around a second checkpoint; there is none, and this release
+    cannot decide who marked a pull request ready (GitHub attests no actor
+    for a draft transition) nor return a ready pull request to draft. Only
+    one case is unreconcilable here: still draft *and* the publication has
+    regressed so that issuing the call is no longer allowed. Pause
+    `EXTERNAL_ACTION_INDETERMINATE` and hand that one to the operator, who
+    may have to cancel the workflow. Say plainly what that costs: cancellation
+    retains the claims, and releasing them needs the bound pull request
+    proven closed, so a healthy draft pull request would have to be closed to
+    free the claim. The recovery ships with the return-to-draft action.
 
     Then stop at `POST_READY`: the draft-gate exception, the return to draft,
     and the terminal projection remain unavailable until the later skill

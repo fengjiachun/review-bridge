@@ -506,9 +506,13 @@ recorded its result. Therefore recovery always reconciles first:
   post-read proves the same watermark is now resolved. A crash after provider
   acceptance but before that response is recorded cannot claim ownership from
   the resolved state alone. Once the response is recorded, the record is made
-  from the action alone and creating it is always still possible: a recovery
-  that observes the pull request first -- and so sees the thread it resolved
-  as resolved -- must not lose the ability to record what it did. Repeat a resolve only while the original
+  from the action alone, so a recovery that observes the pull request first
+  -- and so sees the thread it resolved as resolved -- does not lose the
+  ability to record what it did. A publication driven terminal is the one
+  state that ends this: it accepts no write at all, so the record becomes
+  uncreatable rather than late. The action completes without it there, which
+  costs nothing, because no gate of a terminal publication can pass and the
+  record has nothing left to protect. Repeat a resolve only while the original
   eligibility proof remains valid for the current head. Repeat an unresolve
   only while the server still reports that this workflow's proven resolution
   record is invalid, the `UNRESOLVE_INVALIDATED_CODEX_THREADS` capability is

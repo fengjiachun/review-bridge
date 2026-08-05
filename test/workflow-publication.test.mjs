@@ -2313,8 +2313,9 @@ test("an acknowledged ambiguity can still ask for the next review", async (t) =>
     { clock: () => at + 3_000 },
   );
 
-  // The manual summary reaches PR_DRAFT before Codex status, and this rollout
-  // is draft for its whole life, so it can never hand back the request body.
+  // The manual summary reaches PR_DRAFT before Codex status, and the pull
+  // request is still draft here -- as it is whenever a review request is
+  // needed -- so it can never hand back the request body.
   const manual = await getPublicationSummary(state.store, reviewId);
   assert.equal(manual.status, "PR_DRAFT");
   assert.equal(manual.codex_review_request, undefined);
@@ -3695,4 +3696,138 @@ test("a busy publication lock never destroys the planned mark-ready", async (t) 
   assert.equal(intact.active_action.action_id, planned.action.action_id);
   assert.equal(intact.active_action.status, "PLANNED");
   assert.equal(intact.phase, "PRE_READY");
+});
+
+test("the ready record names the clearance the checkpoint read", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+  );
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  const planned = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    preReady.revision,
+  );
+
+  // An ordinary refreshed observation lands between planning and the call.
+  // It clears the same head, so the checkpoint passes -- and from here the
+  // plan-time revision and the one that authorizes the write differ, which
+  // is what the completed record has to get right.
+  const refreshedAt = at + 10_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 3,
+      observation: draftObservation(state, headSha, {
+        at: refreshedAt,
+        requestId: 100,
+        requestAt: at + 1_000,
+      }),
+    },
+    { clock: () => refreshedAt + 10 },
+  );
+  const refreshed = await getAutonomousPreReady(state.store, reviewId);
+  assert.equal(refreshed.status, "READY_TO_MARK");
+  assert.notEqual(refreshed.revision, planned.action.target.publication_revision);
+
+  const proof = {
+    repository_id: REPOSITORY_ID,
+    pr_number: PR_NUMBER,
+    base_branch: "main",
+    head_branch: TOPIC_BRANCH,
+    head_sha: headSha,
+    is_draft: true,
+  };
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    planned.workflow.revision,
+    planned.action.action_id,
+    proof,
+  );
+  assert.equal(
+    executing.active_action.cleared_publication_revision,
+    refreshed.revision,
+  );
+
+  // The clearance the checkpoint accepted is part of the action from here
+  // on, because the completed record names it: a ledger missing it is
+  // invalid rather than silently plan-time.
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const storedExecuting = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const withoutClearance = structuredClone(storedExecuting);
+  delete withoutClearance.active_action.cleared_publication_revision;
+  await atomicWriteCanonicalJson(workflowPath, withoutClearance);
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, workflow.workflow_id),
+    (error) => error.code === "WORKFLOW_ACTION_INVALID",
+  );
+  await atomicWriteCanonicalJson(workflowPath, storedExecuting);
+
+  const observed = await recordMarkReadyObservation(
+    state.store,
+    workflow.workflow_id,
+    executing.revision,
+    planned.action.action_id,
+    {
+      outcome: "MARKED_READY",
+      repositoryId: REPOSITORY_ID,
+      prNumber: PR_NUMBER,
+      baseBranch: "main",
+      headBranch: TOPIC_BRANCH,
+      headSha,
+      isDraft: false,
+    },
+  );
+  const ready = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    observed.revision,
+    planned.action.action_id,
+  );
+  assert.equal(ready.ready_marks[0].publication_revision, refreshed.revision);
+  assert.notEqual(
+    ready.ready_marks[0].publication_revision,
+    planned.action.target.publication_revision,
+  );
+
+  // And the stored record is validated on every read, so a rewritten outcome
+  // cannot pass as evidence of a mark this workflow performed.
+  const storedReady = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const forgedReady = structuredClone(storedReady);
+  forgedReady.ready_marks[0].outcome = "MARKED_READY_BY_HAND";
+  await atomicWriteCanonicalJson(workflowPath, forgedReady);
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, workflow.workflow_id),
+    (error) => error.code === "WORKFLOW_STATE_INVALID",
+  );
+  await atomicWriteCanonicalJson(workflowPath, storedReady);
 });
