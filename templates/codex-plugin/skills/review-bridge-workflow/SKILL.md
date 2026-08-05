@@ -212,6 +212,13 @@ blocks after the pull request is ready is operator work.
     new blocker. Lock contention and every other failure of the read itself
     are retryable and drop nothing.
 
+    One pre-read keeps the intent instead: one that found the pull request
+    already out of draft. The repair phases the wait routes into push new
+    commits, and a pull request that is already visible for review must not
+    receive them, so that intent is held rather than dropped. Wait for the
+    publication to clear the head again and reconcile
+    `OBSERVED_ALREADY_READY`, or pause for the operator.
+
     The checkpoint runs once, before the one call this action makes. If you
     crash after it, reconcile by reading the pull request. Found ready,
     record `MARKED_READY` — your own pre-read proved it was draft before this

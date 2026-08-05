@@ -525,6 +525,15 @@ const ACTION_KIND_SPECS = {
     // wrong", and destroying a durable intent over a busy lock would be a
     // far worse bug than the stop it was meant to prevent.
     abandonOnCode: "WORKFLOW_PUBLICATION_NOT_READY",
+    // "Nothing external has happened" is true of this action's own call
+    // while it is planned. It is not true of the pull request: the pre-read
+    // may have found it already out of draft, marked by an earlier attempt
+    // or by someone else. Dropping the intent there would discard the only
+    // record of that and return the workflow to a wait whose repair phases
+    // push new commits -- onto a pull request that is already visible for
+    // review. The proof is trusted only for the claim that keeps the intent,
+    // never for the one that destroys it.
+    abandonableProof: (proof) => proof?.is_draft === true,
     claimKind: "PULL_REQUEST",
     markerPrefix: null,
     identityFacts(target) {
@@ -3309,7 +3318,13 @@ export async function markWorkflowActionExecuting(
         // Only the checkpoint's own refusal drops an intent, and only
         // before the external write: PLANNED is what makes "nothing has
         // happened yet" structural rather than something a caller asserts.
-        if (error?.code !== spec.abandonOnCode) {
+        // A kind may still refuse to be dropped on the evidence in front of
+        // it -- see MARK_PR_READY, where an already-ready pull request means
+        // the repair loop must not have the workflow back.
+        if (
+          error?.code !== spec.abandonOnCode ||
+          spec.abandonableProof?.(executingProof) === false
+        ) {
           throw error;
         }
         // Leaving a refused intent in place is what would turn this into a

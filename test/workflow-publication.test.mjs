@@ -4016,3 +4016,132 @@ test("the ready record names the clearance the checkpoint read", async (t) => {
   );
   await atomicWriteCanonicalJson(workflowPath, storedReady);
 });
+
+test("a regressed clearance never returns an already-ready pull request to the loop", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+  );
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  const planned = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    preReady.revision,
+  );
+
+  // The pre-read finds the pull request already out of draft -- an earlier
+  // attempt, or someone else -- and the clearance has regressed in the
+  // meantime.
+  const blockedAt = at + 10_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 3,
+      observation: failingCheck(
+        draftObservation(state, headSha, {
+          at: blockedAt,
+          requestId: 100,
+          requestAt: at + 1_000,
+        }),
+      ),
+    },
+    { clock: () => blockedAt + 10 },
+  );
+  const alreadyReadyProof = {
+    repository_id: REPOSITORY_ID,
+    pr_number: PR_NUMBER,
+    base_branch: "main",
+    head_branch: TOPIC_BRANCH,
+    head_sha: headSha,
+    is_draft: false,
+  };
+  // Dropping the intent here would discard the only record that the pull
+  // request is visible and hand the workflow back to a wait whose repair
+  // phases push new commits onto it. "Nothing external has happened" was
+  // only ever true of this action's own call.
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      state.store,
+      workflow.workflow_id,
+      planned.workflow.revision,
+      planned.action.action_id,
+      alreadyReadyProof,
+    ),
+    (error) =>
+      error.code === "WORKFLOW_PUBLICATION_NOT_READY" &&
+      error.details.action_abandoned === undefined,
+  );
+  const held = await getAutonomousWorkflow(state.store, workflow.workflow_id);
+  assert.equal(held.phase, "PRE_READY");
+  assert.equal(held.active_action.status, "PLANNED");
+
+  // The intent's own exit is still there: once the publication clears the
+  // head again, the checkpoint passes and the action reconciles what it
+  // found rather than claiming a mutation it never issued.
+  const clearedAt = blockedAt + 10_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 4,
+      observation: draftObservation(state, headSha, {
+        at: clearedAt,
+        requestId: 100,
+        requestAt: at + 1_000,
+      }),
+    },
+    { clock: () => clearedAt + 10 },
+  );
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    held.revision,
+    planned.action.action_id,
+    alreadyReadyProof,
+  );
+  const observed = await recordMarkReadyObservation(
+    state.store,
+    workflow.workflow_id,
+    executing.revision,
+    planned.action.action_id,
+    {
+      outcome: "OBSERVED_ALREADY_READY",
+      repositoryId: REPOSITORY_ID,
+      prNumber: PR_NUMBER,
+      baseBranch: "main",
+      headBranch: TOPIC_BRANCH,
+      headSha,
+      isDraft: false,
+    },
+  );
+  const ready = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    observed.revision,
+    planned.action.action_id,
+  );
+  assert.equal(ready.phase, "POST_READY");
+  assert.equal(ready.ready_marks[0].outcome, "OBSERVED_ALREADY_READY");
+});

@@ -527,7 +527,11 @@ recorded its result. Therefore recovery always reconciles first:
   that regressed since planning. A refusal there drops the planned intent
   and returns the workflow to the publication wait: nothing external has
   happened, and a refused intent left in place would block the phase that
-  holds it. Retryable failures of the read itself drop nothing. The pre-ready
+  holds it. That reasoning covers the action's own call, not the pull
+  request: a pre-read that found it already out of draft keeps the intent,
+  because the wait's repair phases push new commits and a pull request
+  already visible for review must not receive them. The pre-read is trusted
+  for the claim that keeps an intent, never for the one that destroys it. Retryable failures of the read itself drop nothing. The pre-ready
   stop itself remains advanceable whenever no action is in flight, so a
   clearance that moves before anything is planned routes onward like any
   other change rather than stranding the run.
