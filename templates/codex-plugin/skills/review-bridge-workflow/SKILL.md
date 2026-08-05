@@ -172,10 +172,11 @@ blocks after the pull request is ready is operator work.
     on its own — a required check that failed and then passed on a rerun with
     no code change — the workflow stays in its repair phase, and the operator
     either commits a fix or cancels the workflow. Do not create an empty commit
-    to escape one. `advance_remote_workflow` accepts `WAIT_PUBLICATION` and
-    `RESOLVE_CODEX_THREADS`, and nothing else: it is how the thread loop
-    returns to the wait, and it refuses every repair phase, `PRE_READY`, and
-    `POST_READY`.
+    to escape one. `advance_remote_workflow` accepts `WAIT_PUBLICATION`,
+    `RESOLVE_CODEX_THREADS`, and `PRE_READY`, and only with no action in
+    flight: it is how the thread loop returns to the wait and how the
+    pre-ready stop reacts to a clearance that moved. It refuses every repair
+    phase and `POST_READY`.
 13. The server pauses `GITHUB_REVIEW_AMBIGUOUS` on an ambiguous or unbound
     result, `SEMANTIC_CONFLICT` on a conflicting merge state,
     `PUBLICATION_INVALIDATED` when the pull request or head diverged from the
@@ -192,7 +193,10 @@ blocks after the pull request is ready is operator work.
     rename a required check, and never rebase or force-push to resolve one.
 14. At `PRE_READY`, call `plan_mark_pull_request_ready`. It refuses unless the
     publication's own projection is `READY_TO_MARK` on this exact head, and it
-    records which observation cleared it. Read the live pull request
+    records which observation cleared it. A refusal here changes nothing —
+    the clearance simply moved between the advance and this call — so call
+    `advance_remote_workflow` and let it route the new blocker; the stop is
+    reachable again once the publication clears the head. Read the live pull request
     immediately before the call and pass it as the executing proof; if that
     pre-read already shows it out of draft on this head, issue no mutation and
     reconcile with `OBSERVED_ALREADY_READY`.

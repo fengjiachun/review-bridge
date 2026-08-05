@@ -3343,6 +3343,56 @@ test("a clearance that regresses at the pre-ready stop routes onward", async (t)
   assert.equal(repairing.phase, "ADDRESS_CHECK_FAILURE");
 });
 
+test("an idle advance at the pre-ready stop spends no revision", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+  );
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(preReady.phase, "PRE_READY");
+
+  // Polling a stop that has not moved is the normal shape of this phase now
+  // that it is advanceable, so an idle check must cost neither a revision
+  // nor an audit event -- the same rule the other two waits follow.
+  const idle = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    preReady.revision,
+  );
+  assert.equal(idle.phase, "PRE_READY");
+  assert.equal(idle.revision, preReady.revision);
+  assert.deepEqual(idle.action_audit, preReady.action_audit);
+
+  // And the stop still leads where it always did.
+  const planned = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    idle.revision,
+  );
+  assert.equal(planned.action.kind, "MARK_PR_READY");
+});
+
 test("a blocked publication is never plannable for mark-ready", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

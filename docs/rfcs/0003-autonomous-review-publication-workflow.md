@@ -526,9 +526,11 @@ recorded its result. Therefore recovery always reconciles first:
   re-reads its own clearance at that same point and refuses a publication
   that regressed since planning. A refusal there drops the planned intent
   and returns the workflow to the publication wait: nothing external has
-  happened, and leaving a refused intent in a phase that can neither advance
-  nor record a head would leave cancellation as its only exit. Retryable
-  failures of the read itself drop nothing.
+  happened, and a refused intent left in place would block the phase that
+  holds it. Retryable failures of the read itself drop nothing. The pre-ready
+  stop itself remains advanceable whenever no action is in flight, so a
+  clearance that moves before anything is planned routes onward like any
+  other change rather than stranding the run.
 
   That checkpoint runs once, before the single call the action makes. A
   driver that crashes after it reconciles by reading the pull request. What
