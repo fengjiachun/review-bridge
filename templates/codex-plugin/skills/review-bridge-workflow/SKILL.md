@@ -138,8 +138,13 @@ blocks after the pull request is ready is operator work.
     watermark, then close it with `plan_thread_resolution`. After the resolve
     call is observed, call `record_automatic_resolution` before
     `complete_workflow_action`: the server-owned record is what the
-    completion requires, and without it the action cannot close. Then
-    `advance_remote_workflow` returns the workflow to the wait. Threads the
+    completion requires. The one exception is a publication that has gone
+    terminal — the pull request merged, closed, or the head diverged — while
+    the resolution was in flight. That ledger accepts no write, so
+    `record_automatic_resolution` fails `PUBLICATION_TERMINAL` and the
+    completion stops requiring it; complete the action and let the terminal
+    publication end the run. Otherwise `advance_remote_workflow` returns the
+    workflow to the wait. Threads the
     plan refuses stay operator work. An idle poll that observes no
     change costs no workflow revision, so waiting needs no backoff
     bookkeeping.

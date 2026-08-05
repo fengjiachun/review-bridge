@@ -531,11 +531,12 @@ recorded its result. Therefore recovery always reconciles first:
   failures of the read itself drop nothing.
 
   That checkpoint runs once, before the single call the action makes. A
-  driver that crashes after it reconciles by reading the pull request, and
-  the pre-read it already recorded decides what it may claim: having found
-  the pull request draft before the call, it completes `MARKED_READY` once
-  the pull request is ready. A pull request still draft is simply called
-  again, which is safe whether or not an earlier attempt landed.
+  driver that crashes after it reconciles by reading the pull request. What
+  it may then claim is decided by the pre-read it already recorded: having
+  found the pull request draft before the call, it completes `MARKED_READY`
+  once the pull request is ready. A pull request it finds still draft is
+  simply called again, which is safe whether or not an earlier attempt
+  landed.
 
   One case has no in-protocol exit in this first implementation: still
   draft, with a clearance that no longer permits the call. Whether the
