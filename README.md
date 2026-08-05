@@ -367,7 +367,9 @@ server-owned resolution proof, and marks the cleared pull request ready: the
 mark-ready intent records which observation cleared the head, and the
 clearance is read again immediately before the call, so a publication that
 regresses after planning refuses the write rather than exposing a head with a
-standing blocker. The run then stops at `POST_READY`. Returning a ready pull
+standing blocker. That checkpoint runs once, before the single call the
+action makes; a controller re-issuing the call after a crash re-reads the
+clearance itself, and a crash it cannot reconcile is an operator matter. The run then stops at `POST_READY`. Returning a ready pull
 request to draft, the draft-gate exception, the compensating unresolve, and
 the post-ready terminal projection ship in the final RFC 0003 implementation
 change, so anything that blocks after the pull request is ready remains

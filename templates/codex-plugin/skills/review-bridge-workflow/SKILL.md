@@ -142,8 +142,10 @@ blocks after the pull request is ready is operator work.
     terminal — the pull request merged, closed, or the head diverged — while
     the resolution was in flight. That ledger accepts no write, so
     `record_automatic_resolution` fails `PUBLICATION_TERMINAL` and the
-    completion stops requiring it; complete the action and let the terminal
-    publication end the run. Otherwise `advance_remote_workflow` returns the
+    completion stops requiring it; complete the action, after which the
+    remote wait pauses `PUBLICATION_INVALIDATED` like any other terminal
+    publication — a resume from there re-enters `IMPLEMENTING` for a new
+    head. Otherwise `advance_remote_workflow` returns the
     workflow to the wait. Threads the
     plan refuses stay operator work. An idle poll that observes no
     change costs no workflow revision, so waiting needs no backoff
@@ -206,10 +208,15 @@ blocks after the pull request is ready is operator work.
     The checkpoint runs once, before the one call this action makes. If you
     crash after it, reconcile by reading the pull request. Found ready,
     record `MARKED_READY` — your own pre-read proved it was draft before this
-    action's call. Found still draft, issue the call and reconcile normally — the
-    ordinary case, and safe whether or not an earlier attempt landed, since
-    the pull request ends ready either way and your recorded pre-read is what
-    decides the outcome you may claim.
+    action's call. Found still draft, read `get_autonomous_pre_ready` again before
+    re-issuing: there is no second server checkpoint, so on this path you are
+    the one enforcing it. Re-issue only while it still reports
+    `READY_TO_MARK` on this exact head — that call is safe whether or not an
+    earlier attempt landed, since the pull request ends ready either way and
+    your recorded pre-read decides the outcome you may claim. If the
+    clearance regressed, do not call: marking ready there would expose a head
+    with a standing blocker into `POST_READY`, which has no repair route.
+    Pause `EXTERNAL_ACTION_INDETERMINATE` instead.
     Do not plan around a second checkpoint; there is none, and this release
     cannot decide who marked a pull request ready (GitHub attests no actor
     for a draft transition) nor return a ready pull request to draft. Only

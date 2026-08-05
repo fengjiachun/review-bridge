@@ -3151,6 +3151,24 @@ test("a cleared draft pull request marks itself ready and then stops", async (t)
     publication_revision: projection.revision,
   });
 
+  // A clearance is recorded only from the checkpoint onward, so a PLANNED
+  // action carrying one is a ledger claiming a check that never ran.
+  const plannedPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const storedPlanned = JSON.parse(await fsp.readFile(plannedPath, "utf8"));
+  const forgedClearance = structuredClone(storedPlanned);
+  forgedClearance.active_action.cleared_publication_revision = 3;
+  await atomicWriteCanonicalJson(plannedPath, forgedClearance);
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, workflow.workflow_id),
+    (error) => error.code === "WORKFLOW_ACTION_INVALID",
+  );
+  await atomicWriteCanonicalJson(plannedPath, storedPlanned);
+
   // The pre-read is the last check before the call, and it binds the exact
   // pull request and head: a drifted head never becomes an executing proof,
   // and neither does a reading that never looked at the draft state.
@@ -3258,6 +3276,71 @@ test("a cleared draft pull request marks itself ready and then stops", async (t)
     advanceRemoteWorkflow(state.store, workflow.workflow_id, ready.revision),
     (error) => error.code === "WORKFLOW_PHASE_INVALID",
   );
+});
+
+test("a clearance that regresses at the pre-ready stop routes onward", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+  );
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(preReady.phase, "PRE_READY");
+
+  // Nothing is planned yet and the clearance regresses. Planning refuses
+  // without changing state, and this phase can neither record a head nor be
+  // resumed into anything else, so without an advance from here a healthy
+  // run would have cancellation as its only exit.
+  const blockedAt = at + 10_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 3,
+      observation: failingCheck(
+        draftObservation(state, headSha, {
+          at: blockedAt,
+          requestId: 100,
+          requestAt: at + 1_000,
+        }),
+      ),
+    },
+    { clock: () => blockedAt + 10 },
+  );
+  await assert.rejects(
+    planMarkPullRequestReady(
+      state.store,
+      workflow.workflow_id,
+      preReady.revision,
+    ),
+    (error) => error.code === "WORKFLOW_PUBLICATION_NOT_READY",
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    preReady.revision,
+  );
+  assert.equal(repairing.phase, "ADDRESS_CHECK_FAILURE");
 });
 
 test("a blocked publication is never plannable for mark-ready", async (t) => {

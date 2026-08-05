@@ -534,9 +534,12 @@ recorded its result. Therefore recovery always reconciles first:
   driver that crashes after it reconciles by reading the pull request. What
   it may then claim is decided by the pre-read it already recorded: having
   found the pull request draft before the call, it completes `MARKED_READY`
-  once the pull request is ready. A pull request it finds still draft is
-  simply called again, which is safe whether or not an earlier attempt
-  landed.
+  once the pull request is ready. A pull request it finds still draft is called
+  again, which is safe whether or not an earlier attempt landed -- but only
+  while the clearance still holds, and on that path the controller enforces
+  that. The server checkpoint does not run a second time, so "no head is
+  marked ready while a blocker stands" is server-enforced on the first
+  attempt and contract-enforced on a recovery.
 
   One case has no in-protocol exit in this first implementation: still
   draft, with a clearance that no longer permits the call. Whether the

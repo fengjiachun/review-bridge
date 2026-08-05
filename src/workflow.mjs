@@ -4180,8 +4180,17 @@ export async function advanceRemoteWorkflow(
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
+    // PRE_READY is advanceable for the same reason the other two are: with
+    // no action in flight it is a wait, and what it waits on can move. A
+    // clearance that regresses before anything is planned would otherwise
+    // strand a healthy run -- planning refuses without changing state, and
+    // this phase can neither record a head nor be resumed into anything
+    // else -- leaving cancellation as the only exit from a projection that
+    // simply changed its mind.
     if (
-      !["WAIT_PUBLICATION", "RESOLVE_CODEX_THREADS"].includes(workflow.phase)
+      !["WAIT_PUBLICATION", "RESOLVE_CODEX_THREADS", "PRE_READY"].includes(
+        workflow.phase,
+      )
     ) {
       fail(
         "WORKFLOW_PHASE_INVALID",
@@ -4191,7 +4200,7 @@ export async function advanceRemoteWorkflow(
     if (workflow.active_action != null) {
       fail(
         "WORKFLOW_PHASE_INVALID",
-        "cannot advance a remote wait while a thread action is active",
+        "cannot advance a remote wait while an action is active",
       );
     }
     if (workflow.current_publication == null) {
