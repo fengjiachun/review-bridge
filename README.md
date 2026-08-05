@@ -311,6 +311,8 @@ IMPLEMENTING
        ├─ ambiguity, conflict, invalidation, or no progress -> PAUSED_HUMAN
        ├─ eligible Codex finding thread -> RESOLVE_CODEX_THREADS
        │    -> recorded reply -> proven resolution -> back to WAIT_PUBLICATION
+       │    (a publication that goes terminal mid-resolution closes the
+       │     action without a record and pauses instead)
        └─ every other invariant passes -> PRE_READY
             -> MARK_PR_READY on the re-read clearance -> POST_READY
 ```
@@ -320,7 +322,8 @@ topic branch, publication target, complete capability set, and authorization
 digest. Store-wide claims admit only one active or paused owner for the local
 branch, the GitHub head ref, and — once a draft pull request is bound — the
 exact pull request. Every external action (reviewer task dispatch, gated-head
-push, draft pull-request creation) persists
+push, draft pull-request creation, thread reply, thread resolution,
+mark-ready) persists
 `PLANNED -> EXECUTING -> OBSERVED -> COMPLETED` in a digest-chained action
 audit and recover one committed crash-tail event before another mutation.
 The complete marker-bound task title and prompt remain in the active action and

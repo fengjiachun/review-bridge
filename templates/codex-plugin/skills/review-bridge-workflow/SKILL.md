@@ -195,8 +195,11 @@ blocks after the pull request is ready is operator work.
     publication's own projection is `READY_TO_MARK` on this exact head, and it
     records which observation cleared it. A refusal here changes nothing —
     the clearance simply moved between the advance and this call — so call
-    `advance_remote_workflow` and let it route the new blocker; the stop is
-    reachable again once the publication clears the head. Read the live pull request
+    `advance_remote_workflow` and let it route the new blocker. Where that
+    lands is the blocker's business, not this step's: a machine finding, a
+    failed check, or a base gap enters a repair phase you leave only by
+    recording a new head, exactly as step 12 describes, while something that
+    settles on its own returns to this stop. Read the live pull request
     immediately before the call and pass it as the executing proof; if that
     pre-read already shows it out of draft on this head, issue no mutation and
     reconcile with `OBSERVED_ALREADY_READY`.
@@ -212,7 +215,11 @@ blocks after the pull request is ready is operator work.
     The checkpoint runs once, before the one call this action makes. If you
     crash after it, reconcile by reading the pull request. Found ready,
     record `MARKED_READY` — your own pre-read proved it was draft before this
-    action's call. Found still draft, read `get_autonomous_pre_ready` again before
+    action's call. Reconcile either outcome with
+    `record_mark_ready_observation` and close the action with
+    `complete_workflow_action`, which is what sets `POST_READY`.
+
+    Found still draft, read `get_autonomous_pre_ready` again before
     re-issuing: there is no second server checkpoint, so on this path you are
     the one enforcing it. Re-issue only while it still reports
     `READY_TO_MARK` on this exact head — that call is safe whether or not an
@@ -490,10 +497,11 @@ For either mode:
     `gh pr merge --match-head-commit <head_sha>`. Never reuse a finalize result,
     direct file read, cached verification, or older revision.
 
-The ten publication tools are `authorize_remote_publication`,
+The twelve publication tools are `authorize_remote_publication`,
 `start_publication`, `get_publication`, `get_publication_summary`,
-`get_autonomous_pre_ready`, `record_codex_review_request`,
-`record_github_snapshot`, `acknowledge_codex_review_ambiguity`,
+`get_autonomous_pre_ready`, `get_thread_resolution_plan`,
+`record_codex_review_request`, `record_github_snapshot`,
+`record_automatic_resolution`, `acknowledge_codex_review_ambiguity`,
 `finalize_publication_gate`, and `verify_publication_gate`. Keep their
 revision ordering explicit and retry `PUBLICATION_BUSY` or `REVIEW_BUSY` only
 after rereading current state. `get_autonomous_pre_ready` exists only for a

@@ -3925,14 +3925,38 @@ test("the ready record names the clearance the checkpoint read", async (t) => {
     "workflow.json",
   );
   const storedTarget = JSON.parse(await fsp.readFile(targetPath, "utf8"));
-  const repointed = structuredClone(storedTarget);
-  repointed.active_action.target.review_id = `${reviewId}-other`;
-  await atomicWriteCanonicalJson(targetPath, repointed);
-  await assert.rejects(
-    getAutonomousWorkflow(state.store, workflow.workflow_id),
-    (error) => error.code === "WORKFLOW_ACTION_INVALID",
-  );
-  await atomicWriteCanonicalJson(targetPath, storedTarget);
+  // Each of these is rewritten in the stored action *and* in the executing
+  // proof that mirrors it, so the proof's own cross-check agrees and the
+  // target validator is the only thing left to object. The action ID digest
+  // covers none of them either: it is built from the pull-request number and
+  // head SHA alone. The repository is deliberately not in this list -- the
+  // claim binding rejects a rewritten repository before any action
+  // validation runs, so no tamper can isolate that conjunct.
+  for (const tamper of [
+    (target) => {
+      target.review_id = `${reviewId}-other`;
+    },
+    (target) => {
+      target.publication_revision = 0;
+    },
+    (target, action) => {
+      target.base_branch = "release";
+      action.executing_proof.base_branch = "release";
+    },
+    (target, action) => {
+      target.head_branch = "other-topic";
+      action.executing_proof.head_branch = "other-topic";
+    },
+  ]) {
+    const repointed = structuredClone(storedTarget);
+    tamper(repointed.active_action.target, repointed.active_action);
+    await atomicWriteCanonicalJson(targetPath, repointed);
+    await assert.rejects(
+      getAutonomousWorkflow(state.store, workflow.workflow_id),
+      (error) => error.code === "WORKFLOW_ACTION_INVALID",
+    );
+    await atomicWriteCanonicalJson(targetPath, storedTarget);
+  }
 
   // The clearance the checkpoint accepted is part of the action from here
   // on, because the completed record names it: a ledger missing it is
