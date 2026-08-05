@@ -30,6 +30,7 @@ import {
   bindWorkflowReview,
   cancelAutonomousWorkflow,
   completeWorkflowAction,
+  getAutonomousWorkflow,
   getAutonomousWorkflowSummary,
   listAutonomousWorkflows,
   markWorkflowActionExecuting,
@@ -1346,7 +1347,6 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     resolutionPlanned,
     resolutionObserved,
   } = await reachObservedThreadResolution(t);
-  const reviewId = second.reviewId;
 
   // A RESOLVED outcome cannot complete before its server-owned record
   // exists: completing first would let the next snapshot make the record
@@ -3466,12 +3466,28 @@ test("a clearance that regresses after planning stops the mark-ready", async (t)
     ),
     (error) =>
       error.code === "WORKFLOW_PUBLICATION_NOT_READY" &&
-      error.details.blocking_reason === "CHECKS_FAILED",
+      error.details.blocking_reason === "CHECKS_FAILED" &&
+      error.details.action_abandoned === planned.action.action_id,
   );
 
-  // A fresh observation that clears the same head again is the state this
-  // action was always waiting for: a new publication revision is not itself
-  // a reason to refuse.
+  // The refusal cannot leave the intent behind: PRE_READY can neither
+  // advance, record a head, nor plan again while an action is active, so a
+  // refused intent left in place would make cancellation the only exit from
+  // a guard that just worked. Nothing external happened, so it is dropped
+  // and the workflow is back in the wait.
+  const abandoned = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(abandoned.active_action, null);
+  assert.equal(abandoned.phase, "WAIT_PUBLICATION");
+
+  // From there the ordinary loop owns it again -- this same failing check
+  // routes to ADDRESS_CHECK_FAILURE from the wait, which is what the remote
+  // routing test already pins. Here the check passes on a rerun instead, and
+  // a fresh observation that clears the same head again is the state
+  // this action was always waiting for: a new publication revision is not
+  // itself a reason to refuse.
   const clearedAt = blockedAt + 10_000;
   await recordGithubSnapshot(
     state.store,
@@ -3489,11 +3505,22 @@ test("a clearance that regresses after planning stops the mark-ready", async (t)
   const cleared = await getAutonomousPreReady(state.store, reviewId);
   assert.equal(cleared.status, "READY_TO_MARK");
   assert.notEqual(cleared.revision, planned.action.target.publication_revision);
+  const backAtPreReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    abandoned.revision,
+  );
+  assert.equal(backAtPreReady.phase, "PRE_READY");
+  const replanned = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    backAtPreReady.revision,
+  );
   const executing = await markWorkflowActionExecuting(
     state.store,
     workflow.workflow_id,
-    planned.workflow.revision,
-    planned.action.action_id,
+    replanned.workflow.revision,
+    replanned.action.action_id,
     {
       repository_id: REPOSITORY_ID,
       pr_number: PR_NUMBER,
@@ -3551,4 +3578,154 @@ test("a resolution whose publication went terminal still closes its action", asy
   assert.equal(resolved.thread_resolutions.length, 1);
   assert.equal(resolved.thread_resolutions[0].outcome, "RESOLVED");
   assert.equal(resolved.active_action, null);
+});
+
+test("a crashed mark-ready re-enters its own pre-write checkpoint", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+  );
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  const planned = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    preReady.revision,
+  );
+  const proof = {
+    repository_id: REPOSITORY_ID,
+    pr_number: PR_NUMBER,
+    base_branch: "main",
+    head_branch: TOPIC_BRANCH,
+    head_sha: headSha,
+    is_draft: true,
+  };
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    planned.workflow.revision,
+    planned.action.action_id,
+    proof,
+  );
+
+  // The driver died between this checkpoint and the provider call. Recovery
+  // re-enters the external write, so it re-enters the checkpoint that guards
+  // it: a clearance that regressed while the driver was gone refuses here,
+  // exactly as it would have before the crash.
+  const blockedAt = at + 10_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 3,
+      observation: failingCheck(
+        draftObservation(state, headSha, {
+          at: blockedAt,
+          requestId: 100,
+          requestAt: at + 1_000,
+        }),
+      ),
+    },
+    { clock: () => blockedAt + 10 },
+  );
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      state.store,
+      workflow.workflow_id,
+      executing.revision,
+      planned.action.action_id,
+      proof,
+    ),
+    (error) =>
+      error.code === "WORKFLOW_PUBLICATION_NOT_READY" &&
+      // An action this far along is not dropped: the provider call may
+      // already have landed, and discarding the intent would discard the
+      // only record of what has to be reconciled.
+      error.details.action_abandoned === undefined,
+  );
+  const stillExecuting = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(stillExecuting.active_action.status, "EXECUTING");
+
+  // Once it clears again, the re-entry succeeds and re-stamps the pre-read,
+  // so the outcome is decided by what the recovering driver actually saw
+  // rather than by a reading from before the crash.
+  const clearedAt = blockedAt + 10_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 4,
+      observation: draftObservation(state, headSha, {
+        at: clearedAt,
+        requestId: 100,
+        requestAt: at + 1_000,
+      }),
+    },
+    { clock: () => clearedAt + 10 },
+  );
+  const reentered = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    stillExecuting.revision,
+    planned.action.action_id,
+    { ...proof, is_draft: false },
+  );
+  assert.equal(reentered.active_action.status, "EXECUTING");
+  assert.equal(reentered.active_action.executing_proof.is_draft, false);
+  const observed = await recordMarkReadyObservation(
+    state.store,
+    workflow.workflow_id,
+    reentered.revision,
+    planned.action.action_id,
+    {
+      outcome: "OBSERVED_ALREADY_READY",
+      repositoryId: REPOSITORY_ID,
+      prNumber: PR_NUMBER,
+      baseBranch: "main",
+      headBranch: TOPIC_BRANCH,
+      headSha,
+      isDraft: false,
+    },
+  );
+  const ready = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    observed.revision,
+    planned.action.action_id,
+  );
+  assert.equal(ready.phase, "POST_READY");
+  assert.equal(ready.ready_marks[0].outcome, "OBSERVED_ALREADY_READY");
+  // The record names the clearance that authorized the write, which here is
+  // the one the re-entry read -- not the one the plan read two publication
+  // revisions earlier.
+  const clearedRevision = (await getAutonomousPreReady(state.store, reviewId))
+    .revision;
+  assert.equal(ready.ready_marks[0].publication_revision, clearedRevision);
+  assert.notEqual(
+    ready.ready_marks[0].publication_revision,
+    planned.action.target.publication_revision,
+  );
 });

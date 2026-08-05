@@ -508,6 +508,10 @@ const ACTION_KIND_SPECS = {
     // the publication has to keep satisfying.
     capability: "MARK_PR_READY",
     phase: "PRE_READY",
+    // Where a refused pre-write checkpoint leaves the workflow: back in the
+    // wait, which re-derives the publication's own next step -- a repair
+    // phase for whatever regressed, or this same stop once it clears again.
+    abandonPhase: "WAIT_PUBLICATION",
     claimKind: "PULL_REQUEST",
     markerPrefix: null,
     identityFacts(target) {
@@ -556,6 +560,9 @@ const ACTION_KIND_SPECS = {
           },
         );
       }
+      // The clearance that actually authorizes the write, which after a
+      // regress-and-clear is not the one the plan read.
+      return preReady.revision;
     },
     validateExecutingProof(action, proof) {
       // The identity read immediately before the call. A pull request already
@@ -800,6 +807,12 @@ function validateActiveAction(workflow) {
     assertTimestamp(
       action.executing_at,
       "workflow.active_action.executing_at",
+    );
+  }
+  if (action.cleared_publication_revision != null) {
+    assertPositiveInteger(
+      action.cleared_publication_revision,
+      "workflow.active_action.cleared_publication_revision",
     );
   }
   if (
@@ -3001,11 +3014,11 @@ export async function planDraftPullRequest(
 }
 
 /**
- * Plan the mark-ready that ends the autonomous run. The clearance is read
- * here, under the publication's own lock, and pinned into the intent: the
- * projection's revision and blocker digest travel with the action, so what
- * the driver executes is the clearance the server derived rather than
- * whatever the publication happens to say when the call lands.
+ * Plan the mark-ready that ends the autonomous run. Planning refuses unless
+ * the publication clears this exact head, and records which observation
+ * cleared it. That record is provenance, not authority: the clearance is
+ * read again at the pre-write checkpoint, and it is that later reading the
+ * completed record names.
  */
 export async function planMarkPullRequestReady(
   storeRoot,
@@ -3245,10 +3258,25 @@ export async function markWorkflowActionExecuting(
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
     const action = workflow.active_action;
-    if (action?.action_id !== actionId || action.status !== "PLANNED") {
-      fail("WORKFLOW_ACTION_STATE_INVALID", "action must be PLANNED");
+    const spec =
+      action == null ? null : ACTION_KIND_SPECS[action.kind];
+    // A kind that re-reads external evidence here may run this checkpoint
+    // again on an action already EXECUTING. Recovery re-enters the external
+    // write, so the checkpoint that guards that write has to be re-enterable
+    // too -- otherwise the guard holds exactly once, for the driver that did
+    // not crash, and the stored pre-read decides an outcome nobody re-read.
+    const reentry = spec?.revalidate != null && action?.status === "EXECUTING";
+    if (
+      action?.action_id !== actionId ||
+      (action.status !== "PLANNED" && !reentry)
+    ) {
+      fail(
+        "WORKFLOW_ACTION_STATE_INVALID",
+        spec?.revalidate == null
+          ? "action must be PLANNED"
+          : "action must be PLANNED or EXECUTING",
+      );
     }
-    const spec = ACTION_KIND_SPECS[action.kind];
     if (spec.validateExecutingProof) {
       spec.validateExecutingProof(action, executingProof);
     } else if (executingProof != null) {
@@ -3261,8 +3289,46 @@ export async function markWorkflowActionExecuting(
     // workflow ledger and can move under them between planning and the call.
     // This is the last durable point before the external write, so it is
     // where that evidence has to be read again.
+    let clearedRevision = null;
     if (spec.revalidate) {
-      await spec.revalidate(storeRoot, action);
+      try {
+        clearedRevision = await spec.revalidate(storeRoot, action);
+      } catch (error) {
+        if (reentry) {
+          // The external write may already have happened. Dropping the
+          // intent here would discard the record of an action that is still
+          // in flight, so the refusal stands on its own and the driver
+          // reconciles what it did.
+          throw error;
+        }
+        // Nothing external has happened yet -- that is what PLANNED means --
+        // so the intent is simply dropped. Leaving it in place is what would
+        // turn this refusal into a stop with no exit: its phase can neither
+        // advance, record a head, nor plan again while an action is active,
+        // so cancelling the whole workflow would be the only way out of a
+        // guard that is working exactly as intended.
+        const discarded = await saveActionMutation(
+          paths,
+          workflow,
+          "ACTION_ABANDONED",
+          async (next) => {
+            next.active_action = null;
+            next.phase = spec.abandonPhase;
+          },
+          {
+            abandoned_action_id: action.action_id,
+            abandoned_kind: action.kind,
+            reason_code: error?.code ?? null,
+          },
+        );
+        error.details = {
+          ...(error?.details ?? {}),
+          action_abandoned: action.action_id,
+          workflow_revision: discarded.revision,
+          phase: discarded.phase,
+        };
+        throw error;
+      }
     }
     return publicWorkflow(
       await saveActionMutation(
@@ -3274,6 +3340,15 @@ export async function markWorkflowActionExecuting(
           next.active_action.executing_at = now();
           next.active_action.executing_proof =
             executingProof == null ? null : structuredClone(executingProof);
+          if (clearedRevision != null) {
+            next.active_action.cleared_publication_revision = clearedRevision;
+          }
+          if (reentry) {
+            // The re-stamp spends a revision while the action stays at the
+            // same status, which is exactly what this offset accounts for.
+            next.active_action.revision_offset =
+              (next.active_action.revision_offset ?? 0) + 1;
+          }
         },
       ),
     );
@@ -3805,7 +3880,7 @@ export async function completeWorkflowAction(
               pr_number: action.target.pr_number,
               head_sha: action.target.head_sha,
               publication_review_id: action.target.review_id,
-              publication_revision: action.target.publication_revision,
+              publication_revision: action.cleared_publication_revision,
               recorded_at: now(),
             });
             next.active_action = null;

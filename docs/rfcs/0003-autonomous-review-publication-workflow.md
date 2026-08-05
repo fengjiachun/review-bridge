@@ -518,7 +518,18 @@ recorded its result. Therefore recovery always reconciles first:
   head branches, full head SHA, and draft state. They must equal the
   action-bound workflow-owned pull request and gated head. An already-ready
   state completes reconciliation only for that exact head; any identity or
-  head drift pauses without issuing or crediting the mutation.
+  head drift pauses without issuing or crediting the mutation. The server
+  re-reads its own clearance at that same point and refuses a publication
+  that regressed since planning. Because recovery re-enters the provider
+  call, it re-enters this checkpoint: the pre-read is taken again and the
+  clearance checked again, so the recorded outcome follows the reading that
+  preceded the surviving call. A refusal before the first call drops the
+  planned intent and returns the workflow to the publication wait — nothing
+  external has happened, and leaving a refused intent in a phase that can
+  neither advance nor record a head would leave cancellation as its only
+  exit. A refusal after the action is executing never drops it: the call may
+  already have landed, and that intent is the only record of what has to be
+  reconciled.
 - **Return to draft for repair**: read the exact pull request and head. Treat an
   already-draft pull request as reconciled completion. Repeat the mutation only
   while the same workflow-owned pull request remains ready on the same head,

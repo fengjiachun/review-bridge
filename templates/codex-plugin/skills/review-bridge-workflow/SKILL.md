@@ -177,13 +177,25 @@ blocks after the pull request is ready is operator work.
     rename a required check, and never rebase or force-push to resolve one.
 14. At `PRE_READY`, call `plan_mark_pull_request_ready`. It refuses unless the
     publication's own projection is `READY_TO_MARK` on this exact head, and it
-    pins that clearance into the intent. Read the live pull request
+    records which observation cleared it. Read the live pull request
     immediately before the call and pass it as the executing proof; if that
     pre-read already shows it out of draft on this head, issue no mutation and
-    reconcile with `OBSERVED_ALREADY_READY`. Then stop at `POST_READY`: the
-    draft-gate exception, the return to draft, and the terminal projection
-    remain unavailable until the later skill update ships. Continue manually
-    only after a fresh operator instruction.
+    reconcile with `OBSERVED_ALREADY_READY`.
+
+    That checkpoint re-reads the clearance. If the publication regressed since
+    planning, it refuses with `WORKFLOW_PUBLICATION_NOT_READY` and drops the
+    planned intent — the response says so in `details.action_abandoned` — and
+    the workflow is back in `WAIT_PUBLICATION` at the revision the error
+    reports, where the ordinary routing owns the new blocker. Recovering from
+    a crash after the checkpoint, call it again with a freshly read pre-read
+    before re-issuing the provider call: the clearance is checked again, and
+    the outcome is decided by the reading you just took rather than by one
+    from before the crash. An action already executing is never dropped, so a
+    refusal there leaves it for you to reconcile.
+
+    Then stop at `POST_READY`: the draft-gate exception, the return to draft,
+    and the terminal projection remain unavailable until the later skill
+    update ships. Continue manually only after a fresh operator instruction.
 
 Every mutation uses the exact current workflow revision. On `WORKFLOW_BUSY`,
 `WORKFLOW_CLAIMS_BUSY`, `LOCK_OWNERSHIP_LOST`, or an indeterminate store write,
