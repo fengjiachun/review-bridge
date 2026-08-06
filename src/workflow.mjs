@@ -246,7 +246,7 @@ const ACTION_KIND_SPECS = {
       }
     },
     dispatch: null,
-    validateExecutingProof(action, proof) {
+    validateExecutingProof(action, proof, workflow) {
       if (
         proof == null ||
         proof.resolved_repository_id !==
@@ -258,7 +258,28 @@ const ACTION_KIND_SPECS = {
           "the pinned push URL must be resolved to the authorized repository before executing",
         );
       }
+      // This push is what puts the new head in front of anyone reading the
+      // pull request, and it is the last point before that happens. Once a
+      // pull request exists, its draft state is part of the pre-read: no
+      // publication is bound here, and the last one may be dead, so the
+      // controller's own reading is the only evidence there is. Trusting it
+      // to *stop* the push is safe in the way trusting it to permit one
+      // would not be -- a wrong answer here only refuses work.
+      if (
+        workflow.pull_request != null &&
+        typeof proof.pull_request_is_draft !== "boolean"
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "the push pre-read must report the draft state of the bound pull request",
+        );
+      }
     },
+    // A visible pull request does not fail the push: it sends the workflow
+    // to the one action that can make it draft again, with the intent
+    // dropped because nothing external has happened yet.
+    exposedByProof: (proof, workflow) =>
+      workflow.pull_request != null && proof?.pull_request_is_draft === false,
     validateResponse(action, response) {
       if (
         response.remote_ref_sha !== action.target.head_sha ||
@@ -512,9 +533,12 @@ const ACTION_KIND_SPECS = {
     validateTarget(workflow, target) {
       const authorized = workflow.authorization.publication_target;
       const pullRequest = workflow.pull_request;
+      // A publication is not required. The two places this action is most
+      // needed have none: between publications, and after one died. What it
+      // needs is the pull request, which the workflow owns either way.
       if (
-        workflow.current_publication == null ||
-        target.review_id !== workflow.current_publication.review_id ||
+        target.review_id !==
+          (workflow.current_publication?.review_id ?? null) ||
         target.head_sha !== workflow.current_head_sha ||
         pullRequest == null ||
         target.repository_id !== pullRequest.repository_id ||
@@ -907,7 +931,7 @@ function validateActiveAction(workflow) {
       );
     }
   } else if (spec.validateExecutingProof) {
-    spec.validateExecutingProof(action, executingProof);
+    spec.validateExecutingProof(action, executingProof, workflow);
   } else if (executingProof !== null) {
     fail(
       "WORKFLOW_ACTION_INVALID",
@@ -3254,25 +3278,24 @@ export async function planReturnToDraft(
       planPhases: ["ENSURE_DRAFT_FOR_REPAIR"],
       invalidMessage: "the return to draft is not currently plannable",
       target: async (workflow) => {
-        if (
-          workflow.current_publication == null ||
-          workflow.pull_request == null
-        ) {
+        if (workflow.pull_request == null) {
           fail(
             "WORKFLOW_STATE_INVALID",
-            "the return to draft has no bound publication and pull request",
+            "the return to draft has no bound pull request",
           );
         }
-        const reviewId = workflow.current_publication.review_id;
-        const projection = await getAutonomousPreReady(storeRoot, reviewId);
-        if (
-          projection.workflow_id !== workflow.workflow_id ||
-          projection.head_sha !== workflow.current_head_sha
-        ) {
-          fail(
-            "WORKFLOW_PUBLICATION_MISMATCH",
-            "publication is not bound to this workflow and head",
-          );
+        const reviewId = workflow.current_publication?.review_id ?? null;
+        if (reviewId != null) {
+          const projection = await getAutonomousPreReady(storeRoot, reviewId);
+          if (
+            projection.workflow_id !== workflow.workflow_id ||
+            projection.head_sha !== workflow.current_head_sha
+          ) {
+            fail(
+              "WORKFLOW_PUBLICATION_MISMATCH",
+              "publication is not bound to this workflow and head",
+            );
+          }
         }
         // No draft-state precondition here: this phase is only reached on
         // evidence that the pull request is visible, and that evidence can
@@ -3513,7 +3536,32 @@ export async function markWorkflowActionExecuting(
     }
     const spec = ACTION_KIND_SPECS[action.kind];
     if (spec.validateExecutingProof) {
-      spec.validateExecutingProof(action, executingProof);
+      spec.validateExecutingProof(action, executingProof, workflow);
+      if (spec.exposedByProof?.(executingProof, workflow)) {
+        const routed = await saveActionMutation(
+          paths,
+          workflow,
+          "ACTION_ABANDONED",
+          async (next) => {
+            next.active_action = null;
+            next.phase = "ENSURE_DRAFT_FOR_REPAIR";
+          },
+          {
+            abandoned_action_id: action.action_id,
+            abandoned_kind: action.kind,
+            reason_code: "WORKFLOW_PULL_REQUEST_EXPOSED",
+          },
+        );
+        fail(
+          "WORKFLOW_PULL_REQUEST_EXPOSED",
+          "the bound pull request is not a draft: it must be returned to draft before this head is pushed to it",
+          {
+            action_abandoned: action.action_id,
+            workflow_revision: routed.revision,
+            phase: routed.phase,
+          },
+        );
+      }
     } else if (executingProof != null) {
       fail(
         "WORKFLOW_ACTION_INVALID",
@@ -4199,12 +4247,15 @@ export async function completeWorkflowAction(
           async (next) => {
             next.active_action.completed_at = now();
             next.active_action = null;
-            // Back to the wait, which re-derives what the pull request being
-            // draft again makes possible: the repair that was blocked, or
-            // the stop this workflow was heading for. The action audit is
-            // the record -- nothing downstream gates on a ledger entry for
-            // an undo, so there is none.
-            next.phase = "WAIT_PUBLICATION";
+            // Back to whichever wait owns the workflow now: the publication
+            // wait re-derives the repair that was blocked, and with no
+            // publication the gated head is still waiting to be pushed. The
+            // action audit is the record -- nothing downstream gates on a
+            // ledger entry for an undo, so there is none.
+            next.phase =
+              next.current_publication == null
+                ? "LOCAL_GATE_PASSED"
+                : "WAIT_PUBLICATION";
           },
         ),
       );

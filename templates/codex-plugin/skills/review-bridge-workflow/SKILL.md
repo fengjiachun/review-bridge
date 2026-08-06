@@ -91,6 +91,14 @@ blocks after the pull request is ready is operator work.
    `complete_workflow_action`. If the remote URL, repository identity, or ref
    cannot be read or does not converge, pause with
    `EXTERNAL_ACTION_INDETERMINATE` instead of re-pushing blindly.
+
+   Once a pull request exists, that pre-read also reports its draft state, as
+   `pull_request_is_draft`. A visible pull request drops the push intent and
+   moves the workflow to `ENSURE_DRAFT_FOR_REPAIR`: return it to draft there
+   and the push is planned again from `LOCAL_GATE_PASSED`. This is the last
+   point before the new head stands in front of reviewers, and no publication
+   is bound here to answer for it, so your reading is the evidence — which is
+   why it is trusted to stop the push and never to permit one.
 9. For `PLAN_DRAFT_PULL_REQUEST`, first resolve the authenticated principal
    that will create the pull request (its numeric actor ID and User or Bot
    type), and call `plan_draft_pull_request` with it; the intent pins that

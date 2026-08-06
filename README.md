@@ -431,7 +431,12 @@ claims.
 
 It also returns the pull request to draft whenever the next thing it would
 push a head for is blocked by one that is already visible for review, so no
-repair reaches a pull request reviewers are looking at. The run then stops at
+head reaches a pull request reviewers are looking at. Two kinds of evidence
+answer that question, and each is trusted in one direction only: a live
+publication's recorded observation, which can refuse a repair, and the
+controller's own pre-read immediately before the push, which can stop that
+push but never permit one. A terminal publication answers nothing — its
+reading is frozen — which is why the push carries its own. The run then stops at
 `POST_READY`. The draft-gate exception, the compensating unresolve, and the
 post-ready terminal projection ship in the final RFC 0003 implementation
 change, so anything that blocks after the pull request is ready remains

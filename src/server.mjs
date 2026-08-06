@@ -488,13 +488,14 @@ if (role === "author") {
     {
       title: "Mark workflow action executing",
       description:
-        "Durably record EXECUTING immediately before the planned external write; a push additionally requires the pinned URL resolved to the authorized repository ID, a thread resolution requires the immediately preceding thread pre-read (thread ID, resolved flag, and -- while unresolved -- the exact comment watermark), and a mark-ready requires the immediately preceding pull-request pre-read (repository, number, both branches, head SHA, and draft flag).",
+        "Durably record EXECUTING immediately before the planned external write; a push additionally requires the pinned URL resolved to the authorized repository ID, a thread resolution requires the immediately preceding thread pre-read (thread ID, resolved flag, and -- while unresolved -- the exact comment watermark), and a mark-ready requires the immediately preceding pull-request pre-read (repository, number, both branches, head SHA, and draft flag), and a push additionally requires that pull request's draft state once one exists -- a visible pull request drops the push intent and routes to ENSURE_DRAFT_FOR_REPAIR rather than putting the new head in front of reviewers.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
         action_id: z.string(),
         resolved_repository_id: z.number().int().positive().optional(),
         resolved_url: z.string().optional(),
+        pull_request_is_draft: z.boolean().optional(),
         thread_id: z.string().optional(),
         is_resolved: z.boolean().optional(),
         thread_watermark: z.string().optional(),
@@ -534,6 +535,9 @@ if (role === "author") {
               : {
                   resolved_repository_id: input.resolved_repository_id,
                   resolved_url: input.resolved_url,
+                  ...(input.pull_request_is_draft == null
+                    ? {}
+                    : { pull_request_is_draft: input.pull_request_is_draft }),
                 },
       ),
   );
@@ -543,7 +547,7 @@ if (role === "author") {
     {
       title: "Plan return to draft",
       description:
-        "Persist the RETURN_PR_TO_DRAFT intent for the workflow-owned pull request. Reachable only from ENSURE_DRAFT_FOR_REPAIR, which the server enters when the next thing this workflow would push a head for is blocked by a pull request that is out of draft. The action is idempotent: a pre-read that already finds it draft reconciles OBSERVED_ALREADY_DRAFT without another mutation.",
+        "Persist the RETURN_PR_TO_DRAFT intent for the workflow-owned pull request. Reachable only from ENSURE_DRAFT_FOR_REPAIR, which the server enters when the next thing this workflow would push a head for is blocked by a pull request that is out of draft -- including the push itself, before any publication exists. No publication need be bound: the action is about the pull request the workflow owns. The action is idempotent: a pre-read that already finds it draft reconciles OBSERVED_ALREADY_DRAFT without another mutation.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),

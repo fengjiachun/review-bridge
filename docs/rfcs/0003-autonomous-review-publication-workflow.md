@@ -592,8 +592,17 @@ to clear. What decides is whether the next step pushes a head at all: a pause th
 resumes into a head-recording phase does, one that resumes into the wait
 does not.
 
-A terminal publication is exempt, and the exemption is the point rather than
-an omission. Such a ledger accepts no further observation, so its last
+The push is the last point before a new head stands in front of anyone
+reading the pull request, and no publication is bound there: the previous one
+was released with the head that replaced it. The controller's own pre-read
+carries the draft state, and a visible pull request drops the push intent
+into the draft restoration rather than issuing it. That reading is caller
+evidence, and it is admitted for exactly one direction -- it can stop a push,
+never authorize one -- which is the same rule the pre-reads of the external
+actions already follow.
+
+A terminal publication is exempt from the observation-based test, and the
+exemption is the point rather than an omission. Such a ledger accepts no further observation, so its last
 reading is frozen: a pull request visible in it is visible in it forever,
 however often it is actually returned to draft. A workflow routing on that
 would never leave, and a head recording refusing on it would never proceed.

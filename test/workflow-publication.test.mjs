@@ -150,6 +150,10 @@ async function gateAndPublishHead(state, workflow, headSha, label) {
     state.store,
     workflow.workflow_id,
   );
+  const workflowState = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
   const recorded =
     summary.phase === "PREPARE_LOCAL_REVIEW"
       ? { revision: workflow.revision }
@@ -231,6 +235,9 @@ async function gateAndPublishHead(state, workflow, headSha, label) {
     {
       resolved_repository_id: REPOSITORY_ID,
       resolved_url: pushPlanned.action.target.remote_url,
+      ...(workflowState?.pull_request == null
+        ? {}
+        : { pull_request_is_draft: true }),
     },
   );
   const pushObserved = await recordPushObservation(
@@ -5506,4 +5513,203 @@ test("stale evidence cannot abandon an action either", async (t) => {
     ),
     (error) => error.code === "WORKFLOW_ACTION_NOT_ABANDONABLE",
   );
+});
+
+test("a gated head is not pushed onto a pull request reviewers can see", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  // The publication dies with the pull request visible. Its reading is
+  // frozen there, so nothing it says can gate the next head -- and the next
+  // head is pushed to that same pull request.
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => {
+      payload.pull_request.is_draft = false;
+      payload.pull_request.reviewed_base_current_base_comparison.status =
+        "DIVERGED";
+      return payload;
+    },
+  );
+  const paused = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  const resumed = await resumeAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    paused.revision,
+    { operatorLabel: "jeremy", rationale: "start a new head" },
+  );
+  const secondHead = await commit(state.repository, "export const value = 3;\n");
+  const repaired = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    resumed.revision,
+    secondHead,
+  );
+  assert.equal(repaired.current_publication, null);
+
+  // Local gate for the new head, then the push. The pre-read is the only
+  // evidence left about the pull request, and it says visible.
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: "Close the remote review loop.",
+    implementationScope: "Add the publication wait and repair phases.",
+    reviewerProvider: "CODEX_TASK",
+  });
+  const bound = await bindWorkflowReview(
+    state.store,
+    workflow.workflow_id,
+    repaired.revision,
+    review.id,
+  );
+  const taskPlanned = await planCodexTaskDispatch(
+    state.store,
+    workflow.workflow_id,
+    bound.revision,
+    review.id,
+  );
+  const taskExecuting = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    taskPlanned.workflow.revision,
+    taskPlanned.action.action_id,
+  );
+  const taskObserved = await recordCodexTaskObservation(
+    state.store,
+    workflow.workflow_id,
+    taskExecuting.revision,
+    taskPlanned.action.action_id,
+    {
+      matchingTaskIds: ["task-two"],
+      taskId: "task-two",
+      title: taskPlanned.dispatch.title,
+      prompt: taskPlanned.dispatch.prompt,
+    },
+  );
+  const dispatched = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    taskObserved.revision,
+    taskPlanned.action.action_id,
+  );
+  await submitInitialReview(state.store, review.id, [], "CODEX_TASK");
+  const clean = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    dispatched.revision,
+  );
+  await finalizeLocalGate(state.store, review.id);
+  const gated = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    clean.revision,
+  );
+  assert.equal(gated.phase, "LOCAL_GATE_PASSED");
+
+  const pushPlanned = await planWorkflowPush(
+    state.store,
+    workflow.workflow_id,
+    gated.revision,
+  );
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      state.store,
+      workflow.workflow_id,
+      pushPlanned.workflow.revision,
+      pushPlanned.action.action_id,
+      {
+        resolved_repository_id: REPOSITORY_ID,
+        resolved_url: pushPlanned.action.target.remote_url,
+        pull_request_is_draft: false,
+      },
+    ),
+    (error) =>
+      error.code === "WORKFLOW_PULL_REQUEST_EXPOSED" &&
+      error.details.action_abandoned === pushPlanned.action.action_id,
+  );
+
+  // The refusal is not a stop: it hands the workflow to the undo, which
+  // needs no publication to run, and the push follows once the pull request
+  // is a draft again.
+  const ensuring = await getAutonomousWorkflow(state.store, workflow.workflow_id);
+  assert.equal(ensuring.phase, "ENSURE_DRAFT_FOR_REPAIR");
+  const undo = await planReturnToDraft(
+    state.store,
+    workflow.workflow_id,
+    ensuring.revision,
+  );
+  assert.equal(undo.action.target.review_id, null);
+  const undoExecuting = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    undo.workflow.revision,
+    undo.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      base_branch: "main",
+      head_branch: TOPIC_BRANCH,
+      head_sha: secondHead,
+      is_draft: false,
+    },
+  );
+  const undoObserved = await recordReturnToDraftObservation(
+    state.store,
+    workflow.workflow_id,
+    undoExecuting.revision,
+    undo.action.action_id,
+    {
+      outcome: "RETURNED_TO_DRAFT",
+      repositoryId: REPOSITORY_ID,
+      prNumber: PR_NUMBER,
+      baseBranch: "main",
+      headBranch: TOPIC_BRANCH,
+      headSha: secondHead,
+      isDraft: true,
+    },
+  );
+  const restored = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    undoObserved.revision,
+    undo.action.action_id,
+  );
+  assert.equal(restored.phase, "LOCAL_GATE_PASSED");
+
+  const replanned = await planWorkflowPush(
+    state.store,
+    workflow.workflow_id,
+    restored.revision,
+  );
+  const pushing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    replanned.workflow.revision,
+    replanned.action.action_id,
+    {
+      resolved_repository_id: REPOSITORY_ID,
+      resolved_url: replanned.action.target.remote_url,
+      pull_request_is_draft: true,
+    },
+  );
+  assert.equal(pushing.active_action.status, "EXECUTING");
 });
