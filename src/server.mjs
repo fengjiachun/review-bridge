@@ -52,7 +52,7 @@ import {
   pauseAutonomousWorkflow,
   planCodexTaskDispatch,
   planDraftPullRequest,
-  abandonMarkReadyAction,
+  abandonWorkflowAction,
   planMarkPullRequestReady,
   planReturnToDraft,
   planThreadReply,
@@ -591,9 +591,9 @@ if (role === "author") {
   );
 
   register(
-    "abandon_mark_ready_action",
+    "abandon_workflow_action",
     {
-      title: "Abandon a crashed mark-ready",
+      title: "Abandon a stuck action on recorded evidence",
       description:
         "Drop an executing MARK_PR_READY that the publication has since observed leaving nothing standing: a recorded observation, stamped by the server after this action executed, showing the pull request draft on its head. Your own pre-read is not accepted for this, because a timeout or a lagging read reports a draft pull request while the mutation applies. Refuses while the recorded observation shows it out of draft; reconcile that action instead. A call still in flight can land after the abandon -- that leaves a visible pull request, which the wait routes into the undo before any head is pushed to it.",
       inputSchema: {
@@ -603,7 +603,7 @@ if (role === "author") {
       },
     },
     (input) =>
-      abandonMarkReadyAction(
+      abandonWorkflowAction(
         storeRoot,
         input.workflow_id,
         input.expected_revision,

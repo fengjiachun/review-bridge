@@ -46,7 +46,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
   const reviewer = await listToolNames("reviewer", store);
 
   assert.deepEqual(author, [
-    "abandon_mark_ready_action",
+    "abandon_workflow_action",
     "acknowledge_codex_review_ambiguity",
     "advance_local_workflow",
     "advance_remote_workflow",

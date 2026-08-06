@@ -556,15 +556,25 @@ recorded its result. Therefore recovery always reconciles first:
   Whether the earlier call landed cannot be established from anything the
   driver can read -- a timeout or a lagging read reports a draft pull request
   while the mutation applies, and this provider attests no actor for a draft
-  transition. The bound publication settles it instead. Its recorded
-  observation is provider evidence the server validated, so an observation
-  taken after the action executed and showing the pull request draft on its
-  head means no mark-ready this action might have issued still stands,
-  whether it never landed or was undone, and the action is abandoned on that
-  evidence alone. An observation older than the execution proves nothing: it
-  shows a draft pull request because the call had not happened yet. An observation
-  showing it out of draft refuses the abandon: that action performed the
-  transition its pre-read predicted, and reconciling it is the honest close.
+  transition. The bound publication settles it instead. Its recorded observation is
+  collected from the provider, validated on the way in, and stamped by the
+  server, so one taken after the action executed and showing the pull request
+  draft on its head means nothing that action issued stands as of that stamp,
+  and it is abandoned on that evidence. An observation older than the
+  execution proves nothing: it shows a draft pull request because the call
+  had not happened yet. One showing it out of draft refuses the abandon --
+  that action performed the transition its pre-read predicted, and
+  reconciling it is the honest close.
+
+  This is not a proof for all time. The provider call is issued after the
+  checkpoint, so a call still in flight may land after the observation that
+  settled it; what that produces is a visible pull request, which the wait
+  routes into the draft restoration before any head is pushed to it. The
+  guarantee is that no head reaches a visible pull request, not that a call
+  is known never to have happened. The same transition settles a stranded
+  draft restoration, on the evidence that settles it: a closed or merged pull
+  request, which can never report the draft state its reconciliation
+  requires.
 
 Whenever the next thing a workflow would do is push a head, and the pull
 request is out of draft, the draft-restoration phase comes first. Every

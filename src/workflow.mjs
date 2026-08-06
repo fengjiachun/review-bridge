@@ -546,6 +546,12 @@ const ACTION_KIND_SPECS = {
         );
       }
     },
+    // A pull request that is closed or merged can never report the draft
+    // state this action's reconciliation requires, so an action still in
+    // flight over one is abandoned instead: there is nothing left to return
+    // to, and no head will be pushed to it either.
+    abandonEvidence: (projection) =>
+      ["CLOSED", "MERGED"].includes(projection.status),
     validateResponse(action, response) {
       if (
         !["RETURNED_TO_DRAFT", "OBSERVED_ALREADY_DRAFT"].includes(
@@ -601,6 +607,13 @@ const ACTION_KIND_SPECS = {
     // draft must not be handed back to a wait whose repair phases push new
     // commits onto it, so that intent lands in the undo instead, which is
     // the only thing that can make the repair legal again.
+    // Nothing this action issued stands once the publication has observed
+    // the pull request draft on its head: it either never landed or was
+    // undone. The observation must postdate the execution, or it describes a
+    // pull request the call had not touched yet.
+    abandonEvidence: (projection, action) =>
+      projection.head_sha === action.target.head_sha &&
+      projection.is_draft === true,
     // Same question as the wait asks: can this pull request still be a
     // draft? A closed or merged one cannot, and an intent dropped over it
     // belongs in the wait, which pauses for the operator as it always did.
@@ -3768,17 +3781,25 @@ export async function recordMarkReadyObservation(
 }
 
 /**
- * Abandon an executing action whose external write provably left nothing
- * standing. The proof cannot come from the caller: a driver that crashed
- * between the checkpoint and the provider call cannot tell whether the call
- * landed, and a pre-read reporting a draft pull request is exactly what a
- * timeout or a lagging read reports while the mutation applies. The bound
- * publication's own recorded observation can, because it is provider
- * evidence the server validated: a pull request draft on this action's head
- * means no mark-ready this action might have issued still stands, whether it
- * never landed or was undone.
+ * Abandon an executing action that the publication has since observed in a
+ * state that settles it: for a mark-ready, a draft pull request on its head,
+ * meaning nothing it issued stands; for a return-to-draft, a closed or
+ * merged one, which can never report the draft state its reconciliation
+ * requires. Each kind names its own evidence.
+ *
+ * The driver's own reading cannot decide this. A pre-read reporting a draft
+ * pull request is exactly what a timeout or a lagging read reports while the
+ * mutation applies, so the evidence is the recorded observation -- collected
+ * from the provider, validated on the way in, and stamped by this server
+ * after the action executed.
+ *
+ * It is not a proof for all time. The provider call is issued after the
+ * checkpoint, so a call still in flight can land afterwards; what that
+ * produces is a visible pull request, which the wait routes into the undo
+ * before any head is pushed to it. The guarantee is that no head reaches a
+ * visible pull request, not that the call is known never to have happened.
  */
-export async function abandonMarkReadyAction(
+export async function abandonWorkflowAction(
   storeRoot,
   workflowId,
   expectedRevision,
@@ -3789,14 +3810,16 @@ export async function abandonMarkReadyAction(
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
     const action = workflow.active_action;
+    const spec =
+      action == null ? null : ACTION_KIND_SPECS[action.kind];
     if (
       action?.action_id !== actionId ||
-      action.kind !== "MARK_PR_READY" ||
+      spec?.abandonEvidence == null ||
       action.status !== "EXECUTING"
     ) {
       fail(
         "WORKFLOW_ACTION_STATE_INVALID",
-        "only an executing mark-ready may be abandoned on recorded evidence",
+        "this action cannot be abandoned on recorded evidence",
       );
     }
     const projection = await getAutonomousPreReady(
@@ -3814,15 +3837,14 @@ export async function abandonMarkReadyAction(
     const observedAt = projection.latest_recorded_at;
     if (
       projection.workflow_id !== workflow.workflow_id ||
-      projection.head_sha !== action.target.head_sha ||
       projection.status === "EVIDENCE_STALE" ||
-      projection.is_draft !== true ||
       observedAt == null ||
-      Date.parse(observedAt) <= Date.parse(action.executing_at)
+      Date.parse(observedAt) <= Date.parse(action.executing_at) ||
+      !spec.abandonEvidence(projection, action)
     ) {
       fail(
-        "WORKFLOW_PULL_REQUEST_EXPOSED",
-        "the bound publication does not record this pull request as a draft observed after this action executed",
+        "WORKFLOW_ACTION_NOT_ABANDONABLE",
+        "the bound publication does not record, after this action executed, the state that settles it",
         {
           review_id: action.target.review_id,
           is_draft: projection.is_draft,
@@ -4504,9 +4526,16 @@ export async function advanceRemoteWorkflow(
     // request still draft is refused exactly as before -- except when the
     // projection now pauses, which stops the workflow rather than resuming
     // work on stale evidence.
-    const repairing = REMOTE_REPAIR_PHASES.includes(workflow.phase);
+    // Any phase that records a head is admitted, not just the remote repair
+    // ones: the exposure that blocks a head can arrive while the workflow
+    // sits in any of them -- including IMPLEMENTING, which is where an
+    // invalidated publication's pause resumes -- and each would otherwise
+    // have no route to the one action that unblocks it. Naming the act
+    // rather than the phases is what stops this list from missing the next
+    // one.
+    const recordsHead = HEAD_RECORDING_PHASES.includes(workflow.phase);
     if (
-      !repairing &&
+      !recordsHead &&
       ![
         "WAIT_PUBLICATION",
         "RESOLVE_CODEX_THREADS",
@@ -4579,7 +4608,7 @@ export async function advanceRemoteWorkflow(
     // is left alone.
     const needsHead =
       repairPhase != null ||
-      repairing ||
+      recordsHead ||
       HEAD_RECORDING_PHASES.includes(
         REMOTE_PAUSE_RESUME_PHASES[pauseReason] ?? "",
       );
@@ -4591,18 +4620,20 @@ export async function advanceRemoteWorkflow(
     // it fall through to the pause path would let a resume move it to
     // another phase, and the addressed-findings record that only
     // ADDRESS_REMOTE_FINDINGS writes would be lost with it.
-    if (repairing && !exposed) {
+    if (recordsHead && !exposed) {
       fail(
         "WORKFLOW_PHASE_INVALID",
         `cannot advance a remote wait in phase ${workflow.phase}`,
       );
     }
     if (exposed) {
-      // No idle short-circuit here: this phase is left by completing the
-      // action, not by polling, so an advance that reaches it either moves
-      // the workflow into it or is the driver asking twice for the same
-      // transition -- and the second ask still has to record the revision
-      // the projection was read at.
+      if (
+        workflow.phase === "ENSURE_DRAFT_FOR_REPAIR" &&
+        workflow.current_publication.awaiting_revision === projection.revision
+      ) {
+        // Polling a phase that has not moved costs nothing here either.
+        return publicWorkflow(workflow);
+      }
       return publicWorkflow(
         await saveMutation(paths, workflow, async (next) => {
           next.current_publication.awaiting_revision = projection.revision;
@@ -4617,7 +4648,7 @@ export async function advanceRemoteWorkflow(
           // be the worse trade.
           const last = next.remote_attempts.at(-1);
           if (
-            repairing &&
+            REMOTE_REPAIR_PHASES.includes(workflow.phase) &&
             last != null &&
             last.head_sha === next.current_head_sha
           ) {
