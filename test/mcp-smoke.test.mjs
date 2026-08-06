@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -23,7 +24,7 @@ async function connectClient(
     env: { ...process.env, REVIEW_BRIDGE_HOME: store },
     stderr: "pipe",
   });
-  const client = new Client({ name: "review-bridge-test", version: "0.5.0" });
+  const client = new Client({ name: "review-bridge-test", version: "0.6.0" });
   await client.connect(transport);
   return client;
 }
@@ -120,7 +121,7 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
     assert.ok(prepare.inputSchema.properties.parent_review_id);
     assert.deepEqual(
       prepare.inputSchema.properties.reviewer_provider.enum,
-      ["CLAUDE_DESKTOP", "CODEX_TASK"],
+      ["CLAUDE_DESKTOP", "CODEX_TASK", "HERMES"],
     );
     assert.ok(prepare.inputSchema.required.includes("reviewer_provider"));
 
@@ -227,6 +228,10 @@ test("reviewer processes list only tasks bound to their provider", async (t) => 
       id: "rb-2026-07-26T000000-000Z-c1a0de01",
       reviewer_provider: "CLAUDE_DESKTOP",
     },
+    {
+      id: "rb-2026-07-26T000000-000Z-c2a0de02",
+      reviewer_provider: "HERMES",
+    },
   ];
   for (const task of tasks) {
     const reviewRoot = path.join(reviewsRoot, task.id);
@@ -248,12 +253,17 @@ test("reviewer processes list only tasks bound to their provider", async (t) => 
     store,
     "CLAUDE_DESKTOP",
   );
+  const hermes = await connectClient("reviewer", store, "HERMES");
   try {
     const codexPending = await codex.callTool({
       name: "list_pending_reviews",
       arguments: {},
     });
     const claudePending = await claude.callTool({
+      name: "list_pending_reviews",
+      arguments: {},
+    });
+    const hermesPending = await hermes.callTool({
       name: "list_pending_reviews",
       arguments: {},
     });
@@ -265,9 +275,28 @@ test("reviewer processes list only tasks bound to their provider", async (t) => 
       JSON.parse(claudePending.content[0].text).map((review) => review.id),
       [tasks[1].id],
     );
+    assert.deepEqual(
+      JSON.parse(hermesPending.content[0].text).map((review) => review.id),
+      [tasks[2].id],
+    );
   } finally {
-    await Promise.all([codex.close(), claude.close()]);
+    await Promise.all([codex.close(), claude.close(), hermes.close()]);
   }
+});
+
+test("reviewer CLI diagnostics enumerate all three reviewer providers", async (t) => {
+  const store = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-mcp-"));
+  t.after(() => fsp.rm(store, { recursive: true, force: true }));
+  const spawn = spawnSync(
+    process.execPath,
+    [serverPath, "--role", "reviewer", "--reviewer-provider", "UNKNOWN"],
+    {
+      env: { ...process.env, REVIEW_BRIDGE_HOME: store },
+      encoding: "utf8",
+    },
+  );
+  assert.equal(spawn.status, 2);
+  assert.match(spawn.stderr, /CLAUDE_DESKTOP\|CODEX_TASK\|HERMES/);
 });
 
 test("MCP errors preserve StoreError code and retryability details", async (t) => {

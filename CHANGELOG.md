@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 - 2026-08-06
+
+### Added
+
+- `HERMES` local reviewer provenance and a self-contained
+  `hermes-integration/` build artifact with separate author-only and
+  reviewer-only MCP snippets, an exact seven-tool reviewer allowlist, a
+  Review Bridge-owned FULL/SUCCESSOR reviewer skill, shared-store/version
+  pinning, and install, verification, isolation, and upgrade guidance.
+
 ## 0.5.0 - 2026-07-31
 
 ### Added

@@ -1,0 +1,37 @@
+# Review Bridge Hermes reviewer profile MCP config snippet.
+#
+# Merge this snippet's server entry into the reviewer Hermes profile's
+# top-level mcp_servers mapping. Render the placeholder paths within one
+# exact Review Bridge release/build (v0.6.0) before use:
+#   - __REVIEW_BRIDGE_RELEASE_PATH__ -> absolute path of the versioned
+#     hermes-integration directory, for example
+#     /opt/review-bridge-v0.6.0/hermes-integration
+#   - __REVIEW_BRIDGE_HOME__        -> absolute path of the shared store used
+#     by every Review Bridge participant (same value as the author profile)
+#
+# The reviewer profile must never receive the author/publication server.
+mcp_servers:
+  review-bridge-reviewer:
+    command: node
+    args:
+      - __REVIEW_BRIDGE_RELEASE_PATH__/server/server.mjs
+      - --role
+      - reviewer
+      - --reviewer-provider
+      - HERMES
+    env:
+      REVIEW_BRIDGE_HOME: __REVIEW_BRIDGE_HOME__
+    enabled: true
+    timeout: 300
+    connect_timeout: 60
+    tools:
+      include:
+        - list_pending_reviews
+        - open_review
+        - read_review_artifact
+        - read_snapshot_file
+        - search_snapshot
+        - submit_review
+        - submit_rereview
+      resources: false
+      prompts: false

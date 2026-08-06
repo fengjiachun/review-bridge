@@ -6,16 +6,16 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey.svg)](#platform-support)
 
 A manually triggered code-review handoff between a Codex author and an
-explicitly bound reviewer: Claude Desktop, a fresh Codex task, or GitHub Codex
-in remote-only publication mode.
+explicitly bound reviewer: Claude Desktop, a fresh Codex task, a Hermes
+profile, or GitHub Codex in remote-only publication mode.
 
 A local review runs like this:
 
 1. You finish a change in a Codex task and ask it to prepare a review. Review
    Bridge captures an **immutable snapshot** of the diff and the changed files.
-2. You open a **fresh reviewer context** — a new Claude Desktop conversation or
-   a brand-new Codex task — which gets read-only tools over that snapshot and
-   submits structured findings.
+2. You open a **fresh reviewer context** — a new Claude Desktop conversation,
+   a brand-new Codex task, or an isolated Hermes reviewer profile/context —
+   which inspects the immutable snapshot and submits structured findings.
 3. If the reviewer submits no findings, the review is already `CLEAN` and you
    finalize it. Otherwise you go back to the author task, **answer every
    finding**, and prepare round two.
@@ -29,6 +29,7 @@ endorsed by, or sponsored by OpenAI or Anthropic.
 
 - [Platform support](#platform-support)
 - [Install](#install)
+- [Hermes reviewer profile](#hermes-reviewer-profile)
 - [Use](#use)
 - [Successor reviews](#successor-reviews)
 - [State machine](#state-machine)
@@ -52,22 +53,24 @@ The GitHub publication collector also requires an authenticated
 
 ## Install
 
-The two halves install differently:
+The client integrations install differently:
 
 | Component | Source |
 | --- | --- |
 | Claude Desktop reviewer extension | Prebuilt `.mcpb` on the [latest release](https://github.com/fengjiachun/review-bridge/releases/latest) |
 | Codex plugin (author + `CODEX_TASK` reviewer) | Build from a clone at the same release tag — the marketplace directory is not published as a release asset |
+| Hermes reviewer and author profiles | `hermes-integration/` inside the same build output — see [Hermes reviewer profile](#hermes-reviewer-profile) |
 
 Install every process that shares a store from the same Review Bridge build. Do
 not mix a locking-enabled build with artifacts from an earlier release; earlier
 processes do not participate in the locking protocol.
 
-Because the two halves come from different places, **pin them to the same
-release tag**: install the extension from a release, then build the Codex plugin
-from a checkout of that same tag. Building from an arbitrary `main` checkout can
-pair a newer author process with an older reviewer extension against one store.
-The version examples below use `v0.5.0`; substitute the release you installed.
+Because the integrations come from different places, **pin every participant
+to the same release tag**: install the extension from a release, then build the
+Codex plugin and Hermes integration from a checkout of that same tag. Building
+from an arbitrary `main` checkout can pair a newer author process with an older
+reviewer against one store. The version examples below use `v0.6.0`; substitute
+the exact release you installed.
 
 ### Claude Desktop extension
 
@@ -101,10 +104,10 @@ installed, then build the local marketplace and register it:
 ```bash
 git clone https://github.com/fengjiachun/review-bridge.git
 cd review-bridge
-git checkout v0.5.0
+git checkout v0.6.0
 npm ci
 npm run build
-codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.5.0/codex-marketplace"
+codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.6.0/codex-marketplace"
 ```
 
 Build from a Git clone, not from the release's source archive: `scripts/build.mjs`
@@ -123,16 +126,52 @@ to build from a working tree with any modified or untracked file, and it runs
 clone at a release tag satisfies both. See [Develop](#develop) for the full
 build and verification loop.
 
+### Hermes reviewer profile
+
+Hermes is a supported local reviewer provider. The build output contains
+`hermes-integration/`, which packages the same server runtime plus:
+
+- `mcp/reviewer.config.yaml` — a reviewer-only Hermes MCP config snippet.
+- `mcp/author.config.yaml` — a separate author-only Hermes MCP config snippet.
+- `skills/review-bridge-reviewer/SKILL.md` — the Review Bridge-owned Hermes
+  reviewer skill.
+- `README.md` — install, upgrade, and profile-isolation instructions.
+
+Hermes auto-injects every tool from a configured MCP server into the profile
+that references it, so **author and reviewer MUST live in separate Hermes
+profiles**: the reviewer profile receives only the reviewer server and skill,
+and the author profile receives only the author server. Never add the
+author/publication server to the reviewer profile, and never add a reviewer
+provider binding to the author profile.
+
+Run `npm run verify:build`, then render `__REVIEW_BRIDGE_RELEASE_PATH__` to the
+absolute, versioned `review-bridge-v0.6.0/hermes-integration` directory and
+`__REVIEW_BRIDGE_HOME__` to one explicit absolute shared store. Merge each
+snippet's server entry into only its matching profile's top-level `mcp_servers`
+mapping.
+All participants share that one `REVIEW_BRIDGE_HOME` and one exact Review
+Bridge version. The packaged `hermes-integration/README.md` gives the complete
+install, profile tool checks, and atomic upgrade procedure.
+
+`HERMES` records configured reviewer provenance; it is not cryptographic model
+identity. Autonomous local task creation remains `CODEX_TASK`-only. After a
+local HERMES gate passes, remote GitHub Codex publication remains an
+author/publication-side operation.
+
 ### Build output
 
-`npm run build` writes everything under `dist/review-bridge-v0.5.0/`:
+`npm run build` writes everything under `dist/review-bridge-v0.6.0/`:
 
 - `codex-marketplace/` — local Codex marketplace containing the Review Bridge
   plugin, author MCP server, and `CODEX_TASK` reviewer MCP server.
-- `review-bridge-reviewer-v0.5.0.mcpb` — MCP Bundle for Claude Desktop.
-- `review-bridge-reviewer-v0.5.0.dxt` — compatibility copy of the same bundle.
+- `review-bridge-reviewer-v0.6.0.mcpb` — MCP Bundle for Claude Desktop.
+- `review-bridge-reviewer-v0.6.0.dxt` — compatibility copy of the same bundle.
 - `claude-extension-source/` — inspectable source of the Claude extension.
-- `review-bridge-source-v0.5.0.zip` — source archive of the built commit, for
+- `hermes-integration/` — Hermes profile MCP config snippets (separate author
+  and reviewer), the Review Bridge-owned Hermes reviewer skill, and
+  install/upgrade/isolation documentation, with the same packaged server
+  runtime.
+- `review-bridge-source-v0.6.0.zip` — source archive of the built commit, for
   inspection and provenance. It carries no Git metadata, so it cannot be used to
   run the build itself.
 - `SHA256SUMS.txt` — checksums for the bundle, compatibility copy, and source
@@ -183,6 +222,17 @@ use the equivalent request:
 > List pending Review Bridge tasks and deeply review `<review_id>`. Follow its
 > review strategy, inspect the required artifacts and relevant snapshot files,
 > then submit structured findings.
+
+For a `HERMES` review, use the dedicated reviewer profile and start a fresh,
+independent context that has no authoring history for the change:
+
+> Independently review Review Bridge task `<review_id>` using the packaged
+> Hermes reviewer skill. Require `reviewer_provider: HERMES`, follow the review
+> strategy, and submit every actionable finding.
+
+Configured Hermes MCP tools are profile-scoped and auto-injected, so this
+reviewer context is independent only when its profile contains the
+reviewer-only MCP server and no Review Bridge author/publication server.
 
 If the reviewer submitted no findings, the review is already `CLEAN` and its
 next action is `FINALIZE_LOCAL_GATE`; there is nothing to answer and
@@ -439,7 +489,7 @@ return the legacy exact body without an ID. For a fresh snapshot, run the
 packaged read-only collector against the review ID:
 
 ```bash
-node dist/review-bridge-v0.5.0/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id>
+node dist/review-bridge-v0.6.0/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id>
 ```
 
 Run that command from the repository root after `npm run build`. Inside an
@@ -489,8 +539,8 @@ Ledger](docs/rfcs/0001-github-publication-ledger.md).
   verdict-writing tools. It has no Review Bridge tool for modifying the
   repository, pushing code, or creating pull requests.
 - Author and reviewer roles run as separate MCP processes with different tool
-  lists. Each local review is immutably bound to `CLAUDE_DESKTOP` or
-  `CODEX_TASK`; mismatched reviewer processes cannot list, read, or submit it.
+  lists. Each local review is immutably bound to `CLAUDE_DESKTOP`, `CODEX_TASK`,
+  or `HERMES`; mismatched reviewer processes cannot list, read, or submit it.
 - Working-tree overlays are copied into the private review store. Unchanged
   files are read from the captured Git object ID.
 - Files larger than 10 MiB are recorded but not copied into the snapshot.
@@ -610,8 +660,8 @@ still missing, confirm the extension's data directory matches the Codex
 `REVIEW_BRIDGE_HOME`.
 
 **A reviewer cannot see a pending review** — each review is immutably bound to
-one provider. A `CLAUDE_DESKTOP` reviewer cannot list or open a `CODEX_TASK`
-review, and vice versa.
+one provider. A `CLAUDE_DESKTOP`, `CODEX_TASK`, or `HERMES` reviewer cannot list
+or open a review bound to either of the other providers.
 
 ## License
 

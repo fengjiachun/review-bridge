@@ -313,6 +313,8 @@ explicitly requests cleanup.
    - `CLAUDE_DESKTOP` for a fresh Claude Desktop conversation.
    - `CODEX_TASK` for a newly created Codex task that is not a fork of the
      author task and has no authoring history for the change.
+   - `HERMES` for a fresh, independent Hermes reviewer context using the
+     packaged Hermes reviewer profile.
    Never call reviewer tools from the author task; provider binding and task
    separation are workflow attestations, not authenticated model identity.
 7. Call `prepare_review` with the base SHA captured in step 1, the selected
@@ -323,8 +325,11 @@ explicitly requests cleanup.
 9. Start a fresh reviewer context for every new `review_id`. For
    `CLAUDE_DESKTOP`, use a fresh Claude conversation. For `CODEX_TASK`, create
    a new Codex task rather than forking this task, and send it only the review
-   ID and a request to follow the packaged reviewer skill. A round-two
-   rereview of the same ID may stay in that reviewer context.
+   ID and a request to follow the packaged reviewer skill. For `HERMES`, start
+   a fresh, independent Hermes reviewer context in the packaged Hermes reviewer
+   profile, and send it only the review ID and a request to follow the packaged
+   reviewer skill. A round-two rereview of the same ID may stay in that reviewer
+   context.
 10. Require the reviewer to follow the returned strategy. For `SUCCESSOR`, it
     must read `successor.json` and all of `successor.diff` and inspect changed
     files plus relevant callers, contracts, and tests; it expands to

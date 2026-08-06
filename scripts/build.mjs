@@ -5,15 +5,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const outputRoot = process.env.REVIEW_BRIDGE_OUTPUT_ROOT
-  ? path.resolve(process.env.REVIEW_BRIDGE_OUTPUT_ROOT)
-  : path.join(projectRoot, "dist", "review-bridge-v0.5.0");
-const codexMarketplace = path.join(outputRoot, "codex-marketplace");
-const codexPlugin = path.join(codexMarketplace, "plugins", "review-bridge");
-const claudeSource = path.join(outputRoot, "claude-extension-source");
-const mcpbOutput = path.join(outputRoot, "review-bridge-reviewer-v0.5.0.mcpb");
-const dxtOutput = path.join(outputRoot, "review-bridge-reviewer-v0.5.0.dxt");
-const sourceOutput = path.join(outputRoot, "review-bridge-source-v0.5.0.zip");
 
 function run(command, args, cwd) {
   const result = spawnSync(command, args, {
@@ -35,10 +26,45 @@ function run(command, args, cwd) {
   return result.stdout;
 }
 
+const workingTreeStatus = run(
+  "git",
+  ["status", "--porcelain", "--untracked-files=all"],
+  projectRoot,
+);
+if (workingTreeStatus.trim()) {
+  throw new Error(
+    "refusing to build from a dirty working tree; commit or stash changes first",
+  );
+}
+
+const rootPackage = JSON.parse(
+  await fsp.readFile(path.join(projectRoot, "package.json"), "utf8"),
+);
+const releaseVersion = rootPackage.version;
+const outputRoot = process.env.REVIEW_BRIDGE_OUTPUT_ROOT
+  ? path.resolve(process.env.REVIEW_BRIDGE_OUTPUT_ROOT)
+  : path.join(projectRoot, "dist", `review-bridge-v${releaseVersion}`);
+const codexMarketplace = path.join(outputRoot, "codex-marketplace");
+const codexPlugin = path.join(codexMarketplace, "plugins", "review-bridge");
+const claudeSource = path.join(outputRoot, "claude-extension-source");
+const hermesIntegration = path.join(outputRoot, "hermes-integration");
+const mcpbOutput = path.join(
+  outputRoot,
+  `review-bridge-reviewer-v${releaseVersion}.mcpb`,
+);
+const dxtOutput = path.join(
+  outputRoot,
+  `review-bridge-reviewer-v${releaseVersion}.dxt`,
+);
+const sourceOutput = path.join(
+  outputRoot,
+  `review-bridge-source-v${releaseVersion}.zip`,
+);
+
 async function installRuntime(target) {
   const runtimePackage = {
     name: "review-bridge-runtime",
-    version: "0.5.0",
+    version: releaseVersion,
     private: true,
     type: "module",
     dependencies: {
@@ -78,17 +104,6 @@ async function copyServer(target) {
   for (const name of entries) {
     await fsp.copyFile(path.join(source, name), path.join(serverTarget, name));
   }
-}
-
-const workingTreeStatus = run(
-  "git",
-  ["status", "--porcelain", "--untracked-files=all"],
-  projectRoot,
-);
-if (workingTreeStatus.trim()) {
-  throw new Error(
-    "refusing to build from a dirty working tree; commit or stash changes first",
-  );
 }
 
 await fsp.rm(outputRoot, { recursive: true, force: true });
@@ -134,6 +149,18 @@ await fsp.cp(
 await fsp.copyFile(path.join(projectRoot, "LICENSE"), path.join(claudeSource, "LICENSE"));
 await copyServer(claudeSource);
 await installRuntime(claudeSource);
+
+// Hermes profile integration: reviewer/author MCP config snippets, the
+// Review Bridge-owned reviewer skill, and install/upgrade/isolation docs,
+// packaged with the same server runtime the other consumers get.
+await fsp.cp(
+  path.join(projectRoot, "templates", "hermes"),
+  hermesIntegration,
+  { recursive: true },
+);
+await fsp.copyFile(path.join(projectRoot, "LICENSE"), path.join(hermesIntegration, "LICENSE"));
+await copyServer(hermesIntegration);
+await installRuntime(hermesIntegration);
 
 const mcpbCli = path.join(projectRoot, "node_modules", ".bin", "mcpb");
 run(mcpbCli, ["validate", claudeSource], projectRoot);
