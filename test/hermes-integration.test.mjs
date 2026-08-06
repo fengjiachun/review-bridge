@@ -470,6 +470,35 @@ test("Hermes reviewer skill is reviewer-scoped and preserves artifact-reading ru
   assert.match(skill, /next_offset/);
 });
 
+test("Codex workflow skill documents manual Hermes provider selection and handoff", async () => {
+  const skill = await readRequired(
+    path.join(
+      "templates",
+      "codex-plugin",
+      "skills",
+      "review-bridge-workflow",
+      "SKILL.md",
+    ),
+  );
+  const providerSelection = skill.match(
+    /6\. Choose `reviewer_provider` explicitly:(?<body>[\s\S]*?)\n7\. Call `prepare_review`/,
+  );
+  assert.ok(providerSelection, "manual reviewer provider section is missing");
+  assert.match(
+    providerSelection.groups.body,
+    /- `HERMES` for a fresh(?:, independent)? Hermes reviewer (?:conversation|context)/i,
+  );
+
+  const reviewerHandoff = skill.match(
+    /9\. Start a fresh reviewer context(?<body>[\s\S]*?)\n10\. Require/,
+  );
+  assert.ok(reviewerHandoff, "manual reviewer handoff section is missing");
+  assert.match(
+    reviewerHandoff.groups.body,
+    /For\s+`HERMES`,[^.]*fresh[^.]*Hermes reviewer (?:conversation|context)[\s\S]*?only the review\s+ID[\s\S]*?packaged\s+reviewer skill/i,
+  );
+});
+
 test("Hermes README documents profile separation, exact release pinning, absolute rendering, and boundaries", async () => {
   const readme = await readRequired(path.join("templates", "hermes", "README.md"));
   assert.match(readme, /separate profiles/i);
