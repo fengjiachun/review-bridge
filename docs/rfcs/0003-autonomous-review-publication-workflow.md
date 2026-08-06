@@ -582,7 +582,10 @@ to clear. A pull request that is closed or merged is the one exposure this does 
 answer -- there is no draft to return to -- and it pauses as it always did.
 An invalidated publication is not that case: its ledger is finished while
 the pull request stays open and returnable, and the workflow that must
-abandon it still needs a draft to push its next head to. The observation that proves the pull request draft again also
+abandon it still needs a draft to push its next head to, so it reaches the
+undo from the wait as readily as from a repair phase. What decides is
+whether the next step pushes a head at all: a pause that resumes into a
+head-recording phase does, one that resumes into the wait does not. The observation that proves the pull request draft again also
 revokes any gate minted while it was visible, so a gate never coexists with
 a head that could replace it. A publication that clears is unaffected and still reaches
 the mark-ready stop, where an already-ready pull request reconciles without

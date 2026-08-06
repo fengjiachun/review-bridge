@@ -194,7 +194,9 @@ blocks after the pull request is ready is operator work.
     does not answer -- there is no draft to return to -- and it pauses as
     always. An `INVALIDATED` publication is not that case: the ledger is
     finished with it while the pull request stays open and returnable, so the
-    undo runs and the new head follows. `record_workflow_head` refuses with
+    undo runs and the new head follows. The phase is advanceable, so if
+    someone else returns the pull request to draft, or it closes, the
+    workflow moves on rather than waiting for an action with nothing to do. `record_workflow_head` refuses with
     `WORKFLOW_PULL_REQUEST_EXPOSED` on the same evidence, and a repair phase
     that hits it advances back through this transition rather than stalling.
     A cleared publication is unaffected: it reaches the pre-ready stop, where

@@ -4851,6 +4851,26 @@ test("a repair diverted through the undo is not a repeated attempt", async (t) =
   assert.equal(rerepairing.phase, "ADDRESS_CHECK_FAILURE");
   assert.equal(rerepairing.remote_attempts.length, 2);
   assert.equal(rerepairing.remote_attempts[1].diverted_at, undefined);
+
+  // The mark is what the stall comparison skips, so a forged one would
+  // silently disable it. It is validated on every load like the rest of the
+  // attempt.
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const forged = structuredClone(stored);
+  forged.remote_attempts[1].diverted_at = "whenever";
+  await atomicWriteCanonicalJson(workflowPath, forged);
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, workflow.workflow_id),
+    (error) =>
+      error instanceof TypeError && /diverted_at/.test(error.message),
+  );
+  await atomicWriteCanonicalJson(workflowPath, stored);
 });
 
 test("an exposed pull request reaches the undo even when the blocker also pauses", async (t) => {
@@ -5150,4 +5170,148 @@ test("a provider clock running ahead cannot abandon a landed mark-ready", async 
   );
   const held = await getAutonomousWorkflow(state.store, workflow.workflow_id);
   assert.equal(held.active_action.status, "EXECUTING");
+});
+
+test("an invalidated publication reaches the undo from the wait as well", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  // No repair phase is involved: the publication is invalidated straight from
+  // the wait, and its remedy is a new head from IMPLEMENTING -- pushed to
+  // this same pull request, which someone has made visible.
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => {
+      payload.pull_request.is_draft = false;
+      payload.pull_request.reviewed_base_current_base_comparison.status =
+        "DIVERGED";
+      return payload;
+    },
+  );
+  const projection = await getAutonomousPreReady(state.store, reviewId);
+  assert.equal(projection.status, "INVALIDATED");
+
+  const ensuring = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(ensuring.phase, "ENSURE_DRAFT_FOR_REPAIR");
+});
+
+test("the undo phase has an exit when the exposure resolves itself", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => {
+      payload.pull_request.is_draft = false;
+      return failingCheck(payload);
+    },
+  );
+  const ensuring = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(ensuring.phase, "ENSURE_DRAFT_FOR_REPAIR");
+
+  // Someone else put it back in draft. The phase's action has nothing left
+  // to do, so the phase must not be where the workflow stays.
+  const draftAgainAt = at + 10_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 3,
+      observation: failingCheck(
+        draftObservation(state, headSha, {
+          at: draftAgainAt,
+          requestId: 100,
+          requestAt: at + 1_000,
+        }),
+      ),
+    },
+    { clock: () => draftAgainAt + 10 },
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    ensuring.revision,
+  );
+  assert.equal(repairing.phase, "ADDRESS_CHECK_FAILURE");
+});
+
+test("a repair phase on a draft pull request cannot be advanced", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => failingCheck(payload),
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(repairing.phase, "ADDRESS_CHECK_FAILURE");
+
+  // A repair phase is admitted to the advance only to be sent to the undo.
+  // With the pull request draft there is nothing to undo, and re-deriving
+  // the blocker here is what the phase exists to prevent.
+  await assert.rejects(
+    advanceRemoteWorkflow(
+      state.store,
+      workflow.workflow_id,
+      repairing.revision,
+    ),
+    (error) => error.code === "WORKFLOW_PHASE_INVALID",
+  );
 });

@@ -4507,9 +4507,15 @@ export async function advanceRemoteWorkflow(
     const repairing = REMOTE_REPAIR_PHASES.includes(workflow.phase);
     if (
       !repairing &&
-      !["WAIT_PUBLICATION", "RESOLVE_CODEX_THREADS", "PRE_READY"].includes(
-        workflow.phase,
-      )
+      ![
+        "WAIT_PUBLICATION",
+        "RESOLVE_CODEX_THREADS",
+        "PRE_READY",
+        // Advanceable so the phase has an exit when the exposure resolves
+        // itself: the pull request returned to draft by another hand, or
+        // closed or merged, leaves nothing for its action to do.
+        "ENSURE_DRAFT_FOR_REPAIR",
+      ].includes(workflow.phase)
     ) {
       fail(
         "WORKFLOW_PHASE_INVALID",
@@ -4565,10 +4571,22 @@ export async function advanceRemoteWorkflow(
     // and returnable. Every other stop yields to the undo first -- including
     // one that pauses -- because the pause re-derives afterwards while a
     // pull request left visible strands the repair its remedy needs.
+    // What matters is whether the next thing this workflow does is push a
+    // head, not which phase asks for it. A repair phase does; so does a
+    // pause whose resume lands in one -- PUBLICATION_INVALIDATED resumes
+    // into IMPLEMENTING, where the remedy is a new head on the same pull
+    // request. A pause that resumes into the wait needs nothing pushed and
+    // is left alone.
+    const needsHead =
+      repairPhase != null ||
+      repairing ||
+      HEAD_RECORDING_PHASES.includes(
+        REMOTE_PAUSE_RESUME_PHASES[pauseReason] ?? "",
+      );
     const exposed =
       projection.is_draft === false &&
       !["CLOSED", "MERGED"].includes(projection.status) &&
-      (repairPhase != null || repairing);
+      needsHead;
     // A repair phase reaches this line only to be sent to the undo. Letting
     // it fall through to the pause path would let a resume move it to
     // another phase, and the addressed-findings record that only
