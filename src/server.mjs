@@ -52,13 +52,16 @@ import {
   pauseAutonomousWorkflow,
   planCodexTaskDispatch,
   planDraftPullRequest,
+  abandonMarkReadyAction,
   planMarkPullRequestReady,
+  planReturnToDraft,
   planThreadReply,
   planThreadResolution,
   planWorkflowPush,
   recordCodexTaskObservation,
   recordDraftPullRequestObservation,
   recordMarkReadyObservation,
+  recordReturnToDraftObservation,
   recordPushObservation,
   recordThreadReplyObservation,
   recordThreadResolutionObservation,
@@ -532,6 +535,79 @@ if (role === "author") {
                   resolved_repository_id: input.resolved_repository_id,
                   resolved_url: input.resolved_url,
                 },
+      ),
+  );
+
+  register(
+    "plan_return_to_draft",
+    {
+      title: "Plan return to draft",
+      description:
+        "Persist the RETURN_PR_TO_DRAFT intent for the workflow-owned pull request. Reachable only from ENSURE_DRAFT_FOR_REPAIR, which the server enters when the next thing this workflow would push a head for is blocked by a pull request that is out of draft. The action is idempotent: a pre-read that already finds it draft reconciles OBSERVED_ALREADY_DRAFT without another mutation.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+      },
+    },
+    (input) =>
+      planReturnToDraft(storeRoot, input.workflow_id, input.expected_revision),
+  );
+
+  register(
+    "record_return_to_draft_observation",
+    {
+      title: "Record return-to-draft observation",
+      description:
+        "Reconcile the pull request after the return-to-draft call: the same repository, number, branches, and head, now a draft. The outcome follows the recorded pre-read both ways -- one that found it ready reconciles RETURNED_TO_DRAFT, one that found it already draft reconciles OBSERVED_ALREADY_DRAFT and claims no mutation.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+        outcome: z.enum(["RETURNED_TO_DRAFT", "OBSERVED_ALREADY_DRAFT"]),
+        repository_id: z.number().int().positive(),
+        pr_number: z.number().int().positive(),
+        base_branch: z.string(),
+        head_branch: z.string(),
+        head_sha: z.string(),
+        is_draft: z.boolean(),
+      },
+    },
+    (input) =>
+      recordReturnToDraftObservation(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
+        {
+          outcome: input.outcome,
+          repositoryId: input.repository_id,
+          prNumber: input.pr_number,
+          baseBranch: input.base_branch,
+          headBranch: input.head_branch,
+          headSha: input.head_sha,
+          isDraft: input.is_draft,
+        },
+      ),
+  );
+
+  register(
+    "abandon_mark_ready_action",
+    {
+      title: "Abandon a crashed mark-ready",
+      description:
+        "Drop an executing MARK_PR_READY whose external write provably left nothing standing. The proof is the bound publication's own recorded observation showing the pull request draft on this action's head -- caller testimony is never accepted, because a timeout or a lagging read reports a draft pull request while the mutation applies. Refuses while the recorded observation shows it out of draft; reconcile that action instead.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+      },
+    },
+    (input) =>
+      abandonMarkReadyAction(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
       ),
   );
 

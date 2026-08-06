@@ -532,11 +532,10 @@ recorded its result. Therefore recovery always reconciles first:
   because the wait's repair phases push new commits and a pull request
   already visible for review must not receive them. The pre-read is trusted
   for the claim that keeps an intent, never for the one that destroys it.
-  A regression that clears on its own frees that intent; one whose remedy is
-  a new head does not, because the held action blocks head recording, and
-  the hold is then permanent. It is the first of the two states this release
-  defers; the second is described below, and both end the same way -- with
-  the operator, until the return-to-draft action ships. Retryable failures of the read itself drop nothing. The pre-ready
+  A pre-read that found it out of draft therefore drops the intent into the
+  draft-restoration phase rather than the wait: the workflow returns the
+  pull request to draft there, and the blocker becomes ordinary work again.
+  Retryable failures of the read itself drop nothing. The pre-ready
   stop itself remains advanceable whenever no action is in flight, so a
   clearance that moves before anything is planned routes onward like any
   other change rather than stranding the run.
@@ -552,32 +551,34 @@ recorded its result. Therefore recovery always reconciles first:
   marked ready while a blocker stands" is server-enforced on the first
   attempt and contract-enforced on a recovery.
 
-  This is the second of the two cases with no in-protocol exit in this
-  first implementation -- the other is the held intent above, and both end
-  the same way. Here the action is executing, the pull request is still
-  draft, and the clearance no longer permits the call. Whether the
-  earlier call landed cannot be established -- a timeout or a lagging read
-  reports a draft pull request while the mutation applies, and this provider
-  attests no actor for a draft transition -- so the action can neither be
-  claimed nor abandoned. Recovering it requires returning a possibly ready
-  pull request to draft, which is a later action. Until that ships, such a
-  crash is an operator matter: the workflow pauses as an indeterminate
-  external action and may have to be cancelled.
+  One case the driver cannot settle: the action is executing, its pre-read
+  found the pull request draft, and the clearance no longer permits the call.
+  Whether the earlier call landed cannot be established from anything the
+  driver can read -- a timeout or a lagging read reports a draft pull request
+  while the mutation applies, and this provider attests no actor for a draft
+  transition. The bound publication settles it instead. Its recorded
+  observation is provider evidence the server validated, so an observation
+  showing the pull request draft on this action's head means no mark-ready
+  this action might have issued still stands, whether it never landed or was
+  undone, and the action is abandoned on that evidence alone. An observation
+  showing it out of draft refuses the abandon: that action performed the
+  transition its pre-read predicted, and reconciling it is the honest close.
 
-A blocker that would enter a repair phase while the pull request is already
-out of draft pauses instead. Every repair ends in a new head pushed to that
-pull request, and one already visible for review must not receive it; this
-release cannot return it to draft, so an operator decides. The pause resumes
-into the wait, which re-derives it while the pull request is still visible.
+Whenever the next thing a workflow would do is push a head, and the pull
+request is out of draft, the draft-restoration phase comes first. Every
+repair ends in a new head pushed to that pull request, and one already
+visible for review must not receive it. Entering a repair is not the only
+moment that matters -- a pull request marked ready after the repair began
+would otherwise be pushed to anyway -- so recording a head refuses on the
+same evidence while the publication binding that carries it is still held,
+and a repair phase whose head cannot be recorded is admitted back to the
+wait for exactly this transition, without re-evaluating its blocker.
 
-Entering the repair is not the only moment that matters: a pull request
-marked ready after the repair began would otherwise be pushed to anyway, so
-recording a head refuses on the same evidence while the publication binding
-that carries it is still held. Returning the pull request to draft is what
-releases both, and the observation that proves it revokes any gate minted
-while it was visible. A publication that clears is unaffected and still
-reaches the mark-ready stop, where an already-ready pull request reconciles
-without claiming a mutation.
+The observation that proves the pull request draft again also revokes any
+gate minted while it was visible, so a gate never coexists with a head that
+could replace it. A publication that clears is unaffected and still reaches
+the mark-ready stop, where an already-ready pull request reconciles without
+claiming a mutation.
 
 - **Return to draft for repair**: read the exact pull request and head. Treat an
   already-draft pull request as reconciled completion. Repeat the mutation only
