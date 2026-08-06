@@ -558,9 +558,11 @@ recorded its result. Therefore recovery always reconciles first:
   while the mutation applies, and this provider attests no actor for a draft
   transition. The bound publication settles it instead. Its recorded
   observation is provider evidence the server validated, so an observation
-  showing the pull request draft on this action's head means no mark-ready
-  this action might have issued still stands, whether it never landed or was
-  undone, and the action is abandoned on that evidence alone. An observation
+  taken after the action executed and showing the pull request draft on its
+  head means no mark-ready this action might have issued still stands,
+  whether it never landed or was undone, and the action is abandoned on that
+  evidence alone. An observation older than the execution proves nothing: it
+  shows a draft pull request because the call had not happened yet. An observation
   showing it out of draft refuses the abandon: that action performed the
   transition its pre-read predicted, and reconciling it is the honest close.
 
@@ -574,9 +576,13 @@ same evidence while the publication binding that carries it is still held,
 and a repair phase whose head cannot be recorded is admitted back to the
 wait for exactly this transition, without re-evaluating its blocker.
 
-The observation that proves the pull request draft again also revokes any
-gate minted while it was visible, so a gate never coexists with a head that
-could replace it. A publication that clears is unaffected and still reaches
+A repair the workflow is diverted out of is not recorded as an attempt at
+it, so the return does not read as a repeat of a position already proven not
+to clear. A publication that is already terminal is the one exposure this
+does not answer -- there is no draft to return to -- and it pauses as it
+always did. The observation that proves the pull request draft again also
+revokes any gate minted while it was visible, so a gate never coexists with
+a head that could replace it. A publication that clears is unaffected and still reaches
 the mark-ready stop, where an already-ready pull request reconciles without
 claiming a mutation.
 

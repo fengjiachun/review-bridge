@@ -601,8 +601,11 @@ const ACTION_KIND_SPECS = {
     // draft must not be handed back to a wait whose repair phases push new
     // commits onto it, so that intent lands in the undo instead, which is
     // the only thing that can make the repair legal again.
-    abandonPhaseForProof: (proof) =>
-      proof?.is_draft === false ? "ENSURE_DRAFT_FOR_REPAIR" : null,
+    abandonPhaseForProof: (proof, error) =>
+      proof?.is_draft === false &&
+      !["INVALIDATED", "CLOSED", "MERGED"].includes(error?.details?.status)
+        ? "ENSURE_DRAFT_FOR_REPAIR"
+        : null,
     claimKind: "PULL_REQUEST",
     markerPrefix: null,
     identityFacts(target) {
@@ -3520,7 +3523,8 @@ export async function markWorkflowActionExecuting(
             // default when the evidence in front of it says the default is
             // unsafe -- see MARK_PR_READY and a visible pull request.
             next.phase =
-              spec.abandonPhaseForProof?.(executingProof) ?? spec.abandonPhase;
+              spec.abandonPhaseForProof?.(executingProof, error) ??
+              spec.abandonPhase;
           },
           {
             abandoned_action_id: action.action_id,
@@ -3793,15 +3797,29 @@ export async function abandonMarkReadyAction(
       storeRoot,
       action.target.review_id,
     );
+    // The observation has to have been taken after the write it is supposed
+    // to have missed, or it says nothing about it: one recorded before the
+    // action executed shows a draft pull request simply because the call had
+    // not happened yet. Stale evidence is refused for the same reason -- the
+    // projection itself declines to answer on it.
+    const observedAt = projection.latest_observed_at;
     if (
       projection.workflow_id !== workflow.workflow_id ||
       projection.head_sha !== action.target.head_sha ||
-      projection.is_draft !== true
+      projection.status === "EVIDENCE_STALE" ||
+      projection.is_draft !== true ||
+      observedAt == null ||
+      Date.parse(observedAt) <= Date.parse(action.executing_at)
     ) {
       fail(
         "WORKFLOW_PULL_REQUEST_EXPOSED",
-        "the bound publication does not record this pull request as a draft on this head",
-        { review_id: action.target.review_id, is_draft: projection.is_draft },
+        "the bound publication does not record this pull request as a draft observed after this action executed",
+        {
+          review_id: action.target.review_id,
+          is_draft: projection.is_draft,
+          status: projection.status,
+          latest_observed_at: observedAt,
+        },
       );
     }
     return publicWorkflow(
@@ -4470,11 +4488,13 @@ export async function advanceRemoteWorkflow(
     // else -- leaving cancellation as the only exit from a projection that
     // simply changed its mind.
     //
-    // A repair phase is admitted only to be sent to the undo below: someone
-    // may mark the pull request ready after the repair began, and head
-    // recording then refuses, so without this the repair would have no way
-    // to reach the one action that unblocks it. It is not re-evaluated here
-    // -- an advance that finds it still draft is refused just as before.
+    // A repair phase is admitted so it can reach the undo below: someone may
+    // mark the pull request ready after the repair began, and head recording
+    // then refuses, so without this the repair would have no way to reach
+    // the one action that unblocks it. An advance that finds the pull
+    // request still draft is refused exactly as before -- except when the
+    // projection now pauses, which stops the workflow rather than resuming
+    // work on stale evidence.
     const repairing = REMOTE_REPAIR_PHASES.includes(workflow.phase);
     if (
       !repairing &&
@@ -4527,24 +4547,51 @@ export async function advanceRemoteWorkflow(
     // repair is about to start; from a repair phase it means the head it
     // exists to record cannot be recorded. The blocker itself is not
     // re-evaluated in either case.
+    const pauseReason = remotePauseReason(projection);
+    // A terminal publication is the one exposure the undo cannot answer: its
+    // pull request is merged or closed, so there is no draft to return to
+    // and no repair to protect. Every other stop yields to the undo first --
+    // including one that pauses -- because the pause re-derives afterwards
+    // while a pull request left visible strands the repair its remedy needs.
     const exposed =
-      projection.is_draft === false && (repairPhase != null || repairing);
-    if (repairing && !exposed) {
+      projection.is_draft === false &&
+      pauseReason !== "PUBLICATION_INVALIDATED" &&
+      (repairPhase != null || repairing);
+    if (repairing && !exposed && pauseReason == null) {
       fail(
         "WORKFLOW_PHASE_INVALID",
         `cannot advance a remote wait in phase ${workflow.phase}`,
       );
     }
-    const pauseReason = remotePauseReason(projection);
-    if (exposed && pauseReason == null) {
+    if (exposed) {
+      // No idle short-circuit here: this phase is left by completing the
+      // action, not by polling, so an advance that reaches it either moves
+      // the workflow into it or is the driver asking twice for the same
+      // transition -- and the second ask still has to record the revision
+      // the projection was read at.
       return publicWorkflow(
-        workflow.phase === "ENSURE_DRAFT_FOR_REPAIR" &&
-          workflow.current_publication.awaiting_revision === projection.revision
-          ? workflow
-          : await saveMutation(paths, workflow, async (next) => {
-              next.current_publication.awaiting_revision = projection.revision;
-              next.phase = "ENSURE_DRAFT_FOR_REPAIR";
-            }),
+        await saveMutation(paths, workflow, async (next) => {
+          next.current_publication.awaiting_revision = projection.revision;
+          // A repair the workflow is diverted out of before it could record
+          // a head was never an attempt at anything, whatever the projection
+          // said on the way out. Leaving its entry in the chain would make
+          // the return from the undo look like a repeat of a position
+          // already proven not to clear, and the motivating case would end
+          // in NO_PROGRESS instead of the repair it went to make legal.
+          // Nothing else appends while a repair phase holds, so the entry to
+          // drop is the one on the end, and it is dropped only for this
+          // head: an attempt against an earlier head is history, not this
+          // diversion.
+          const last = next.remote_attempts.at(-1);
+          if (
+            repairing &&
+            last != null &&
+            last.head_sha === next.current_head_sha
+          ) {
+            next.remote_attempts.pop();
+          }
+          next.phase = "ENSURE_DRAFT_FOR_REPAIR";
+        }),
       );
     }
     if (repairPhase == null && pauseReason == null) {

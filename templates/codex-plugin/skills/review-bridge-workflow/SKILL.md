@@ -188,7 +188,11 @@ blocks after the pull request is ready is operator work.
     `record_return_to_draft_observation` — `RETURNED_TO_DRAFT` after your own
     call, `OBSERVED_ALREADY_DRAFT` when the pre-read already found it draft.
     Completion returns the workflow to the wait, which re-derives the blocker
-    as ordinary work. `record_workflow_head` refuses with
+    as ordinary work — the diverted repair is not counted as an attempt, so
+    it resumes rather than stalling `NO_PROGRESS` on a position it never
+    tried. A publication already terminal is the one exposure this does not
+    answer: there is no draft to return to, and it pauses
+    `PUBLICATION_INVALIDATED` as always. `record_workflow_head` refuses with
     `WORKFLOW_PULL_REQUEST_EXPOSED` on the same evidence, and a repair phase
     that hits it advances back through this transition rather than stalling.
     A cleared publication is unaffected: it reaches the pre-ready stop, where
@@ -253,10 +257,11 @@ blocks after the pull request is ready is operator work.
     Do not plan around a second checkpoint either; there is none, and nothing
     you can read decides whether an earlier call landed (GitHub attests no
     actor for a draft transition). Call `abandon_mark_ready_action` instead.
-    The server drops the action only when the bound publication's own
-    recorded observation shows the pull request draft on this head — record a
-    fresh observation first if the ledger's predates the crash — and refuses
-    while that observation shows it out of draft, because then the action
+    Record a fresh observation first: the server drops the action only on one
+    taken *after* the action executed, since an older one shows a draft pull
+    request simply because the call had not happened yet, and it refuses a
+    stale projection for the same reason. It also refuses while the
+    observation shows the pull request out of draft, because then the action
     performed the transition its pre-read predicted and reconciling it is the
     honest close.
 
