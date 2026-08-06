@@ -185,8 +185,8 @@ blocks after the pull request is ready is operator work.
     to escape one. `advance_remote_workflow` accepts `WAIT_PUBLICATION`,
     `RESOLVE_CODEX_THREADS`, and `PRE_READY`, and only with no action in
     flight: it is how the thread loop returns to the wait and how the
-    pre-ready stop reacts to a clearance that moved. It refuses every repair
-    phase and `POST_READY`.
+    pre-ready stop reacts to a clearance that moved. It refuses `POST_READY`, and refuses a repair
+    phase except to send it to the draft restoration described next.
 13. The server routes to `ENSURE_DRAFT_FOR_REPAIR` whenever the next thing
     the workflow would push a head for is blocked by a pull request that is
     out of draft: every repair ends in a new head pushed to it, and one
@@ -196,10 +196,15 @@ blocks after the pull request is ready is operator work.
     `record_return_to_draft_observation` — `RETURNED_TO_DRAFT` after your own
     call, `OBSERVED_ALREADY_DRAFT` when the pre-read already found it draft.
     If the pull request closes or merges while that action is in flight, it
-    can never report the draft state its reconciliation needs: call
-    `abandon_workflow_action`, which settles a return-to-draft on exactly
-    that observed state, and the wait pauses the terminal publication as
-    always. Completion returns the workflow to the wait, which re-derives the
+    can never report the draft state its reconciliation needs. With a
+    publication bound, `abandon_workflow_action` settles it on that observed
+    state and the wait pauses the terminal publication as always. With none
+    bound — the restoration reached from a refused push — there is nothing
+    left for this workflow to do: its pull request is gone, so no head can be
+    pushed to it and no draft can be returned to. Pause
+    `EXTERNAL_ACTION_INDETERMINATE` and cancel. That cancellation is the
+    cheap one: releasing the claims needs the bound pull request proven
+    closed, which is exactly what has happened. Completion returns the workflow to the wait, which re-derives the
     blocker as ordinary work — the diverted repair is not counted as an attempt, so
     it resumes rather than stalling `NO_PROGRESS` on a position it never
     tried. A terminal publication — closed, merged, or invalidated — is

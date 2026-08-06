@@ -5630,6 +5630,21 @@ test("a gated head is not pushed onto a pull request reviewers can see", async (
     workflow.workflow_id,
     gated.revision,
   );
+  // The pre-read must answer at all: a push that does not say what the pull
+  // request is cannot be the last check before it lands on one.
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      state.store,
+      workflow.workflow_id,
+      pushPlanned.workflow.revision,
+      pushPlanned.action.action_id,
+      {
+        resolved_repository_id: REPOSITORY_ID,
+        resolved_url: pushPlanned.action.target.remote_url,
+      },
+    ),
+    (error) => error.code === "WORKFLOW_ACTION_INVALID",
+  );
   await assert.rejects(
     markWorkflowActionExecuting(
       state.store,

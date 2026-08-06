@@ -3259,10 +3259,13 @@ export async function planMarkPullRequestReady(
 }
 
 /**
- * Plan the return to draft. The blocker that needs it is read here, so the
- * intent can only exist while the pull request really is out of draft with
- * something a repair has to answer -- or while a mark-ready intent is stuck
- * behind exactly that.
+ * Plan the return to draft. It checks the workflow owns a pull request and,
+ * when a publication is bound, that the publication is this workflow's on
+ * this head. It deliberately checks no draft state: the phase is reached
+ * only on evidence that the pull request is visible, and that evidence can
+ * be a pre-read no ledger has caught up with -- or, before any publication
+ * exists, the only evidence there is. The action's own pre-read settles it,
+ * and an already-draft pull request reconciles without a second mutation.
  */
 export async function planReturnToDraft(
   storeRoot,

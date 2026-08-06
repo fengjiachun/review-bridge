@@ -601,6 +601,13 @@ evidence, and it is admitted for exactly one direction -- it can stop a push,
 never authorize one -- which is the same rule the pre-reads of the external
 actions already follow.
 
+A pull request that has closed or merged ends the workflow rather than
+routing anywhere. Nothing can be pushed to it and it has no draft to return
+to, so the restoration reached from a refused push has no work left; the
+controller pauses and the workflow is cancelled. That cancellation is the
+inexpensive one: releasing the ownership claims requires the bound pull
+request proven closed, which is precisely the state that ended it.
+
 A terminal publication is exempt from the observation-based test, and the
 exemption is the point rather than an omission. Such a ledger accepts no further observation, so its last
 reading is frozen: a pull request visible in it is visible in it forever,
