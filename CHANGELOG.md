@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 - 2026-07-31
+## 0.6.0 - 2026-08-06
 
 ### Added
 
@@ -9,6 +9,11 @@
   reviewer-only MCP snippets, an exact seven-tool reviewer allowlist, a
   Review Bridge-owned FULL/SUCCESSOR reviewer skill, shared-store/version
   pinning, and install, verification, isolation, and upgrade guidance.
+
+## 0.5.0 - 2026-07-31
+
+### Added
+
 - An opt-in autonomous local workflow (RFC 0003 PR1): a schema-version-1
   workflow ledger binds immutable authorization, store-wide ownership claims,
   marker-reconciled Codex reviewer task dispatch, and crash recovery, and

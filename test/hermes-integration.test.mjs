@@ -16,7 +16,7 @@ const projectRoot = path.resolve(
 );
 const hermesTemplates = path.join(projectRoot, "templates", "hermes");
 const serverPath = path.join(projectRoot, "src", "server.mjs");
-const RELEASE_VERSION = "0.5.0";
+const RELEASE_VERSION = "0.6.0";
 const RELEASE_PATH_PLACEHOLDER = "__REVIEW_BRIDGE_RELEASE_PATH__";
 const STORE_PLACEHOLDER = "__REVIEW_BRIDGE_HOME__";
 
@@ -507,7 +507,7 @@ test("Hermes README documents profile separation, exact release pinning, absolut
   assert.match(readme, /one exact Review Bridge (release|build|version)/i);
   assert.match(readme, /absolute path/i);
   assert.match(readme, /__REVIEW_BRIDGE_RELEASE_PATH__/);
-  assert.match(readme, /v0\.5\.0/);
+  assert.match(readme, /v0\.6\.0/);
   assert.match(readme, /install/i);
   assert.match(readme, /upgrade/i);
   assert.match(readme, /verify/i);
@@ -518,6 +518,80 @@ test("Hermes README documents profile separation, exact release pinning, absolut
   assert.match(readme, /author\/publication side/i);
 });
 
+test("Hermes install and release artifacts use the 0.6.0 release identity", async () => {
+  const [
+    packageJson,
+    packageLock,
+    build,
+    verifyBuild,
+    server,
+    claudeManifest,
+    codexManifest,
+    rootReadme,
+    hermesReadme,
+    hermesAuthorConfig,
+    hermesReviewerConfig,
+    changelog,
+  ] = await Promise.all([
+    readRequired("package.json"),
+    readRequired("package-lock.json"),
+    readRequired(path.join("scripts", "build.mjs")),
+    readRequired(path.join("scripts", "verify-build.mjs")),
+    readRequired(path.join("src", "server.mjs")),
+    readRequired(path.join("templates", "claude-extension", "manifest.json")),
+    readRequired(
+      path.join("templates", "codex-plugin", ".codex-plugin", "plugin.json"),
+    ),
+    readRequired("README.md"),
+    readRequired(path.join("templates", "hermes", "README.md")),
+    readRequired(path.join("templates", "hermes", "mcp", "author.config.yaml")),
+    readRequired(path.join("templates", "hermes", "mcp", "reviewer.config.yaml")),
+    readRequired("CHANGELOG.md"),
+  ]);
+
+  // v0.5.0 was released before Hermes support existed, so it cannot be the
+  // tag or output path used by the current Hermes installation instructions.
+  assert.match(hermesReadme, /exact `v0\.6\.0` tag/);
+
+  const rootPackage = JSON.parse(packageJson);
+  const lock = JSON.parse(packageLock);
+  assert.equal(rootPackage.version, RELEASE_VERSION);
+  assert.equal(lock.version, RELEASE_VERSION);
+  assert.equal(lock.packages[""].version, RELEASE_VERSION);
+  assert.equal(JSON.parse(claudeManifest).version, RELEASE_VERSION);
+  assert.equal(JSON.parse(codexManifest).version, RELEASE_VERSION);
+  assert.match(server, /version: "0\.6\.0"/);
+
+  for (const currentReleaseText of [
+    build,
+    verifyBuild,
+    rootReadme,
+    hermesReadme,
+    hermesAuthorConfig,
+    hermesReviewerConfig,
+  ]) {
+    assert.doesNotMatch(currentReleaseText, /v0\.5\.0|0\.5\.0/);
+  }
+
+  assert.match(build, /releaseVersion/);
+  assert.match(verifyBuild, /releaseVersion/);
+  assert.match(rootReadme, /v0\.6\.0/);
+  assert.match(hermesReadme, /v0\.6\.0/);
+  assert.match(hermesAuthorConfig, /v0\.6\.0/);
+  assert.match(hermesReviewerConfig, /v0\.6\.0/);
+
+  const currentChangelog = changelog.match(
+    /^## 0\.6\.0[^\n]*\n(?<body>[\s\S]*?)(?=^## )/m,
+  );
+  const previousChangelog = changelog.match(
+    /^## 0\.5\.0[^\n]*\n(?<body>[\s\S]*?)(?=^## )/m,
+  );
+  assert.ok(currentChangelog, "the 0.6.0 changelog entry is missing");
+  assert.match(currentChangelog.groups.body, /HERMES/);
+  assert.ok(previousChangelog, "the historical 0.5.0 changelog entry is missing");
+  assert.doesNotMatch(previousChangelog.groups.body, /HERMES|hermes-integration/);
+});
+
 test("build script packages a versioned hermes-integration directory and preserves Codex and Claude outputs", async () => {
   const [build, packageJson] = await Promise.all([
     readRequired(path.join("scripts", "build.mjs")),
@@ -526,7 +600,7 @@ test("build script packages a versioned hermes-integration directory and preserv
   assert.equal(JSON.parse(packageJson).version, RELEASE_VERSION);
   assert.match(build, /hermes-integration/);
   assert.match(build, /outputRoot/);
-  assert.match(build, /review-bridge-v0\.5\.0/);
+  assert.match(build, /releaseVersion/);
   assert.match(build, /templates["']?,?\s*["']hermes/);
   assert.match(build, /copyServer\(hermesIntegration\)/);
   assert.match(build, /installRuntime\(hermesIntegration\)/);
@@ -554,7 +628,7 @@ test("verify-build validates packaged Hermes artifacts, HERMES binding, isolatio
   assert.match(verify, /hermesReviewer.*listTools/s);
   assert.match(verify, /hermesAuthor/s);
   // Version consistency with the release metadata.
-  assert.match(verify, /review-bridge-v0\.5\.0/);
+  assert.match(verify, /releaseVersion/);
   assert.match(verify, /package\.json/);
 });
 

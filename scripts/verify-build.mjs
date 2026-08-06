@@ -13,7 +13,10 @@ import {
 } from "./hermes-config.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const releaseVersion = "0.5.0";
+const rootPackage = JSON.parse(
+  await fsp.readFile(path.join(projectRoot, "package.json"), "utf8"),
+);
+const releaseVersion = rootPackage.version;
 const releasePathPlaceholder = "__REVIEW_BRIDGE_RELEASE_PATH__";
 const storePlaceholder = "__REVIEW_BRIDGE_HOME__";
 const reviewerToolNames = [
@@ -27,7 +30,7 @@ const reviewerToolNames = [
 ];
 const outputRoot = process.env.REVIEW_BRIDGE_OUTPUT_ROOT
   ? path.resolve(process.env.REVIEW_BRIDGE_OUTPUT_ROOT)
-  : path.join(projectRoot, "dist", "review-bridge-v0.5.0");
+  : path.join(projectRoot, "dist", `review-bridge-v${releaseVersion}`);
 const marketplaceRoot = path.join(outputRoot, "codex-marketplace");
 const pluginRoot = path.join(marketplaceRoot, "plugins", "review-bridge");
 const authorServer = path.join(pluginRoot, "server", "server.mjs");
@@ -35,9 +38,18 @@ const reviewerRoot = path.join(outputRoot, "claude-extension-source");
 const reviewerServer = path.join(reviewerRoot, "server", "server.mjs");
 const hermesIntegration = path.join(outputRoot, "hermes-integration");
 const hermesServer = path.join(hermesIntegration, "server", "server.mjs");
-const mcpb = path.join(outputRoot, "review-bridge-reviewer-v0.5.0.mcpb");
-const dxt = path.join(outputRoot, "review-bridge-reviewer-v0.5.0.dxt");
-const sourceArchive = path.join(outputRoot, "review-bridge-source-v0.5.0.zip");
+const mcpb = path.join(
+  outputRoot,
+  `review-bridge-reviewer-v${releaseVersion}.mcpb`,
+);
+const dxt = path.join(
+  outputRoot,
+  `review-bridge-reviewer-v${releaseVersion}.dxt`,
+);
+const sourceArchive = path.join(
+  outputRoot,
+  `review-bridge-source-v${releaseVersion}.zip`,
+);
 
 function run(command, args, cwd) {
   const result = spawnSync(command, args, {
@@ -334,7 +346,6 @@ function publicationObservation({ at, baseSha, headSha, requestAt }) {
   };
 }
 
-const rootPackage = await readJson(path.join(projectRoot, "package.json"));
 assert.equal(rootPackage.version, releaseVersion);
 if (!process.env.REVIEW_BRIDGE_OUTPUT_ROOT) {
   assert.equal(
@@ -748,7 +759,7 @@ assert.match(hermesReadme, /auto-injects?\s+every selected/i);
 assert.match(hermesReadme, /REVIEW_BRIDGE_HOME/);
 assert.match(hermesReadme, /absolute path/i);
 assert.match(hermesReadme, /__REVIEW_BRIDGE_RELEASE_PATH__/);
-assert.match(hermesReadme, /v0\.5\.0/);
+assert.ok(hermesReadme.includes(`v${releaseVersion}`));
 assert.match(hermesReadme, /upgrade/i);
 assert.match(hermesReadme, /CODEX_TASK/);
 assert.match(hermesReadme, /provenance/i);
