@@ -573,3 +573,40 @@ test("root README and CHANGELOG document Hermes as a local reviewer provider", a
   assert.match(changelog, /Hermes/i);
   assert.match(changelog, /hermes-integration|profile/);
 });
+
+test("root README provider isolation covers Hermes in security and troubleshooting", async () => {
+  const readme = await readRequired("README.md");
+  const security = readme.match(
+    /## Security and scope(?<body>[\s\S]*?)\n## /,
+  );
+  const troubleshooting = readme.match(
+    /## Troubleshooting(?<body>[\s\S]*?)\n## /,
+  );
+  assert.ok(security, "Security and scope section is missing");
+  assert.ok(troubleshooting, "Troubleshooting section is missing");
+
+  for (const [name, section] of [
+    ["Security and scope", security.groups.body],
+    ["Troubleshooting", troubleshooting.groups.body],
+  ]) {
+    for (const provider of ["CLAUDE_DESKTOP", "CODEX_TASK", "HERMES"]) {
+      assert.ok(
+        section.includes("`" + provider + "`"),
+        `${name} omits ${provider}`,
+      );
+    }
+  }
+
+  assert.match(
+    security.groups.body,
+    /mismatched reviewer processes cannot list, read, or submit it/i,
+  );
+  assert.match(
+    troubleshooting.groups.body,
+    /immutably bound to\s+one provider[\s\S]*?reviewer cannot list\s+or open\s+a review bound to either of the other providers/i,
+  );
+  assert.match(
+    readme,
+    /Autonomous local task creation remains `CODEX_TASK`-only\./,
+  );
+});

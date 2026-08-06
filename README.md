@@ -539,8 +539,8 @@ Ledger](docs/rfcs/0001-github-publication-ledger.md).
   verdict-writing tools. It has no Review Bridge tool for modifying the
   repository, pushing code, or creating pull requests.
 - Author and reviewer roles run as separate MCP processes with different tool
-  lists. Each local review is immutably bound to `CLAUDE_DESKTOP` or
-  `CODEX_TASK`; mismatched reviewer processes cannot list, read, or submit it.
+  lists. Each local review is immutably bound to `CLAUDE_DESKTOP`, `CODEX_TASK`,
+  or `HERMES`; mismatched reviewer processes cannot list, read, or submit it.
 - Working-tree overlays are copied into the private review store. Unchanged
   files are read from the captured Git object ID.
 - Files larger than 10 MiB are recorded but not copied into the snapshot.
@@ -660,8 +660,8 @@ still missing, confirm the extension's data directory matches the Codex
 `REVIEW_BRIDGE_HOME`.
 
 **A reviewer cannot see a pending review** — each review is immutably bound to
-one provider. A `CLAUDE_DESKTOP` reviewer cannot list or open a `CODEX_TASK`
-review, and vice versa.
+one provider. A `CLAUDE_DESKTOP`, `CODEX_TASK`, or `HERMES` reviewer cannot list
+or open a review bound to either of the other providers.
 
 ## License
 
