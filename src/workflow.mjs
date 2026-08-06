@@ -555,18 +555,23 @@ const ACTION_KIND_SPECS = {
     },
     dispatch: null,
     validateExecutingProof(action, proof) {
+      // No head here. This action changes what a pull request is, not what
+      // it points at, and on the route that matters most -- a push refused
+      // because the pull request is visible -- the pull request provably
+      // carries the previous head, because the push that would have moved it
+      // is the one being refused. Requiring the workflow's current head
+      // would refuse every honest reading of it.
       if (
         proof == null ||
         proof.repository_id !== action.target.repository_id ||
         proof.pr_number !== action.target.pr_number ||
         proof.base_branch !== action.target.base_branch ||
         proof.head_branch !== action.target.head_branch ||
-        proof.head_sha !== action.target.head_sha ||
         typeof proof.is_draft !== "boolean"
       ) {
         fail(
           "WORKFLOW_ACTION_INVALID",
-          "the return-to-draft pre-read must bind the exact pull request and head",
+          "the return-to-draft pre-read must bind the exact pull request",
         );
       }
     },
@@ -585,7 +590,6 @@ const ACTION_KIND_SPECS = {
         response.pr_number !== action.target.pr_number ||
         response.base_branch !== action.target.base_branch ||
         response.head_branch !== action.target.head_branch ||
-        response.head_sha !== action.target.head_sha ||
         response.is_draft !== true ||
         // The same rule the mark-ready reconciliation follows, in the other
         // direction: only the claim that this action performed the
@@ -3323,7 +3327,7 @@ export async function recordReturnToDraftObservation(
   workflowId,
   expectedRevision,
   actionId,
-  { outcome, repositoryId, prNumber, baseBranch, headBranch, headSha, isDraft },
+  { outcome, repositoryId, prNumber, baseBranch, headBranch, isDraft },
 ) {
   if (!["RETURNED_TO_DRAFT", "OBSERVED_ALREADY_DRAFT"].includes(outcome)) {
     throw new TypeError(
@@ -3332,7 +3336,6 @@ export async function recordReturnToDraftObservation(
   }
   assertPositiveInteger(repositoryId, "repository_id");
   assertPositiveInteger(prNumber, "pr_number");
-  assertSha(headSha, "head_sha");
   return recordActionObservation(
     storeRoot,
     workflowId,
@@ -3345,7 +3348,6 @@ export async function recordReturnToDraftObservation(
       pr_number: prNumber,
       base_branch: baseBranch,
       head_branch: headBranch,
-      head_sha: headSha,
       is_draft: isDraft,
     }),
   );
@@ -3880,6 +3882,15 @@ export async function abandonWorkflowAction(
       fail(
         "WORKFLOW_ACTION_STATE_INVALID",
         "this action cannot be abandoned on recorded evidence",
+      );
+    }
+    if (action.target.review_id == null) {
+      // Nothing recorded this action's world: the evidence this transition
+      // decides on comes from a publication, and there is none. The pull
+      // request itself is the only thing left to reconcile against.
+      fail(
+        "WORKFLOW_ACTION_STATE_INVALID",
+        "no publication is bound to this action, so no recorded observation can settle it",
       );
     }
     const projection = await getAutonomousPreReady(
@@ -4590,14 +4601,13 @@ export async function advanceRemoteWorkflow(
     // request still draft is refused exactly as before -- except when the
     // projection now pauses, which stops the workflow rather than resuming
     // work on stale evidence.
-    // Any phase that records a head is admitted, not just the remote repair
-    // ones: the exposure that blocks a head can arrive while the workflow
-    // sits in any of them -- including IMPLEMENTING, which is where an
-    // invalidated publication's pause resumes -- and each would otherwise
-    // have no route to the one action that unblocks it. Naming the act
-    // rather than the phases is what stops this list from missing the next
-    // one.
-    const recordsHead = HEAD_RECORDING_PHASES.includes(workflow.phase);
+    // A repair phase is admitted so it can reach the undo: someone may mark
+    // the pull request ready after the repair began, and head recording then
+    // refuses. The local head-recording phases are not admitted, and do not
+    // need to be: reaching one means the publication that could have raised
+    // the exposure is already terminal, and a terminal publication decides
+    // nothing here.
+    const recordsHead = REMOTE_REPAIR_PHASES.includes(workflow.phase);
     if (
       !recordsHead &&
       ![
@@ -5000,6 +5010,25 @@ export async function resumeAutonomousWorkflow(
     // accept: every recorded head must be a descendant of the last, so a
     // rewritten head is rejected however the workflow resumes. Say so instead
     // of resuming into a phase that will re-derive the same stop.
+    // A pull request that has closed or merged takes its workflow with it:
+    // resuming into a phase that records a head would spend a whole local
+    // cycle to discover at the push that there is nothing to push to.
+    if (
+      workflow.pause?.reason_code === "PUBLICATION_INVALIDATED" &&
+      workflow.pull_request != null &&
+      workflow.current_publication != null
+    ) {
+      const projection = await getAutonomousPreReady(
+        storeRoot,
+        workflow.current_publication.review_id,
+      );
+      if (["CLOSED", "MERGED"].includes(projection.status)) {
+        fail(
+          "WORKFLOW_RESUME_INVALID",
+          "the bound pull request is closed or merged: this workflow has nothing left to push to and must be cancelled",
+        );
+      }
+    }
     if (workflow.pause?.reason_code === "HISTORY_REWRITE_REQUIRED") {
       fail(
         "WORKFLOW_RESUME_INVALID",

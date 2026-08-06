@@ -1656,7 +1656,9 @@ Implementation is split into three changes after this RFC is accepted:
 The pull request stays draft for the whole of item 2, so everything that acts
 on ready state belongs to item 3: both draft-gate pauses, the provider-policy
 proof, the single-use `draft_gate_exception`, the mark-ready action, and
-`RETURN_PR_TO_DRAFT_FOR_REPAIR`, whose precondition is a ready pull request.
+`RETURN_PR_TO_DRAFT_FOR_REPAIR`, which acts on a pull request that is out of
+draft -- established by a live publication's observation, or, where none can
+answer, by the controller's pre-read immediately before the push.
 Item 2 keeps the reachable pauses `GITHUB_REVIEW_AMBIGUOUS`,
 `PUBLICATION_INVALIDATED`, `REQUIRED_CHECK_UNACTIONABLE`, `SEMANTIC_CONFLICT`,
 `HISTORY_REWRITE_REQUIRED`, and `NO_PROGRESS`. Unresolved review threads block

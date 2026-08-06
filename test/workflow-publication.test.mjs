@@ -2831,7 +2831,6 @@ test("a gate cannot outlive the workflow head that could replace it", async (t) 
       prNumber: PR_NUMBER,
       baseBranch: "main",
       headBranch: TOPIC_BRANCH,
-      headSha,
       isDraft: true,
     },
   );
@@ -4447,7 +4446,6 @@ test("a regressed clearance never returns an already-ready pull request to the l
       prNumber: PR_NUMBER,
       baseBranch: "main",
       headBranch: TOPIC_BRANCH,
-      headSha,
       isDraft: true,
     },
   );
@@ -4574,7 +4572,6 @@ test("a repair returns the pull request to draft before it starts", async (t) =>
         prNumber: PR_NUMBER,
         baseBranch: "main",
         headBranch: TOPIC_BRANCH,
-        headSha,
         isDraft: false,
       },
     ),
@@ -4592,7 +4589,6 @@ test("a repair returns the pull request to draft before it starts", async (t) =>
         prNumber: PR_NUMBER,
         baseBranch: "main",
         headBranch: TOPIC_BRANCH,
-        headSha,
         isDraft: true,
       },
     ),
@@ -4609,7 +4605,6 @@ test("a repair returns the pull request to draft before it starts", async (t) =>
       prNumber: PR_NUMBER,
       baseBranch: "main",
       headBranch: TOPIC_BRANCH,
-      headSha,
       isDraft: true,
     },
   );
@@ -4821,7 +4816,6 @@ test("a repair diverted through the undo is not a repeated attempt", async (t) =
       prNumber: PR_NUMBER,
       baseBranch: "main",
       headBranch: TOPIC_BRANCH,
-      headSha,
       isDraft: true,
     },
   );
@@ -5111,7 +5105,7 @@ test("a terminal publication stops deciding what the pull request is", async (t)
   assert.equal(repaired.current_publication, null);
 });
 
-test("a merged publication does not freeze the next head either", async (t) => {
+test("a merged pull request ends the run instead of starting a cycle", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(
@@ -5145,20 +5139,20 @@ test("a merged publication does not freeze the next head either", async (t) => {
     waiting.revision,
   );
   assert.equal(paused.pause.reason_code, "PUBLICATION_INVALIDATED");
-  const resumed = await resumeAutonomousWorkflow(
-    state.store,
-    workflow.workflow_id,
-    paused.revision,
-    { operatorLabel: "jeremy", rationale: "the pull request merged" },
+
+  // Resuming would send it to record a head, run a whole local review, and
+  // discover at the push that the pull request it would land on is gone.
+  // The workflow is over; cancelling is what is left, and it is cheap
+  // because the claim release wants exactly this proof.
+  await assert.rejects(
+    resumeAutonomousWorkflow(
+      state.store,
+      workflow.workflow_id,
+      paused.revision,
+      { operatorLabel: "jeremy", rationale: "try to continue" },
+    ),
+    (error) => error.code === "WORKFLOW_RESUME_INVALID",
   );
-  assert.equal(resumed.phase, "IMPLEMENTING");
-  const repaired = await recordWorkflowHead(
-    state.store,
-    workflow.workflow_id,
-    resumed.revision,
-    await commit(state.repository, "export const value = 3;\n"),
-  );
-  assert.equal(repaired.current_publication, null);
 });
 test("the undo phase has an exit when the exposure resolves itself", async (t) => {
   const state = await fixture();
@@ -5673,6 +5667,10 @@ test("a gated head is not pushed onto a pull request reviewers can see", async (
     ensuring.revision,
   );
   assert.equal(undo.action.target.review_id, null);
+  // The pull request still carries the first head -- the push that would
+  // have moved it is the one just refused -- so a pre-read that reported the
+  // workflow's current head would be a lie. This action does not ask for
+  // one: it changes what the pull request is, not what it points at.
   const undoExecuting = await markWorkflowActionExecuting(
     state.store,
     workflow.workflow_id,
@@ -5683,7 +5681,6 @@ test("a gated head is not pushed onto a pull request reviewers can see", async (
       pr_number: PR_NUMBER,
       base_branch: "main",
       head_branch: TOPIC_BRANCH,
-      head_sha: secondHead,
       is_draft: false,
     },
   );
@@ -5698,7 +5695,6 @@ test("a gated head is not pushed onto a pull request reviewers can see", async (
       prNumber: PR_NUMBER,
       baseBranch: "main",
       headBranch: TOPIC_BRANCH,
-      headSha: secondHead,
       isDraft: true,
     },
   );

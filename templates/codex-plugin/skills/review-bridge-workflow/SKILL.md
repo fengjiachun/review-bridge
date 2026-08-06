@@ -203,8 +203,9 @@ blocks after the pull request is ready is operator work.
     left for this workflow to do: its pull request is gone, so no head can be
     pushed to it and no draft can be returned to. Pause
     `EXTERNAL_ACTION_INDETERMINATE` and cancel. That cancellation is the
-    cheap one: releasing the claims needs the bound pull request proven
-    closed, which is exactly what has happened. Completion returns the workflow to the wait, which re-derives the
+    cheap one where it usually is not: releasing the claims needs the bound
+    pull request proven closed, which is exactly what has happened, alongside
+    the ordinary proofs that the local branch and the head ref are gone. Completion returns the workflow to the wait, which re-derives the
     blocker as ordinary work — the diverted repair is not counted as an attempt, so
     it resumes rather than stalling `NO_PROGRESS` on a position it never
     tried. A terminal publication — closed, merged, or invalidated — is
