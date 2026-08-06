@@ -578,9 +578,11 @@ wait for exactly this transition, without re-evaluating its blocker.
 
 A repair the workflow is diverted out of is not recorded as an attempt at
 it, so the return does not read as a repeat of a position already proven not
-to clear. A publication that is already terminal is the one exposure this
-does not answer -- there is no draft to return to -- and it pauses as it
-always did. The observation that proves the pull request draft again also
+to clear. A pull request that is closed or merged is the one exposure this does not
+answer -- there is no draft to return to -- and it pauses as it always did.
+An invalidated publication is not that case: its ledger is finished while
+the pull request stays open and returnable, and the workflow that must
+abandon it still needs a draft to push its next head to. The observation that proves the pull request draft again also
 revokes any gate minted while it was visible, so a gate never coexists with
 a head that could replace it. A publication that clears is unaffected and still reaches
 the mark-ready stop, where an already-ready pull request reconciles without

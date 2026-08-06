@@ -5636,6 +5636,10 @@ export async function getAutonomousPreReady(
         head_sha: publicationAuthorization.head_sha,
         is_draft: ledger.latest_observation?.pull_request?.is_draft ?? null,
         latest_observed_at: ledger.latest_observation?.observed_at ?? null,
+        // The server stamped this one; observed_at is the provider's word for
+        // when it looked. A consumer ordering an observation against its own
+        // writes needs the stamp it authored.
+        latest_recorded_at: ledger.latest_observation?.recorded_at ?? null,
       };
     } finally {
       await closeAuthorizationFiles(authorization);

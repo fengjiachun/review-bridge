@@ -190,9 +190,11 @@ blocks after the pull request is ready is operator work.
     Completion returns the workflow to the wait, which re-derives the blocker
     as ordinary work — the diverted repair is not counted as an attempt, so
     it resumes rather than stalling `NO_PROGRESS` on a position it never
-    tried. A publication already terminal is the one exposure this does not
-    answer: there is no draft to return to, and it pauses
-    `PUBLICATION_INVALIDATED` as always. `record_workflow_head` refuses with
+    tried. A closed or merged pull request is the one exposure this
+    does not answer -- there is no draft to return to -- and it pauses as
+    always. An `INVALIDATED` publication is not that case: the ledger is
+    finished with it while the pull request stays open and returnable, so the
+    undo runs and the new head follows. `record_workflow_head` refuses with
     `WORKFLOW_PULL_REQUEST_EXPOSED` on the same evidence, and a repair phase
     that hits it advances back through this transition rather than stalling.
     A cleared publication is unaffected: it reaches the pre-ready stop, where

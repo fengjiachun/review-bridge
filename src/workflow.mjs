@@ -601,9 +601,12 @@ const ACTION_KIND_SPECS = {
     // draft must not be handed back to a wait whose repair phases push new
     // commits onto it, so that intent lands in the undo instead, which is
     // the only thing that can make the repair legal again.
+    // Same question as the wait asks: can this pull request still be a
+    // draft? A closed or merged one cannot, and an intent dropped over it
+    // belongs in the wait, which pauses for the operator as it always did.
     abandonPhaseForProof: (proof, error) =>
       proof?.is_draft === false &&
-      !["INVALIDATED", "CLOSED", "MERGED"].includes(error?.details?.status)
+      !["CLOSED", "MERGED"].includes(error?.details?.status)
         ? "ENSURE_DRAFT_FOR_REPAIR"
         : null,
     claimKind: "PULL_REQUEST",
@@ -1220,6 +1223,9 @@ function validateWorkflow(workflow) {
       fail("WORKFLOW_STATE_INVALID", "remote attempt blocker digest is invalid");
     }
     assertString(attempt.status, "remote attempt status", { max: 1024 });
+    if (attempt.diverted_at != null) {
+      assertTimestamp(attempt.diverted_at, "remote attempt diverted_at");
+    }
     assertTimestamp(attempt.at, "remote attempt at");
   }
   for (const [index, record] of workflow.addressed_findings.entries()) {
@@ -3802,7 +3808,10 @@ export async function abandonMarkReadyAction(
     // action executed shows a draft pull request simply because the call had
     // not happened yet. Stale evidence is refused for the same reason -- the
     // projection itself declines to answer on it.
-    const observedAt = projection.latest_observed_at;
+    // The provider's observed_at is its own word for when it looked, and a
+    // clock ahead of this one would let an observation taken before the call
+    // pass as taken after it. The recorded_at stamp is this server's.
+    const observedAt = projection.latest_recorded_at;
     if (
       projection.workflow_id !== workflow.workflow_id ||
       projection.head_sha !== action.target.head_sha ||
@@ -3818,7 +3827,7 @@ export async function abandonMarkReadyAction(
           review_id: action.target.review_id,
           is_draft: projection.is_draft,
           status: projection.status,
-          latest_observed_at: observedAt,
+          latest_recorded_at: observedAt,
         },
       );
     }
@@ -4548,16 +4557,23 @@ export async function advanceRemoteWorkflow(
     // exists to record cannot be recorded. The blocker itself is not
     // re-evaluated in either case.
     const pauseReason = remotePauseReason(projection);
-    // A terminal publication is the one exposure the undo cannot answer: its
-    // pull request is merged or closed, so there is no draft to return to
-    // and no repair to protect. Every other stop yields to the undo first --
-    // including one that pauses -- because the pause re-derives afterwards
-    // while a pull request left visible strands the repair its remedy needs.
+    // A closed ledger is the one exposure the undo cannot answer: its pull
+    // request is merged or closed, so there is no draft to return to and no
+    // repair to protect. That is the ledger's own terminal record, not the
+    // derived status: INVALIDATED also covers an identity mismatch, a
+    // diverged base, and a history conflict, all with the pull request open
+    // and returnable. Every other stop yields to the undo first -- including
+    // one that pauses -- because the pause re-derives afterwards while a
+    // pull request left visible strands the repair its remedy needs.
     const exposed =
       projection.is_draft === false &&
-      pauseReason !== "PUBLICATION_INVALIDATED" &&
+      !["CLOSED", "MERGED"].includes(projection.status) &&
       (repairPhase != null || repairing);
-    if (repairing && !exposed && pauseReason == null) {
+    // A repair phase reaches this line only to be sent to the undo. Letting
+    // it fall through to the pause path would let a resume move it to
+    // another phase, and the addressed-findings record that only
+    // ADDRESS_REMOTE_FINDINGS writes would be lost with it.
+    if (repairing && !exposed) {
       fail(
         "WORKFLOW_PHASE_INVALID",
         `cannot advance a remote wait in phase ${workflow.phase}`,
@@ -4574,21 +4590,20 @@ export async function advanceRemoteWorkflow(
           next.current_publication.awaiting_revision = projection.revision;
           // A repair the workflow is diverted out of before it could record
           // a head was never an attempt at anything, whatever the projection
-          // said on the way out. Leaving its entry in the chain would make
-          // the return from the undo look like a repeat of a position
-          // already proven not to clear, and the motivating case would end
-          // in NO_PROGRESS instead of the repair it went to make legal.
-          // Nothing else appends while a repair phase holds, so the entry to
-          // drop is the one on the end, and it is dropped only for this
-          // head: an attempt against an earlier head is history, not this
-          // diversion.
+          // said on the way out. Counting it would make the return from the
+          // undo read as a repeat of a position already proven not to clear,
+          // and the motivating case would end in NO_PROGRESS instead of the
+          // repair it went to make legal. The entry is marked rather than
+          // removed: a stall pause appends one too, and destroying the
+          // operator's record of a real repeat to fix a spurious one would
+          // be the worse trade.
           const last = next.remote_attempts.at(-1);
           if (
             repairing &&
             last != null &&
             last.head_sha === next.current_head_sha
           ) {
-            next.remote_attempts.pop();
+            last.diverted_at = now();
           }
           next.phase = "ENSURE_DRAFT_FOR_REPAIR";
         }),
@@ -4654,6 +4669,7 @@ export async function advanceRemoteWorkflow(
     const repeated =
       workflow.remote_attempts.find(
         (attempt) =>
+          attempt.diverted_at == null &&
           attempt.blocker_sha256 === projection.blocker_sha256 &&
           (attempt.head_sha === workflow.current_head_sha ||
             attempt.tree_sha === tree),

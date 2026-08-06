@@ -4779,9 +4779,10 @@ test("a repair diverted through the undo is not a repeated attempt", async (t) =
     repairing.revision,
   );
   assert.equal(ensuring.phase, "ENSURE_DRAFT_FOR_REPAIR");
-  // The repair it was diverted out of never ran, so it is not left in the
-  // attempt chain to be matched against on the way back.
-  assert.equal(ensuring.remote_attempts.length, 0);
+  // The repair it was diverted out of never ran, so it is marked rather than
+  // counted -- the operator's record stays, the stall comparison skips it.
+  assert.equal(ensuring.remote_attempts.length, 1);
+  assert.notEqual(ensuring.remote_attempts[0].diverted_at, undefined);
 
   const planned = await planReturnToDraft(
     state.store,
@@ -4848,7 +4849,8 @@ test("a repair diverted through the undo is not a repeated attempt", async (t) =
     restored.revision,
   );
   assert.equal(rerepairing.phase, "ADDRESS_CHECK_FAILURE");
-  assert.equal(rerepairing.remote_attempts.length, 1);
+  assert.equal(rerepairing.remote_attempts.length, 2);
+  assert.equal(rerepairing.remote_attempts[1].diverted_at, undefined);
 });
 
 test("an exposed pull request reaches the undo even when the blocker also pauses", async (t) => {
@@ -4999,4 +5001,153 @@ test("a terminal publication is not sent to an undo it cannot run", async (t) =>
   );
   assert.equal(paused.phase, "PAUSED_HUMAN");
   assert.equal(paused.pause.reason_code, "PUBLICATION_INVALIDATED");
+});
+
+test("an invalidated publication whose pull request is open still reaches the undo", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => failingCheck(payload),
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(repairing.phase, "ADDRESS_CHECK_FAILURE");
+
+  // INVALIDATED is not only a closed ledger: a base that diverged from the
+  // reviewed one derives it with the pull request open and returnable. The
+  // undo has to be reachable there, or the workflow is stranded exactly as
+  // it was before this action existed.
+  const divergedAt = at + 10_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 3,
+      observation: (() => {
+        const payload = draftObservation(state, headSha, {
+          at: divergedAt,
+          requestId: 100,
+          requestAt: at + 1_000,
+          isDraft: false,
+        });
+        payload.pull_request.reviewed_base_current_base_comparison.status =
+          "DIVERGED";
+        return payload;
+      })(),
+    },
+    { clock: () => divergedAt + 10 },
+  );
+  // The ledger is finished with this publication, but the pull request is
+  // still open and can still be a draft, so the undo is what it needs.
+  const projection = await getAutonomousPreReady(state.store, reviewId);
+  assert.equal(projection.status, "INVALIDATED");
+  assert.equal(projection.is_draft, false);
+
+  const ensuring = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    repairing.revision,
+  );
+  assert.equal(ensuring.phase, "ENSURE_DRAFT_FOR_REPAIR");
+});
+
+test("a provider clock running ahead cannot abandon a landed mark-ready", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now() - 120_000;
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+  );
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  const planned = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    preReady.revision,
+  );
+
+  // The provider stamps this observation twenty seconds ahead of this
+  // server's clock -- inside the thirty seconds the ledger tolerates -- and
+  // the server records it before the action executes.
+  const skewedAt = Date.now() + 20_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 3,
+      observation: draftObservation(state, headSha, {
+        at: skewedAt,
+        requestId: 100,
+        requestAt: at + 1_000,
+      }),
+    },
+    { clock: () => Date.now() },
+  );
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    planned.workflow.revision,
+    planned.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      base_branch: "main",
+      head_branch: TOPIC_BRANCH,
+      head_sha: headSha,
+      is_draft: true,
+    },
+  );
+
+  // Read by the provider's timestamp this observation looks newer than the
+  // execution and would abandon a mark-ready that may well have landed. The
+  // stamp that decides is the one this server wrote.
+  await assert.rejects(
+    abandonMarkReadyAction(
+      state.store,
+      workflow.workflow_id,
+      executing.revision,
+      planned.action.action_id,
+    ),
+    (error) => error.code === "WORKFLOW_PULL_REQUEST_EXPOSED",
+  );
+  const held = await getAutonomousWorkflow(state.store, workflow.workflow_id);
+  assert.equal(held.active_action.status, "EXECUTING");
 });
