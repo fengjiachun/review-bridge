@@ -595,7 +595,7 @@ if (role === "author") {
     {
       title: "Abandon a stuck action on recorded evidence",
       description:
-        "Drop an executing MARK_PR_READY that the publication has since observed leaving nothing standing: a recorded observation, stamped by the server after this action executed, showing the pull request draft on its head. Your own pre-read is not accepted for this, because a timeout or a lagging read reports a draft pull request while the mutation applies. Refuses while the recorded observation shows it out of draft; reconcile that action instead. A call still in flight can land after the abandon -- that leaves a visible pull request, which the wait routes into the undo before any head is pushed to it.",
+        "Drop an executing action that the publication has since observed in a state that settles it. For MARK_PR_READY that is a draft pull request on the action's head, meaning nothing it issued stands; for RETURN_PR_TO_DRAFT it is a closed or merged pull request, which can never report the draft state its reconciliation requires. In both cases the evidence is a recorded observation stamped by the server after this action executed; your own pre-read is not accepted, because a timeout or a lagging read reports a draft pull request while the mutation applies. Refuses when the observation does not show that state, or when it has aged out -- reconcile the action instead. A mark-ready call still in flight can land after the abandon; that leaves a visible pull request, which the wait routes into the draft restoration before any head is pushed to it.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),

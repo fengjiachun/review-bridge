@@ -187,16 +187,22 @@ blocks after the pull request is ready is operator work.
     only if that pre-read finds it ready, and reconcile with
     `record_return_to_draft_observation` — `RETURNED_TO_DRAFT` after your own
     call, `OBSERVED_ALREADY_DRAFT` when the pre-read already found it draft.
-    Completion returns the workflow to the wait, which re-derives the blocker
-    as ordinary work — the diverted repair is not counted as an attempt, so
+    If the pull request closes or merges while that action is in flight, it
+    can never report the draft state its reconciliation needs: call
+    `abandon_workflow_action`, which settles a return-to-draft on exactly
+    that observed state, and the wait pauses the terminal publication as
+    always. Completion returns the workflow to the wait, which re-derives the
+    blocker as ordinary work — the diverted repair is not counted as an attempt, so
     it resumes rather than stalling `NO_PROGRESS` on a position it never
-    tried. A closed or merged pull request is the one exposure this
-    does not answer -- there is no draft to return to -- and it pauses as
-    always. An `INVALIDATED` publication is not that case: the ledger is
-    finished with it while the pull request stays open and returnable, so the
-    undo runs and the new head follows. The phase is advanceable, so if
-    someone else returns the pull request to draft, or it closes, the
-    workflow moves on rather than waiting for an action with nothing to do. `record_workflow_head` refuses with
+    tried. A terminal publication — closed, merged, or invalidated — is
+    the one case this does not answer, and deliberately: it records no
+    further observation, so its last reading is frozen and could never
+    report the pull request as a draft again however many times it became
+    one. The wait pauses it as always, and the publication started for the
+    next head is what reads the pull request afresh. The phase is
+    advanceable, so if someone else returns the pull request to draft the
+    workflow moves on rather than waiting for an action with nothing to
+    do. `record_workflow_head` refuses with
     `WORKFLOW_PULL_REQUEST_EXPOSED` on the same evidence, and a repair phase
     that hits it advances back through this transition rather than stalling.
     A cleared publication is unaffected: it reaches the pre-ready stop, where
@@ -260,7 +266,7 @@ blocks after the pull request is ready is operator work.
     with a standing blocker into `POST_READY`, which has no repair route.
     Do not plan around a second checkpoint either; there is none, and nothing
     you can read decides whether an earlier call landed (GitHub attests no
-    actor for a draft transition). Call `abandon_mark_ready_action` instead.
+    actor for a draft transition). Call `abandon_workflow_action` instead.
     Record a fresh observation first: the server drops the action only on one
     taken *after* the action executed, since an older one shows a draft pull
     request simply because the call had not happened yet, and it refuses a

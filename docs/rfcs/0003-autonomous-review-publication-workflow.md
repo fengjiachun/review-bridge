@@ -588,14 +588,18 @@ wait for exactly this transition, without re-evaluating its blocker.
 
 A repair the workflow is diverted out of is not recorded as an attempt at
 it, so the return does not read as a repeat of a position already proven not
-to clear. A pull request that is closed or merged is the one exposure this does not
-answer -- there is no draft to return to -- and it pauses as it always did.
-An invalidated publication is not that case: its ledger is finished while
-the pull request stays open and returnable, and the workflow that must
-abandon it still needs a draft to push its next head to, so it reaches the
-undo from the wait as readily as from a repair phase. What decides is
-whether the next step pushes a head at all: a pause that resumes into a
-head-recording phase does, one that resumes into the wait does not. The observation that proves the pull request draft again also
+to clear. What decides is whether the next step pushes a head at all: a pause that
+resumes into a head-recording phase does, one that resumes into the wait
+does not.
+
+A terminal publication is exempt, and the exemption is the point rather than
+an omission. Such a ledger accepts no further observation, so its last
+reading is frozen: a pull request visible in it is visible in it forever,
+however often it is actually returned to draft. A workflow routing on that
+would never leave, and a head recording refusing on it would never proceed.
+The guarantee this gives is therefore about live publications; the one
+started for the next head reads the pull request again, and its first
+observation restores it. The observation that proves the pull request draft again also
 revokes any gate minted while it was visible, so a gate never coexists with
 a head that could replace it. A publication that clears is unaffected and still reaches
 the mark-ready stop, where an already-ready pull request reconciles without

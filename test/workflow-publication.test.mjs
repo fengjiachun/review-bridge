@@ -5023,7 +5023,7 @@ test("a terminal publication is not sent to an undo it cannot run", async (t) =>
   assert.equal(paused.pause.reason_code, "PUBLICATION_INVALIDATED");
 });
 
-test("an invalidated publication whose pull request is open still reaches the undo", async (t) => {
+test("a terminal publication stops deciding what the pull request is", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(
@@ -5037,158 +5037,10 @@ test("an invalidated publication whose pull request is open still reaches the un
     headSha,
     "one",
   );
-  const at = Date.now();
-  const { workflow: waiting } = await reachRemoteWait(
-    state,
-    atPublication,
-    reviewId,
-    headSha,
-    at,
-    (payload) => failingCheck(payload),
-  );
-  const repairing = await advanceRemoteWorkflow(
-    state.store,
-    workflow.workflow_id,
-    waiting.revision,
-  );
-  assert.equal(repairing.phase, "ADDRESS_CHECK_FAILURE");
-
-  // INVALIDATED is not only a closed ledger: a base that diverged from the
-  // reviewed one derives it with the pull request open and returnable. The
-  // undo has to be reachable there, or the workflow is stranded exactly as
-  // it was before this action existed.
-  const divergedAt = at + 10_000;
-  await recordGithubSnapshot(
-    state.store,
-    reviewId,
-    {
-      expectedRevision: 3,
-      observation: (() => {
-        const payload = draftObservation(state, headSha, {
-          at: divergedAt,
-          requestId: 100,
-          requestAt: at + 1_000,
-          isDraft: false,
-        });
-        payload.pull_request.reviewed_base_current_base_comparison.status =
-          "DIVERGED";
-        return payload;
-      })(),
-    },
-    { clock: () => divergedAt + 10 },
-  );
-  // The ledger is finished with this publication, but the pull request is
-  // still open and can still be a draft, so the undo is what it needs.
-  const projection = await getAutonomousPreReady(state.store, reviewId);
-  assert.equal(projection.status, "INVALIDATED");
-  assert.equal(projection.is_draft, false);
-
-  const ensuring = await advanceRemoteWorkflow(
-    state.store,
-    workflow.workflow_id,
-    repairing.revision,
-  );
-  assert.equal(ensuring.phase, "ENSURE_DRAFT_FOR_REPAIR");
-});
-
-test("a provider clock running ahead cannot abandon a landed mark-ready", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
-  const at = Date.now() - 120_000;
-  const { workflow: waiting } = await reachRemoteWait(
-    state,
-    atPublication,
-    reviewId,
-    headSha,
-    at,
-  );
-  const preReady = await advanceRemoteWorkflow(
-    state.store,
-    workflow.workflow_id,
-    waiting.revision,
-  );
-  const planned = await planMarkPullRequestReady(
-    state.store,
-    workflow.workflow_id,
-    preReady.revision,
-  );
-
-  // The provider stamps this observation twenty seconds ahead of this
-  // server's clock -- inside the thirty seconds the ledger tolerates -- and
-  // the server records it before the action executes.
-  const skewedAt = Date.now() + 20_000;
-  await recordGithubSnapshot(
-    state.store,
-    reviewId,
-    {
-      expectedRevision: 3,
-      observation: draftObservation(state, headSha, {
-        at: skewedAt,
-        requestId: 100,
-        requestAt: at + 1_000,
-      }),
-    },
-    { clock: () => Date.now() },
-  );
-  const executing = await markWorkflowActionExecuting(
-    state.store,
-    workflow.workflow_id,
-    planned.workflow.revision,
-    planned.action.action_id,
-    {
-      repository_id: REPOSITORY_ID,
-      pr_number: PR_NUMBER,
-      base_branch: "main",
-      head_branch: TOPIC_BRANCH,
-      head_sha: headSha,
-      is_draft: true,
-    },
-  );
-
-  // Read by the provider's timestamp this observation looks newer than the
-  // execution and would abandon a mark-ready that may well have landed. The
-  // stamp that decides is the one this server wrote.
-  await assert.rejects(
-    abandonWorkflowAction(
-      state.store,
-      workflow.workflow_id,
-      executing.revision,
-      planned.action.action_id,
-    ),
-    (error) => error.code === "WORKFLOW_ACTION_NOT_ABANDONABLE",
-  );
-  const held = await getAutonomousWorkflow(state.store, workflow.workflow_id);
-  assert.equal(held.active_action.status, "EXECUTING");
-});
-
-test("an invalidated publication reaches the undo from the wait as well", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
-  // No repair phase is involved: the publication is invalidated straight from
-  // the wait, and its remedy is a new head from IMPLEMENTING -- pushed to
-  // this same pull request, which someone has made visible.
+  // The observation that invalidates the publication also shows the pull
+  // request visible. That reading is now frozen: a terminal ledger refuses
+  // every further snapshot, so nothing can ever report the pull request as a
+  // draft again through it. Routing on it would loop forever.
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -5205,15 +5057,102 @@ test("an invalidated publication reaches the undo from the wait as well", async 
   );
   const projection = await getAutonomousPreReady(state.store, reviewId);
   assert.equal(projection.status, "INVALIDATED");
+  assert.equal(projection.is_draft, false);
+  const laterAt = at + 10_000;
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      reviewId,
+      {
+        expectedRevision: 3,
+        observation: draftObservation(state, headSha, {
+          at: laterAt,
+          requestId: 100,
+          requestAt: at + 1_000,
+        }),
+      },
+      { clock: () => laterAt + 10 },
+    ),
+    (error) => error.code === "PUBLICATION_TERMINAL",
+  );
 
-  const ensuring = await advanceRemoteWorkflow(
+  // So the workflow stops asking it: the pause is the ordinary one, and the
+  // head it resumes to record is not refused on evidence that can never
+  // change. The publication started for that head reads the pull request
+  // afresh, which is where the guarantee comes back.
+  const paused = await advanceRemoteWorkflow(
     state.store,
     workflow.workflow_id,
     waiting.revision,
   );
-  assert.equal(ensuring.phase, "ENSURE_DRAFT_FOR_REPAIR");
+  assert.equal(paused.phase, "PAUSED_HUMAN");
+  assert.equal(paused.pause.reason_code, "PUBLICATION_INVALIDATED");
+  const resumed = await resumeAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    paused.revision,
+    { operatorLabel: "jeremy", rationale: "start a new head" },
+  );
+  assert.equal(resumed.phase, "IMPLEMENTING");
+  const repaired = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    resumed.revision,
+    await commit(state.repository, "export const value = 3;\n"),
+  );
+  assert.equal(repaired.phase, "PREPARE_LOCAL_REVIEW");
+  assert.equal(repaired.current_publication, null);
 });
 
+test("a merged publication does not freeze the next head either", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+    (payload) => {
+      payload.pull_request.is_draft = false;
+      payload.pull_request.state = "CLOSED";
+      payload.pull_request.merged = true;
+      return payload;
+    },
+  );
+  const paused = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(paused.pause.reason_code, "PUBLICATION_INVALIDATED");
+  const resumed = await resumeAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    paused.revision,
+    { operatorLabel: "jeremy", rationale: "the pull request merged" },
+  );
+  assert.equal(resumed.phase, "IMPLEMENTING");
+  const repaired = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    resumed.revision,
+    await commit(state.repository, "export const value = 3;\n"),
+  );
+  assert.equal(repaired.current_publication, null);
+});
 test("the undo phase has an exit when the exposure resolves itself", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -5486,6 +5425,84 @@ test("an undo whose pull request is still returnable is not abandonable", async 
       workflow.workflow_id,
       executing.revision,
       planned.action.action_id,
+    ),
+    (error) => error.code === "WORKFLOW_ACTION_NOT_ABANDONABLE",
+  );
+});
+
+test("stale evidence cannot abandon an action either", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+  );
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  const planned = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    preReady.revision,
+  );
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    planned.workflow.revision,
+    planned.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      base_branch: "main",
+      head_branch: TOPIC_BRANCH,
+      head_sha: headSha,
+      is_draft: true,
+    },
+  );
+
+  // The observation is recorded after the action executes and shows a draft
+  // pull request -- but by the time the abandon asks, it has aged out. The
+  // projection declines to answer on expired evidence, and so must this.
+  const recordedAt = Date.now() + 1_000;
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 3,
+      observation: failingCheck(
+        draftObservation(state, headSha, {
+          at: recordedAt,
+          requestId: 100,
+          requestAt: at + 1_000,
+        }),
+      ),
+    },
+    { clock: () => recordedAt + 10 },
+  );
+  await assert.rejects(
+    abandonWorkflowAction(
+      state.store,
+      workflow.workflow_id,
+      executing.revision,
+      planned.action.action_id,
+      { clock: () => recordedAt + 10 * 60_000 },
     ),
     (error) => error.code === "WORKFLOW_ACTION_NOT_ABANDONABLE",
   );

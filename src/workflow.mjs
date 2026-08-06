@@ -2779,12 +2779,20 @@ export async function recordWorkflowHead(
     // marked ready after the repair began, and the phase check alone would
     // never notice. The binding is still held here, which is what makes the
     // draft flag readable at all -- recording clears it.
+    //
+    // A terminal publication is exempt for the same reason the wait exempts
+    // it: its observation is frozen, so it can neither confirm a return to
+    // draft nor ever stop refusing. The publication started for the next
+    // head reads the pull request again.
     if (workflow.current_publication != null) {
       const projection = await getAutonomousPreReady(
         storeRoot,
         workflow.current_publication.review_id,
       );
-      if (projection.is_draft === false) {
+      if (
+        projection.is_draft === false &&
+        !["INVALIDATED", "CLOSED", "MERGED"].includes(projection.status)
+      ) {
         fail(
           "WORKFLOW_PULL_REQUEST_EXPOSED",
           "the bound pull request is no longer a draft: a new head cannot be recorded for it until it is returned to draft",
@@ -3804,6 +3812,7 @@ export async function abandonWorkflowAction(
   workflowId,
   expectedRevision,
   actionId,
+  { clock = Date.now } = {},
 ) {
   assertString(actionId, "action_id", { max: 1024 });
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
@@ -3825,6 +3834,7 @@ export async function abandonWorkflowAction(
     const projection = await getAutonomousPreReady(
       storeRoot,
       action.target.review_id,
+      { clock },
     );
     // The observation has to have been taken after the write it is supposed
     // to have missed, or it says nothing about it: one recorded before the
@@ -4612,9 +4622,17 @@ export async function advanceRemoteWorkflow(
       HEAD_RECORDING_PHASES.includes(
         REMOTE_PAUSE_RESUME_PHASES[pauseReason] ?? "",
       );
+    // Only a live publication can answer this. A terminal one records no
+    // further observation -- recordGithubSnapshot refuses outright -- so its
+    // last reading is frozen: a pull request visible in it stays visible in
+    // it forever, however many times it is actually returned to draft.
+    // Deriving exposure from that livelocked this phase against the wait,
+    // with no reading that could ever end it. A dead ledger is not evidence
+    // about a pull request now; the publication started for the next head
+    // observes it afresh, and its first reading restores the guarantee.
     const exposed =
       projection.is_draft === false &&
-      !["CLOSED", "MERGED"].includes(projection.status) &&
+      !["INVALIDATED", "CLOSED", "MERGED"].includes(projection.status) &&
       needsHead;
     // A repair phase reaches this line only to be sent to the undo. Letting
     // it fall through to the pause path would let a resume move it to
