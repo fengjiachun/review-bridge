@@ -4792,6 +4792,11 @@ export async function advanceRemoteWorkflow(
                   url: pullRequest.url,
                 },
                 head_sha: next.current_head_sha,
+                // A null here can never be persisted: saveActionMutation
+                // validates the candidate ledger before any write, and the
+                // terminal-record validator requires the ID of the review
+                // that gated this head. A run without one simply cannot
+                // reach the terminal record.
                 local_review_id: next.current_review?.review_id ?? null,
                 publication_id: next.current_publication.review_id,
                 observation_revision: projection.revision,
