@@ -359,9 +359,9 @@ IMPLEMENTING
        ├─ required check fails -> ADDRESS_CHECK_FAILURE  ──┤-> COMMIT_HEAD
        ├─ base gap             -> UPDATE_FROM_BASE       ──┘   -> new local review
        ├─ ambiguity, conflict, invalidation, or no progress -> PAUSED_HUMAN
-       ├─ any repair while the pull request is already out of draft
-       │    -> PAUSED_HUMAN, and recording a head refuses on the same
-       │       evidence, so no repair reaches a visible pull request
+       ├─ any head to push while the pull request is out of draft
+       │    -> ENSURE_DRAFT_FOR_REPAIR -> back to WAIT_PUBLICATION
+       │       (recording a head refuses on the same evidence)
        ├─ eligible Codex finding thread -> RESOLVE_CODEX_THREADS
        │    -> recorded reply -> proven resolution -> back to WAIT_PUBLICATION
        │    (a publication that goes terminal mid-resolution closes the
@@ -425,9 +425,20 @@ clearance is read again immediately before the call, so a publication that
 regresses after planning refuses the write rather than exposing a head with a
 standing blocker. That checkpoint runs once, before the single call the
 action makes; a controller re-issuing the call after a crash re-reads the
-clearance itself, and a crash it cannot reconcile is an operator matter. The run then stops at `POST_READY`. Returning a ready pull
-request to draft, the draft-gate exception, the compensating unresolve, and
-the post-ready terminal projection ship in the final RFC 0003 implementation
+clearance itself, and a crash it cannot settle that way is abandoned on the
+publication's own recorded observation rather than on anything the driver
+claims.
+
+It also returns the pull request to draft whenever the next thing it would
+push a head for is blocked by one that is already visible for review, so no
+head reaches a pull request reviewers are looking at. Two kinds of evidence
+answer that question, and each is trusted in one direction only: a live
+publication's recorded observation, which can refuse a repair, and the
+controller's own pre-read immediately before the push, which can stop that
+push but never permit one. A terminal publication answers nothing — its
+reading is frozen — which is why the push carries its own. The run then stops at
+`POST_READY`. The draft-gate exception, the compensating unresolve, and the
+post-ready terminal projection ship in the final RFC 0003 implementation
 change, so anything that blocks after the pull request is ready remains
 operator work. Threads the eligibility plan refuses also remain operator work.
 The existing manual publication flow below remains unchanged.

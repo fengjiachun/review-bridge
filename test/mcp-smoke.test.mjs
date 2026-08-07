@@ -46,6 +46,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
   const reviewer = await listToolNames("reviewer", store);
 
   assert.deepEqual(author, [
+    "abandon_workflow_action",
     "acknowledge_codex_review_ambiguity",
     "advance_local_workflow",
     "advance_remote_workflow",
@@ -72,6 +73,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
     "plan_codex_task_dispatch",
     "plan_draft_pull_request",
     "plan_mark_pull_request_ready",
+    "plan_return_to_draft",
     "plan_thread_reply",
     "plan_thread_resolution",
     "plan_workflow_push",
@@ -84,6 +86,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
     "record_github_snapshot",
     "record_mark_ready_observation",
     "record_push_observation",
+    "record_return_to_draft_observation",
     "record_thread_reply_observation",
     "record_thread_resolution_observation",
     "record_workflow_head",

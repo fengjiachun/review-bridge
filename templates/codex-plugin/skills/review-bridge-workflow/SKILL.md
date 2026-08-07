@@ -91,6 +91,14 @@ blocks after the pull request is ready is operator work.
    `complete_workflow_action`. If the remote URL, repository identity, or ref
    cannot be read or does not converge, pause with
    `EXTERNAL_ACTION_INDETERMINATE` instead of re-pushing blindly.
+
+   Once a pull request exists, that pre-read also reports its draft state, as
+   `pull_request_is_draft`. A visible pull request drops the push intent and
+   moves the workflow to `ENSURE_DRAFT_FOR_REPAIR`: return it to draft there
+   and the push is planned again from `LOCAL_GATE_PASSED`. This is the last
+   point before the new head stands in front of reviewers, and no publication
+   is bound here to answer for it, so your reading is the evidence — which is
+   why it is trusted to stop the push and never to permit one.
 9. For `PLAN_DRAFT_PULL_REQUEST`, first resolve the authenticated principal
    that will create the pull request (its numeric actor ID and User or Bot
    type), and call `plan_draft_pull_request` with it; the intent pins that
@@ -177,20 +185,44 @@ blocks after the pull request is ready is operator work.
     to escape one. `advance_remote_workflow` accepts `WAIT_PUBLICATION`,
     `RESOLVE_CODEX_THREADS`, and `PRE_READY`, and only with no action in
     flight: it is how the thread loop returns to the wait and how the
-    pre-ready stop reacts to a clearance that moved. It refuses every repair
-    phase and `POST_READY`.
-13. The server pauses `PULL_REQUEST_EXPOSED` when a blocker would route into
-    a repair phase while the pull request is already out of draft: every
-    repair ends in a new head pushed to that pull request, and one reviewers
-    can already see must not receive it. The remedy is outside the workflow
-    — someone returns it to draft — so resuming re-enters the wait, which
-    re-derives the stop while it is still visible. `record_workflow_head`
-    refuses on the same evidence with `WORKFLOW_PULL_REQUEST_EXPOSED`, so a
-    repair already under way when someone marks the pull request ready
-    cannot finish onto it either. A cleared publication is
-    unaffected: it reaches the pre-ready stop, where an already-ready pull
-    request reconciles `OBSERVED_ALREADY_READY` without claiming a mutation.
-    The server also pauses `GITHUB_REVIEW_AMBIGUOUS` on an ambiguous or
+    pre-ready stop reacts to a clearance that moved. It refuses `POST_READY`, and refuses a repair
+    phase except to send it to the draft restoration described next.
+13. The server routes to `ENSURE_DRAFT_FOR_REPAIR` whenever the next thing
+    the workflow would push a head for is blocked by a pull request that is
+    out of draft: every repair ends in a new head pushed to it, and one
+    reviewers can already see must not receive it. Call
+    `plan_return_to_draft` there, pre-read the pull request, issue the call
+    only if that pre-read finds it ready, and reconcile with
+    `record_return_to_draft_observation` — `RETURNED_TO_DRAFT` after your own
+    call, `OBSERVED_ALREADY_DRAFT` when the pre-read already found it draft.
+    If the pull request closes or merges while that action is in flight, it
+    can never report the draft state its reconciliation needs. With a
+    publication bound, `abandon_workflow_action` settles it on that observed
+    state and the wait pauses the terminal publication as always. With none
+    bound — the restoration reached from a refused push — there is nothing
+    left for this workflow to do: its pull request is gone, so no head can be
+    pushed to it and no draft can be returned to. Pause
+    `EXTERNAL_ACTION_INDETERMINATE` and cancel. That cancellation is the
+    cheap one where it usually is not: releasing the claims needs the bound
+    pull request proven closed, which is exactly what has happened, alongside
+    the ordinary proofs that the local branch and the head ref are gone. Completion returns the workflow to the wait, which re-derives the
+    blocker as ordinary work — the diverted repair is not counted as an attempt, so
+    it resumes rather than stalling `NO_PROGRESS` on a position it never
+    tried. A terminal publication — closed, merged, or invalidated — is
+    the one case this does not answer, and deliberately: it records no
+    further observation, so its last reading is frozen and could never
+    report the pull request as a draft again however many times it became
+    one. The wait pauses it as always, and the publication started for the
+    next head is what reads the pull request afresh. The phase is
+    advanceable, so if someone else returns the pull request to draft the
+    workflow moves on rather than waiting for an action with nothing to
+    do. `record_workflow_head` refuses with
+    `WORKFLOW_PULL_REQUEST_EXPOSED` on the same evidence, and a repair phase
+    that hits it advances back through this transition rather than stalling.
+    A cleared publication is unaffected: it reaches the pre-ready stop, where
+    an already-ready pull request reconciles `OBSERVED_ALREADY_READY` without
+    claiming a mutation.
+14. The server pauses `GITHUB_REVIEW_AMBIGUOUS` on an ambiguous or
     unbound result, `SEMANTIC_CONFLICT` on a conflicting merge state,
     `PUBLICATION_INVALIDATED` when the pull request or head diverged from the
     authorization, and `NO_PROGRESS` when an attempt's normalized blockers and
@@ -204,7 +236,7 @@ blocks after the pull request is ready is operator work.
     rewrite — that last one cannot be resumed, because every workflow head must
     descend from the last, so it ends in cancellation. Never waive, remove, or
     rename a required check, and never rebase or force-push to resolve one.
-14. At `PRE_READY`, call `plan_mark_pull_request_ready`. It refuses unless the
+15. At `PRE_READY`, call `plan_mark_pull_request_ready`. It refuses unless the
     publication's own projection is `READY_TO_MARK` on this exact head, and it
     records which observation cleared it. A refusal here changes nothing —
     the clearance simply moved between the advance and this call — so call
@@ -225,18 +257,11 @@ blocks after the pull request is ready is operator work.
     new blocker. Lock contention and every other failure of the read itself
     are retryable and drop nothing.
 
-    One pre-read keeps the intent instead: one that found the pull request
-    already out of draft. The repair phases the wait routes into push new
-    commits, and a pull request that is already visible for review must not
-    receive them, so that intent is held rather than dropped. If the
-    regression clears on its own — a check that passes on a rerun, a review
-    that lands — the checkpoint passes and you reconcile
-    `OBSERVED_ALREADY_READY`. If it needs a new head instead, this release
-    cannot get there: the held action blocks head recording exactly as
-    intended, so the hold is permanent. Pause
-    `EXTERNAL_ACTION_INDETERMINATE` and hand it to the operator, with the
-    same cancellation cost as the other deferred case. Both wait for the
-    return-to-draft action.
+    One pre-read sends the dropped intent somewhere else: one that found the
+    pull request already out of draft. The repair phases the wait routes into
+    push new commits, and a pull request already visible for review must not
+    receive them, so that intent lands in `ENSURE_DRAFT_FOR_REPAIR` instead —
+    return it to draft there, and the blocker becomes ordinary work.
 
     The checkpoint runs once, before the one call this action makes. If you
     crash after it, reconcile by reading the pull request. Found ready,
@@ -253,23 +278,22 @@ blocks after the pull request is ready is operator work.
     your recorded pre-read decides the outcome you may claim. If the
     clearance regressed, do not call: marking ready there would expose a head
     with a standing blocker into `POST_READY`, which has no repair route.
-    Pause `EXTERNAL_ACTION_INDETERMINATE` instead.
-    Do not plan around a second checkpoint; there is none, and this release
-    cannot decide who marked a pull request ready (GitHub attests no actor
-    for a draft transition) nor return a ready pull request to draft. This is
-    the second unreconcilable case, alongside the held intent above: the
-    action is executing, the pull request is still draft, *and* the
-    publication has regressed so that issuing the call is no longer
-    allowed. Pause
-    `EXTERNAL_ACTION_INDETERMINATE` and hand that one to the operator, who
-    may have to cancel the workflow. Say plainly what that costs: cancellation
-    retains the claims, and releasing them needs the bound pull request
-    proven closed, so a healthy draft pull request would have to be closed to
-    free the claim. The recovery ships with the return-to-draft action.
+    Do not plan around a second checkpoint either; there is none, and nothing
+    you can read decides whether an earlier call landed (GitHub attests no
+    actor for a draft transition). Call `abandon_workflow_action` instead.
+    Record a fresh observation first: the server drops the action only on one
+    taken *after* the action executed, since an older one shows a draft pull
+    request simply because the call had not happened yet, and it refuses a
+    stale projection for the same reason. It also refuses while the
+    observation shows the pull request out of draft, because then the action
+    performed the transition its pre-read predicted and reconciling it is the
+    honest close.
 
-    Then stop at `POST_READY`: the draft-gate exception, the return to draft,
-    and the terminal projection remain unavailable until the later skill
-    update ships. Continue manually only after a fresh operator instruction.
+    Then stop at `POST_READY`: the draft-gate exception and the terminal
+    projection remain unavailable until the later skill update ships, and
+    nothing routes out of that stop, so a blocker arriving after the pull
+    request is ready is operator work. Continue manually only after a fresh
+    operator instruction.
 
 Every mutation uses the exact current workflow revision. On `WORKFLOW_BUSY`,
 `WORKFLOW_CLAIMS_BUSY`, `LOCK_OWNERSHIP_LOST`, or an indeterminate store write,

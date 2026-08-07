@@ -52,13 +52,16 @@ import {
   pauseAutonomousWorkflow,
   planCodexTaskDispatch,
   planDraftPullRequest,
+  abandonWorkflowAction,
   planMarkPullRequestReady,
+  planReturnToDraft,
   planThreadReply,
   planThreadResolution,
   planWorkflowPush,
   recordCodexTaskObservation,
   recordDraftPullRequestObservation,
   recordMarkReadyObservation,
+  recordReturnToDraftObservation,
   recordPushObservation,
   recordThreadReplyObservation,
   recordThreadResolutionObservation,
@@ -485,13 +488,14 @@ if (role === "author") {
     {
       title: "Mark workflow action executing",
       description:
-        "Durably record EXECUTING immediately before the planned external write; a push additionally requires the pinned URL resolved to the authorized repository ID, a thread resolution requires the immediately preceding thread pre-read (thread ID, resolved flag, and -- while unresolved -- the exact comment watermark), and a mark-ready requires the immediately preceding pull-request pre-read (repository, number, both branches, head SHA, and draft flag).",
+        "Durably record EXECUTING immediately before the planned external write; a push additionally requires the pinned URL resolved to the authorized repository ID, a thread resolution requires the immediately preceding thread pre-read (thread ID, resolved flag, and -- while unresolved -- the exact comment watermark), and a mark-ready requires the immediately preceding pull-request pre-read (repository, number, both branches, head SHA, and draft flag), and a push additionally requires that pull request's draft state once one exists -- a visible pull request drops the push intent and routes to ENSURE_DRAFT_FOR_REPAIR rather than putting the new head in front of reviewers.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
         action_id: z.string(),
         resolved_repository_id: z.number().int().positive().optional(),
         resolved_url: z.string().optional(),
+        pull_request_is_draft: z.boolean().optional(),
         thread_id: z.string().optional(),
         is_resolved: z.boolean().optional(),
         thread_watermark: z.string().optional(),
@@ -531,7 +535,81 @@ if (role === "author") {
               : {
                   resolved_repository_id: input.resolved_repository_id,
                   resolved_url: input.resolved_url,
+                  ...(input.pull_request_is_draft == null
+                    ? {}
+                    : { pull_request_is_draft: input.pull_request_is_draft }),
                 },
+      ),
+  );
+
+  register(
+    "plan_return_to_draft",
+    {
+      title: "Plan return to draft",
+      description:
+        "Persist the RETURN_PR_TO_DRAFT intent for the workflow-owned pull request. Reachable only from ENSURE_DRAFT_FOR_REPAIR, which the server enters when the next thing this workflow would push a head for is blocked by a pull request that is out of draft -- including the push itself, before any publication exists. No publication need be bound: the action is about the pull request the workflow owns. The action is idempotent: a pre-read that already finds it draft reconciles OBSERVED_ALREADY_DRAFT without another mutation.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+      },
+    },
+    (input) =>
+      planReturnToDraft(storeRoot, input.workflow_id, input.expected_revision),
+  );
+
+  register(
+    "record_return_to_draft_observation",
+    {
+      title: "Record return-to-draft observation",
+      description:
+        "Reconcile the pull request after the return-to-draft call: the same repository, number, branches, and head, now a draft. The outcome follows the recorded pre-read both ways -- one that found it ready reconciles RETURNED_TO_DRAFT, one that found it already draft reconciles OBSERVED_ALREADY_DRAFT and claims no mutation.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+        outcome: z.enum(["RETURNED_TO_DRAFT", "OBSERVED_ALREADY_DRAFT"]),
+        repository_id: z.number().int().positive(),
+        pr_number: z.number().int().positive(),
+        base_branch: z.string(),
+        head_branch: z.string(),
+        is_draft: z.boolean(),
+      },
+    },
+    (input) =>
+      recordReturnToDraftObservation(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
+        {
+          outcome: input.outcome,
+          repositoryId: input.repository_id,
+          prNumber: input.pr_number,
+          baseBranch: input.base_branch,
+          headBranch: input.head_branch,
+          isDraft: input.is_draft,
+        },
+      ),
+  );
+
+  register(
+    "abandon_workflow_action",
+    {
+      title: "Abandon a stuck action on recorded evidence",
+      description:
+        "Drop an executing action that the publication has since observed in a state that settles it. For MARK_PR_READY that is a draft pull request on the action's head, meaning nothing it issued stands; for RETURN_PR_TO_DRAFT it is a closed or merged pull request, which can never report the draft state its reconciliation requires. In both cases the evidence is a recorded observation stamped by the server after this action executed; your own pre-read is not accepted, because a timeout or a lagging read reports a draft pull request while the mutation applies. Refuses when the observation does not show that state, or when it has aged out -- reconcile the action instead. A mark-ready call still in flight can land after the abandon; that leaves a visible pull request, which the wait routes into the draft restoration before any head is pushed to it.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+      },
+    },
+    (input) =>
+      abandonWorkflowAction(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
       ),
   );
 
