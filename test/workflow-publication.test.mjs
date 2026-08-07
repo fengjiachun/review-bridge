@@ -5964,7 +5964,7 @@ test("the terminal projection records MERGE_READY and the workflow stops with a 
 
   // The controller records one fresh complete observation of the ready pull
   // request, and only then may the run reach its terminal state.
-  const observedAt = Date.now();
+  const observedAt = at + 2_000;
   await recordGithubSnapshot(
     state.store,
     reviewId,
@@ -6051,7 +6051,7 @@ test("the terminal projection records MERGE_READY and the workflow stops with a 
 test("a terminal workflow can release its claims after the operator merges", async (t) => {
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
-  const observedAt = Date.now();
+  const observedAt = at + 2_000;
   await recordGithubSnapshot(
     state.store,
     reviewId,
@@ -6113,7 +6113,7 @@ test("a terminal workflow can release its claims after the operator merges", asy
 test("a post-ready observation that is not MERGE_READY blocks the terminal projection", async (t) => {
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
-  const observedAt = Date.now();
+  const observedAt = at + 2_000;
 
   // An unresolved thread in the post-ready observation: the terminal
   // projection reports the derived blocker, never a terminal state.
@@ -6174,7 +6174,7 @@ test("a post-ready observation that is not MERGE_READY blocks the terminal proje
 test("a new thread comment between mark-ready and the terminal observation blocks autonomous_terminal", async (t) => {
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
-  const observedAt = Date.now();
+  const observedAt = at + 2_000;
   const thread = resolvedThread(headSha);
   const watermark = threadWatermark(thread);
   const payload = readyObservation(state, headSha, {
@@ -6505,7 +6505,7 @@ test("the terminal replay accepts one linear supersession chain and blocks every
 
 test("the terminal replay refuses human participation in an active record's thread", async (t) => {
   const { state, reviewId, headSha, at, clearanceRevision } = await reachPostReady(t);
-  const observedAt = Date.now();
+  const observedAt = at + 2_000;
   const human = { id: 555, type: "User", login: "human" };
   const thread = resolvedThread(headSha, {
     comments: [
@@ -6573,7 +6573,7 @@ test("the terminal replay refuses human participation in an active record's thre
 test("a post-ready check failure returns the ready pull request to draft before repair", async (t) => {
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
-  const observedAt = Date.now();
+  const observedAt = at + 2_000;
   const payload = readyObservation(state, headSha, {
     at: observedAt,
     requestId: 100,
@@ -6607,7 +6607,7 @@ test("a post-ready check failure returns the ready pull request to draft before 
 test("the terminal record requires an observation recorded after the clearance", async (t) => {
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
-  const observedAt = Date.now();
+  const observedAt = at + 2_000;
 
   // A ready observation edited onto the ledger at the clearance revision is
   // indistinguishable to the projection -- it reports MERGE_READY -- but the
@@ -6654,7 +6654,7 @@ test("the terminal record requires an observation recorded after the clearance",
 
 test("a terminal workflow ledger cannot be tampered into a different claim", async (t) => {
   const { state, workflow, reviewId, headSha, at } = await reachPostReady(t);
-  const observedAt = Date.now();
+  const observedAt = at + 2_000;
   const recorded = await recordGithubSnapshot(
     state.store,
     reviewId,
