@@ -6571,6 +6571,15 @@ test("the terminal replay accepts one linear supersession chain and blocks every
   });
   const humanResolved = await getAutonomousTerminal(state.store, reviewId);
   assert.equal(humanResolved.blocking_reason, "THREAD_RESOLUTION_RECORD_MISSING");
+  // The manual merge path must reach the same verdict: finalizing a gate
+  // over evidence the terminal replay rejects must fail, or the operator
+  // could merge over a resolution the autonomous projection refuses.
+  await assert.rejects(
+    finalizePublicationGate(state.store, reviewId, {
+      expectedRevision: recorded.revision,
+    }),
+    (error) => error.code === "PUBLICATION_NOT_READY",
+  );
 
   // A successor on an unrelated head is not a descendant: the active record
   // must be at the head the observation covers, or the terminal claim would
@@ -6613,6 +6622,62 @@ test("the terminal replay accepts one linear supersession chain and blocks every
   });
   const unrelatedHead = await getAutonomousTerminal(state.store, reviewId);
   assert.equal(unrelatedHead.blocking_reason, "THREAD_RESOLUTION_CHAIN_BROKEN");
+});
+
+test("the manual gate verification refuses evidence the terminal replay rejects", async (t) => {
+  const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t);
+  const observedAt = at + 2_000;
+  const thread = resolvedThread(headSha);
+  const watermark = threadWatermark(thread);
+  const payload = readyObservation(state, headSha, {
+    at: observedAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  payload.review_threads.total_count = 1;
+  payload.review_threads.unresolved_count = 0;
+  payload.review_threads.threads = [thread];
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: payload },
+    { clock: () => observedAt + 10 },
+  );
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [
+      resolutionRecord({
+        number: 1,
+        actionId: "act-1",
+        watermark,
+        headSha,
+        recordedRevision: recorded.revision,
+      }),
+    ];
+  });
+  // The gate can be minted while the record covers the resolved thread.
+  await finalizePublicationGate(
+    state.store,
+    reviewId,
+    { expectedRevision: recorded.revision },
+    { clock: () => observedAt + 20 },
+  );
+  assert.equal(
+    (await verifyPublicationGate(state.store, reviewId, {
+      clock: () => observedAt + 30,
+    })).valid,
+    true,
+  );
+  // Removing the record leaves the resolved thread recordless; the manual
+  // verification must refuse the gate over evidence the terminal replay
+  // rejects, even though the observation digest itself is unchanged.
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [];
+  });
+  const revoked = await verifyPublicationGate(state.store, reviewId, {
+    clock: () => observedAt + 40,
+  });
+  assert.equal(revoked.valid, false);
 });
 
 test("the terminal replay refuses human participation in an active record's thread", async (t) => {

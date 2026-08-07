@@ -5613,7 +5613,13 @@ function assessPublicationGate(
     sourceAuthorization.source_sha256 !== publicationAuthorization.source_sha256 ||
     gate.github_observation_sha256 !== canonicalDigest(ledger.latest_observation) ||
     gate.expires_at !== expectedExpiresAt ||
-    derived.status !== "MERGE_READY"
+    derived.status !== "MERGE_READY" ||
+    // The terminal replay is the same evidence the autonomous terminal
+    // projection refuses a success claim over; a gate minted before the
+    // evidence moved must not keep verifying over what the replay rejects.
+    (ledger.version === 3 &&
+      workflowBinding != null &&
+      terminalResolutionBlockers(ledger, workflowBinding).length > 0)
   ) {
     return { state: "INVALID", reviewerProvider: null, expiresAt: null };
   }
@@ -6788,6 +6794,21 @@ export async function finalizePublicationGate(
         fail(
           "PUBLICATION_NOT_READY",
           `publication status is ${derived.status}, not MERGE_READY`,
+        );
+      }
+      // The terminal replay is the same evidence the autonomous terminal
+      // projection refuses a success claim over: a recordless resolved
+      // thread or human participation in an active record's thread. The
+      // manual merge path must not mint a gate over evidence the
+      // autonomous projection would reject, or the operator could merge
+      // over a resolution the run itself never owned.
+      if (
+        ledger.version === 3 &&
+        terminalResolutionBlockers(ledger, workflowBinding).length > 0
+      ) {
+        fail(
+          "PUBLICATION_NOT_READY",
+          "the autonomous terminal replay rejects the final evidence",
         );
       }
       const passedAt = new Date(currentMs).toISOString();
