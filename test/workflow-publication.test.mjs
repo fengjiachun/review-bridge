@@ -6169,6 +6169,14 @@ test("a post-ready observation that is not MERGE_READY blocks the terminal proje
   );
   assert.equal(stillStopped.phase, "POST_READY");
   assert.equal(stillStopped.terminal, null);
+  // The blocked evaluation is recorded on the publication binding, so a
+  // controller that follows only next_action stops for the operator instead
+  // of re-collecting snapshots forever.
+  assert.equal(
+    (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
+      .next_action,
+    "AWAIT_OPERATOR",
+  );
 });
 
 test("a new thread comment between mark-ready and the terminal observation blocks autonomous_terminal", async (t) => {
@@ -6538,6 +6546,31 @@ test("the terminal replay accepts one linear supersession chain and blocks every
   });
   const mixed = await getAutonomousTerminal(state.store, reviewId);
   assert.equal(mixed.blocking_reason, "THREAD_RESOLUTION_RECORD_MISSING");
+
+  // A resolved thread with no active record is not a workflow-owned
+  // resolution: a human, or unknown provenance, resolved it externally, and
+  // the terminal claim must not mint over it however clean the derived gate
+  // looks (it sees only the unresolved count).
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [];
+    ledger.resolution_lifecycle = [];
+    ledger.latest_observation.review_threads = {
+      ...ledger.latest_observation.review_threads,
+      total_count: 1,
+      unresolved_count: 0,
+      threads: [
+        {
+          id: "PRRT_HUMAN_RESOLVED",
+          is_resolved: true,
+          is_outdated: false,
+          path: null,
+          line: null,
+        },
+      ],
+    };
+  });
+  const humanResolved = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(humanResolved.blocking_reason, "THREAD_RESOLUTION_RECORD_MISSING");
 });
 
 test("the terminal replay refuses human participation in an active record's thread", async (t) => {

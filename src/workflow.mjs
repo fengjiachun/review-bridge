@@ -2611,12 +2611,19 @@ function nextAction(workflow) {
     // fresh post-ready observation: only a MERGE_READY verdict over it can
     // record the terminal entry. The driver records the snapshot and calls
     // advance_remote_workflow; a compliant driver must not stop at
-    // AWAIT_OPERATOR while the workflow is still ACTIVE. Once the terminal
-    // record exists the status is MERGE_READY and the run stops for the
-    // operator's manual merge.
+    // AWAIT_OPERATOR while the workflow is still ACTIVE. Once that fresh
+    // observation has been evaluated -- the advance records the publication
+    // revision it observed on the current_publication binding -- a
+    // non-actionable terminal blocker leaves the run stopped for the
+    // operator, so the summary advertises AWAIT_OPERATOR instead of asking
+    // the driver to re-collect forever. A terminal workflow (status
+    // MERGE_READY) stops the same way.
     POST_READY:
       workflow.status === "ACTIVE"
-        ? "RECORD_FRESH_OBSERVATION_AND_ADVANCE"
+        ? (workflow.current_publication?.awaiting_revision ?? 0) >
+          (workflow.ready_marks.at(-1)?.publication_revision ?? 0)
+          ? "AWAIT_OPERATOR"
+          : "RECORD_FRESH_OBSERVATION_AND_ADVANCE"
         : "AWAIT_OPERATOR",
   };
   return actions[workflow.phase] ?? "INSPECT_WORKFLOW";
@@ -4970,9 +4977,23 @@ export async function advanceRemoteWorkflow(
       // resolution record, a stale observation, an unresolved thread, or a
       // pull request that is not ready. None of those is fixed by moving the
       // phase -- the ready pull request must not be handed to the draft-phase
-      // wait -- so the run stays stopped here and the operator decides.
+      // wait -- so the run stays stopped here and the operator decides. The
+      // first blocked evaluation records the publication revision it observed
+      // so the summary stops advertising RECORD_FRESH_OBSERVATION_AND_ADVANCE:
+      // a controller that follows only next_action must stop for the operator
+      // instead of re-collecting snapshots forever.
       if (workflow.phase === "POST_READY") {
-        return publicWorkflow(workflow);
+        if (
+          workflow.current_publication.awaiting_revision ===
+          projection.revision
+        ) {
+          return publicWorkflow(workflow);
+        }
+        return publicWorkflow(
+          await saveMutation(paths, workflow, async (next) => {
+            next.current_publication.awaiting_revision = projection.revision;
+          }),
+        );
       }
       const reachedPreReady = projection.status === "READY_TO_MARK";
       // Unresolved threads are no longer only an operator's problem: when at

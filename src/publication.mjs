@@ -4505,6 +4505,29 @@ function terminalResolutionBlockers(ledger, binding) {
       });
     }
   }
+  // A resolved thread with no active record is not a workflow-owned
+  // resolution -- a human, or unknown provenance, resolved it externally --
+  // and the terminal claim must not mint over it. The derived gate sees only
+  // the unresolved count, so this is the replay's own check: the workflow
+  // records every resolution it owns, and a resolved thread it never
+  // recorded is exactly the RFC's missing-record case.
+  const alreadyBlocked = new Set(
+    blockers.map((blocker) => blocker.thread_id),
+  );
+  for (const thread of ledger.latest_observation?.review_threads?.threads ??
+    []) {
+    if (
+      thread.is_resolved === true &&
+      !frontier.active.has(thread.id) &&
+      !alreadyBlocked.has(thread.id)
+    ) {
+      blockers.push({
+        reason: "THREAD_RESOLUTION_RECORD_MISSING",
+        thread_id: thread.id,
+        record: null,
+      });
+    }
+  }
   return blockers;
 }
 

@@ -316,13 +316,16 @@ gap returns the ready pull request to draft before any repair.
 
     Any other terminal verdict keeps the run stopped at `POST_READY`: a
     contested resolution record, a new thread comment, a stale observation, or
-    an unresolved thread is operator work, and the idle advance costs no
-    revision. An actionable current-head machine finding, failed required
-    check, or strict-policy base gap is the one route out: `advance_remote_workflow`
-    sends the visible pull request to `ENSURE_DRAFT_FOR_REPAIR` first, exactly
-    as step 13 describes, and the repair loop then runs as usual. A draft pull
-    request in the post-ready observation is never a success — record another
-    observation only after the pull request is genuinely ready.
+    an unresolved thread is operator work. Once the first blocked evaluation
+    is recorded, the summary advertises `AWAIT_OPERATOR` — do not keep
+    re-collecting snapshots; the operator decides, and only an explicit
+    operator instruction resumes the loop. An actionable current-head machine
+    finding, failed required check, or strict-policy base gap is the one route
+    out: `advance_remote_workflow` sends the visible pull request to
+    `ENSURE_DRAFT_FOR_REPAIR` first, exactly as step 13 describes, and the
+    repair loop then runs as usual. A draft pull request in the post-ready
+    observation is never a success — record another observation only after
+    the pull request is genuinely ready.
 
 Every mutation uses the exact current workflow revision. On `WORKFLOW_BUSY`,
 `WORKFLOW_CLAIMS_BUSY`, `LOCK_OWNERSHIP_LOST`, or an indeterminate store write,
