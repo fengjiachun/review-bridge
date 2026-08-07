@@ -5711,27 +5711,44 @@ export async function getPublicationSummary(
         ledger.terminal == null &&
         ledger.latest_observation != null &&
         currentMs > Date.parse(expiresAtFor(ledger));
+      // The terminal replay is the same evidence the autonomous terminal
+      // projection refuses a success claim over, and the same evidence the
+      // finalization and verification paths now require clean. The summary
+      // must reflect it too, or a summary-driven manual flow would keep
+      // advertising FINALIZE_PUBLICATION_GATE and retry a finalization that
+      // deterministically throws.
+      const terminalBlockers =
+        ledger.version === 3
+          ? terminalResolutionBlockers(ledger, workflowBinding)
+          : [];
+      const replayBlocked = terminalBlockers.length > 0;
+      const effectiveStatus =
+        derived.status === "MERGE_READY" && replayBlocked
+          ? "CHANGES_REQUIRED"
+          : derived.status;
       const blockingReason = evidenceStale
         ? "EVIDENCE_STALE"
-        : derived.status === "MERGE_READY" && gate.state === "INVALID"
-          ? "PUBLICATION_GATE_INVALID"
-          : derived.status === "MERGE_READY" && gate.state === "MALFORMED"
-            ? "PUBLICATION_GATE_MALFORMED"
-            : derived.blockingReason;
+        : replayBlocked
+          ? terminalBlockers[0].reason
+          : derived.status === "MERGE_READY" && gate.state === "INVALID"
+            ? "PUBLICATION_GATE_INVALID"
+            : derived.status === "MERGE_READY" && gate.state === "MALFORMED"
+              ? "PUBLICATION_GATE_MALFORMED"
+              : derived.blockingReason;
       const closure =
         ledger.latest_observation == null
           ? { requests: [], results: [] }
           : ambiguityClosure(ledger);
       const nextAction = nextPublicationAction(
         ledger,
-        derived,
+        { ...derived, status: effectiveStatus },
         gate.state,
         evidenceStale,
       );
       return {
         review_id: ledger.review_id,
         revision: ledger.revision,
-        status: derived.status,
+        status: effectiveStatus,
         authorization_mode: publicationAuthorization.mode,
         base_sha: publicationAuthorization.base_sha,
         head_sha: publicationAuthorization.head_sha,

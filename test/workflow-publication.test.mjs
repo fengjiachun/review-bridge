@@ -6580,6 +6580,13 @@ test("the terminal replay accepts one linear supersession chain and blocks every
     }),
     (error) => error.code === "PUBLICATION_NOT_READY",
   );
+  // The summary must reflect the same verdict, or a summary-driven manual
+  // flow would keep advertising FINALIZE_PUBLICATION_GATE and retry a
+  // finalization that deterministically throws.
+  const summary = await getPublicationSummary(state.store, reviewId);
+  assert.equal(summary.status, "CHANGES_REQUIRED");
+  assert.equal(summary.blocking_reason, "THREAD_RESOLUTION_RECORD_MISSING");
+  assert.notEqual(summary.next_action, "FINALIZE_PUBLICATION_GATE");
 
   // A successor on an unrelated head is not a descendant: the active record
   // must be at the head the observation covers, or the terminal claim would
