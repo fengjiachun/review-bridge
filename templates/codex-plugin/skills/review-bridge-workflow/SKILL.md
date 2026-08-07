@@ -16,10 +16,14 @@ through the local `CODEX_TASK` gate, the reconciled push of the gated head,
 the marker-bound draft pull request, the version-3 publication ledger, the
 remote wait, the three repair loops that return a new head to local review,
 the reply-then-resolve closure of eligible Codex finding threads, and the
-mark-ready that takes the cleared pull request out of draft. It stops at
-`POST_READY`: returning a ready pull request to draft, the draft-gate
-exception, and the terminal projection remain unavailable, so anything that
-blocks after the pull request is ready is operator work.
+mark-ready that takes the cleared pull request out of draft. It then records
+one fresh complete observation of the ready pull request and evaluates the
+`autonomous_terminal` projection; when that reports `MERGE_READY` it records
+its terminal entry and stops deliberately. A blocker that arrives after the
+pull request is ready — a contested resolution record, a new thread comment, a
+stale observation — leaves the run stopped at `POST_READY` as operator work,
+except that an actionable current-head finding, failed required check, or base
+gap returns the ready pull request to draft before any repair.
 
 1. Obtain direct operator authorization for the exact repository path,
    operator-selected base ref and resolved full base SHA, requirement,
@@ -183,9 +187,10 @@ blocks after the pull request is ready is operator work.
     no code change — the workflow stays in its repair phase, and the operator
     either commits a fix or cancels the workflow. Do not create an empty commit
     to escape one. `advance_remote_workflow` accepts `WAIT_PUBLICATION`,
-    `RESOLVE_CODEX_THREADS`, and `PRE_READY`, and only with no action in
-    flight: it is how the thread loop returns to the wait and how the
-    pre-ready stop reacts to a clearance that moved. It refuses `POST_READY`, and refuses a repair
+    `RESOLVE_CODEX_THREADS`, `PRE_READY`, and `POST_READY`, and only with no
+    action in flight: it is how the thread loop returns to the wait, how the
+    pre-ready stop reacts to a clearance that moved, and how the post-ready
+    stop reaches its terminal record. It refuses a repair
     phase except to send it to the draft restoration described next.
 13. The server routes to `ENSURE_DRAFT_FOR_REPAIR` whenever the next thing
     the workflow would push a head for is blocked by a pull request that is
@@ -277,7 +282,8 @@ blocks after the pull request is ready is operator work.
     earlier attempt landed, since the pull request ends ready either way and
     your recorded pre-read decides the outcome you may claim. If the
     clearance regressed, do not call: marking ready there would expose a head
-    with a standing blocker into `POST_READY`, which has no repair route.
+    with a standing blocker to reviewers before the return-to-draft undo could
+    make the repair legal.
     Do not plan around a second checkpoint either; there is none, and nothing
     you can read decides whether an earlier call landed (GitHub attests no
     actor for a draft transition). Call `abandon_workflow_action` instead.
@@ -289,11 +295,28 @@ blocks after the pull request is ready is operator work.
     performed the transition its pre-read predicted and reconciling it is the
     honest close.
 
-    Then stop at `POST_READY`: the draft-gate exception and the terminal
-    projection remain unavailable until the later skill update ships, and
-    nothing routes out of that stop, so a blocker arriving after the pull
-    request is ready is operator work. Continue manually only after a fresh
-    operator instruction.
+16. At `POST_READY`, record one fresh complete observation of the ready pull
+    request (`record_github_snapshot`), then call `advance_remote_workflow`.
+    The server evaluates that observation through the `autonomous_terminal`
+    projection: it requires publication `MERGE_READY`, revalidates the
+    workflow binding and both authorization digests, and replays every
+    automatic-resolution record and lifecycle chain against the same
+    observation. Only when the projection reports `MERGE_READY` — and the
+    observation was recorded after the clearance the mark-ready consumed —
+    does the workflow record its terminal entry, set status `MERGE_READY`, and
+    stop. A terminal workflow refuses every further mutation; it never calls
+    `verify_publication_gate` and never merges. Merging is the operator's
+    later explicit instruction through the existing manual path.
+
+    Any other terminal verdict keeps the run stopped at `POST_READY`: a
+    contested resolution record, a new thread comment, a stale observation, or
+    an unresolved thread is operator work, and the idle advance costs no
+    revision. An actionable current-head machine finding, failed required
+    check, or strict-policy base gap is the one route out: `advance_remote_workflow`
+    sends the visible pull request to `ENSURE_DRAFT_FOR_REPAIR` first, exactly
+    as step 13 describes, and the repair loop then runs as usual. A draft pull
+    request in the post-ready observation is never a success — record another
+    observation only after the pull request is genuinely ready.
 
 Every mutation uses the exact current workflow revision. On `WORKFLOW_BUSY`,
 `WORKFLOW_CLAIMS_BUSY`, `LOCK_OWNERSHIP_LOST`, or an indeterminate store write,

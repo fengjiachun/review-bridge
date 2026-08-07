@@ -59,6 +59,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
     "finalize_local_gate",
     "finalize_publication_gate",
     "get_autonomous_pre_ready",
+    "get_autonomous_terminal",
     "get_autonomous_workflow",
     "get_autonomous_workflow_summary",
     "get_publication",

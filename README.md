@@ -368,6 +368,10 @@ IMPLEMENTING
        │     action without a record and pauses instead)
        └─ every other invariant passes -> PRE_READY
             -> MARK_PR_READY on the re-read clearance -> POST_READY
+                 -> fresh post-ready observation
+                 -> autonomous_terminal MERGE_READY -> terminal record, stop
+                    (actionable finding/check/base gap returns to draft first;
+                     any other blocker stays stopped as operator work)
 ```
 
 `start_autonomous_workflow` binds the immutable repository, base, requirement,
@@ -436,12 +440,33 @@ answer that question, and each is trusted in one direction only: a live
 publication's recorded observation, which can refuse a repair, and the
 controller's own pre-read immediately before the push, which can stop that
 push but never permit one. A terminal publication answers nothing — its
-reading is frozen — which is why the push carries its own. The run then stops at
-`POST_READY`. The draft-gate exception, the compensating unresolve, and the
-post-ready terminal projection ship in the final RFC 0003 implementation
-change, so anything that blocks after the pull request is ready remains
-operator work. Threads the eligibility plan refuses also remain operator work.
-The existing manual publication flow below remains unchanged.
+reading is frozen — which is why the push carries its own.
+
+After the mark-ready action completes, the controller records one fresh
+complete observation of the ready pull request, and the run evaluates it
+through the `autonomous_terminal` projection: the same fail-closed invariant
+order with the draft flag *not* ignored, then an independent revalidation of
+the workflow binding and both authorization digests, then a complete replay of
+every automatic-resolution record and lifecycle chain against that same
+observation. Only a projection that reports `MERGE_READY` over an observation
+recorded after the clearance the mark-ready consumed lets the workflow record
+its terminal entry (status, workflow revision, pull request identity and URL,
+exact head, local review and publication IDs, post-ready observation revision
+and digest, both authorization digests, and the record-and-lifecycle-set
+digest), set status `MERGE_READY`, and stop. It never calls
+`verify_publication_gate` and never merges; a later operator merge instruction
+goes through the existing manual path unchanged. An invalidated active
+resolution frontier, a missing or extra record, a broken supersession chain, a
+mismatched active record, or human participation in a resolved thread blocks
+the terminal projection with its own reason even when the publication status
+is `MERGE_READY`, and a valid superseded predecessor stays audit evidence
+rather than being compared against the current watermark. An actionable
+current-head finding, failed required check, or strict-policy base gap in the
+post-ready observation returns the ready pull request to draft before repair;
+anything else that blocks after the pull request is ready — a contested
+resolution, a new thread comment, a stale observation, an unresolved thread —
+remains operator work. Threads the eligibility plan refuses also remain
+operator work. The existing manual publication flow below remains unchanged.
 
 ## GitHub publication gate
 

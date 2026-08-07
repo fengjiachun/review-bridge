@@ -111,7 +111,7 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
     if (!Number.isSafeInteger(workflow.revision) || workflow.revision < 1) {
       fail("WORKFLOW_STATE_INVALID", "workflow.revision is invalid");
     }
-    if (!["ACTIVE", "PAUSED", "CANCELLED"].includes(workflow.status)) {
+    if (!["ACTIVE", "PAUSED", "CANCELLED", "MERGE_READY"].includes(workflow.status)) {
       fail("WORKFLOW_STATE_INVALID", "workflow status is invalid");
     }
     if (typeof workflow.phase !== "string" || workflow.phase === "") {

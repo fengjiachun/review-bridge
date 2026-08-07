@@ -13,6 +13,7 @@ import {
   acknowledgeCodexReviewAmbiguity,
   finalizePublicationGate,
   getAutonomousPreReady,
+  getAutonomousTerminal,
   getPublication,
   getPublicationSummary,
   getThreadResolutionPlan,
@@ -20,6 +21,7 @@ import {
   recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
+  threadWatermark,
   verifyPublicationGate,
 } from "../src/publication.mjs";
 import {
@@ -3390,13 +3392,20 @@ test("a cleared draft pull request marks itself ready and then stops", async (t)
     },
   );
 
-  // The pull request is out of draft, so no repair phase may run: this stage
-  // cannot return it to draft, and advancing anyway would let the workflow
-  // rewrite an exposed head.
-  await assert.rejects(
-    advanceRemoteWorkflow(state.store, workflow.workflow_id, ready.revision),
-    (error) => error.code === "WORKFLOW_PHASE_INVALID",
+  // The pull request is out of draft, so no repair phase may run without
+  // returning it to draft first, and no terminal record exists yet: the
+  // controller has not recorded the fresh post-ready observation the terminal
+  // projection requires. The advance is legal but idle -- the run is stopped
+  // at POST_READY, spends no revision, and records nothing.
+  const idle = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    ready.revision,
   );
+  assert.equal(idle.phase, "POST_READY");
+  assert.equal(idle.status, "ACTIVE");
+  assert.equal(idle.revision, ready.revision);
+  assert.equal(idle.terminal, null);
 });
 
 test("a clearance that regresses at the pre-ready stop routes onward", async (t) => {
@@ -5723,4 +5732,890 @@ test("a gated head is not pushed onto a pull request reviewers can see", async (
     },
   );
   assert.equal(pushing.active_action.status, "EXECUTING");
+});
+
+/* ---------------------------------------------------------------------------
+ * RFC 0003 item 3: the autonomous_terminal projection and the terminal record.
+ * ------------------------------------------------------------------------- */
+
+/** A complete post-ready (non-draft) observation. */
+function readyObservation(state, headSha, options) {
+  return draftObservation(state, headSha, { ...options, isDraft: false });
+}
+
+/** Walk a workflow through mark-ready into POST_READY. */
+async function reachPostReady(t) {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+  );
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(preReady.phase, "PRE_READY");
+  const planned = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    preReady.revision,
+  );
+  const clearance = await getAutonomousPreReady(state.store, reviewId);
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    planned.workflow.revision,
+    planned.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      base_branch: "main",
+      head_branch: TOPIC_BRANCH,
+      head_sha: headSha,
+      is_draft: true,
+    },
+  );
+  const observed = await recordMarkReadyObservation(
+    state.store,
+    workflow.workflow_id,
+    executing.revision,
+    planned.action.action_id,
+    {
+      outcome: "MARKED_READY",
+      repositoryId: REPOSITORY_ID,
+      prNumber: PR_NUMBER,
+      baseBranch: "main",
+      headBranch: TOPIC_BRANCH,
+      headSha,
+      isDraft: false,
+    },
+  );
+  const ready = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    observed.revision,
+    planned.action.action_id,
+  );
+  assert.equal(ready.phase, "POST_READY");
+  return { state, workflow: ready, reviewId, headSha, at, clearanceRevision: clearance.revision };
+}
+
+function publicationFilePath(state, reviewId) {
+  return path.join(state.store, "reviews", reviewId, "publication.json");
+}
+
+async function editPublication(state, reviewId, mutate) {
+  const filePath = publicationFilePath(state, reviewId);
+  const ledger = JSON.parse(await fsp.readFile(filePath, "utf8"));
+  mutate(ledger);
+  await atomicWriteCanonicalJson(filePath, ledger);
+}
+
+function codexActor() {
+  return { id: CODEX_ACTOR_ID, type: "Bot", login: "chatgpt-codex-connector[bot]" };
+}
+
+/** A resolved Codex-rooted thread whose root review examined the gated head. */
+function resolvedThread(headSha, { threadId = "PRRT_1", comments = null } = {}) {
+  const codex = codexActor();
+  const at = Date.now();
+  const root = {
+    id: "PRRC_1",
+    database_id: 900,
+    created_at: iso(at - 5_000),
+    updated_at: iso(at - 5_000),
+    actor: codex,
+    review: {
+      id: "PRR_1",
+      database_id: 101,
+      state: "COMMENTED",
+      reviewed_head_sha: headSha,
+      actor: codex,
+    },
+  };
+  const all = comments ?? [root];
+  return {
+    id: threadId,
+    is_resolved: true,
+    is_outdated: false,
+    path: null,
+    line: null,
+    comment_count: all.length,
+    comments_pagination_complete: true,
+    provenance_complete: true,
+    comments: all,
+  };
+}
+
+/** A server-owned automatic-resolution record in the stored shape. */
+function resolutionRecord({
+  number,
+  actionId,
+  threadId = "PRRT_1",
+  watermark,
+  headSha,
+  recordedRevision,
+}) {
+  const at = Date.now();
+  return {
+    number,
+    action_id: actionId,
+    thread_id: threadId,
+    thread_watermark: watermark,
+    eligibility_sha256: digest(`eligibility-${actionId}`),
+    head_sha: headSha,
+    actor: { id: 555, type: "User" },
+    reply_comment_id: 901,
+    pre_read: { observed_at: iso(at - 3_000), is_resolved: false },
+    post_read: {
+      observed_at: iso(at - 2_000),
+      is_resolved: true,
+      resolved_by: { id: 555, type: "User" },
+    },
+    recorded_at: iso(at - 1_000),
+    recorded_revision: recordedRevision,
+  };
+}
+
+function invalidatedEvent({ number, threadId = "PRRT_1", recordId, priorWatermark, newWatermark }) {
+  return {
+    kind: "INVALIDATED",
+    number,
+    thread_id: threadId,
+    record_id: recordId,
+    prior_watermark: priorWatermark,
+    new_watermark: newWatermark,
+    follow_up_comments: [],
+    reason: "pinned codex feedback",
+    at: iso(Date.now()),
+  };
+}
+
+function unresolveEvent({ number, threadId = "PRRT_1", recordId }) {
+  return {
+    kind: "UNRESOLVED_FOR_REPAIR",
+    number,
+    thread_id: threadId,
+    record_id: recordId,
+    action_id: `unresolve-${recordId}`,
+    at: iso(Date.now()),
+  };
+}
+
+function supersedeEvent({ number, threadId = "PRRT_1", predecessorId, successorId, invalidationEvent, unresolveEvent }) {
+  return {
+    kind: "SUPERSEDES",
+    number,
+    thread_id: threadId,
+    predecessor_id: predecessorId,
+    successor_id: successorId,
+    invalidation_event: invalidationEvent,
+    unresolve_event: unresolveEvent,
+    at: iso(Date.now()),
+  };
+}
+
+test("the terminal projection records MERGE_READY and the workflow stops with a terminal record", async (t) => {
+  const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t);
+  assert.equal(workflow.status, "ACTIVE");
+  assert.equal(workflow.ready_marks.length, 1);
+  assert.equal(workflow.ready_marks[0].publication_revision, clearanceRevision);
+
+  // The terminal projection never evaluates the pre-mark-ready observation:
+  // it shows a draft pull request, which is not a successful run.
+  const before = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(before.status, "PR_DRAFT");
+  assert.notEqual(before.blocking_reason, null);
+  assert.notEqual(before.blockers.length, 0);
+
+  // Without a fresh post-ready observation the workflow stays stopped: the
+  // advance is legal but idle, and spends no revision.
+  const idle = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(idle.phase, "POST_READY");
+  assert.equal(idle.status, "ACTIVE");
+  assert.equal(idle.revision, workflow.revision);
+  assert.equal(idle.terminal, null);
+
+  // The controller records one fresh complete observation of the ready pull
+  // request, and only then may the run reach its terminal state.
+  const observedAt = Date.now();
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: readyObservation(state, headSha, { at: observedAt, requestId: 100, requestAt: at + 1_000 }) },
+    { clock: () => observedAt + 10 },
+  );
+  const terminal = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(terminal.status, "MERGE_READY");
+  assert.equal(terminal.blocking_reason, null);
+  assert.deepEqual(terminal.blockers, []);
+  assert.equal(terminal.observation_revision, clearanceRevision + 1);
+  assert.match(terminal.observation_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(
+    terminal.resolution_sha256,
+    sha256(canonicalJson({ automatic_resolutions: [], resolution_lifecycle: [] })),
+  );
+  assert.equal(terminal.ready_exception_sha256, null);
+  assert.deepEqual(terminal.human_review_requirements, []);
+  assert.equal(terminal.workflow_authorization_sha256, workflow.authorization.workflow_authorization_sha256);
+
+  const done = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(done.status, "MERGE_READY");
+  assert.equal(done.phase, "POST_READY");
+  assert.equal(done.revision, workflow.revision + 1);
+  assert.notEqual(done.terminal, null);
+  assert.equal(done.terminal.status, "MERGE_READY");
+  assert.equal(done.terminal.workflow_revision, done.revision);
+  assert.deepEqual(done.terminal.pull_request, {
+    repository_id: REPOSITORY_ID,
+    pr_number: PR_NUMBER,
+    url: `https://github.com/example/review-bridge/pull/${PR_NUMBER}`,
+  });
+  assert.equal(done.terminal.head_sha, headSha);
+  assert.equal(done.terminal.local_review_id, reviewId);
+  assert.equal(done.terminal.publication_id, reviewId);
+  assert.equal(done.terminal.observation_revision, clearanceRevision + 1);
+  assert.match(done.terminal.observation_sha256, /^[0-9a-f]{64}$/);
+  assert.match(done.terminal.publication_authorization_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(done.terminal.workflow_authorization_sha256, terminal.workflow_authorization_sha256);
+  assert.equal(done.terminal.resolution_sha256, terminal.resolution_sha256);
+  assert.equal(done.terminal.ready_exception_sha256, null);
+  assert.deepEqual(done.terminal.human_review_requirements, []);
+  assert.match(done.terminal.recorded_at, /^[0-9T:.Z-]+$/);
+
+  // The run stops: the summary names the terminal state, and no further
+  // advance, pause, or resume is possible. The workflow never called
+  // verify_publication_gate -- no gate file exists -- and merging stays the
+  // operator's manual act.
+  const summary = await getAutonomousWorkflowSummary(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(summary.status, "MERGE_READY");
+  assert.equal(summary.next_action, "AWAIT_OPERATOR");
+  assert.equal(summary.terminal.status, "MERGE_READY");
+  await assert.rejects(
+    advanceRemoteWorkflow(state.store, workflow.workflow_id, done.revision),
+    (error) => error.code === "WORKFLOW_NOT_ACTIVE",
+  );
+  await assert.rejects(
+    pauseAutonomousWorkflow(state.store, workflow.workflow_id, done.revision, {
+      reasonCode: "NO_PROGRESS",
+      blockedAction: "WAIT_PUBLICATION",
+      evidence: "x",
+    }),
+    (error) => error.code === "WORKFLOW_NOT_ACTIVE",
+  );
+  const full = await getAutonomousWorkflow(state.store, workflow.workflow_id);
+  assert.equal(full.terminal.status, "MERGE_READY");
+  await assert.rejects(
+    fsp.access(path.join(state.store, "reviews", reviewId, "publication-gate.json")),
+    (error) => error.code === "ENOENT",
+  );
+  // The manual merge path stays readable: the binding reader accepts the
+  // terminal workflow, so finalization and verification can still run later.
+  const reread = await getAutonomousPreReady(state.store, reviewId);
+  assert.equal(reread.status, "READY_TO_MARK");
+});
+
+test("a post-ready observation that is not MERGE_READY blocks the terminal projection", async (t) => {
+  const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t);
+  const observedAt = Date.now();
+
+  // An unresolved thread in the post-ready observation: the terminal
+  // projection reports the derived blocker, never a terminal state.
+  const payload = readyObservation(state, headSha, {
+    at: observedAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  payload.review_threads.total_count = 1;
+  payload.review_threads.unresolved_count = 1;
+  payload.review_threads.threads = [
+    { id: "PRRT_HUMAN", is_resolved: false, is_outdated: false, path: null, line: null },
+  ];
+  const blockedLedger = await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: payload },
+    { clock: () => observedAt + 10 },
+  );
+  const blocked = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(blocked.status, "CHANGES_REQUIRED");
+  assert.equal(blocked.blocking_reason, "UNRESOLVED_REVIEW_THREADS");
+  assert.notEqual(blocked.blockers.length, 0);
+
+  // A draft pull request in the post-ready observation is not a success: the
+  // terminal projection is the one projection that does not ignore the flag.
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: blockedLedger.revision,
+      observation: draftObservation(state, headSha, {
+        at: observedAt + 4_000,
+        requestId: 100,
+        requestAt: at + 1_000,
+      }),
+    },
+    { clock: () => observedAt + 4_010 },
+  );
+  const draft = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(draft.status, "PR_DRAFT");
+
+  // Expired evidence never mints a terminal record either.
+  const stale = await getAutonomousTerminal(state.store, reviewId, {
+    clock: () => observedAt + 10 + 6 * 60 * 1000,
+  });
+  assert.equal(stale.status, "EVIDENCE_STALE");
+
+  const stillStopped = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(stillStopped.phase, "POST_READY");
+  assert.equal(stillStopped.terminal, null);
+});
+
+test("a new thread comment between mark-ready and the terminal observation blocks autonomous_terminal", async (t) => {
+  const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t);
+  const observedAt = Date.now();
+  const thread = resolvedThread(headSha);
+  const watermark = threadWatermark(thread);
+  const payload = readyObservation(state, headSha, {
+    at: observedAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  payload.review_threads.total_count = 1;
+  payload.review_threads.unresolved_count = 0;
+  payload.review_threads.threads = [thread];
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: payload },
+    { clock: () => observedAt + 10 },
+  );
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [
+      resolutionRecord({
+        number: 1,
+        actionId: "act-1",
+        watermark,
+        headSha,
+        recordedRevision: recorded.revision,
+      }),
+    ];
+  });
+  const clear = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(clear.status, "MERGE_READY");
+
+  // A comment arrives after mark-ready: the thread watermark moves, so the
+  // active record no longer matches and the terminal projection fails closed
+  // even though the publication status is still MERGE_READY.
+  const codex = codexActor();
+  const movedThread = resolvedThread(headSha, {
+    comments: [
+      ...thread.comments,
+      {
+        id: "PRRC_2",
+        database_id: 902,
+        created_at: iso(observedAt + 500),
+        updated_at: iso(observedAt + 500),
+        actor: codex,
+        review: null,
+      },
+    ],
+  });
+  const movedPayload = readyObservation(state, headSha, {
+    at: observedAt + 2_000,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  movedPayload.review_threads.total_count = 1;
+  movedPayload.review_threads.unresolved_count = 0;
+  movedPayload.review_threads.threads = [movedThread];
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: recorded.revision, observation: movedPayload },
+    { clock: () => observedAt + 2_010 },
+  );
+  const blocked = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(blocked.status, "CHANGES_REQUIRED");
+  assert.equal(blocked.blocking_reason, "THREAD_RESOLUTION_INVALIDATED");
+  assert.deepEqual(blocked.blockers, [
+    "thread_resolution:THREAD_RESOLUTION_INVALIDATED:PRRT_1",
+  ]);
+  const stopped = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(stopped.phase, "POST_READY");
+  assert.equal(stopped.terminal, null);
+});
+
+test("the terminal replay accepts one linear supersession chain and blocks every broken chain", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    atPublication,
+    reviewId,
+    headSha,
+    at,
+  );
+  // The terminal projection only replays over a derived MERGE_READY, so this
+  // test drives the ledger directly: a ready observation with one resolved
+  // thread, then records and lifecycle events injected in the stored shape.
+  const thread = resolvedThread(headSha);
+  const finalWatermark = threadWatermark(thread);
+  const payload = readyObservation(state, headSha, {
+    at: at + 20_000,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  payload.review_threads.total_count = 1;
+  payload.review_threads.unresolved_count = 0;
+  payload.review_threads.threads = [thread];
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: 3, observation: payload },
+    { clock: () => at + 20_010 },
+  );
+  const earlierWatermark = digest("earlier watermark");
+  const earlierHead = "a".repeat(40);
+  const recordOne = resolutionRecord({
+    number: 1,
+    actionId: "act-1",
+    watermark: earlierWatermark,
+    headSha: earlierHead,
+    recordedRevision: 3,
+  });
+  const recordTwo = resolutionRecord({
+    number: 2,
+    actionId: "act-2",
+    watermark: finalWatermark,
+    headSha,
+    recordedRevision: recorded.revision,
+  });
+
+  // A valid chain: the predecessor is retired by an invalidation, a
+  // compensating unresolve, and a supersession to a successor whose fresh
+  // watermark matches the final observation. The superseded predecessor is
+  // audit evidence and is never compared against the current watermark.
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [recordOne, recordTwo];
+    ledger.resolution_lifecycle = [
+      invalidatedEvent({
+        number: 1,
+        recordId: "act-1",
+        priorWatermark: earlierWatermark,
+        newWatermark: finalWatermark,
+      }),
+      unresolveEvent({ number: 2, recordId: "act-1" }),
+      supersedeEvent({
+        number: 3,
+        predecessorId: "act-1",
+        successorId: "act-2",
+        invalidationEvent: 1,
+        unresolveEvent: 2,
+      }),
+    ];
+  });
+  const valid = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(valid.status, "MERGE_READY", "a linear supersession chain replays");
+  assert.deepEqual(valid.blockers, []);
+
+  // Missing unresolve: the supersession cannot be replayed without the
+  // compensating unresolve its own binding names.
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.resolution_lifecycle = [
+      invalidatedEvent({
+        number: 1,
+        recordId: "act-1",
+        priorWatermark: earlierWatermark,
+        newWatermark: finalWatermark,
+      }),
+      unresolveEvent({ number: 2, recordId: "act-1" }),
+      supersedeEvent({
+        number: 3,
+        predecessorId: "act-1",
+        successorId: "act-2",
+        invalidationEvent: 1,
+        unresolveEvent: 99,
+      }),
+    ];
+  });
+  const missingUnresolve = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(missingUnresolve.blocking_reason, "THREAD_RESOLUTION_CHAIN_BROKEN");
+
+  // A fork: one predecessor to two successors is not a chain.
+  const recordThree = resolutionRecord({
+    number: 3,
+    actionId: "act-3",
+    threadId: "PRRT_1",
+    watermark: digest("third watermark"),
+    headSha: "b".repeat(40),
+    recordedRevision: recorded.revision + 1,
+  });
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [recordOne, recordTwo, recordThree];
+    ledger.resolution_lifecycle = [
+      invalidatedEvent({
+        number: 1,
+        recordId: "act-1",
+        priorWatermark: earlierWatermark,
+        newWatermark: finalWatermark,
+      }),
+      unresolveEvent({ number: 2, recordId: "act-1" }),
+      supersedeEvent({
+        number: 3,
+        predecessorId: "act-1",
+        successorId: "act-2",
+        invalidationEvent: 1,
+        unresolveEvent: 2,
+      }),
+      supersedeEvent({
+        number: 4,
+        predecessorId: "act-1",
+        successorId: "act-3",
+        invalidationEvent: 1,
+        unresolveEvent: 2,
+      }),
+    ];
+  });
+  const fork = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(fork.blocking_reason, "THREAD_RESOLUTION_CHAIN_BROKEN");
+
+  // A cycle: the successor map is injective but nothing has a head, so no
+  // single chain covers the records.
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [recordOne, recordTwo];
+    ledger.resolution_lifecycle = [
+      invalidatedEvent({
+        number: 1,
+        recordId: "act-1",
+        priorWatermark: earlierWatermark,
+        newWatermark: finalWatermark,
+      }),
+      unresolveEvent({ number: 2, recordId: "act-1" }),
+      supersedeEvent({
+        number: 3,
+        predecessorId: "act-1",
+        successorId: "act-2",
+        invalidationEvent: 1,
+        unresolveEvent: 2,
+      }),
+      supersedeEvent({
+        number: 4,
+        predecessorId: "act-2",
+        successorId: "act-1",
+        invalidationEvent: 1,
+        unresolveEvent: 2,
+      }),
+    ];
+  });
+  const cycle = await getAutonomousTerminal(state.store, reviewId);
+  assert.notEqual(cycle.status, "MERGE_READY");
+  assert.notEqual(cycle.blocking_reason, null);
+
+  // Two records with no supersession: an extra active record, not a chain.
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [recordOne, recordTwo];
+    ledger.resolution_lifecycle = [];
+  });
+  const extra = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(extra.blocking_reason, "THREAD_RESOLUTION_RECORD_EXTRA");
+
+  // A supersession naming a successor record that does not exist.
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [recordOne];
+    ledger.resolution_lifecycle = [
+      invalidatedEvent({
+        number: 1,
+        recordId: "act-1",
+        priorWatermark: earlierWatermark,
+        newWatermark: finalWatermark,
+      }),
+      unresolveEvent({ number: 2, recordId: "act-1" }),
+      supersedeEvent({
+        number: 3,
+        predecessorId: "act-1",
+        successorId: "act-missing",
+        invalidationEvent: 1,
+        unresolveEvent: 2,
+      }),
+    ];
+  });
+  const missing = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(missing.blocking_reason, "THREAD_RESOLUTION_RECORD_MISSING");
+
+  // An invalidation of the active record with no supersession after it is an
+  // invalidated active frontier.
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [
+      resolutionRecord({
+        number: 1,
+        actionId: "act-1",
+        watermark: finalWatermark,
+        headSha,
+        recordedRevision: recorded.revision,
+      }),
+    ];
+    ledger.resolution_lifecycle = [
+      invalidatedEvent({
+        number: 1,
+        recordId: "act-1",
+        priorWatermark: finalWatermark,
+        newWatermark: digest("moved again"),
+      }),
+    ];
+  });
+  const invalidated = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(invalidated.blocking_reason, "THREAD_RESOLUTION_INVALIDATED");
+});
+
+test("the terminal replay refuses human participation in an active record's thread", async (t) => {
+  const { state, reviewId, headSha, at, clearanceRevision } = await reachPostReady(t);
+  const observedAt = Date.now();
+  const human = { id: 555, type: "User", login: "human" };
+  const thread = resolvedThread(headSha, {
+    comments: [
+      {
+        id: "PRRC_1",
+        database_id: 900,
+        created_at: iso(observedAt - 5_000),
+        updated_at: iso(observedAt - 5_000),
+        actor: codexActor(),
+        review: {
+          id: "PRR_1",
+          database_id: 101,
+          state: "COMMENTED",
+          reviewed_head_sha: headSha,
+          actor: codexActor(),
+        },
+      },
+      {
+        id: "PRRC_2",
+        database_id: 901,
+        created_at: iso(observedAt - 1_000),
+        updated_at: iso(observedAt - 1_000),
+        actor: human,
+        review: null,
+      },
+    ],
+  });
+  const watermark = threadWatermark(thread);
+  const payload = readyObservation(state, headSha, {
+    at: observedAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  payload.review_threads.total_count = 1;
+  payload.review_threads.unresolved_count = 0;
+  payload.review_threads.threads = [thread];
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: payload },
+    { clock: () => observedAt + 10 },
+  );
+  // A record that matches the watermark exactly still cannot mint a terminal
+  // record for a thread a human participated in: the record's own watermark
+  // proves only that the sequence is unchanged, not that it was eligible.
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [
+      resolutionRecord({
+        number: 1,
+        actionId: "act-1",
+        watermark,
+        headSha,
+        recordedRevision: recorded.revision,
+      }),
+    ];
+  });
+  const blocked = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(blocked.status, "CHANGES_REQUIRED");
+  assert.equal(blocked.blocking_reason, "THREAD_RESOLUTION_UNSAFE");
+  assert.deepEqual(blocked.blockers, [
+    "thread_resolution:THREAD_RESOLUTION_UNSAFE:PRRT_1",
+  ]);
+});
+
+test("a post-ready check failure returns the ready pull request to draft before repair", async (t) => {
+  const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t);
+  const observedAt = Date.now();
+  const payload = readyObservation(state, headSha, {
+    at: observedAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  failingCheck(payload);
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: payload },
+    { clock: () => observedAt + 10 },
+  );
+  // The terminal projection reports the failed check, and the advance sends
+  // the visible pull request back to draft before any repair commit may be
+  // made -- the same exposure rule that guards the ordinary repair phases.
+  const projection = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(projection.status, "CHECKS_FAILED");
+  const advanced = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(advanced.phase, "ENSURE_DRAFT_FOR_REPAIR");
+  assert.equal(
+    (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
+      .next_action,
+    "PLAN_RETURN_TO_DRAFT",
+  );
+});
+
+test("the terminal record requires an observation recorded after the clearance", async (t) => {
+  const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t);
+  const observedAt = Date.now();
+
+  // A ready observation edited onto the ledger at the clearance revision is
+  // indistinguishable to the projection -- it reports MERGE_READY -- but the
+  // workflow still refuses to record a terminal entry over it: the RFC's
+  // "one fresh complete observation" is recorded *after* the mark-ready
+  // action consumed its clearance, and the revision comparison is what makes
+  // that structural rather than a clock.
+  const payload = readyObservation(state, headSha, {
+    at: observedAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.latest_observation = { ...payload, recorded_at: iso(observedAt + 10) };
+  });
+  const projection = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(projection.status, "MERGE_READY");
+  assert.equal(projection.revision, clearanceRevision);
+  const refused = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(refused.phase, "POST_READY");
+  assert.equal(refused.status, "ACTIVE");
+  assert.equal(refused.terminal, null);
+
+  // The genuinely fresh observation (a later revision) is what authorizes it.
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: readyObservation(state, headSha, { at: observedAt + 1_000, requestId: 100, requestAt: at + 1_000 }) },
+    { clock: () => observedAt + 1_010 },
+  );
+  assert.equal(recorded.revision, clearanceRevision + 1);
+  const done = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(done.status, "MERGE_READY");
+  assert.equal(done.terminal.observation_revision, clearanceRevision + 1);
+});
+
+test("a terminal workflow ledger cannot be tampered into a different claim", async (t) => {
+  const { state, workflow, reviewId, headSha, at } = await reachPostReady(t);
+  const observedAt = Date.now();
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    {
+      expectedRevision:
+        workflow.ready_marks[0].publication_revision,
+      observation: readyObservation(state, headSha, {
+        at: observedAt,
+        requestId: 100,
+        requestAt: at + 1_000,
+      }),
+    },
+    { clock: () => observedAt + 10 },
+  );
+  assert.ok(recorded.revision);
+  const done = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(done.status, "MERGE_READY");
+
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const tampered = structuredClone(stored);
+  tampered.terminal.status = "MERGED";
+  await atomicWriteCanonicalJson(workflowPath, tampered);
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, workflow.workflow_id),
+    (error) => error.code === "WORKFLOW_STATE_INVALID",
+  );
+  await atomicWriteCanonicalJson(workflowPath, stored);
+
+  // The terminal status without the terminal record is equally invalid.
+  const bare = structuredClone(stored);
+  bare.terminal = null;
+  await atomicWriteCanonicalJson(workflowPath, bare);
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, workflow.workflow_id),
+    (error) => error.code === "WORKFLOW_STATE_INVALID",
+  );
+  await atomicWriteCanonicalJson(workflowPath, stored);
 });
