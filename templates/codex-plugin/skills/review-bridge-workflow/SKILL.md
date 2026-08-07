@@ -295,9 +295,12 @@ gap returns the ready pull request to draft before any repair.
     performed the transition its pre-read predicted and reconciling it is the
     honest close.
 
-16. At `POST_READY`, record one fresh complete observation of the ready pull
-    request (`record_github_snapshot`), then call `advance_remote_workflow`.
-    The server evaluates that observation through the `autonomous_terminal`
+16. At `POST_READY`, the workflow summary advertises
+    `RECORD_FRESH_OBSERVATION_AND_ADVANCE` while the workflow is still
+    `ACTIVE`: record one fresh complete observation of the ready pull request
+    (`record_github_snapshot`), then call `advance_remote_workflow`. Do not
+    stop at `AWAIT_OPERATOR` here — the run still owes the server that
+    observation. The server evaluates it through the `autonomous_terminal`
     projection: it requires publication `MERGE_READY`, revalidates the
     workflow binding and both authorization digests, and replays every
     automatic-resolution record and lifecycle chain against the same
@@ -306,7 +309,10 @@ gap returns the ready pull request to draft before any repair.
     does the workflow record its terminal entry, set status `MERGE_READY`, and
     stop. A terminal workflow refuses every further mutation; it never calls
     `verify_publication_gate` and never merges. Merging is the operator's
-    later explicit instruction through the existing manual path.
+    later explicit instruction through the existing manual path, and the
+    operator's post-merge reconciliation cleanup can still release the
+    workflow's claims (`release_workflow_claims` accepts a `MERGE_READY`
+    workflow) so a later run can reuse the topic branch.
 
     Any other terminal verdict keeps the run stopped at `POST_READY`: a
     contested resolution record, a new thread comment, a stale observation, or

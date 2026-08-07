@@ -4228,12 +4228,25 @@ function resolutionFrontier(ledger) {
   const events = ledger.resolution_lifecycle ?? [];
   const active = new Map();
   const blockers = [];
-  if (records.length === 0) {
-    return { active, blockers };
-  }
   const blocked = (reason, threadId, record = null) => {
     blockers.push({ reason, thread_id: threadId, record });
   };
+  if (records.length === 0) {
+    if (events.length > 0) {
+      // Lifecycle events with no resolution records are orphan evidence:
+      // every event kind names a record that must exist, so the named
+      // record is missing and the frontier cannot be replayed. The terminal
+      // projection must never accept an orphan INVALIDATED,
+      // UNRESOLVED_FOR_REPAIR, or SUPERSEDES as though it proved nothing.
+      const orphanThreads = [
+        ...new Set(events.map((event) => event.thread_id)),
+      ];
+      for (const threadId of orphanThreads) {
+        blocked("THREAD_RESOLUTION_RECORD_MISSING", threadId);
+      }
+    }
+    return { active, blockers };
+  }
   const byThread = new Map();
   for (const record of records) {
     if (!byThread.has(record.thread_id)) {

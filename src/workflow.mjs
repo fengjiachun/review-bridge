@@ -1562,10 +1562,10 @@ function validateWorkflow(workflow) {
     );
   }
   const released = dispositions.has("RELEASED");
-  if (released && workflow.status !== "CANCELLED") {
+  if (released && !["CANCELLED", "MERGE_READY"].includes(workflow.status)) {
     fail(
       "WORKFLOW_CLAIMS_INVALID",
-      "released claims require a cancelled workflow",
+      "released claims require a cancelled or terminal workflow",
     );
   }
   if (released !== (workflow.claim_release != null)) {
@@ -2606,7 +2606,17 @@ function nextAction(workflow) {
       EXECUTING: "RECONCILE_MARK_PR_READY",
       OBSERVED: "COMPLETE_MARK_PR_READY",
     }),
-    POST_READY: "AWAIT_OPERATOR",
+    // A run that has marked its pull request ready still owes the server one
+    // fresh post-ready observation: only a MERGE_READY verdict over it can
+    // record the terminal entry. The driver records the snapshot and calls
+    // advance_remote_workflow; a compliant driver must not stop at
+    // AWAIT_OPERATOR while the workflow is still ACTIVE. Once the terminal
+    // record exists the status is MERGE_READY and the run stops for the
+    // operator's manual merge.
+    POST_READY:
+      workflow.status === "ACTIVE"
+        ? "RECORD_FRESH_OBSERVATION_AND_ADVANCE"
+        : "AWAIT_OPERATOR",
   };
   return actions[workflow.phase] ?? "INSPECT_WORKFLOW";
 }
@@ -5326,10 +5336,10 @@ export async function releaseWorkflowClaims(
   }
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
-    if (workflow.status !== "CANCELLED") {
+    if (!["CANCELLED", "MERGE_READY"].includes(workflow.status)) {
       fail(
         "WORKFLOW_STATE_INVALID",
-        "claims may be released only after explicit cancellation",
+        "claims may be released only after explicit cancellation or a recorded terminal state",
       );
     }
     const activeClaims = workflow.claims.filter(
@@ -5377,10 +5387,16 @@ export async function releaseWorkflowClaims(
           return true;
         }
         const observedAt = Date.parse(evidence.observed_at);
-        const cancelledAt = Date.parse(workflow.cancellation.cancelled_at);
+        // The reconciliation evidence must postdate the state that made the
+        // release legal: for a cancelled workflow the cancellation, for a
+        // terminal workflow the recorded terminal entry the merge followed.
+        const referenceAt =
+          workflow.status === "MERGE_READY"
+            ? Date.parse(workflow.terminal.recorded_at)
+            : Date.parse(workflow.cancellation.cancelled_at);
         const currentTime = Date.now();
         return (
-          observedAt < cancelledAt ||
+          observedAt < referenceAt ||
           currentTime - observedAt > MAX_RECONCILIATION_AGE_MS ||
           observedAt - currentTime > MAX_FUTURE_CLOCK_SKEW_MS ||
           sha256(canonicalJson(evidence.target)) !==

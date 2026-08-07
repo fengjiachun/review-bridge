@@ -53,6 +53,7 @@ import {
   recordThreadReplyObservation,
   recordThreadResolutionObservation,
   recordWorkflowHead,
+  releaseWorkflowClaims,
   resumeAutonomousWorkflow,
   startAutonomousWorkflow,
 } from "../src/workflow.mjs";
@@ -3371,10 +3372,13 @@ test("a cleared draft pull request marks itself ready and then stops", async (t)
     planned.action.action_id,
   );
   assert.equal(ready.phase, "POST_READY");
+  // The driver must not stop here: a compliant driver follows the
+  // server-derived next_action, and the run still owes one fresh post-ready
+  // observation before the terminal projection can record MERGE_READY.
   assert.equal(
     (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
       .next_action,
-    "AWAIT_OPERATOR",
+    "RECORD_FRESH_OBSERVATION_AND_ADVANCE",
   );
   assert.equal(ready.ready_marks.length, 1);
   assert.deepEqual(
@@ -6044,6 +6048,68 @@ test("the terminal projection records MERGE_READY and the workflow stops with a 
   assert.equal(reread.status, "READY_TO_MARK");
 });
 
+test("a terminal workflow can release its claims after the operator merges", async (t) => {
+  const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t);
+  const observedAt = Date.now();
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: readyObservation(state, headSha, { at: observedAt, requestId: 100, requestAt: at + 1_000 }) },
+    { clock: () => observedAt + 10 },
+  );
+  const done = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(done.status, "MERGE_READY");
+  assert.equal(
+    done.claims.every((claim) => claim.disposition === "ACTIVE"),
+    true,
+  );
+  // The operator merged and deleted the branches: the documented
+  // reconciliation cleanup must be able to release the claims of a terminal
+  // workflow, or the topic branch is owned forever and a later workflow
+  // reusing it is rejected.
+  const released = await releaseWorkflowClaims(
+    state.store,
+    workflow.workflow_id,
+    done.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "The pull request merged and the topic branch was deleted.",
+      reconciledClaims: done.claims
+        .filter((claim) => claim.disposition === "ACTIVE")
+        .map((claim) => ({
+          kind: claim.kind,
+          canonical_key_sha256: claim.canonical_key_sha256,
+          target: claim.target,
+          workflow_revision: done.revision,
+          ...(claim.kind === "PULL_REQUEST"
+            ? { present: true, open: false }
+            : { present: false }),
+          observed_at: new Date().toISOString(),
+        })),
+    },
+  );
+  assert.equal(released.status, "MERGE_READY");
+  assert.equal(
+    released.claims.every((claim) => claim.disposition === "RELEASED"),
+    true,
+  );
+  assert.equal(released.claim_release != null, true);
+  const reread = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(reread.status, "MERGE_READY");
+  assert.equal(
+    reread.claims.every((claim) => claim.disposition === "RELEASED"),
+    true,
+  );
+});
+
 test("a post-ready observation that is not MERGE_READY blocks the terminal projection", async (t) => {
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
@@ -6417,6 +6483,24 @@ test("the terminal replay accepts one linear supersession chain and blocks every
   });
   const invalidated = await getAutonomousTerminal(state.store, reviewId);
   assert.equal(invalidated.blocking_reason, "THREAD_RESOLUTION_INVALIDATED");
+
+  // Orphan lifecycle events with no resolution records are missing-record
+  // evidence: every event kind names a record that must exist, and the
+  // terminal projection must never accept an orphan event as proof of
+  // nothing.
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [];
+    ledger.resolution_lifecycle = [
+      invalidatedEvent({
+        number: 1,
+        recordId: "act-ghost",
+        priorWatermark: finalWatermark,
+        newWatermark: digest("moved again"),
+      }),
+    ];
+  });
+  const orphan = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(orphan.blocking_reason, "THREAD_RESOLUTION_RECORD_MISSING");
 });
 
 test("the terminal replay refuses human participation in an active record's thread", async (t) => {
