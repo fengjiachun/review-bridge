@@ -6501,6 +6501,43 @@ test("the terminal replay accepts one linear supersession chain and blocks every
   });
   const orphan = await getAutonomousTerminal(state.store, reviewId);
   assert.equal(orphan.blocking_reason, "THREAD_RESOLUTION_RECORD_MISSING");
+  // The pre-ready gate must reach the same verdict: a recordless blocker
+  // must not read as "no invalidation" once it reaches derivePublication.
+  const orphanGate = await getAutonomousPreReady(state.store, reviewId);
+  assert.equal(orphanGate.blocking_reason, "THREAD_RESOLUTION_INVALIDATED");
+
+  // A mixed ledger: one thread with a valid chain and another with only an
+  // orphan lifecycle event. The event-only thread must still block the
+  // terminal projection; one thread's valid records cannot hide another
+  // thread's missing record.
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [recordOne, recordTwo];
+    ledger.resolution_lifecycle = [
+      invalidatedEvent({
+        number: 1,
+        recordId: "act-1",
+        priorWatermark: earlierWatermark,
+        newWatermark: finalWatermark,
+      }),
+      unresolveEvent({ number: 2, recordId: "act-1" }),
+      supersedeEvent({
+        number: 3,
+        predecessorId: "act-1",
+        successorId: "act-2",
+        invalidationEvent: 1,
+        unresolveEvent: 2,
+      }),
+      invalidatedEvent({
+        number: 4,
+        threadId: "PRRT_GHOST",
+        recordId: "act-ghost",
+        priorWatermark: finalWatermark,
+        newWatermark: digest("moved again"),
+      }),
+    ];
+  });
+  const mixed = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(mixed.blocking_reason, "THREAD_RESOLUTION_RECORD_MISSING");
 });
 
 test("the terminal replay refuses human participation in an active record's thread", async (t) => {

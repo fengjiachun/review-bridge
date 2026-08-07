@@ -4181,7 +4181,12 @@ function derivePublication(
 function invalidatedAutomaticResolution(ledger) {
   const frontier = resolutionFrontier(ledger);
   if (frontier.blockers.length > 0) {
-    return frontier.blockers[0].record;
+    // A blocker invalidates the frontier even when it names no record
+    // (orphan lifecycle events with no resolution records). The single
+    // caller only tests for null, so return the blocker itself, not its
+    // nullable record -- a recordless blocker must not read as "no
+    // invalidation".
+    return frontier.blockers[0];
   }
   const threads = new Map(
     ledger.latest_observation.review_threads.threads.map((thread) => [
@@ -4253,6 +4258,15 @@ function resolutionFrontier(ledger) {
       byThread.set(record.thread_id, []);
     }
     byThread.get(record.thread_id).push(record);
+  }
+  // Threads that appear only in lifecycle events -- with no resolution
+  // records at all -- are orphan evidence even when other threads carry
+  // valid chains: a mixed ledger must not let one thread's records hide
+  // another thread's missing record.
+  for (const threadId of new Set(events.map((event) => event.thread_id))) {
+    if (!byThread.has(threadId)) {
+      blocked("THREAD_RESOLUTION_RECORD_MISSING", threadId);
+    }
   }
   for (const [threadId, threadRecords] of byThread) {
     const sorted = [...threadRecords].sort((left, right) => left.number - right.number);

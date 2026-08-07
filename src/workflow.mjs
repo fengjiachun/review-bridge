@@ -4793,6 +4793,25 @@ export async function advanceRemoteWorkflow(
             workflow,
             "WORKFLOW_TERMINAL",
             async (next) => {
+              // The terminal record is the run's success claim. Re-read the
+              // publication under the workflow mutation: a snapshot writer
+              // on another process can hold the publication lock while this
+              // advance is between the projection above and the ledger
+              // write, and the terminal entry must not be minted over a
+              // publication that moved. Failing closed leaves the run
+              // stopped at POST_READY for the driver to re-collect.
+              const current = await getAutonomousTerminal(storeRoot, reviewId, {
+                clock,
+              });
+              if (
+                current.status !== "MERGE_READY" ||
+                current.revision !== projection.revision
+              ) {
+                fail(
+                  "WORKFLOW_PUBLICATION_MISMATCH",
+                  "publication advanced after the terminal projection was read",
+                );
+              }
               next.terminal = {
                 status: "MERGE_READY",
                 workflow_revision: next.revision + 1,
