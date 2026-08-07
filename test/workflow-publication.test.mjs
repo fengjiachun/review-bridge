@@ -6571,6 +6571,48 @@ test("the terminal replay accepts one linear supersession chain and blocks every
   });
   const humanResolved = await getAutonomousTerminal(state.store, reviewId);
   assert.equal(humanResolved.blocking_reason, "THREAD_RESOLUTION_RECORD_MISSING");
+
+  // A successor on an unrelated head is not a descendant: the active record
+  // must be at the head the observation covers, or the terminal claim would
+  // mint over a resolution that never happened at the head it evaluates.
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [
+      resolutionRecord({
+        number: 1,
+        actionId: "act-1",
+        threadId: "PRRT_1",
+        watermark: earlierWatermark,
+        headSha: "c".repeat(40),
+        recordedRevision: recorded.revision,
+      }),
+      resolutionRecord({
+        number: 2,
+        actionId: "act-2",
+        threadId: "PRRT_1",
+        watermark: finalWatermark,
+        headSha: "d".repeat(40),
+        recordedRevision: recorded.revision + 1,
+      }),
+    ];
+    ledger.resolution_lifecycle = [
+      invalidatedEvent({
+        number: 1,
+        recordId: "act-1",
+        priorWatermark: earlierWatermark,
+        newWatermark: finalWatermark,
+      }),
+      unresolveEvent({ number: 2, recordId: "act-1" }),
+      supersedeEvent({
+        number: 3,
+        predecessorId: "act-1",
+        successorId: "act-2",
+        invalidationEvent: 1,
+        unresolveEvent: 2,
+      }),
+    ];
+  });
+  const unrelatedHead = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(unrelatedHead.blocking_reason, "THREAD_RESOLUTION_CHAIN_BROKEN");
 });
 
 test("the terminal replay refuses human participation in an active record's thread", async (t) => {

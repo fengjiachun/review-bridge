@@ -4416,6 +4416,20 @@ function resolutionFrontier(ledger) {
       );
       continue;
     }
+    // The active record's resolution must be at the head the observation
+    // covers. A successor on an unrelated or rewritten head passes the
+    // inequality check without ever having been recorded against the head
+    // the replay evaluates, so the terminal claim would mint over a
+    // resolution that never happened there. The pure replay cannot verify
+    // git descent -- the SUPERSEDES writer's ancestry check is the RFC's
+    // other half -- but this is the strongest structural proof available.
+    if (
+      activeRecord.head_sha !==
+      (ledger.latest_observation?.pull_request?.head_sha ?? null)
+    ) {
+      blocked("THREAD_RESOLUTION_CHAIN_BROKEN", threadId, activeRecord);
+      continue;
+    }
     active.set(threadId, activeRecord);
   }
   return { active, blockers };
