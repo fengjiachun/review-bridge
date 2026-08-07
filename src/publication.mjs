@@ -6067,108 +6067,161 @@ export async function getAutonomousTerminal(
     const currentMs = clock();
     const authorization = await openAuthorizationFiles(paths, reviewId);
     try {
-      const ledger = authorization.ledger;
-      if (ledger.version !== 3) {
-        fail(
-          "PUBLICATION_NOT_AUTONOMOUS",
-          "only a version 3 publication has an autonomous projection",
-        );
-      }
-      const binding = await requireWorkflowBinding(storeRoot, ledger);
-      const publicationAuthorization = authorizationForLedger(ledger);
-      const derived = derivePublication(ledger, {
-        historyConflict: workflowHeadConflict(binding, ledger),
+      return await projectAutonomousTerminalCore({
+        storeRoot,
+        paths,
+        reviewId,
+        authorization,
+        currentMs,
       });
-      const evidenceStale =
-        ledger.terminal == null &&
-        ledger.latest_observation != null &&
-        currentMs > Date.parse(expiresAtFor(ledger));
-      // The replay is the independent revalidation the RFC requires, so it
-      // runs whenever the evidence is fresh. Its blockers are the reasons a
-      // run must not go terminal even though the publication status says it
-      // is clear -- and, when the derived gate already reported the generic
-      // THREAD_RESOLUTION_INVALIDATED, they name the exact failure instead.
-      const replay = evidenceStale
-        ? []
-        : terminalResolutionBlockers(ledger, binding);
-      const replayBlockers = replay.map(
-        (blocker) =>
-          `thread_resolution:${blocker.reason}:${blocker.thread_id}`,
-      );
-      let status;
-      let blockingReason;
-      let blockers;
-      if (evidenceStale) {
-        status = "EVIDENCE_STALE";
-        blockingReason = "EVIDENCE_STALE";
-        blockers = normalizedBlockers(ledger, derived);
-      } else if (derived.status !== "MERGE_READY") {
-        status = derived.status;
-        blockingReason = derived.blockingReason;
-        blockers = normalizedBlockers(ledger, derived);
-        // The derived gate folds every resolution failure into one generic
-        // reason; the replay's own verdict discriminates so the operator can
-        // tell a broken supersession chain from a moved watermark. The status
-        // and routing are unchanged either way.
-        if (
-          derived.blockingReason === "THREAD_RESOLUTION_INVALIDATED" &&
-          replay.length > 0
-        ) {
-          blockingReason = replay[0].reason;
-          blockers = replayBlockers;
-        }
-      } else if (replay.length > 0) {
-        // Derived MERGE_READY but the replay sees what the gate cannot (a
-        // thread a human participated in): the status stays distinct from
-        // MERGE_READY so a consumer switching on it can never mint a terminal
-        // record by forgetting the blockers. CHANGES_REQUIRED matches the
-        // pre-ready gate's verdict for an invalidated resolution record; the
-        // reason discriminates.
-        status = "CHANGES_REQUIRED";
-        blockingReason = replay[0].reason;
-        blockers = replayBlockers;
-      } else {
-        status = "MERGE_READY";
-        blockingReason = null;
-        blockers = [];
-      }
-      return {
-        review_id: ledger.review_id,
-        revision: ledger.revision,
-        workflow_id: ledger.workflow_id,
-        workflow_revision: binding.revision,
-        status,
-        blocking_reason: status === "MERGE_READY" ? null : blockingReason,
-        blockers,
-        blocker_sha256: blockerDigest(status, blockers),
-        head_sha: publicationAuthorization.head_sha,
-        is_draft: ledger.latest_observation?.pull_request?.is_draft ?? null,
-        latest_observed_at: ledger.latest_observation?.observed_at ?? null,
-        latest_recorded_at: ledger.latest_observation?.recorded_at ?? null,
-        // The exact identity and digests the terminal record must bind, so
-        // the workflow records what this projection revalidated rather than
-        // anything it read elsewhere.
-        pull_request: binding.pull_request,
-        publication_authorization_sha256:
-          publicationAuthorization.source_sha256,
-        workflow_authorization_sha256: ledger.workflow_authorization_sha256,
-        observation_revision:
-          ledger.latest_observation == null ? null : ledger.revision,
-        observation_sha256:
-          ledger.latest_observation == null
-            ? null
-            : canonicalDigest(ledger.latest_observation),
-        resolution_sha256: resolutionSetDigest(ledger),
-        // RFC 0003's draft-gate exception is deliberately unreachable in this
-        // repository: checks and Codex reviews run on draft pull requests, so
-        // no exception machinery exists and none is consumed.
-        ready_exception_sha256: null,
-        // Repository policy is not modelled in this codebase: a human formal
-        // review that requests changes, or a human or unknown thread, blocks
-        // MERGE_READY before this projection exists, and nothing else policy
-        // imposes is recorded anywhere a projection could read it.
-        human_review_requirements: [],
-      };
+    } finally {
+      await closeAuthorizationFiles(authorization);
+    }
+  });
+}
+
+// The lock-free core of the terminal projection. The caller must already
+// hold the publication lock: the workflow terminal branch uses it to
+// revalidate the publication and keep it stable across the workflow ledger
+// write, and nothing else calls it.
+async function projectAutonomousTerminalCore({
+  storeRoot,
+  paths,
+  reviewId,
+  authorization,
+  currentMs,
+}) {
+  const ledger = authorization.ledger;
+  if (ledger.version !== 3) {
+    fail(
+      "PUBLICATION_NOT_AUTONOMOUS",
+      "only a version 3 publication has an autonomous projection",
+    );
+  }
+  const binding = await requireWorkflowBinding(storeRoot, ledger);
+  const publicationAuthorization = authorizationForLedger(ledger);
+  const derived = derivePublication(ledger, {
+    historyConflict: workflowHeadConflict(binding, ledger),
+  });
+  const evidenceStale =
+    ledger.terminal == null &&
+    ledger.latest_observation != null &&
+    currentMs > Date.parse(expiresAtFor(ledger));
+  // The replay is the independent revalidation the RFC requires, so it
+  // runs whenever the evidence is fresh. Its blockers are the reasons a
+  // run must not go terminal even though the publication status says it
+  // is clear -- and, when the derived gate already reported the generic
+  // THREAD_RESOLUTION_INVALIDATED, they name the exact failure instead.
+  const replay = evidenceStale
+    ? []
+    : terminalResolutionBlockers(ledger, binding);
+  const replayBlockers = replay.map(
+    (blocker) =>
+      `thread_resolution:${blocker.reason}:${blocker.thread_id}`,
+  );
+  let status;
+  let blockingReason;
+  let blockers;
+  if (evidenceStale) {
+    status = "EVIDENCE_STALE";
+    blockingReason = "EVIDENCE_STALE";
+    blockers = normalizedBlockers(ledger, derived);
+  } else if (derived.status !== "MERGE_READY") {
+    status = derived.status;
+    blockingReason = derived.blockingReason;
+    blockers = normalizedBlockers(ledger, derived);
+    // The derived gate folds every resolution failure into one generic
+    // reason; the replay's own verdict discriminates so the operator can
+    // tell a broken supersession chain from a moved watermark. The status
+    // and routing are unchanged either way.
+    if (
+      derived.blockingReason === "THREAD_RESOLUTION_INVALIDATED" &&
+      replay.length > 0
+    ) {
+      blockingReason = replay[0].reason;
+      blockers = replayBlockers;
+    }
+  } else if (replay.length > 0) {
+    // Derived MERGE_READY but the replay sees what the gate cannot (a
+    // thread a human participated in): the status stays distinct from
+    // MERGE_READY so a consumer switching on it can never mint a terminal
+    // record by forgetting the blockers. CHANGES_REQUIRED matches the
+    // pre-ready gate's verdict for an invalidated resolution record; the
+    // reason discriminates.
+    status = "CHANGES_REQUIRED";
+    blockingReason = replay[0].reason;
+    blockers = replayBlockers;
+  } else {
+    status = "MERGE_READY";
+    blockingReason = null;
+    blockers = [];
+  }
+  return {
+    review_id: ledger.review_id,
+    revision: ledger.revision,
+    workflow_id: ledger.workflow_id,
+    workflow_revision: binding.revision,
+    status,
+    blocking_reason: status === "MERGE_READY" ? null : blockingReason,
+    blockers,
+    blocker_sha256: blockerDigest(status, blockers),
+    head_sha: publicationAuthorization.head_sha,
+    is_draft: ledger.latest_observation?.pull_request?.is_draft ?? null,
+    latest_observed_at: ledger.latest_observation?.observed_at ?? null,
+    latest_recorded_at: ledger.latest_observation?.recorded_at ?? null,
+    // The exact identity and digests the terminal record must bind, so
+    // the workflow records what this projection revalidated rather than
+    // anything it read elsewhere.
+    pull_request: binding.pull_request,
+    publication_authorization_sha256:
+      publicationAuthorization.source_sha256,
+    workflow_authorization_sha256: ledger.workflow_authorization_sha256,
+    observation_revision:
+      ledger.latest_observation == null ? null : ledger.revision,
+    observation_sha256:
+      ledger.latest_observation == null
+        ? null
+        : canonicalDigest(ledger.latest_observation),
+    resolution_sha256: resolutionSetDigest(ledger),
+    // RFC 0003's draft-gate exception is deliberately unreachable in this
+    // repository: checks and Codex reviews run on draft pull requests, so
+    // no exception machinery exists and none is consumed.
+    ready_exception_sha256: null,
+    // Repository policy is not modelled in this codebase: a human formal
+    // review that requests changes, or a human or unknown thread, blocks
+    // MERGE_READY before this projection exists, and nothing else policy
+    // imposes is recorded anywhere a projection could read it.
+    human_review_requirements: [],
+  };
+}
+
+// Hold the publication lock while the workflow records its terminal entry:
+// the terminal record is the run's success claim, and a snapshot writer
+// must not be able to commit a newer blocking observation between the
+// projection revalidation and the workflow ledger write. The publication
+// lock is per-review and the workflow write is per-workflow, and no
+// publication-lock path acquires the workflow lock (binding reads are
+// lock-free), so holding it here blocks only publication mutations and
+// cannot invert the lock order.
+export async function withAutonomousTerminalLock(
+  storeRoot,
+  reviewId,
+  operation,
+  { clock = Date.now } = {},
+) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    const currentMs = clock();
+    const authorization = await openAuthorizationFiles(paths, reviewId);
+    try {
+      const current = await projectAutonomousTerminalCore({
+        storeRoot,
+        paths,
+        reviewId,
+        authorization,
+        currentMs,
+      });
+      return await operation(current);
     } finally {
       await closeAuthorizationFiles(authorization);
     }

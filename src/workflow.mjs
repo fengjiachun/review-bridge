@@ -7,6 +7,7 @@ import { getReviewSnapshot } from "./core.mjs";
 import {
   getAutonomousPreReady,
   getAutonomousTerminal,
+  withAutonomousTerminalLock,
   getPublication,
   getPublicationFindingsReview,
   getThreadResolutionPlan,
@@ -4787,22 +4788,18 @@ export async function advanceRemoteWorkflow(
       ) {
         const pullRequest = workflow.pull_request;
         const recordedAt = now();
+        // The terminal record is the run's success claim. Revalidate the
+        // publication and keep it stable across the workflow ledger write:
+        // withAutonomousTerminalLock holds the publication lock while the
+        // projection is re-read AND while saveActionMutation writes
+        // workflow.json, so a snapshot writer cannot commit a newer
+        // blocking observation between the two. Failing closed leaves the
+        // run stopped at POST_READY for the driver to re-collect.
         return publicWorkflow(
-          await saveActionMutation(
-            paths,
-            workflow,
-            "WORKFLOW_TERMINAL",
-            async (next) => {
-              // The terminal record is the run's success claim. Re-read the
-              // publication under the workflow mutation: a snapshot writer
-              // on another process can hold the publication lock while this
-              // advance is between the projection above and the ledger
-              // write, and the terminal entry must not be minted over a
-              // publication that moved. Failing closed leaves the run
-              // stopped at POST_READY for the driver to re-collect.
-              const current = await getAutonomousTerminal(storeRoot, reviewId, {
-                clock,
-              });
+          await withAutonomousTerminalLock(
+            storeRoot,
+            reviewId,
+            async (current) => {
               if (
                 current.status !== "MERGE_READY" ||
                 current.revision !== projection.revision
@@ -4812,40 +4809,49 @@ export async function advanceRemoteWorkflow(
                   "publication advanced after the terminal projection was read",
                 );
               }
-              next.terminal = {
-                status: "MERGE_READY",
-                workflow_revision: next.revision + 1,
-                pull_request: {
-                  repository_id: pullRequest.repository_id,
-                  pr_number: pullRequest.pr_number,
-                  url: pullRequest.url,
+              return saveActionMutation(
+                paths,
+                workflow,
+                "WORKFLOW_TERMINAL",
+                async (next) => {
+                  next.terminal = {
+                    status: "MERGE_READY",
+                    workflow_revision: next.revision + 1,
+                    pull_request: {
+                      repository_id: pullRequest.repository_id,
+                      pr_number: pullRequest.pr_number,
+                      url: pullRequest.url,
+                    },
+                    head_sha: next.current_head_sha,
+                    // A null here can never be persisted: saveActionMutation
+                    // validates the candidate ledger before any write, and the
+                    // terminal-record validator requires the ID of the review
+                    // that gated this head. A run without one simply cannot
+                    // reach the terminal record.
+                    local_review_id: next.current_review?.review_id ?? null,
+                    publication_id: next.current_publication.review_id,
+                    observation_revision: projection.revision,
+                    observation_sha256: projection.observation_sha256,
+                    publication_authorization_sha256:
+                      projection.publication_authorization_sha256,
+                    workflow_authorization_sha256:
+                      projection.workflow_authorization_sha256,
+                    resolution_sha256: projection.resolution_sha256,
+                    ready_exception_sha256: projection.ready_exception_sha256,
+                    human_review_requirements:
+                      projection.human_review_requirements,
+                    recorded_at: recordedAt,
+                  };
+                  next.status = "MERGE_READY";
+                  // The phase stays POST_READY: it is the wait the run stops
+                  // in, and the operator's later merge instruction goes
+                  // through the manual publication path, not through this
+                  // workflow.
+                  next.phase = "POST_READY";
                 },
-                head_sha: next.current_head_sha,
-                // A null here can never be persisted: saveActionMutation
-                // validates the candidate ledger before any write, and the
-                // terminal-record validator requires the ID of the review
-                // that gated this head. A run without one simply cannot
-                // reach the terminal record.
-                local_review_id: next.current_review?.review_id ?? null,
-                publication_id: next.current_publication.review_id,
-                observation_revision: projection.revision,
-                observation_sha256: projection.observation_sha256,
-                publication_authorization_sha256:
-                  projection.publication_authorization_sha256,
-                workflow_authorization_sha256:
-                  projection.workflow_authorization_sha256,
-                resolution_sha256: projection.resolution_sha256,
-                ready_exception_sha256: projection.ready_exception_sha256,
-                human_review_requirements:
-                  projection.human_review_requirements,
-                recorded_at: recordedAt,
-              };
-              next.status = "MERGE_READY";
-              // The phase stays POST_READY: it is the wait the run stops in,
-              // and the operator's later merge instruction goes through the
-              // manual publication path, not through this workflow.
-              next.phase = "POST_READY";
+              );
             },
+            { clock },
           ),
         );
       }
