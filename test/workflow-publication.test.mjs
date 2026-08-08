@@ -5798,7 +5798,7 @@ function readyObservation(state, headSha, options) {
 }
 
 /** Walk a workflow through mark-ready into POST_READY. */
-async function reachPostReady(t) {
+async function reachPostReady(t, { startedAtOffset = 0 } = {}) {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(
@@ -5812,7 +5812,7 @@ async function reachPostReady(t) {
     headSha,
     "one",
   );
-  const at = Date.now();
+  const at = Date.now() + startedAtOffset;
   const { workflow: waiting } = await reachRemoteWait(
     state,
     atPublication,
@@ -5986,6 +5986,364 @@ function supersedeEvent({ number, threadId = "PRRT_1", predecessorId, successorI
   };
 }
 
+test("a newer MERGE_READY revision with one pre-ready source stays POST_READY", async (t) => {
+  const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t);
+  const readyAt = Date.parse(workflow.ready_marks[0].recorded_at);
+  const observedAt = readyAt + 2_000;
+  const payload = readyObservation(state, headSha, {
+    at: observedAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  const staleStatusSource = payload.required_checks.collection.run_sources.find(
+    (source) => source.kind === "COMMIT_STATUS",
+  );
+  staleStatusSource.collected_at = iso(readyAt - 1);
+
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: payload },
+    { clock: () => observedAt + 10 },
+  );
+  assert.equal(recorded.revision, clearanceRevision + 1);
+  const persisted = await getPublication(state.store, reviewId);
+  assert.ok(Date.parse(persisted.latest_observation.observed_at) > readyAt);
+  assert.ok(Date.parse(persisted.latest_observation.recorded_at) > readyAt);
+  const projection = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(projection.status, "MERGE_READY");
+  assert.equal(projection.oldest_collection_at, iso(readyAt - 1));
+
+  const refused = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(refused.status, "ACTIVE");
+  assert.equal(refused.phase, "POST_READY");
+  assert.equal(refused.terminal, null);
+  assert.equal(refused.revision, workflow.revision);
+  assert.equal(
+    (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
+      .next_action,
+    "RECORD_FRESH_OBSERVATION_AND_ADVANCE",
+  );
+});
+
+test("post-ready freshness is strict at the ready-mark timestamp boundary", async (t) => {
+  const cases = [
+    { label: "equal is rejected", oldestOffset: 0, terminalizes: false },
+    { label: "+1ms is accepted", oldestOffset: 1, terminalizes: true },
+  ];
+  let ran = 0;
+
+  for (const item of cases) {
+    await t.test(item.label, async (t) => {
+      ran += 1;
+      const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+        await reachPostReady(t);
+      const readyAt = Date.parse(workflow.ready_marks[0].recorded_at);
+      // BASE_BRANCH_METADATA is the fixture's oldest collection source.
+      const observedAt = readyAt + 900 + item.oldestOffset;
+      const payload = readyObservation(state, headSha, {
+        at: observedAt,
+        requestId: 100,
+        requestAt: at + 1_000,
+      });
+      if (item.terminalizes) {
+        failingCheck(payload);
+        payload.required_checks.runs[0].conclusion = "SUCCESS";
+        payload.required_checks.runs[0].started_at = iso(readyAt - 10_000);
+        payload.required_checks.runs[0].completed_at = iso(readyAt - 9_000);
+      }
+      await recordGithubSnapshot(
+        state.store,
+        reviewId,
+        { expectedRevision: clearanceRevision, observation: payload },
+        { clock: () => observedAt + 10 },
+      );
+      const projection = await getAutonomousTerminal(state.store, reviewId);
+      assert.equal(projection.status, "MERGE_READY", item.label);
+      assert.equal(
+        projection.oldest_collection_at,
+        iso(readyAt + item.oldestOffset),
+        item.label,
+      );
+
+      const advanced = await advanceRemoteWorkflow(
+        state.store,
+        workflow.workflow_id,
+        workflow.revision,
+      );
+      assert.equal(
+        advanced.status,
+        item.terminalizes ? "MERGE_READY" : "ACTIVE",
+        item.label,
+      );
+      assert.equal(advanced.phase, "POST_READY", item.label);
+      assert.equal(advanced.terminal == null, !item.terminalizes, item.label);
+      assert.equal(
+        advanced.revision,
+        workflow.revision + (item.terminalizes ? 1 : 0),
+        item.label,
+      );
+    });
+  }
+  assert.equal(ran, cases.length);
+});
+
+test("every canonical observation source family participates in post-ready freshness", async (t) => {
+  function source(collection, kind) {
+    return [
+      ...(collection.sources ?? []),
+      ...(collection.policy_sources ?? []),
+      ...(collection.run_sources ?? []),
+    ].find((entry) => entry.kind === kind);
+  }
+
+  const cases = [
+    ["pull request", (payload, staleAt) => {
+      source(payload.pull_request.collection, "PULL_REQUEST").collected_at = staleAt;
+    }],
+    ["base metadata", (payload, staleAt) => {
+      source(payload.pull_request.collection, "BASE_BRANCH_METADATA").collected_at = staleAt;
+    }],
+    ["base-head comparison", (payload, staleAt) => {
+      source(payload.pull_request.collection, "BASE_HEAD_COMPARISON").collected_at = staleAt;
+    }],
+    ["reviewed-base comparison", (payload, staleAt) => {
+      source(
+        payload.pull_request.collection,
+        "REVIEWED_BASE_CURRENT_BASE_COMPARISON",
+      ).collected_at = staleAt;
+    }],
+    ["required-check policy", (payload, staleAt) => {
+      source(payload.required_checks.collection, "APPLICABLE_RULES").collected_at =
+        staleAt;
+    }],
+    ["required-check run", (payload, staleAt) => {
+      source(payload.required_checks.collection, "CHECK_RUN").collected_at = staleAt;
+    }],
+    ["Codex issue comments", (payload, staleAt) => {
+      source(payload.codex_review.collection, "ISSUE_COMMENTS").collected_at = staleAt;
+    }],
+    ["Codex reviews", (payload, staleAt) => {
+      source(payload.codex_review.collection, "PULL_REQUEST_REVIEWS").collected_at =
+        staleAt;
+    }],
+    ["Codex review comments", (payload, staleAt) => {
+      source(
+        payload.codex_review.collection,
+        "PULL_REQUEST_REVIEW_COMMENTS",
+      ).collected_at = staleAt;
+    }],
+    ["review threads", (payload, staleAt) => {
+      payload.review_threads.collection.collected_at = staleAt;
+      source(
+        payload.review_threads.collection,
+        "PULL_REQUEST_REVIEW_THREADS",
+      ).collected_at = staleAt;
+    }],
+  ];
+  let ran = 0;
+
+  for (const [label, mutate] of cases) {
+    await t.test(label, async (t) => {
+      ran += 1;
+      const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+        await reachPostReady(t);
+      const readyAt = Date.parse(workflow.ready_marks[0].recorded_at);
+      const observedAt = readyAt + 2_000;
+      const staleAt = iso(readyAt - 1);
+      const payload = readyObservation(state, headSha, {
+        at: observedAt,
+        requestId: 100,
+        requestAt: at + 1_000,
+      });
+      mutate(payload, staleAt);
+
+      await recordGithubSnapshot(
+        state.store,
+        reviewId,
+        { expectedRevision: clearanceRevision, observation: payload },
+        { clock: () => observedAt + 10 },
+      );
+      const projection = await getAutonomousTerminal(state.store, reviewId);
+      assert.equal(projection.status, "MERGE_READY", label);
+      assert.equal(projection.oldest_collection_at, staleAt, label);
+      const refused = await advanceRemoteWorkflow(
+        state.store,
+        workflow.workflow_id,
+        workflow.revision,
+      );
+      assert.equal(refused.status, "ACTIVE", label);
+      assert.equal(refused.phase, "POST_READY", label);
+      assert.equal(refused.terminal, null, label);
+      assert.equal(refused.revision, workflow.revision, label);
+      assert.equal(
+        (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
+          .next_action,
+        "RECORD_FRESH_OBSERVATION_AND_ADVANCE",
+        label,
+      );
+    });
+  }
+  assert.equal(ran, cases.length);
+});
+
+test("a stale referenced review-thread ancestry comparison stays POST_READY", async (t) => {
+  const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t);
+  const readyAt = Date.parse(workflow.ready_marks.at(-1).recorded_at);
+  const observedAt = readyAt + 2_000;
+  const staleAt = iso(readyAt - 1);
+  const findingHeadSha = "a".repeat(40);
+  const thread = resolvedThread(findingHeadSha);
+  const payload = readyObservation(state, headSha, {
+    at: observedAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  payload.review_threads.total_count = 1;
+  payload.review_threads.unresolved_count = 0;
+  payload.review_threads.threads = [thread];
+  payload.review_threads.ancestry = [
+    {
+      finding_head_sha: findingHeadSha,
+      status: "AHEAD",
+      descends: true,
+      endpoint: `GET /repos/example/review-bridge/compare/${findingHeadSha}...${headSha}`,
+      collected_at: staleAt,
+    },
+  ];
+
+  // Every ordinary collection and source is fresh. Only the comparison used
+  // to establish descent for this thread sits on the stale side of ready.
+  for (const collection of [
+    payload.pull_request.collection,
+    payload.required_checks.collection,
+    payload.codex_review.collection,
+    payload.review_threads.collection,
+  ]) {
+    for (const collectedAt of [
+      collection.collected_at,
+      ...(collection.sources ?? []).map((source) => source.collected_at),
+      ...(collection.policy_sources ?? []).map((source) => source.collected_at),
+      ...(collection.run_sources ?? []).map((source) => source.collected_at),
+    ]) {
+      assert.ok(Date.parse(collectedAt) > readyAt);
+    }
+  }
+
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: payload },
+    { clock: () => observedAt + 10 },
+  );
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [
+      resolutionRecord({
+        number: 1,
+        actionId: "act-ancestry",
+        watermark: threadWatermark(thread),
+        headSha,
+        recordedRevision: recorded.revision,
+      }),
+    ];
+  });
+
+  const projection = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(projection.status, "MERGE_READY");
+  assert.equal(projection.oldest_collection_at, staleAt);
+  const refused = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(refused.status, "ACTIVE");
+  assert.equal(refused.phase, "POST_READY");
+  assert.equal(refused.terminal, null);
+  assert.equal(refused.revision, workflow.revision);
+  assert.equal(
+    (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
+      .next_action,
+    "RECORD_FRESH_OBSERVATION_AND_ADVANCE",
+  );
+});
+
+test("an observation timestamp before its collection is rejected before terminal freshness", async (t) => {
+  const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t);
+  const readyAt = Date.parse(workflow.ready_marks[0].recorded_at);
+  const observedAt = readyAt + 2_000;
+  const payload = readyObservation(state, headSha, {
+    at: observedAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  payload.observed_at = iso(readyAt - 1);
+
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      reviewId,
+      { expectedRevision: clearanceRevision, observation: payload },
+      { clock: () => observedAt + 10 },
+    ),
+    (error) => {
+      assert.equal(error.code, "INVALID_INPUT");
+      assert.match(
+        error.message,
+        /observation\.observed_at must not precede a collection/,
+      );
+      return true;
+    },
+  );
+  assert.equal((await getPublication(state.store, reviewId)).revision, clearanceRevision);
+});
+
+test("historical provider event timestamps do not make a fresh post-ready collection stale", async (t) => {
+  const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t, { startedAtOffset: -2_000 });
+  const readyAt = Date.parse(workflow.ready_marks[0].recorded_at);
+  const observedAt = readyAt + 2_000;
+  const historicalAt = readyAt - 60_000;
+  const payload = readyObservation(state, headSha, {
+    at: observedAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  failingCheck(payload);
+  payload.required_checks.runs[0].conclusion = "SUCCESS";
+  payload.required_checks.runs[0].started_at = iso(historicalAt);
+  payload.required_checks.runs[0].completed_at = iso(historicalAt + 1_000);
+
+  assert.ok(Date.parse(payload.required_checks.runs[0].completed_at) < readyAt);
+  assert.ok(Date.parse(payload.codex_review.requests[0].event_at) < readyAt);
+  assert.ok(Date.parse(payload.codex_review.results[0].event_at) < readyAt);
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: payload },
+    { clock: () => observedAt + 10 },
+  );
+  assert.equal(recorded.revision, clearanceRevision + 1);
+  const projection = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(projection.status, "MERGE_READY");
+  assert.ok(Date.parse(projection.oldest_collection_at) > readyAt);
+
+  const done = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(done.status, "MERGE_READY");
+  assert.notEqual(done.terminal, null);
+  assert.equal(done.terminal.observation_revision, recorded.revision);
+});
+
 test("the terminal projection records MERGE_READY and the workflow stops with a terminal record", async (t) => {
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
@@ -6014,7 +6372,7 @@ test("the terminal projection records MERGE_READY and the workflow stops with a 
 
   // The controller records one fresh complete observation of the ready pull
   // request, and only then may the run reach its terminal state.
-  const observedAt = at + 2_000;
+  const observedAt = Date.parse(workflow.ready_marks[0].recorded_at) + 2_000;
   await recordGithubSnapshot(
     state.store,
     reviewId,
@@ -6023,6 +6381,10 @@ test("the terminal projection records MERGE_READY and the workflow stops with a 
   );
   const terminal = await getAutonomousTerminal(state.store, reviewId);
   assert.equal(terminal.status, "MERGE_READY");
+  assert.ok(
+    Date.parse(terminal.oldest_collection_at) >
+      Date.parse(workflow.ready_marks[0].recorded_at),
+  );
   assert.equal(terminal.blocking_reason, null);
   assert.deepEqual(terminal.blockers, []);
   assert.equal(terminal.observation_revision, clearanceRevision + 1);
@@ -6453,7 +6815,8 @@ test("pre-resolved negative controls reject invalid projected workflow resolutio
 test("a terminal workflow can release its claims after the operator merges", async (t) => {
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
-  const observedAt = at + 2_000;
+  const readyAt = Date.parse(workflow.ready_marks.at(-1).recorded_at);
+  const observedAt = readyAt + 2_000;
   await recordGithubSnapshot(
     state.store,
     reviewId,
@@ -7282,7 +7645,8 @@ test("a post-ready check failure returns the ready pull request to draft before 
 test("the terminal record requires an observation recorded after the clearance", async (t) => {
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
-  const observedAt = at + 2_000;
+  const readyAt = Date.parse(workflow.ready_marks.at(-1).recorded_at);
+  const observedAt = readyAt + 2_000;
 
   // A ready observation edited onto the ledger at the clearance revision is
   // indistinguishable to the projection -- it reports MERGE_READY -- but the
@@ -7329,7 +7693,8 @@ test("the terminal record requires an observation recorded after the clearance",
 
 test("a terminal workflow ledger cannot be tampered into a different claim", async (t) => {
   const { state, workflow, reviewId, headSha, at } = await reachPostReady(t);
-  const observedAt = at + 2_000;
+  const readyAt = Date.parse(workflow.ready_marks.at(-1).recorded_at);
+  const observedAt = readyAt + 2_000;
   const recorded = await recordGithubSnapshot(
     state.store,
     reviewId,

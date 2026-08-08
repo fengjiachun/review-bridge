@@ -5292,6 +5292,10 @@ function observationTimes(observation) {
   return times;
 }
 
+function oldestObservationAt(observation) {
+  return new Date(Math.min(...observationTimes(observation))).toISOString();
+}
+
 function expiresAtFor(ledger) {
   const observation = ledger.latest_observation;
   const minimum = Math.min(
@@ -6255,6 +6259,10 @@ async function projectAutonomousTerminalCore({
     is_draft: ledger.latest_observation?.pull_request?.is_draft ?? null,
     latest_observed_at: ledger.latest_observation?.observed_at ?? null,
     latest_recorded_at: ledger.latest_observation?.recorded_at ?? null,
+    oldest_collection_at:
+      ledger.latest_observation == null
+        ? null
+        : oldestObservationAt(ledger.latest_observation),
     // The exact identity and digests the terminal record must bind, so
     // the workflow records what this projection revalidated rather than
     // anything it read elsewhere.
@@ -6860,9 +6868,7 @@ export async function finalizePublicationGate(
         fail("EVIDENCE_STALE", "publication evidence expired before finalization");
       }
       const observationDigest = canonicalDigest(ledger.latest_observation);
-      const oldestCollectionAt = new Date(
-        Math.min(...observationTimes(ledger.latest_observation)),
-      ).toISOString();
+      const oldestCollectionAt = oldestObservationAt(ledger.latest_observation);
       const finalGate = {
         version: ledger.version,
         review_id: reviewId,

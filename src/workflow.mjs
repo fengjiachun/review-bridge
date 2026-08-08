@@ -78,6 +78,14 @@ function now() {
   return new Date().toISOString();
 }
 
+function hasFreshPostReadyObservation(projection, readyMark) {
+  return (
+    readyMark != null &&
+    projection.revision > readyMark.publication_revision &&
+    Date.parse(projection.oldest_collection_at) > Date.parse(readyMark.recorded_at)
+  );
+}
+
 function assertString(value, name, { max = 200_000 } = {}) {
   if (
     typeof value !== "string" ||
@@ -4789,10 +4797,7 @@ export async function advanceRemoteWorkflow(
     // "one fresh complete observation" structural rather than a clock.
     if (workflow.phase === "POST_READY" && projection.status === "MERGE_READY") {
       const readyMark = workflow.ready_marks.at(-1) ?? null;
-      if (
-        readyMark != null &&
-        projection.revision > readyMark.publication_revision
-      ) {
+      if (hasFreshPostReadyObservation(projection, readyMark)) {
         const pullRequest = workflow.pull_request;
         const recordedAt = now();
         // The terminal record is the run's success claim. Revalidate the
@@ -4809,7 +4814,8 @@ export async function advanceRemoteWorkflow(
             async (current) => {
               if (
                 current.status !== "MERGE_READY" ||
-                current.revision !== projection.revision
+                current.revision !== projection.revision ||
+                !hasFreshPostReadyObservation(current, readyMark)
               ) {
                 fail(
                   "WORKFLOW_PUBLICATION_MISMATCH",
@@ -4863,8 +4869,10 @@ export async function advanceRemoteWorkflow(
         );
       }
       // The projection reports MERGE_READY but the observation is not the
-      // post-ready one (nothing was recorded after the clearance). The run is
-      // not finished; fall through so the phase stays put.
+      // post-ready one. Keep the workflow unchanged rather than recording the
+      // observation revision as an operator stop: the driver still owes one
+      // complete fresh collection epoch.
+      return publicWorkflow(workflow);
     }
     const repairPhase = remoteRepairPhase(projection);
     // Every repair phase is left by recording a new head, which is pushed to
