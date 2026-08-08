@@ -27,6 +27,7 @@ import {
   authorizeRemotePublication,
   finalizePublicationGate,
   getAutonomousPreReady,
+  getAutonomousTerminal,
   getPublication,
   getPublicationSummary,
   getThreadResolutionPlan,
@@ -212,7 +213,7 @@ if (role === "author") {
         "List compact autonomous workflow states without advancing them.",
       inputSchema: {
         statuses: z
-          .array(z.enum(["ACTIVE", "PAUSED", "CANCELLED"]))
+          .array(z.enum(["ACTIVE", "PAUSED", "CANCELLED", "MERGE_READY"]))
           .optional(),
       },
     },
@@ -1235,6 +1236,17 @@ if (role === "author") {
       inputSchema: { review_id: z.string() },
     },
     (input) => getAutonomousPreReady(storeRoot, input.review_id),
+  );
+
+  register(
+    "get_autonomous_terminal",
+    {
+      title: "Get autonomous terminal projection",
+      description:
+        "Evaluate the post-ready observation through the terminal projection: require publication MERGE_READY, revalidate the workflow binding and both authorization digests, and replay every automatic-resolution record and lifecycle chain against the same observation, returning the fail-closed blocker set that prevents a terminal record.",
+      inputSchema: { review_id: z.string() },
+    },
+    (input) => getAutonomousTerminal(storeRoot, input.review_id),
   );
 
   register(

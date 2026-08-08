@@ -34,6 +34,12 @@ const MAX_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_MS = 30 * 1000;
 const MAX_ATOMIC_WINDOW_MS = 2 * 60 * 1000;
 const POST_VISIBILITY_GRACE_MS = 30 * 1000;
+// How long a terminal/gate consumer waits for a historical ancestor
+// publication's lock before reporting PUBLICATION_BUSY. The wait is shorter
+// than the default because the caller already holds the current publication
+// lock: an ancestor mutation is brief, and a still-locked source must fail
+// closed as retryable contention instead of stalling the current projection.
+const HISTORICAL_ANCESTOR_LOCK_WAIT_MS = 1_000;
 const BODY_REQUEST = "@codex review";
 const REQUEST_BODY_SHA256 = sha256(Buffer.from(BODY_REQUEST, "utf8"));
 
@@ -1921,7 +1927,11 @@ function validateStoredLedger(ledger) {
         "publication.automatic_resolutions is malformed",
       );
     }
-    const resolvedThreads = new Set();
+    // A thread may carry several records once a proven successor supersedes
+    // its predecessor (RFC 0003 "Automatic thread resolution"). Supersession
+    // is a read-side replay concern, so this validator is structural only:
+    // which record is active, and whether the chain is sound, is decided by
+    // `resolutionFrontier` when a projection or gate evaluates the ledger.
     for (const [index, record] of resolutions.entries()) {
       assertObject(record, "automatic-resolution record");
       if (record.number !== index + 1) {
@@ -1932,13 +1942,6 @@ function validateStoredLedger(ledger) {
       }
       assertString(record.action_id, "automatic-resolution action_id", 1024);
       assertString(record.thread_id, "automatic-resolution thread_id", 1024);
-      if (resolvedThreads.has(record.thread_id)) {
-        fail(
-          "PUBLICATION_STORE_INVALID",
-          "a thread can carry only one automatic-resolution record",
-        );
-      }
-      resolvedThreads.add(record.thread_id);
       assertDigest(
         record.thread_watermark,
         "automatic-resolution thread_watermark",
@@ -1986,10 +1989,95 @@ function validateStoredLedger(ledger) {
       timestampMs(record.recorded_at, "automatic-resolution recorded_at");
       assertRevision(record.recorded_revision);
     }
+    // Lifecycle events are the supersession chain's audit trail: an
+    // invalidation, the compensating unresolve, and the supersession that
+    // retires the predecessor. The writer ships with the compensating-unresolve
+    // rollout; this validator is structural so a chain is storable and the
+    // terminal replay (which decides what is active) can report a broken one
+    // fail-closed instead of refusing to read it.
+    const lifecycle = ledger.resolution_lifecycle ?? [];
+    if (!Array.isArray(lifecycle)) {
+      fail(
+        "PUBLICATION_STORE_INVALID",
+        "publication.resolution_lifecycle is malformed",
+      );
+    }
+    for (const [index, event] of lifecycle.entries()) {
+      assertObject(event, "resolution-lifecycle event");
+      if (event.number !== index + 1) {
+        fail(
+          "PUBLICATION_STORE_INVALID",
+          "resolution-lifecycle numbers must be sequential",
+        );
+      }
+      assertString(event.thread_id, "resolution-lifecycle thread_id", 1024);
+      timestampMs(event.at, "resolution-lifecycle at");
+      if (event.kind === "INVALIDATED") {
+        assertString(event.record_id, "resolution-lifecycle record_id", 1024);
+        assertDigest(
+          event.prior_watermark,
+          "resolution-lifecycle prior_watermark",
+        );
+        assertDigest(event.new_watermark, "resolution-lifecycle new_watermark");
+        if (!Array.isArray(event.follow_up_comments)) {
+          fail(
+            "PUBLICATION_STORE_INVALID",
+            "resolution-lifecycle follow_up_comments is malformed",
+          );
+        }
+        for (const comment of event.follow_up_comments) {
+          assertObject(comment, "resolution-lifecycle follow-up comment");
+          assertId(comment.comment_id, "resolution-lifecycle comment_id");
+          assertObject(comment.actor, "resolution-lifecycle comment actor");
+          assertId(comment.actor.id, "resolution-lifecycle comment actor id");
+          assertString(
+            comment.actor.type,
+            "resolution-lifecycle comment actor type",
+            100,
+          );
+          timestampMs(
+            comment.created_at,
+            "resolution-lifecycle comment created_at",
+          );
+        }
+        assertString(event.reason, "resolution-lifecycle reason", 1024);
+      } else if (event.kind === "UNRESOLVED_FOR_REPAIR") {
+        assertString(event.record_id, "resolution-lifecycle record_id", 1024);
+        assertString(event.action_id, "resolution-lifecycle action_id", 1024);
+      } else if (event.kind === "SUPERSEDES") {
+        assertString(
+          event.predecessor_id,
+          "resolution-lifecycle predecessor_id",
+          1024,
+        );
+        assertString(
+          event.successor_id,
+          "resolution-lifecycle successor_id",
+          1024,
+        );
+        if (
+          !Number.isSafeInteger(event.invalidation_event) ||
+          event.invalidation_event < 1 ||
+          !Number.isSafeInteger(event.unresolve_event) ||
+          event.unresolve_event < 1
+        ) {
+          fail(
+            "PUBLICATION_STORE_INVALID",
+            "resolution-lifecycle SUPERSEDES event bindings are invalid",
+          );
+        }
+      } else {
+        fail(
+          "PUBLICATION_STORE_INVALID",
+          "resolution-lifecycle event kind is invalid",
+        );
+      }
+    }
   } else if (
     "workflow_id" in ledger ||
     "workflow_authorization_sha256" in ledger ||
-    "automatic_resolutions" in ledger
+    "automatic_resolutions" in ledger ||
+    "resolution_lifecycle" in ledger
   ) {
     fail(
       "PUBLICATION_STORE_INVALID",
@@ -4091,10 +4179,20 @@ function derivePublication(
 // claim: the thread it bound, unchanged, now resolved. Anything else --
 // thread gone, provenance no longer complete, watermark moved, or resolution
 // undone -- invalidates the record.
+//
+// The comparison runs over the active frontier only. A record a SUPERSEDES
+// event retired is audit evidence, not a live claim, so it is never compared
+// against the current watermark as though it were still active; a chain that
+// cannot be replayed as one linear frontier blocks through its own reason.
 function invalidatedAutomaticResolution(ledger) {
-  const records = ledger.automatic_resolutions ?? [];
-  if (records.length === 0) {
-    return null;
+  const frontier = resolutionFrontier(ledger);
+  if (frontier.blockers.length > 0) {
+    // A blocker invalidates the frontier even when it names no record
+    // (orphan lifecycle events with no resolution records). The single
+    // caller only tests for null, so return the blocker itself, not its
+    // nullable record -- a recordless blocker must not read as "no
+    // invalidation".
+    return frontier.blockers[0];
   }
   const threads = new Map(
     ledger.latest_observation.review_threads.threads.map((thread) => [
@@ -4102,7 +4200,7 @@ function invalidatedAutomaticResolution(ledger) {
       thread,
     ]),
   );
-  for (const record of records) {
+  for (const record of frontier.active.values()) {
     const thread = threads.get(record.thread_id);
     if (
       thread == null ||
@@ -4114,6 +4212,777 @@ function invalidatedAutomaticResolution(ledger) {
     }
   }
   return null;
+}
+
+/**
+ * Replay one thread's automatic-resolution records and lifecycle events into
+ * its active frontier.
+ *
+ * A valid chain per thread is one linear sequence of records in which every
+ * predecessor is retired by exactly one SUPERSEDES event whose invalidation
+ * and compensating-unresolve events are present, ordered, and bound to that
+ * predecessor. The last record is active; every earlier record is superseded
+ * audit evidence. Fork, cycle, gap, missing record, extra record, missing
+ * unresolve, event misordering, or a successor that proves nothing new all
+ * block with their own reason instead of being folded into the watermark
+ * comparison -- the terminal projection must never treat a contested chain as
+ * a resolved thread merely because the active record happens to match.
+ *
+ * The replay is structural: it needs no observation. Whether the active
+ * record still matches the observation's thread watermark is the caller's
+ * comparison (`invalidatedAutomaticResolution` for the gate, the terminal
+ * projection for the post-ready evaluation), so the two share exactly one
+ * notion of what is active and cannot disagree about it.
+ */
+function resolutionFrontier(ledger) {
+  const records = ledger.automatic_resolutions ?? [];
+  const events = ledger.resolution_lifecycle ?? [];
+  const active = new Map();
+  const blockers = [];
+  const blocked = (reason, threadId, record = null) => {
+    blockers.push({ reason, thread_id: threadId, record });
+  };
+  if (records.length === 0) {
+    if (events.length > 0) {
+      // Lifecycle events with no resolution records are orphan evidence:
+      // every event kind names a record that must exist, so the named
+      // record is missing and the frontier cannot be replayed. The terminal
+      // projection must never accept an orphan INVALIDATED,
+      // UNRESOLVED_FOR_REPAIR, or SUPERSEDES as though it proved nothing.
+      const orphanThreads = [
+        ...new Set(events.map((event) => event.thread_id)),
+      ];
+      for (const threadId of orphanThreads) {
+        blocked("THREAD_RESOLUTION_RECORD_MISSING", threadId);
+      }
+    }
+    return { active, blockers };
+  }
+  const byThread = new Map();
+  for (const record of records) {
+    if (!byThread.has(record.thread_id)) {
+      byThread.set(record.thread_id, []);
+    }
+    byThread.get(record.thread_id).push(record);
+  }
+  // Threads that appear only in lifecycle events -- with no resolution
+  // records at all -- are orphan evidence even when other threads carry
+  // valid chains: a mixed ledger must not let one thread's records hide
+  // another thread's missing record.
+  for (const threadId of new Set(events.map((event) => event.thread_id))) {
+    if (!byThread.has(threadId)) {
+      blocked("THREAD_RESOLUTION_RECORD_MISSING", threadId);
+    }
+  }
+  for (const [threadId, threadRecords] of byThread) {
+    const sorted = [...threadRecords].sort((left, right) => left.number - right.number);
+    const byActionId = new Map(sorted.map((record) => [record.action_id, record]));
+    const firstRecord = sorted[0];
+    const threadEvents = events.filter((event) => event.thread_id === threadId);
+    const supersedes = threadEvents.filter((event) => event.kind === "SUPERSEDES");
+    const invalidated = threadEvents.filter((event) => event.kind === "INVALIDATED");
+    const unresolved = threadEvents.filter((event) => event.kind === "UNRESOLVED_FOR_REPAIR");
+    // Every event reference must resolve to a stored record. A SUPERSEDES
+    // naming a record that does not exist is a missing record, not a chain
+    // that can be replayed around it.
+    let broken = false;
+    for (const event of supersedes) {
+      if (
+        !byActionId.has(event.predecessor_id) ||
+        !byActionId.has(event.successor_id)
+      ) {
+        blocked("THREAD_RESOLUTION_RECORD_MISSING", threadId, firstRecord);
+        broken = true;
+        break;
+      }
+    }
+    if (broken) continue;
+    for (const event of invalidated) {
+      if (!byActionId.has(event.record_id)) {
+        blocked("THREAD_RESOLUTION_RECORD_MISSING", threadId, firstRecord);
+        broken = true;
+        break;
+      }
+    }
+    if (broken) continue;
+    for (const event of unresolved) {
+      if (!byActionId.has(event.record_id)) {
+        blocked("THREAD_RESOLUTION_RECORD_MISSING", threadId, firstRecord);
+        broken = true;
+        break;
+      }
+    }
+    if (broken) continue;
+    // One successor per record and one predecessor per record: a fork (one
+    // predecessor to two successors) or a shared successor is not a chain.
+    const successorOf = new Map();
+    const predecessorOf = new Map();
+    for (const event of supersedes) {
+      if (
+        successorOf.has(event.predecessor_id) ||
+        predecessorOf.has(event.successor_id)
+      ) {
+        blocked("THREAD_RESOLUTION_CHAIN_BROKEN", threadId, firstRecord);
+        broken = true;
+        break;
+      }
+      successorOf.set(event.predecessor_id, event.successor_id);
+      predecessorOf.set(event.successor_id, event.predecessor_id);
+    }
+    if (broken) continue;
+    // Walk every chain from its head record. Exactly one chain must cover
+    // every record of the thread; a second chain, an unreachable record, or a
+    // cycle (which the injective successor map renders as a component with no
+    // head) means the frontier is not one linear supersession chain.
+    const chains = [];
+    for (const record of sorted) {
+      if (predecessorOf.has(record.action_id)) {
+        continue;
+      }
+      const chain = [];
+      let current = record;
+      while (current != null) {
+        chain.push(current);
+        const nextId = successorOf.get(current.action_id);
+        current = nextId == null ? null : byActionId.get(nextId);
+      }
+      chains.push(chain);
+    }
+    if (chains.length !== 1) {
+      blocked("THREAD_RESOLUTION_RECORD_EXTRA", threadId, firstRecord);
+      continue;
+    }
+    const chain = chains[0];
+    if (chain.length !== sorted.length) {
+      blocked("THREAD_RESOLUTION_RECORD_EXTRA", threadId, firstRecord);
+      continue;
+    }
+    // Every transition needs its invalidation and compensating unresolve,
+    // in order, before the SUPERSEDES that retires the predecessor.
+    const eventIndex = new Map(events.map((event, index) => [event, index]));
+    for (let position = 0; position < chain.length - 1; position += 1) {
+      const predecessor = chain[position];
+      const successor = chain[position + 1];
+      const supersede = supersedes.find(
+        (event) =>
+          event.predecessor_id === predecessor.action_id &&
+          event.successor_id === successor.action_id,
+      );
+      if (supersede == null) {
+        blocked("THREAD_RESOLUTION_CHAIN_BROKEN", threadId, firstRecord);
+        broken = true;
+        break;
+      }
+      const invalidation = events[supersede.invalidation_event - 1];
+      const unresolveEvent = events[supersede.unresolve_event - 1];
+      if (
+        invalidation?.kind !== "INVALIDATED" ||
+        invalidation.record_id !== predecessor.action_id ||
+        invalidation.prior_watermark !== predecessor.thread_watermark ||
+        unresolveEvent?.kind !== "UNRESOLVED_FOR_REPAIR" ||
+        unresolveEvent.record_id !== predecessor.action_id ||
+        eventIndex.get(invalidation) >= eventIndex.get(unresolveEvent) ||
+        eventIndex.get(unresolveEvent) >= eventIndex.get(supersede)
+      ) {
+        // A supersession whose invalidation or compensating unresolve is
+        // missing, misbound, or out of order cannot be replayed; a missing
+        // unresolve is the RFC's named case and the rest are the same broken
+        // chain.
+        blocked("THREAD_RESOLUTION_CHAIN_BROKEN", threadId, firstRecord);
+        broken = true;
+        break;
+      }
+      // The successor must prove something new: a later record, a fresh
+      // watermark, and a head that differs from the one the finding blocked.
+      // Without that there is no fix to supersede with, however the events
+      // are arranged.
+      if (
+        successor.recorded_revision <= predecessor.recorded_revision ||
+        successor.thread_watermark === predecessor.thread_watermark ||
+        successor.head_sha === predecessor.head_sha
+      ) {
+        blocked("THREAD_RESOLUTION_CHAIN_BROKEN", threadId, firstRecord);
+        broken = true;
+        break;
+      }
+    }
+    if (broken) continue;
+    const activeRecord = chain[chain.length - 1];
+    // An invalidation of the active record -- with no SUPERSEDES after it --
+    // is an invalidated active frontier. A compensating unresolve bound to it
+    // is the same state wearing its consequence: neither has been retired.
+    if (
+      invalidated.some((event) => event.record_id === activeRecord.action_id) ||
+      unresolved.some((event) => event.record_id === activeRecord.action_id)
+    ) {
+      blocked(
+        "THREAD_RESOLUTION_INVALIDATED",
+        threadId,
+        activeRecord,
+      );
+      continue;
+    }
+    // The active record's resolution must be at the head the observation
+    // covers. A successor on an unrelated or rewritten head passes the
+    // inequality check without ever having been recorded against the head
+    // the replay evaluates, so the terminal claim would mint over a
+    // resolution that never happened there. The pure replay cannot verify
+    // git descent -- the SUPERSEDES writer's ancestry check is the RFC's
+    // other half -- but this is the strongest structural proof available.
+    if (
+      activeRecord.head_sha !==
+      (ledger.latest_observation?.pull_request?.head_sha ?? null)
+    ) {
+      blocked("THREAD_RESOLUTION_CHAIN_BROKEN", threadId, activeRecord);
+      continue;
+    }
+    active.set(threadId, activeRecord);
+  }
+  return { active, blockers };
+}
+
+// The digest the terminal record binds over every automatic-resolution record
+// and lifecycle event the replay consumed. RFC 0003: the final gate and the
+// terminal record both bind the record-and-lifecycle-set digest.
+function resolutionSetDigest(ledger) {
+  return sha256(
+    canonicalJson({
+      automatic_resolutions: ledger.automatic_resolutions ?? [],
+      resolution_lifecycle: ledger.resolution_lifecycle ?? [],
+    }),
+  );
+}
+
+// Whether a comment that is not the Codex root is not the workflow's own
+// recorded reply either. Mirrors the eligibility rule's sole exception: an
+// operator writing in the thread by hand is a participant, not a step of this
+// workflow. The active record's watermark cannot carry this check alone -- a
+// record is bound to the watermark that included the comment sequence at
+// creation, so a thread that was never eligible could still replay -- which is
+// why the terminal projection asks the question directly.
+function threadHasForeignParticipation(ledger, binding, thread) {
+  if (thread.provenance_complete !== true || !Array.isArray(thread.comments)) {
+    return false;
+  }
+  const codexActor = ledger.target.codex_actor;
+  const replies = binding?.thread_replies ?? [];
+  return thread.comments.some((comment, index) => {
+    if (index === 0) {
+      return (
+        comment.actor?.id !== codexActor.id ||
+        comment.actor?.type !== codexActor.type
+      );
+    }
+    if (
+      comment.actor?.id === codexActor.id &&
+      comment.actor?.type === codexActor.type
+    ) {
+      return false;
+    }
+    return !replies.some(
+      (reply) =>
+        reply.thread_id === thread.id &&
+        reply.comment_id === comment.database_id &&
+        reply.actor.id === comment.actor?.id &&
+        reply.actor.type === comment.actor?.type,
+    );
+  });
+}
+
+function matchingPreResolvedWorkflowOutcome(ledger, binding, thread) {
+  if (thread.provenance_complete !== true) {
+    return false;
+  }
+  const headSha = ledger.latest_observation?.pull_request?.head_sha;
+  const watermark = threadWatermark(thread);
+  return (binding?.thread_resolutions ?? []).some(
+    (resolution) =>
+      resolution.outcome === "OBSERVED_PRE_RESOLVED" &&
+      resolution.thread_id === thread.id &&
+      resolution.publication_review_id === ledger.review_id &&
+      resolution.head_sha === headSha &&
+      resolution.thread_watermark === watermark,
+  );
+}
+
+// The terminal projection's replay: every blocking reason the RFC names, over
+// the frontier plus the post-ready observation's thread watermarks. Returns an
+// empty list only when every chain replays and every active record still
+// matches its thread exactly.
+//
+// `resolutionContext` is the precomputed effective resolution context for the
+// operation (see `withEffectiveResolutionContext`). Its `proofs` map carries
+// the threads whose resolution is proven by a validated historical ancestor
+// publication; those threads are covered exactly like pre-resolved outcomes
+// and never reported RECORD_MISSING. When no context is supplied the replay
+// behaves exactly as before, so every caller that predates Design A keeps its
+// verdict.
+function terminalResolutionBlockers(ledger, binding, resolutionContext = null) {
+  const frontier = resolutionFrontier(ledger);
+  const blockers = [...frontier.blockers];
+  const threads = new Map(
+    (ledger.latest_observation?.review_threads?.threads ?? []).map((thread) => [
+      thread.id,
+      thread,
+    ]),
+  );
+  for (const [threadId, record] of frontier.active) {
+    const thread = threads.get(threadId);
+    if (
+      thread == null ||
+      thread.provenance_complete !== true ||
+      thread.is_resolved !== true ||
+      threadWatermark(thread) !== record.thread_watermark
+    ) {
+      blockers.push({
+        reason: "THREAD_RESOLUTION_INVALIDATED",
+        thread_id: threadId,
+        record,
+      });
+      continue;
+    }
+    if (threadHasForeignParticipation(ledger, binding, thread)) {
+      blockers.push({
+        reason: "THREAD_RESOLUTION_UNSAFE",
+        thread_id: threadId,
+        record,
+      });
+    }
+  }
+  // A resolved thread with no active record ordinarily has unknown ownership,
+  // so the terminal claim must not mint over it. The two recordless workflow
+  // paths are an action whose pre-read found this exact thread already
+  // resolved -- its completed outcome binds the same publication, head, and
+  // watermark but deliberately owns no automatic-resolution record -- and a
+  // later publication reusing the workflow-owned resolution proof its
+  // ancestor publication recorded, which the precomputed context qualified
+  // against the same lineage, source, and current-thread evidence.
+  const alreadyBlocked = new Set(
+    blockers.map((blocker) => blocker.thread_id),
+  );
+  for (const thread of ledger.latest_observation?.review_threads?.threads ??
+    []) {
+    if (
+      thread.is_resolved === true &&
+      !frontier.active.has(thread.id) &&
+      !alreadyBlocked.has(thread.id)
+    ) {
+      if (
+        matchingPreResolvedWorkflowOutcome(ledger, binding, thread) ||
+        resolutionContext?.proofs?.has(thread.id)
+      ) {
+        if (threadHasForeignParticipation(ledger, binding, thread)) {
+          blockers.push({
+            reason: "THREAD_RESOLUTION_UNSAFE",
+            thread_id: thread.id,
+            record: null,
+          });
+        }
+        continue;
+      }
+      blockers.push({
+        reason: "THREAD_RESOLUTION_RECORD_MISSING",
+        thread_id: thread.id,
+        record: null,
+      });
+    }
+  }
+  return blockers;
+}
+
+/**
+ * Whether one workflow attempt strictly precedes another in the recorded
+ * attempt history, each appearing exactly once. The lineage is the durable
+ * `workflow.attempts` order (oldest first): a duplicated, absent, or
+ * reordered head cannot prove that the historical resolution's head is an
+ * ancestor of the current authorization head.
+ */
+function validAttemptLineage(attemptHeadHistory, oldHead, currentHead) {
+  let oldIndex = -1;
+  let currentIndex = -1;
+  for (let index = 0; index < attemptHeadHistory.length; index += 1) {
+    const head = attemptHeadHistory[index];
+    if (head === oldHead) {
+      if (oldIndex !== -1) {
+        return false;
+      }
+      oldIndex = index;
+    }
+    if (head === currentHead) {
+      if (currentIndex !== -1) {
+        return false;
+      }
+      currentIndex = index;
+    }
+  }
+  return oldIndex !== -1 && currentIndex !== -1 && oldIndex < currentIndex;
+}
+
+function attemptIndex(attemptHeadHistory, head) {
+  return attemptHeadHistory.indexOf(head);
+}
+
+// The digest a terminal record or final gate binds when the replay consumed a
+// validated historical resolution proof. The current resolution set digest is
+// wrapped together with the sorted historical references, so no proof can be
+// substituted, dropped, or added after the fact without changing the bound
+// digest. With no proofs the exact existing resolutionSetDigest output is
+// preserved, so v3 gates minted without historical context and v1/v2 gates
+// never see a different value.
+function effectiveResolutionDigest(currentDigest, proofs) {
+  if (proofs.size === 0) {
+    return currentDigest;
+  }
+  // Code-unit string order, not localeCompare: the digest must be stable
+  // across runtimes and locales, and no environment locale may influence
+  // which references the bound digest names.
+  const historical = [...proofs.values()].sort((left, right) => {
+    if (left.thread_id < right.thread_id) {
+      return -1;
+    }
+    if (left.thread_id > right.thread_id) {
+      return 1;
+    }
+    return 0;
+  });
+  return sha256(
+    canonicalJson({
+      resolution_sha256: currentDigest,
+      historical,
+    }),
+  );
+}
+
+async function withAncestorPublicationLock(paths, reviewId, operation) {
+  return withStateLock(
+    {
+      directory: paths.directory,
+      reviewId,
+      domain: "publication",
+      waitMs: HISTORICAL_ANCESTOR_LOCK_WAIT_MS,
+    },
+    operation,
+  );
+}
+
+/**
+ * Validate one historical resolution outcome against the ancestor publication
+ * it names, under that publication's retained lock, and return the reference
+ * that binds the proof into the effective digest. Returns null when any link
+ * fails: missing or substituted source, broken binding or authorization
+ * identity, a missing/corrupt/substituted bound authorization artifact, a
+ * source head that does not match the outcome, a source frontier that does
+ * not actively own the exact outcome, a source latest observation that no
+ * longer shows the exact thread resolved and complete at the record's
+ * watermark, unsafe participation, or a current thread that no longer
+ * matches. A null leaves the thread blocked exactly as a recordless thread is
+ * blocked today.
+ *
+ * Lock order: the caller already holds the current publication lock, and this
+ * runs under the ancestor publication lock retained by
+ * `withEffectiveResolutionContext` (newest-to-oldest across outcomes).
+ * Publication locks never acquire the workflow lock (binding reads are
+ * lock-free), so no cycle exists between the workflow lock, the current
+ * publication lock, and the ancestor publication locks.
+ */
+async function qualifyHistoricalProof(
+  storeRoot,
+  ledger,
+  binding,
+  thread,
+  outcome,
+) {
+  const ancestorPaths = pathsFor(storeRoot, outcome.publication_review_id);
+  try {
+    const ancestorLedger = await loadPublicationFile(
+      ancestorPaths,
+      outcome.publication_review_id,
+      { allowMissing: true },
+    );
+    if (ancestorLedger == null) {
+      // The named historical publication no longer exists: there is no
+      // source ledger to prove the resolution from.
+      return null;
+    }
+    const ancestorBinding = await requireWorkflowBinding(
+      storeRoot,
+      ancestorLedger,
+    );
+    if (
+      ancestorBinding == null ||
+      ancestorBinding.workflow_id !== binding?.workflow_id ||
+      ancestorBinding.workflow_authorization_sha256 !==
+        binding?.workflow_authorization_sha256
+    ) {
+      // The source publication is not bound to this workflow under this
+      // authorization, so its record cannot prove this workflow's
+      // resolution.
+      return null;
+    }
+    const currentTarget = ledger.target;
+    const ancestorTarget = ancestorLedger.target;
+    if (
+      ancestorTarget.repository_id !== currentTarget.repository_id ||
+      ancestorTarget.owner !== currentTarget.owner ||
+      ancestorTarget.repo !== currentTarget.repo ||
+      ancestorTarget.pr_number !== currentTarget.pr_number ||
+      ancestorTarget.base_branch !== currentTarget.base_branch ||
+      ancestorTarget.head_branch !== currentTarget.head_branch
+    ) {
+      // The source publication belongs to a different pull request or
+      // target: its thread resolution decides nothing for this one.
+      return null;
+    }
+    // Revalidate the source publication's bound authorization artifact under
+    // the retained source lock, exactly as every other consumer does: the
+    // local gate or remote authorization must exist, be well-formed, match
+    // the ledger's authorization, and be the only authorization present. A
+    // missing, corrupt, or substituted artifact means the ledger's
+    // authorization facts cannot be trusted, so the source cannot prove the
+    // outcome.
+    const sourceAuthorization = await readBoundAuthorization(
+      ancestorPaths,
+      outcome.publication_review_id,
+      ancestorLedger,
+    );
+    if (sourceAuthorization.head_sha !== outcome.head_sha) {
+      // The source publication's validated authorization head is not the
+      // head the workflow outcome recorded, so the record cannot be the
+      // outcome's.
+      return null;
+    }
+    // Replay the ancestor's complete automatic-resolution records and
+    // lifecycle events. Only the exact outcome action/thread/head/
+    // watermark as the active frontier record qualifies; missing,
+    // retired, invalidated, orphaned, broken, substituted, or unrelated
+    // evidence leaves the thread blocked.
+    const ancestorFrontier = resolutionFrontier(ancestorLedger);
+    const activeRecord = ancestorFrontier.active.get(outcome.thread_id);
+    if (
+      activeRecord == null ||
+      activeRecord.action_id !== outcome.action_id ||
+      activeRecord.thread_id !== outcome.thread_id ||
+      activeRecord.head_sha !== outcome.head_sha ||
+      activeRecord.thread_watermark !== outcome.thread_watermark
+    ) {
+      return null;
+    }
+    // The source's latest persisted observation must still show the exact
+    // thread resolved, complete, at the record's watermark, under a complete
+    // review-thread collection, and free of foreign participation under the
+    // same policy that guards active records and pre-resolved outcomes. The
+    // observation is mandatory: absence of source observation is not proof,
+    // so a cleared observation (latest_observation is null) never qualifies
+    // the thread, whatever the frontier alone would conclude. The only
+    // accepted visibility boundary is a human toggle that leaves the
+    // persisted resolution visible -- the source observation still positively
+    // shows the thread -- never the absence of the observation itself.
+    const ancestorObservation = ancestorLedger.latest_observation;
+    if (ancestorObservation == null) {
+      return null;
+    }
+    const reviewThreads = ancestorObservation.review_threads;
+    const sourceThreads = reviewThreads?.threads;
+    if (
+      !Array.isArray(sourceThreads) ||
+      reviewThreads.collection?.status !== "COMPLETE"
+    ) {
+      return null;
+    }
+    const sourceThread = sourceThreads.find(
+      (candidate) => candidate.id === outcome.thread_id,
+    );
+    if (
+      sourceThread == null ||
+      sourceThread.is_resolved !== true ||
+      sourceThread.provenance_complete !== true ||
+      sourceThread.comments_pagination_complete !== true ||
+      threadWatermark(sourceThread) !== activeRecord.thread_watermark
+    ) {
+      return null;
+    }
+    if (
+      threadHasForeignParticipation(
+        ancestorLedger,
+        ancestorBinding,
+        sourceThread,
+      )
+    ) {
+      return null;
+    }
+    // The current thread must still be resolved, complete, at the exact same
+    // watermark, and free of foreign participation under the same policy that
+    // guards active records and pre-resolved outcomes.
+    if (
+      thread.provenance_complete !== true ||
+      thread.comments_pagination_complete !== true ||
+      threadWatermark(thread) !== outcome.thread_watermark
+    ) {
+      return null;
+    }
+    if (threadHasForeignParticipation(ledger, binding, thread)) {
+      return null;
+    }
+    return {
+      thread_id: thread.id,
+      source_publication_review_id: ancestorLedger.review_id,
+      source_publication_revision: ancestorLedger.revision,
+      // The source publication's own authorization digest (the local gate or
+      // remote authorization artifact), bound separately from the workflow
+      // authorization digest below.
+      source_authorization_sha256: sourceAuthorization.source_sha256,
+      workflow_authorization_sha256:
+        ancestorBinding.workflow_authorization_sha256,
+      source_resolution_sha256: resolutionSetDigest(ancestorLedger),
+      action_id: activeRecord.action_id,
+      record_digest: sha256(canonicalJson(activeRecord)),
+    };
+  } catch (error) {
+    // Lock contention on the source publication is the one failure that must
+    // propagate as retryable PUBLICATION_BUSY: the evidence may be mid-write
+    // and the caller must reread and retry, never silently degrade to success
+    // or to a missing-record verdict. Any other source failure means the
+    // source cannot qualify, so the thread stays blocked by the ordinary
+    // recordless path.
+    if (error?.code === "PUBLICATION_BUSY") {
+      throw error;
+    }
+    return null;
+  }
+}
+
+/**
+ * Precompute, once per operation, the effective resolution context every
+ * safety consumer shares: the autonomous terminal projection, the summary
+ * replay override, manual finalization, and gate assessment/verification.
+ *
+ * A current resolved thread that owns no active record and is not covered by
+ * the exact current-head OBSERVED_PRE_RESOLVED exception may reuse a
+ * workflow-owned automatic-resolution proof from an ancestor publication when
+ * every link qualifies: an exact historical RESOLVED outcome, an ordered
+ * unique attempt lineage from the outcome head to the current authorization
+ * head, a source publication that revalidates under its own lock (including
+ * its bound authorization artifact and its latest observation), a source
+ * frontier whose active record is exactly the outcome, and a current thread
+ * that still matches. Threads that fail any link keep the ordinary
+ * fail-closed verdict (THREAD_RESOLUTION_RECORD_MISSING and friends).
+ *
+ * The authority-consuming operation runs inside the retained-lock callback:
+ * every unique ancestor publication lock is acquired once, newest-to-oldest
+ * by workflow attempt order, and held -- together with the validated
+ * authorization evidence the proofs were read under -- until `operation`
+ * returns. No consumer reads a source from an unlocked snapshot, and no
+ * source lock is released before the write the digest authorizes commits.
+ * The current publication lock is already held by every caller, and
+ * publication-lock paths never acquire the workflow lock (binding reads are
+ * lock-free), so the acyclic order is: workflow lock (when held) -> current
+ * publication -> source ancestors newest-to-oldest. Source lock contention
+ * propagates retryable PUBLICATION_BUSY and never maps to a missing-record or
+ * success verdict.
+ *
+ * The returned `effectiveDigest` preserves the exact `resolutionSetDigest`
+ * output when no proofs exist, so empty-context behavior and v1/v2
+ * compatibility are unchanged.
+ */
+async function withEffectiveResolutionContext(
+  storeRoot,
+  ledger,
+  binding,
+  operation,
+) {
+  const currentDigest = resolutionSetDigest(ledger);
+  if (
+    ledger.version !== 3 ||
+    ledger.latest_observation?.review_threads == null
+  ) {
+    return operation({ proofs: new Map(), effectiveDigest: currentDigest });
+  }
+  const frontier = resolutionFrontier(ledger);
+  const currentHead = authorizationForLedger(ledger).head_sha;
+  const attemptHeadHistory = binding?.attempt_head_history ?? [];
+  const candidates = [];
+  for (const thread of ledger.latest_observation.review_threads.threads ?? []) {
+    if (
+      thread.is_resolved !== true ||
+      frontier.active.has(thread.id) ||
+      matchingPreResolvedWorkflowOutcome(ledger, binding, thread)
+    ) {
+      continue;
+    }
+    const outcome = (binding?.thread_resolutions ?? []).find(
+      (resolution) =>
+        resolution.outcome === "RESOLVED" &&
+        resolution.thread_id === thread.id &&
+        resolution.publication_review_id !== ledger.review_id,
+    );
+    if (outcome == null) {
+      continue;
+    }
+    if (
+      !validAttemptLineage(attemptHeadHistory, outcome.head_sha, currentHead)
+    ) {
+      continue;
+    }
+    candidates.push({ thread, outcome });
+  }
+  // Acquire ancestor publication locks newest-to-oldest by attempt order so
+  // concurrent operations over the same lineage cannot deadlock on each
+  // other's source locks. Multiple threads from the same source publication
+  // share one lock acquisition.
+  candidates.sort(
+    (left, right) =>
+      attemptIndex(attemptHeadHistory, right.outcome.head_sha) -
+      attemptIndex(attemptHeadHistory, left.outcome.head_sha),
+  );
+  const sources = [];
+  const sourcesByReviewId = new Map();
+  for (const { outcome } of candidates) {
+    const headIndex = attemptIndex(attemptHeadHistory, outcome.head_sha);
+    const existing = sourcesByReviewId.get(outcome.publication_review_id);
+    if (existing == null) {
+      const entry = { reviewId: outcome.publication_review_id, headIndex };
+      sourcesByReviewId.set(outcome.publication_review_id, entry);
+      sources.push(entry);
+    } else if (headIndex > existing.headIndex) {
+      existing.headIndex = headIndex;
+    }
+  }
+  sources.sort((left, right) => right.headIndex - left.headIndex);
+  return acquireSourceLocks(storeRoot, sources, 0, async () => {
+    const proofs = new Map();
+    for (const { thread, outcome } of candidates) {
+      const proof = await qualifyHistoricalProof(
+        storeRoot,
+        ledger,
+        binding,
+        thread,
+        outcome,
+      );
+      if (proof != null) {
+        proofs.set(thread.id, proof);
+      }
+    }
+    return operation({
+      proofs,
+      effectiveDigest: effectiveResolutionDigest(currentDigest, proofs),
+    });
+  });
+}
+
+// Recursively hold every unique ancestor publication lock, newest-to-oldest,
+// for the duration of `operation`. Release unwinds oldest-to-newest; combined
+// with the newest-first acquisition this keeps the global lock order
+// deterministic so concurrent consumers of the same lineage never deadlock.
+async function acquireSourceLocks(storeRoot, sources, position, operation) {
+  if (position >= sources.length) {
+    return operation();
+  }
+  const reviewId = sources[position].reviewId;
+  return withAncestorPublicationLock(
+    pathsFor(storeRoot, reviewId),
+    reviewId,
+    () => acquireSourceLocks(storeRoot, sources, position + 1, operation),
+  );
 }
 
 export function derivePublicationStatus(ledger) {
@@ -4838,6 +5707,10 @@ function observationTimes(observation) {
   return times;
 }
 
+function oldestObservationAt(observation) {
+  return new Date(Math.min(...observationTimes(observation))).toISOString();
+}
+
 function expiresAtFor(ledger) {
   const observation = ledger.latest_observation;
   const minimum = Math.min(
@@ -5130,6 +6003,7 @@ function assessPublicationGate(
   gateParseError,
   currentMs,
   workflowBinding = null,
+  resolutionContext = null,
 ) {
   if (gateParseError) {
     return { state: "MALFORMED", reviewerProvider: null, expiresAt: null };
@@ -5164,7 +6038,9 @@ function assessPublicationGate(
         gate.workflow_authorization_sha256 ===
           ledger.workflow_authorization_sha256 &&
         gate.workflow_authorization_sha256 ===
-          workflowBinding.workflow_authorization_sha256;
+          workflowBinding.workflow_authorization_sha256 &&
+        gate.resolution_sha256 ===
+          (resolutionContext?.effectiveDigest ?? resolutionSetDigest(ledger));
   const authorizationBindingMatches =
     ledger.version === 1
       ? gate.version === 1 &&
@@ -5184,7 +6060,17 @@ function assessPublicationGate(
     sourceAuthorization.source_sha256 !== publicationAuthorization.source_sha256 ||
     gate.github_observation_sha256 !== canonicalDigest(ledger.latest_observation) ||
     gate.expires_at !== expectedExpiresAt ||
-    derived.status !== "MERGE_READY"
+    derived.status !== "MERGE_READY" ||
+    // The terminal replay is the same evidence the autonomous terminal
+    // projection refuses a success claim over; a gate minted before the
+    // evidence moved must not keep verifying over what the replay rejects.
+    (ledger.version === 3 &&
+      workflowBinding != null &&
+      terminalResolutionBlockers(
+        ledger,
+        workflowBinding,
+        resolutionContext,
+      ).length > 0)
   ) {
     return { state: "INVALID", reviewerProvider: null, expiresAt: null };
   }
@@ -5259,64 +6145,98 @@ export async function getPublicationSummary(
     try {
       const ledger = authorization.ledger;
       const workflowBinding = await requireWorkflowBinding(storeRoot, ledger);
-      const publicationAuthorization = authorizationForLedger(ledger);
-      const derived = derivePublication(ledger, {
-        historyConflict: workflowHeadConflict(workflowBinding, ledger),
-      });
-      const gate = assessPublicationGate(
+      // The summary computation and its gate assessment run inside the
+      // retained source-lock callback so a historical proof can never be read
+      // from an unlocked snapshot.
+      return await withEffectiveResolutionContext(
+        storeRoot,
         ledger,
-        publicationAuthorization,
-        authorization.sourceAuthorization,
-        authorization.publicationGate,
-        authorization.gateParseError,
-        currentMs,
         workflowBinding,
-      );
-      const evidenceStale =
-        ledger.terminal == null &&
-        ledger.latest_observation != null &&
-        currentMs > Date.parse(expiresAtFor(ledger));
-      const blockingReason = evidenceStale
-        ? "EVIDENCE_STALE"
-        : derived.status === "MERGE_READY" && gate.state === "INVALID"
-          ? "PUBLICATION_GATE_INVALID"
-          : derived.status === "MERGE_READY" && gate.state === "MALFORMED"
-            ? "PUBLICATION_GATE_MALFORMED"
-            : derived.blockingReason;
-      const closure =
-        ledger.latest_observation == null
-          ? { requests: [], results: [] }
-          : ambiguityClosure(ledger);
-      const nextAction = nextPublicationAction(
-        ledger,
-        derived,
-        gate.state,
-        evidenceStale,
-      );
-      return {
-        review_id: ledger.review_id,
-        revision: ledger.revision,
-        status: derived.status,
-        authorization_mode: publicationAuthorization.mode,
-        base_sha: publicationAuthorization.base_sha,
-        head_sha: publicationAuthorization.head_sha,
-        target: {
-          owner: ledger.target.owner,
-          repo: ledger.target.repo,
-          pr_number: ledger.target.pr_number,
-          base_branch: ledger.target.base_branch,
-          head_branch: ledger.target.head_branch,
+        async (resolutionContext) => {
+          const publicationAuthorization = authorizationForLedger(ledger);
+          const derived = derivePublication(ledger, {
+            historyConflict: workflowHeadConflict(workflowBinding, ledger),
+          });
+          const gate = assessPublicationGate(
+            ledger,
+            publicationAuthorization,
+            authorization.sourceAuthorization,
+            authorization.publicationGate,
+            authorization.gateParseError,
+            currentMs,
+            workflowBinding,
+            resolutionContext,
+          );
+          const evidenceStale =
+            ledger.terminal == null &&
+            ledger.latest_observation != null &&
+            currentMs > Date.parse(expiresAtFor(ledger));
+          // The terminal replay is the same evidence the autonomous terminal
+          // projection refuses a success claim over, and the same evidence
+          // the finalization and verification paths now require clean. The
+          // summary must reflect it too, or a summary-driven manual flow
+          // would keep advertising FINALIZE_PUBLICATION_GATE and retry a
+          // finalization that deterministically throws.
+          const terminalBlockers =
+            ledger.version === 3
+              ? terminalResolutionBlockers(
+                  ledger,
+                  workflowBinding,
+                  resolutionContext,
+                )
+              : [];
+          const replayOverridesDerived =
+            derived.status === "MERGE_READY" && terminalBlockers.length > 0;
+          const effectiveStatus = replayOverridesDerived
+            ? "CHANGES_REQUIRED"
+            : derived.status;
+          const blockingReason = evidenceStale
+            ? "EVIDENCE_STALE"
+            : replayOverridesDerived
+              ? terminalBlockers[0].reason
+              : derived.status === "MERGE_READY" && gate.state === "INVALID"
+                ? "PUBLICATION_GATE_INVALID"
+                : derived.status === "MERGE_READY" &&
+                    gate.state === "MALFORMED"
+                  ? "PUBLICATION_GATE_MALFORMED"
+                  : derived.blockingReason;
+          const closure =
+            ledger.latest_observation == null
+              ? { requests: [], results: [] }
+              : ambiguityClosure(ledger);
+          const nextAction = nextPublicationAction(
+            ledger,
+            { ...derived, status: effectiveStatus },
+            gate.state,
+            evidenceStale,
+          );
+          return {
+            review_id: ledger.review_id,
+            revision: ledger.revision,
+            status: effectiveStatus,
+            authorization_mode: publicationAuthorization.mode,
+            base_sha: publicationAuthorization.base_sha,
+            head_sha: publicationAuthorization.head_sha,
+            target: {
+              owner: ledger.target.owner,
+              repo: ledger.target.repo,
+              pr_number: ledger.target.pr_number,
+              base_branch: ledger.target.base_branch,
+              head_branch: ledger.target.head_branch,
+            },
+            latest_observed_at:
+              ledger.latest_observation?.observed_at ?? null,
+            blocking_reason: blockingReason,
+            next_action: nextAction,
+            ...(nextAction === "POST_AND_RECORD_CODEX_REVIEW_REQUEST"
+              ? { codex_review_request: publicationRequest(ledger) }
+              : {}),
+            required_request_refs: clone(closure.requests),
+            required_ambiguous_results: clone(closure.results),
+            gate_state: gate.state,
+          };
         },
-        latest_observed_at: ledger.latest_observation?.observed_at ?? null,
-        blocking_reason: blockingReason,
-        next_action: nextAction,
-        ...(nextAction === "POST_AND_RECORD_CODEX_REVIEW_REQUEST"
-          ? { codex_review_request: publicationRequest(ledger) }
-          : {}),
-        required_request_refs: clone(closure.requests),
-        required_ambiguous_results: clone(closure.results),
-        gate_state: gate.state,
-      };
+      );
     } finally {
       await closeAuthorizationFiles(authorization);
     }
@@ -5641,6 +6561,227 @@ export async function getAutonomousPreReady(
         // writes needs the stamp it authored.
         latest_recorded_at: ledger.latest_observation?.recorded_at ?? null,
       };
+    } finally {
+      await closeAuthorizationFiles(authorization);
+    }
+  });
+}
+
+/**
+ * The post-ready terminal projection: the only proof that a run that has
+ * marked its pull request ready may record its terminal `MERGE_READY` entry.
+ *
+ * It requires the publication's derived status to be `MERGE_READY`, then
+ * independently revalidates the workflow binding, both authorization digests,
+ * the exact head, and the complete automatic-resolution record and lifecycle
+ * replay against the same post-ready observation. Unlike the pre-ready
+ * projection it does not ignore the draft flag: a pull request that is draft
+ * again is not a successful run, whatever else clears.
+ *
+ * The workflow side is the only place that knows whether the observation being
+ * evaluated was recorded after the mark-ready action consumed its clearance,
+ * so the freshness half of "one fresh complete observation" is enforced there
+ * (advanceRemoteWorkflow) against the ready mark's recorded clearance
+ * revision. This projection reports `MERGE_READY` only over the evidence it
+ * can see; the terminal record is the workflow's claim, not this object's.
+ */
+export async function getAutonomousTerminal(
+  storeRoot,
+  reviewId,
+  { clock = Date.now } = {},
+) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    const currentMs = clock();
+    const authorization = await openAuthorizationFiles(paths, reviewId);
+    try {
+      const ledger = authorization.ledger;
+      const binding = await requireWorkflowBinding(storeRoot, ledger);
+      return await withEffectiveResolutionContext(
+        storeRoot,
+        ledger,
+        binding,
+        (resolutionContext) =>
+          projectAutonomousTerminalCore({
+            storeRoot,
+            paths,
+            reviewId,
+            authorization,
+            currentMs,
+            binding,
+            resolutionContext,
+          }),
+      );
+    } finally {
+      await closeAuthorizationFiles(authorization);
+    }
+  });
+}
+
+// The lock-free core of the terminal projection. The caller must already
+// hold the publication lock and the retained source-lock callback (see
+// `withEffectiveResolutionContext`): the workflow terminal branch uses it to
+// revalidate the publication and keep it stable across the workflow ledger
+// write, and nothing else calls it. The binding and resolution context are
+// supplied by the caller so the same validated evidence feeds the projection
+// and the authority-consuming operation that follows it.
+async function projectAutonomousTerminalCore({
+  storeRoot,
+  paths,
+  reviewId,
+  authorization,
+  currentMs,
+  binding,
+  resolutionContext,
+}) {
+  const ledger = authorization.ledger;
+  if (ledger.version !== 3) {
+    fail(
+      "PUBLICATION_NOT_AUTONOMOUS",
+      "only a version 3 publication has an autonomous projection",
+    );
+  }
+  const publicationAuthorization = authorizationForLedger(ledger);
+  const derived = derivePublication(ledger, {
+    historyConflict: workflowHeadConflict(binding, ledger),
+  });
+  const evidenceStale =
+    ledger.terminal == null &&
+    ledger.latest_observation != null &&
+    currentMs > Date.parse(expiresAtFor(ledger));
+  // The replay is the independent revalidation the RFC requires, so it
+  // runs whenever the evidence is fresh. Its blockers are the reasons a
+  // run must not go terminal even though the publication status says it
+  // is clear -- and, when the derived gate already reported the generic
+  // THREAD_RESOLUTION_INVALIDATED, they name the exact failure instead.
+  const replay = evidenceStale
+    ? []
+    : terminalResolutionBlockers(ledger, binding, resolutionContext);
+  const replayBlockers = replay.map(
+    (blocker) =>
+      `thread_resolution:${blocker.reason}:${blocker.thread_id}`,
+  );
+  let status;
+  let blockingReason;
+  let blockers;
+  if (evidenceStale) {
+    status = "EVIDENCE_STALE";
+    blockingReason = "EVIDENCE_STALE";
+    blockers = normalizedBlockers(ledger, derived);
+  } else if (derived.status !== "MERGE_READY") {
+    status = derived.status;
+    blockingReason = derived.blockingReason;
+    blockers = normalizedBlockers(ledger, derived);
+    // The derived gate folds every resolution failure into one generic
+    // reason; the replay's own verdict discriminates so the operator can
+    // tell a broken supersession chain from a moved watermark. The status
+    // and routing are unchanged either way.
+    if (
+      derived.blockingReason === "THREAD_RESOLUTION_INVALIDATED" &&
+      replay.length > 0
+    ) {
+      blockingReason = replay[0].reason;
+      blockers = replayBlockers;
+    }
+  } else if (replay.length > 0) {
+    // Derived MERGE_READY but the replay sees what the gate cannot (a
+    // thread a human participated in): the status stays distinct from
+    // MERGE_READY so a consumer switching on it can never mint a terminal
+    // record by forgetting the blockers. CHANGES_REQUIRED matches the
+    // pre-ready gate's verdict for an invalidated resolution record; the
+    // reason discriminates.
+    status = "CHANGES_REQUIRED";
+    blockingReason = replay[0].reason;
+    blockers = replayBlockers;
+  } else {
+    status = "MERGE_READY";
+    blockingReason = null;
+    blockers = [];
+  }
+  return {
+    review_id: ledger.review_id,
+    revision: ledger.revision,
+    workflow_id: ledger.workflow_id,
+    workflow_revision: binding.revision,
+    status,
+    blocking_reason: status === "MERGE_READY" ? null : blockingReason,
+    blockers,
+    blocker_sha256: blockerDigest(status, blockers),
+    head_sha: publicationAuthorization.head_sha,
+    is_draft: ledger.latest_observation?.pull_request?.is_draft ?? null,
+    latest_observed_at: ledger.latest_observation?.observed_at ?? null,
+    latest_recorded_at: ledger.latest_observation?.recorded_at ?? null,
+    oldest_collection_at:
+      ledger.latest_observation == null
+        ? null
+        : oldestObservationAt(ledger.latest_observation),
+    // The exact identity and digests the terminal record must bind, so
+    // the workflow records what this projection revalidated rather than
+    // anything it read elsewhere.
+    pull_request: binding.pull_request,
+    publication_authorization_sha256:
+      publicationAuthorization.source_sha256,
+    workflow_authorization_sha256: ledger.workflow_authorization_sha256,
+    observation_revision:
+      ledger.latest_observation == null ? null : ledger.revision,
+    observation_sha256:
+      ledger.latest_observation == null
+        ? null
+        : canonicalDigest(ledger.latest_observation),
+    resolution_sha256: resolutionContext.effectiveDigest,
+    // RFC 0003's draft-gate exception is deliberately unreachable in this
+    // repository: checks and Codex reviews run on draft pull requests, so
+    // no exception machinery exists and none is consumed.
+    ready_exception_sha256: null,
+    // Repository policy is not modelled in this codebase: a human formal
+    // review that requests changes, or a human or unknown thread, blocks
+    // MERGE_READY before this projection exists, and nothing else policy
+    // imposes is recorded anywhere a projection could read it.
+    human_review_requirements: [],
+  };
+}
+
+// Hold the publication lock while the workflow records its terminal entry:
+// the terminal record is the run's success claim, and a snapshot writer
+// must not be able to commit a newer blocking observation between the
+// projection revalidation and the workflow ledger write. The publication
+// lock is per-review and the workflow write is per-workflow, and no
+// publication-lock path acquires the workflow lock (binding reads are
+// lock-free), so holding it here blocks only publication mutations and
+// cannot invert the lock order. The operation callback additionally runs
+// inside the retained source-lock callback, so a historical resolution
+// proof's source publications stay locked until the workflow ledger write
+// commits.
+export async function withAutonomousTerminalLock(
+  storeRoot,
+  reviewId,
+  operation,
+  { clock = Date.now } = {},
+) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    const currentMs = clock();
+    const authorization = await openAuthorizationFiles(paths, reviewId);
+    try {
+      const ledger = authorization.ledger;
+      const binding = await requireWorkflowBinding(storeRoot, ledger);
+      return await withEffectiveResolutionContext(
+        storeRoot,
+        ledger,
+        binding,
+        async (resolutionContext) => {
+          const current = await projectAutonomousTerminalCore({
+            storeRoot,
+            paths,
+            reviewId,
+            authorization,
+            currentMs,
+            binding,
+            resolutionContext,
+          });
+          return await operation(current);
+        },
+      );
     } finally {
       await closeAuthorizationFiles(authorization);
     }
@@ -6158,82 +7299,124 @@ export async function finalizePublicationGate(
       const workflowBinding = await requireWorkflowBinding(storeRoot, ledger, {
         mutating: true,
       });
-      const publicationAuthorization = authorizationForLedger(ledger);
-      requireRevision(ledger, expectedRevision);
-      requireMutable(ledger);
-      if (authorization.gateParseError) {
-        fail("PUBLICATION_GATE_INVALID", "existing publication gate is malformed");
-      }
-      validateStoredObservationFresh(ledger, currentMs);
-      const derived = derivePublication(ledger);
-      if (derived.status !== "MERGE_READY" || ledger.status !== "MERGE_READY") {
-        fail(
-          "PUBLICATION_NOT_READY",
-          `publication status is ${derived.status}, not MERGE_READY`,
-        );
-      }
-      const passedAt = new Date(currentMs).toISOString();
-      const expiresAt = expiresAtFor(ledger);
-      if (currentMs > Date.parse(expiresAt)) {
-        fail("EVIDENCE_STALE", "publication evidence expired before finalization");
-      }
-      const observationDigest = canonicalDigest(ledger.latest_observation);
-      const oldestCollectionAt = new Date(
-        Math.min(...observationTimes(ledger.latest_observation)),
-      ).toISOString();
-      const finalGate = {
-        version: ledger.version,
-        review_id: reviewId,
-        issuance_committed: true,
-        passed_at: passedAt,
-        repository_id: ledger.target.repository_id,
-        pr_number: ledger.target.pr_number,
-        head_sha: publicationAuthorization.head_sha,
-        reviewer_provider: publicationAuthorization.reviewer_provider,
-        ...(ledger.version === 1
-          ? {
-              local_gate_sha256: publicationAuthorization.source_sha256,
-            }
-          : {
-              authorization_mode: publicationAuthorization.mode,
-              authorization_sha256: publicationAuthorization.source_sha256,
-            }),
-        ...(ledger.version === 3
-          ? {
-              workflow_id: workflowBinding.workflow_id,
-              workflow_authorization_sha256:
-                workflowBinding.workflow_authorization_sha256,
-            }
-          : {}),
-        publication_revision: ledger.revision,
-        github_observation_sha256: observationDigest,
-        github_observed_at: ledger.latest_observation.observed_at,
-        github_oldest_collection_at: oldestCollectionAt,
-        github_recorded_at: ledger.latest_observation.recorded_at,
-        expires_at: expiresAt,
-        status: "MERGE_READY",
-      };
-      const candidateGate = { ...finalGate, issuance_committed: false };
-      const gateDigest = canonicalDigest(finalGate);
-      await atomicWriteCanonicalJson(paths.gate, candidateGate);
-      await appendAuditEvent(
-        paths,
-        reviewId,
-        {
-          event: "GATE_FINALIZATION_PASSED",
-          outcome: "SUCCESS",
-          normalized_reason: null,
-          at: passedAt,
-          publication_revision: ledger.revision,
-          head_sha: publicationAuthorization.head_sha,
-          github_observation_sha256: observationDigest,
-          gate_sha256: gateDigest,
-          expires_at: expiresAt,
+      // The gate mint -- the authority-consuming write -- runs inside the
+      // retained source-lock callback so a historical proof can never be
+      // computed from one source state and committed over another.
+      return await withEffectiveResolutionContext(
+        storeRoot,
+        ledger,
+        workflowBinding,
+        async (resolutionContext) => {
+          const publicationAuthorization = authorizationForLedger(ledger);
+          requireRevision(ledger, expectedRevision);
+          requireMutable(ledger);
+          if (authorization.gateParseError) {
+            fail(
+              "PUBLICATION_GATE_INVALID",
+              "existing publication gate is malformed",
+            );
+          }
+          validateStoredObservationFresh(ledger, currentMs);
+          const derived = derivePublication(ledger);
+          if (
+            derived.status !== "MERGE_READY" ||
+            ledger.status !== "MERGE_READY"
+          ) {
+            fail(
+              "PUBLICATION_NOT_READY",
+              `publication status is ${derived.status}, not MERGE_READY`,
+            );
+          }
+          // The terminal replay is the same evidence the autonomous terminal
+          // projection refuses a success claim over: a recordless resolved
+          // thread or human participation in an active record's thread. The
+          // manual merge path must not mint a gate over evidence the
+          // autonomous projection would reject, or the operator could merge
+          // over a resolution the run itself never owned.
+          if (
+            ledger.version === 3 &&
+            terminalResolutionBlockers(
+              ledger,
+              workflowBinding,
+              resolutionContext,
+            ).length > 0
+          ) {
+            fail(
+              "PUBLICATION_NOT_READY",
+              "the autonomous terminal replay rejects the final evidence",
+            );
+          }
+          const passedAt = new Date(currentMs).toISOString();
+          const expiresAt = expiresAtFor(ledger);
+          if (currentMs > Date.parse(expiresAt)) {
+            fail(
+              "EVIDENCE_STALE",
+              "publication evidence expired before finalization",
+            );
+          }
+          const observationDigest = canonicalDigest(ledger.latest_observation);
+          const oldestCollectionAt = oldestObservationAt(
+            ledger.latest_observation,
+          );
+          const finalGate = {
+            version: ledger.version,
+            review_id: reviewId,
+            issuance_committed: true,
+            passed_at: passedAt,
+            repository_id: ledger.target.repository_id,
+            pr_number: ledger.target.pr_number,
+            head_sha: publicationAuthorization.head_sha,
+            reviewer_provider: publicationAuthorization.reviewer_provider,
+            ...(ledger.version === 1
+              ? {
+                  local_gate_sha256: publicationAuthorization.source_sha256,
+                }
+              : {
+                  authorization_mode: publicationAuthorization.mode,
+                  authorization_sha256: publicationAuthorization.source_sha256,
+                }),
+            ...(ledger.version === 3
+              ? {
+                  workflow_id: workflowBinding.workflow_id,
+                  workflow_authorization_sha256:
+                    workflowBinding.workflow_authorization_sha256,
+                  resolution_sha256: resolutionContext.effectiveDigest,
+                }
+              : {}),
+            publication_revision: ledger.revision,
+            github_observation_sha256: observationDigest,
+            github_observed_at: ledger.latest_observation.observed_at,
+            github_oldest_collection_at: oldestCollectionAt,
+            github_recorded_at: ledger.latest_observation.recorded_at,
+            expires_at: expiresAt,
+            status: "MERGE_READY",
+          };
+          const candidateGate = {
+            ...finalGate,
+            issuance_committed: false,
+          };
+          const gateDigest = canonicalDigest(finalGate);
+          await atomicWriteCanonicalJson(paths.gate, candidateGate);
+          await appendAuditEvent(
+            paths,
+            reviewId,
+            {
+              event: "GATE_FINALIZATION_PASSED",
+              outcome: "SUCCESS",
+              normalized_reason: null,
+              at: passedAt,
+              publication_revision: ledger.revision,
+              head_sha: publicationAuthorization.head_sha,
+              github_observation_sha256: observationDigest,
+              gate_sha256: gateDigest,
+              expires_at: expiresAt,
+            },
+            auditSession,
+          );
+          await atomicWriteCanonicalJson(paths.gate, finalGate);
+          return finalGate;
         },
-        auditSession,
       );
-      await atomicWriteCanonicalJson(paths.gate, finalGate);
-      return finalGate;
     } finally {
       if (auditSession != null) {
         await closeAuditSession(auditSession);
@@ -6273,12 +7456,48 @@ export async function verifyPublicationGate(
       const gateDigest = gate == null ? null : canonicalDigest(gate);
       const auditSession = await openAuditSession(paths, reviewId);
       try {
+        // The audit record every verification writes, over the verdict the
+        // assessment reached (which for a workflow-bound publication was
+        // reached inside the retained source-lock callback below).
+        const writeAudit = (result) =>
+          appendAuditEvent(
+            paths,
+            reviewId,
+            {
+              event: "GATE_VERIFIED",
+              outcome: result.valid ? "SUCCESS" : "FAILURE",
+              normalized_reason: result.valid ? null : result.reason,
+              at: verifiedAt,
+              publication_revision: result.valid
+                ? result.publication_revision
+                : Number.isSafeInteger(gate?.publication_revision) &&
+                    gate.publication_revision > 0
+                  ? gate.publication_revision
+                  : null,
+              head_sha: result.valid
+                ? result.head_sha
+                : SHA_RE.test(gate?.head_sha ?? "")
+                  ? gate.head_sha
+                  : null,
+              github_observation_sha256:
+                DIGEST_RE.test(gate?.github_observation_sha256 ?? "")
+                  ? gate.github_observation_sha256
+                  : null,
+              gate_sha256: gateDigest,
+              expires_at:
+                isCanonicalTimestamp(gate?.expires_at)
+                  ? gate.expires_at
+                  : null,
+            },
+            auditSession,
+          );
         let response;
         if (gate == null || authorization.gateParseError) {
           response = verificationFailure(
             "GATE_MISSING_OR_MALFORMED",
             verifiedAt,
           );
+          await writeAudit(response);
         } else {
           // A broken workflow binding is a gate mismatch, not a crash: the
           // GATE_VERIFIED audit event must still record the failed check.
@@ -6288,62 +7507,48 @@ export async function verifyPublicationGate(
           } catch {
             workflowBinding = null;
           }
-          const gateAssessment = assessPublicationGate(
+          // The effective resolution context is precomputed once for the
+          // assessment, and the assessment and its audit record run inside
+          // the retained source-lock callback: a gate minted over historical
+          // proof must verify against the same effective digest, lock
+          // contention on a historical source publication must propagate
+          // retryable PUBLICATION_BUSY rather than read the source without
+          // its lock, and the source evidence cannot change between the
+          // digest comparison and the verdict the audit records.
+          response = await withEffectiveResolutionContext(
+            storeRoot,
             ledger,
-            publicationAuthorization,
-            authorization.sourceAuthorization,
-            gate,
-            false,
-            currentMs,
             workflowBinding,
+            async (resolutionContext) => {
+              const gateAssessment = assessPublicationGate(
+                ledger,
+                publicationAuthorization,
+                authorization.sourceAuthorization,
+                gate,
+                false,
+                currentMs,
+                workflowBinding,
+                resolutionContext,
+              );
+              const result =
+                gateAssessment.state === "INVALID"
+                  ? verificationFailure("GATE_MISMATCH", verifiedAt)
+                  : gateAssessment.state === "EXPIRED"
+                    ? verificationFailure("EVIDENCE_STALE", verifiedAt)
+                    : {
+                        valid: true,
+                        status: "MERGE_READY",
+                        head_sha: gate.head_sha,
+                        reviewer_provider: gateAssessment.reviewerProvider,
+                        publication_revision: gate.publication_revision,
+                        expires_at: gate.expires_at,
+                        verified_at: verifiedAt,
+                      };
+              await writeAudit(result);
+              return result;
+            },
           );
-          if (gateAssessment.state === "INVALID") {
-            response = verificationFailure("GATE_MISMATCH", verifiedAt);
-          } else if (gateAssessment.state === "EXPIRED") {
-            response = verificationFailure("EVIDENCE_STALE", verifiedAt);
-          } else {
-            response = {
-              valid: true,
-              status: "MERGE_READY",
-              head_sha: gate.head_sha,
-              reviewer_provider: gateAssessment.reviewerProvider,
-              publication_revision: gate.publication_revision,
-              expires_at: gate.expires_at,
-              verified_at: verifiedAt,
-            };
-          }
         }
-        await appendAuditEvent(
-          paths,
-          reviewId,
-          {
-            event: "GATE_VERIFIED",
-            outcome: response.valid ? "SUCCESS" : "FAILURE",
-            normalized_reason: response.valid ? null : response.reason,
-            at: verifiedAt,
-            publication_revision: response.valid
-              ? response.publication_revision
-              : Number.isSafeInteger(gate?.publication_revision) &&
-                  gate.publication_revision > 0
-                ? gate.publication_revision
-                : null,
-            head_sha: response.valid
-              ? response.head_sha
-              : SHA_RE.test(gate?.head_sha ?? "")
-                ? gate.head_sha
-                : null,
-            github_observation_sha256:
-              DIGEST_RE.test(gate?.github_observation_sha256 ?? "")
-                ? gate.github_observation_sha256
-                : null,
-            gate_sha256: gateDigest,
-            expires_at:
-              isCanonicalTimestamp(gate?.expires_at)
-                ? gate.expires_at
-                : null,
-          },
-          auditSession,
-        );
         return response;
       } finally {
         await closeAuditSession(auditSession);

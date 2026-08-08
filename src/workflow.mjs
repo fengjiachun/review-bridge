@@ -6,6 +6,8 @@ import path from "node:path";
 import { getReviewSnapshot } from "./core.mjs";
 import {
   getAutonomousPreReady,
+  getAutonomousTerminal,
+  withAutonomousTerminalLock,
   getPublication,
   getPublicationFindingsReview,
   getThreadResolutionPlan,
@@ -74,6 +76,14 @@ function fail(code, message, details = {}) {
 
 function now() {
   return new Date().toISOString();
+}
+
+function hasFreshPostReadyObservation(projection, readyMark) {
+  return (
+    readyMark != null &&
+    projection.revision > readyMark.publication_revision &&
+    Date.parse(projection.oldest_collection_at) > Date.parse(readyMark.recorded_at)
+  );
 }
 
 function assertString(value, name, { max = 200_000 } = {}) {
@@ -1241,7 +1251,7 @@ function validateWorkflow(workflow) {
       "workflow authorization digest mismatch",
     );
   }
-  if (!["ACTIVE", "PAUSED", "CANCELLED"].includes(workflow.status)) {
+  if (!["ACTIVE", "PAUSED", "CANCELLED", "MERGE_READY"].includes(workflow.status)) {
     fail("WORKFLOW_STATE_INVALID", "workflow status is invalid");
   }
   if (
@@ -1393,6 +1403,100 @@ function validateWorkflow(workflow) {
     );
     assertTimestamp(mark.recorded_at, "ready-mark recorded_at");
   }
+  // The terminal record is the success claim: it exists exactly when the
+  // workflow has reached terminal MERGE_READY, and it binds every fact the
+  // terminal projection revalidated so the claim is inspectable on its own.
+  if (workflow.terminal != null) {
+    if (workflow.status !== "MERGE_READY") {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "a terminal record requires workflow status MERGE_READY",
+      );
+    }
+    const terminal = assertObject(workflow.terminal, "workflow.terminal");
+    if (terminal.status !== "MERGE_READY") {
+      fail("WORKFLOW_STATE_INVALID", "workflow terminal status is invalid");
+    }
+    assertPositiveInteger(
+      terminal.workflow_revision,
+      "workflow.terminal.workflow_revision",
+    );
+    const pullRequest = assertObject(
+      terminal.pull_request,
+      "workflow.terminal.pull_request",
+    );
+    assertPositiveInteger(
+      pullRequest.repository_id,
+      "workflow.terminal.pull_request.repository_id",
+    );
+    assertPositiveInteger(
+      pullRequest.pr_number,
+      "workflow.terminal.pull_request.pr_number",
+    );
+    assertString(pullRequest.url, "workflow.terminal.pull_request.url", {
+      max: 4096,
+    });
+    assertSha(terminal.head_sha, "workflow.terminal.head_sha");
+    assertString(
+      terminal.local_review_id,
+      "workflow.terminal.local_review_id",
+      { max: 1024 },
+    );
+    assertString(
+      terminal.publication_id,
+      "workflow.terminal.publication_id",
+      { max: 1024 },
+    );
+    assertPositiveInteger(
+      terminal.observation_revision,
+      "workflow.terminal.observation_revision",
+    );
+    if (!DIGEST_RE.test(terminal.observation_sha256 ?? "")) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "workflow terminal observation digest is invalid",
+      );
+    }
+    if (!DIGEST_RE.test(terminal.publication_authorization_sha256 ?? "")) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "workflow terminal publication authorization digest is invalid",
+      );
+    }
+    if (!DIGEST_RE.test(terminal.workflow_authorization_sha256 ?? "")) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "workflow terminal workflow authorization digest is invalid",
+      );
+    }
+    if (!DIGEST_RE.test(terminal.resolution_sha256 ?? "")) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "workflow terminal resolution digest is invalid",
+      );
+    }
+    if (
+      terminal.ready_exception_sha256 !== null &&
+      !DIGEST_RE.test(terminal.ready_exception_sha256 ?? "")
+    ) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "workflow terminal exception digest is invalid",
+      );
+    }
+    if (!Array.isArray(terminal.human_review_requirements)) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "workflow terminal human review requirements are malformed",
+      );
+    }
+    assertTimestamp(terminal.recorded_at, "workflow.terminal.recorded_at");
+  } else if (workflow.status === "MERGE_READY") {
+    fail(
+      "WORKFLOW_STATE_INVALID",
+      "workflow status MERGE_READY requires a terminal record",
+    );
+  }
   validateCurrentPublication(workflow);
   const claimKeys = new Set();
   for (const entry of workflow.claims) {
@@ -1467,10 +1571,10 @@ function validateWorkflow(workflow) {
     );
   }
   const released = dispositions.has("RELEASED");
-  if (released && workflow.status !== "CANCELLED") {
+  if (released && !["CANCELLED", "MERGE_READY"].includes(workflow.status)) {
     fail(
       "WORKFLOW_CLAIMS_INVALID",
-      "released claims require a cancelled workflow",
+      "released claims require a cancelled or terminal workflow",
     );
   }
   if (released !== (workflow.claim_release != null)) {
@@ -1549,6 +1653,7 @@ const REMOTE_FIELD_DEFAULTS = Object.freeze({
   thread_replies: [],
   thread_resolutions: [],
   ready_marks: [],
+  terminal: null,
 });
 
 function withRemoteFieldDefaults(workflow) {
@@ -1909,6 +2014,7 @@ function auditedWorkflowState(workflow) {
     thread_replies: workflow.thread_replies ?? [],
     thread_resolutions: workflow.thread_resolutions ?? [],
     ready_marks: workflow.ready_marks ?? [],
+    terminal: workflow.terminal ?? null,
     active_action: workflow.active_action,
     reviewer_task: workflow.reviewer_task,
     current_review: workflow.current_review,
@@ -2114,6 +2220,7 @@ function requireWorkflowAuditBinding(workflow, audit) {
     thread_replies: [],
     thread_resolutions: [],
     ready_marks: [],
+    terminal: null,
     active_action: null,
     reviewer_task: null,
     current_review: null,
@@ -2144,6 +2251,8 @@ function requireWorkflowAuditBinding(workflow, audit) {
       canonicalJson(lastState.thread_resolutions ?? []) ||
     canonicalJson(workflow.ready_marks ?? []) !==
       canonicalJson(lastState.ready_marks ?? []) ||
+    canonicalJson(workflow.terminal ?? null) !==
+      canonicalJson(lastState.terminal ?? null) ||
     canonicalJson(workflow.active_action) !==
       canonicalJson(lastState.active_action) ||
     canonicalJson(workflow.reviewer_task) !==
@@ -2202,6 +2311,7 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "thread_replies",
     "thread_resolutions",
     "ready_marks",
+    "terminal",
     "active_action",
     "reviewer_task",
     "current_review",
@@ -2505,7 +2615,24 @@ function nextAction(workflow) {
       EXECUTING: "RECONCILE_MARK_PR_READY",
       OBSERVED: "COMPLETE_MARK_PR_READY",
     }),
-    POST_READY: "AWAIT_OPERATOR",
+    // A run that has marked its pull request ready still owes the server one
+    // fresh post-ready observation: only a MERGE_READY verdict over it can
+    // record the terminal entry. The driver records the snapshot and calls
+    // advance_remote_workflow; a compliant driver must not stop at
+    // AWAIT_OPERATOR while the workflow is still ACTIVE. Once that fresh
+    // observation has been evaluated -- the advance records the publication
+    // revision it observed on the current_publication binding -- a
+    // non-actionable terminal blocker leaves the run stopped for the
+    // operator, so the summary advertises AWAIT_OPERATOR instead of asking
+    // the driver to re-collect forever. A terminal workflow (status
+    // MERGE_READY) stops the same way.
+    POST_READY:
+      workflow.status === "ACTIVE"
+        ? (workflow.current_publication?.awaiting_revision ?? 0) >
+          (workflow.ready_marks.at(-1)?.publication_revision ?? 0)
+          ? "AWAIT_OPERATOR"
+          : "RECORD_FRESH_OBSERVATION_AND_ADVANCE"
+        : "AWAIT_OPERATOR",
   };
   return actions[workflow.phase] ?? "INSPECT_WORKFLOW";
 }
@@ -2529,6 +2656,7 @@ function workflowSummary(workflow) {
     thread_replies: workflow.thread_replies,
     thread_resolutions: workflow.thread_resolutions,
     ready_marks: workflow.ready_marks,
+    terminal: workflow.terminal,
     active_action:
       workflow.active_action == null
         ? null
@@ -2658,6 +2786,7 @@ export async function startAutonomousWorkflow(
     thread_replies: [],
     thread_resolutions: [],
     ready_marks: [],
+    terminal: null,
     claims: workflowClaims,
     active_action: null,
     progress_fingerprint: null,
@@ -4618,6 +4747,11 @@ export async function advanceRemoteWorkflow(
         // itself: the pull request returned to draft by another hand, or
         // closed or merged, leaves nothing for its action to do.
         "ENSURE_DRAFT_FOR_REPAIR",
+        // Advanceable so the run can reach its recorded terminal state: the
+        // terminal projection decides whether a fresh post-ready observation
+        // proves the run succeeded, and every other verdict routes onward or
+        // leaves the phase where it is.
+        "POST_READY",
       ].includes(workflow.phase)
     ) {
       fail(
@@ -4635,9 +4769,15 @@ export async function advanceRemoteWorkflow(
       fail("WORKFLOW_STATE_INVALID", "the remote wait has no bound publication");
     }
     const reviewId = workflow.current_publication.review_id;
-    const projection = await getAutonomousPreReady(storeRoot, reviewId, {
-      clock,
-    });
+    // POST_READY is evaluated through the terminal projection, which is the
+    // only one that may authorize the terminal record; every other phase keeps
+    // the pre-ready evaluator. Both revalidate the same identity and both
+    // report the derived status when it is not their own, so the routing below
+    // is shared.
+    const projection =
+      workflow.phase === "POST_READY"
+        ? await getAutonomousTerminal(storeRoot, reviewId, { clock })
+        : await getAutonomousPreReady(storeRoot, reviewId, { clock });
     if (
       projection.workflow_id !== workflow.workflow_id ||
       projection.review_id !== reviewId ||
@@ -4647,6 +4787,116 @@ export async function advanceRemoteWorkflow(
         "WORKFLOW_PUBLICATION_MISMATCH",
         "publication is not bound to this workflow and head",
       );
+    }
+    // Every POST_READY verdict is actionable only over an observation the
+    // projection could not have evaluated over the pre-mark-ready state: the
+    // ready mark records the clearance revision, and any observation recorded
+    // at or before it, or gathered before it, shows a draft pull request and
+    // never reaches the terminal branch. The freshness gate therefore applies
+    // to every status the terminal projection can report, not just the
+    // MERGE_READY stop: a newer revision whose oldest collection is stale -- a
+    // mixed-epoch draft or non-success snapshot -- must not spend the workflow
+    // revision, must not record the blocked evaluation as an operator stop,
+    // and must not route a repair, pause, or thread-resolution verdict the
+    // ready pull request never earned. Identity and binding were revalidated
+    // above, so a mismatch still fails closed before this gate is consulted.
+    const readyMark = workflow.ready_marks.at(-1) ?? null;
+    if (
+      workflow.phase === "POST_READY" &&
+      !hasFreshPostReadyObservation(projection, readyMark)
+    ) {
+      return publicWorkflow(workflow);
+    }
+    // The terminal record is the run's success claim. It is minted only when
+    // the terminal projection says MERGE_READY over an observation recorded
+    // after the mark-ready action consumed its clearance -- the ready mark
+    // records the clearance revision, and any observation the projection could
+    // evaluate over the pre-mark-ready state would show a draft pull request
+    // and never reach this branch. The revision comparison is what makes
+    // "one fresh complete observation" structural rather than a clock.
+    if (workflow.phase === "POST_READY" && projection.status === "MERGE_READY") {
+      if (hasFreshPostReadyObservation(projection, readyMark)) {
+        const pullRequest = workflow.pull_request;
+        const recordedAt = now();
+        // The terminal record is the run's success claim. Revalidate the
+        // publication and keep it stable across the workflow ledger write:
+        // withAutonomousTerminalLock holds the publication lock while the
+        // projection is re-read AND while saveActionMutation writes
+        // workflow.json, so a snapshot writer cannot commit a newer
+        // blocking observation between the two. Failing closed leaves the
+        // run stopped at POST_READY for the driver to re-collect.
+        return publicWorkflow(
+          await withAutonomousTerminalLock(
+            storeRoot,
+            reviewId,
+            async (current) => {
+              if (
+                current.status !== "MERGE_READY" ||
+                current.revision !== projection.revision ||
+                !hasFreshPostReadyObservation(current, readyMark)
+              ) {
+                fail(
+                  "WORKFLOW_PUBLICATION_MISMATCH",
+                  "publication advanced after the terminal projection was read",
+                );
+              }
+              return saveActionMutation(
+                paths,
+                workflow,
+                "WORKFLOW_TERMINAL",
+                async (next) => {
+                  next.terminal = {
+                    status: "MERGE_READY",
+                    workflow_revision: next.revision + 1,
+                    pull_request: {
+                      repository_id: pullRequest.repository_id,
+                      pr_number: pullRequest.pr_number,
+                      url: pullRequest.url,
+                    },
+                    head_sha: next.current_head_sha,
+                    // A null here can never be persisted: saveActionMutation
+                    // validates the candidate ledger before any write, and the
+                    // terminal-record validator requires the ID of the review
+                    // that gated this head. A run without one simply cannot
+                    // reach the terminal record.
+                    local_review_id: next.current_review?.review_id ?? null,
+                    publication_id: next.current_publication.review_id,
+                    // The terminal record binds what the retained-lock
+                    // revalidation proved, not the earlier unlocked
+                    // projection: a replay-clean source mutation between the
+                    // two projections moves the effective resolution digest
+                    // while leaving status and revision unchanged, and the
+                    // record must claim the freshly revalidated evidence.
+                    observation_revision: current.revision,
+                    observation_sha256: current.observation_sha256,
+                    publication_authorization_sha256:
+                      current.publication_authorization_sha256,
+                    workflow_authorization_sha256:
+                      current.workflow_authorization_sha256,
+                    resolution_sha256: current.resolution_sha256,
+                    ready_exception_sha256: current.ready_exception_sha256,
+                    human_review_requirements:
+                      current.human_review_requirements,
+                    recorded_at: recordedAt,
+                  };
+                  next.status = "MERGE_READY";
+                  // The phase stays POST_READY: it is the wait the run stops
+                  // in, and the operator's later merge instruction goes
+                  // through the manual publication path, not through this
+                  // workflow.
+                  next.phase = "POST_READY";
+                },
+              );
+            },
+            { clock },
+          ),
+        );
+      }
+      // The projection reports MERGE_READY but the observation is not the
+      // post-ready one. Keep the workflow unchanged rather than recording the
+      // observation revision as an operator stop: the driver still owes one
+      // complete fresh collection epoch.
+      return publicWorkflow(workflow);
     }
     const repairPhase = remoteRepairPhase(projection);
     // Every repair phase is left by recording a new head, which is pushed to
@@ -4752,6 +5002,31 @@ export async function advanceRemoteWorkflow(
       // withdrawn: every status this projection can report before it reaches
       // the check and Codex gates masks a blocker that is still standing, so
       // the release kept firing on unevaluated evidence.
+      //
+      // At POST_READY the terminal branch above already returned for a genuine
+      // MERGE_READY, so reaching here means the run is blocked at the terminal
+      // gate by something that is not an actionable repair: a contested
+      // resolution record, a stale observation, an unresolved thread, or a
+      // pull request that is not ready. None of those is fixed by moving the
+      // phase -- the ready pull request must not be handed to the draft-phase
+      // wait -- so the run stays stopped here and the operator decides. The
+      // first blocked evaluation records the publication revision it observed
+      // so the summary stops advertising RECORD_FRESH_OBSERVATION_AND_ADVANCE:
+      // a controller that follows only next_action must stop for the operator
+      // instead of re-collecting snapshots forever.
+      if (workflow.phase === "POST_READY") {
+        if (
+          workflow.current_publication.awaiting_revision ===
+          projection.revision
+        ) {
+          return publicWorkflow(workflow);
+        }
+        return publicWorkflow(
+          await saveMutation(paths, workflow, async (next) => {
+            next.current_publication.awaiting_revision = projection.revision;
+          }),
+        );
+      }
       const reachedPreReady = projection.status === "READY_TO_MARK";
       // Unresolved threads are no longer only an operator's problem: when at
       // least one is eligible, the workflow moves to the thread-resolution
@@ -5139,10 +5414,10 @@ export async function releaseWorkflowClaims(
   }
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
-    if (workflow.status !== "CANCELLED") {
+    if (!["CANCELLED", "MERGE_READY"].includes(workflow.status)) {
       fail(
         "WORKFLOW_STATE_INVALID",
-        "claims may be released only after explicit cancellation",
+        "claims may be released only after explicit cancellation or a recorded terminal state",
       );
     }
     const activeClaims = workflow.claims.filter(
@@ -5190,10 +5465,16 @@ export async function releaseWorkflowClaims(
           return true;
         }
         const observedAt = Date.parse(evidence.observed_at);
-        const cancelledAt = Date.parse(workflow.cancellation.cancelled_at);
+        // The reconciliation evidence must postdate the state that made the
+        // release legal: for a cancelled workflow the cancellation, for a
+        // terminal workflow the recorded terminal entry the merge followed.
+        const referenceAt =
+          workflow.status === "MERGE_READY"
+            ? Date.parse(workflow.terminal.recorded_at)
+            : Date.parse(workflow.cancellation.cancelled_at);
         const currentTime = Date.now();
         return (
-          observedAt < cancelledAt ||
+          observedAt < referenceAt ||
           currentTime - observedAt > MAX_RECONCILIATION_AGE_MS ||
           observedAt - currentTime > MAX_FUTURE_CLOCK_SKEW_MS ||
           sha256(canonicalJson(evidence.target)) !==
