@@ -5618,7 +5618,8 @@ function assessPublicationGate(
         gate.workflow_authorization_sha256 ===
           ledger.workflow_authorization_sha256 &&
         gate.workflow_authorization_sha256 ===
-          workflowBinding.workflow_authorization_sha256;
+          workflowBinding.workflow_authorization_sha256 &&
+        gate.resolution_sha256 === resolutionSetDigest(ledger);
   const authorizationBindingMatches =
     ledger.version === 1
       ? gate.version === 1 &&
@@ -6884,6 +6885,7 @@ export async function finalizePublicationGate(
               workflow_id: workflowBinding.workflow_id,
               workflow_authorization_sha256:
                 workflowBinding.workflow_authorization_sha256,
+              resolution_sha256: resolutionSetDigest(ledger),
             }
           : {}),
         publication_revision: ledger.revision,

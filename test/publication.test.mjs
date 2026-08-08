@@ -1391,6 +1391,7 @@ test("remote-only authorization reaches the same audited merge gate", async (t) 
   assert.equal(gate.authorization_sha256.length, 64);
   assert.equal(gate.reviewer_provider, null);
   assert.equal("local_gate_sha256" in gate, false);
+  assert.equal("resolution_sha256" in gate, false);
   const verified = await verifyPublicationGate(state.store, state.reviewId, {
     clock: () => observedAt + 30,
   });
@@ -1602,6 +1603,7 @@ test("version 1 local ledgers remain readable and completable", async (t) => {
   assert.equal(gate.version, 1);
   assert.equal(gate.local_gate_sha256, legacy.local_gate.gate_sha256);
   assert.equal(gate.reviewer_provider, "CLAUDE_DESKTOP");
+  assert.equal("resolution_sha256" in gate, false);
   const verified = await verifyPublicationGate(state.store, state.reviewId, {
     clock: () => observedAt + 30,
   });

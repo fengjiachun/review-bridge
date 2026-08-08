@@ -3142,6 +3142,15 @@ test("the version 3 gate carries both digests and verifies them independently", 
   assert.match(gate.authorization_sha256, /^[0-9a-f]{64}$/);
   assert.equal(gate.workflow_id, workflow.workflow_id);
   assert.match(gate.workflow_authorization_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(
+    gate.resolution_sha256,
+    sha256(
+      canonicalJson({
+        automatic_resolutions: [],
+        resolution_lifecycle: [],
+      }),
+    ),
+  );
   assert.notEqual(gate.authorization_sha256, gate.workflow_authorization_sha256);
 
   const verified = await verifyPublicationGate(
@@ -3159,7 +3168,40 @@ test("the version 3 gate carries both digests and verifies them independently", 
     reviewId,
     "publication-gate.json",
   );
+  const storedGate = JSON.parse(await fsp.readFile(gatePath, "utf8"));
+  const changedResolutionDigest = structuredClone(storedGate);
+  changedResolutionDigest.resolution_sha256 = "2".repeat(64);
+  await atomicWriteCanonicalJson(gatePath, changedResolutionDigest);
+  const resolutionRejected = await verifyPublicationGate(
+    state.store,
+    reviewId,
+    { clock: () => at + 3_150 },
+  );
+  assert.equal(resolutionRejected.valid, false);
+  assert.equal(resolutionRejected.reason, "GATE_MISMATCH");
+
+  const underBound = structuredClone(storedGate);
+  delete underBound.resolution_sha256;
+  await atomicWriteCanonicalJson(gatePath, underBound);
+  const underBoundRejected = await verifyPublicationGate(
+    state.store,
+    reviewId,
+    { clock: () => at + 3_175 },
+  );
+  assert.equal(underBoundRejected.valid, false);
+  assert.equal(underBoundRejected.reason, "GATE_MISMATCH");
+  const underBoundSummary = await getPublicationSummary(
+    state.store,
+    reviewId,
+    { clock: () => at + 3_180 },
+  );
+  assert.equal(underBoundSummary.status, "MERGE_READY");
+  assert.equal(underBoundSummary.gate_state, "INVALID");
+  assert.equal(underBoundSummary.blocking_reason, "PUBLICATION_GATE_INVALID");
+  assert.equal(underBoundSummary.next_action, "FINALIZE_PUBLICATION_GATE");
+
   const forged = JSON.parse(await fsp.readFile(gatePath, "utf8"));
+  forged.resolution_sha256 = storedGate.resolution_sha256;
   forged.workflow_authorization_sha256 = "1".repeat(64);
   await atomicWriteCanonicalJson(gatePath, forged);
   const rejected = await verifyPublicationGate(
@@ -6704,6 +6746,30 @@ test("the terminal replay accepts one linear supersession chain and blocks every
   assert.equal(valid.status, "MERGE_READY", "a linear supersession chain replays");
   assert.deepEqual(valid.blockers, []);
 
+  await finalizePublicationGate(
+    state.store,
+    reviewId,
+    { expectedRevision: recorded.revision },
+    { clock: () => at + 20_020 },
+  );
+  assert.equal(
+    (await verifyPublicationGate(state.store, reviewId, {
+      clock: () => at + 20_030,
+    })).valid,
+    true,
+  );
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.resolution_lifecycle[0].reason = "same replay, different evidence";
+  });
+  const lifecycleSubstitution = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(lifecycleSubstitution.status, "MERGE_READY");
+  assert.deepEqual(lifecycleSubstitution.blockers, []);
+  const lifecycleRejected = await verifyPublicationGate(state.store, reviewId, {
+    clock: () => at + 20_040,
+  });
+  assert.equal(lifecycleRejected.valid, false);
+  assert.equal(lifecycleRejected.reason, "GATE_MISMATCH");
+
   // Missing unresolve: the supersession cannot be replayed without the
   // compensating unresolve its own binding names.
   await editPublication(state, reviewId, (ledger) => {
@@ -6989,6 +7055,71 @@ test("the terminal replay accepts one linear supersession chain and blocks every
   });
   const unrelatedHead = await getAutonomousTerminal(state.store, reviewId);
   assert.equal(unrelatedHead.blocking_reason, "THREAD_RESOLUTION_CHAIN_BROKEN");
+});
+
+test("the final gate rejects replay-valid same-revision resolution evidence substitution", async (t) => {
+  const { state, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t);
+  const observedAt = at + 2_000;
+  const thread = resolvedThread(headSha);
+  const watermark = threadWatermark(thread);
+  const payload = readyObservation(state, headSha, {
+    at: observedAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  payload.review_threads.total_count = 1;
+  payload.review_threads.unresolved_count = 0;
+  payload.review_threads.threads = [thread];
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: payload },
+    { clock: () => observedAt + 10 },
+  );
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions = [
+      resolutionRecord({
+        number: 1,
+        actionId: "act-original",
+        watermark,
+        headSha,
+        recordedRevision: recorded.revision,
+      }),
+    ];
+  });
+  await finalizePublicationGate(
+    state.store,
+    reviewId,
+    { expectedRevision: recorded.revision },
+    { clock: () => observedAt + 20 },
+  );
+  assert.equal(
+    (await verifyPublicationGate(state.store, reviewId, {
+      clock: () => observedAt + 30,
+    })).valid,
+    true,
+  );
+
+  // Replace the record at the same publication revision with a different,
+  // structurally valid record that still covers the active thread exactly.
+  // Replay alone remains clean, so only the final gate's resolution-set
+  // binding can detect the substitution.
+  await editPublication(state, reviewId, (ledger) => {
+    ledger.automatic_resolutions[0].action_id = "act-substitute";
+    ledger.automatic_resolutions[0].eligibility_sha256 = digest(
+      "eligibility-act-substitute",
+    );
+  });
+  const replayClean = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(replayClean.status, "MERGE_READY");
+  assert.deepEqual(replayClean.blockers, []);
+
+  const rejected = await verifyPublicationGate(state.store, reviewId, {
+    clock: () => observedAt + 40,
+  });
+  assert.equal(rejected.valid, false);
+  assert.equal(rejected.reason, "GATE_MISMATCH");
 });
 
 test("the manual gate verification refuses evidence the terminal replay rejects", async (t) => {
