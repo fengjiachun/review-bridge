@@ -165,6 +165,31 @@ gap returns the ready pull request to draft before any repair.
     change costs no workflow revision, so waiting needs no backoff
     bookkeeping.
 
+    When the pre-ready projection reports an invalidated workflow-owned
+    resolution, call `get_invalidated_resolution_plan`; only an
+    `actionable: true` result may be passed to `plan_thread_unresolve` for its
+    exact thread. Immediately before the provider call, read the authorized
+    repository ID, pull-request number, thread ID, resolution state, and exact
+    `new_watermark`, then persist that proof with
+    `mark_workflow_action_executing`. If the thread is already unresolved,
+    issue no mutation and record `OBSERVED_ALREADY_UNRESOLVED`; otherwise
+    issue the unresolve and record `UNRESOLVED`. Call
+    `record_automatic_unresolve` before `complete_workflow_action`; it appends
+    the server-owned `INVALIDATED` and `UNRESOLVED_FOR_REPAIR` events and
+    clears the stale observation. If the publication becomes terminal while
+    the unresolve is in flight, it accepts no lifecycle write; complete the
+    observed action without one and let the remote wait pause the terminal
+    publication, exactly like a terminal in-flight resolution. A pinned-Codex
+    follow-up next runs the
+    return-to-draft action (an already-draft pre-read is a no-op) before it
+    enters the remote repair path. Human or unknown participation performs the
+    same compensating unresolve and then pauses `THREAD_RESOLUTION_UNSAFE`.
+    During reconciliation
+    repeat the external unresolve only while the same server plan remains
+    actionable for the same workflow, pull request, thread, record, and
+    watermark; never use a controller pre-read to authorize or discard a
+    different durable intent.
+
     When the projection reports `GITHUB_REVIEW_NOT_REQUESTED` — which is what
     an acknowledged ambiguity leaves behind — post the exact
     `codex_review_request.body` it returns and immediately bind it with
@@ -586,11 +611,13 @@ For either mode:
     `gh pr merge --match-head-commit <head_sha>`. Never reuse a finalize result,
     direct file read, cached verification, or older revision.
 
-The twelve publication tools are `authorize_remote_publication`,
+The fourteen publication tools are `authorize_remote_publication`,
 `start_publication`, `get_publication`, `get_publication_summary`,
 `get_autonomous_pre_ready`, `get_thread_resolution_plan`,
+`get_invalidated_resolution_plan`,
 `record_codex_review_request`, `record_github_snapshot`,
-`record_automatic_resolution`, `acknowledge_codex_review_ambiguity`,
+`record_automatic_resolution`, `record_automatic_unresolve`,
+`acknowledge_codex_review_ambiguity`,
 `finalize_publication_gate`, and `verify_publication_gate`. Keep their
 revision ordering explicit and retry `PUBLICATION_BUSY` or `REVIEW_BUSY` only
 after rereading current state. `get_autonomous_pre_ready` exists only for a

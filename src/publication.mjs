@@ -2351,6 +2351,7 @@ function validateStoredLedger(ledger) {
         "GITHUB_SNAPSHOT_RECORDED",
         "CODEX_REVIEW_AMBIGUITY_ACKNOWLEDGED",
         "AUTOMATIC_RESOLUTION_RECORDED",
+        "AUTOMATIC_RESOLUTION_UNRESOLVED",
       ],
       "publication history event",
     );
@@ -2362,12 +2363,13 @@ function validateStoredLedger(ledger) {
     if (event.head_sha !== publicationAuthorization.head_sha) {
       fail("PUBLICATION_STORE_INVALID", "publication history head changed");
     }
-    // Both mutating events clear the observation: a posted request and a
-    // resolved thread each change the pull request out from under whatever
-    // was observed before them.
+    // These mutating events clear the observation: a posted request or a
+    // thread resolution-state change makes the prior pull-request snapshot
+    // stale.
     if (
       event.event === "CODEX_REVIEW_REQUEST_RECORDED" ||
-      event.event === "AUTOMATIC_RESOLUTION_RECORDED"
+      event.event === "AUTOMATIC_RESOLUTION_RECORDED" ||
+      event.event === "AUTOMATIC_RESOLUTION_UNRESOLVED"
     ) {
       if (event.cleared_observation_sha256 !== null) {
         assertDigest(
@@ -2378,15 +2380,27 @@ function validateStoredLedger(ledger) {
     } else if ("cleared_observation_sha256" in event) {
       fail(
         "PUBLICATION_STORE_INVALID",
-        "only request-recorded history may carry cleared_observation_sha256",
+        "only request or thread-mutation history may carry cleared_observation_sha256",
       );
     }
-    if (event.event === "AUTOMATIC_RESOLUTION_RECORDED") {
+    if (
+      event.event === "AUTOMATIC_RESOLUTION_RECORDED" ||
+      event.event === "AUTOMATIC_RESOLUTION_UNRESOLVED"
+    ) {
       assertString(event.thread_id, "resolution history thread_id", 1024);
     } else if ("thread_id" in event) {
       fail(
         "PUBLICATION_STORE_INVALID",
         "only resolution-recorded history may carry thread_id",
+      );
+    }
+    if (event.event === "AUTOMATIC_RESOLUTION_UNRESOLVED") {
+      assertString(event.record_id, "unresolve history record_id", 1024);
+      assertString(event.action_id, "unresolve history action_id", 1024);
+    } else if ("record_id" in event || "action_id" in event) {
+      fail(
+        "PUBLICATION_STORE_INVALID",
+        "only unresolve history may carry record_id and action_id",
       );
     }
   }
@@ -3841,18 +3855,21 @@ export function threadResolutionEligibility(ledger, thread, context) {
   // names that review by ID and reviewed head. A thread rooted in any other
   // review -- an unsolicited in-window one included -- matches no record and
   // refuses here.
-  const addressed = workflow.addressed_findings.find(
+  const addressed = workflow.addressed_findings.filter(
     (record) =>
       record.findings_review.result_id === review.database_id &&
       record.findings_review.reviewed_head_sha === review.reviewed_head_sha &&
       record.addressed_by.length > 0,
   );
-  if (addressed == null) {
+  if (addressed.length === 0) {
     return refuse("FIX_NOT_RECORDED");
   }
   // The commits travel with the verdict: they are what the reply action
   // names, so the reply can never claim more than the record it answers.
-  return { eligible: true, addressed_by: [...addressed.addressed_by] };
+  return {
+    eligible: true,
+    addressed_by: addressed.flatMap((record) => record.addressed_by),
+  };
 }
 
 // The full Codex verdict for the gated head: the status codexStatus reports,
@@ -6906,6 +6923,266 @@ export async function recordCodexReviewRequest(
   });
 }
 
+function invalidatedResolutionPlan(ledger, binding) {
+  const headSha = authorizationForLedger(ledger).head_sha;
+  const observation = ledger.latest_observation;
+  if (
+    ledger.version !== 3 ||
+    ledger.terminal != null ||
+    observation?.review_threads?.collection?.status !== "COMPLETE"
+  ) {
+    return {
+      review_id: ledger.review_id,
+      revision: ledger.revision,
+      workflow_id: ledger.workflow_id ?? null,
+      head_sha: headSha,
+      actionable: false,
+      reason: "EVIDENCE_UNAVAILABLE",
+    };
+  }
+  const frontier = resolutionFrontier(ledger);
+  if (frontier.blockers.length > 0) {
+    return {
+      review_id: ledger.review_id,
+      revision: ledger.revision,
+      workflow_id: ledger.workflow_id,
+      head_sha: headSha,
+      actionable: false,
+      reason: frontier.blockers[0].reason,
+    };
+  }
+  const threads = new Map(
+    observation.review_threads.threads.map((thread) => [thread.id, thread]),
+  );
+  for (const [threadId, record] of frontier.active) {
+    const outcome = (binding.thread_resolutions ?? []).findLast(
+      (entry) =>
+        entry.outcome === "RESOLVED" &&
+        entry.action_id === record.action_id &&
+        entry.thread_id === threadId &&
+        entry.publication_review_id === ledger.review_id,
+    );
+    if (outcome == null) {
+      continue;
+    }
+    const thread = threads.get(threadId);
+    if (thread == null || thread.provenance_complete !== true) {
+      return {
+        review_id: ledger.review_id,
+        revision: ledger.revision,
+        workflow_id: ledger.workflow_id,
+        head_sha: headSha,
+        actionable: false,
+        thread_id: threadId,
+        record_id: record.action_id,
+        reason: "PROVENANCE_INCOMPLETE",
+      };
+    }
+    const newWatermark = threadWatermark(thread);
+    if (
+      thread.is_resolved === true &&
+      newWatermark === record.thread_watermark &&
+      !threadHasForeignParticipation(ledger, binding, thread)
+    ) {
+      continue;
+    }
+    const replyIndex = thread.comments.findIndex(
+      (comment) => comment.database_id === record.reply_comment_id,
+    );
+    const laterComments = thread.comments.slice(
+      replyIndex < 0 ? 0 : replyIndex + 1,
+    );
+    const followUpComments = laterComments.map((comment) => ({
+      comment_id: comment.database_id,
+      actor: { id: comment.actor.id, type: comment.actor.type },
+      created_at: comment.created_at,
+    }));
+    const codexActor = ledger.target.codex_actor;
+    const pinnedOnly =
+      replyIndex >= 0 &&
+      laterComments.length > 0 &&
+      laterComments.every(
+        (comment) =>
+          comment.actor?.id === codexActor.id &&
+          comment.actor?.type === codexActor.type,
+      );
+    const rootReview = thread.comments[0]?.review;
+    if (
+      !Number.isSafeInteger(rootReview?.database_id) ||
+      !SHA_RE.test(rootReview?.reviewed_head_sha ?? "")
+    ) {
+      return {
+        review_id: ledger.review_id,
+        revision: ledger.revision,
+        workflow_id: ledger.workflow_id,
+        head_sha: headSha,
+        actionable: false,
+        thread_id: threadId,
+        record_id: record.action_id,
+        reason: "PROVENANCE_INCOMPLETE",
+      };
+    }
+    return {
+      review_id: ledger.review_id,
+      revision: ledger.revision,
+      workflow_id: ledger.workflow_id,
+      head_sha: headSha,
+      actionable: true,
+      thread_id: threadId,
+      record_id: record.action_id,
+      prior_watermark: record.thread_watermark,
+      new_watermark: newWatermark,
+      follow_up_comments: followUpComments,
+      reason: pinnedOnly
+        ? "PINNED_CODEX_FOLLOW_UP"
+        : "THREAD_RESOLUTION_UNSAFE",
+      findings_review: {
+        result_id: rootReview.database_id,
+        reviewed_head_sha: rootReview.reviewed_head_sha,
+      },
+    };
+  }
+  return {
+    review_id: ledger.review_id,
+    revision: ledger.revision,
+    workflow_id: ledger.workflow_id,
+    head_sha: headSha,
+    actionable: false,
+    reason: "NO_INVALIDATED_RESOLUTION",
+  };
+}
+
+export async function getInvalidatedResolutionPlan(storeRoot, reviewId) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    const authorization = await openAuthorizationFiles(paths, reviewId);
+    try {
+      const ledger = authorization.ledger;
+      const binding = await requireWorkflowBinding(storeRoot, ledger);
+      return invalidatedResolutionPlan(ledger, binding);
+    } finally {
+      await closeAuthorizationFiles(authorization);
+    }
+  });
+}
+
+export async function recordAutomaticUnresolve(
+  storeRoot,
+  reviewId,
+  { expectedRevision, workflowId, actionId },
+  { clock = Date.now } = {},
+) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    assertRevision(expectedRevision);
+    assertString(actionId, "action_id", 1024);
+    const ledger = await loadPublicationFile(paths, reviewId);
+    requireRevision(ledger, expectedRevision);
+    requireMutable(ledger);
+    if (ledger.version !== 3 || ledger.workflow_id !== workflowId) {
+      fail(
+        "PUBLICATION_NOT_AUTONOMOUS",
+        "the compensating unresolve must name its bound autonomous workflow",
+      );
+    }
+    const existing = (ledger.resolution_lifecycle ?? []).find(
+      (event) =>
+        event.kind === "UNRESOLVED_FOR_REPAIR" &&
+        event.action_id === actionId,
+    );
+    if (existing != null) {
+      return clone(ledger);
+    }
+    const originalLedger = clone(ledger);
+    const binding = await requireWorkflowBinding(storeRoot, ledger, {
+      mutating: true,
+    });
+    const action = binding.active_unresolve;
+    if (
+      action == null ||
+      action.action_id !== actionId ||
+      action.review_id !== reviewId
+    ) {
+      fail(
+        "WORKFLOW_UNRESOLVE_ACTION_MISSING",
+        "the workflow has no observed compensating unresolve under that action",
+      );
+    }
+    const plan = invalidatedResolutionPlan(ledger, binding);
+    for (const field of [
+      "thread_id",
+      "record_id",
+      "prior_watermark",
+      "new_watermark",
+      "reason",
+    ]) {
+      if (plan[field] !== action[field]) {
+        fail(
+          "THREAD_RESOLUTION_NOT_INVALIDATED",
+          "the current server evidence no longer matches the unresolve action",
+        );
+      }
+    }
+    if (
+      plan.actionable !== true ||
+      canonicalJson(plan.follow_up_comments) !==
+        canonicalJson(action.follow_up_comments) ||
+      canonicalJson(plan.findings_review) !==
+        canonicalJson(action.findings_review)
+    ) {
+      fail(
+        "THREAD_RESOLUTION_NOT_INVALIDATED",
+        "the current server evidence no longer matches the unresolve action",
+      );
+    }
+    const at = new Date(clock()).toISOString();
+    const events = ledger.resolution_lifecycle ?? [];
+    const clearedObservationSha256 = canonicalDigest(ledger.latest_observation);
+    ledger.resolution_lifecycle = [
+      ...events,
+      {
+        number: events.length + 1,
+        kind: "INVALIDATED",
+        thread_id: action.thread_id,
+        record_id: action.record_id,
+        prior_watermark: action.prior_watermark,
+        new_watermark: action.new_watermark,
+        follow_up_comments: clone(action.follow_up_comments),
+        reason: action.reason,
+        at,
+      },
+      {
+        number: events.length + 2,
+        kind: "UNRESOLVED_FOR_REPAIR",
+        thread_id: action.thread_id,
+        record_id: action.record_id,
+        action_id: action.action_id,
+        at,
+      },
+    ];
+    const nextRevision = ledger.revision + 1;
+    ledger.latest_observation = null;
+    ledger.revision = nextRevision;
+    ledger.updated_at = at;
+    ledger.history.push({
+      at,
+      event: "AUTOMATIC_RESOLUTION_UNRESOLVED",
+      revision: nextRevision,
+      status: ledger.status,
+      head_sha: authorizationForLedger(ledger).head_sha,
+      thread_id: action.thread_id,
+      record_id: action.record_id,
+      action_id: action.action_id,
+      cleared_observation_sha256: clearedObservationSha256,
+    });
+    const storedLedger = capacityTerminal(originalLedger, ledger);
+    assertLedgerSize(storedLedger);
+    await revokeGate(paths);
+    await saveLedger(paths, storedLedger);
+    return storedLedger;
+  });
+}
+
 /**
  * The server-owned proof that this workflow performed one thread's
  * unresolved-to-resolved transition. Every binding comes from the workflow's
@@ -6928,6 +7205,10 @@ export async function recordCodexReviewRequest(
  * Recording clears the observation: the mutation just changed the pull
  * request, so whatever was observed before it no longer describes the
  * remote state, and every later conclusion must come from a fresh snapshot.
+ * When the workflow previously completed a safe compensating unresolve, the
+ * writer imports that thread's exact predecessor chain from its ancestor
+ * publication and appends SUPERSEDES. The candidate is replayed before it is
+ * stored, so the writer cannot manufacture a chain the terminal gate rejects.
  */
 export async function recordAutomaticResolution(
   storeRoot,
@@ -6985,8 +7266,6 @@ export async function recordAutomaticResolution(
         "the workflow has no observed resolution of this publication under that action",
       );
     }
-    // A different action reaching the same thread is a conflict, not a
-    // repeat.
     if (
       (ledger.automatic_resolutions ?? []).some(
         (record) => record.thread_id === resolution.thread_id,
@@ -7006,8 +7285,10 @@ export async function recordAutomaticResolution(
         "the resolution action was planned against a different head",
       );
     }
-    const reply = binding.thread_replies.find(
-      (entry) => entry.thread_id === resolution.thread_id,
+    const reply = binding.thread_replies.findLast(
+      (entry) =>
+        entry.thread_id === resolution.thread_id &&
+        entry.comment_id === resolution.reply_comment_id,
     );
     if (
       reply == null ||
@@ -7023,6 +7304,153 @@ export async function recordAutomaticResolution(
     const recordedAt = new Date(currentMs).toISOString();
     const nextRevision = ledger.revision + 1;
     const observation = ledger.latest_observation;
+    const predecessorOutcome = (binding.thread_resolutions ?? []).findLast(
+      (entry) =>
+        entry.outcome === "RESOLVED" &&
+        entry.thread_id === resolution.thread_id &&
+        entry.action_id !== actionId,
+    );
+    const predecessorUnresolve =
+      predecessorOutcome == null
+        ? null
+        : (binding.thread_unresolutions ?? []).findLast(
+            (entry) =>
+              entry.thread_id === resolution.thread_id &&
+              entry.record_id === predecessorOutcome.action_id,
+          );
+    let predecessor = null;
+    let invalidationEvent = null;
+    let unresolveEvent = null;
+    if (predecessorOutcome != null) {
+      if (
+        predecessorUnresolve == null ||
+        predecessorUnresolve.reason !== "PINNED_CODEX_FOLLOW_UP" ||
+        !(binding.addressed_findings ?? []).some(
+          (record) =>
+            record.findings_review.result_id ===
+              predecessorUnresolve.findings_review.result_id &&
+            record.findings_review.reviewed_head_sha ===
+              predecessorUnresolve.findings_review.reviewed_head_sha &&
+            record.addressed_by.length > 0,
+        ) ||
+        !validAttemptLineage(
+          binding.attempt_head_history ?? [],
+          predecessorOutcome.head_sha,
+          resolution.head_sha,
+        )
+      ) {
+        fail(
+          "PUBLICATION_HISTORY_CONFLICT",
+          "a prior thread resolution may be superseded only after its " +
+            "pinned-Codex invalidation and compensating unresolve",
+        );
+      }
+      const sourceReviewId = predecessorOutcome.publication_review_id;
+      if (sourceReviewId === reviewId) {
+        fail(
+          "PUBLICATION_HISTORY_CONFLICT",
+          "a successor resolution requires a descendant-head publication",
+        );
+      }
+      const sourcePaths = pathsFor(storeRoot, sourceReviewId);
+      await withAncestorPublicationLock(sourcePaths, sourceReviewId, async () => {
+        const sourceLedger = await loadPublicationFile(
+          sourcePaths,
+          sourceReviewId,
+        );
+        const sourceBinding = await requireWorkflowBinding(
+          storeRoot,
+          sourceLedger,
+        );
+        const sourceAuthorization = await readBoundAuthorization(
+          sourcePaths,
+          sourceReviewId,
+          sourceLedger,
+        );
+        if (
+          sourceBinding.workflow_id !== workflowId ||
+          sourceBinding.workflow_authorization_sha256 !==
+            binding.workflow_authorization_sha256 ||
+          sourceAuthorization.head_sha !== predecessorOutcome.head_sha ||
+          sourceLedger.target.repository_id !== ledger.target.repository_id ||
+          sourceLedger.target.pr_number !== ledger.target.pr_number
+        ) {
+          fail(
+            "PUBLICATION_HISTORY_CONFLICT",
+            "the predecessor resolution belongs to a different workflow or pull request",
+          );
+        }
+        const sourceRecords = (sourceLedger.automatic_resolutions ?? []).filter(
+          (record) => record.thread_id === resolution.thread_id,
+        );
+        const sourceEvents = (sourceLedger.resolution_lifecycle ?? []).filter(
+          (event) => event.thread_id === resolution.thread_id,
+        );
+        predecessor = sourceRecords.find(
+          (record) => record.action_id === predecessorOutcome.action_id,
+        );
+        const invalidated = sourceEvents.find(
+          (event) =>
+            event.kind === "INVALIDATED" &&
+            event.record_id === predecessorOutcome.action_id &&
+            event.reason === "PINNED_CODEX_FOLLOW_UP",
+        );
+        const unresolved = sourceEvents.find(
+          (event) =>
+            event.kind === "UNRESOLVED_FOR_REPAIR" &&
+            event.record_id === predecessorOutcome.action_id &&
+            event.action_id === predecessorUnresolve.action_id,
+        );
+        if (
+          predecessor == null ||
+          invalidated == null ||
+          unresolved == null ||
+          predecessor.thread_watermark !==
+            predecessorUnresolve.prior_watermark ||
+          invalidated.new_watermark !== predecessorUnresolve.new_watermark ||
+          sourceEvents.indexOf(invalidated) >= sourceEvents.indexOf(unresolved)
+        ) {
+          fail(
+            "PUBLICATION_HISTORY_CONFLICT",
+            "the predecessor publication does not contain the bound invalidation and unresolve chain",
+          );
+        }
+        const recordBase = (ledger.automatic_resolutions ?? []).length;
+        const eventBase = (ledger.resolution_lifecycle ?? []).length;
+        const eventNumbers = new Map(
+          sourceEvents.map((event, index) => [
+            event.number,
+            eventBase + index + 1,
+          ]),
+        );
+        ledger.automatic_resolutions = [
+          ...(ledger.automatic_resolutions ?? []),
+          ...sourceRecords.map((record, index) => ({
+            ...clone(record),
+            number: recordBase + index + 1,
+          })),
+        ];
+        ledger.resolution_lifecycle = [
+          ...(ledger.resolution_lifecycle ?? []),
+          ...sourceEvents.map((event, index) => ({
+            ...clone(event),
+            number: eventBase + index + 1,
+            ...(event.kind === "SUPERSEDES"
+              ? {
+                  invalidation_event: eventNumbers.get(event.invalidation_event),
+                  unresolve_event: eventNumbers.get(event.unresolve_event),
+                }
+              : {}),
+          })),
+        ];
+        invalidationEvent = eventNumbers.get(invalidated.number);
+        unresolveEvent = eventNumbers.get(unresolved.number);
+      });
+    }
+    const successorRecordedRevision = Math.max(
+      nextRevision,
+      (predecessor?.recorded_revision ?? 0) + 1,
+    );
     ledger.automatic_resolutions = [
       ...(ledger.automatic_resolutions ?? []),
       {
@@ -7047,9 +7475,57 @@ export async function recordAutomaticResolution(
           },
         },
         recorded_at: recordedAt,
-        recorded_revision: nextRevision,
+        recorded_revision: successorRecordedRevision,
       },
     ];
+    if (predecessor != null) {
+      if (
+        predecessor.thread_watermark === resolution.thread_watermark ||
+        predecessor.head_sha === resolution.head_sha
+      ) {
+        fail(
+          "PUBLICATION_HISTORY_CONFLICT",
+          "the successor resolution must bind a new head and watermark",
+        );
+      }
+      const events = ledger.resolution_lifecycle ?? [];
+      ledger.resolution_lifecycle = [
+        ...events,
+        {
+          number: events.length + 1,
+          kind: "SUPERSEDES",
+          thread_id: resolution.thread_id,
+          predecessor_id: predecessor.action_id,
+          successor_id: actionId,
+          invalidation_event: invalidationEvent,
+          unresolve_event: unresolveEvent,
+          at: recordedAt,
+        },
+      ];
+    }
+    if (predecessor != null) {
+      const replayLedger =
+        ledger.latest_observation == null
+          ? {
+              ...ledger,
+              latest_observation: {
+                pull_request: { head_sha: resolution.head_sha },
+              },
+            }
+          : ledger;
+      const replay = resolutionFrontier(replayLedger);
+      const active = replay.active.get(resolution.thread_id);
+      if (
+        replay.blockers.length > 0 ||
+        active?.action_id !== actionId ||
+        active.thread_watermark !== resolution.thread_watermark
+      ) {
+        fail(
+          "PUBLICATION_HISTORY_CONFLICT",
+          "the automatic-resolution writer did not produce one replayable active frontier",
+        );
+      }
+    }
     ledger.latest_observation = null;
     ledger.revision = nextRevision;
     ledger.updated_at = recordedAt;

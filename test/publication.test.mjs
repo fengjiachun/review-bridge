@@ -3190,7 +3190,7 @@ test("pre-start audit and stored-history invariants report their contract errors
   );
   await assert.rejects(
     getPublication(second.store, second.reviewId),
-    /only request-recorded history/,
+    /only request or thread-mutation history/,
   );
 });
 

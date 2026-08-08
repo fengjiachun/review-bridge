@@ -10,6 +10,7 @@ import {
   withAutonomousTerminalLock,
   getPublication,
   getPublicationFindingsReview,
+  getInvalidatedResolutionPlan,
   getThreadResolutionPlan,
 } from "./publication.mjs";
 import {
@@ -392,8 +393,10 @@ const ACTION_KIND_SPECS = {
       };
     },
     validateTarget(workflow, target) {
-      const reply = (workflow.thread_replies ?? []).find(
-        (entry) => entry.thread_id === target.thread_id,
+      const reply = (workflow.thread_replies ?? []).findLast(
+        (entry) =>
+          entry.thread_id === target.thread_id &&
+          entry.comment_id === target.reply_comment_id,
       );
       if (
         workflow.current_publication == null ||
@@ -456,6 +459,109 @@ const ACTION_KIND_SPECS = {
         response.thread_watermark !== action.target.thread_watermark ||
         response.resolved_by_id !== action.target.expected_actor_id ||
         response.resolved_by_type !== action.target.expected_actor_type
+      ) {
+        fail("WORKFLOW_ACTION_INVALID", "active action response is invalid");
+      }
+    },
+  },
+  UNRESOLVE_REVIEW_THREAD: {
+    capability: "UNRESOLVE_INVALIDATED_CODEX_THREADS",
+    phase: "RESOLVE_CODEX_THREADS",
+    claimKind: "PULL_REQUEST",
+    markerPrefix: null,
+    identityFacts(target) {
+      return {
+        thread_id: target.thread_id,
+        record_id: target.record_id,
+        new_watermark: target.new_watermark,
+      };
+    },
+    validateTarget(workflow, target) {
+      const authorized = workflow.authorization.publication_target;
+      const pullRequest = workflow.pull_request;
+      if (
+        workflow.current_publication == null ||
+        pullRequest == null ||
+        target.review_id !== workflow.current_publication.review_id ||
+        target.repository_id !== authorized.base_repository_id ||
+        target.repository_id !== pullRequest.repository_id ||
+        target.pr_number !== pullRequest.pr_number ||
+        target.head_sha !== workflow.current_head_sha ||
+        typeof target.thread_id !== "string" ||
+        target.thread_id === "" ||
+        typeof target.record_id !== "string" ||
+        target.record_id === "" ||
+        !DIGEST_RE.test(target.prior_watermark ?? "") ||
+        !DIGEST_RE.test(target.new_watermark ?? "") ||
+        !["PINNED_CODEX_FOLLOW_UP", "THREAD_RESOLUTION_UNSAFE"].includes(
+          target.reason,
+        ) ||
+        !Array.isArray(target.follow_up_comments) ||
+        !Number.isSafeInteger(target.findings_review?.result_id) ||
+        !SHA_RE.test(target.findings_review?.reviewed_head_sha ?? "")
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "thread-unresolve target does not match the authorized pull request " +
+            "and invalidated record",
+        );
+      }
+    },
+    dispatch: null,
+    validateExecutingProof(action, proof) {
+      if (
+        proof == null ||
+        proof.repository_id !== action.target.repository_id ||
+        proof.pr_number !== action.target.pr_number ||
+        proof.thread_id !== action.target.thread_id ||
+        proof.thread_watermark !== action.target.new_watermark ||
+        typeof proof.is_resolved !== "boolean"
+      ) {
+        fail(
+          "WORKFLOW_ACTION_INVALID",
+          "the unresolve pre-read must bind the exact pull request, thread, " +
+            "and invalidated watermark",
+        );
+      }
+    },
+    async revalidate(storeRoot, action) {
+      const plan = await getInvalidatedResolutionPlan(
+        storeRoot,
+        action.target.review_id,
+      );
+      if (
+        plan.actionable !== true ||
+        plan.workflow_id == null ||
+        plan.thread_id !== action.target.thread_id ||
+        plan.record_id !== action.target.record_id ||
+        plan.prior_watermark !== action.target.prior_watermark ||
+        plan.new_watermark !== action.target.new_watermark ||
+        plan.reason !== action.target.reason ||
+        canonicalJson(plan.follow_up_comments) !==
+          canonicalJson(action.target.follow_up_comments) ||
+        canonicalJson(plan.findings_review) !==
+          canonicalJson(action.target.findings_review)
+      ) {
+        fail(
+          "THREAD_RESOLUTION_NOT_INVALIDATED",
+          "the publication no longer reports the planned resolution invalid",
+        );
+      }
+      return plan.revision;
+    },
+    abandonOnCode: "THREAD_RESOLUTION_NOT_INVALIDATED",
+    abandonPhase: "WAIT_PUBLICATION",
+    validateResponse(action, response) {
+      const expectedOutcome = action.executing_proof?.is_resolved
+        ? "UNRESOLVED"
+        : "OBSERVED_ALREADY_UNRESOLVED";
+      if (
+        response.outcome !== expectedOutcome ||
+        response.repository_id !== action.target.repository_id ||
+        response.pr_number !== action.target.pr_number ||
+        response.thread_id !== action.target.thread_id ||
+        response.thread_watermark !== action.target.new_watermark ||
+        response.is_resolved !== false
       ) {
         fail("WORKFLOW_ACTION_INVALID", "active action response is invalid");
       }
@@ -1261,6 +1367,7 @@ function validateWorkflow(workflow) {
     !Array.isArray(workflow.addressed_findings) ||
     !Array.isArray(workflow.thread_replies) ||
     !Array.isArray(workflow.thread_resolutions) ||
+    !Array.isArray(workflow.thread_unresolutions) ||
     !Array.isArray(workflow.ready_marks)
   ) {
     fail("WORKFLOW_STATE_INVALID", "workflow arrays are malformed");
@@ -1317,19 +1424,12 @@ function validateWorkflow(workflow) {
     }
     assertTimestamp(record.recorded_at, "addressed-finding recorded_at");
   }
-  const repliedThreads = new Set();
   for (const [index, reply] of workflow.thread_replies.entries()) {
     assertObject(reply, "workflow.thread_replies entry");
     if (reply.number !== index + 1) {
       fail("WORKFLOW_STATE_INVALID", "thread-reply numbers must be sequential");
     }
     assertString(reply.thread_id, "thread-reply thread_id", { max: 1024 });
-    // One reply per thread: the eligibility exception admits "the recorded
-    // reply", singular, and a second would mean an action was double-run.
-    if (repliedThreads.has(reply.thread_id)) {
-      fail("WORKFLOW_STATE_INVALID", "a thread can carry only one recorded reply");
-    }
-    repliedThreads.add(reply.thread_id);
     assertPositiveInteger(reply.comment_id, "thread-reply comment_id");
     assertObject(reply.actor, "thread-reply actor");
     assertPositiveInteger(reply.actor.id, "thread-reply actor id");
@@ -1346,7 +1446,6 @@ function validateWorkflow(workflow) {
     }
     assertTimestamp(reply.recorded_at, "thread-reply recorded_at");
   }
-  const resolvedThreads = new Set();
   for (const [index, resolution] of workflow.thread_resolutions.entries()) {
     assertObject(resolution, "workflow.thread_resolutions entry");
     if (resolution.number !== index + 1) {
@@ -1358,13 +1457,6 @@ function validateWorkflow(workflow) {
     assertString(resolution.thread_id, "thread-resolution thread_id", {
       max: 1024,
     });
-    if (resolvedThreads.has(resolution.thread_id)) {
-      fail(
-        "WORKFLOW_STATE_INVALID",
-        "a thread can carry only one recorded resolution outcome",
-      );
-    }
-    resolvedThreads.add(resolution.thread_id);
     if (!["RESOLVED", "OBSERVED_PRE_RESOLVED"].includes(resolution.outcome)) {
       fail("WORKFLOW_STATE_INVALID", "thread-resolution outcome is invalid");
     }
@@ -1381,6 +1473,100 @@ function validateWorkflow(workflow) {
       { max: 1024 },
     );
     assertTimestamp(resolution.recorded_at, "thread-resolution recorded_at");
+  }
+  const unresolveRecords = new Set();
+  const unresolveActions = new Set();
+  for (const [index, unresolve] of workflow.thread_unresolutions.entries()) {
+    assertObject(unresolve, "workflow.thread_unresolutions entry");
+    if (unresolve.number !== index + 1) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "thread-unresolve numbers must be sequential",
+      );
+    }
+    assertString(unresolve.thread_id, "thread-unresolve thread_id", {
+      max: 1024,
+    });
+    assertString(unresolve.record_id, "thread-unresolve record_id", {
+      max: 1024,
+    });
+    assertString(unresolve.action_id, "thread-unresolve action_id", {
+      max: 1024,
+    });
+    if (
+      unresolveRecords.has(unresolve.record_id) ||
+      unresolveActions.has(unresolve.action_id)
+    ) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "a resolution record and unresolve action may be completed only once",
+      );
+    }
+    unresolveRecords.add(unresolve.record_id);
+    unresolveActions.add(unresolve.action_id);
+    assertString(unresolve.publication_review_id, "thread-unresolve review_id", {
+      max: 1024,
+    });
+    if (
+      !DIGEST_RE.test(unresolve.prior_watermark ?? "") ||
+      !DIGEST_RE.test(unresolve.new_watermark ?? "")
+    ) {
+      fail("WORKFLOW_STATE_INVALID", "thread-unresolve watermark is invalid");
+    }
+    if (
+      !["PINNED_CODEX_FOLLOW_UP", "THREAD_RESOLUTION_UNSAFE"].includes(
+        unresolve.reason,
+      )
+    ) {
+      fail("WORKFLOW_STATE_INVALID", "thread-unresolve reason is invalid");
+    }
+    assertObject(unresolve.findings_review, "thread-unresolve findings_review");
+    assertPositiveInteger(
+      unresolve.findings_review.result_id,
+      "thread-unresolve findings result_id",
+    );
+    assertSha(
+      unresolve.findings_review.reviewed_head_sha,
+      "thread-unresolve findings reviewed_head_sha",
+    );
+    assertTimestamp(unresolve.recorded_at, "thread-unresolve recorded_at");
+  }
+  const safeUnresolvesByThread = new Map();
+  for (const unresolve of workflow.thread_unresolutions) {
+    if (unresolve.reason !== "PINNED_CODEX_FOLLOW_UP") continue;
+    const predecessor = workflow.thread_resolutions.find(
+      (resolution) =>
+        resolution.thread_id === unresolve.thread_id &&
+        resolution.action_id === unresolve.record_id &&
+        resolution.outcome === "RESOLVED",
+    );
+    if (predecessor == null) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "a safe thread unresolve must name this workflow's proven resolution",
+      );
+    }
+    safeUnresolvesByThread.set(
+      unresolve.thread_id,
+      (safeUnresolvesByThread.get(unresolve.thread_id) ?? 0) + 1,
+    );
+  }
+  for (const threadId of new Set([
+    ...workflow.thread_replies.map((entry) => entry.thread_id),
+    ...workflow.thread_resolutions.map((entry) => entry.thread_id),
+  ])) {
+    const allowed = (safeUnresolvesByThread.get(threadId) ?? 0) + 1;
+    if (
+      workflow.thread_replies.filter((entry) => entry.thread_id === threadId)
+        .length > allowed ||
+      workflow.thread_resolutions.filter((entry) => entry.thread_id === threadId)
+        .length > allowed
+    ) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "repeating a thread reply or resolution requires one completed safe unresolve",
+      );
+    }
   }
   for (const [index, mark] of workflow.ready_marks.entries()) {
     assertObject(mark, "workflow.ready_marks entry");
@@ -1652,6 +1838,7 @@ const REMOTE_FIELD_DEFAULTS = Object.freeze({
   addressed_findings: [],
   thread_replies: [],
   thread_resolutions: [],
+  thread_unresolutions: [],
   ready_marks: [],
   terminal: null,
 });
@@ -2013,6 +2200,7 @@ function auditedWorkflowState(workflow) {
     addressed_findings: workflow.addressed_findings ?? [],
     thread_replies: workflow.thread_replies ?? [],
     thread_resolutions: workflow.thread_resolutions ?? [],
+    thread_unresolutions: workflow.thread_unresolutions ?? [],
     ready_marks: workflow.ready_marks ?? [],
     terminal: workflow.terminal ?? null,
     active_action: workflow.active_action,
@@ -2219,6 +2407,7 @@ function requireWorkflowAuditBinding(workflow, audit) {
     addressed_findings: [],
     thread_replies: [],
     thread_resolutions: [],
+    thread_unresolutions: [],
     ready_marks: [],
     terminal: null,
     active_action: null,
@@ -2249,6 +2438,8 @@ function requireWorkflowAuditBinding(workflow, audit) {
       canonicalJson(lastState.thread_replies ?? []) ||
     canonicalJson(workflow.thread_resolutions ?? []) !==
       canonicalJson(lastState.thread_resolutions ?? []) ||
+    canonicalJson(workflow.thread_unresolutions ?? []) !==
+      canonicalJson(lastState.thread_unresolutions ?? []) ||
     canonicalJson(workflow.ready_marks ?? []) !==
       canonicalJson(lastState.ready_marks ?? []) ||
     canonicalJson(workflow.terminal ?? null) !==
@@ -2310,6 +2501,7 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "addressed_findings",
     "thread_replies",
     "thread_resolutions",
+    "thread_unresolutions",
     "ready_marks",
     "terminal",
     "active_action",
@@ -2600,6 +2792,11 @@ function nextAction(workflow) {
               EXECUTING: "RECONCILE_THREAD_RESOLUTION",
               OBSERVED: "COMPLETE_THREAD_RESOLUTION",
             },
+            UNRESOLVE_REVIEW_THREAD: {
+              PLANNED: "UNRESOLVE_REVIEW_THREAD",
+              EXECUTING: "RECONCILE_THREAD_UNRESOLVE",
+              OBSERVED: "RECORD_AND_COMPLETE_THREAD_UNRESOLVE",
+            },
           }[workflow.active_action.kind]?.[workflow.active_action.status] ??
           "INSPECT_WORKFLOW"),
     ADDRESS_REMOTE_FINDINGS: "ADDRESS_REMOTE_FINDINGS",
@@ -2655,6 +2852,7 @@ function workflowSummary(workflow) {
     addressed_findings: workflow.addressed_findings,
     thread_replies: workflow.thread_replies,
     thread_resolutions: workflow.thread_resolutions,
+    thread_unresolutions: workflow.thread_unresolutions,
     ready_marks: workflow.ready_marks,
     terminal: workflow.terminal,
     active_action:
@@ -2785,6 +2983,7 @@ export async function startAutonomousWorkflow(
     addressed_findings: [],
     thread_replies: [],
     thread_resolutions: [],
+    thread_unresolutions: [],
     ready_marks: [],
     terminal: null,
     claims: workflowClaims,
@@ -2971,10 +3170,23 @@ export async function recordWorkflowHead(
           "the remote repair has no bound publication",
         );
       }
-      const findings = await getPublicationFindingsReview(
-        storeRoot,
-        workflow.current_publication.review_id,
+      const repairedResolution = workflow.thread_unresolutions.findLast(
+        (entry) =>
+          entry.publication_review_id === workflow.current_publication.review_id &&
+          entry.reason === "PINNED_CODEX_FOLLOW_UP",
       );
+      const findings =
+        repairedResolution == null
+          ? await getPublicationFindingsReview(
+              storeRoot,
+              workflow.current_publication.review_id,
+            )
+          : {
+              workflow_id: workflow.workflow_id,
+              head_sha: workflow.current_head_sha,
+              revision: workflow.current_publication.awaiting_revision,
+              findings_review: repairedResolution.findings_review,
+            };
       // The identity must come from the same publication revision whose
       // projection sent this workflow into the repair phase -- the revision
       // advanceRemoteWorkflow recorded as awaiting_revision in the mutation
@@ -3508,10 +3720,20 @@ export async function planThreadReply(
             "thread resolution has no bound publication",
           );
         }
+        const previousResolution = workflow.thread_resolutions.findLast(
+          (entry) => entry.thread_id === threadId,
+        );
+        const repairedPrevious =
+          previousResolution != null &&
+          workflow.thread_unresolutions.some(
+            (entry) =>
+              entry.thread_id === threadId &&
+              entry.record_id === previousResolution.action_id &&
+              entry.reason === "PINNED_CODEX_FOLLOW_UP",
+          );
         if (
-          workflow.thread_replies.some(
-            (reply) => reply.thread_id === threadId,
-          )
+          workflow.thread_replies.some((reply) => reply.thread_id === threadId) &&
+          !repairedPrevious
         ) {
           fail(
             "WORKFLOW_THREAD_ALREADY_ANSWERED",
@@ -3582,7 +3804,7 @@ export async function planThreadResolution(
             "thread resolution has no bound publication",
           );
         }
-        const reply = workflow.thread_replies.find(
+        const reply = workflow.thread_replies.findLast(
           (entry) => entry.thread_id === threadId,
         );
         if (reply == null) {
@@ -3592,9 +3814,16 @@ export async function planThreadResolution(
             { thread_id: threadId },
           );
         }
+        const previousResolution = workflow.thread_resolutions.findLast(
+          (entry) => entry.thread_id === threadId,
+        );
         if (
-          workflow.thread_resolutions.some(
-            (entry) => entry.thread_id === threadId,
+          previousResolution != null &&
+          !workflow.thread_unresolutions.some(
+            (entry) =>
+              entry.thread_id === threadId &&
+              entry.record_id === previousResolution.action_id &&
+              entry.reason === "PINNED_CODEX_FOLLOW_UP",
           )
         ) {
           fail(
@@ -3647,6 +3876,66 @@ export async function planThreadResolution(
           expected_actor_id: reply.actor.id,
           expected_actor_type: reply.actor.type,
           reply_comment_id: reply.comment_id,
+        };
+      },
+    },
+  );
+}
+
+export async function planThreadUnresolve(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  { threadId },
+) {
+  assertString(threadId, "thread_id", { max: 1024 });
+  return planWorkflowAction(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    "UNRESOLVE_REVIEW_THREAD",
+    {
+      planPhases: ["RESOLVE_CODEX_THREADS"],
+      invalidMessage: "a compensating unresolve is not currently plannable",
+      target: async (workflow) => {
+        if (workflow.current_publication == null || workflow.pull_request == null) {
+          fail(
+            "WORKFLOW_STATE_INVALID",
+            "the compensating unresolve has no bound publication and pull request",
+          );
+        }
+        const plan = await getInvalidatedResolutionPlan(
+          storeRoot,
+          workflow.current_publication.review_id,
+        );
+        if (
+          plan.workflow_id !== workflow.workflow_id ||
+          plan.head_sha !== workflow.current_head_sha
+        ) {
+          fail(
+            "WORKFLOW_PUBLICATION_MISMATCH",
+            "publication is not bound to this workflow and head",
+          );
+        }
+        if (plan.thread_id !== threadId || plan.actionable !== true) {
+          fail(
+            "WORKFLOW_THREAD_NOT_INVALIDATED",
+            "the server does not report this workflow-owned resolution as actionable",
+            { thread_id: threadId, reason: plan.reason },
+          );
+        }
+        return {
+          review_id: workflow.current_publication.review_id,
+          repository_id: workflow.pull_request.repository_id,
+          pr_number: workflow.pull_request.pr_number,
+          head_sha: workflow.current_head_sha,
+          thread_id: threadId,
+          record_id: plan.record_id,
+          prior_watermark: plan.prior_watermark,
+          new_watermark: plan.new_watermark,
+          follow_up_comments: plan.follow_up_comments,
+          reason: plan.reason,
+          findings_review: plan.findings_review,
         };
       },
     },
@@ -3927,6 +4216,41 @@ export async function recordThreadResolutionObservation(
             resolved_by_type: resolvedByType,
           }
         : {}),
+    }),
+  );
+}
+
+export async function recordThreadUnresolveObservation(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  actionId,
+  { outcome, repositoryId, prNumber, threadId, isResolved, threadWatermark },
+) {
+  if (![
+    "UNRESOLVED",
+    "OBSERVED_ALREADY_UNRESOLVED",
+  ].includes(outcome)) {
+    throw new TypeError(
+      "outcome must be UNRESOLVED or OBSERVED_ALREADY_UNRESOLVED",
+    );
+  }
+  assertPositiveInteger(repositoryId, "repository_id");
+  assertPositiveInteger(prNumber, "pr_number");
+  assertString(threadId, "thread_id", { max: 1024 });
+  return recordActionObservation(
+    storeRoot,
+    workflowId,
+    expectedRevision,
+    actionId,
+    "UNRESOLVE_REVIEW_THREAD",
+    () => ({
+      outcome,
+      repository_id: repositoryId,
+      pr_number: prNumber,
+      thread_id: threadId,
+      is_resolved: isResolved,
+      thread_watermark: threadWatermark,
     }),
   );
 }
@@ -4381,6 +4705,85 @@ export async function completeWorkflowAction(
         ),
       );
     }
+    if (action.kind === "UNRESOLVE_REVIEW_THREAD") {
+      const ledger = await getPublication(storeRoot, action.target.review_id);
+      const invalidated = (ledger.resolution_lifecycle ?? []).find(
+        (event) =>
+          event.kind === "INVALIDATED" &&
+          event.record_id === action.target.record_id &&
+          event.new_watermark === action.target.new_watermark,
+      );
+      const unresolved = (ledger.resolution_lifecycle ?? []).find(
+        (event) =>
+          event.kind === "UNRESOLVED_FOR_REPAIR" &&
+          event.record_id === action.target.record_id &&
+          event.action_id === action.action_id,
+      );
+      const lifecycleRecorded = invalidated != null && unresolved != null;
+      if (!lifecycleRecorded && ledger.terminal == null) {
+        fail(
+          "WORKFLOW_UNRESOLVE_RECORD_MISSING",
+          "an observed compensating unresolve completes only after its " +
+            "lifecycle evidence is stored",
+          { review_id: action.target.review_id, retryable: true },
+        );
+      }
+      return publicWorkflow(
+        await saveActionMutation(
+          paths,
+          workflow,
+          lifecycleRecorded && action.target.reason === "THREAD_RESOLUTION_UNSAFE"
+            ? "WORKFLOW_PAUSED"
+            : "ACTION_COMPLETED",
+          async (next) => {
+            next.active_action.completed_at = now();
+            if (lifecycleRecorded) {
+              next.thread_unresolutions.push({
+                number: next.thread_unresolutions.length + 1,
+                thread_id: action.target.thread_id,
+                record_id: action.target.record_id,
+                action_id: action.action_id,
+                prior_watermark: action.target.prior_watermark,
+                new_watermark: action.target.new_watermark,
+                reason: action.target.reason,
+                publication_review_id: action.target.review_id,
+                findings_review: action.target.findings_review,
+                recorded_at: now(),
+              });
+            }
+            next.active_action = null;
+            if (!lifecycleRecorded) {
+              next.phase = "WAIT_PUBLICATION";
+            } else if (action.target.reason === "THREAD_RESOLUTION_UNSAFE") {
+              next.status = "PAUSED";
+              next.phase = "PAUSED_HUMAN";
+              next.pause = {
+                reason_code: "THREAD_RESOLUTION_UNSAFE",
+                blocked_action: "UNRESOLVE_REVIEW_THREAD",
+                evidence: JSON.stringify({
+                  review_id: action.target.review_id,
+                  thread_id: action.target.thread_id,
+                  record_id: action.target.record_id,
+                  prior_watermark: action.target.prior_watermark,
+                  new_watermark: action.target.new_watermark,
+                  follow_up_comments: action.target.follow_up_comments,
+                }),
+                resume_phase: "ENSURE_DRAFT_FOR_REPAIR",
+                review_id: workflow.current_review?.review_id ?? null,
+                action_id: action.action_id,
+                paused_at: now(),
+              };
+            } else {
+              // Recording the lifecycle clears the publication observation,
+              // including its draft flag. Re-enter repair only through the
+              // return-to-draft action: its own pre-read either performs the
+              // transition or proves the pull request is already draft.
+              next.phase = "ENSURE_DRAFT_FOR_REPAIR";
+            }
+          },
+        ),
+      );
+    }
     if (action.kind === "RETURN_PR_TO_DRAFT") {
       return publicWorkflow(
         await saveActionMutation(
@@ -4395,10 +4798,18 @@ export async function completeWorkflowAction(
             // publication the gated head is still waiting to be pushed. The
             // action audit is the record -- nothing downstream gates on a
             // ledger entry for an undo, so there is none.
+            const repairedResolution = next.thread_unresolutions.findLast(
+              (entry) =>
+                entry.publication_review_id ===
+                  next.current_publication?.review_id &&
+                entry.reason === "PINNED_CODEX_FOLLOW_UP",
+            );
             next.phase =
               next.current_publication == null
                 ? "LOCAL_GATE_PASSED"
-                : "WAIT_PUBLICATION";
+                : repairedResolution == null
+                  ? "WAIT_PUBLICATION"
+                  : "ADDRESS_REMOTE_FINDINGS";
           },
         ),
       );
@@ -4898,6 +5309,27 @@ export async function advanceRemoteWorkflow(
       // complete fresh collection epoch.
       return publicWorkflow(workflow);
     }
+    if (
+      workflow.phase === "POST_READY" &&
+      projection.status === "CHANGES_REQUIRED" &&
+      [
+        "THREAD_RESOLUTION_INVALIDATED",
+        "THREAD_RESOLUTION_UNSAFE",
+      ].includes(projection.blocking_reason)
+    ) {
+      const invalidated = await getInvalidatedResolutionPlan(
+        storeRoot,
+        reviewId,
+      );
+      if (invalidated.actionable === true) {
+        return publicWorkflow(
+          await saveMutation(paths, workflow, async (next) => {
+            next.current_publication.awaiting_revision = projection.revision;
+            next.phase = "RESOLVE_CODEX_THREADS";
+          }),
+        );
+      }
+    }
     const repairPhase = remoteRepairPhase(projection);
     // Every repair phase is left by recording a new head, which is pushed to
     // this pull request, so a repair must not start while the pull request is
@@ -5037,6 +5469,20 @@ export async function advanceRemoteWorkflow(
       let desiredPhase = "WAIT_PUBLICATION";
       if (reachedPreReady) {
         desiredPhase = "PRE_READY";
+      } else if (
+        projection.status === "CHANGES_REQUIRED" &&
+        [
+          "THREAD_RESOLUTION_INVALIDATED",
+          "THREAD_RESOLUTION_UNSAFE",
+        ].includes(projection.blocking_reason)
+      ) {
+        const invalidated = await getInvalidatedResolutionPlan(
+          storeRoot,
+          reviewId,
+        );
+        if (invalidated.actionable === true) {
+          desiredPhase = "RESOLVE_CODEX_THREADS";
+        }
       } else if (
         projection.status === "CHANGES_REQUIRED" &&
         projection.blocking_reason === "UNRESOLVED_REVIEW_THREADS"
