@@ -1466,6 +1466,23 @@ test("an addressed finding's thread becomes eligible in the next publication's p
   });
   // The mutation invalidated whatever was observed before it.
   assert.equal(withRecord.latest_observation, null);
+  const recollectionSummary = await getPublicationSummary(
+    state.store,
+    second.reviewId,
+    { clock: () => resolveAt + 3_010 },
+  );
+  assert.deepEqual(
+    {
+      status: recollectionSummary.status,
+      blocking_reason: recollectionSummary.blocking_reason,
+      next_action: recollectionSummary.next_action,
+    },
+    {
+      status: "PR_PENDING",
+      blocking_reason: "NO_GITHUB_SNAPSHOT",
+      next_action: "RECORD_GITHUB_SNAPSHOT",
+    },
+  );
 
   // Recovery re-running the same action's record creation is a no-op, and
   // stays one after the action itself is gone.
@@ -1515,6 +1532,23 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     second.reviewId,
     { expectedRevision: withRecord.revision, observation: doneObservation },
     { clock: () => doneAt + 10 },
+  );
+  const continuationSummary = await getPublicationSummary(
+    state.store,
+    second.reviewId,
+    { clock: () => doneAt + 20 },
+  );
+  assert.deepEqual(
+    {
+      status: continuationSummary.status,
+      blocking_reason: continuationSummary.blocking_reason,
+      next_action: continuationSummary.next_action,
+    },
+    {
+      status: "PR_DRAFT",
+      blocking_reason: "PR_DRAFT",
+      next_action: "MARK_PULL_REQUEST_READY",
+    },
   );
   const preReady = await getAutonomousPreReady(state.store, second.reviewId, {
     clock: () => doneAt + 20,

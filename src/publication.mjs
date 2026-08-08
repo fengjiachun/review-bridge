@@ -5751,14 +5751,14 @@ export async function getPublicationSummary(
         ledger.version === 3
           ? terminalResolutionBlockers(ledger, workflowBinding)
           : [];
-      const replayBlocked = terminalBlockers.length > 0;
-      const effectiveStatus =
-        derived.status === "MERGE_READY" && replayBlocked
-          ? "CHANGES_REQUIRED"
-          : derived.status;
+      const replayOverridesDerived =
+        derived.status === "MERGE_READY" && terminalBlockers.length > 0;
+      const effectiveStatus = replayOverridesDerived
+        ? "CHANGES_REQUIRED"
+        : derived.status;
       const blockingReason = evidenceStale
         ? "EVIDENCE_STALE"
-        : replayBlocked
+        : replayOverridesDerived
           ? terminalBlockers[0].reason
           : derived.status === "MERGE_READY" && gate.state === "INVALID"
             ? "PUBLICATION_GATE_INVALID"
