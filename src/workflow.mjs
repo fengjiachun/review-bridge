@@ -4788,6 +4788,25 @@ export async function advanceRemoteWorkflow(
         "publication is not bound to this workflow and head",
       );
     }
+    // Every POST_READY verdict is actionable only over an observation the
+    // projection could not have evaluated over the pre-mark-ready state: the
+    // ready mark records the clearance revision, and any observation recorded
+    // at or before it, or gathered before it, shows a draft pull request and
+    // never reaches the terminal branch. The freshness gate therefore applies
+    // to every status the terminal projection can report, not just the
+    // MERGE_READY stop: a newer revision whose oldest collection is stale -- a
+    // mixed-epoch draft or non-success snapshot -- must not spend the workflow
+    // revision, must not record the blocked evaluation as an operator stop,
+    // and must not route a repair, pause, or thread-resolution verdict the
+    // ready pull request never earned. Identity and binding were revalidated
+    // above, so a mismatch still fails closed before this gate is consulted.
+    const readyMark = workflow.ready_marks.at(-1) ?? null;
+    if (
+      workflow.phase === "POST_READY" &&
+      !hasFreshPostReadyObservation(projection, readyMark)
+    ) {
+      return publicWorkflow(workflow);
+    }
     // The terminal record is the run's success claim. It is minted only when
     // the terminal projection says MERGE_READY over an observation recorded
     // after the mark-ready action consumed its clearance -- the ready mark
@@ -4796,7 +4815,6 @@ export async function advanceRemoteWorkflow(
     // and never reach this branch. The revision comparison is what makes
     // "one fresh complete observation" structural rather than a clock.
     if (workflow.phase === "POST_READY" && projection.status === "MERGE_READY") {
-      const readyMark = workflow.ready_marks.at(-1) ?? null;
       if (hasFreshPostReadyObservation(projection, readyMark)) {
         const pullRequest = workflow.pull_request;
         const recordedAt = now();

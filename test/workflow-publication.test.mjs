@@ -6095,6 +6095,147 @@ test("a newer MERGE_READY revision with one pre-ready source stays POST_READY", 
   );
 });
 
+test("stale non-MERGE_READY post-ready observation remains recoverable", async (t) => {
+  const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t);
+  const readyAt = Date.parse(workflow.ready_marks[0].recorded_at);
+  const observedAt = readyAt + 2_000;
+  const staleAt = iso(readyAt - 1);
+  // A draft observation recorded after ready is a legitimate newer revision,
+  // but its PULL_REQUEST source is the one collection the projection must
+  // treat as stale: it was gathered before the mark-ready action consumed the
+  // clearance, so the verdict it supports is not evidence about the ready run.
+  const payload = draftObservation(state, headSha, {
+    at: observedAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  const pullRequestSources = payload.pull_request.collection.sources;
+  const staleSource = pullRequestSources.find(
+    (source) => source.kind === "PULL_REQUEST",
+  );
+  staleSource.collected_at = staleAt;
+
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: payload },
+    { clock: () => observedAt + 10 },
+  );
+  // Setup validity: the revision is genuinely newer than the ready mark, the
+  // observation and its persisted recorded_at are after ready, and exactly
+  // one independent PULL_REQUEST source sits on the stale side.
+  assert.equal(recorded.revision, clearanceRevision + 1);
+  assert.ok(recorded.revision > workflow.ready_marks[0].publication_revision);
+  const persisted = await getPublication(state.store, reviewId);
+  assert.ok(Date.parse(persisted.latest_observation.observed_at) > readyAt);
+  assert.ok(Date.parse(persisted.latest_observation.recorded_at) > readyAt);
+  assert.equal(
+    pullRequestSources.filter((source) => source.collected_at === staleAt)
+      .length,
+    1,
+  );
+  for (const source of pullRequestSources) {
+    if (source.kind !== "PULL_REQUEST") {
+      assert.ok(
+        Date.parse(source.collected_at) > readyAt,
+        `${source.kind} must stay fresh`,
+      );
+    }
+  }
+
+  const projection = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(projection.status, "PR_DRAFT");
+  assert.equal(projection.revision, clearanceRevision + 1);
+  assert.equal(projection.oldest_collection_at, staleAt);
+  assert.ok(Date.parse(projection.oldest_collection_at) < readyAt);
+
+  // Before the advance the run is still actionable by the driver.
+  assert.equal(workflow.status, "ACTIVE");
+  assert.equal(workflow.phase, "POST_READY");
+  assert.equal(workflow.terminal, null);
+  assert.equal(workflow.current_publication.awaiting_revision, clearanceRevision);
+  assert.equal(
+    (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
+      .next_action,
+    "RECORD_FRESH_OBSERVATION_AND_ADVANCE",
+  );
+
+  // A stale non-MERGE_READY verdict is not actionable: the advance must leave
+  // the workflow unchanged so the driver still owes one fresh post-ready
+  // collection instead of stopping for the operator over old evidence.
+  const advanced = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(advanced.status, "ACTIVE");
+  assert.equal(advanced.phase, "POST_READY");
+  assert.equal(advanced.terminal, null);
+  assert.equal(advanced.revision, workflow.revision);
+  assert.equal(
+    advanced.current_publication.awaiting_revision,
+    clearanceRevision,
+  );
+  assert.equal(
+    (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
+      .next_action,
+    "RECORD_FRESH_OBSERVATION_AND_ADVANCE",
+  );
+});
+
+test("a stale post-ready check failure stays POST_READY instead of routing to repair", async (t) => {
+  const { state, workflow, reviewId, headSha, at, clearanceRevision } =
+    await reachPostReady(t);
+  const readyAt = Date.parse(workflow.ready_marks[0].recorded_at);
+  const observedAt = readyAt + 2_000;
+  const staleAt = iso(readyAt - 1);
+  const payload = readyObservation(state, headSha, {
+    at: observedAt,
+    requestId: 100,
+    requestAt: at + 1_000,
+  });
+  failingCheck(payload);
+  const pullRequestSource = payload.pull_request.collection.sources.find(
+    (source) => source.kind === "PULL_REQUEST",
+  );
+  pullRequestSource.collected_at = staleAt;
+
+  await recordGithubSnapshot(
+    state.store,
+    reviewId,
+    { expectedRevision: clearanceRevision, observation: payload },
+    { clock: () => observedAt + 10 },
+  );
+  const projection = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(projection.status, "CHECKS_FAILED");
+  assert.equal(projection.revision, clearanceRevision + 1);
+  assert.equal(projection.oldest_collection_at, staleAt);
+
+  // The same failed check over a fresh observation returns the ready pull
+  // request to draft before repair; over stale evidence the advance must not
+  // route anywhere -- deleting or moving the shared freshness gate would make
+  // this assertion fail by exposing the repair routing again.
+  const advanced = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(advanced.status, "ACTIVE");
+  assert.equal(advanced.phase, "POST_READY");
+  assert.equal(advanced.terminal, null);
+  assert.equal(advanced.revision, workflow.revision);
+  assert.equal(
+    advanced.current_publication.awaiting_revision,
+    clearanceRevision,
+  );
+  assert.equal(
+    (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
+      .next_action,
+    "RECORD_FRESH_OBSERVATION_AND_ADVANCE",
+  );
+});
+
 test("post-ready freshness is strict at the ready-mark timestamp boundary", async (t) => {
   const cases = [
     { label: "equal is rejected", oldestOffset: 0, terminalizes: false },
@@ -6801,6 +6942,26 @@ async function reachRepairAncestorProof(t, { extraProofs = [] } = {}) {
   const regressionObservation = structuredClone(oldResolvedObservation);
   regressionObservation.observed_at = iso(regressionAt);
   regressionObservation.pull_request.is_draft = false;
+  // The regression is a post-ready observation: every ordinary collection and
+  // source must be gathered after the ready mark (the readyMark floor above),
+  // not carried over from the pre-ready replied epoch -- a stale oldest
+  // collection would make the check-failure verdict non-actionable at the
+  // terminal freshness gate and the repair flow below could never start.
+  for (const [collection, at] of [
+    [regressionObservation.pull_request.collection, regressionAt - 900],
+    [regressionObservation.required_checks.collection, regressionAt - 800],
+    [regressionObservation.codex_review.collection, regressionAt - 500],
+    [regressionObservation.review_threads.collection, regressionAt - 400],
+  ]) {
+    collection.collected_at = iso(at);
+    for (const source of [
+      ...(collection.sources ?? []),
+      ...(collection.policy_sources ?? []),
+      ...(collection.run_sources ?? []),
+    ]) {
+      source.collected_at = iso(at);
+    }
+  }
   withResolvedThread(regressionObservation, oldHead, regressionAt - 400, sourceExtraThreads);
   const regressed = await recordGithubSnapshot(
     state.store,
@@ -8807,7 +8968,12 @@ test("the terminal replay refuses human participation in an active record's thre
 test("a post-ready check failure returns the ready pull request to draft before repair", async (t) => {
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
-  const observedAt = at + 2_000;
+  // The failed check must be observed over a genuinely fresh post-ready
+  // collection: every source is gathered after the ready mark, exactly like
+  // the terminal freshness tests, so the advance routes the ready pull
+  // request back to draft on evidence earned after mark-ready.
+  const observedAt =
+    Date.parse(workflow.ready_marks[0].recorded_at) + 2_000;
   const payload = readyObservation(state, headSha, {
     at: observedAt,
     requestId: 100,
@@ -8825,6 +8991,10 @@ test("a post-ready check failure returns the ready pull request to draft before 
   // made -- the same exposure rule that guards the ordinary repair phases.
   const projection = await getAutonomousTerminal(state.store, reviewId);
   assert.equal(projection.status, "CHECKS_FAILED");
+  assert.ok(
+    Date.parse(projection.oldest_collection_at) >
+      Date.parse(workflow.ready_marks[0].recorded_at),
+  );
   const advanced = await advanceRemoteWorkflow(
     state.store,
     workflow.workflow_id,
