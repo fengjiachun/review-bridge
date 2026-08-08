@@ -24,10 +24,13 @@ not hold up.
 
 ## When everything goes well
 
-A change driven by the autonomous workflow moves through seven steps. (Every
-step can also be performed manually through the same tools; the workflow adds
-ordering, ownership, and crash recovery on top. The manual path differs in a
-few places noted below.)
+A change driven by the autonomous workflow moves through seven steps. Two
+words used throughout: the **driver** is the model (or person) calling the
+tools, and the **ledger** is the server-side record the tools write — the
+driver proposes, the ledger decides what counts. (Every step can also be
+performed manually through the same tools; the workflow adds ordering,
+ownership, and crash recovery on top. The manual path differs in a few places
+noted below.)
 
 ```mermaid
 flowchart LR
@@ -45,11 +48,17 @@ flowchart LR
 descend from the previous one. No force-pushes, no rewrites.
 
 **2 — Local review.** The first gate, before the code leaves your machine.
-The system captures an **immutable snapshot** of the change — including any
-uncommitted working-tree state — and hands it to a reviewer that had no part
-in writing it: a fresh Claude Desktop conversation, a brand-new Codex task, or
-an isolated Hermes profile. The reviewer reads the snapshot, never your live
-working tree, and submits structured findings. No findings means `CLEAN`.
+The system captures an **immutable snapshot** of the change and hands it to a
+reviewer that had no part in writing it. The reviewer reads the snapshot,
+never your live working tree, and submits structured findings. No findings
+means `CLEAN`.
+
+The autonomous workflow always dispatches this review to a brand-new **Codex
+task**, reconciled by a correlation marker. On the manual path you choose the
+reviewer — a fresh Claude Desktop conversation, a new Codex task, or an
+isolated Hermes profile — and a manual snapshot may also capture uncommitted
+working-tree state; the workflow never has any, since step 1 required a clean
+tree.
 
 Note that this gate attests **snapshot consistency**, not test results:
 finalizing it re-checks that the tree still matches what the reviewer saw.
@@ -63,7 +72,10 @@ reviewers are not looking at it yet, and the workflow relies on that.
 **4 — Ask Codex to review.** The server composes the request comment — with a
 correlation marker — and the driver posts it verbatim. The marker is how a
 later result is recognized as answering *this* request rather than one from
-last week.
+last week. (This is the one external write that does not use the four-step
+action trail described below: the comment is posted, then bound to the ledger,
+and a crash between the two is caught by unbound-request detection — the
+marker makes the orphan recognizable.)
 
 **5 — Watch.** Periodically the driver collects the PR's complete state in
 one pass — check runs, Codex results, review threads — and records it in the
@@ -134,10 +146,11 @@ read itself.
 
 ## The autonomous workflow: every external action leaves a trail
 
-The workflow's driver is a model, and a model can crash at any point. Every
-externally visible action — pushing, creating the PR, posting a reply,
-resolving a thread, flipping draft state — therefore goes through the same
-four durable steps:
+The workflow's driver is a model, and a model can crash at any point. Each
+externally visible action — pushing, creating the PR, posting a thread reply,
+resolving a thread, flipping draft state either way — therefore goes through
+the same four durable steps (the Codex review request of step 4 is the one
+exception, with its own recovery):
 
 ```mermaid
 flowchart LR
@@ -178,11 +191,15 @@ new snapshot, dispatching each prior finding as resolved, rebuttal-accepted,
 or still open. Anything still open — or newly found — after round two
 escalates to a human. There is no third round.
 
-**Why observations are single-pass.** Paginated reads do not describe one
+**Why some reads refuse to paginate.** Paginated reads do not describe one
 moment. If page one says "checks green" and a check fails while you fetch
-page two, the assembled "complete" picture is fiction. So each feed is read
-in a single request, and a response that indicates another page marks the
-collection incomplete instead of walking it.
+page two, the assembled "complete" picture is fiction. So the resources where
+a single deciding value matters — check runs, commit statuses, review
+threads — are read in one request each, and a response that indicates another
+page **fails the collection** rather than walking it. The three comment and
+review feeds are walked page by page, but each page's provenance is recorded
+and the adapter validates the walk's completeness before anything is decided
+from it.
 
 **Templates are packaging, not the capability boundary.** The repository
 ships install templates for a Codex plugin, a Claude Desktop reviewer
