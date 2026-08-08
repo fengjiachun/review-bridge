@@ -4483,6 +4483,22 @@ function threadHasForeignParticipation(ledger, binding, thread) {
   });
 }
 
+function matchingPreResolvedWorkflowOutcome(ledger, binding, thread) {
+  if (thread.provenance_complete !== true) {
+    return false;
+  }
+  const headSha = ledger.latest_observation?.pull_request?.head_sha;
+  const watermark = threadWatermark(thread);
+  return (binding?.thread_resolutions ?? []).some(
+    (resolution) =>
+      resolution.outcome === "OBSERVED_PRE_RESOLVED" &&
+      resolution.thread_id === thread.id &&
+      resolution.publication_review_id === ledger.review_id &&
+      resolution.head_sha === headSha &&
+      resolution.thread_watermark === watermark,
+  );
+}
+
 // The terminal projection's replay: every blocking reason the RFC names, over
 // the frontier plus the post-ready observation's thread watermarks. Returns an
 // empty list only when every chain replays and every active record still
@@ -4519,12 +4535,11 @@ function terminalResolutionBlockers(ledger, binding) {
       });
     }
   }
-  // A resolved thread with no active record is not a workflow-owned
-  // resolution -- a human, or unknown provenance, resolved it externally --
-  // and the terminal claim must not mint over it. The derived gate sees only
-  // the unresolved count, so this is the replay's own check: the workflow
-  // records every resolution it owns, and a resolved thread it never
-  // recorded is exactly the RFC's missing-record case.
+  // A resolved thread with no active record ordinarily has unknown ownership,
+  // so the terminal claim must not mint over it. The one recordless workflow
+  // path is an action whose pre-read found this exact thread already resolved:
+  // its completed outcome binds the same publication, head, and watermark but
+  // deliberately owns no automatic-resolution record.
   const alreadyBlocked = new Set(
     blockers.map((blocker) => blocker.thread_id),
   );
@@ -4535,6 +4550,16 @@ function terminalResolutionBlockers(ledger, binding) {
       !frontier.active.has(thread.id) &&
       !alreadyBlocked.has(thread.id)
     ) {
+      if (matchingPreResolvedWorkflowOutcome(ledger, binding, thread)) {
+        if (threadHasForeignParticipation(ledger, binding, thread)) {
+          blockers.push({
+            reason: "THREAD_RESOLUTION_UNSAFE",
+            thread_id: thread.id,
+            record: null,
+          });
+        }
+        continue;
+      }
       blockers.push({
         reason: "THREAD_RESOLUTION_RECORD_MISSING",
         thread_id: thread.id,

@@ -932,13 +932,14 @@ test("a remote finding returns through a new gated head and a new publication", 
 });
 
 /**
- * Drive a workflow to an observed, workflow-owned thread resolution: a
- * finding thread answered by the workflow's own recorded reply, resolved
- * on a re-read watermark, with the action OBSERVED and its publication
- * record not yet created. Both the eligibility walk and the completion
- * rules start from exactly this state, so it is built once.
+ * Drive a workflow to an observed thread-resolution outcome: a finding
+ * thread answered by the workflow's own recorded reply, then either resolved
+ * by the workflow or found already resolved at the action pre-read.
  */
-async function reachObservedThreadResolution(t) {
+async function reachObservedThreadResolution(
+  t,
+  { outcome = "RESOLVED" } = {},
+) {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(
@@ -1291,30 +1292,32 @@ async function reachObservedThreadResolution(t) {
     resolutionPlanned.action.action_id,
     {
       thread_id: "PRRT_1",
-      is_resolved: false,
-      thread_watermark: watermark,
+      is_resolved: outcome === "OBSERVED_PRE_RESOLVED",
+      ...(outcome === "RESOLVED" ? { thread_watermark: watermark } : {}),
     },
   );
   // A response attributing the transition to anyone but the action's own
   // actor never becomes an observation -- refused before anything persists,
   // so the true post-read can still be recorded at the same revision.
-  await assert.rejects(
-    recordThreadResolutionObservation(
-      state.store,
-      workflow.workflow_id,
-      resolutionExecuting.revision,
-      resolutionPlanned.action.action_id,
-      {
-        outcome: "RESOLVED",
-        threadId: "PRRT_1",
-        isResolved: true,
-        threadWatermark: watermark,
-        resolvedById: 999,
-        resolvedByType: "User",
-      },
-    ),
-    (error) => error.code === "WORKFLOW_ACTION_INVALID",
-  );
+  if (outcome === "RESOLVED") {
+    await assert.rejects(
+      recordThreadResolutionObservation(
+        state.store,
+        workflow.workflow_id,
+        resolutionExecuting.revision,
+        resolutionPlanned.action.action_id,
+        {
+          outcome: "RESOLVED",
+          threadId: "PRRT_1",
+          isResolved: true,
+          threadWatermark: watermark,
+          resolvedById: 999,
+          resolvedByType: "User",
+        },
+      ),
+      (error) => error.code === "WORKFLOW_ACTION_INVALID",
+    );
+  }
 
   const resolutionObserved = await recordThreadResolutionObservation(
     state.store,
@@ -1322,12 +1325,16 @@ async function reachObservedThreadResolution(t) {
     resolutionExecuting.revision,
     resolutionPlanned.action.action_id,
     {
-      outcome: "RESOLVED",
+      outcome,
       threadId: "PRRT_1",
       isResolved: true,
-      threadWatermark: watermark,
-      resolvedById: 555,
-      resolvedByType: "User",
+      ...(outcome === "RESOLVED"
+        ? {
+            threadWatermark: watermark,
+            resolvedById: 555,
+            resolvedByType: "User",
+          }
+        : {}),
     },
   );
   return {
@@ -1335,6 +1342,7 @@ async function reachObservedThreadResolution(t) {
     workflow,
     first,
     second,
+    secondHead,
     codex,
     record,
     workflowPath,
@@ -6046,6 +6054,358 @@ test("the terminal projection records MERGE_READY and the workflow stops with a 
   // terminal workflow, so finalization and verification can still run later.
   const reread = await getAutonomousPreReady(state.store, reviewId);
   assert.equal(reread.status, "READY_TO_MARK");
+});
+
+async function reachCompletedPreResolvedPostReady(t) {
+  const {
+    state,
+    workflow,
+    second,
+    secondHead,
+    workflowPath,
+    repliedObservation,
+    resolveAt,
+    resolutionPlanned,
+    resolutionObserved,
+  } = await reachObservedThreadResolution(t, {
+    outcome: "OBSERVED_PRE_RESOLVED",
+  });
+
+  const resolved = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    resolutionObserved.revision,
+    resolutionPlanned.action.action_id,
+  );
+  assert.equal(resolved.thread_resolutions.length, 1);
+  assert.equal(
+    resolved.thread_resolutions[0].outcome,
+    "OBSERVED_PRE_RESOLVED",
+  );
+  assert.equal(
+    (await getPublication(state.store, second.reviewId)).automatic_resolutions
+      .length,
+    0,
+  );
+
+  const resolvedAt = resolveAt + 20_000;
+  const resolvedObservation = structuredClone(repliedObservation);
+  resolvedObservation.observed_at = iso(resolvedAt);
+  resolvedObservation.review_threads.unresolved_count = 0;
+  resolvedObservation.review_threads.threads[0].is_resolved = true;
+  const beforeResolvedSnapshot = await getPublication(
+    state.store,
+    second.reviewId,
+  );
+  const recordedResolved = await recordGithubSnapshot(
+    state.store,
+    second.reviewId,
+    {
+      expectedRevision: beforeResolvedSnapshot.revision,
+      observation: resolvedObservation,
+    },
+    { clock: () => resolvedAt + 10 },
+  );
+  const preReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    resolved.revision,
+  );
+  assert.equal(preReady.phase, "PRE_READY");
+
+  const planned = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    preReady.revision,
+  );
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    planned.workflow.revision,
+    planned.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      base_branch: "main",
+      head_branch: TOPIC_BRANCH,
+      head_sha: secondHead,
+      is_draft: true,
+    },
+  );
+  const observed = await recordMarkReadyObservation(
+    state.store,
+    workflow.workflow_id,
+    executing.revision,
+    planned.action.action_id,
+    {
+      outcome: "MARKED_READY",
+      repositoryId: REPOSITORY_ID,
+      prNumber: PR_NUMBER,
+      baseBranch: "main",
+      headBranch: TOPIC_BRANCH,
+      headSha: secondHead,
+      isDraft: false,
+    },
+  );
+  const postReady = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    observed.revision,
+    planned.action.action_id,
+  );
+  assert.equal(postReady.phase, "POST_READY");
+
+  const postReadyAt = resolvedAt + 10_000;
+  const postReadyObservation = structuredClone(resolvedObservation);
+  postReadyObservation.observed_at = iso(postReadyAt);
+  postReadyObservation.pull_request.is_draft = false;
+  const recordedPostReady = await recordGithubSnapshot(
+    state.store,
+    second.reviewId,
+    {
+      expectedRevision: recordedResolved.revision,
+      observation: postReadyObservation,
+    },
+    { clock: () => postReadyAt + 10 },
+  );
+
+  return {
+    state,
+    workflow,
+    second,
+    secondHead,
+    workflowPath,
+    resolvedObservation,
+    recordedPostReady,
+    postReadyAt,
+  };
+}
+
+async function assertPreResolvedTerminalAndGateBlocked(
+  state,
+  reviewId,
+  expectedRevision,
+  expectedReason,
+  label,
+  clockAt,
+) {
+  const terminal = await getAutonomousTerminal(state.store, reviewId);
+  assert.equal(terminal.status, "CHANGES_REQUIRED", label);
+  assert.equal(terminal.blocking_reason, expectedReason, label);
+  assert.deepEqual(
+    terminal.blockers,
+    [`thread_resolution:${expectedReason}:PRRT_1`],
+    label,
+  );
+  const summary = await getPublicationSummary(state.store, reviewId);
+  assert.equal(summary.status, "CHANGES_REQUIRED", label);
+  assert.equal(summary.blocking_reason, expectedReason, label);
+  assert.notEqual(summary.next_action, "FINALIZE_PUBLICATION_GATE", label);
+  await assert.rejects(
+    finalizePublicationGate(
+      state.store,
+      reviewId,
+      { expectedRevision },
+      { clock: () => clockAt },
+    ),
+    (error) => error.code === "PUBLICATION_NOT_READY",
+    label,
+  );
+}
+
+test("a completed pre-resolved workflow action satisfies terminal replay without an automatic-resolution record", async (t) => {
+  const { state, second, recordedPostReady, postReadyAt } =
+    await reachCompletedPreResolvedPostReady(t);
+
+  const terminal = await getAutonomousTerminal(state.store, second.reviewId);
+  let gateError = null;
+  try {
+    await finalizePublicationGate(
+      state.store,
+      second.reviewId,
+      {
+        expectedRevision: recordedPostReady.revision,
+      },
+      { clock: () => postReadyAt + 20 },
+    );
+  } catch (error) {
+    gateError = error.code;
+  }
+  assert.deepEqual(
+    {
+      status: terminal.status,
+      blockingReason: terminal.blocking_reason,
+      gateError,
+    },
+    { status: "MERGE_READY", blockingReason: null, gateError: null },
+  );
+});
+
+test("pre-resolved negative controls reject every mismatched workflow outcome binding", async (t) => {
+  const { state, second, workflowPath, recordedPostReady, postReadyAt } =
+    await reachCompletedPreResolvedPostReady(t);
+  const storedWorkflow = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const otherHead =
+    storedWorkflow.thread_resolutions[0].head_sha === "f".repeat(40)
+      ? "e".repeat(40)
+      : "f".repeat(40);
+  const mismatches = [
+    ["outcome", (record) => (record.outcome = "RESOLVED")],
+    ["thread_id", (record) => (record.thread_id = "PRRT_OTHER")],
+    [
+      "publication_review_id",
+      (record) =>
+        (record.publication_review_id = `${record.publication_review_id}-other`),
+    ],
+    ["head_sha", (record) => (record.head_sha = otherHead)],
+    [
+      "thread_watermark",
+      (record) =>
+        (record.thread_watermark = digest("mismatched pre-resolved watermark")),
+    ],
+  ];
+
+  for (const [field, mutate] of mismatches) {
+    const tampered = structuredClone(storedWorkflow);
+    mutate(tampered.thread_resolutions[0]);
+    await atomicWriteCanonicalJson(workflowPath, tampered);
+    try {
+      await assertPreResolvedTerminalAndGateBlocked(
+        state,
+        second.reviewId,
+        recordedPostReady.revision,
+        "THREAD_RESOLUTION_RECORD_MISSING",
+        `mismatched ${field}`,
+        postReadyAt + 20,
+      );
+    } finally {
+      await atomicWriteCanonicalJson(workflowPath, storedWorkflow);
+    }
+  }
+});
+
+test("pre-resolved negative controls fail closed on incomplete provenance and foreign participation", async (t) => {
+  const { state, second, workflowPath, recordedPostReady, postReadyAt } =
+    await reachCompletedPreResolvedPostReady(t);
+  const publicationPath = publicationFilePath(state, second.reviewId);
+  const storedWorkflow = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const storedPublication = JSON.parse(
+    await fsp.readFile(publicationPath, "utf8"),
+  );
+  const cases = [
+    {
+      label: "incomplete current thread provenance",
+      expectedReason: "THREAD_RESOLUTION_RECORD_MISSING",
+      mutate(_workflow, publication) {
+        publication.latest_observation.review_threads.threads[0].provenance_complete =
+          false;
+      },
+    },
+    {
+      label: "foreign participation on an otherwise matching outcome",
+      expectedReason: "THREAD_RESOLUTION_UNSAFE",
+      mutate(workflow, publication) {
+        const thread =
+          publication.latest_observation.review_threads.threads[0];
+        thread.comments.push({
+          id: "PRRC_FOREIGN",
+          database_id: 902,
+          created_at: iso(postReadyAt - 500),
+          updated_at: iso(postReadyAt - 500),
+          actor: { id: 777, type: "User", login: "foreign" },
+          review: null,
+        });
+        thread.comment_count = thread.comments.length;
+        workflow.thread_resolutions[0].thread_watermark =
+          threadWatermark(thread);
+      },
+    },
+  ];
+
+  for (const { label, expectedReason, mutate } of cases) {
+    const workflow = structuredClone(storedWorkflow);
+    const publication = structuredClone(storedPublication);
+    mutate(workflow, publication);
+    await atomicWriteCanonicalJson(workflowPath, workflow);
+    await atomicWriteCanonicalJson(publicationPath, publication);
+    try {
+      await assertPreResolvedTerminalAndGateBlocked(
+        state,
+        second.reviewId,
+        recordedPostReady.revision,
+        expectedReason,
+        label,
+        postReadyAt + 20,
+      );
+    } finally {
+      await atomicWriteCanonicalJson(workflowPath, storedWorkflow);
+      await atomicWriteCanonicalJson(publicationPath, storedPublication);
+    }
+  }
+});
+
+test("pre-resolved negative controls reject invalid projected workflow resolution records", async (t) => {
+  const { state, second, workflowPath, recordedPostReady, postReadyAt } =
+    await reachCompletedPreResolvedPostReady(t);
+  const storedWorkflow = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const invalidRecords = [
+    ["thread_id shape", (record) => (record.thread_id = null)],
+    ["outcome shape", (record) => (record.outcome = null)],
+    ["action_id shape", (record) => (record.action_id = null)],
+    [
+      "thread_watermark shape",
+      (record) => (record.thread_watermark = "not-a-digest"),
+    ],
+    ["head_sha shape", (record) => (record.head_sha = "not-a-sha")],
+    [
+      "publication_review_id shape",
+      (record) => (record.publication_review_id = null),
+    ],
+    ["record number/order", (record) => (record.number = 2)],
+    [
+      "duplicate thread",
+      (_record, workflow) => {
+        const duplicate = structuredClone(workflow.thread_resolutions[0]);
+        duplicate.number = 2;
+        duplicate.action_id = `${duplicate.action_id}-duplicate`;
+        workflow.thread_resolutions.push(duplicate);
+      },
+    ],
+  ];
+
+  for (const [label, mutate] of invalidRecords) {
+    const tampered = structuredClone(storedWorkflow);
+    mutate(tampered.thread_resolutions[0], tampered);
+    await atomicWriteCanonicalJson(workflowPath, tampered);
+    try {
+      for (const [consumer, consume] of [
+        [
+          "terminal projection",
+          () => getAutonomousTerminal(state.store, second.reviewId),
+        ],
+        [
+          "manual gate",
+          () =>
+            finalizePublicationGate(
+              state.store,
+              second.reviewId,
+              {
+                expectedRevision: recordedPostReady.revision,
+              },
+              { clock: () => postReadyAt + 20 },
+            ),
+        ],
+      ]) {
+        await assert.rejects(
+          consume(),
+          (error) => error.code === "WORKFLOW_STATE_INVALID",
+          `${label}: ${consumer}`,
+        );
+      }
+    } finally {
+      await atomicWriteCanonicalJson(workflowPath, storedWorkflow);
+    }
+  }
 });
 
 test("a terminal workflow can release its claims after the operator merges", async (t) => {

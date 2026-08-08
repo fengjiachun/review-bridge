@@ -206,6 +206,33 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
         fail("WORKFLOW_STATE_INVALID", "thread-reply record is invalid");
       }
     }
+    // Completed resolution outcomes are the workflow-side evidence that an
+    // action found a thread already resolved and therefore performed no
+    // transition for an automatic-resolution record to own.
+    const threadResolutions = Array.isArray(workflow.thread_resolutions)
+      ? workflow.thread_resolutions
+      : [];
+    const resolvedThreads = new Set();
+    for (const [index, resolution] of threadResolutions.entries()) {
+      if (
+        resolution?.number !== index + 1 ||
+        typeof resolution.thread_id !== "string" ||
+        resolution.thread_id === "" ||
+        resolvedThreads.has(resolution.thread_id) ||
+        !["RESOLVED", "OBSERVED_PRE_RESOLVED"].includes(resolution.outcome) ||
+        typeof resolution.action_id !== "string" ||
+        resolution.action_id === "" ||
+        !DIGEST_RE.test(resolution.thread_watermark ?? "") ||
+        !SHA_RE.test(resolution.head_sha ?? "") ||
+        typeof resolution.publication_review_id !== "string" ||
+        resolution.publication_review_id === "" ||
+        typeof resolution.recorded_at !== "string" ||
+        resolution.recorded_at === ""
+      ) {
+        fail("WORKFLOW_STATE_INVALID", "thread-resolution record is invalid");
+      }
+      resolvedThreads.add(resolution.thread_id);
+    }
     // The one in-flight action a publication is allowed to read: a thread
     // resolution this workflow has already observed as its own transition.
     // Everything the automatic-resolution record binds is pinned here by the
@@ -291,6 +318,14 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
         thread_id: reply.thread_id,
         comment_id: reply.comment_id,
         actor: { id: reply.actor.id, type: reply.actor.type },
+      })),
+      thread_resolutions: threadResolutions.map((resolution) => ({
+        thread_id: resolution.thread_id,
+        outcome: resolution.outcome,
+        action_id: resolution.action_id,
+        thread_watermark: resolution.thread_watermark,
+        head_sha: resolution.head_sha,
+        publication_review_id: resolution.publication_review_id,
       })),
       active_resolution: activeResolution,
       base_sha: workflow.base_sha,
