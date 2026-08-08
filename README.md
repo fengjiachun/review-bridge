@@ -22,11 +22,15 @@ A local review runs like this:
 4. The review ends in `LOCAL_GATE_PASSED`, or in `HUMAN_REQUIRED` when a
    finding still stands after round two.
 
+New to the project? [How Review Bridge reviews a change](docs/review-flow.md)
+walks one change from commit to merge-ready and explains why each step exists.
+
 Review Bridge is an independent community project. It is not affiliated with,
 endorsed by, or sponsored by OpenAI or Anthropic.
 
 ## Contents
 
+- [How Review Bridge reviews a change](docs/review-flow.md)
 - [Platform support](#platform-support)
 - [Install](#install)
 - [Hermes reviewer profile](#hermes-reviewer-profile)
@@ -245,7 +249,10 @@ Otherwise, back in Codex:
 Resume the same reviewer context for round two. The final state is one of:
 
 - `LOCAL_GATE_PASSED`: the reviewer found no remaining issue and the working tree
-  still matches the reviewed snapshot.
+  still matches the reviewed snapshot. The gate attests snapshot consistency,
+  not test results: the deterministic check gate lives in the publication
+  layer, where a failing required check blocks `MERGE_READY` on provider
+  evidence rather than on the author's word.
 - `HUMAN_REQUIRED`: a finding remains or a new finding appears after round two.
 
 For `HUMAN_REQUIRED`, call `get_review_summary`, then pass its exact
