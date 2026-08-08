@@ -34,6 +34,12 @@ const MAX_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_MS = 30 * 1000;
 const MAX_ATOMIC_WINDOW_MS = 2 * 60 * 1000;
 const POST_VISIBILITY_GRACE_MS = 30 * 1000;
+// How long a terminal/gate consumer waits for a historical ancestor
+// publication's lock before reporting PUBLICATION_BUSY. The wait is shorter
+// than the default because the caller already holds the current publication
+// lock: an ancestor mutation is brief, and a still-locked source must fail
+// closed as retryable contention instead of stalling the current projection.
+const HISTORICAL_ANCESTOR_LOCK_WAIT_MS = 1_000;
 const BODY_REQUEST = "@codex review";
 const REQUEST_BODY_SHA256 = sha256(Buffer.from(BODY_REQUEST, "utf8"));
 
@@ -4503,7 +4509,15 @@ function matchingPreResolvedWorkflowOutcome(ledger, binding, thread) {
 // the frontier plus the post-ready observation's thread watermarks. Returns an
 // empty list only when every chain replays and every active record still
 // matches its thread exactly.
-function terminalResolutionBlockers(ledger, binding) {
+//
+// `resolutionContext` is the precomputed effective resolution context for the
+// operation (see `withEffectiveResolutionContext`). Its `proofs` map carries
+// the threads whose resolution is proven by a validated historical ancestor
+// publication; those threads are covered exactly like pre-resolved outcomes
+// and never reported RECORD_MISSING. When no context is supplied the replay
+// behaves exactly as before, so every caller that predates Design A keeps its
+// verdict.
+function terminalResolutionBlockers(ledger, binding, resolutionContext = null) {
   const frontier = resolutionFrontier(ledger);
   const blockers = [...frontier.blockers];
   const threads = new Map(
@@ -4536,10 +4550,13 @@ function terminalResolutionBlockers(ledger, binding) {
     }
   }
   // A resolved thread with no active record ordinarily has unknown ownership,
-  // so the terminal claim must not mint over it. The one recordless workflow
-  // path is an action whose pre-read found this exact thread already resolved:
-  // its completed outcome binds the same publication, head, and watermark but
-  // deliberately owns no automatic-resolution record.
+  // so the terminal claim must not mint over it. The two recordless workflow
+  // paths are an action whose pre-read found this exact thread already
+  // resolved -- its completed outcome binds the same publication, head, and
+  // watermark but deliberately owns no automatic-resolution record -- and a
+  // later publication reusing the workflow-owned resolution proof its
+  // ancestor publication recorded, which the precomputed context qualified
+  // against the same lineage, source, and current-thread evidence.
   const alreadyBlocked = new Set(
     blockers.map((blocker) => blocker.thread_id),
   );
@@ -4550,7 +4567,10 @@ function terminalResolutionBlockers(ledger, binding) {
       !frontier.active.has(thread.id) &&
       !alreadyBlocked.has(thread.id)
     ) {
-      if (matchingPreResolvedWorkflowOutcome(ledger, binding, thread)) {
+      if (
+        matchingPreResolvedWorkflowOutcome(ledger, binding, thread) ||
+        resolutionContext?.proofs?.has(thread.id)
+      ) {
         if (threadHasForeignParticipation(ledger, binding, thread)) {
           blockers.push({
             reason: "THREAD_RESOLUTION_UNSAFE",
@@ -4568,6 +4588,401 @@ function terminalResolutionBlockers(ledger, binding) {
     }
   }
   return blockers;
+}
+
+/**
+ * Whether one workflow attempt strictly precedes another in the recorded
+ * attempt history, each appearing exactly once. The lineage is the durable
+ * `workflow.attempts` order (oldest first): a duplicated, absent, or
+ * reordered head cannot prove that the historical resolution's head is an
+ * ancestor of the current authorization head.
+ */
+function validAttemptLineage(attemptHeadHistory, oldHead, currentHead) {
+  let oldIndex = -1;
+  let currentIndex = -1;
+  for (let index = 0; index < attemptHeadHistory.length; index += 1) {
+    const head = attemptHeadHistory[index];
+    if (head === oldHead) {
+      if (oldIndex !== -1) {
+        return false;
+      }
+      oldIndex = index;
+    }
+    if (head === currentHead) {
+      if (currentIndex !== -1) {
+        return false;
+      }
+      currentIndex = index;
+    }
+  }
+  return oldIndex !== -1 && currentIndex !== -1 && oldIndex < currentIndex;
+}
+
+function attemptIndex(attemptHeadHistory, head) {
+  return attemptHeadHistory.indexOf(head);
+}
+
+// The digest a terminal record or final gate binds when the replay consumed a
+// validated historical resolution proof. The current resolution set digest is
+// wrapped together with the sorted historical references, so no proof can be
+// substituted, dropped, or added after the fact without changing the bound
+// digest. With no proofs the exact existing resolutionSetDigest output is
+// preserved, so v3 gates minted without historical context and v1/v2 gates
+// never see a different value.
+function effectiveResolutionDigest(currentDigest, proofs) {
+  if (proofs.size === 0) {
+    return currentDigest;
+  }
+  // Code-unit string order, not localeCompare: the digest must be stable
+  // across runtimes and locales, and no environment locale may influence
+  // which references the bound digest names.
+  const historical = [...proofs.values()].sort((left, right) => {
+    if (left.thread_id < right.thread_id) {
+      return -1;
+    }
+    if (left.thread_id > right.thread_id) {
+      return 1;
+    }
+    return 0;
+  });
+  return sha256(
+    canonicalJson({
+      resolution_sha256: currentDigest,
+      historical,
+    }),
+  );
+}
+
+async function withAncestorPublicationLock(paths, reviewId, operation) {
+  return withStateLock(
+    {
+      directory: paths.directory,
+      reviewId,
+      domain: "publication",
+      waitMs: HISTORICAL_ANCESTOR_LOCK_WAIT_MS,
+    },
+    operation,
+  );
+}
+
+/**
+ * Validate one historical resolution outcome against the ancestor publication
+ * it names, under that publication's retained lock, and return the reference
+ * that binds the proof into the effective digest. Returns null when any link
+ * fails: missing or substituted source, broken binding or authorization
+ * identity, a missing/corrupt/substituted bound authorization artifact, a
+ * source head that does not match the outcome, a source frontier that does
+ * not actively own the exact outcome, a source latest observation that no
+ * longer shows the exact thread resolved and complete at the record's
+ * watermark, unsafe participation, or a current thread that no longer
+ * matches. A null leaves the thread blocked exactly as a recordless thread is
+ * blocked today.
+ *
+ * Lock order: the caller already holds the current publication lock, and this
+ * runs under the ancestor publication lock retained by
+ * `withEffectiveResolutionContext` (newest-to-oldest across outcomes).
+ * Publication locks never acquire the workflow lock (binding reads are
+ * lock-free), so no cycle exists between the workflow lock, the current
+ * publication lock, and the ancestor publication locks.
+ */
+async function qualifyHistoricalProof(
+  storeRoot,
+  ledger,
+  binding,
+  thread,
+  outcome,
+) {
+  const ancestorPaths = pathsFor(storeRoot, outcome.publication_review_id);
+  try {
+    const ancestorLedger = await loadPublicationFile(
+      ancestorPaths,
+      outcome.publication_review_id,
+      { allowMissing: true },
+    );
+    if (ancestorLedger == null) {
+      // The named historical publication no longer exists: there is no
+      // source ledger to prove the resolution from.
+      return null;
+    }
+    const ancestorBinding = await requireWorkflowBinding(
+      storeRoot,
+      ancestorLedger,
+    );
+    if (
+      ancestorBinding == null ||
+      ancestorBinding.workflow_id !== binding?.workflow_id ||
+      ancestorBinding.workflow_authorization_sha256 !==
+        binding?.workflow_authorization_sha256
+    ) {
+      // The source publication is not bound to this workflow under this
+      // authorization, so its record cannot prove this workflow's
+      // resolution.
+      return null;
+    }
+    const currentTarget = ledger.target;
+    const ancestorTarget = ancestorLedger.target;
+    if (
+      ancestorTarget.repository_id !== currentTarget.repository_id ||
+      ancestorTarget.owner !== currentTarget.owner ||
+      ancestorTarget.repo !== currentTarget.repo ||
+      ancestorTarget.pr_number !== currentTarget.pr_number ||
+      ancestorTarget.base_branch !== currentTarget.base_branch ||
+      ancestorTarget.head_branch !== currentTarget.head_branch
+    ) {
+      // The source publication belongs to a different pull request or
+      // target: its thread resolution decides nothing for this one.
+      return null;
+    }
+    // Revalidate the source publication's bound authorization artifact under
+    // the retained source lock, exactly as every other consumer does: the
+    // local gate or remote authorization must exist, be well-formed, match
+    // the ledger's authorization, and be the only authorization present. A
+    // missing, corrupt, or substituted artifact means the ledger's
+    // authorization facts cannot be trusted, so the source cannot prove the
+    // outcome.
+    const sourceAuthorization = await readBoundAuthorization(
+      ancestorPaths,
+      outcome.publication_review_id,
+      ancestorLedger,
+    );
+    if (sourceAuthorization.head_sha !== outcome.head_sha) {
+      // The source publication's validated authorization head is not the
+      // head the workflow outcome recorded, so the record cannot be the
+      // outcome's.
+      return null;
+    }
+    // Replay the ancestor's complete automatic-resolution records and
+    // lifecycle events. Only the exact outcome action/thread/head/
+    // watermark as the active frontier record qualifies; missing,
+    // retired, invalidated, orphaned, broken, substituted, or unrelated
+    // evidence leaves the thread blocked.
+    const ancestorFrontier = resolutionFrontier(ancestorLedger);
+    const activeRecord = ancestorFrontier.active.get(outcome.thread_id);
+    if (
+      activeRecord == null ||
+      activeRecord.action_id !== outcome.action_id ||
+      activeRecord.thread_id !== outcome.thread_id ||
+      activeRecord.head_sha !== outcome.head_sha ||
+      activeRecord.thread_watermark !== outcome.thread_watermark
+    ) {
+      return null;
+    }
+    // The source's latest persisted observation must still show the exact
+    // thread resolved, complete, at the record's watermark, under a complete
+    // review-thread collection, and free of foreign participation under the
+    // same policy that guards active records and pre-resolved outcomes. The
+    // observation is mandatory: absence of source observation is not proof,
+    // so a cleared observation (latest_observation is null) never qualifies
+    // the thread, whatever the frontier alone would conclude. The only
+    // accepted visibility boundary is a human toggle that leaves the
+    // persisted resolution visible -- the source observation still positively
+    // shows the thread -- never the absence of the observation itself.
+    const ancestorObservation = ancestorLedger.latest_observation;
+    if (ancestorObservation == null) {
+      return null;
+    }
+    const reviewThreads = ancestorObservation.review_threads;
+    const sourceThreads = reviewThreads?.threads;
+    if (
+      !Array.isArray(sourceThreads) ||
+      reviewThreads.collection?.status !== "COMPLETE"
+    ) {
+      return null;
+    }
+    const sourceThread = sourceThreads.find(
+      (candidate) => candidate.id === outcome.thread_id,
+    );
+    if (
+      sourceThread == null ||
+      sourceThread.is_resolved !== true ||
+      sourceThread.provenance_complete !== true ||
+      sourceThread.comments_pagination_complete !== true ||
+      threadWatermark(sourceThread) !== activeRecord.thread_watermark
+    ) {
+      return null;
+    }
+    if (
+      threadHasForeignParticipation(
+        ancestorLedger,
+        ancestorBinding,
+        sourceThread,
+      )
+    ) {
+      return null;
+    }
+    // The current thread must still be resolved, complete, at the exact same
+    // watermark, and free of foreign participation under the same policy that
+    // guards active records and pre-resolved outcomes.
+    if (
+      thread.provenance_complete !== true ||
+      thread.comments_pagination_complete !== true ||
+      threadWatermark(thread) !== outcome.thread_watermark
+    ) {
+      return null;
+    }
+    if (threadHasForeignParticipation(ledger, binding, thread)) {
+      return null;
+    }
+    return {
+      thread_id: thread.id,
+      source_publication_review_id: ancestorLedger.review_id,
+      source_publication_revision: ancestorLedger.revision,
+      // The source publication's own authorization digest (the local gate or
+      // remote authorization artifact), bound separately from the workflow
+      // authorization digest below.
+      source_authorization_sha256: sourceAuthorization.source_sha256,
+      workflow_authorization_sha256:
+        ancestorBinding.workflow_authorization_sha256,
+      source_resolution_sha256: resolutionSetDigest(ancestorLedger),
+      action_id: activeRecord.action_id,
+      record_digest: sha256(canonicalJson(activeRecord)),
+    };
+  } catch (error) {
+    // Lock contention on the source publication is the one failure that must
+    // propagate as retryable PUBLICATION_BUSY: the evidence may be mid-write
+    // and the caller must reread and retry, never silently degrade to success
+    // or to a missing-record verdict. Any other source failure means the
+    // source cannot qualify, so the thread stays blocked by the ordinary
+    // recordless path.
+    if (error?.code === "PUBLICATION_BUSY") {
+      throw error;
+    }
+    return null;
+  }
+}
+
+/**
+ * Precompute, once per operation, the effective resolution context every
+ * safety consumer shares: the autonomous terminal projection, the summary
+ * replay override, manual finalization, and gate assessment/verification.
+ *
+ * A current resolved thread that owns no active record and is not covered by
+ * the exact current-head OBSERVED_PRE_RESOLVED exception may reuse a
+ * workflow-owned automatic-resolution proof from an ancestor publication when
+ * every link qualifies: an exact historical RESOLVED outcome, an ordered
+ * unique attempt lineage from the outcome head to the current authorization
+ * head, a source publication that revalidates under its own lock (including
+ * its bound authorization artifact and its latest observation), a source
+ * frontier whose active record is exactly the outcome, and a current thread
+ * that still matches. Threads that fail any link keep the ordinary
+ * fail-closed verdict (THREAD_RESOLUTION_RECORD_MISSING and friends).
+ *
+ * The authority-consuming operation runs inside the retained-lock callback:
+ * every unique ancestor publication lock is acquired once, newest-to-oldest
+ * by workflow attempt order, and held -- together with the validated
+ * authorization evidence the proofs were read under -- until `operation`
+ * returns. No consumer reads a source from an unlocked snapshot, and no
+ * source lock is released before the write the digest authorizes commits.
+ * The current publication lock is already held by every caller, and
+ * publication-lock paths never acquire the workflow lock (binding reads are
+ * lock-free), so the acyclic order is: workflow lock (when held) -> current
+ * publication -> source ancestors newest-to-oldest. Source lock contention
+ * propagates retryable PUBLICATION_BUSY and never maps to a missing-record or
+ * success verdict.
+ *
+ * The returned `effectiveDigest` preserves the exact `resolutionSetDigest`
+ * output when no proofs exist, so empty-context behavior and v1/v2
+ * compatibility are unchanged.
+ */
+async function withEffectiveResolutionContext(
+  storeRoot,
+  ledger,
+  binding,
+  operation,
+) {
+  const currentDigest = resolutionSetDigest(ledger);
+  if (
+    ledger.version !== 3 ||
+    ledger.latest_observation?.review_threads == null
+  ) {
+    return operation({ proofs: new Map(), effectiveDigest: currentDigest });
+  }
+  const frontier = resolutionFrontier(ledger);
+  const currentHead = authorizationForLedger(ledger).head_sha;
+  const attemptHeadHistory = binding?.attempt_head_history ?? [];
+  const candidates = [];
+  for (const thread of ledger.latest_observation.review_threads.threads ?? []) {
+    if (
+      thread.is_resolved !== true ||
+      frontier.active.has(thread.id) ||
+      matchingPreResolvedWorkflowOutcome(ledger, binding, thread)
+    ) {
+      continue;
+    }
+    const outcome = (binding?.thread_resolutions ?? []).find(
+      (resolution) =>
+        resolution.outcome === "RESOLVED" &&
+        resolution.thread_id === thread.id &&
+        resolution.publication_review_id !== ledger.review_id,
+    );
+    if (outcome == null) {
+      continue;
+    }
+    if (
+      !validAttemptLineage(attemptHeadHistory, outcome.head_sha, currentHead)
+    ) {
+      continue;
+    }
+    candidates.push({ thread, outcome });
+  }
+  // Acquire ancestor publication locks newest-to-oldest by attempt order so
+  // concurrent operations over the same lineage cannot deadlock on each
+  // other's source locks. Multiple threads from the same source publication
+  // share one lock acquisition.
+  candidates.sort(
+    (left, right) =>
+      attemptIndex(attemptHeadHistory, right.outcome.head_sha) -
+      attemptIndex(attemptHeadHistory, left.outcome.head_sha),
+  );
+  const sources = [];
+  const sourcesByReviewId = new Map();
+  for (const { outcome } of candidates) {
+    const headIndex = attemptIndex(attemptHeadHistory, outcome.head_sha);
+    const existing = sourcesByReviewId.get(outcome.publication_review_id);
+    if (existing == null) {
+      const entry = { reviewId: outcome.publication_review_id, headIndex };
+      sourcesByReviewId.set(outcome.publication_review_id, entry);
+      sources.push(entry);
+    } else if (headIndex > existing.headIndex) {
+      existing.headIndex = headIndex;
+    }
+  }
+  sources.sort((left, right) => right.headIndex - left.headIndex);
+  return acquireSourceLocks(storeRoot, sources, 0, async () => {
+    const proofs = new Map();
+    for (const { thread, outcome } of candidates) {
+      const proof = await qualifyHistoricalProof(
+        storeRoot,
+        ledger,
+        binding,
+        thread,
+        outcome,
+      );
+      if (proof != null) {
+        proofs.set(thread.id, proof);
+      }
+    }
+    return operation({
+      proofs,
+      effectiveDigest: effectiveResolutionDigest(currentDigest, proofs),
+    });
+  });
+}
+
+// Recursively hold every unique ancestor publication lock, newest-to-oldest,
+// for the duration of `operation`. Release unwinds oldest-to-newest; combined
+// with the newest-first acquisition this keeps the global lock order
+// deterministic so concurrent consumers of the same lineage never deadlock.
+async function acquireSourceLocks(storeRoot, sources, position, operation) {
+  if (position >= sources.length) {
+    return operation();
+  }
+  const reviewId = sources[position].reviewId;
+  return withAncestorPublicationLock(
+    pathsFor(storeRoot, reviewId),
+    reviewId,
+    () => acquireSourceLocks(storeRoot, sources, position + 1, operation),
+  );
 }
 
 export function derivePublicationStatus(ledger) {
@@ -5588,6 +6003,7 @@ function assessPublicationGate(
   gateParseError,
   currentMs,
   workflowBinding = null,
+  resolutionContext = null,
 ) {
   if (gateParseError) {
     return { state: "MALFORMED", reviewerProvider: null, expiresAt: null };
@@ -5623,7 +6039,8 @@ function assessPublicationGate(
           ledger.workflow_authorization_sha256 &&
         gate.workflow_authorization_sha256 ===
           workflowBinding.workflow_authorization_sha256 &&
-        gate.resolution_sha256 === resolutionSetDigest(ledger);
+        gate.resolution_sha256 ===
+          (resolutionContext?.effectiveDigest ?? resolutionSetDigest(ledger));
   const authorizationBindingMatches =
     ledger.version === 1
       ? gate.version === 1 &&
@@ -5649,7 +6066,11 @@ function assessPublicationGate(
     // evidence moved must not keep verifying over what the replay rejects.
     (ledger.version === 3 &&
       workflowBinding != null &&
-      terminalResolutionBlockers(ledger, workflowBinding).length > 0)
+      terminalResolutionBlockers(
+        ledger,
+        workflowBinding,
+        resolutionContext,
+      ).length > 0)
   ) {
     return { state: "INVALID", reviewerProvider: null, expiresAt: null };
   }
@@ -5724,81 +6145,98 @@ export async function getPublicationSummary(
     try {
       const ledger = authorization.ledger;
       const workflowBinding = await requireWorkflowBinding(storeRoot, ledger);
-      const publicationAuthorization = authorizationForLedger(ledger);
-      const derived = derivePublication(ledger, {
-        historyConflict: workflowHeadConflict(workflowBinding, ledger),
-      });
-      const gate = assessPublicationGate(
+      // The summary computation and its gate assessment run inside the
+      // retained source-lock callback so a historical proof can never be read
+      // from an unlocked snapshot.
+      return await withEffectiveResolutionContext(
+        storeRoot,
         ledger,
-        publicationAuthorization,
-        authorization.sourceAuthorization,
-        authorization.publicationGate,
-        authorization.gateParseError,
-        currentMs,
         workflowBinding,
-      );
-      const evidenceStale =
-        ledger.terminal == null &&
-        ledger.latest_observation != null &&
-        currentMs > Date.parse(expiresAtFor(ledger));
-      // The terminal replay is the same evidence the autonomous terminal
-      // projection refuses a success claim over, and the same evidence the
-      // finalization and verification paths now require clean. The summary
-      // must reflect it too, or a summary-driven manual flow would keep
-      // advertising FINALIZE_PUBLICATION_GATE and retry a finalization that
-      // deterministically throws.
-      const terminalBlockers =
-        ledger.version === 3
-          ? terminalResolutionBlockers(ledger, workflowBinding)
-          : [];
-      const replayOverridesDerived =
-        derived.status === "MERGE_READY" && terminalBlockers.length > 0;
-      const effectiveStatus = replayOverridesDerived
-        ? "CHANGES_REQUIRED"
-        : derived.status;
-      const blockingReason = evidenceStale
-        ? "EVIDENCE_STALE"
-        : replayOverridesDerived
-          ? terminalBlockers[0].reason
-          : derived.status === "MERGE_READY" && gate.state === "INVALID"
-            ? "PUBLICATION_GATE_INVALID"
-            : derived.status === "MERGE_READY" && gate.state === "MALFORMED"
-              ? "PUBLICATION_GATE_MALFORMED"
-              : derived.blockingReason;
-      const closure =
-        ledger.latest_observation == null
-          ? { requests: [], results: [] }
-          : ambiguityClosure(ledger);
-      const nextAction = nextPublicationAction(
-        ledger,
-        { ...derived, status: effectiveStatus },
-        gate.state,
-        evidenceStale,
-      );
-      return {
-        review_id: ledger.review_id,
-        revision: ledger.revision,
-        status: effectiveStatus,
-        authorization_mode: publicationAuthorization.mode,
-        base_sha: publicationAuthorization.base_sha,
-        head_sha: publicationAuthorization.head_sha,
-        target: {
-          owner: ledger.target.owner,
-          repo: ledger.target.repo,
-          pr_number: ledger.target.pr_number,
-          base_branch: ledger.target.base_branch,
-          head_branch: ledger.target.head_branch,
+        async (resolutionContext) => {
+          const publicationAuthorization = authorizationForLedger(ledger);
+          const derived = derivePublication(ledger, {
+            historyConflict: workflowHeadConflict(workflowBinding, ledger),
+          });
+          const gate = assessPublicationGate(
+            ledger,
+            publicationAuthorization,
+            authorization.sourceAuthorization,
+            authorization.publicationGate,
+            authorization.gateParseError,
+            currentMs,
+            workflowBinding,
+            resolutionContext,
+          );
+          const evidenceStale =
+            ledger.terminal == null &&
+            ledger.latest_observation != null &&
+            currentMs > Date.parse(expiresAtFor(ledger));
+          // The terminal replay is the same evidence the autonomous terminal
+          // projection refuses a success claim over, and the same evidence
+          // the finalization and verification paths now require clean. The
+          // summary must reflect it too, or a summary-driven manual flow
+          // would keep advertising FINALIZE_PUBLICATION_GATE and retry a
+          // finalization that deterministically throws.
+          const terminalBlockers =
+            ledger.version === 3
+              ? terminalResolutionBlockers(
+                  ledger,
+                  workflowBinding,
+                  resolutionContext,
+                )
+              : [];
+          const replayOverridesDerived =
+            derived.status === "MERGE_READY" && terminalBlockers.length > 0;
+          const effectiveStatus = replayOverridesDerived
+            ? "CHANGES_REQUIRED"
+            : derived.status;
+          const blockingReason = evidenceStale
+            ? "EVIDENCE_STALE"
+            : replayOverridesDerived
+              ? terminalBlockers[0].reason
+              : derived.status === "MERGE_READY" && gate.state === "INVALID"
+                ? "PUBLICATION_GATE_INVALID"
+                : derived.status === "MERGE_READY" &&
+                    gate.state === "MALFORMED"
+                  ? "PUBLICATION_GATE_MALFORMED"
+                  : derived.blockingReason;
+          const closure =
+            ledger.latest_observation == null
+              ? { requests: [], results: [] }
+              : ambiguityClosure(ledger);
+          const nextAction = nextPublicationAction(
+            ledger,
+            { ...derived, status: effectiveStatus },
+            gate.state,
+            evidenceStale,
+          );
+          return {
+            review_id: ledger.review_id,
+            revision: ledger.revision,
+            status: effectiveStatus,
+            authorization_mode: publicationAuthorization.mode,
+            base_sha: publicationAuthorization.base_sha,
+            head_sha: publicationAuthorization.head_sha,
+            target: {
+              owner: ledger.target.owner,
+              repo: ledger.target.repo,
+              pr_number: ledger.target.pr_number,
+              base_branch: ledger.target.base_branch,
+              head_branch: ledger.target.head_branch,
+            },
+            latest_observed_at:
+              ledger.latest_observation?.observed_at ?? null,
+            blocking_reason: blockingReason,
+            next_action: nextAction,
+            ...(nextAction === "POST_AND_RECORD_CODEX_REVIEW_REQUEST"
+              ? { codex_review_request: publicationRequest(ledger) }
+              : {}),
+            required_request_refs: clone(closure.requests),
+            required_ambiguous_results: clone(closure.results),
+            gate_state: gate.state,
+          };
         },
-        latest_observed_at: ledger.latest_observation?.observed_at ?? null,
-        blocking_reason: blockingReason,
-        next_action: nextAction,
-        ...(nextAction === "POST_AND_RECORD_CODEX_REVIEW_REQUEST"
-          ? { codex_review_request: publicationRequest(ledger) }
-          : {}),
-        required_request_refs: clone(closure.requests),
-        required_ambiguous_results: clone(closure.results),
-        gate_state: gate.state,
-      };
+      );
     } finally {
       await closeAuthorizationFiles(authorization);
     }
@@ -6157,13 +6595,23 @@ export async function getAutonomousTerminal(
     const currentMs = clock();
     const authorization = await openAuthorizationFiles(paths, reviewId);
     try {
-      return await projectAutonomousTerminalCore({
+      const ledger = authorization.ledger;
+      const binding = await requireWorkflowBinding(storeRoot, ledger);
+      return await withEffectiveResolutionContext(
         storeRoot,
-        paths,
-        reviewId,
-        authorization,
-        currentMs,
-      });
+        ledger,
+        binding,
+        (resolutionContext) =>
+          projectAutonomousTerminalCore({
+            storeRoot,
+            paths,
+            reviewId,
+            authorization,
+            currentMs,
+            binding,
+            resolutionContext,
+          }),
+      );
     } finally {
       await closeAuthorizationFiles(authorization);
     }
@@ -6171,15 +6619,20 @@ export async function getAutonomousTerminal(
 }
 
 // The lock-free core of the terminal projection. The caller must already
-// hold the publication lock: the workflow terminal branch uses it to
+// hold the publication lock and the retained source-lock callback (see
+// `withEffectiveResolutionContext`): the workflow terminal branch uses it to
 // revalidate the publication and keep it stable across the workflow ledger
-// write, and nothing else calls it.
+// write, and nothing else calls it. The binding and resolution context are
+// supplied by the caller so the same validated evidence feeds the projection
+// and the authority-consuming operation that follows it.
 async function projectAutonomousTerminalCore({
   storeRoot,
   paths,
   reviewId,
   authorization,
   currentMs,
+  binding,
+  resolutionContext,
 }) {
   const ledger = authorization.ledger;
   if (ledger.version !== 3) {
@@ -6188,7 +6641,6 @@ async function projectAutonomousTerminalCore({
       "only a version 3 publication has an autonomous projection",
     );
   }
-  const binding = await requireWorkflowBinding(storeRoot, ledger);
   const publicationAuthorization = authorizationForLedger(ledger);
   const derived = derivePublication(ledger, {
     historyConflict: workflowHeadConflict(binding, ledger),
@@ -6204,7 +6656,7 @@ async function projectAutonomousTerminalCore({
   // THREAD_RESOLUTION_INVALIDATED, they name the exact failure instead.
   const replay = evidenceStale
     ? []
-    : terminalResolutionBlockers(ledger, binding);
+    : terminalResolutionBlockers(ledger, binding, resolutionContext);
   const replayBlockers = replay.map(
     (blocker) =>
       `thread_resolution:${blocker.reason}:${blocker.thread_id}`,
@@ -6276,7 +6728,7 @@ async function projectAutonomousTerminalCore({
       ledger.latest_observation == null
         ? null
         : canonicalDigest(ledger.latest_observation),
-    resolution_sha256: resolutionSetDigest(ledger),
+    resolution_sha256: resolutionContext.effectiveDigest,
     // RFC 0003's draft-gate exception is deliberately unreachable in this
     // repository: checks and Codex reviews run on draft pull requests, so
     // no exception machinery exists and none is consumed.
@@ -6296,7 +6748,10 @@ async function projectAutonomousTerminalCore({
 // lock is per-review and the workflow write is per-workflow, and no
 // publication-lock path acquires the workflow lock (binding reads are
 // lock-free), so holding it here blocks only publication mutations and
-// cannot invert the lock order.
+// cannot invert the lock order. The operation callback additionally runs
+// inside the retained source-lock callback, so a historical resolution
+// proof's source publications stay locked until the workflow ledger write
+// commits.
 export async function withAutonomousTerminalLock(
   storeRoot,
   reviewId,
@@ -6308,14 +6763,25 @@ export async function withAutonomousTerminalLock(
     const currentMs = clock();
     const authorization = await openAuthorizationFiles(paths, reviewId);
     try {
-      const current = await projectAutonomousTerminalCore({
+      const ledger = authorization.ledger;
+      const binding = await requireWorkflowBinding(storeRoot, ledger);
+      return await withEffectiveResolutionContext(
         storeRoot,
-        paths,
-        reviewId,
-        authorization,
-        currentMs,
-      });
-      return await operation(current);
+        ledger,
+        binding,
+        async (resolutionContext) => {
+          const current = await projectAutonomousTerminalCore({
+            storeRoot,
+            paths,
+            reviewId,
+            authorization,
+            currentMs,
+            binding,
+            resolutionContext,
+          });
+          return await operation(current);
+        },
+      );
     } finally {
       await closeAuthorizationFiles(authorization);
     }
@@ -6833,96 +7299,124 @@ export async function finalizePublicationGate(
       const workflowBinding = await requireWorkflowBinding(storeRoot, ledger, {
         mutating: true,
       });
-      const publicationAuthorization = authorizationForLedger(ledger);
-      requireRevision(ledger, expectedRevision);
-      requireMutable(ledger);
-      if (authorization.gateParseError) {
-        fail("PUBLICATION_GATE_INVALID", "existing publication gate is malformed");
-      }
-      validateStoredObservationFresh(ledger, currentMs);
-      const derived = derivePublication(ledger);
-      if (derived.status !== "MERGE_READY" || ledger.status !== "MERGE_READY") {
-        fail(
-          "PUBLICATION_NOT_READY",
-          `publication status is ${derived.status}, not MERGE_READY`,
-        );
-      }
-      // The terminal replay is the same evidence the autonomous terminal
-      // projection refuses a success claim over: a recordless resolved
-      // thread or human participation in an active record's thread. The
-      // manual merge path must not mint a gate over evidence the
-      // autonomous projection would reject, or the operator could merge
-      // over a resolution the run itself never owned.
-      if (
-        ledger.version === 3 &&
-        terminalResolutionBlockers(ledger, workflowBinding).length > 0
-      ) {
-        fail(
-          "PUBLICATION_NOT_READY",
-          "the autonomous terminal replay rejects the final evidence",
-        );
-      }
-      const passedAt = new Date(currentMs).toISOString();
-      const expiresAt = expiresAtFor(ledger);
-      if (currentMs > Date.parse(expiresAt)) {
-        fail("EVIDENCE_STALE", "publication evidence expired before finalization");
-      }
-      const observationDigest = canonicalDigest(ledger.latest_observation);
-      const oldestCollectionAt = oldestObservationAt(ledger.latest_observation);
-      const finalGate = {
-        version: ledger.version,
-        review_id: reviewId,
-        issuance_committed: true,
-        passed_at: passedAt,
-        repository_id: ledger.target.repository_id,
-        pr_number: ledger.target.pr_number,
-        head_sha: publicationAuthorization.head_sha,
-        reviewer_provider: publicationAuthorization.reviewer_provider,
-        ...(ledger.version === 1
-          ? {
-              local_gate_sha256: publicationAuthorization.source_sha256,
-            }
-          : {
-              authorization_mode: publicationAuthorization.mode,
-              authorization_sha256: publicationAuthorization.source_sha256,
-            }),
-        ...(ledger.version === 3
-          ? {
-              workflow_id: workflowBinding.workflow_id,
-              workflow_authorization_sha256:
-                workflowBinding.workflow_authorization_sha256,
-              resolution_sha256: resolutionSetDigest(ledger),
-            }
-          : {}),
-        publication_revision: ledger.revision,
-        github_observation_sha256: observationDigest,
-        github_observed_at: ledger.latest_observation.observed_at,
-        github_oldest_collection_at: oldestCollectionAt,
-        github_recorded_at: ledger.latest_observation.recorded_at,
-        expires_at: expiresAt,
-        status: "MERGE_READY",
-      };
-      const candidateGate = { ...finalGate, issuance_committed: false };
-      const gateDigest = canonicalDigest(finalGate);
-      await atomicWriteCanonicalJson(paths.gate, candidateGate);
-      await appendAuditEvent(
-        paths,
-        reviewId,
-        {
-          event: "GATE_FINALIZATION_PASSED",
-          outcome: "SUCCESS",
-          normalized_reason: null,
-          at: passedAt,
-          publication_revision: ledger.revision,
-          head_sha: publicationAuthorization.head_sha,
-          github_observation_sha256: observationDigest,
-          gate_sha256: gateDigest,
-          expires_at: expiresAt,
+      // The gate mint -- the authority-consuming write -- runs inside the
+      // retained source-lock callback so a historical proof can never be
+      // computed from one source state and committed over another.
+      return await withEffectiveResolutionContext(
+        storeRoot,
+        ledger,
+        workflowBinding,
+        async (resolutionContext) => {
+          const publicationAuthorization = authorizationForLedger(ledger);
+          requireRevision(ledger, expectedRevision);
+          requireMutable(ledger);
+          if (authorization.gateParseError) {
+            fail(
+              "PUBLICATION_GATE_INVALID",
+              "existing publication gate is malformed",
+            );
+          }
+          validateStoredObservationFresh(ledger, currentMs);
+          const derived = derivePublication(ledger);
+          if (
+            derived.status !== "MERGE_READY" ||
+            ledger.status !== "MERGE_READY"
+          ) {
+            fail(
+              "PUBLICATION_NOT_READY",
+              `publication status is ${derived.status}, not MERGE_READY`,
+            );
+          }
+          // The terminal replay is the same evidence the autonomous terminal
+          // projection refuses a success claim over: a recordless resolved
+          // thread or human participation in an active record's thread. The
+          // manual merge path must not mint a gate over evidence the
+          // autonomous projection would reject, or the operator could merge
+          // over a resolution the run itself never owned.
+          if (
+            ledger.version === 3 &&
+            terminalResolutionBlockers(
+              ledger,
+              workflowBinding,
+              resolutionContext,
+            ).length > 0
+          ) {
+            fail(
+              "PUBLICATION_NOT_READY",
+              "the autonomous terminal replay rejects the final evidence",
+            );
+          }
+          const passedAt = new Date(currentMs).toISOString();
+          const expiresAt = expiresAtFor(ledger);
+          if (currentMs > Date.parse(expiresAt)) {
+            fail(
+              "EVIDENCE_STALE",
+              "publication evidence expired before finalization",
+            );
+          }
+          const observationDigest = canonicalDigest(ledger.latest_observation);
+          const oldestCollectionAt = oldestObservationAt(
+            ledger.latest_observation,
+          );
+          const finalGate = {
+            version: ledger.version,
+            review_id: reviewId,
+            issuance_committed: true,
+            passed_at: passedAt,
+            repository_id: ledger.target.repository_id,
+            pr_number: ledger.target.pr_number,
+            head_sha: publicationAuthorization.head_sha,
+            reviewer_provider: publicationAuthorization.reviewer_provider,
+            ...(ledger.version === 1
+              ? {
+                  local_gate_sha256: publicationAuthorization.source_sha256,
+                }
+              : {
+                  authorization_mode: publicationAuthorization.mode,
+                  authorization_sha256: publicationAuthorization.source_sha256,
+                }),
+            ...(ledger.version === 3
+              ? {
+                  workflow_id: workflowBinding.workflow_id,
+                  workflow_authorization_sha256:
+                    workflowBinding.workflow_authorization_sha256,
+                  resolution_sha256: resolutionContext.effectiveDigest,
+                }
+              : {}),
+            publication_revision: ledger.revision,
+            github_observation_sha256: observationDigest,
+            github_observed_at: ledger.latest_observation.observed_at,
+            github_oldest_collection_at: oldestCollectionAt,
+            github_recorded_at: ledger.latest_observation.recorded_at,
+            expires_at: expiresAt,
+            status: "MERGE_READY",
+          };
+          const candidateGate = {
+            ...finalGate,
+            issuance_committed: false,
+          };
+          const gateDigest = canonicalDigest(finalGate);
+          await atomicWriteCanonicalJson(paths.gate, candidateGate);
+          await appendAuditEvent(
+            paths,
+            reviewId,
+            {
+              event: "GATE_FINALIZATION_PASSED",
+              outcome: "SUCCESS",
+              normalized_reason: null,
+              at: passedAt,
+              publication_revision: ledger.revision,
+              head_sha: publicationAuthorization.head_sha,
+              github_observation_sha256: observationDigest,
+              gate_sha256: gateDigest,
+              expires_at: expiresAt,
+            },
+            auditSession,
+          );
+          await atomicWriteCanonicalJson(paths.gate, finalGate);
+          return finalGate;
         },
-        auditSession,
       );
-      await atomicWriteCanonicalJson(paths.gate, finalGate);
-      return finalGate;
     } finally {
       if (auditSession != null) {
         await closeAuditSession(auditSession);
@@ -6962,12 +7456,48 @@ export async function verifyPublicationGate(
       const gateDigest = gate == null ? null : canonicalDigest(gate);
       const auditSession = await openAuditSession(paths, reviewId);
       try {
+        // The audit record every verification writes, over the verdict the
+        // assessment reached (which for a workflow-bound publication was
+        // reached inside the retained source-lock callback below).
+        const writeAudit = (result) =>
+          appendAuditEvent(
+            paths,
+            reviewId,
+            {
+              event: "GATE_VERIFIED",
+              outcome: result.valid ? "SUCCESS" : "FAILURE",
+              normalized_reason: result.valid ? null : result.reason,
+              at: verifiedAt,
+              publication_revision: result.valid
+                ? result.publication_revision
+                : Number.isSafeInteger(gate?.publication_revision) &&
+                    gate.publication_revision > 0
+                  ? gate.publication_revision
+                  : null,
+              head_sha: result.valid
+                ? result.head_sha
+                : SHA_RE.test(gate?.head_sha ?? "")
+                  ? gate.head_sha
+                  : null,
+              github_observation_sha256:
+                DIGEST_RE.test(gate?.github_observation_sha256 ?? "")
+                  ? gate.github_observation_sha256
+                  : null,
+              gate_sha256: gateDigest,
+              expires_at:
+                isCanonicalTimestamp(gate?.expires_at)
+                  ? gate.expires_at
+                  : null,
+            },
+            auditSession,
+          );
         let response;
         if (gate == null || authorization.gateParseError) {
           response = verificationFailure(
             "GATE_MISSING_OR_MALFORMED",
             verifiedAt,
           );
+          await writeAudit(response);
         } else {
           // A broken workflow binding is a gate mismatch, not a crash: the
           // GATE_VERIFIED audit event must still record the failed check.
@@ -6977,62 +7507,48 @@ export async function verifyPublicationGate(
           } catch {
             workflowBinding = null;
           }
-          const gateAssessment = assessPublicationGate(
+          // The effective resolution context is precomputed once for the
+          // assessment, and the assessment and its audit record run inside
+          // the retained source-lock callback: a gate minted over historical
+          // proof must verify against the same effective digest, lock
+          // contention on a historical source publication must propagate
+          // retryable PUBLICATION_BUSY rather than read the source without
+          // its lock, and the source evidence cannot change between the
+          // digest comparison and the verdict the audit records.
+          response = await withEffectiveResolutionContext(
+            storeRoot,
             ledger,
-            publicationAuthorization,
-            authorization.sourceAuthorization,
-            gate,
-            false,
-            currentMs,
             workflowBinding,
+            async (resolutionContext) => {
+              const gateAssessment = assessPublicationGate(
+                ledger,
+                publicationAuthorization,
+                authorization.sourceAuthorization,
+                gate,
+                false,
+                currentMs,
+                workflowBinding,
+                resolutionContext,
+              );
+              const result =
+                gateAssessment.state === "INVALID"
+                  ? verificationFailure("GATE_MISMATCH", verifiedAt)
+                  : gateAssessment.state === "EXPIRED"
+                    ? verificationFailure("EVIDENCE_STALE", verifiedAt)
+                    : {
+                        valid: true,
+                        status: "MERGE_READY",
+                        head_sha: gate.head_sha,
+                        reviewer_provider: gateAssessment.reviewerProvider,
+                        publication_revision: gate.publication_revision,
+                        expires_at: gate.expires_at,
+                        verified_at: verifiedAt,
+                      };
+              await writeAudit(result);
+              return result;
+            },
           );
-          if (gateAssessment.state === "INVALID") {
-            response = verificationFailure("GATE_MISMATCH", verifiedAt);
-          } else if (gateAssessment.state === "EXPIRED") {
-            response = verificationFailure("EVIDENCE_STALE", verifiedAt);
-          } else {
-            response = {
-              valid: true,
-              status: "MERGE_READY",
-              head_sha: gate.head_sha,
-              reviewer_provider: gateAssessment.reviewerProvider,
-              publication_revision: gate.publication_revision,
-              expires_at: gate.expires_at,
-              verified_at: verifiedAt,
-            };
-          }
         }
-        await appendAuditEvent(
-          paths,
-          reviewId,
-          {
-            event: "GATE_VERIFIED",
-            outcome: response.valid ? "SUCCESS" : "FAILURE",
-            normalized_reason: response.valid ? null : response.reason,
-            at: verifiedAt,
-            publication_revision: response.valid
-              ? response.publication_revision
-              : Number.isSafeInteger(gate?.publication_revision) &&
-                  gate.publication_revision > 0
-                ? gate.publication_revision
-                : null,
-            head_sha: response.valid
-              ? response.head_sha
-              : SHA_RE.test(gate?.head_sha ?? "")
-                ? gate.head_sha
-                : null,
-            github_observation_sha256:
-              DIGEST_RE.test(gate?.github_observation_sha256 ?? "")
-                ? gate.github_observation_sha256
-                : null,
-            gate_sha256: gateDigest,
-            expires_at:
-              isCanonicalTimestamp(gate?.expires_at)
-                ? gate.expires_at
-                : null,
-          },
-          auditSession,
-        );
         return response;
       } finally {
         await closeAuditSession(auditSession);

@@ -4843,16 +4843,22 @@ export async function advanceRemoteWorkflow(
                     // reach the terminal record.
                     local_review_id: next.current_review?.review_id ?? null,
                     publication_id: next.current_publication.review_id,
-                    observation_revision: projection.revision,
-                    observation_sha256: projection.observation_sha256,
+                    // The terminal record binds what the retained-lock
+                    // revalidation proved, not the earlier unlocked
+                    // projection: a replay-clean source mutation between the
+                    // two projections moves the effective resolution digest
+                    // while leaving status and revision unchanged, and the
+                    // record must claim the freshly revalidated evidence.
+                    observation_revision: current.revision,
+                    observation_sha256: current.observation_sha256,
                     publication_authorization_sha256:
-                      projection.publication_authorization_sha256,
+                      current.publication_authorization_sha256,
                     workflow_authorization_sha256:
-                      projection.workflow_authorization_sha256,
-                    resolution_sha256: projection.resolution_sha256,
-                    ready_exception_sha256: projection.ready_exception_sha256,
+                      current.workflow_authorization_sha256,
+                    resolution_sha256: current.resolution_sha256,
+                    ready_exception_sha256: current.ready_exception_sha256,
                     human_review_requirements:
-                      projection.human_review_requirements,
+                      current.human_review_requirements,
                     recorded_at: recordedAt,
                   };
                   next.status = "MERGE_READY";

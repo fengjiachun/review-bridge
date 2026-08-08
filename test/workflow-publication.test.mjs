@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +24,7 @@ import {
   startPublication,
   threadWatermark,
   verifyPublicationGate,
+  withAutonomousTerminalLock,
 } from "../src/publication.mjs";
 import {
   advanceLocalWorkflow,
@@ -61,6 +63,7 @@ import {
   acquireStateLock,
   atomicWriteCanonicalJson,
   canonicalJson,
+  canonicalJsonBytes,
   sha256,
 } from "../src/storage.mjs";
 import {
@@ -938,7 +941,15 @@ test("a remote finding returns through a new gated head and a new publication", 
  */
 async function reachObservedThreadResolution(
   t,
-  { outcome = "RESOLVED" } = {},
+  {
+    outcome = "RESOLVED",
+    // Optional additional resolved threads carried by the first
+    // publication's writer-validated observation: each names a second
+    // finding this workflow resolved before repairing the first. The
+    // factory receives { firstHead } so a test can root the thread in the
+    // same finding review that raised PRRT_1.
+    firstPublicationThreads = null,
+  } = {},
 ) {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -948,13 +959,31 @@ async function reachObservedThreadResolution(
   );
   const firstHead = await commit(state.repository, "export const value = 2;\n");
   const first = await gateAndPublishHead(state, workflow, firstHead, "one");
+  const extraFirstThreads =
+    firstPublicationThreads == null
+      ? []
+      : firstPublicationThreads({ firstHead });
   const { workflow: waiting } = await reachRemoteWait(
     state,
     first.workflow,
     first.reviewId,
     firstHead,
     Date.now(),
-    (payload) => findingsResult(payload),
+    (payload) => {
+      findingsResult(payload);
+      if (extraFirstThreads.length > 0) {
+        // The first publication observes the second finding already
+        // resolved alongside the unresolved first finding: the observation
+        // stays exactly valid (counts, provenance, ancestry) so the real
+        // recordGithubSnapshot writer accepts it.
+        payload.review_threads.total_count = extraFirstThreads.length;
+        payload.review_threads.unresolved_count = 0;
+        payload.review_threads.threads = extraFirstThreads.map((entry) =>
+          structuredClone(entry),
+        );
+      }
+      return payload;
+    },
   );
   const repairing = await advanceRemoteWorkflow(
     state.store,
@@ -1352,6 +1381,7 @@ async function reachObservedThreadResolution(
     watermark,
     resolutionPlanned,
     resolutionObserved,
+    extraFirstThreads,
   };
 }
 
@@ -6494,6 +6524,1138 @@ test("the terminal projection records MERGE_READY and the workflow stops with a 
   assert.equal(reread.status, "READY_TO_MARK");
 });
 
+test("a repair publication reuses workflow-owned resolution proof from its ancestor", async (t) => {
+  const {
+    state,
+    currentPublication,
+    currentRecordedReady,
+    currentReadyAt,
+  } = await reachRepairAncestorProof(t);
+
+  // Design A: both shared consumers should recover the historical proof. The
+  // pre-Design-A implementation instead reports THREAD_RESOLUTION_RECORD_MISSING
+  // because it inspects only this publication's empty record arrays.
+  const terminal = await getAutonomousTerminal(
+    state.store,
+    currentPublication.reviewId,
+  );
+  const summary = await getPublicationSummary(
+    state.store,
+    currentPublication.reviewId,
+  );
+  let manualGate = { ok: true, code: null, blockingReason: null };
+  try {
+    await finalizePublicationGate(
+      state.store,
+      currentPublication.reviewId,
+      { expectedRevision: currentRecordedReady.revision },
+      { clock: () => currentReadyAt + 20 },
+    );
+  } catch (error) {
+    manualGate = {
+      ok: false,
+      code: error.code,
+      blockingReason: error.details?.blocking_reason ?? null,
+    };
+  }
+  assert.deepEqual(
+    {
+      terminal: {
+        status: terminal.status,
+        blockingReason: terminal.blocking_reason,
+      },
+      summary: {
+        status: summary.status,
+        blockingReason: summary.blocking_reason,
+        nextAction: summary.next_action,
+      },
+      manualGate,
+    },
+    {
+      terminal: { status: "MERGE_READY", blockingReason: null },
+      summary: {
+        status: "MERGE_READY",
+        blockingReason: null,
+        nextAction: "FINALIZE_PUBLICATION_GATE",
+      },
+      manualGate: { ok: true, code: null, blockingReason: null },
+    },
+  );
+});
+
+/**
+ * Drive one workflow through a workflow-owned automatic resolution on an old
+ * publication, a check regression that returns the pull request to draft, a
+ * repair head, and a descendant publication that observes the same fully
+ * provenanced resolved thread without recording any automatic resolution of
+ * its own. The descendant is left POST_READY with one fresh ready
+ * observation, exactly the state Design A must clear from the historical
+ * proof. Returns the objects the shared consumers and the mutation controls
+ * need.
+ */
+async function reachRepairAncestorProof(t, { extraProofs = [] } = {}) {
+  // extraProofs: array of { threadId, actionId, source: "old" | "first" }.
+  // Each names a second historical resolution proof whose thread is carried
+  // by every writer-validated source and current observation; the server-owned
+  // source record and workflow outcome that bind the proof are appended after
+  // the observations commit.
+  const firstProofs = extraProofs.filter((entry) => entry.source === "first");
+  const {
+    state,
+    workflow,
+    first,
+    second: oldPublication,
+    secondHead: oldHead,
+    record: addressedFinding,
+    repliedObservation,
+    resolveAt,
+    watermark,
+    resolutionPlanned,
+    resolutionObserved,
+    extraFirstThreads,
+  } = await reachObservedThreadResolution(t, {
+    ...(firstProofs.length > 0
+      ? {
+          firstPublicationThreads: ({ firstHead }) =>
+            firstProofs.map((entry) =>
+              resolvedThread(firstHead, { threadId: entry.threadId }),
+            ),
+        }
+      : {}),
+  });
+  const firstHead = (
+    await getPublication(state.store, first.reviewId)
+  ).authorization.head_sha;
+  const threadById = new Map(
+    extraFirstThreads.map((thread) => [thread.id, thread]),
+  );
+  const entries = extraProofs.map((spec) => {
+    const onFirst = spec.source === "first";
+    const sourcePublication = onFirst ? first : oldPublication;
+    const sourceHead = onFirst ? firstHead : oldHead;
+    // Reuse the exact threads the first publication's writer-validated
+    // observation already committed so every watermark stays identical.
+    const thread = onFirst
+      ? threadById.get(spec.threadId)
+      : resolvedThread(firstHead, { threadId: spec.threadId });
+    return {
+      ...spec,
+      sourcePublication,
+      sourceHead,
+      thread,
+      watermark: threadWatermark(thread),
+    };
+  });
+  const sourceExtraThreads = entries
+    .filter((entry) => entry.sourcePublication.reviewId === oldPublication.reviewId)
+    .map((entry) => entry.thread);
+  const currentExtraThreads = entries.map((entry) => entry.thread);
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+
+  const thread = structuredClone(
+    repliedObservation.review_threads.threads[0],
+  );
+  thread.is_resolved = true;
+  assert.equal(thread.id, "PRRT_1");
+  assert.equal(thread.provenance_complete, true);
+  assert.equal(thread.comments_pagination_complete, true);
+  assert.equal(threadWatermark(thread), watermark);
+
+  const withResolvedThread = (payload, headSha, collectedAt, extraThreads = []) => {
+    const threads = [
+      structuredClone(thread),
+      ...extraThreads.map((entry) => structuredClone(entry)),
+    ];
+    payload.review_threads.total_count = threads.length;
+    payload.review_threads.unresolved_count = 0;
+    payload.review_threads.threads = threads;
+    payload.review_threads.ancestry = [
+      {
+        finding_head_sha: addressedFinding.findings_review.reviewed_head_sha,
+        status: "AHEAD",
+        descends: true,
+        endpoint: `GET /repos/example/review-bridge/compare/${addressedFinding.findings_review.reviewed_head_sha}...${headSha}`,
+        collected_at: iso(collectedAt),
+      },
+    ];
+    return payload;
+  };
+
+  // Persist the server-owned record before completing the action that made
+  // the transition. This is the proof the later publication must discover in
+  // workflow history instead of requiring a duplicate record of its own.
+  const oldBeforeRecord = await getPublication(
+    state.store,
+    oldPublication.reviewId,
+  );
+  const oldWithRecord = await recordAutomaticResolution(
+    state.store,
+    oldPublication.reviewId,
+    {
+      expectedRevision: oldBeforeRecord.revision,
+      workflowId: workflow.workflow_id,
+      actionId: resolutionPlanned.action.action_id,
+    },
+    { clock: () => resolveAt + 3_000 },
+  );
+  const resolved = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    resolutionObserved.revision,
+    resolutionPlanned.action.action_id,
+  );
+  assert.deepEqual(
+    resolved.thread_resolutions.map((entry) => ({
+      action_id: entry.action_id,
+      thread_id: entry.thread_id,
+      outcome: entry.outcome,
+      head_sha: entry.head_sha,
+      thread_watermark: entry.thread_watermark,
+      publication_review_id: entry.publication_review_id,
+    })),
+    [
+      {
+        action_id: resolutionPlanned.action.action_id,
+        thread_id: "PRRT_1",
+        outcome: "RESOLVED",
+        head_sha: oldHead,
+        thread_watermark: watermark,
+        publication_review_id: oldPublication.reviewId,
+      },
+    ],
+  );
+
+  const oldResolvedAt = resolveAt + 20_000;
+  const oldResolvedObservation = structuredClone(repliedObservation);
+  oldResolvedObservation.observed_at = iso(oldResolvedAt);
+  withResolvedThread(oldResolvedObservation, oldHead, oldResolvedAt - 400, sourceExtraThreads);
+  const oldResolved = await recordGithubSnapshot(
+    state.store,
+    oldPublication.reviewId,
+    {
+      expectedRevision: oldWithRecord.revision,
+      observation: oldResolvedObservation,
+    },
+    { clock: () => oldResolvedAt + 10 },
+  );
+  const oldPreReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    resolved.revision,
+  );
+  assert.equal(oldPreReady.phase, "PRE_READY");
+
+  // Expose the old head, then regress a required check. The real workflow
+  // must undo the ready state before it may commit and record the repair.
+  const oldMark = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    oldPreReady.revision,
+  );
+  const oldMarkExecuting = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    oldMark.workflow.revision,
+    oldMark.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      base_branch: "main",
+      head_branch: TOPIC_BRANCH,
+      head_sha: oldHead,
+      is_draft: true,
+    },
+  );
+  const oldMarkObserved = await recordMarkReadyObservation(
+    state.store,
+    workflow.workflow_id,
+    oldMarkExecuting.revision,
+    oldMark.action.action_id,
+    {
+      outcome: "MARKED_READY",
+      repositoryId: REPOSITORY_ID,
+      prNumber: PR_NUMBER,
+      baseBranch: "main",
+      headBranch: TOPIC_BRANCH,
+      headSha: oldHead,
+      isDraft: false,
+    },
+  );
+  const oldPostReady = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    oldMarkObserved.revision,
+    oldMark.action.action_id,
+  );
+  assert.equal(oldPostReady.phase, "POST_READY");
+
+  const regressionAt = Math.max(
+    Date.parse(oldPostReady.ready_marks.at(-1).recorded_at) + 2_000,
+    oldResolvedAt + 5_000,
+  );
+  const regressionObservation = structuredClone(oldResolvedObservation);
+  regressionObservation.observed_at = iso(regressionAt);
+  regressionObservation.pull_request.is_draft = false;
+  withResolvedThread(regressionObservation, oldHead, regressionAt - 400, sourceExtraThreads);
+  const regressed = await recordGithubSnapshot(
+    state.store,
+    oldPublication.reviewId,
+    {
+      expectedRevision: oldResolved.revision,
+      observation: failingCheck(regressionObservation),
+    },
+    { clock: () => regressionAt + 10 },
+  );
+  const ensuringDraft = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    oldPostReady.revision,
+  );
+  assert.equal(ensuringDraft.phase, "ENSURE_DRAFT_FOR_REPAIR");
+
+  const undo = await planReturnToDraft(
+    state.store,
+    workflow.workflow_id,
+    ensuringDraft.revision,
+  );
+  const undoExecuting = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    undo.workflow.revision,
+    undo.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      base_branch: "main",
+      head_branch: TOPIC_BRANCH,
+      head_sha: oldHead,
+      is_draft: false,
+    },
+  );
+  const undoObserved = await recordReturnToDraftObservation(
+    state.store,
+    workflow.workflow_id,
+    undoExecuting.revision,
+    undo.action.action_id,
+    {
+      outcome: "RETURNED_TO_DRAFT",
+      repositoryId: REPOSITORY_ID,
+      prNumber: PR_NUMBER,
+      baseBranch: "main",
+      headBranch: TOPIC_BRANCH,
+      isDraft: true,
+    },
+  );
+  const restored = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    undoObserved.revision,
+    undo.action.action_id,
+  );
+  assert.equal(restored.phase, "WAIT_PUBLICATION");
+
+  const draftAgainAt = regressionAt + 5_000;
+  const draftAgainObservation = structuredClone(regressionObservation);
+  draftAgainObservation.observed_at = iso(draftAgainAt);
+  draftAgainObservation.pull_request.is_draft = true;
+  withResolvedThread(draftAgainObservation, oldHead, draftAgainAt - 400, sourceExtraThreads);
+  await recordGithubSnapshot(
+    state.store,
+    oldPublication.reviewId,
+    {
+      expectedRevision: regressed.revision,
+      observation: draftAgainObservation,
+    },
+    { clock: () => draftAgainAt + 10 },
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    restored.revision,
+  );
+  assert.equal(repairing.phase, "ADDRESS_CHECK_FAILURE");
+
+  const repairHead = await commit(
+    state.repository,
+    "export const value = 4;\n",
+  );
+  const repaired = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    repairing.revision,
+    repairHead,
+  );
+  assert.equal(repaired.phase, "PREPARE_LOCAL_REVIEW");
+  assert.equal(repaired.current_publication, null);
+
+  const currentPublication = await gateAndPublishHead(
+    state,
+    { workflow_id: workflow.workflow_id, revision: repaired.revision },
+    repairHead,
+    "three",
+  );
+  assert.notEqual(currentPublication.reviewId, oldPublication.reviewId);
+  const currentAt = draftAgainAt + 5_000;
+  const { workflow: currentWait } = await reachRemoteWait(
+    state,
+    currentPublication.workflow,
+    currentPublication.reviewId,
+    repairHead,
+    currentAt,
+    (payload) =>
+      withResolvedThread(payload, repairHead, currentAt + 1_600),
+  );
+  const currentPreReady = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    currentWait.revision,
+  );
+  assert.equal(currentPreReady.phase, "PRE_READY");
+
+  const currentMark = await planMarkPullRequestReady(
+    state.store,
+    workflow.workflow_id,
+    currentPreReady.revision,
+  );
+  const currentClearance = await getAutonomousPreReady(
+    state.store,
+    currentPublication.reviewId,
+  );
+  assert.equal(currentClearance.status, "READY_TO_MARK");
+  const currentMarkExecuting = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    currentMark.workflow.revision,
+    currentMark.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      base_branch: "main",
+      head_branch: TOPIC_BRANCH,
+      head_sha: repairHead,
+      is_draft: true,
+    },
+  );
+  const currentMarkObserved = await recordMarkReadyObservation(
+    state.store,
+    workflow.workflow_id,
+    currentMarkExecuting.revision,
+    currentMark.action.action_id,
+    {
+      outcome: "MARKED_READY",
+      repositoryId: REPOSITORY_ID,
+      prNumber: PR_NUMBER,
+      baseBranch: "main",
+      headBranch: TOPIC_BRANCH,
+      headSha: repairHead,
+      isDraft: false,
+    },
+  );
+  const currentPostReady = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    currentMarkObserved.revision,
+    currentMark.action.action_id,
+  );
+  assert.equal(currentPostReady.phase, "POST_READY");
+
+  const currentReadyAt = Math.max(
+    Date.parse(currentPostReady.ready_marks.at(-1).recorded_at) + 2_000,
+    currentAt + 10_000,
+  );
+  const currentRecordedReady = await recordGithubSnapshot(
+    state.store,
+    currentPublication.reviewId,
+    {
+      expectedRevision: currentClearance.revision,
+      observation: withResolvedThread(
+        readyObservation(state, repairHead, {
+          at: currentReadyAt,
+          requestId: 100,
+          requestAt: currentAt + 1_000,
+        }),
+        repairHead,
+        currentReadyAt - 400,
+        currentExtraThreads,
+      ),
+    },
+    { clock: () => currentReadyAt + 10 },
+  );
+  assert.ok(
+    Date.parse(
+      currentRecordedReady.latest_observation.review_threads.collection
+        .collected_at,
+    ) > Date.parse(currentPostReady.ready_marks.at(-1).recorded_at),
+  );
+
+  // Setup proof: the workflow's attempt lineage connects the historical
+  // publication head to this descendant repair head. The historical ledger
+  // owns one exact active record; the current ledger owns none, but observes
+  // the same fully-provenanced resolved thread at the same watermark.
+  const finalWorkflow = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.deepEqual(
+    finalWorkflow.attempts.slice(-2).map((attempt) => attempt.head_sha),
+    [oldHead, repairHead],
+  );
+  const historical = await getPublication(
+    state.store,
+    oldPublication.reviewId,
+  );
+  assert.deepEqual(
+    historical.automatic_resolutions.map((entry) => ({
+      number: entry.number,
+      action_id: entry.action_id,
+      thread_id: entry.thread_id,
+      thread_watermark: entry.thread_watermark,
+      head_sha: entry.head_sha,
+      reply_comment_id: entry.reply_comment_id,
+      actor: entry.actor,
+      recorded_revision: entry.recorded_revision,
+    })),
+    [
+      {
+        number: 1,
+        action_id: resolutionPlanned.action.action_id,
+        thread_id: "PRRT_1",
+        thread_watermark: watermark,
+        head_sha: oldHead,
+        reply_comment_id: 901,
+        actor: { id: 555, type: "User" },
+        recorded_revision: oldWithRecord.revision,
+      },
+    ],
+  );
+  assert.deepEqual(historical.resolution_lifecycle ?? [], []);
+
+  const current = await getPublication(
+    state.store,
+    currentPublication.reviewId,
+  );
+  assert.deepEqual(
+    {
+      automatic_resolutions: current.automatic_resolutions,
+      resolution_lifecycle: current.resolution_lifecycle ?? [],
+    },
+    { automatic_resolutions: [], resolution_lifecycle: [] },
+  );
+  const currentThread = current.latest_observation.review_threads.threads[0];
+  assert.equal(currentThread.id, "PRRT_1");
+  assert.equal(currentThread.is_resolved, true);
+  assert.equal(currentThread.provenance_complete, true);
+  assert.equal(currentThread.comments_pagination_complete, true);
+  assert.deepEqual(currentThread.comments, thread.comments);
+  assert.equal(threadWatermark(currentThread), watermark);
+
+  // Each additional proof is bound by the server-owned source record and the
+  // workflow outcome only after every source/current observation carrying its
+  // thread has been committed by the real recordGithubSnapshot writer above
+  // (and after the audit-validating workflow read above). No public API can
+  // author a record or outcome for a synthetic action, so this is the only
+  // direct write. Assert the persisted observations are exactly the shapes
+  // the writer accepted: exact counts, provenance, pagination, and ancestry.
+  for (const entry of entries) {
+    const sourceLedger = await getPublication(
+      state.store,
+      entry.sourcePublication.reviewId,
+    );
+    const persistedSource = await appendHistoricalResolutionProof(state, {
+      workflowPath,
+      sourceReviewId: entry.sourcePublication.reviewId,
+      headSha: entry.sourceHead,
+      thread: entry.thread,
+      actionId: entry.actionId,
+      recordedRevision: sourceLedger.revision,
+    });
+    const onFirst = entry.sourcePublication.reviewId === first.reviewId;
+    assertWriterValidatedReviewThreads(
+      persistedSource.latest_observation,
+      onFirst ? [entry.threadId] : ["PRRT_1", entry.threadId],
+      onFirst ? [] : [firstHead],
+    );
+  }
+  if (entries.length > 0) {
+    const persistedCurrent = await getPublication(
+      state.store,
+      currentPublication.reviewId,
+    );
+    assertWriterValidatedReviewThreads(
+      persistedCurrent.latest_observation,
+      ["PRRT_1", ...entries.map((entry) => entry.threadId)],
+      [firstHead],
+    );
+  }
+
+  return {
+    state,
+    workflow,
+    workflowPath,
+    oldPublication,
+    currentPublication,
+    firstPublication: first,
+    repairHead,
+    oldHead,
+    firstHead,
+    watermark,
+    resolutionPlanned,
+    currentRecordedReady,
+    currentReadyAt,
+    extraProofResults: entries,
+  };
+}
+
+test("historical resolution proof mutation controls fail closed at every consumer", async (t) => {
+  const {
+    state,
+    workflowPath,
+    oldPublication,
+    currentPublication,
+    currentRecordedReady,
+    currentReadyAt,
+    watermark,
+    oldHead,
+    repairHead,
+  } = await reachRepairAncestorProof(t);
+  const oldPath = publicationFilePath(state, oldPublication.reviewId);
+  const currentPath = publicationFilePath(state, currentPublication.reviewId);
+
+  // Sanity: the untouched scenario clears everywhere, so every case below is
+  // blocked by its own mutation and not by a broken setup.
+  assert.equal(
+    (await getAutonomousTerminal(state.store, currentPublication.reviewId))
+      .status,
+    "MERGE_READY",
+  );
+
+  const storedOld = JSON.parse(await fsp.readFile(oldPath, "utf8"));
+  const storedCurrent = JSON.parse(await fsp.readFile(currentPath, "utf8"));
+  const storedWorkflow = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const otherHead =
+    oldHead === "f".repeat(40) ? "e".repeat(40) : "f".repeat(40);
+  const otherDigest = digest("mismatched historical proof");
+
+  // Each case mutates one persisted field or class and must fail closed at
+  // the terminal projection, the summary replay override, and the manual
+  // finalization gate. `reason === null` means the mutation makes the binding
+  // reader reject the workflow ledger outright.
+  const cases = [
+    {
+      label: "historical publication missing",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      deleteOld: true,
+    },
+    {
+      label: "historical publication substituted by another valid publication",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(old) {
+        old.authorization.head_sha = otherHead;
+      },
+    },
+    {
+      label: "old workflow binding/authorization identity mismatch",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(old) {
+        old.workflow_authorization_sha256 = otherDigest;
+      },
+    },
+    {
+      label: "unrelated PR target on the source publication",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(old) {
+        old.target.pr_number = PR_NUMBER + 1;
+      },
+    },
+    {
+      label: "old action mismatch",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(old) {
+        old.automatic_resolutions[0].action_id = "act-substitute";
+      },
+    },
+    {
+      label: "old thread mismatch",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(old) {
+        old.automatic_resolutions[0].thread_id = "PRRT_OTHER";
+      },
+    },
+    {
+      label: "old watermark mismatch",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(old) {
+        old.automatic_resolutions[0].thread_watermark = otherDigest;
+      },
+    },
+    {
+      label: "named historical record absent",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(old) {
+        old.automatic_resolutions = [];
+      },
+    },
+    {
+      label: "old lifecycle invalidated",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(old) {
+        old.resolution_lifecycle = [
+          invalidatedEvent({
+            number: 1,
+            recordId: old.automatic_resolutions[0].action_id,
+            priorWatermark: old.automatic_resolutions[0].thread_watermark,
+            newWatermark: otherDigest,
+          }),
+        ];
+      },
+    },
+    {
+      label: "old lifecycle unresolved for repair",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(old) {
+        old.resolution_lifecycle = [
+          unresolveEvent({
+            number: 1,
+            recordId: old.automatic_resolutions[0].action_id,
+          }),
+        ];
+      },
+    },
+    {
+      label: "old lifecycle orphaned",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(old) {
+        old.automatic_resolutions = [];
+        old.resolution_lifecycle = [
+          invalidatedEvent({
+            number: 1,
+            recordId: "act-ghost",
+            priorWatermark: old.automatic_resolutions[0]?.thread_watermark ?? watermark,
+            newWatermark: otherDigest,
+          }),
+        ];
+      },
+    },
+    {
+      label: "old record supersession evidence",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      // Retiring the outcome record by a supersession is inherently
+      // unreplayable at the same source head: the frontier requires the
+      // successor to prove a new head while the active record must match the
+      // source observation's head, so any attempt leaves the outcome thread
+      // without an active record and the proof blocked.
+      apply(old) {
+        const retired = old.automatic_resolutions[0];
+        const successor = structuredClone(retired);
+        successor.number = 2;
+        successor.action_id = "act-successor";
+        successor.thread_watermark = otherDigest;
+        old.automatic_resolutions = [retired, successor];
+        old.resolution_lifecycle = [
+          invalidatedEvent({
+            number: 1,
+            recordId: retired.action_id,
+            priorWatermark: retired.thread_watermark,
+            newWatermark: otherDigest,
+          }),
+          unresolveEvent({ number: 2, recordId: retired.action_id }),
+          supersedeEvent({
+            number: 3,
+            predecessorId: retired.action_id,
+            successorId: "act-successor",
+            invalidationEvent: 1,
+            unresolveEvent: 2,
+          }),
+        ];
+      },
+    },
+    {
+      label: "old lifecycle chain broken",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(old) {
+        const retired = old.automatic_resolutions[0];
+        old.resolution_lifecycle = [
+          invalidatedEvent({
+            number: 1,
+            recordId: retired.action_id,
+            priorWatermark: retired.thread_watermark,
+            newWatermark: otherDigest,
+          }),
+          unresolveEvent({ number: 2, recordId: retired.action_id }),
+          supersedeEvent({
+            number: 3,
+            predecessorId: retired.action_id,
+            successorId: "act-missing",
+            invalidationEvent: 1,
+            unresolveEvent: 2,
+          }),
+        ];
+      },
+    },
+    {
+      label: "current thread unresolved",
+      reason: "UNRESOLVED_REVIEW_THREADS",
+      apply(_old, current) {
+        current.latest_observation.review_threads.unresolved_count = 1;
+        current.latest_observation.review_threads.threads[0].is_resolved =
+          false;
+      },
+    },
+    {
+      label: "current thread provenance incomplete",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(_old, current) {
+        current.latest_observation.review_threads.threads[0]
+          .provenance_complete = false;
+      },
+    },
+    {
+      label: "current thread watermark changed",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(_old, current) {
+        const thread =
+          current.latest_observation.review_threads.threads[0];
+        thread.comments.push({
+          id: "PRRC_WM",
+          database_id: 903,
+          created_at: iso(currentReadyAt - 300),
+          updated_at: iso(currentReadyAt - 300),
+          actor: codexActor(),
+          review: null,
+        });
+        thread.comment_count = thread.comments.length;
+      },
+    },
+    {
+      label: "current foreign participation",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(_old, current) {
+        const thread =
+          current.latest_observation.review_threads.threads[0];
+        thread.comments.push({
+          id: "PRRC_FOREIGN",
+          database_id: 904,
+          created_at: iso(currentReadyAt - 300),
+          updated_at: iso(currentReadyAt - 300),
+          actor: { id: 777, type: "User", login: "foreign" },
+          review: null,
+        });
+        thread.comment_count = thread.comments.length;
+      },
+    },
+    {
+      label: "old head absent from the attempt lineage",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(_old, _current, workflow) {
+        workflow.attempts = workflow.attempts
+          .filter((attempt) => attempt.head_sha !== oldHead)
+          .map((attempt, index) => ({ ...attempt, number: index + 1 }));
+      },
+    },
+    {
+      label: "current head absent from the attempt lineage",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(_old, _current, workflow) {
+        workflow.attempts = workflow.attempts
+          .filter((attempt) => attempt.head_sha !== repairHead)
+          .map((attempt, index) => ({ ...attempt, number: index + 1 }));
+      },
+    },
+    {
+      label: "duplicate head in the attempt lineage",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(_old, _current, workflow) {
+        const duplicate = structuredClone(
+          workflow.attempts.find((attempt) => attempt.head_sha === oldHead),
+        );
+        workflow.attempts.push(duplicate);
+        workflow.attempts = workflow.attempts.map((attempt, index) => ({
+          ...attempt,
+          number: index + 1,
+        }));
+      },
+    },
+    {
+      label: "reversed attempt lineage",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(_old, _current, workflow) {
+        const swapped = workflow.attempts.map((attempt) => ({
+          ...attempt,
+          head_sha:
+            attempt.head_sha === oldHead
+              ? repairHead
+              : attempt.head_sha === repairHead
+                ? oldHead
+                : attempt.head_sha,
+        }));
+        workflow.attempts = swapped;
+      },
+    },
+    {
+      label: "malformed attempt lineage",
+      reason: null,
+      apply(_old, _current, workflow) {
+        workflow.attempts[workflow.attempts.length - 1].head_sha =
+          "not-a-sha";
+      },
+    },
+    {
+      label: "unrelated workflow outcome head",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(_old, _current, workflow) {
+        workflow.thread_resolutions[0].head_sha = otherHead;
+      },
+    },
+    {
+      label: "unrelated workflow outcome thread",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(_old, _current, workflow) {
+        workflow.thread_resolutions[0].thread_id = "PRRT_OTHER";
+      },
+    },
+    {
+      label: "unrelated workflow outcome watermark",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(_old, _current, workflow) {
+        workflow.thread_resolutions[0].thread_watermark = otherDigest;
+      },
+    },
+    {
+      label: "workflow outcome no longer names a different publication",
+      reason: "THREAD_RESOLUTION_RECORD_MISSING",
+      apply(_old, _current, workflow) {
+        workflow.thread_resolutions[0].publication_review_id =
+          currentPublication.reviewId;
+      },
+    },
+  ];
+
+  for (const { label, reason, deleteOld = false, apply } of cases) {
+    const old = structuredClone(storedOld);
+    const current = structuredClone(storedCurrent);
+    const workflow = structuredClone(storedWorkflow);
+    if (apply != null) {
+      apply(old, current, workflow);
+    }
+    if (deleteOld) {
+      await fsp.rm(oldPath);
+    } else {
+      await atomicWriteCanonicalJson(oldPath, old);
+    }
+    await atomicWriteCanonicalJson(currentPath, current);
+    await atomicWriteCanonicalJson(workflowPath, workflow);
+    try {
+      if (reason === null) {
+        await assert.rejects(
+          getAutonomousTerminal(state.store, currentPublication.reviewId),
+          (error) => error.code === "WORKFLOW_STATE_INVALID",
+          `${label}: terminal projection`,
+        );
+        await assert.rejects(
+          getPublicationSummary(state.store, currentPublication.reviewId),
+          (error) => error.code === "WORKFLOW_STATE_INVALID",
+          `${label}: summary`,
+        );
+        await assert.rejects(
+          finalizePublicationGate(
+            state.store,
+            currentPublication.reviewId,
+            { expectedRevision: currentRecordedReady.revision },
+            { clock: () => currentReadyAt + 20 },
+          ),
+          (error) => error.code === "WORKFLOW_STATE_INVALID",
+          `${label}: manual gate`,
+        );
+      } else {
+        const terminal = await getAutonomousTerminal(
+          state.store,
+          currentPublication.reviewId,
+        );
+        assert.equal(terminal.status, "CHANGES_REQUIRED", label);
+        assert.equal(terminal.blocking_reason, reason, label);
+        const summary = await getPublicationSummary(
+          state.store,
+          currentPublication.reviewId,
+        );
+        assert.equal(summary.status, "CHANGES_REQUIRED", label);
+        assert.equal(summary.blocking_reason, reason, label);
+        assert.notEqual(
+          summary.next_action,
+          "FINALIZE_PUBLICATION_GATE",
+          label,
+        );
+        await assert.rejects(
+          finalizePublicationGate(
+            state.store,
+            currentPublication.reviewId,
+            { expectedRevision: currentRecordedReady.revision },
+            { clock: () => currentReadyAt + 20 },
+          ),
+          (error) => error.code === "PUBLICATION_NOT_READY",
+          `${label}: manual gate`,
+        );
+      }
+    } finally {
+      await atomicWriteCanonicalJson(oldPath, storedOld);
+      await atomicWriteCanonicalJson(currentPath, storedCurrent);
+      await atomicWriteCanonicalJson(workflowPath, storedWorkflow);
+    }
+  }
+});
+
+test("post-gate historical proof substitution causes GATE_MISMATCH", async (t) => {
+  const {
+    state,
+    workflowPath,
+    oldPublication,
+    currentPublication,
+    currentRecordedReady,
+    currentReadyAt,
+  } = await reachRepairAncestorProof(t);
+  const oldPath = publicationFilePath(state, oldPublication.reviewId);
+
+  // The gate is minted over the historical proof; the effective digest binds
+  // the current resolution set plus the sorted historical references.
+  await finalizePublicationGate(
+    state.store,
+    currentPublication.reviewId,
+    { expectedRevision: currentRecordedReady.revision },
+    { clock: () => currentReadyAt + 20 },
+  );
+  assert.equal(
+    (await verifyPublicationGate(state.store, currentPublication.reviewId, {
+      clock: () => currentReadyAt + 30,
+    })).valid,
+    true,
+  );
+
+  const storedOld = JSON.parse(await fsp.readFile(oldPath, "utf8"));
+  const storedWorkflow = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const substitutions = [
+    {
+      label: "source active record digest substitution",
+      replayClean: true,
+      apply(old) {
+        old.automatic_resolutions[0].eligibility_sha256 = digest(
+          "eligibility-substitute",
+        );
+      },
+    },
+    {
+      label: "source lifecycle evidence substitution",
+      replayClean: true,
+      apply(old) {
+        old.resolution_lifecycle = [
+          invalidatedEvent({
+            number: 1,
+            threadId: "PRRT_OTHER",
+            recordId: "act-ghost",
+            priorWatermark: digest("prior-other"),
+            newWatermark: digest("moved-other"),
+          }),
+        ];
+      },
+    },
+    {
+      label: "source publication revision substitution",
+      // A bare revision bump leaves the source ledger structurally invalid
+      // (the history cursor must end at exactly the revision it claims, and
+      // its updated_at must match), so the source cannot even be read back
+      // under its lock. The replay itself fails closed before any gate
+      // comparison: the thread keeps the recordless blocker, and verification
+      // still names GATE_MISMATCH.
+      replayClean: false,
+      apply(old) {
+        old.revision += 1;
+        old.updated_at = new Date(
+          Date.parse(old.updated_at) + 1_000,
+        ).toISOString();
+      },
+    },
+    {
+      label: "workflow outcome head substitution",
+      replayClean: false,
+      apply(_old, workflow) {
+        workflow.thread_resolutions[0].head_sha =
+          workflow.thread_resolutions[0].head_sha === "f".repeat(40)
+            ? "e".repeat(40)
+            : "f".repeat(40);
+      },
+    },
+  ];
+
+  for (const { label, replayClean, apply } of substitutions) {
+    const old = structuredClone(storedOld);
+    const workflow = structuredClone(storedWorkflow);
+    apply(old, workflow);
+    await atomicWriteCanonicalJson(oldPath, old);
+    await atomicWriteCanonicalJson(workflowPath, workflow);
+    try {
+      const terminal = await getAutonomousTerminal(
+        state.store,
+        currentPublication.reviewId,
+      );
+      if (replayClean) {
+        // The substitution leaves the replay untouched: the resolution proof
+        // still qualifies, so the projection stays MERGE_READY and the gate is
+        // reached. The gate was minted over the effective digest that binds
+        // the sorted historical references, so the substituted evidence fails
+        // verification below with GATE_MISMATCH.
+        assert.equal(terminal.status, "MERGE_READY", label);
+      } else {
+        // The substitution breaks the replay itself, so the terminal must
+        // name the exact recordless blocker before the gate is ever
+        // compared; verification then still fails with GATE_MISMATCH.
+        assert.equal(terminal.status, "CHANGES_REQUIRED", label);
+        assert.equal(
+          terminal.blocking_reason,
+          "THREAD_RESOLUTION_RECORD_MISSING",
+          label,
+        );
+      }
+      const rejected = await verifyPublicationGate(
+        state.store,
+        currentPublication.reviewId,
+        { clock: () => currentReadyAt + 40 },
+      );
+      assert.equal(rejected.valid, false, label);
+      assert.equal(rejected.reason, "GATE_MISMATCH", label);
+    } finally {
+      await atomicWriteCanonicalJson(oldPath, storedOld);
+      await atomicWriteCanonicalJson(workflowPath, storedWorkflow);
+    }
+  }
+});
+
+test("historical proof source lock contention propagates retryable PUBLICATION_BUSY", async (t) => {
+  const { state, oldPublication, currentPublication } =
+    await reachRepairAncestorProof(t);
+  const release = await acquireStateLock({
+    directory: path.join(state.store, "reviews", oldPublication.reviewId),
+    reviewId: oldPublication.reviewId,
+    domain: "publication",
+  });
+  try {
+    // The terminal projection holds the current publication lock and then
+    // needs the ancestor publication lock. A locked source must propagate
+    // retryable PUBLICATION_BUSY -- never read through it, and never degrade
+    // to a missing-record verdict the driver would misread as evidence.
+    await assert.rejects(
+      getAutonomousTerminal(state.store, currentPublication.reviewId),
+      (error) =>
+        error.code === "PUBLICATION_BUSY" &&
+        error.details?.retryable === true,
+    );
+  } finally {
+    await release();
+  }
+});
+
 async function reachCompletedPreResolvedPostReady(t) {
   const {
     state,
@@ -7776,4 +8938,1127 @@ test("a terminal workflow ledger cannot be tampered into a different claim", asy
     (error) => error.code === "WORKFLOW_STATE_INVALID",
   );
   await atomicWriteCanonicalJson(workflowPath, stored);
+});
+
+test("historical resolution proof mutation controls reject source latest observation evidence", async (t) => {
+  const {
+    state,
+    workflowPath,
+    oldPublication,
+    currentPublication,
+    currentRecordedReady,
+    currentReadyAt,
+  } = await reachRepairAncestorProof(t);
+  const oldPath = publicationFilePath(state, oldPublication.reviewId);
+  const currentPath = publicationFilePath(state, currentPublication.reviewId);
+
+  // Sanity: the untouched scenario clears everywhere, so every case below is
+  // blocked by its own source-observation mutation and not by a broken setup.
+  assert.equal(
+    (await getAutonomousTerminal(state.store, currentPublication.reviewId))
+      .status,
+    "MERGE_READY",
+  );
+
+  const storedOld = JSON.parse(await fsp.readFile(oldPath, "utf8"));
+  const storedCurrent = JSON.parse(await fsp.readFile(currentPath, "utf8"));
+  const storedWorkflow = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const baselineSourceThread =
+    storedOld.latest_observation.review_threads.threads[0];
+
+  // Each case mutates the source publication's latest persisted observation --
+  // the positive evidence the historical qualification must demand -- while
+  // every other link stays valid. Where the mutation itself moves the thread
+  // watermark, the bound source record and workflow outcome are updated to the
+  // moved watermark too, so the named conjunct is the only failing one.
+  const cases = [
+    {
+      label: "source latest observation cleared",
+      apply(old) {
+        old.latest_observation = null;
+      },
+    },
+    {
+      label: "source thread unresolved at the same watermark",
+      apply(old) {
+        old.latest_observation.review_threads.threads[0].is_resolved = false;
+      },
+    },
+    {
+      label: "source target thread absent",
+      apply(old) {
+        old.latest_observation.review_threads.threads = [];
+      },
+    },
+    {
+      label: "source review_threads collection incomplete",
+      apply(old) {
+        old.latest_observation.review_threads.collection.status =
+          "INCOMPLETE";
+      },
+    },
+    {
+      label: "source thread provenance incomplete",
+      apply(old) {
+        old.latest_observation.review_threads.threads[0].provenance_complete =
+          false;
+      },
+    },
+    {
+      label: "source thread comments pagination incomplete",
+      apply(old) {
+        old.latest_observation.review_threads.threads[0]
+          .comments_pagination_complete = false;
+      },
+    },
+    {
+      label: "source thread watermark changed",
+      apply(old) {
+        const thread =
+          old.latest_observation.review_threads.threads[0];
+        thread.comments.push({
+          id: "PRRC_WM_SRC",
+          database_id: 905,
+          created_at: iso(currentReadyAt - 300),
+          updated_at: iso(currentReadyAt - 300),
+          actor: codexActor(),
+          review: null,
+        });
+        thread.comment_count = thread.comments.length;
+      },
+    },
+    {
+      label: "source thread foreign participation",
+      // The source ledger's codex_actor is the policy fact that decides
+      // whether the source thread's comments are foreign, and it sits outside
+      // the watermark entirely: mutating it makes the source unsafe while
+      // every comment, count, record, outcome, and current thread stays
+      // byte-identical (prove below), so the source safety predicate is the
+      // only failing conjunct -- never an earlier watermark mismatch. The
+      // stored-ledger validator pins the persisted Codex result evidence
+      // (codex_result_history and the baseline candidate results) to the same
+      // policy actor, so the actor identity is rewritten consistently there
+      // too -- preserving every non-actor field -- and the source still loads
+      // as a valid ledger whose only change is the re-pinned policy actor.
+      apply(old) {
+        old.target.codex_actor = {
+          ...old.target.codex_actor,
+          id: CODEX_ACTOR_ID - 1,
+        };
+        for (const entry of old.codex_result_history ?? []) {
+          if (entry.actor?.id === CODEX_ACTOR_ID) {
+            entry.actor = { ...entry.actor, id: CODEX_ACTOR_ID - 1 };
+          }
+        }
+        for (const entry of old.codex_review_baseline.candidate_results ?? []) {
+          if (entry.actor?.id === CODEX_ACTOR_ID) {
+            entry.actor = { ...entry.actor, id: CODEX_ACTOR_ID - 1 };
+          }
+        }
+      },
+      prove: async (old, current, workflow) => {
+        const sourceThread = old.latest_observation.review_threads.threads[0];
+        assert.deepEqual(
+          sourceThread,
+          baselineSourceThread,
+          "source thread evidence must stay byte-identical",
+        );
+        assert.equal(
+          threadWatermark(sourceThread),
+          threadWatermark(baselineSourceThread),
+          "source thread watermark must not move",
+        );
+        assert.equal(
+          sourceThread.comment_count,
+          sourceThread.comments.length,
+          "source thread comment count unchanged",
+        );
+        assert.equal(
+          old.automatic_resolutions[0].thread_watermark,
+          storedOld.automatic_resolutions[0].thread_watermark,
+          "source record watermark unchanged",
+        );
+        assert.deepEqual(
+          workflow.thread_resolutions,
+          storedWorkflow.thread_resolutions,
+          "workflow outcomes unchanged",
+        );
+        assert.equal(
+          old.automatic_resolutions[0].thread_watermark,
+          workflow.thread_resolutions[0].thread_watermark,
+          "source record and outcome watermarks stay equal",
+        );
+        const currentThread =
+          current.latest_observation.review_threads.threads[0];
+        assert.equal(
+          threadWatermark(currentThread),
+          workflow.thread_resolutions[0].thread_watermark,
+          "current thread watermark still equals the outcome",
+        );
+        assert.equal(
+          current.target.codex_actor.id,
+          CODEX_ACTOR_ID,
+          "current actor policy untouched",
+        );
+        assert.equal(
+          old.latest_observation.review_threads.collection.status,
+          "COMPLETE",
+          "source observation collection still complete",
+        );
+        assert.equal(
+          old.authorization.head_sha,
+          storedOld.authorization.head_sha,
+          "source authorization head unchanged",
+        );
+      },
+    },
+  ];
+
+  for (const { label, apply, prove } of cases) {
+    const old = structuredClone(storedOld);
+    const current = structuredClone(storedCurrent);
+    const workflow = structuredClone(storedWorkflow);
+    apply(old, current, workflow);
+    await prove?.(old, current, workflow);
+    await atomicWriteCanonicalJson(oldPath, old);
+    await atomicWriteCanonicalJson(currentPath, current);
+    await atomicWriteCanonicalJson(workflowPath, workflow);
+    try {
+      const terminal = await getAutonomousTerminal(
+        state.store,
+        currentPublication.reviewId,
+      );
+      assert.equal(terminal.status, "CHANGES_REQUIRED", label);
+      assert.equal(
+        terminal.blocking_reason,
+        "THREAD_RESOLUTION_RECORD_MISSING",
+        label,
+      );
+      const summary = await getPublicationSummary(
+        state.store,
+        currentPublication.reviewId,
+      );
+      assert.equal(summary.status, "CHANGES_REQUIRED", label);
+      assert.equal(
+        summary.blocking_reason,
+        "THREAD_RESOLUTION_RECORD_MISSING",
+        label,
+      );
+      assert.notEqual(
+        summary.next_action,
+        "FINALIZE_PUBLICATION_GATE",
+        label,
+      );
+      await assert.rejects(
+        finalizePublicationGate(
+          state.store,
+          currentPublication.reviewId,
+          { expectedRevision: currentRecordedReady.revision },
+          { clock: () => currentReadyAt + 20 },
+        ),
+        (error) => error.code === "PUBLICATION_NOT_READY",
+        `${label}: manual gate`,
+      );
+    } finally {
+      await atomicWriteCanonicalJson(oldPath, storedOld);
+      await atomicWriteCanonicalJson(currentPath, storedCurrent);
+      await atomicWriteCanonicalJson(workflowPath, storedWorkflow);
+    }
+  }
+});
+
+test("historical resolution proof mutation controls reject source authorization mutations", async (t) => {
+  const {
+    state,
+    oldPublication,
+    currentPublication,
+    currentRecordedReady,
+    currentReadyAt,
+  } = await reachRepairAncestorProof(t);
+  const oldPath = publicationFilePath(state, oldPublication.reviewId);
+  const currentPath = publicationFilePath(state, currentPublication.reviewId);
+  // The repair-ancestor lifecycle authorizes every publication in
+  // EXPLICIT_ONLY mode, so the bound authorization artifact is a local gate.
+  const localGatePath = path.join(
+    state.store,
+    "reviews",
+    oldPublication.reviewId,
+    "gate.json",
+  );
+
+  // Sanity: the untouched scenario clears everywhere.
+  assert.equal(
+    (await getAutonomousTerminal(state.store, currentPublication.reviewId))
+      .status,
+    "MERGE_READY",
+  );
+
+  const storedOld = JSON.parse(await fsp.readFile(oldPath, "utf8"));
+  const storedCurrent = JSON.parse(await fsp.readFile(currentPath, "utf8"));
+  const storedArtifact = await fsp.readFile(localGatePath, "utf8");
+
+  const otherDigest = digest("mismatched source authorization");
+  const cases = [
+    {
+      label: "source authorization digest substituted in the ledger",
+      artifact: "keep",
+      apply(old) {
+        old.authorization.source_sha256 = otherDigest;
+      },
+    },
+    {
+      label: "source bound authorization artifact missing",
+      artifact: "remove",
+      apply() {},
+    },
+    {
+      label: "source bound authorization artifact corrupt",
+      artifact: "corrupt",
+      apply() {},
+    },
+    {
+      label: "source bound authorization artifact substituted",
+      // A different structurally valid local gate: the snapshot hash moves so
+      // the artifact bytes (and therefore its bound source_sha256) differ from
+      // what the ledger authorizes, while every other field -- review
+      // identity, heads, provider -- stays valid.
+      artifact: "substitute",
+      apply() {},
+    },
+  ];
+
+  for (const { label, artifact, apply } of cases) {
+    const old = structuredClone(storedOld);
+    const current = structuredClone(storedCurrent);
+    apply(old);
+    await atomicWriteCanonicalJson(oldPath, old);
+    await atomicWriteCanonicalJson(currentPath, current);
+    if (artifact === "remove") {
+      await fsp.rm(localGatePath);
+    } else if (artifact === "corrupt") {
+      await fsp.writeFile(localGatePath, "{ not canonical json", {
+        mode: 0o600,
+      });
+    } else if (artifact === "substitute") {
+      const substituted = JSON.parse(storedArtifact);
+      substituted.snapshot_hash = digest("substituted local gate snapshot");
+      await atomicWriteCanonicalJson(localGatePath, substituted);
+    }
+    try {
+      const terminal = await getAutonomousTerminal(
+        state.store,
+        currentPublication.reviewId,
+      );
+      assert.equal(terminal.status, "CHANGES_REQUIRED", label);
+      assert.equal(
+        terminal.blocking_reason,
+        "THREAD_RESOLUTION_RECORD_MISSING",
+        label,
+      );
+      const summary = await getPublicationSummary(
+        state.store,
+        currentPublication.reviewId,
+      );
+      assert.equal(summary.status, "CHANGES_REQUIRED", label);
+      assert.equal(
+        summary.blocking_reason,
+        "THREAD_RESOLUTION_RECORD_MISSING",
+        label,
+      );
+      assert.notEqual(
+        summary.next_action,
+        "FINALIZE_PUBLICATION_GATE",
+        label,
+      );
+      await assert.rejects(
+        finalizePublicationGate(
+          state.store,
+          currentPublication.reviewId,
+          { expectedRevision: currentRecordedReady.revision },
+          { clock: () => currentReadyAt + 20 },
+        ),
+        (error) => error.code === "PUBLICATION_NOT_READY",
+        `${label}: manual gate`,
+      );
+    } finally {
+      await atomicWriteCanonicalJson(oldPath, storedOld);
+      await atomicWriteCanonicalJson(currentPath, storedCurrent);
+      await fsp.writeFile(localGatePath, storedArtifact, {
+        mode: 0o600,
+      });
+    }
+  }
+});
+
+test("post-gate source authority substitution never verifies valid", async (t) => {
+  const {
+    state,
+    workflowPath,
+    oldPublication,
+    currentPublication,
+    currentRecordedReady,
+    currentReadyAt,
+  } = await reachRepairAncestorProof(t);
+  const oldPath = publicationFilePath(state, oldPublication.reviewId);
+  const localGatePath = path.join(
+    state.store,
+    "reviews",
+    oldPublication.reviewId,
+    "gate.json",
+  );
+
+  // The gate is minted over the historical proof; the effective digest binds
+  // the current resolution set plus the sorted historical references, each of
+  // which separately binds the source publication's own authorization digest.
+  await finalizePublicationGate(
+    state.store,
+    currentPublication.reviewId,
+    { expectedRevision: currentRecordedReady.revision },
+    { clock: () => currentReadyAt + 20 },
+  );
+  assert.equal(
+    (await verifyPublicationGate(state.store, currentPublication.reviewId, {
+      clock: () => currentReadyAt + 30,
+    })).valid,
+    true,
+  );
+
+  const storedOld = JSON.parse(await fsp.readFile(oldPath, "utf8"));
+  const storedWorkflow = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const storedArtifact = await fsp.readFile(localGatePath, "utf8");
+  const otherDigest = digest("post-gate source authorization");
+
+  const substitutions = [
+    {
+      label: "replay-invalid ledger authorization digest substitution",
+      replayClean: false,
+      async apply() {
+        const old = structuredClone(storedOld);
+        old.authorization.source_sha256 = otherDigest;
+        await atomicWriteCanonicalJson(oldPath, old);
+      },
+    },
+    {
+      label: "replay-invalid bound authorization artifact substitution",
+      replayClean: false,
+      async apply() {
+        const substituted = JSON.parse(storedArtifact);
+        substituted.snapshot_hash = digest("substituted post-gate snapshot");
+        await atomicWriteCanonicalJson(localGatePath, substituted);
+      },
+    },
+    {
+      label: "replay-clean consistent source authority substitution",
+      // The artifact and the ledger's authorization digest are replaced
+      // together, so the source still revalidates under its own lock and the
+      // proof still qualifies -- but the bound source_authorization_sha256 is
+      // a different digest, so the gate minted over the old authority fails
+      // verification with GATE_MISMATCH.
+      replayClean: true,
+      async apply() {
+        const old = structuredClone(storedOld);
+        const substituted = JSON.parse(storedArtifact);
+        substituted.snapshot_hash = digest("substituted consistent snapshot");
+        await atomicWriteCanonicalJson(localGatePath, substituted);
+        old.authorization.source_sha256 = sha256(
+          canonicalJsonBytes(substituted),
+        );
+        await atomicWriteCanonicalJson(oldPath, old);
+      },
+    },
+  ];
+
+  for (const { label, replayClean, apply } of substitutions) {
+    await apply();
+    try {
+      const terminal = await getAutonomousTerminal(
+        state.store,
+        currentPublication.reviewId,
+        { clock: () => currentReadyAt + 40 },
+      );
+      if (replayClean) {
+        // The substitution leaves the replay untouched: the resolution proof
+        // still qualifies, so the projection stays MERGE_READY and the gate is
+        // reached. The gate was minted over the effective digest that binds
+        // the sorted historical references, so the substituted authority fails
+        // verification below with GATE_MISMATCH.
+        assert.equal(terminal.status, "MERGE_READY", label);
+      } else {
+        // The substitution breaks the source revalidation itself, so the
+        // terminal must name the exact recordless blocker before the gate is
+        // ever compared; verification then still fails with GATE_MISMATCH.
+        assert.equal(terminal.status, "CHANGES_REQUIRED", label);
+        assert.equal(
+          terminal.blocking_reason,
+          "THREAD_RESOLUTION_RECORD_MISSING",
+          label,
+        );
+      }
+      const rejected = await verifyPublicationGate(
+        state.store,
+        currentPublication.reviewId,
+        { clock: () => currentReadyAt + 50 },
+      );
+      assert.equal(rejected.valid, false, label);
+      assert.equal(rejected.reason, "GATE_MISMATCH", label);
+    } finally {
+      await atomicWriteCanonicalJson(oldPath, storedOld);
+      await atomicWriteCanonicalJson(workflowPath, storedWorkflow);
+      await fsp.writeFile(localGatePath, storedArtifact, { mode: 0o600 });
+    }
+  }
+});
+
+test("withAutonomousTerminalLock retains the historical source lock and post-release mutations fail verification", async (t) => {
+  const {
+    state,
+    oldPublication,
+    currentPublication,
+    currentRecordedReady,
+    currentReadyAt,
+  } = await reachRepairAncestorProof(t);
+  const oldPath = publicationFilePath(state, oldPublication.reviewId);
+  const oldDirectory = path.join(
+    state.store,
+    "reviews",
+    oldPublication.reviewId,
+  );
+  const storedOld = JSON.parse(await fsp.readFile(oldPath, "utf8"));
+
+  // Mint the gate over the historical proof, then prove the authority path
+  // (the same retained-lock callback the workflow terminal write uses) keeps
+  // the source lock for the whole operation -- not merely through
+  // qualification -- and that a coordinated source mutation after release
+  // cannot escape the bound digest.
+  await finalizePublicationGate(
+    state.store,
+    currentPublication.reviewId,
+    { expectedRevision: currentRecordedReady.revision },
+    { clock: () => currentReadyAt + 20 },
+  );
+  assert.equal(
+    (await verifyPublicationGate(state.store, currentPublication.reviewId, {
+      clock: () => currentReadyAt + 30,
+    })).valid,
+    true,
+  );
+
+  await withAutonomousTerminalLock(
+    state.store,
+    currentPublication.reviewId,
+    async (current) => {
+      assert.equal(current.status, "MERGE_READY");
+      // While the callback runs the ancestor publication lock must still be
+      // held: a bounded acquisition attempt fails retryable PUBLICATION_BUSY,
+      // never reads through the locked source and never degrades to a
+      // missing-record verdict.
+      await assert.rejects(
+        acquireStateLock({
+          directory: oldDirectory,
+          reviewId: oldPublication.reviewId,
+          domain: "publication",
+          waitMs: 150,
+        }),
+        (error) =>
+          error.code === "PUBLICATION_BUSY" &&
+          error.details?.retryable === true,
+        "source lock retained through the authority-consuming callback",
+      );
+    },
+    { clock: () => currentReadyAt + 40 },
+  );
+
+  // After the callback releases the source lock, a coordinated mutation may
+  // proceed...
+  const mutated = structuredClone(storedOld);
+  mutated.automatic_resolutions[0].eligibility_sha256 = digest(
+    "post-gate source eligibility",
+  );
+  await atomicWriteCanonicalJson(oldPath, mutated);
+  try {
+    // ...but the gate minted over the stale proof must fail verification.
+    const rejected = await verifyPublicationGate(
+      state.store,
+      currentPublication.reviewId,
+      { clock: () => currentReadyAt + 50 },
+    );
+    assert.equal(rejected.valid, false);
+    assert.equal(rejected.reason, "GATE_MISMATCH");
+  } finally {
+    await atomicWriteCanonicalJson(oldPath, storedOld);
+  }
+});
+
+test("the workflow records its MERGE_READY terminal over the historical resolution proof", async (t) => {
+  const {
+    state,
+    workflow,
+    currentPublication,
+    currentReadyAt,
+  } = await reachRepairAncestorProof(t);
+
+  // The descendant is POST_READY with one fresh ready observation and no
+  // automatic-resolution record of its own; only the historical proof clears
+  // the terminal replay. The real terminal path must mint the workflow's
+  // MERGE_READY record over that proof and bind the exact digests the
+  // terminal projection revalidated.
+  const before = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(before.phase, "POST_READY");
+  assert.equal(before.terminal, null);
+
+  const projection = await getAutonomousTerminal(
+    state.store,
+    currentPublication.reviewId,
+    { clock: () => currentReadyAt + 20 },
+  );
+  assert.equal(projection.status, "MERGE_READY");
+  assert.equal(projection.blocking_reason, null);
+
+  const terminalWorkflow = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    before.revision,
+    { clock: () => currentReadyAt + 25 },
+  );
+  assert.equal(terminalWorkflow.status, "MERGE_READY");
+  assert.equal(terminalWorkflow.terminal.status, "MERGE_READY");
+  assert.equal(terminalWorkflow.terminal.publication_id, currentPublication.reviewId);
+  assert.equal(
+    terminalWorkflow.terminal.observation_revision,
+    projection.revision,
+  );
+  assert.equal(
+    terminalWorkflow.terminal.observation_sha256,
+    projection.observation_sha256,
+  );
+  assert.equal(
+    terminalWorkflow.terminal.publication_authorization_sha256,
+    projection.publication_authorization_sha256,
+  );
+  assert.equal(
+    terminalWorkflow.terminal.workflow_authorization_sha256,
+    projection.workflow_authorization_sha256,
+  );
+  assert.equal(
+    terminalWorkflow.terminal.resolution_sha256,
+    projection.resolution_sha256,
+  );
+
+  // The record survives a fresh workflow read, and the terminal publication
+  // stops accepting further snapshots.
+  const reread = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(reread.terminal.status, "MERGE_READY");
+  assert.equal(
+    reread.terminal.resolution_sha256,
+    projection.resolution_sha256,
+  );
+});
+
+test("the workflow terminal binds the freshly revalidated projection, not the earlier one", async (t) => {
+  const {
+    state,
+    workflow,
+    oldPublication,
+    currentPublication,
+    currentReadyAt,
+  } = await reachRepairAncestorProof(t);
+  const oldPath = publicationFilePath(state, oldPublication.reviewId);
+
+  // Precompute a replay-clean ancestor ledger mutation: the active record's
+  // eligibility digest is not part of any replay-validity link, but it is
+  // bound into the proof's record digest and source resolution digest, so it
+  // moves the effective resolution digest while every link that keeps the
+  // terminal projection MERGE_READY stays intact (exactly the substitution
+  // the post-gate tests prove replay-clean and digest-sensitive).
+  const storedOld = JSON.parse(await fsp.readFile(oldPath, "utf8"));
+  const mutatedOld = structuredClone(storedOld);
+  mutatedOld.automatic_resolutions[0].eligibility_sha256 = digest(
+    "terminal-toctou-eligibility",
+  );
+
+  const before = await getAutonomousWorkflow(state.store, workflow.workflow_id);
+  assert.equal(before.phase, "POST_READY");
+  assert.equal(before.terminal, null);
+
+  // The stable projection the advance reads first: computed over the original
+  // source, before the mutation lands anywhere.
+  const first = await getAutonomousTerminal(
+    state.store,
+    currentPublication.reviewId,
+    { clock: () => currentReadyAt + 20 },
+  );
+  assert.equal(first.status, "MERGE_READY");
+
+  // advanceRemoteWorkflow reads the provided clock exactly twice on the
+  // POST_READY terminal path: once at the first projection's entry and once
+  // at the retained-lock revalidation's entry. The second call happens while
+  // the current publication lock is held but before the ancestor publication
+  // lock has been acquired, so the source file is unlocked at exactly that
+  // seam: land the precomputed replay-clean mutation there with a direct
+  // synchronous canonical write (matching canonicalJsonBytes/0o600), and the
+  // revalidation reads the mutated source while the first projection never
+  // saw it. If the clock is ever called a different number of times the
+  // count assertion below fails the test instead of relying on an
+  // undocumented barrier.
+  let calls = 0;
+  const advanceClock = () => {
+    calls += 1;
+    if (calls === 2) {
+      writeFileSync(oldPath, canonicalJsonBytes(mutatedOld), { mode: 0o600 });
+    }
+    return currentReadyAt + 25;
+  };
+
+  let done;
+  try {
+    done = await advanceRemoteWorkflow(
+      state.store,
+      workflow.workflow_id,
+      before.revision,
+      { clock: advanceClock },
+    );
+    assert.equal(calls, 2, "the advance must read the clock exactly twice");
+
+    // The mutation landed between the first projection and the locked
+    // revalidation, so the freshly recomputed digest differs from the first
+    // while the current publication revision and status are unchanged.
+    const expected = await getAutonomousTerminal(
+      state.store,
+      currentPublication.reviewId,
+      { clock: () => currentReadyAt + 30 },
+    );
+    assert.equal(expected.status, "MERGE_READY");
+    assert.equal(expected.revision, first.revision);
+    assert.notEqual(
+      expected.resolution_sha256,
+      first.resolution_sha256,
+      "the eligibility mutation must move the effective resolution digest",
+    );
+
+    assert.equal(done.status, "MERGE_READY");
+    assert.equal(done.terminal.status, "MERGE_READY");
+    // The terminal record is the run's success claim and must bind what the
+    // locked revalidation actually proved -- the second digest -- never the
+    // stale first projection's.
+    assert.equal(
+      done.terminal.resolution_sha256,
+      expected.resolution_sha256,
+    );
+    assert.notEqual(done.terminal.resolution_sha256, first.resolution_sha256);
+    // Every other projection-derived bound field also comes from the fresh
+    // revalidation; the mutation leaves them unchanged, so they must still
+    // match it exactly.
+    assert.equal(done.terminal.observation_revision, expected.revision);
+    assert.equal(done.terminal.observation_sha256, expected.observation_sha256);
+    assert.equal(
+      done.terminal.publication_authorization_sha256,
+      expected.publication_authorization_sha256,
+    );
+    assert.equal(
+      done.terminal.workflow_authorization_sha256,
+      expected.workflow_authorization_sha256,
+    );
+    assert.equal(
+      done.terminal.ready_exception_sha256,
+      expected.ready_exception_sha256,
+    );
+    assert.deepEqual(
+      done.terminal.human_review_requirements,
+      expected.human_review_requirements,
+    );
+  } finally {
+    // Restore the source so no mutated evidence survives the test.
+    await atomicWriteCanonicalJson(oldPath, storedOld);
+  }
+});
+
+/**
+ * Assert the exact persisted review-thread shape the real recordGithubSnapshot
+ * writer requires and commits: exact counts, complete provenance and comment
+ * pagination, and an ancestry set covering exactly the referenced finding
+ * heads (threads rooted in the gated head itself need no entry).
+ */
+function assertWriterValidatedReviewThreads(
+  observation,
+  expectedThreadIds,
+  expectedFindingHeads,
+) {
+  const threads = observation.review_threads.threads;
+  assert.equal(
+    observation.review_threads.total_count,
+    threads.length,
+    "total_count must equal the persisted thread count",
+  );
+  assert.equal(
+    observation.review_threads.unresolved_count,
+    threads.filter((thread) => thread.is_resolved === false).length,
+    "unresolved_count must match the persisted threads",
+  );
+  assert.deepEqual(
+    threads.map((thread) => thread.id).sort(),
+    [...expectedThreadIds].sort(),
+    "persisted thread ids",
+  );
+  for (const thread of threads) {
+    assert.equal(thread.provenance_complete, true);
+    assert.equal(thread.comments_pagination_complete, true);
+  }
+  assert.deepEqual(
+    (observation.review_threads.ancestry ?? [])
+      .map((entry) => entry.finding_head_sha)
+      .sort(),
+    [...expectedFindingHeads].sort(),
+    "ancestry must cover exactly the referenced finding heads",
+  );
+}
+
+/**
+ * Append the server-owned record and workflow outcome that bind one
+ * additional historical resolution proof. The observation evidence itself is
+ * already committed by the real recordGithubSnapshot writer inside the setup
+ * (source and current observations carry the extra thread from the first
+ * writer-accepted snapshot onward); no public API can author a record or
+ * outcome for a synthetic action, so this narrow mutation is the only direct
+ * write left. Returns the persisted source ledger.
+ */
+async function appendHistoricalResolutionProof(
+  state,
+  {
+    workflowPath,
+    sourceReviewId,
+    headSha,
+    thread,
+    actionId,
+    recordedRevision,
+  },
+) {
+  const sourcePath = publicationFilePath(state, sourceReviewId);
+  const workflow = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const source = JSON.parse(await fsp.readFile(sourcePath, "utf8"));
+  const watermark = threadWatermark(thread);
+
+  const records = source.automatic_resolutions ?? [];
+  records.push(
+    resolutionRecord({
+      number: records.length + 1,
+      actionId,
+      threadId: thread.id,
+      watermark,
+      headSha,
+      recordedRevision,
+    }),
+  );
+  source.automatic_resolutions = records;
+  workflow.thread_resolutions.push({
+    number: workflow.thread_resolutions.length + 1,
+    thread_id: thread.id,
+    outcome: "RESOLVED",
+    action_id: actionId,
+    thread_watermark: watermark,
+    head_sha: headSha,
+    publication_review_id: sourceReviewId,
+    recorded_at: iso(Date.now()),
+  });
+
+  await atomicWriteCanonicalJson(sourcePath, source);
+  await atomicWriteCanonicalJson(workflowPath, workflow);
+  return source;
+}
+
+test("multi-proof non-ASCII thread IDs bind an insertion-order-independent terminal digest", async (t) => {
+  const {
+    state,
+    workflowPath,
+    currentPublication,
+    currentReadyAt,
+    extraProofResults,
+  } = await reachRepairAncestorProof(t, {
+    extraProofs: [
+      { threadId: "PRRT_α", actionId: "act-alpha", source: "old" },
+    ],
+  });
+  const currentPath = publicationFilePath(state, currentPublication.reviewId);
+
+  // A second resolved thread at the same source head whose ID is non-ASCII:
+  // the effective digest must order the two historical references by code
+  // unit, not by locale or by insertion order, so no environment locale and
+  // no input order can change the bound digest. The thread's observation
+  // evidence was committed by the real recordGithubSnapshot writer during the
+  // setup; only the server-owned record and workflow outcome were appended.
+  const secondThreadId = "PRRT_α";
+  const secondWatermark = extraProofResults[0].watermark;
+  assert.match(secondWatermark, /^[0-9a-f]{64}$/);
+
+  const storedWorkflow = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  const storedCurrent = JSON.parse(await fsp.readFile(currentPath, "utf8"));
+
+  const terminalDigest = async () => {
+    const terminal = await getAutonomousTerminal(
+      state.store,
+      currentPublication.reviewId,
+      { clock: () => currentReadyAt + 20 },
+    );
+    assert.equal(terminal.status, "MERGE_READY");
+    assert.deepEqual(terminal.blockers, []);
+    return terminal.resolution_sha256;
+  };
+
+  const first = await terminalDigest();
+  assert.match(first, /^[0-9a-f]{64}$/);
+
+  // Reversing the workflow's completed-outcome order (and renumbering the
+  // outcomes, as the binding requires) must not change the bound digest: the
+  // references are bound sorted by thread id in code-unit order, never by the
+  // order the outcomes were recorded.
+  const reversedWorkflow = structuredClone(storedWorkflow);
+  reversedWorkflow.thread_resolutions.reverse();
+  reversedWorkflow.thread_resolutions = reversedWorkflow.thread_resolutions.map(
+    (resolution, index) => ({ ...resolution, number: index + 1 }),
+  );
+  await atomicWriteCanonicalJson(workflowPath, reversedWorkflow);
+  try {
+    assert.equal(await terminalDigest(), first, "workflow outcome order");
+  } finally {
+    await atomicWriteCanonicalJson(workflowPath, storedWorkflow);
+  }
+
+  // Reversing the observation's thread order must not change it either.
+  const reversedCurrent = structuredClone(storedCurrent);
+  reversedCurrent.latest_observation.review_threads.threads.reverse();
+  await atomicWriteCanonicalJson(currentPath, reversedCurrent);
+  try {
+    assert.equal(await terminalDigest(), first, "observation thread order");
+  } finally {
+    await atomicWriteCanonicalJson(currentPath, storedCurrent);
+  }
+
+  // The second proof participates in the bound digest: dropping it from the
+  // current observation changes the digest.
+  const singleProof = structuredClone(storedCurrent);
+  singleProof.latest_observation.review_threads.threads =
+    singleProof.latest_observation.review_threads.threads.filter(
+      (thread) => thread.id !== secondThreadId,
+    );
+  await atomicWriteCanonicalJson(currentPath, singleProof);
+  try {
+    assert.notEqual(await terminalDigest(), first, "dropped proof");
+  } finally {
+    await atomicWriteCanonicalJson(currentPath, storedCurrent);
+  }
+});
+
+test("two distinct ancestor source publications exercise newest-to-oldest acquisition", async (t) => {
+  const {
+    state,
+    workflow,
+    workflowPath,
+    firstPublication,
+    oldPublication,
+    currentPublication,
+    currentRecordedReady,
+    currentReadyAt,
+    oldHead,
+    firstHead,
+  } = await reachRepairAncestorProof(t, {
+    extraProofs: [
+      { threadId: "PRRT_β", actionId: "act-beta", source: "first" },
+    ],
+  });
+  const oldPath = publicationFilePath(state, oldPublication.reviewId);
+  const firstPath = publicationFilePath(state, firstPublication.reviewId);
+
+  // The first publication is an older ancestor of the same workflow: its head
+  // precedes the old publication's head in the recorded attempt lineage. Both
+  // ancestors' observations were accepted by the real recordGithubSnapshot
+  // writer (PRRT_β resolved on the first publication, PRRT_1 on the old).
+  // The lineage is read from the persisted workflow ledger directly: after
+  // the synthetic second outcome is appended, the audit-validating reader
+  // intentionally refuses the ledger, so the raw recorded attempt order is
+  // the honest persisted fact to assert.
+  const attemptHeads = JSON.parse(
+    await fsp.readFile(workflowPath, "utf8"),
+  ).attempts.map((attempt) => attempt.head_sha);
+  assert.ok(attemptHeads.indexOf(firstHead) < attemptHeads.indexOf(oldHead));
+
+  // Sanity: both proofs qualify and the projection reaches MERGE_READY.
+  const terminal = await getAutonomousTerminal(
+    state.store,
+    currentPublication.reviewId,
+    { clock: () => currentReadyAt + 20 },
+  );
+  assert.equal(terminal.status, "MERGE_READY");
+  assert.deepEqual(terminal.blockers, []);
+  assert.match(terminal.resolution_sha256, /^[0-9a-f]{64}$/);
+
+  // Newest-to-oldest lock order. Hold the oldest ancestor's lock, start a
+  // consumer asynchronously, and poll with bounded competing acquisitions of
+  // the newest ancestor: while the consumer is blocked on the oldest lock it
+  // must already hold the newest one, so every competing newest acquisition
+  // returns retryable PUBLICATION_BUSY. A reversed implementation would
+  // attempt the oldest first, never reach the newest, and fail the poll.
+  let releaseOldest = null;
+  let consumer = null;
+  try {
+    releaseOldest = await acquireStateLock({
+      directory: path.join(state.store, "reviews", firstPublication.reviewId),
+      reviewId: firstPublication.reviewId,
+      domain: "publication",
+    });
+    consumer = getAutonomousTerminal(state.store, currentPublication.reviewId, {
+      clock: () => currentReadyAt + 20,
+    });
+    let newestHeldByConsumer = false;
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline && !newestHeldByConsumer) {
+      try {
+        const releaseProbe = await acquireStateLock({
+          directory: path.join(state.store, "reviews", oldPublication.reviewId),
+          reviewId: oldPublication.reviewId,
+          domain: "publication",
+          waitMs: 100,
+        });
+        // The consumer never held the newest source: either it has not
+        // reached the sources yet (retry) or the acquisition order is
+        // reversed (deadline expires below).
+        await releaseProbe();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      } catch (error) {
+        if (
+          error?.code === "PUBLICATION_BUSY" &&
+          error?.details?.retryable === true
+        ) {
+          newestHeldByConsumer = true;
+        } else {
+          throw error;
+        }
+      }
+    }
+    assert.equal(
+      newestHeldByConsumer,
+      true,
+      "consumer must acquire the newest ancestor source while blocked on the oldest",
+    );
+    await releaseOldest();
+    releaseOldest = null;
+    const result = await consumer;
+    consumer = null;
+    assert.equal(result.status, "MERGE_READY");
+    assert.deepEqual(result.blockers, []);
+  } finally {
+    if (releaseOldest != null) {
+      await releaseOldest();
+    }
+    if (consumer != null) {
+      await consumer.catch(() => {});
+    }
+  }
+
+  // The bound digest covers both sources: a post-gate mutation of either
+  // ancestor fails verification with GATE_MISMATCH.
+  await finalizePublicationGate(
+    state.store,
+    currentPublication.reviewId,
+    { expectedRevision: currentRecordedReady.revision },
+    { clock: () => currentReadyAt + 30 },
+  );
+  assert.equal(
+    (await verifyPublicationGate(state.store, currentPublication.reviewId, {
+      clock: () => currentReadyAt + 40,
+    })).valid,
+    true,
+  );
+
+  const storedOld = JSON.parse(await fsp.readFile(oldPath, "utf8"));
+  const storedFirst = JSON.parse(await fsp.readFile(firstPath, "utf8"));
+  for (const [label, sourcePath, storedSource] of [
+    ["oldest ancestor", firstPath, storedFirst],
+    ["newest ancestor", oldPath, storedOld],
+  ]) {
+    const mutated = structuredClone(storedSource);
+    mutated.automatic_resolutions[0].eligibility_sha256 = digest(
+      `post-gate ${label}`,
+    );
+    await atomicWriteCanonicalJson(sourcePath, mutated);
+    try {
+      const rejected = await verifyPublicationGate(
+        state.store,
+        currentPublication.reviewId,
+        { clock: () => currentReadyAt + 50 },
+      );
+      assert.equal(rejected.valid, false, label);
+      assert.equal(rejected.reason, "GATE_MISMATCH", label);
+    } finally {
+      await atomicWriteCanonicalJson(sourcePath, storedSource);
+    }
+  }
+
+  // Lock contention on either source publication propagates retryable
+  // PUBLICATION_BUSY: both ancestors are acquired and consumed under their
+  // own locks, never read from an unlocked snapshot.
+  for (const [label, reviewId] of [
+    ["oldest source", firstPublication.reviewId],
+    ["newest source", oldPublication.reviewId],
+  ]) {
+    const release = await acquireStateLock({
+      directory: path.join(state.store, "reviews", reviewId),
+      reviewId,
+      domain: "publication",
+    });
+    try {
+      await assert.rejects(
+        getAutonomousTerminal(state.store, currentPublication.reviewId),
+        (error) =>
+          error.code === "PUBLICATION_BUSY" &&
+          error.details?.retryable === true,
+        `${label} lock contention`,
+      );
+    } finally {
+      await release();
+    }
+  }
+});
+
+test("two historical proofs from one source publication retain one source lock", async (t) => {
+  const { state, oldPublication, currentPublication, currentReadyAt } =
+    await reachRepairAncestorProof(t, {
+      extraProofs: [
+        { threadId: "PRRT_α", actionId: "act-alpha", source: "old" },
+      ],
+    });
+
+  // Two outcomes name the same source publication, so the effective context
+  // must acquire that one source lock exactly once and retain it through the
+  // operation callback: a competing acquisition inside the retained callback
+  // is retryable PUBLICATION_BUSY. A second self-acquisition would block the
+  // consumer on its own lock and time it out, so the MERGE_READY assertion
+  // below catches that regression too.
+  const terminal = await withAutonomousTerminalLock(
+    state.store,
+    currentPublication.reviewId,
+    async (current) => {
+      assert.equal(current.status, "MERGE_READY");
+      assert.deepEqual(current.blockers, []);
+      await assert.rejects(
+        acquireStateLock({
+          directory: path.join(state.store, "reviews", oldPublication.reviewId),
+          reviewId: oldPublication.reviewId,
+          domain: "publication",
+          waitMs: 200,
+        }),
+        (error) =>
+          error.code === "PUBLICATION_BUSY" &&
+          error.details?.retryable === true,
+        "competing acquisition of the same source inside the retained callback",
+      );
+      return current;
+    },
+    { clock: () => currentReadyAt + 20 },
+  );
+  assert.equal(terminal.status, "MERGE_READY");
 });

@@ -164,6 +164,22 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
         fail("WORKFLOW_STATE_INVALID", "remote attempt head is invalid");
       }
     }
+    // Every head this workflow recorded as an attempt, oldest first. The
+    // ordered lineage joins a historical resolution outcome's head to the
+    // current authorization head, so entries are validated to the same shape
+    // the workflow ledger records and projected in their stored order.
+    const attemptHistory = Array.isArray(workflow.attempts)
+      ? workflow.attempts
+      : [];
+    for (const [index, attempt] of attemptHistory.entries()) {
+      if (
+        !Number.isSafeInteger(attempt?.number) ||
+        attempt.number !== index + 1 ||
+        !SHA_RE.test(attempt?.head_sha ?? "")
+      ) {
+        fail("WORKFLOW_STATE_INVALID", "workflow attempt history entry is invalid");
+      }
+    }
     // Every finding review this workflow has recorded as addressed, and the
     // commits that addressed it. The eligibility predicate joins a thread's
     // root review against these, so the identity fields are validated to the
@@ -307,6 +323,7 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
       status: workflow.status,
       phase: workflow.phase,
       attempt_head_shas: attempts.map((attempt) => attempt.head_sha),
+      attempt_head_history: attemptHistory.map((attempt) => attempt.head_sha),
       addressed_findings: addressedFindings.map((record) => ({
         findings_review: {
           result_id: record.findings_review.result_id,
