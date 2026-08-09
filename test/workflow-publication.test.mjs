@@ -6928,7 +6928,28 @@ test("an unresolve refresh preserves every unaffected active proof", () => {
   );
   assert.equal(advancedTargetEvidence.observation_refreshed, true);
   assert.deepEqual(advancedTargetEvidence.concurrent_invalidations, []);
+  assert.equal(advancedTargetEvidence.target_unsafe, false);
   assert.deepEqual(advancedTargetEvidence.blockers, []);
+
+  const unsafeAdvancedTarget = structuredClone(advancedTarget);
+  unsafeAdvancedTarget.latest_observation.review_threads.threads[0].comments.push(
+    {
+      id: "PRRC_TARGET_HUMAN",
+      database_id: 1_000,
+      created_at: iso(observedAt + 2),
+      updated_at: iso(observedAt + 2),
+      actor: { id: 777, type: "User", login: "participant" },
+      review: null,
+    },
+  );
+  const unsafeTargetEvidence = projectUnresolveCompletionEvidence(
+    unsafeAdvancedTarget,
+    binding,
+    target,
+  );
+  assert.equal(unsafeTargetEvidence.observation_refreshed, true);
+  assert.equal(unsafeTargetEvidence.target_unsafe, true);
+  assert.deepEqual(unsafeTargetEvidence.blockers, []);
 
   const missingInvalidationEvidence = structuredClone(advancedTarget);
   missingInvalidationEvidence.latest_observation.review_threads.threads[0].comments =

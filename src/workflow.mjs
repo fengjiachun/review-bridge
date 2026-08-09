@@ -4798,6 +4798,10 @@ export async function completeWorkflowAction(
         },
         async (evidence) => {
           const lifecycleRecorded = evidence.lifecycle_recorded;
+          const unsafe =
+            lifecycleRecorded &&
+            (action.target.reason === "THREAD_RESOLUTION_UNSAFE" ||
+              evidence.target_unsafe === true);
           if (!lifecycleRecorded && evidence.terminal == null) {
             fail(
               "WORKFLOW_UNRESOLVE_RECORD_MISSING",
@@ -4822,10 +4826,7 @@ export async function completeWorkflowAction(
             await saveActionMutation(
               paths,
               workflow,
-              lifecycleRecorded &&
-                action.target.reason === "THREAD_RESOLUTION_UNSAFE"
-                ? "WORKFLOW_PAUSED"
-                : "ACTION_COMPLETED",
+              unsafe ? "WORKFLOW_PAUSED" : "ACTION_COMPLETED",
               async (next) => {
                 next.active_action.completed_at = now();
                 if (lifecycleRecorded) {
@@ -4836,7 +4837,9 @@ export async function completeWorkflowAction(
                     action_id: action.action_id,
                     prior_watermark: action.target.prior_watermark,
                     new_watermark: action.target.new_watermark,
-                    reason: action.target.reason,
+                    reason: unsafe
+                      ? "THREAD_RESOLUTION_UNSAFE"
+                      : action.target.reason,
                     publication_review_id: action.target.review_id,
                     findings_review: action.target.findings_review,
                     recorded_at: now(),
@@ -4845,9 +4848,7 @@ export async function completeWorkflowAction(
                 next.active_action = null;
                 if (!lifecycleRecorded) {
                   next.phase = "WAIT_PUBLICATION";
-                } else if (
-                  action.target.reason === "THREAD_RESOLUTION_UNSAFE"
-                ) {
+                } else if (unsafe) {
                   next.status = "PAUSED";
                   next.phase = "PAUSED_HUMAN";
                   next.pause = {
@@ -4860,6 +4861,8 @@ export async function completeWorkflowAction(
                       prior_watermark: action.target.prior_watermark,
                       new_watermark: action.target.new_watermark,
                       follow_up_comments: action.target.follow_up_comments,
+                      late_foreign_participation:
+                        evidence.target_unsafe === true,
                     }),
                     resume_phase: "ENSURE_DRAFT_FOR_REPAIR",
                     review_id: workflow.current_review?.review_id ?? null,

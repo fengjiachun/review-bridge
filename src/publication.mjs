@@ -6045,6 +6045,7 @@ export function projectUnresolveCompletionEvidence(
   const observation = ledger.latest_observation;
   const blockers = [];
   const concurrentInvalidations = [];
+  let targetUnsafe = false;
   if (lifecycleRecorded && observation != null) {
     const eventAt = Date.parse(unresolved.at);
     if (
@@ -6098,6 +6099,9 @@ export function projectUnresolveCompletionEvidence(
     } else if (!preservesInvalidation) {
       targetReason = "THREAD_INVALIDATION_EVIDENCE_MISSING";
     }
+    targetUnsafe =
+      targetReason == null &&
+      threadHasForeignParticipation(ledger, binding, targetThread);
     if (targetReason != null) {
       blockers.push({
         reason: targetReason,
@@ -6170,6 +6174,8 @@ export function projectUnresolveCompletionEvidence(
     observation_refreshed:
       lifecycleRecorded && observation != null && blockers.length === 0,
     concurrent_invalidations: concurrentInvalidations,
+    target_unsafe:
+      lifecycleRecorded && observation != null && targetUnsafe === true,
     blockers,
   };
 }
