@@ -6012,6 +6012,14 @@ export async function getPublication(storeRoot, reviewId) {
   return ledger;
 }
 
+function completedUnresolveRecordIds(binding, reviewId) {
+  return new Set(
+    (binding?.thread_unresolutions ?? [])
+      .filter((entry) => entry.publication_review_id === reviewId)
+      .map((entry) => entry.record_id),
+  );
+}
+
 // The evidence a compensating-unresolve action must preserve before the
 // workflow may advance to a new head. The invalidated record itself is
 // deliberately absent from the active frontier; every other active record
@@ -6036,6 +6044,7 @@ export function projectUnresolveCompletionEvidence(
   const lifecycleRecorded = invalidated != null && unresolved != null;
   const observation = ledger.latest_observation;
   const blockers = [];
+  const concurrentInvalidations = [];
   if (lifecycleRecorded && observation != null) {
     const eventAt = Date.parse(unresolved.at);
     if (
@@ -6049,11 +6058,16 @@ export function projectUnresolveCompletionEvidence(
       });
     }
     const frontier = resolutionFrontier(ledger);
+    const completedUnresolves = completedUnresolveRecordIds(
+      binding,
+      ledger.review_id,
+    );
     for (const blocker of frontier.blockers) {
       const expectedInvalidation =
         blocker.reason === "THREAD_RESOLUTION_INVALIDATED" &&
-        blocker.record?.action_id === recordId &&
-        blocker.thread_id === invalidated.thread_id;
+        ((blocker.record?.action_id === recordId &&
+          blocker.thread_id === invalidated.thread_id) ||
+          completedUnresolves.has(blocker.record?.action_id));
       if (!expectedInvalidation) {
         blockers.push({
           reason: blocker.reason,
@@ -6073,16 +6087,34 @@ export function projectUnresolveCompletionEvidence(
         reason = "THREAD_COLLECTION_INCOMPLETE";
       } else if (thread == null) {
         reason = "THREAD_MISSING";
-      } else if (thread.is_resolved !== true) {
-        reason = "THREAD_UNRESOLVED";
       } else if (thread.provenance_complete !== true) {
         reason = "THREAD_PROVENANCE_INCOMPLETE";
       } else if (thread.comments_pagination_complete !== true) {
         reason = "THREAD_PAGINATION_INCOMPLETE";
-      } else if (threadWatermark(thread) !== record.thread_watermark) {
-        reason = "THREAD_WATERMARK_MISMATCH";
-      } else if (threadHasForeignParticipation(ledger, binding, thread)) {
-        reason = "THREAD_RESOLUTION_UNSAFE";
+      } else {
+        const watermarkMatches =
+          threadWatermark(thread) === record.thread_watermark;
+        const foreignParticipation = threadHasForeignParticipation(
+          ledger,
+          binding,
+          thread,
+        );
+        if (
+          thread.is_resolved !== true ||
+          !watermarkMatches ||
+          foreignParticipation
+        ) {
+          concurrentInvalidations.push({
+            reason:
+              thread.is_resolved !== true
+                ? "THREAD_UNRESOLVED"
+                : !watermarkMatches
+                  ? "THREAD_WATERMARK_MISMATCH"
+                  : "THREAD_RESOLUTION_UNSAFE",
+            thread_id: threadId,
+            record_id: record.action_id,
+          });
+        }
       }
       if (reason != null) {
         blockers.push({
@@ -6098,6 +6130,7 @@ export function projectUnresolveCompletionEvidence(
     lifecycle_recorded: lifecycleRecorded,
     observation_refreshed:
       lifecycleRecorded && observation != null && blockers.length === 0,
+    concurrent_invalidations: concurrentInvalidations,
     blockers,
   };
 }
@@ -7050,14 +7083,23 @@ function invalidatedResolutionPlan(ledger, binding) {
     };
   }
   const frontier = resolutionFrontier(ledger);
-  if (frontier.blockers.length > 0) {
+  const completedUnresolves = completedUnresolveRecordIds(
+    binding,
+    ledger.review_id,
+  );
+  const blockingFrontier = frontier.blockers.filter(
+    (blocker) =>
+      blocker.reason !== "THREAD_RESOLUTION_INVALIDATED" ||
+      !completedUnresolves.has(blocker.record?.action_id),
+  );
+  if (blockingFrontier.length > 0) {
     return {
       review_id: ledger.review_id,
       revision: ledger.revision,
       workflow_id: ledger.workflow_id,
       head_sha: headSha,
       actionable: false,
-      reason: frontier.blockers[0].reason,
+      reason: blockingFrontier[0].reason,
     };
   }
   const threads = new Map(

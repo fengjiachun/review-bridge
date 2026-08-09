@@ -178,6 +178,10 @@ gap returns the ready pull request to draft before any repair.
     and `UNRESOLVED_FOR_REPAIR` events and clears the stale observation. Then
     collect and record a fresh complete GitHub snapshot before
     `complete_workflow_action`, restoring proof for every unaffected thread.
+    If that snapshot shows another workflow-owned resolution was invalidated
+    concurrently, completion stays in `RESOLVE_CODEX_THREADS`; repeat the same
+    plan, observe, lifecycle, refresh, and completion sequence until every
+    invalidated record is drained. Only then enter the return-to-draft repair.
     If the publication becomes terminal while
     the unresolve is in flight, it accepts no lifecycle write; complete the
     observed action without one and let the remote wait pause the terminal

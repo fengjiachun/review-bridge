@@ -4794,6 +4794,12 @@ export async function completeWorkflowAction(
                     action_id: action.action_id,
                     paused_at: now(),
                   };
+                } else if (evidence.concurrent_invalidations.length > 0) {
+                  // Drain every invalidated workflow-owned record before a
+                  // repair head can freeze this source publication. The next
+                  // plan ignores only lifecycle blockers whose compensating
+                  // unresolve is already complete in this workflow.
+                  next.phase = "RESOLVE_CODEX_THREADS";
                 } else {
                   // Recording the lifecycle clears the publication
                   // observation, including its draft flag. Re-enter repair

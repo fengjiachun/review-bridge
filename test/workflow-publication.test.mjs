@@ -1211,7 +1211,14 @@ async function reachObservedThreadResolution(
   // A fresh observation carries the reply as a thread comment by the human
   // operator account. Condition 7 admits exactly that recorded comment, so
   // the thread stays eligible; the same comment unrecorded would refuse.
-  const repliedAt = Date.now();
+  const repliedPublication = await getPublication(
+    state.store,
+    second.reviewId,
+  );
+  const repliedAt = Math.max(
+    Date.now(),
+    Date.parse(repliedPublication.created_at) + 1_000,
+  );
   const repliedObservation = draftObservation(state, secondHead, {
     at: repliedAt,
     requestId: 100,
@@ -6709,6 +6716,7 @@ test("an unresolve refresh preserves every unaffected active proof", () => {
   targetThread.is_resolved = false;
   payload.review_threads.threads = [targetThread, unaffectedThread];
   const ledger = {
+    review_id: "rb-test-unresolve-refresh",
     terminal: null,
     target: { codex_actor: codexActor() },
     latest_observation: payload,
@@ -6747,6 +6755,7 @@ test("an unresolve refresh preserves every unaffected active proof", () => {
     target,
   );
   assert.equal(complete.observation_refreshed, true);
+  assert.deepEqual(complete.concurrent_invalidations, []);
   assert.deepEqual(complete.blockers, []);
 
   const incomplete = structuredClone(ledger);
@@ -6765,6 +6774,70 @@ test("an unresolve refresh preserves every unaffected active proof", () => {
       record_id: unaffectedRecord.action_id,
     },
   ]);
+
+  const concurrent = structuredClone(ledger);
+  concurrent.latest_observation.review_threads.threads[1].comments[0]
+    .updated_at = iso(observedAt + 1);
+  const queued = projectUnresolveCompletionEvidence(
+    concurrent,
+    binding,
+    target,
+  );
+  assert.equal(queued.observation_refreshed, true);
+  assert.deepEqual(queued.blockers, []);
+  assert.deepEqual(queued.concurrent_invalidations, [
+    {
+      reason: "THREAD_WATERMARK_MISMATCH",
+      thread_id: unaffectedThread.id,
+      record_id: unaffectedRecord.action_id,
+    },
+  ]);
+
+  const drained = structuredClone(concurrent);
+  const secondWatermark = threadWatermark(
+    drained.latest_observation.review_threads.threads[1],
+  );
+  drained.resolution_lifecycle.push(
+    {
+      kind: "INVALIDATED",
+      number: 3,
+      thread_id: unaffectedThread.id,
+      record_id: unaffectedRecord.action_id,
+      prior_watermark: unaffectedRecord.thread_watermark,
+      new_watermark: secondWatermark,
+      follow_up_comments: [],
+      reason: "PINNED_CODEX_FOLLOW_UP",
+      at: iso(eventAt),
+    },
+    {
+      kind: "UNRESOLVED_FOR_REPAIR",
+      number: 4,
+      thread_id: unaffectedThread.id,
+      record_id: unaffectedRecord.action_id,
+      action_id: "unresolve-unaffected",
+      at: iso(eventAt),
+    },
+  );
+  const afterSecond = projectUnresolveCompletionEvidence(
+    drained,
+    {
+      thread_replies: [],
+      thread_unresolutions: [
+        {
+          publication_review_id: ledger.review_id,
+          record_id: targetRecord.action_id,
+        },
+      ],
+    },
+    {
+      recordId: unaffectedRecord.action_id,
+      actionId: "unresolve-unaffected",
+      newWatermark: secondWatermark,
+    },
+  );
+  assert.equal(afterSecond.observation_refreshed, true);
+  assert.deepEqual(afterSecond.blockers, []);
+  assert.deepEqual(afterSecond.concurrent_invalidations, []);
 
   const stale = structuredClone(ledger);
   stale.latest_observation.pull_request.collection.sources[0].collected_at =
