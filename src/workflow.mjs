@@ -3214,11 +3214,10 @@ export async function recordWorkflowHead(
         workflow.current_publication.review_id,
       );
       if (
-        currentFindings.findings_review != null &&
-        (currentFindings.workflow_id !== workflow.workflow_id ||
-          currentFindings.head_sha !== workflow.current_head_sha ||
-          currentFindings.revision !==
-            workflow.current_publication.awaiting_revision)
+        currentFindings.workflow_id !== workflow.workflow_id ||
+        currentFindings.head_sha !== workflow.current_head_sha ||
+        currentFindings.revision !==
+          workflow.current_publication.awaiting_revision
       ) {
         fail(
           "WORKFLOW_FINDINGS_UNIDENTIFIED",
