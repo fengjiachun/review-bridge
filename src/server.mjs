@@ -3,6 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { threadActionExecutingProof } from "./server-input.mjs";
 import {
   defaultStoreRoot,
   exportHumanArbitration,
@@ -519,13 +520,7 @@ if (role === "author") {
         input.expected_revision,
         input.action_id,
         input.thread_id != null
-          ? {
-              thread_id: input.thread_id,
-              is_resolved: input.is_resolved,
-              ...(input.thread_watermark == null
-                ? {}
-                : { thread_watermark: input.thread_watermark }),
-            }
+          ? threadActionExecutingProof(input)
           : input.pr_number != null
             ? {
                 repository_id: input.pr_repository_id,
