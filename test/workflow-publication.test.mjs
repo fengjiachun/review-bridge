@@ -1916,9 +1916,11 @@ test("an addressed finding's thread becomes eligible in the next publication's p
   const recoveredStore = path.join(state.root, "recovered-unresolve-store");
   await fsp.cp(state.store, recoveredStore, { recursive: true });
   const beforeRecovery = await getPublication(recoveredStore, second.reviewId);
-  const recoveryObservation = structuredClone(beforeRecovery.latest_observation);
-  retimeObservation(recoveryObservation, movedAt + 500);
-  const recoveryThread = recoveryObservation.review_threads.threads[0];
+  const postObservedRecovery = structuredClone(
+    beforeRecovery.latest_observation,
+  );
+  retimeObservation(postObservedRecovery, movedAt + 500);
+  const recoveryThread = postObservedRecovery.review_threads.threads[0];
   recoveryThread.is_resolved = false;
   recoveryThread.comment_count += 1;
   recoveryThread.comments.push({
@@ -1934,7 +1936,7 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     second.reviewId,
     {
       expectedRevision: beforeRecovery.revision,
-      observation: recoveryObservation,
+      observation: postObservedRecovery,
     },
     { clock: () => movedAt + 510 },
   );
