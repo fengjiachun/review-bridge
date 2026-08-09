@@ -516,13 +516,22 @@ const ACTION_KIND_SPECS = {
         proof.repository_id !== action.target.repository_id ||
         proof.pr_number !== action.target.pr_number ||
         proof.thread_id !== action.target.thread_id ||
-        proof.thread_watermark !== action.target.new_watermark ||
         typeof proof.is_resolved !== "boolean"
       ) {
         fail(
           "WORKFLOW_ACTION_INVALID",
           "the unresolve pre-read must bind the exact pull request, thread, " +
             "and invalidated watermark",
+        );
+      }
+      if (proof.thread_watermark !== action.target.new_watermark) {
+        fail(
+          "THREAD_RESOLUTION_NOT_INVALIDATED",
+          "the live thread no longer matches the planned invalidation",
+          {
+            planned_watermark: action.target.new_watermark,
+            live_watermark: proof.thread_watermark,
+          },
         );
       }
     },
@@ -3998,47 +4007,50 @@ export async function markWorkflowActionExecuting(
     // workflow ledger and can move under them between planning and the call.
     // This is the last durable point before the external write, so it is
     // where that evidence has to be read again.
+    const abandon = async (error) => {
+      // Only the checkpoint's own refusal drops an intent, and only
+      // before the external write: PLANNED is what makes "nothing has
+      // happened yet" structural rather than something a caller asserts.
+      if (error?.code !== spec.abandonOnCode) {
+        throw error;
+      }
+      // Leaving a refused intent in place is what would turn this into a
+      // stop with no exit: its phase can neither advance, record a head,
+      // nor plan again while an action is active, so cancelling the whole
+      // workflow would be the only way out of a guard that is working
+      // exactly as intended.
+      const discarded = await saveActionMutation(
+        paths,
+        workflow,
+        "ACTION_ABANDONED",
+        async (next) => {
+          next.active_action = null;
+          // A kind may send the dropped intent somewhere other than its
+          // default when the evidence in front of it says the default is
+          // unsafe -- see MARK_PR_READY and a visible pull request.
+          next.phase =
+            spec.abandonPhaseForProof?.(executingProof, error) ??
+            spec.abandonPhase;
+        },
+        {
+          abandoned_action_id: action.action_id,
+          abandoned_kind: action.kind,
+          reason_code: error?.code ?? null,
+        },
+      );
+      error.details = {
+        ...(error?.details ?? {}),
+        action_abandoned: action.action_id,
+        workflow_revision: discarded.revision,
+        phase: discarded.phase,
+      };
+      throw error;
+    };
     const revalidate = async () => {
       try {
         return await spec.revalidate(storeRoot, action);
       } catch (error) {
-        // Only the checkpoint's own refusal drops an intent, and only
-        // before the external write: PLANNED is what makes "nothing has
-        // happened yet" structural rather than something a caller asserts.
-        if (error?.code !== spec.abandonOnCode) {
-          throw error;
-        }
-        // Leaving a refused intent in place is what would turn this into a
-        // stop with no exit: its phase can neither advance, record a head,
-        // nor plan again while an action is active, so cancelling the whole
-        // workflow would be the only way out of a guard that is working
-        // exactly as intended.
-        const discarded = await saveActionMutation(
-          paths,
-          workflow,
-          "ACTION_ABANDONED",
-          async (next) => {
-            next.active_action = null;
-            // A kind may send the dropped intent somewhere other than its
-            // default when the evidence in front of it says the default is
-            // unsafe -- see MARK_PR_READY and a visible pull request.
-            next.phase =
-              spec.abandonPhaseForProof?.(executingProof, error) ??
-              spec.abandonPhase;
-          },
-          {
-            abandoned_action_id: action.action_id,
-            abandoned_kind: action.kind,
-            reason_code: error?.code ?? null,
-          },
-        );
-        error.details = {
-          ...(error?.details ?? {}),
-          action_abandoned: action.action_id,
-          workflow_revision: discarded.revision,
-          phase: discarded.phase,
-        };
-        throw error;
+        await abandon(error);
       }
     };
     let clearedRevision = null;
@@ -4046,7 +4058,11 @@ export async function markWorkflowActionExecuting(
       clearedRevision = await revalidate();
     }
     if (spec.validateExecutingProof) {
-      spec.validateExecutingProof(action, executingProof, workflow);
+      try {
+        spec.validateExecutingProof(action, executingProof, workflow);
+      } catch (error) {
+        await abandon(error);
+      }
       if (spec.exposedByProof?.(executingProof, workflow)) {
         const routed = await saveActionMutation(
           paths,

@@ -1869,6 +1869,49 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       .active_action,
     null,
   );
+  // The provider pre-read may be newer than the persisted publication even
+  // after that publication passed revalidation. Treat its moved watermark as
+  // the same stale intent: no provider write happened, so abandon and wait for
+  // a snapshot that can produce the replacement plan.
+  const liveAdvancedStore = path.join(
+    state.root,
+    "live-advanced-unresolve-store",
+  );
+  await fsp.cp(state.store, liveAdvancedStore, { recursive: true });
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      liveAdvancedStore,
+      workflow.workflow_id,
+      unresolvePlanned.workflow.revision,
+      unresolvePlanned.action.action_id,
+      {
+        repository_id: REPOSITORY_ID,
+        pr_number: PR_NUMBER,
+        thread_id: "PRRT_1",
+        thread_watermark: advancedPlan.new_watermark,
+        is_resolved: true,
+      },
+    ),
+    (error) => {
+      assert.equal(error.code, "THREAD_RESOLUTION_NOT_INVALIDATED");
+      assert.equal(
+        error.details.action_abandoned,
+        unresolvePlanned.action.action_id,
+      );
+      assert.equal(error.details.phase, "WAIT_PUBLICATION");
+      assert.equal(
+        error.details.planned_watermark,
+        invalidationPlan.new_watermark,
+      );
+      assert.equal(error.details.live_watermark, advancedPlan.new_watermark);
+      return true;
+    },
+  );
+  assert.equal(
+    (await getAutonomousWorkflow(liveAdvancedStore, workflow.workflow_id))
+      .active_action,
+    null,
+  );
   const unresolveExecuting = await markWorkflowActionExecuting(
     state.store,
     workflow.workflow_id,
