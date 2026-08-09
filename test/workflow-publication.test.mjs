@@ -6751,6 +6751,16 @@ test("an unresolve refresh preserves every unaffected active proof", () => {
     headSha,
     recordedRevision: 4,
   });
+  targetThread.comment_count = 2;
+  targetThread.comments.push({
+    id: "PRRC_target_follow_up",
+    database_id: 902,
+    created_at: iso(observedAt - 100),
+    updated_at: iso(observedAt - 100),
+    actor: codexActor(),
+    review: null,
+  });
+  const targetNewWatermark = threadWatermark(targetThread);
   const payload = observation({
     at: observedAt,
     baseSha: "a".repeat(40),
@@ -6776,7 +6786,7 @@ test("an unresolve refresh preserves every unaffected active proof", () => {
         thread_id: targetThread.id,
         record_id: targetRecord.action_id,
         prior_watermark: targetRecord.thread_watermark,
-        new_watermark: digest("target follow-up"),
+        new_watermark: targetNewWatermark,
         follow_up_comments: [],
         reason: "PINNED_CODEX_FOLLOW_UP",
         at: iso(eventAt),
@@ -6795,7 +6805,7 @@ test("an unresolve refresh preserves every unaffected active proof", () => {
   const target = {
     recordId: targetRecord.action_id,
     actionId: "unresolve-target",
-    newWatermark: digest("target follow-up"),
+    newWatermark: targetNewWatermark,
   };
   const complete = projectUnresolveCompletionEvidence(
     ledger,
@@ -6805,6 +6815,22 @@ test("an unresolve refresh preserves every unaffected active proof", () => {
   assert.equal(complete.observation_refreshed, true);
   assert.deepEqual(complete.concurrent_invalidations, []);
   assert.deepEqual(complete.blockers, []);
+
+  const resolvedTarget = structuredClone(ledger);
+  resolvedTarget.latest_observation.review_threads.threads[0].is_resolved = true;
+  const targetBlocked = projectUnresolveCompletionEvidence(
+    resolvedTarget,
+    binding,
+    target,
+  );
+  assert.equal(targetBlocked.observation_refreshed, false);
+  assert.deepEqual(targetBlocked.blockers, [
+    {
+      reason: "THREAD_RESOLVED",
+      thread_id: targetThread.id,
+      record_id: targetRecord.action_id,
+    },
+  ]);
 
   const incomplete = structuredClone(ledger);
   incomplete.latest_observation.review_threads.threads[1]

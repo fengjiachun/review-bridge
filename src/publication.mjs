@@ -6062,6 +6062,32 @@ export function projectUnresolveCompletionEvidence(
       binding,
       ledger.review_id,
     );
+    const reviewThreads = observation.review_threads;
+    const threads = new Map(
+      (reviewThreads?.threads ?? []).map((thread) => [thread.id, thread]),
+    );
+    const targetThread = threads.get(invalidated.thread_id);
+    let targetReason = null;
+    if (reviewThreads?.collection?.status !== "COMPLETE") {
+      targetReason = "THREAD_COLLECTION_INCOMPLETE";
+    } else if (targetThread == null) {
+      targetReason = "THREAD_MISSING";
+    } else if (targetThread.provenance_complete !== true) {
+      targetReason = "THREAD_PROVENANCE_INCOMPLETE";
+    } else if (targetThread.comments_pagination_complete !== true) {
+      targetReason = "THREAD_PAGINATION_INCOMPLETE";
+    } else if (targetThread.is_resolved !== false) {
+      targetReason = "THREAD_RESOLVED";
+    } else if (threadWatermark(targetThread) !== newWatermark) {
+      targetReason = "THREAD_WATERMARK_MISMATCH";
+    }
+    if (targetReason != null) {
+      blockers.push({
+        reason: targetReason,
+        thread_id: invalidated.thread_id,
+        record_id: recordId,
+      });
+    }
     for (const blocker of frontier.blockers) {
       const expectedInvalidation =
         blocker.reason === "THREAD_RESOLUTION_INVALIDATED" &&
@@ -6076,10 +6102,6 @@ export function projectUnresolveCompletionEvidence(
         });
       }
     }
-    const reviewThreads = observation.review_threads;
-    const threads = new Map(
-      (reviewThreads?.threads ?? []).map((thread) => [thread.id, thread]),
-    );
     for (const [threadId, record] of frontier.active) {
       const thread = threads.get(threadId);
       let reason = null;
