@@ -174,9 +174,11 @@ gap returns the ready pull request to draft before any repair.
     `mark_workflow_action_executing`. If the thread is already unresolved,
     issue no mutation and record `OBSERVED_ALREADY_UNRESOLVED`; otherwise
     issue the unresolve and record `UNRESOLVED`. Call
-    `record_automatic_unresolve` before `complete_workflow_action`; it appends
-    the server-owned `INVALIDATED` and `UNRESOLVED_FOR_REPAIR` events and
-    clears the stale observation. If the publication becomes terminal while
+    `record_automatic_unresolve`; it appends the server-owned `INVALIDATED`
+    and `UNRESOLVED_FOR_REPAIR` events and clears the stale observation. Then
+    collect and record a fresh complete GitHub snapshot before
+    `complete_workflow_action`, restoring proof for every unaffected thread.
+    If the publication becomes terminal while
     the unresolve is in flight, it accepts no lifecycle write; complete the
     observed action without one and let the remote wait pause the terminal
     publication, exactly like a terminal in-flight resolution. A pinned-Codex

@@ -4737,6 +4737,19 @@ export async function completeWorkflowAction(
           { review_id: action.target.review_id, retryable: true },
         );
       }
+      const observationRefreshed =
+        lifecycleRecorded &&
+        ledger.latest_observation != null &&
+        Date.parse(ledger.latest_observation.recorded_at) >
+          Date.parse(unresolved.at);
+      if (!observationRefreshed && ledger.terminal == null) {
+        fail(
+          "WORKFLOW_UNRESOLVE_REFRESH_MISSING",
+          "an observed compensating unresolve completes only after a fresh " +
+            "GitHub snapshot restores the publication evidence",
+          { review_id: action.target.review_id, retryable: true },
+        );
+      }
       return publicWorkflow(
         await saveActionMutation(
           paths,

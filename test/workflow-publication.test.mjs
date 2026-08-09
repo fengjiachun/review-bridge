@@ -1705,7 +1705,7 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       threadWatermark: unsafePlan.new_watermark,
     },
   );
-  await recordAutomaticUnresolve(
+  const unsafeUnresolved = await recordAutomaticUnresolve(
     unsafeStore,
     second.reviewId,
     {
@@ -1713,6 +1713,21 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       workflowId: workflow.workflow_id,
       actionId: unsafePlanned.action.action_id,
     },
+  );
+  const unsafeRefreshAt =
+    Date.parse(unsafeUnresolved.resolution_lifecycle.at(-1).at) + 10;
+  const unsafeRefresh = structuredClone(movedObservation);
+  unsafeRefresh.observed_at = iso(unsafeRefreshAt);
+  unsafeRefresh.review_threads.threads[0].is_resolved = false;
+  unsafeRefresh.review_threads.unresolved_count = 1;
+  await recordGithubSnapshot(
+    unsafeStore,
+    second.reviewId,
+    {
+      expectedRevision: unsafeUnresolved.revision,
+      observation: unsafeRefresh,
+    },
+    { clock: () => unsafeRefreshAt },
   );
   const unsafePaused = await completeWorkflowAction(
     unsafeStore,
@@ -1895,6 +1910,32 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     },
   );
   assert.equal(repeatedUnresolve.revision, withUnresolve.revision);
+  await assert.rejects(
+    completeWorkflowAction(
+      state.store,
+      workflow.workflow_id,
+      unresolveObserved.revision,
+      unresolvePlanned.action.action_id,
+    ),
+    (error) => error.code === "WORKFLOW_UNRESOLVE_REFRESH_MISSING",
+  );
+  const refreshedObservation = structuredClone(movedObservation);
+  refreshedObservation.observed_at = iso(movedAt + 35);
+  refreshedObservation.review_threads.threads[0].is_resolved = false;
+  refreshedObservation.review_threads.unresolved_count = 1;
+  const refreshedPublication = await recordGithubSnapshot(
+    state.store,
+    second.reviewId,
+    {
+      expectedRevision: withUnresolve.revision,
+      observation: refreshedObservation,
+    },
+    { clock: () => movedAt + 40 },
+  );
+  assert.ok(
+    Date.parse(refreshedPublication.latest_observation.recorded_at) >
+      Date.parse(withUnresolve.resolution_lifecycle[1].at),
+  );
   const atDraftRepair = await completeWorkflowAction(
     state.store,
     workflow.workflow_id,

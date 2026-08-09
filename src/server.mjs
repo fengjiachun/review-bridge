@@ -902,7 +902,7 @@ if (role === "author") {
     {
       title: "Record automatic unresolve",
       description:
-        "Append the server-owned INVALIDATED and UNRESOLVED_FOR_REPAIR lifecycle events from the observed unresolve action, then clear the stale observation. Idempotent for the same action.",
+        "Append the server-owned INVALIDATED and UNRESOLVED_FOR_REPAIR lifecycle events from the observed unresolve action, then clear the stale observation. Record a fresh complete GitHub snapshot before completing the workflow action. Idempotent for the same action.",
       inputSchema: {
         review_id: z.string(),
         expected_revision: z.number().int().positive(),
