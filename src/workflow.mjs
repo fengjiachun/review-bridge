@@ -3093,6 +3093,27 @@ export async function listAutonomousWorkflows(storeRoot, statuses = null) {
   );
 }
 
+export function distinctUnresolveFindingReviews(
+  threadUnresolutions,
+  publicationReviewId,
+) {
+  const seen = new Set();
+  const reviews = [];
+  for (const entry of threadUnresolutions) {
+    if (
+      entry.publication_review_id !== publicationReviewId ||
+      entry.reason !== "PINNED_CODEX_FOLLOW_UP"
+    ) {
+      continue;
+    }
+    const key = canonicalJson(entry.findings_review);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    reviews.push(entry.findings_review);
+  }
+  return reviews;
+}
+
 export async function recordWorkflowHead(
   storeRoot,
   workflowId,
@@ -3163,7 +3184,7 @@ export async function recordWorkflowHead(
     // as pre-existing. The identity is read from the bound publication rather
     // than taken from the caller, so the record can only name the review
     // whose correlated result actually blocked.
-    let addressedFinding = null;
+    let addressedFindings = [];
     if (workflow.phase === "ADDRESS_REMOTE_FINDINGS") {
       if (workflow.current_publication == null) {
         fail(
@@ -3171,23 +3192,24 @@ export async function recordWorkflowHead(
           "the remote repair has no bound publication",
         );
       }
-      const repairedResolution = workflow.thread_unresolutions.findLast(
-        (entry) =>
-          entry.publication_review_id === workflow.current_publication.review_id &&
-          entry.reason === "PINNED_CODEX_FOLLOW_UP",
+      const repairedReviews = distinctUnresolveFindingReviews(
+        workflow.thread_unresolutions,
+        workflow.current_publication.review_id,
       );
       const findings =
-        repairedResolution == null
-          ? await getPublicationFindingsReview(
-              storeRoot,
-              workflow.current_publication.review_id,
-            )
-          : {
+        repairedReviews.length === 0
+          ? [
+              await getPublicationFindingsReview(
+                storeRoot,
+                workflow.current_publication.review_id,
+              ),
+            ]
+          : repairedReviews.map((findingsReview) => ({
               workflow_id: workflow.workflow_id,
               head_sha: workflow.current_head_sha,
               revision: workflow.current_publication.awaiting_revision,
-              findings_review: repairedResolution.findings_review,
-            };
+              findings_review: findingsReview,
+            }));
       // The identity must come from the same publication revision whose
       // projection sent this workflow into the repair phase -- the revision
       // advanceRemoteWorkflow recorded as awaiting_revision in the mutation
@@ -3196,34 +3218,37 @@ export async function recordWorkflowHead(
       // snapshot slid between the blocking evidence and the record: an
       // identity read across such a snapshot could name a review the
       // publication no longer supports.
-      if (
-        findings.workflow_id !== workflow.workflow_id ||
-        findings.head_sha !== workflow.current_head_sha ||
-        findings.revision !== workflow.current_publication.awaiting_revision ||
-        findings.findings_review == null
-      ) {
-        fail(
-          "WORKFLOW_FINDINGS_UNIDENTIFIED",
-          "the bound publication does not name a correlated findings review at the revision that entered the repair phase",
-          { review_id: workflow.current_publication.review_id },
-        );
+      for (const finding of findings) {
+        if (
+          finding.workflow_id !== workflow.workflow_id ||
+          finding.head_sha !== workflow.current_head_sha ||
+          finding.revision !== workflow.current_publication.awaiting_revision ||
+          finding.findings_review == null
+        ) {
+          fail(
+            "WORKFLOW_FINDINGS_UNIDENTIFIED",
+            "the bound publication does not name a correlated findings review at the revision that entered the repair phase",
+            { review_id: workflow.current_publication.review_id },
+          );
+        }
       }
-      addressedFinding = {
+      const addressedBy = runGit(repository.path, [
+        "rev-list",
+        "--reverse",
+        `${previousHead}..${headSha}`,
+      ])
+        .stdout.split("\n")
+        .filter((line) => line !== "");
+      addressedFindings = findings.map((finding) => ({
         publication_review_id: workflow.current_publication.review_id,
-        publication_revision: findings.revision,
-        findings_review: findings.findings_review,
+        publication_revision: finding.revision,
+        findings_review: finding.findings_review,
         // Every commit this repair introduced, oldest first. The head alone
         // would also be true, but the record's words are "addressed by one or
         // more commits", and the range previousHead..headSha is exactly the
         // set this workflow created to answer the finding.
-        addressed_by: runGit(repository.path, [
-          "rev-list",
-          "--reverse",
-          `${previousHead}..${headSha}`,
-        ])
-          .stdout.split("\n")
-          .filter((line) => line !== ""),
-      };
+        addressed_by: addressedBy,
+      }));
     }
     return publicWorkflow(
       await saveMutation(paths, workflow, async (next) => {
@@ -3231,7 +3256,7 @@ export async function recordWorkflowHead(
           next.phase === "ADDRESS_LOCAL_FINDINGS"
             ? next.current_review?.review_id ?? null
             : null;
-        if (addressedFinding != null) {
+        for (const addressedFinding of addressedFindings) {
           next.addressed_findings.push({
             number: next.addressed_findings.length + 1,
             ...addressedFinding,

@@ -19,6 +19,7 @@ import {
   bindWorkflowReview,
   cancelAutonomousWorkflow,
   completeWorkflowAction,
+  distinctUnresolveFindingReviews,
   getAutonomousWorkflow,
   getAutonomousWorkflowSummary,
   listAutonomousWorkflows,
@@ -232,6 +233,44 @@ function claimReleaseEvidence(workflow, observedAt = new Date().toISOString()) {
       observed_at: observedAt,
     }));
 }
+
+test("repair head keeps every distinct safely drained findings review", () => {
+  const first = { result_id: 11, reviewed_head_sha: "a".repeat(40) };
+  const second = { result_id: 12, reviewed_head_sha: "b".repeat(40) };
+  assert.deepEqual(
+    distinctUnresolveFindingReviews(
+      [
+        {
+          publication_review_id: "rb-current",
+          reason: "PINNED_CODEX_FOLLOW_UP",
+          findings_review: first,
+        },
+        {
+          publication_review_id: "rb-current",
+          reason: "PINNED_CODEX_FOLLOW_UP",
+          findings_review: second,
+        },
+        {
+          publication_review_id: "rb-current",
+          reason: "PINNED_CODEX_FOLLOW_UP",
+          findings_review: first,
+        },
+        {
+          publication_review_id: "rb-foreign",
+          reason: "PINNED_CODEX_FOLLOW_UP",
+          findings_review: { result_id: 13, reviewed_head_sha: "c".repeat(40) },
+        },
+        {
+          publication_review_id: "rb-current",
+          reason: "THREAD_RESOLUTION_UNSAFE",
+          findings_review: { result_id: 14, reviewed_head_sha: "d".repeat(40) },
+        },
+      ],
+      "rb-current",
+    ),
+    [first, second],
+  );
+});
 
 test("workflow start binds immutable authorization and exclusive claims", async (t) => {
   const state = await fixture();
