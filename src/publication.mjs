@@ -4926,7 +4926,7 @@ async function withEffectiveResolutionContext(
     ) {
       continue;
     }
-    const outcome = (binding?.thread_resolutions ?? []).find(
+    const outcome = (binding?.thread_resolutions ?? []).findLast(
       (resolution) =>
         resolution.outcome === "RESOLVED" &&
         resolution.thread_id === thread.id &&
@@ -6670,6 +6670,18 @@ export async function getThreadResolutionPlan(storeRoot, reviewId) {
  * freshness window.
  */
 export async function getPublicationFindingsReview(storeRoot, reviewId) {
+  return withPublicationFindingsReviewLock(
+    storeRoot,
+    reviewId,
+    async (findings) => findings,
+  );
+}
+
+export async function withPublicationFindingsReviewLock(
+  storeRoot,
+  reviewId,
+  operation,
+) {
   const paths = pathsFor(storeRoot, reviewId);
   return publicationLock(paths, reviewId, async () => {
     const authorization = await openAuthorizationFiles(paths, reviewId);
@@ -6677,19 +6689,16 @@ export async function getPublicationFindingsReview(storeRoot, reviewId) {
       const ledger = authorization.ledger;
       const decision =
         ledger.latest_observation == null ? null : codexDecision(ledger);
-      return {
+      return await operation({
         review_id: reviewId,
-        // The revision this identity was derived from. The caller binds it to
-        // the revision it observed when the evidence blocked, so an identity
-        // read across an intervening snapshot cannot be recorded as though it
-        // were the blocking one -- this lock is released before the caller's
-        // own mutation persists, and the binding stands in for the atomicity
-        // the two separate writes lack.
+        // The revision this identity was derived from. The callback remains
+        // under the publication lock, so callers can carry this binding
+        // through a related mutation without an intervening snapshot.
         revision: ledger.revision,
         workflow_id: ledger.workflow_id ?? null,
         head_sha: authorizationForLedger(ledger).head_sha,
         findings_review: decision?.findingsReview ?? null,
-      };
+      });
     } finally {
       await closeAuthorizationFiles(authorization);
     }

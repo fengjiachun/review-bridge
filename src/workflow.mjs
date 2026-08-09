@@ -9,9 +9,9 @@ import {
   getAutonomousTerminal,
   withAutonomousTerminalLock,
   getPublication,
-  getPublicationFindingsReview,
   getInvalidatedResolutionPlan,
   getThreadResolutionPlan,
+  withPublicationFindingsReviewLock,
   withUnresolveCompletionEvidenceLock,
 } from "./publication.mjs";
 import {
@@ -3195,13 +3195,42 @@ export async function recordWorkflowHead(
         );
       }
     }
+    const saveRecordedHead = async (addressedFindings) =>
+      publicWorkflow(
+        await saveMutation(paths, workflow, async (next) => {
+          const reviewId =
+            next.phase === "ADDRESS_LOCAL_FINDINGS"
+              ? next.current_review?.review_id ?? null
+              : null;
+          for (const addressedFinding of addressedFindings) {
+            next.addressed_findings.push({
+              number: next.addressed_findings.length + 1,
+              ...addressedFinding,
+              recorded_at: now(),
+            });
+          }
+          next.current_head_sha = headSha;
+          next.attempts.push({
+            number: next.attempts.length + 1,
+            head_sha: headSha,
+            review_id: reviewId,
+            recorded_at: now(),
+          });
+          // A new head invalidates every piece of evidence bound to the old one.
+          // The publication ledger stays on disk as history but can no longer
+          // authorize this workflow; the repaired head starts a fresh cycle.
+          next.current_publication = null;
+          if (next.phase !== "ADDRESS_LOCAL_FINDINGS") {
+            next.phase = "PREPARE_LOCAL_REVIEW";
+          }
+        }),
+      );
     // A head recorded to answer remote findings must say which finding review
     // it answers -- RFC 0003 eligibility condition 3, and the only link that
     // survives into the next publication, whose baseline absorbs this review
     // as pre-existing. The identity is read from the bound publication rather
     // than taken from the caller, so the record can only name the review
     // whose correlated result actually blocked.
-    let addressedFindings = [];
     if (workflow.phase === "ADDRESS_REMOTE_FINDINGS") {
       if (workflow.current_publication == null) {
         fail(
@@ -3209,109 +3238,82 @@ export async function recordWorkflowHead(
           "the remote repair has no bound publication",
         );
       }
-      const currentFindings = await getPublicationFindingsReview(
+      return withPublicationFindingsReviewLock(
         storeRoot,
         workflow.current_publication.review_id,
-      );
-      if (
-        currentFindings.workflow_id !== workflow.workflow_id ||
-        currentFindings.head_sha !== workflow.current_head_sha ||
-        currentFindings.revision !==
-          workflow.current_publication.awaiting_revision
-      ) {
-        fail(
-          "WORKFLOW_FINDINGS_UNIDENTIFIED",
-          "the current findings review moved after the repair phase was selected",
-          { review_id: workflow.current_publication.review_id },
-        );
-      }
-      const repairedReviews = distinctUnresolveFindingReviews(
-        workflow.thread_unresolutions,
-        workflow.current_publication.review_id,
-        currentFindings.findings_review,
-      );
-      const findings = repairedReviews.map((findingsReview) => ({
-        workflow_id: workflow.workflow_id,
-        head_sha: workflow.current_head_sha,
-        revision: workflow.current_publication.awaiting_revision,
-        findings_review: findingsReview,
-      }));
-      if (findings.length === 0) {
-        fail(
-          "WORKFLOW_FINDINGS_UNIDENTIFIED",
-          "the remote repair has no current or drained findings review",
-          { review_id: workflow.current_publication.review_id },
-        );
-      }
-      // The identity must come from the same publication revision whose
-      // projection sent this workflow into the repair phase -- the revision
-      // advanceRemoteWorkflow recorded as awaiting_revision in the mutation
-      // that set the phase. The publication lock is released before this
-      // workflow mutation persists, so revision equality is what proves no
-      // snapshot slid between the blocking evidence and the record: an
-      // identity read across such a snapshot could name a review the
-      // publication no longer supports.
-      for (const finding of findings) {
-        if (
-          finding.workflow_id !== workflow.workflow_id ||
-          finding.head_sha !== workflow.current_head_sha ||
-          finding.revision !== workflow.current_publication.awaiting_revision ||
-          finding.findings_review == null
-        ) {
-          fail(
-            "WORKFLOW_FINDINGS_UNIDENTIFIED",
-            "the bound publication does not name a correlated findings review at the revision that entered the repair phase",
-            { review_id: workflow.current_publication.review_id },
+        async (currentFindings) => {
+          if (
+            currentFindings.workflow_id !== workflow.workflow_id ||
+            currentFindings.head_sha !== workflow.current_head_sha ||
+            currentFindings.revision !==
+              workflow.current_publication.awaiting_revision
+          ) {
+            fail(
+              "WORKFLOW_FINDINGS_UNIDENTIFIED",
+              "the current findings review moved after the repair phase was selected",
+              { review_id: workflow.current_publication.review_id },
+            );
+          }
+          const repairedReviews = distinctUnresolveFindingReviews(
+            workflow.thread_unresolutions,
+            workflow.current_publication.review_id,
+            currentFindings.findings_review,
           );
-        }
-      }
-      const addressedBy = runGit(repository.path, [
-        "rev-list",
-        "--reverse",
-        `${previousHead}..${headSha}`,
-      ])
-        .stdout.split("\n")
-        .filter((line) => line !== "");
-      addressedFindings = findings.map((finding) => ({
-        publication_review_id: workflow.current_publication.review_id,
-        publication_revision: finding.revision,
-        findings_review: finding.findings_review,
-        // Every commit this repair introduced, oldest first. The head alone
-        // would also be true, but the record's words are "addressed by one or
-        // more commits", and the range previousHead..headSha is exactly the
-        // set this workflow created to answer the finding.
-        addressed_by: addressedBy,
-      }));
+          const findings = repairedReviews.map((findingsReview) => ({
+            workflow_id: workflow.workflow_id,
+            head_sha: workflow.current_head_sha,
+            revision: workflow.current_publication.awaiting_revision,
+            findings_review: findingsReview,
+          }));
+          if (findings.length === 0) {
+            fail(
+              "WORKFLOW_FINDINGS_UNIDENTIFIED",
+              "the remote repair has no current or drained findings review",
+              { review_id: workflow.current_publication.review_id },
+            );
+          }
+          // The identity must come from the same publication revision whose
+          // projection sent this workflow into the repair phase. This callback
+          // holds the publication lock through saveRecordedHead, so no snapshot
+          // can invalidate another resolution between this check and clearing
+          // the workflow's publication binding.
+          for (const finding of findings) {
+            if (
+              finding.workflow_id !== workflow.workflow_id ||
+              finding.head_sha !== workflow.current_head_sha ||
+              finding.revision !==
+                workflow.current_publication.awaiting_revision ||
+              finding.findings_review == null
+            ) {
+              fail(
+                "WORKFLOW_FINDINGS_UNIDENTIFIED",
+                "the bound publication does not name a correlated findings review at the revision that entered the repair phase",
+                { review_id: workflow.current_publication.review_id },
+              );
+            }
+          }
+          const addressedBy = runGit(repository.path, [
+            "rev-list",
+            "--reverse",
+            `${previousHead}..${headSha}`,
+          ])
+            .stdout.split("\n")
+            .filter((line) => line !== "");
+          const addressedFindings = findings.map((finding) => ({
+            publication_review_id: workflow.current_publication.review_id,
+            publication_revision: finding.revision,
+            findings_review: finding.findings_review,
+            // Every commit this repair introduced, oldest first. The head alone
+            // would also be true, but the record's words are "addressed by one or
+            // more commits", and the range previousHead..headSha is exactly the
+            // set this workflow created to answer the finding.
+            addressed_by: addressedBy,
+          }));
+          return saveRecordedHead(addressedFindings);
+        },
+      );
     }
-    return publicWorkflow(
-      await saveMutation(paths, workflow, async (next) => {
-        const reviewId =
-          next.phase === "ADDRESS_LOCAL_FINDINGS"
-            ? next.current_review?.review_id ?? null
-            : null;
-        for (const addressedFinding of addressedFindings) {
-          next.addressed_findings.push({
-            number: next.addressed_findings.length + 1,
-            ...addressedFinding,
-            recorded_at: now(),
-          });
-        }
-        next.current_head_sha = headSha;
-        next.attempts.push({
-          number: next.attempts.length + 1,
-          head_sha: headSha,
-          review_id: reviewId,
-          recorded_at: now(),
-        });
-        // A new head invalidates every piece of evidence bound to the old one.
-        // The publication ledger stays on disk as history but can no longer
-        // authorize this workflow; the repaired head starts a fresh cycle.
-        next.current_publication = null;
-        if (next.phase !== "ADDRESS_LOCAL_FINDINGS") {
-          next.phase = "PREPARE_LOCAL_REVIEW";
-        }
-      }),
-    );
+    return saveRecordedHead([]);
   });
 }
 
