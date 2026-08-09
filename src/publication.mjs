@@ -6012,6 +6012,115 @@ export async function getPublication(storeRoot, reviewId) {
   return ledger;
 }
 
+// The evidence a compensating-unresolve action must preserve before the
+// workflow may advance to a new head. The invalidated record itself is
+// deliberately absent from the active frontier; every other active record
+// must remain usable as historical proof after this publication freezes.
+export function projectUnresolveCompletionEvidence(
+  ledger,
+  binding,
+  { recordId, actionId, newWatermark },
+) {
+  const invalidated = (ledger.resolution_lifecycle ?? []).find(
+    (event) =>
+      event.kind === "INVALIDATED" &&
+      event.record_id === recordId &&
+      event.new_watermark === newWatermark,
+  );
+  const unresolved = (ledger.resolution_lifecycle ?? []).find(
+    (event) =>
+      event.kind === "UNRESOLVED_FOR_REPAIR" &&
+      event.record_id === recordId &&
+      event.action_id === actionId,
+  );
+  const lifecycleRecorded = invalidated != null && unresolved != null;
+  const observation = ledger.latest_observation;
+  const blockers = [];
+  if (lifecycleRecorded && observation != null) {
+    const eventAt = Date.parse(unresolved.at);
+    if (
+      Date.parse(observation.recorded_at) <= eventAt ||
+      Date.parse(oldestObservationAt(observation)) <= eventAt
+    ) {
+      blockers.push({
+        reason: "OBSERVATION_NOT_FRESH",
+        thread_id: null,
+        record_id: null,
+      });
+    }
+    const frontier = resolutionFrontier(ledger);
+    for (const blocker of frontier.blockers) {
+      const expectedInvalidation =
+        blocker.reason === "THREAD_RESOLUTION_INVALIDATED" &&
+        blocker.record?.action_id === recordId &&
+        blocker.thread_id === invalidated.thread_id;
+      if (!expectedInvalidation) {
+        blockers.push({
+          reason: blocker.reason,
+          thread_id: blocker.thread_id,
+          record_id: blocker.record?.action_id ?? null,
+        });
+      }
+    }
+    const reviewThreads = observation.review_threads;
+    const threads = new Map(
+      (reviewThreads?.threads ?? []).map((thread) => [thread.id, thread]),
+    );
+    for (const [threadId, record] of frontier.active) {
+      const thread = threads.get(threadId);
+      let reason = null;
+      if (reviewThreads?.collection?.status !== "COMPLETE") {
+        reason = "THREAD_COLLECTION_INCOMPLETE";
+      } else if (thread == null) {
+        reason = "THREAD_MISSING";
+      } else if (thread.is_resolved !== true) {
+        reason = "THREAD_UNRESOLVED";
+      } else if (thread.provenance_complete !== true) {
+        reason = "THREAD_PROVENANCE_INCOMPLETE";
+      } else if (thread.comments_pagination_complete !== true) {
+        reason = "THREAD_PAGINATION_INCOMPLETE";
+      } else if (threadWatermark(thread) !== record.thread_watermark) {
+        reason = "THREAD_WATERMARK_MISMATCH";
+      } else if (threadHasForeignParticipation(ledger, binding, thread)) {
+        reason = "THREAD_RESOLUTION_UNSAFE";
+      }
+      if (reason != null) {
+        blockers.push({
+          reason,
+          thread_id: threadId,
+          record_id: record.action_id,
+        });
+      }
+    }
+  }
+  return {
+    terminal: ledger.terminal,
+    lifecycle_recorded: lifecycleRecorded,
+    observation_refreshed:
+      lifecycleRecorded && observation != null && blockers.length === 0,
+    blockers,
+  };
+}
+
+// Keep the publication stable until the workflow action commits. Otherwise a
+// concurrent snapshot could replace a qualifying refresh with degraded proof
+// between projection and completion.
+export async function withUnresolveCompletionEvidenceLock(
+  storeRoot,
+  reviewId,
+  target,
+  operation,
+) {
+  const paths = pathsFor(storeRoot, reviewId);
+  return publicationLock(paths, reviewId, async () => {
+    const ledger = await loadPublicationFile(paths, reviewId);
+    const binding = await requireWorkflowBinding(storeRoot, ledger);
+    return operation(
+      projectUnresolveCompletionEvidence(ledger, binding, target),
+    );
+  });
+}
+
 function assessPublicationGate(
   ledger,
   publicationAuthorization,

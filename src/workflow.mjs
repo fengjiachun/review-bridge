@@ -12,6 +12,7 @@ import {
   getPublicationFindingsReview,
   getInvalidatedResolutionPlan,
   getThreadResolutionPlan,
+  withUnresolveCompletionEvidenceLock,
 } from "./publication.mjs";
 import {
   atomicWriteCanonicalJson,
@@ -4715,95 +4716,96 @@ export async function completeWorkflowAction(
       );
     }
     if (action.kind === "UNRESOLVE_REVIEW_THREAD") {
-      const ledger = await getPublication(storeRoot, action.target.review_id);
-      const invalidated = (ledger.resolution_lifecycle ?? []).find(
-        (event) =>
-          event.kind === "INVALIDATED" &&
-          event.record_id === action.target.record_id &&
-          event.new_watermark === action.target.new_watermark,
-      );
-      const unresolved = (ledger.resolution_lifecycle ?? []).find(
-        (event) =>
-          event.kind === "UNRESOLVED_FOR_REPAIR" &&
-          event.record_id === action.target.record_id &&
-          event.action_id === action.action_id,
-      );
-      const lifecycleRecorded = invalidated != null && unresolved != null;
-      if (!lifecycleRecorded && ledger.terminal == null) {
-        fail(
-          "WORKFLOW_UNRESOLVE_RECORD_MISSING",
-          "an observed compensating unresolve completes only after its " +
-            "lifecycle evidence is stored",
-          { review_id: action.target.review_id, retryable: true },
-        );
-      }
-      const observationRefreshed =
-        lifecycleRecorded &&
-        ledger.latest_observation != null &&
-        Date.parse(ledger.latest_observation.recorded_at) >
-          Date.parse(unresolved.at);
-      if (!observationRefreshed && ledger.terminal == null) {
-        fail(
-          "WORKFLOW_UNRESOLVE_REFRESH_MISSING",
-          "an observed compensating unresolve completes only after a fresh " +
-            "GitHub snapshot restores the publication evidence",
-          { review_id: action.target.review_id, retryable: true },
-        );
-      }
-      return publicWorkflow(
-        await saveActionMutation(
-          paths,
-          workflow,
-          lifecycleRecorded && action.target.reason === "THREAD_RESOLUTION_UNSAFE"
-            ? "WORKFLOW_PAUSED"
-            : "ACTION_COMPLETED",
-          async (next) => {
-            next.active_action.completed_at = now();
-            if (lifecycleRecorded) {
-              next.thread_unresolutions.push({
-                number: next.thread_unresolutions.length + 1,
-                thread_id: action.target.thread_id,
-                record_id: action.target.record_id,
-                action_id: action.action_id,
-                prior_watermark: action.target.prior_watermark,
-                new_watermark: action.target.new_watermark,
-                reason: action.target.reason,
-                publication_review_id: action.target.review_id,
-                findings_review: action.target.findings_review,
-                recorded_at: now(),
-              });
-            }
-            next.active_action = null;
-            if (!lifecycleRecorded) {
-              next.phase = "WAIT_PUBLICATION";
-            } else if (action.target.reason === "THREAD_RESOLUTION_UNSAFE") {
-              next.status = "PAUSED";
-              next.phase = "PAUSED_HUMAN";
-              next.pause = {
-                reason_code: "THREAD_RESOLUTION_UNSAFE",
-                blocked_action: "UNRESOLVE_REVIEW_THREAD",
-                evidence: JSON.stringify({
-                  review_id: action.target.review_id,
-                  thread_id: action.target.thread_id,
-                  record_id: action.target.record_id,
-                  prior_watermark: action.target.prior_watermark,
-                  new_watermark: action.target.new_watermark,
-                  follow_up_comments: action.target.follow_up_comments,
-                }),
-                resume_phase: "ENSURE_DRAFT_FOR_REPAIR",
-                review_id: workflow.current_review?.review_id ?? null,
-                action_id: action.action_id,
-                paused_at: now(),
-              };
-            } else {
-              // Recording the lifecycle clears the publication observation,
-              // including its draft flag. Re-enter repair only through the
-              // return-to-draft action: its own pre-read either performs the
-              // transition or proves the pull request is already draft.
-              next.phase = "ENSURE_DRAFT_FOR_REPAIR";
-            }
-          },
-        ),
+      return withUnresolveCompletionEvidenceLock(
+        storeRoot,
+        action.target.review_id,
+        {
+          recordId: action.target.record_id,
+          actionId: action.action_id,
+          newWatermark: action.target.new_watermark,
+        },
+        async (evidence) => {
+          const lifecycleRecorded = evidence.lifecycle_recorded;
+          if (!lifecycleRecorded && evidence.terminal == null) {
+            fail(
+              "WORKFLOW_UNRESOLVE_RECORD_MISSING",
+              "an observed compensating unresolve completes only after its " +
+                "lifecycle evidence is stored",
+              { review_id: action.target.review_id, retryable: true },
+            );
+          }
+          if (!evidence.observation_refreshed && evidence.terminal == null) {
+            fail(
+              "WORKFLOW_UNRESOLVE_REFRESH_MISSING",
+              "an observed compensating unresolve completes only after a " +
+                "fresh GitHub snapshot restores every unaffected thread proof",
+              {
+                review_id: action.target.review_id,
+                blockers: evidence.blockers,
+                retryable: true,
+              },
+            );
+          }
+          return publicWorkflow(
+            await saveActionMutation(
+              paths,
+              workflow,
+              lifecycleRecorded &&
+                action.target.reason === "THREAD_RESOLUTION_UNSAFE"
+                ? "WORKFLOW_PAUSED"
+                : "ACTION_COMPLETED",
+              async (next) => {
+                next.active_action.completed_at = now();
+                if (lifecycleRecorded) {
+                  next.thread_unresolutions.push({
+                    number: next.thread_unresolutions.length + 1,
+                    thread_id: action.target.thread_id,
+                    record_id: action.target.record_id,
+                    action_id: action.action_id,
+                    prior_watermark: action.target.prior_watermark,
+                    new_watermark: action.target.new_watermark,
+                    reason: action.target.reason,
+                    publication_review_id: action.target.review_id,
+                    findings_review: action.target.findings_review,
+                    recorded_at: now(),
+                  });
+                }
+                next.active_action = null;
+                if (!lifecycleRecorded) {
+                  next.phase = "WAIT_PUBLICATION";
+                } else if (
+                  action.target.reason === "THREAD_RESOLUTION_UNSAFE"
+                ) {
+                  next.status = "PAUSED";
+                  next.phase = "PAUSED_HUMAN";
+                  next.pause = {
+                    reason_code: "THREAD_RESOLUTION_UNSAFE",
+                    blocked_action: "UNRESOLVE_REVIEW_THREAD",
+                    evidence: JSON.stringify({
+                      review_id: action.target.review_id,
+                      thread_id: action.target.thread_id,
+                      record_id: action.target.record_id,
+                      prior_watermark: action.target.prior_watermark,
+                      new_watermark: action.target.new_watermark,
+                      follow_up_comments: action.target.follow_up_comments,
+                    }),
+                    resume_phase: "ENSURE_DRAFT_FOR_REPAIR",
+                    review_id: workflow.current_review?.review_id ?? null,
+                    action_id: action.action_id,
+                    paused_at: now(),
+                  };
+                } else {
+                  // Recording the lifecycle clears the publication
+                  // observation, including its draft flag. Re-enter repair
+                  // only through the return-to-draft action: its own pre-read
+                  // either performs the transition or proves the pull request
+                  // is already draft.
+                  next.phase = "ENSURE_DRAFT_FOR_REPAIR";
+                }
+              },
+            ),
+          );
+        },
       );
     }
     if (action.kind === "RETURN_PR_TO_DRAFT") {

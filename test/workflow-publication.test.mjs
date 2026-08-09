@@ -23,6 +23,7 @@ import {
   recordAutomaticUnresolve,
   recordCodexReviewRequest,
   recordGithubSnapshot,
+  projectUnresolveCompletionEvidence,
   startPublication,
   threadWatermark,
   verifyPublicationGate,
@@ -90,6 +91,29 @@ function git(cwd, ...args) {
   });
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();
+}
+
+function retimeObservation(payload, at) {
+  payload.observed_at = iso(at);
+  for (const collection of [
+    payload.pull_request.collection,
+    payload.required_checks.collection,
+    payload.codex_review.collection,
+    payload.review_threads.collection,
+  ]) {
+    collection.collected_at = iso(at);
+    for (const source of [
+      ...(collection.sources ?? []),
+      ...(collection.policy_sources ?? []),
+      ...(collection.run_sources ?? []),
+    ]) {
+      source.collected_at = iso(at);
+    }
+  }
+  for (const ancestry of payload.review_threads.ancestry ?? []) {
+    ancestry.collected_at = iso(at);
+  }
+  return payload;
 }
 
 async function fixture() {
@@ -1717,7 +1741,7 @@ test("an addressed finding's thread becomes eligible in the next publication's p
   const unsafeRefreshAt =
     Date.parse(unsafeUnresolved.resolution_lifecycle.at(-1).at) + 10;
   const unsafeRefresh = structuredClone(movedObservation);
-  unsafeRefresh.observed_at = iso(unsafeRefreshAt);
+  retimeObservation(unsafeRefresh, unsafeRefreshAt);
   unsafeRefresh.review_threads.threads[0].is_resolved = false;
   unsafeRefresh.review_threads.unresolved_count = 1;
   await recordGithubSnapshot(
@@ -1920,7 +1944,7 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     (error) => error.code === "WORKFLOW_UNRESOLVE_REFRESH_MISSING",
   );
   const refreshedObservation = structuredClone(movedObservation);
-  refreshedObservation.observed_at = iso(movedAt + 35);
+  retimeObservation(refreshedObservation, movedAt + 35);
   refreshedObservation.review_threads.threads[0].is_resolved = false;
   refreshedObservation.review_threads.unresolved_count = 1;
   const refreshedPublication = await recordGithubSnapshot(
@@ -6646,6 +6670,113 @@ function supersedeEvent({ number, threadId = "PRRT_1", predecessorId, successorI
     at: iso(Date.now()),
   };
 }
+
+test("an unresolve refresh preserves every unaffected active proof", () => {
+  const at = Date.now();
+  const eventAt = at + 1_000;
+  const observedAt = eventAt + 1_000;
+  const headSha = "b".repeat(40);
+  const targetThread = resolvedThread(headSha, { threadId: "PRRT_target" });
+  const unaffectedThread = resolvedThread(headSha, {
+    threadId: "PRRT_unaffected",
+  });
+  const targetRecord = resolutionRecord({
+    number: 1,
+    actionId: "act-target",
+    threadId: targetThread.id,
+    watermark: threadWatermark(targetThread),
+    headSha,
+    recordedRevision: 3,
+  });
+  const unaffectedRecord = resolutionRecord({
+    number: 2,
+    actionId: "act-unaffected",
+    threadId: unaffectedThread.id,
+    watermark: threadWatermark(unaffectedThread),
+    headSha,
+    recordedRevision: 4,
+  });
+  const payload = observation({
+    at: observedAt,
+    baseSha: "a".repeat(40),
+    headSha,
+    requestId: 100,
+    requestAt: at,
+  });
+  payload.recorded_at = iso(observedAt + 10);
+  payload.review_threads.total_count = 2;
+  payload.review_threads.unresolved_count = 1;
+  targetThread.is_resolved = false;
+  payload.review_threads.threads = [targetThread, unaffectedThread];
+  const ledger = {
+    terminal: null,
+    target: { codex_actor: codexActor() },
+    latest_observation: payload,
+    automatic_resolutions: [targetRecord, unaffectedRecord],
+    resolution_lifecycle: [
+      {
+        kind: "INVALIDATED",
+        number: 1,
+        thread_id: targetThread.id,
+        record_id: targetRecord.action_id,
+        prior_watermark: targetRecord.thread_watermark,
+        new_watermark: digest("target follow-up"),
+        follow_up_comments: [],
+        reason: "PINNED_CODEX_FOLLOW_UP",
+        at: iso(eventAt),
+      },
+      {
+        kind: "UNRESOLVED_FOR_REPAIR",
+        number: 2,
+        thread_id: targetThread.id,
+        record_id: targetRecord.action_id,
+        action_id: "unresolve-target",
+        at: iso(eventAt),
+      },
+    ],
+  };
+  const binding = { thread_replies: [] };
+  const target = {
+    recordId: targetRecord.action_id,
+    actionId: "unresolve-target",
+    newWatermark: digest("target follow-up"),
+  };
+  const complete = projectUnresolveCompletionEvidence(
+    ledger,
+    binding,
+    target,
+  );
+  assert.equal(complete.observation_refreshed, true);
+  assert.deepEqual(complete.blockers, []);
+
+  const incomplete = structuredClone(ledger);
+  incomplete.latest_observation.review_threads.threads[1]
+    .comments_pagination_complete = false;
+  const blocked = projectUnresolveCompletionEvidence(
+    incomplete,
+    binding,
+    target,
+  );
+  assert.equal(blocked.observation_refreshed, false);
+  assert.deepEqual(blocked.blockers, [
+    {
+      reason: "THREAD_PAGINATION_INCOMPLETE",
+      thread_id: unaffectedThread.id,
+      record_id: unaffectedRecord.action_id,
+    },
+  ]);
+
+  const stale = structuredClone(ledger);
+  stale.latest_observation.pull_request.collection.sources[0].collected_at =
+    iso(eventAt);
+  const staleEvidence = projectUnresolveCompletionEvidence(
+    stale,
+    binding,
+    target,
+  );
+  assert.equal(staleEvidence.observation_refreshed, false);
+  assert.equal(staleEvidence.blockers[0].reason, "OBSERVATION_NOT_FRESH");
+});
 
 test("a newer MERGE_READY revision with one pre-ready source stays POST_READY", async (t) => {
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
