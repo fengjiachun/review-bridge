@@ -1821,6 +1821,54 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       .active_action,
     null,
   );
+  const advancedStore = path.join(state.root, "advanced-unresolve-store");
+  await fsp.cp(state.store, advancedStore, { recursive: true });
+  await editPublication(
+    { ...state, store: advancedStore },
+    second.reviewId,
+    (ledger) => {
+      const thread = ledger.latest_observation.review_threads.threads[0];
+      thread.comment_count = 4;
+      thread.comments.push({
+        id: "PRRC_4",
+        database_id: 904,
+        created_at: iso(movedAt + 1),
+        updated_at: iso(movedAt + 1),
+        actor: codex,
+        review: null,
+      });
+    },
+  );
+  const advancedPlan = await getInvalidatedResolutionPlan(
+    advancedStore,
+    second.reviewId,
+  );
+  assert.notEqual(advancedPlan.new_watermark, invalidationPlan.new_watermark);
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      advancedStore,
+      workflow.workflow_id,
+      unresolvePlanned.workflow.revision,
+      unresolvePlanned.action.action_id,
+      {
+        repository_id: REPOSITORY_ID,
+        pr_number: PR_NUMBER,
+        thread_id: "PRRT_1",
+        thread_watermark: advancedPlan.new_watermark,
+        is_resolved: true,
+      },
+    ),
+    (error) => {
+      assert.equal(error.code, "THREAD_RESOLUTION_NOT_INVALIDATED");
+      assert.equal(error.details.phase, "WAIT_PUBLICATION");
+      return true;
+    },
+  );
+  assert.equal(
+    (await getAutonomousWorkflow(advancedStore, workflow.workflow_id))
+      .active_action,
+    null,
+  );
   const unresolveExecuting = await markWorkflowActionExecuting(
     state.store,
     workflow.workflow_id,

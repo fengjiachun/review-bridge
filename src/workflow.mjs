@@ -509,6 +509,7 @@ const ACTION_KIND_SPECS = {
       }
     },
     dispatch: null,
+    revalidateBeforeProof: true,
     validateExecutingProof(action, proof) {
       if (
         proof == null ||
@@ -3993,47 +3994,13 @@ export async function markWorkflowActionExecuting(
       fail("WORKFLOW_ACTION_STATE_INVALID", "action must be PLANNED");
     }
     const spec = ACTION_KIND_SPECS[action.kind];
-    if (spec.validateExecutingProof) {
-      spec.validateExecutingProof(action, executingProof, workflow);
-      if (spec.exposedByProof?.(executingProof, workflow)) {
-        const routed = await saveActionMutation(
-          paths,
-          workflow,
-          "ACTION_ABANDONED",
-          async (next) => {
-            next.active_action = null;
-            next.phase = "ENSURE_DRAFT_FOR_REPAIR";
-          },
-          {
-            abandoned_action_id: action.action_id,
-            abandoned_kind: action.kind,
-            reason_code: "WORKFLOW_PULL_REQUEST_EXPOSED",
-          },
-        );
-        fail(
-          "WORKFLOW_PULL_REQUEST_EXPOSED",
-          "the bound pull request is not a draft: it must be returned to draft before this head is pushed to it",
-          {
-            action_abandoned: action.action_id,
-            workflow_revision: routed.revision,
-            phase: routed.phase,
-          },
-        );
-      }
-    } else if (executingProof != null) {
-      fail(
-        "WORKFLOW_ACTION_INVALID",
-        "this action kind does not take an executing proof",
-      );
-    }
     // Some intents are only as good as evidence that lives outside the
     // workflow ledger and can move under them between planning and the call.
     // This is the last durable point before the external write, so it is
     // where that evidence has to be read again.
-    let clearedRevision = null;
-    if (spec.revalidate) {
+    const revalidate = async () => {
       try {
-        clearedRevision = await spec.revalidate(storeRoot, action);
+        return await spec.revalidate(storeRoot, action);
       } catch (error) {
         // Only the checkpoint's own refusal drops an intent, and only
         // before the external write: PLANNED is what makes "nothing has
@@ -4073,6 +4040,46 @@ export async function markWorkflowActionExecuting(
         };
         throw error;
       }
+    };
+    let clearedRevision = null;
+    if (spec.revalidateBeforeProof === true) {
+      clearedRevision = await revalidate();
+    }
+    if (spec.validateExecutingProof) {
+      spec.validateExecutingProof(action, executingProof, workflow);
+      if (spec.exposedByProof?.(executingProof, workflow)) {
+        const routed = await saveActionMutation(
+          paths,
+          workflow,
+          "ACTION_ABANDONED",
+          async (next) => {
+            next.active_action = null;
+            next.phase = "ENSURE_DRAFT_FOR_REPAIR";
+          },
+          {
+            abandoned_action_id: action.action_id,
+            abandoned_kind: action.kind,
+            reason_code: "WORKFLOW_PULL_REQUEST_EXPOSED",
+          },
+        );
+        fail(
+          "WORKFLOW_PULL_REQUEST_EXPOSED",
+          "the bound pull request is not a draft: it must be returned to draft before this head is pushed to it",
+          {
+            action_abandoned: action.action_id,
+            workflow_revision: routed.revision,
+            phase: routed.phase,
+          },
+        );
+      }
+    } else if (executingProof != null) {
+      fail(
+        "WORKFLOW_ACTION_INVALID",
+        "this action kind does not take an executing proof",
+      );
+    }
+    if (spec.revalidate != null && spec.revalidateBeforeProof !== true) {
+      clearedRevision = await revalidate();
     }
     return publicWorkflow(
       await saveActionMutation(
