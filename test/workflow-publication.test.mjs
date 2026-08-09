@@ -1913,6 +1913,45 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       threadWatermark: invalidationPlan.new_watermark,
     },
   );
+  const recoveredStore = path.join(state.root, "recovered-unresolve-store");
+  await fsp.cp(state.store, recoveredStore, { recursive: true });
+  const beforeRecovery = await getPublication(recoveredStore, second.reviewId);
+  const recoveryObservation = structuredClone(beforeRecovery.latest_observation);
+  retimeObservation(recoveryObservation, movedAt + 500);
+  const recoveryThread = recoveryObservation.review_threads.threads[0];
+  recoveryThread.is_resolved = false;
+  recoveryThread.comment_count += 1;
+  recoveryThread.comments.push({
+    id: "PRRC_recovery_follow_up",
+    database_id: 905,
+    created_at: iso(movedAt + 400),
+    updated_at: iso(movedAt + 400),
+    actor: codex,
+    review: null,
+  });
+  const recoveredSnapshot = await recordGithubSnapshot(
+    recoveredStore,
+    second.reviewId,
+    {
+      expectedRevision: beforeRecovery.revision,
+      observation: recoveryObservation,
+    },
+    { clock: () => movedAt + 510 },
+  );
+  const recoveredUnresolve = await recordAutomaticUnresolve(
+    recoveredStore,
+    second.reviewId,
+    {
+      expectedRevision: recoveredSnapshot.revision,
+      workflowId: workflow.workflow_id,
+      actionId: unresolvePlanned.action.action_id,
+    },
+    { clock: () => movedAt + 520 },
+  );
+  assert.deepEqual(
+    recoveredUnresolve.resolution_lifecycle.map((event) => event.kind),
+    ["INVALIDATED", "UNRESOLVED_FOR_REPAIR"],
+  );
   const terminalStore = path.join(state.root, "terminal-unresolve-store");
   await fsp.cp(state.store, terminalStore, { recursive: true });
   const terminalObservation = structuredClone(movedObservation);
@@ -6868,6 +6907,7 @@ test("an unresolve refresh preserves every unaffected active proof", () => {
   ]);
 
   const drained = structuredClone(concurrent);
+  drained.latest_observation.review_threads.threads[1].is_resolved = false;
   const secondWatermark = threadWatermark(
     drained.latest_observation.review_threads.threads[1],
   );

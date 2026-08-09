@@ -7281,33 +7281,6 @@ export async function recordAutomaticUnresolve(
         "the workflow has no observed compensating unresolve under that action",
       );
     }
-    const plan = invalidatedResolutionPlan(ledger, binding);
-    for (const field of [
-      "thread_id",
-      "record_id",
-      "prior_watermark",
-      "new_watermark",
-      "reason",
-    ]) {
-      if (plan[field] !== action[field]) {
-        fail(
-          "THREAD_RESOLUTION_NOT_INVALIDATED",
-          "the current server evidence no longer matches the unresolve action",
-        );
-      }
-    }
-    if (
-      plan.actionable !== true ||
-      canonicalJson(plan.follow_up_comments) !==
-        canonicalJson(action.follow_up_comments) ||
-      canonicalJson(plan.findings_review) !==
-        canonicalJson(action.findings_review)
-    ) {
-      fail(
-        "THREAD_RESOLUTION_NOT_INVALIDATED",
-        "the current server evidence no longer matches the unresolve action",
-      );
-    }
     const at = new Date(clock()).toISOString();
     const events = ledger.resolution_lifecycle ?? [];
     const clearedObservationSha256 = canonicalDigest(ledger.latest_observation);
