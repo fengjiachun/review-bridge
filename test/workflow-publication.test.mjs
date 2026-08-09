@@ -8849,7 +8849,7 @@ async function reachCompletedPreResolvedPostReady(t) {
 
   return {
     state,
-    workflow,
+    workflow: postReady,
     second,
     secondHead,
     workflowPath,
@@ -8858,6 +8858,50 @@ async function reachCompletedPreResolvedPostReady(t) {
     postReadyAt,
   };
 }
+
+test("post-ready drains an invalidated resolution before current-head findings", async (t) => {
+  const {
+    state,
+    workflow,
+    second,
+    resolvedObservation,
+    recordedPostReady,
+    postReadyAt,
+  } = await reachCompletedPreResolvedPostReady(t);
+  const movedObservation = structuredClone(resolvedObservation);
+  retimeObservation(movedObservation, postReadyAt + 2_000);
+  movedObservation.pull_request.is_draft = false;
+  const thread = movedObservation.review_threads.threads[0];
+  thread.comments.push({
+    id: "PRRC_FOLLOW_UP",
+    database_id: 903,
+    created_at: iso(postReadyAt + 1_000),
+    updated_at: iso(postReadyAt + 1_000),
+    actor: codexActor(),
+    review: null,
+  });
+  thread.comment_count = thread.comments.length;
+  findingsResult(movedObservation, digest("current-head finding"));
+  await recordGithubSnapshot(
+    state.store,
+    second.reviewId,
+    {
+      expectedRevision: recordedPostReady.revision,
+      observation: movedObservation,
+    },
+    { clock: () => postReadyAt + 2_010 },
+  );
+
+  const terminal = await getAutonomousTerminal(state.store, second.reviewId);
+  assert.equal(terminal.status, "CHANGES_REQUIRED");
+  assert.equal(terminal.blocking_reason, "CODEX_FINDINGS");
+  const resolving = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(resolving.phase, "RESOLVE_CODEX_THREADS");
+});
 
 async function assertPreResolvedTerminalAndGateBlocked(
   state,

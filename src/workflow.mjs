@@ -5373,12 +5373,12 @@ export async function advanceRemoteWorkflow(
     }
     if (
       workflow.phase === "POST_READY" &&
-      projection.status === "CHANGES_REQUIRED" &&
-      [
-        "THREAD_RESOLUTION_INVALIDATED",
-        "THREAD_RESOLUTION_UNSAFE",
-      ].includes(projection.blocking_reason)
+      projection.status === "CHANGES_REQUIRED"
     ) {
+      // A higher-priority blocker can mask an invalidated resolution in the
+      // publication projection. Drain the workflow-owned invalidation before
+      // routing any repair that records a successor head; otherwise that head
+      // abandons the source publication and strands its resolved thread.
       const invalidated = await getInvalidatedResolutionPlan(
         storeRoot,
         reviewId,
@@ -5540,27 +5540,20 @@ export async function advanceRemoteWorkflow(
         : "WAIT_PUBLICATION";
       if (reachedPreReady) {
         desiredPhase = "PRE_READY";
-      } else if (
-        projection.status === "CHANGES_REQUIRED" &&
-        [
-          "THREAD_RESOLUTION_INVALIDATED",
-          "THREAD_RESOLUTION_UNSAFE",
-        ].includes(projection.blocking_reason)
-      ) {
+      } else if (projection.status === "CHANGES_REQUIRED") {
         const invalidated = await getInvalidatedResolutionPlan(
           storeRoot,
           reviewId,
         );
         if (invalidated.actionable === true) {
           desiredPhase = "RESOLVE_CODEX_THREADS";
-        }
-      } else if (
-        projection.status === "CHANGES_REQUIRED" &&
-        projection.blocking_reason === "UNRESOLVED_REVIEW_THREADS"
-      ) {
-        const plan = await getThreadResolutionPlan(storeRoot, reviewId);
-        if (plan.threads.some((thread) => thread.eligible)) {
-          desiredPhase = "RESOLVE_CODEX_THREADS";
+        } else if (
+          projection.blocking_reason === "UNRESOLVED_REVIEW_THREADS"
+        ) {
+          const plan = await getThreadResolutionPlan(storeRoot, reviewId);
+          if (plan.threads.some((thread) => thread.eligible)) {
+            desiredPhase = "RESOLVE_CODEX_THREADS";
+          }
         }
       }
       if (
