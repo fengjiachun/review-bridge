@@ -94,6 +94,7 @@ function git(cwd, ...args) {
 }
 
 function retimeObservation(payload, at) {
+  delete payload.recorded_at;
   payload.observed_at = iso(at);
   for (const collection of [
     payload.pull_request.collection,
@@ -1751,7 +1752,6 @@ test("an addressed finding's thread becomes eligible in the next publication's p
   const unsafeRefreshAt =
     Date.parse(unsafeUnresolved.resolution_lifecycle.at(-1).at) + 10;
   const unsafeRefresh = structuredClone(unsafeMovedObservation);
-  delete unsafeRefresh.recorded_at;
   retimeObservation(unsafeRefresh, unsafeRefreshAt);
   unsafeRefresh.review_threads.threads[0].is_resolved = false;
   unsafeRefresh.review_threads.unresolved_count = 1;
@@ -9011,7 +9011,7 @@ test("post-ready drains an invalidated resolution before current-head findings",
 
   const terminal = await getAutonomousTerminal(state.store, second.reviewId);
   assert.equal(terminal.status, "EVIDENCE_INCOMPLETE");
-  assert.equal(terminal.blocking_reason, "GITHUB_COLLECTION_INCOMPLETE");
+  assert.equal(terminal.blocking_reason, "BASE_BRANCH_EVIDENCE_INCOHERENT");
   const resolving = await advanceRemoteWorkflow(
     state.store,
     workflow.workflow_id,
