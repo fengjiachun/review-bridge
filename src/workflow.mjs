@@ -4863,6 +4863,13 @@ export async function completeWorkflowAction(
       );
     }
     if (action.kind === "RETURN_PR_TO_DRAFT") {
+      const invalidated =
+        workflow.current_publication == null
+          ? null
+          : await getInvalidatedResolutionPlan(
+              storeRoot,
+              workflow.current_publication.review_id,
+            );
       return publicWorkflow(
         await saveActionMutation(
           paths,
@@ -4885,6 +4892,8 @@ export async function completeWorkflowAction(
             next.phase =
               next.current_publication == null
                 ? "LOCAL_GATE_PASSED"
+                : invalidated?.actionable === true
+                  ? "RESOLVE_CODEX_THREADS"
                 : repairedResolution == null
                   ? "WAIT_PUBLICATION"
                   : "ADDRESS_REMOTE_FINDINGS";

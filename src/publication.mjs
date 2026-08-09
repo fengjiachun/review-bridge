@@ -6068,6 +6068,23 @@ export function projectUnresolveCompletionEvidence(
     );
     const targetThread = threads.get(invalidated.thread_id);
     let targetReason = null;
+    const targetComments = new Map(
+      (targetThread?.comments ?? []).map((comment) => [
+        comment.database_id,
+        comment,
+      ]),
+    );
+    const preservesInvalidation = (invalidated.follow_up_comments ?? []).every(
+      (followUp) => {
+        const comment = targetComments.get(followUp.comment_id);
+        return (
+          comment != null &&
+          comment.actor?.id === followUp.actor?.id &&
+          comment.actor?.type === followUp.actor?.type &&
+          comment.created_at === followUp.created_at
+        );
+      },
+    );
     if (reviewThreads?.collection?.status !== "COMPLETE") {
       targetReason = "THREAD_COLLECTION_INCOMPLETE";
     } else if (targetThread == null) {
@@ -6078,8 +6095,8 @@ export function projectUnresolveCompletionEvidence(
       targetReason = "THREAD_PAGINATION_INCOMPLETE";
     } else if (targetThread.is_resolved !== false) {
       targetReason = "THREAD_RESOLVED";
-    } else if (threadWatermark(targetThread) !== newWatermark) {
-      targetReason = "THREAD_WATERMARK_MISMATCH";
+    } else if (!preservesInvalidation) {
+      targetReason = "THREAD_INVALIDATION_EVIDENCE_MISSING";
     }
     if (targetReason != null) {
       blockers.push({

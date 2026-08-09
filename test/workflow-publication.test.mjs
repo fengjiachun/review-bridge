@@ -6874,7 +6874,13 @@ test("an unresolve refresh preserves every unaffected active proof", () => {
         record_id: targetRecord.action_id,
         prior_watermark: targetRecord.thread_watermark,
         new_watermark: targetNewWatermark,
-        follow_up_comments: [],
+        follow_up_comments: [
+          {
+            comment_id: 902,
+            actor: codexActor(),
+            created_at: targetThread.comments.at(-1).created_at,
+          },
+        ],
         reason: "PINNED_CODEX_FOLLOW_UP",
         at: iso(eventAt),
       },
@@ -6902,6 +6908,46 @@ test("an unresolve refresh preserves every unaffected active proof", () => {
   assert.equal(complete.observation_refreshed, true);
   assert.deepEqual(complete.concurrent_invalidations, []);
   assert.deepEqual(complete.blockers, []);
+
+  const advancedTarget = structuredClone(ledger);
+  const advancedTargetThread =
+    advancedTarget.latest_observation.review_threads.threads[0];
+  advancedTargetThread.comments.push({
+    id: "PRRC_TARGET_LATER",
+    database_id: 999,
+    created_at: iso(observedAt + 1),
+    updated_at: iso(observedAt + 1),
+    actor: codexActor(),
+    review: null,
+  });
+  advancedTargetThread.comment_count = advancedTargetThread.comments.length;
+  const advancedTargetEvidence = projectUnresolveCompletionEvidence(
+    advancedTarget,
+    binding,
+    target,
+  );
+  assert.equal(advancedTargetEvidence.observation_refreshed, true);
+  assert.deepEqual(advancedTargetEvidence.concurrent_invalidations, []);
+  assert.deepEqual(advancedTargetEvidence.blockers, []);
+
+  const missingInvalidationEvidence = structuredClone(advancedTarget);
+  missingInvalidationEvidence.latest_observation.review_threads.threads[0].comments =
+    missingInvalidationEvidence.latest_observation.review_threads.threads[0].comments.filter(
+      (comment) => comment.database_id !== 902,
+    );
+  const missingTargetEvidence = projectUnresolveCompletionEvidence(
+    missingInvalidationEvidence,
+    binding,
+    target,
+  );
+  assert.equal(missingTargetEvidence.observation_refreshed, false);
+  assert.deepEqual(missingTargetEvidence.blockers, [
+    {
+      reason: "THREAD_INVALIDATION_EVIDENCE_MISSING",
+      thread_id: targetThread.id,
+      record_id: targetRecord.action_id,
+    },
+  ]);
 
   const resolvedTarget = structuredClone(ledger);
   resolvedTarget.latest_observation.review_threads.threads[0].is_resolved = true;
