@@ -1969,7 +1969,6 @@ test("an addressed finding's thread becomes eligible in the next publication's p
   retimeObservation(postObservedRecovery, movedAt + 500);
   const recoveryThread = postObservedRecovery.review_threads.threads[0];
   recoveryThread.is_resolved = false;
-  recoveryThread.comment_count += 1;
   recoveryThread.comments.push({
     id: "PRRC_recovery_follow_up",
     database_id: 905,
@@ -1978,6 +1977,11 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     actor: codex,
     review: null,
   });
+  recoveryThread.comment_count = recoveryThread.comments.length;
+  postObservedRecovery.review_threads.unresolved_count =
+    postObservedRecovery.review_threads.threads.filter(
+      (thread) => thread.is_resolved === false,
+    ).length;
   const recoveredSnapshot = await recordGithubSnapshot(
     recoveredStore,
     second.reviewId,
@@ -8848,7 +8852,10 @@ test("historical proof source lock contention propagates retryable PUBLICATION_B
   }
 });
 
-async function reachCompletedPreResolvedPostReady(t) {
+async function reachCompletedPreResolvedPostReady(
+  t,
+  { outcome = "OBSERVED_PRE_RESOLVED" } = {},
+) {
   const {
     state,
     workflow,
@@ -8859,9 +8866,27 @@ async function reachCompletedPreResolvedPostReady(t) {
     resolveAt,
     resolutionPlanned,
     resolutionObserved,
-  } = await reachObservedThreadResolution(t, {
-    outcome: "OBSERVED_PRE_RESOLVED",
-  });
+  } = await reachObservedThreadResolution(t, { outcome });
+
+  let beforeResolvedSnapshot;
+  if (outcome === "RESOLVED") {
+    const beforeRecord = await getPublication(state.store, second.reviewId);
+    beforeResolvedSnapshot = await recordAutomaticResolution(
+      state.store,
+      second.reviewId,
+      {
+        expectedRevision: beforeRecord.revision,
+        workflowId: workflow.workflow_id,
+        actionId: resolutionPlanned.action.action_id,
+      },
+      { clock: () => resolveAt + 1_000 },
+    );
+  } else {
+    beforeResolvedSnapshot = await getPublication(
+      state.store,
+      second.reviewId,
+    );
+  }
 
   const resolved = await completeWorkflowAction(
     state.store,
@@ -8870,14 +8895,11 @@ async function reachCompletedPreResolvedPostReady(t) {
     resolutionPlanned.action.action_id,
   );
   assert.equal(resolved.thread_resolutions.length, 1);
-  assert.equal(
-    resolved.thread_resolutions[0].outcome,
-    "OBSERVED_PRE_RESOLVED",
-  );
+  assert.equal(resolved.thread_resolutions[0].outcome, outcome);
   assert.equal(
     (await getPublication(state.store, second.reviewId)).automatic_resolutions
       .length,
-    0,
+    outcome === "RESOLVED" ? 1 : 0,
   );
 
   const resolvedAt = resolveAt + 20_000;
@@ -8885,10 +8907,6 @@ async function reachCompletedPreResolvedPostReady(t) {
   resolvedObservation.observed_at = iso(resolvedAt);
   resolvedObservation.review_threads.unresolved_count = 0;
   resolvedObservation.review_threads.threads[0].is_resolved = true;
-  const beforeResolvedSnapshot = await getPublication(
-    state.store,
-    second.reviewId,
-  );
   const recordedResolved = await recordGithubSnapshot(
     state.store,
     second.reviewId,
@@ -8981,7 +8999,7 @@ test("post-ready drains an invalidated resolution before current-head findings",
     resolvedObservation,
     recordedPostReady,
     postReadyAt,
-  } = await reachCompletedPreResolvedPostReady(t);
+  } = await reachCompletedPreResolvedPostReady(t, { outcome: "RESOLVED" });
   const movedObservation = structuredClone(resolvedObservation);
   retimeObservation(movedObservation, postReadyAt + 2_000);
   movedObservation.pull_request.is_draft = false;
@@ -9012,6 +9030,11 @@ test("post-ready drains an invalidated resolution before current-head findings",
   const terminal = await getAutonomousTerminal(state.store, second.reviewId);
   assert.equal(terminal.status, "EVIDENCE_INCOMPLETE");
   assert.equal(terminal.blocking_reason, "BASE_BRANCH_EVIDENCE_INCOHERENT");
+  const invalidated = await getInvalidatedResolutionPlan(
+    state.store,
+    second.reviewId,
+  );
+  assert.equal(invalidated.actionable, true, JSON.stringify(invalidated));
   const resolving = await advanceRemoteWorkflow(
     state.store,
     workflow.workflow_id,
@@ -11158,11 +11181,16 @@ test("two distinct ancestor source publications exercise newest-to-oldest acquis
       reviewId: firstPublication.reviewId,
       domain: "publication",
     });
-    consumer = getAutonomousTerminal(state.store, currentPublication.reviewId, {
-      clock: () => currentReadyAt + 20,
-    });
+    consumer = getAutonomousTerminal(
+      state.store,
+      currentPublication.reviewId,
+      { clock: () => currentReadyAt + 20 },
+    ).then(
+      (result) => ({ result, error: null }),
+      (error) => ({ result: null, error }),
+    );
     let newestHeldByConsumer = false;
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + 5_000;
     while (Date.now() < deadline && !newestHeldByConsumer) {
       try {
         const releaseProbe = await acquireStateLock({
@@ -11194,8 +11222,11 @@ test("two distinct ancestor source publications exercise newest-to-oldest acquis
     );
     await releaseOldest();
     releaseOldest = null;
-    const result = await consumer;
+    const { result, error } = await consumer;
     consumer = null;
+    if (error != null) {
+      throw error;
+    }
     assert.equal(result.status, "MERGE_READY");
     assert.deepEqual(result.blockers, []);
   } finally {
@@ -11203,7 +11234,7 @@ test("two distinct ancestor source publications exercise newest-to-oldest acquis
       await releaseOldest();
     }
     if (consumer != null) {
-      await consumer.catch(() => {});
+      await consumer;
     }
   }
 
