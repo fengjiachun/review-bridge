@@ -1611,7 +1611,7 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     actor: codex,
     review: null,
   });
-  await recordGithubSnapshot(
+  const movedSnapshot = await recordGithubSnapshot(
     state.store,
     second.reviewId,
     { expectedRevision: withRecord.revision + 1, observation: movedObservation },
@@ -1785,7 +1785,7 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       pr_number: PR_NUMBER,
       thread_id: "PRRT_1",
       thread_watermark: invalidationPlan.new_watermark,
-      is_resolved: false,
+      is_resolved: true,
     },
   );
   await assert.rejects(
@@ -1795,7 +1795,7 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       unresolveExecuting.revision,
       unresolvePlanned.action.action_id,
       {
-        outcome: "UNRESOLVED",
+        outcome: "OBSERVED_ALREADY_UNRESOLVED",
         repositoryId: REPOSITORY_ID,
         prNumber: PR_NUMBER,
         threadId: "PRRT_1",
@@ -1811,7 +1811,7 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     unresolveExecuting.revision,
     unresolvePlanned.action.action_id,
     {
-      outcome: "OBSERVED_ALREADY_UNRESOLVED",
+      outcome: "UNRESOLVED",
       repositoryId: REPOSITORY_ID,
       prNumber: PR_NUMBER,
       threadId: "PRRT_1",
@@ -1819,6 +1819,30 @@ test("an addressed finding's thread becomes eligible in the next publication's p
       threadWatermark: invalidationPlan.new_watermark,
     },
   );
+  const terminalStore = path.join(state.root, "terminal-unresolve-store");
+  await fsp.cp(state.store, terminalStore, { recursive: true });
+  const terminalObservation = structuredClone(movedObservation);
+  terminalObservation.observed_at = iso(movedAt + 1_000);
+  terminalObservation.pull_request.state = "CLOSED";
+  const terminalPublication = await recordGithubSnapshot(
+    terminalStore,
+    second.reviewId,
+    {
+      expectedRevision: movedSnapshot.revision,
+      observation: terminalObservation,
+    },
+    { clock: () => movedAt + 1_010 },
+  );
+  assert.equal(terminalPublication.terminal.status, "CLOSED");
+  const terminalCompletion = await completeWorkflowAction(
+    terminalStore,
+    workflow.workflow_id,
+    unresolveObserved.revision,
+    unresolvePlanned.action.action_id,
+  );
+  assert.equal(terminalCompletion.phase, "WAIT_PUBLICATION");
+  assert.equal(terminalCompletion.active_action, null);
+  assert.equal(terminalCompletion.thread_unresolutions.length, 0);
   await assert.rejects(
     completeWorkflowAction(
       state.store,
@@ -1879,10 +1903,16 @@ test("an addressed finding's thread becomes eligible in the next publication's p
   );
   assert.equal(atDraftRepair.phase, "ENSURE_DRAFT_FOR_REPAIR");
   assert.equal(atDraftRepair.thread_unresolutions.length, 1);
-  const draftPlanned = await planReturnToDraft(
+  const stillAtDraftRepair = await advanceRemoteWorkflow(
     state.store,
     workflow.workflow_id,
     atDraftRepair.revision,
+  );
+  assert.equal(stillAtDraftRepair.phase, "ENSURE_DRAFT_FOR_REPAIR");
+  const draftPlanned = await planReturnToDraft(
+    state.store,
+    workflow.workflow_id,
+    stillAtDraftRepair.revision,
   );
   const draftExecuting = await markWorkflowActionExecuting(
     state.store,
@@ -1979,6 +2009,15 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     workflow.workflow_id,
     successorWaiting.revision,
   );
+  await assert.rejects(
+    planThreadResolution(
+      state.store,
+      workflow.workflow_id,
+      successorResolving.revision,
+      { threadId: "PRRT_1" },
+    ),
+    (error) => error.code === "WORKFLOW_THREAD_REPLY_ALREADY_USED",
+  );
   const successorReplyPlanned = await planThreadReply(
     state.store,
     workflow.workflow_id,
@@ -2045,6 +2084,15 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     third.reviewId,
     { expectedRevision: 3, observation: successorObservation },
     { clock: () => successorReplyAt + 10 },
+  );
+  await assert.rejects(
+    planThreadReply(
+      state.store,
+      workflow.workflow_id,
+      successorReplied.revision,
+      { threadId: "PRRT_1", actorId: 555, actorType: "User" },
+    ),
+    (error) => error.code === "WORKFLOW_THREAD_ALREADY_ANSWERED",
   );
   const currentSuccessorPlan = await getThreadResolutionPlan(
     state.store,

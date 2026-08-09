@@ -3720,20 +3720,16 @@ export async function planThreadReply(
             "thread resolution has no bound publication",
           );
         }
-        const previousResolution = workflow.thread_resolutions.findLast(
-          (entry) => entry.thread_id === threadId,
-        );
-        const repairedPrevious =
-          previousResolution != null &&
-          workflow.thread_unresolutions.some(
+        const allowedReplies =
+          workflow.thread_unresolutions.filter(
             (entry) =>
               entry.thread_id === threadId &&
-              entry.record_id === previousResolution.action_id &&
               entry.reason === "PINNED_CODEX_FOLLOW_UP",
-          );
+          ).length + 1;
         if (
-          workflow.thread_replies.some((reply) => reply.thread_id === threadId) &&
-          !repairedPrevious
+          workflow.thread_replies.filter(
+            (reply) => reply.thread_id === threadId,
+          ).length >= allowedReplies
         ) {
           fail(
             "WORKFLOW_THREAD_ALREADY_ANSWERED",
@@ -3812,6 +3808,19 @@ export async function planThreadResolution(
             "WORKFLOW_THREAD_NOT_ANSWERED",
             "a resolution must follow the workflow's recorded reply",
             { thread_id: threadId },
+          );
+        }
+        const replyCount = workflow.thread_replies.filter(
+          (entry) => entry.thread_id === threadId,
+        ).length;
+        const resolutionCount = workflow.thread_resolutions.filter(
+          (entry) => entry.thread_id === threadId,
+        ).length;
+        if (replyCount <= resolutionCount) {
+          fail(
+            "WORKFLOW_THREAD_REPLY_ALREADY_USED",
+            "a resolution requires a new recorded reply after the compensating unresolve",
+            { thread_id: threadId, reply_comment_id: reply.comment_id },
           );
         }
         const previousResolution = workflow.thread_resolutions.findLast(
@@ -5466,7 +5475,16 @@ export async function advanceRemoteWorkflow(
       // before -- and a workflow already in the resolution phase whose
       // blocker moved on returns to the wait rather than keeping a phase
       // whose work no longer exists.
-      let desiredPhase = "WAIT_PUBLICATION";
+      const pendingPinnedUnresolveRepair =
+        workflow.phase === "ENSURE_DRAFT_FOR_REPAIR" &&
+        workflow.thread_unresolutions.some(
+          (entry) =>
+            entry.publication_review_id === reviewId &&
+            entry.reason === "PINNED_CODEX_FOLLOW_UP",
+        );
+      let desiredPhase = pendingPinnedUnresolveRepair
+        ? "ENSURE_DRAFT_FOR_REPAIR"
+        : "WAIT_PUBLICATION";
       if (reachedPreReady) {
         desiredPhase = "PRE_READY";
       } else if (
