@@ -237,6 +237,7 @@ function claimReleaseEvidence(workflow, observedAt = new Date().toISOString()) {
 test("repair head keeps every distinct safely drained findings review", () => {
   const first = { result_id: 11, reviewed_head_sha: "a".repeat(40) };
   const second = { result_id: 12, reviewed_head_sha: "b".repeat(40) };
+  const current = { result_id: 15, reviewed_head_sha: "e".repeat(40) };
   assert.deepEqual(
     distinctUnresolveFindingReviews(
       [
@@ -267,8 +268,23 @@ test("repair head keeps every distinct safely drained findings review", () => {
         },
       ],
       "rb-current",
+      current,
     ),
-    [first, second],
+    [first, second, current],
+  );
+  assert.deepEqual(
+    distinctUnresolveFindingReviews(
+      [
+        {
+          publication_review_id: "rb-current",
+          reason: "PINNED_CODEX_FOLLOW_UP",
+          findings_review: current,
+        },
+      ],
+      "rb-current",
+      current,
+    ),
+    [current],
   );
 });
 

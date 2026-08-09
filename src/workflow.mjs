@@ -3106,6 +3106,7 @@ export async function listAutonomousWorkflows(storeRoot, statuses = null) {
 export function distinctUnresolveFindingReviews(
   threadUnresolutions,
   publicationReviewId,
+  currentFindingsReview = null,
 ) {
   const seen = new Set();
   const reviews = [];
@@ -3120,6 +3121,12 @@ export function distinctUnresolveFindingReviews(
     if (seen.has(key)) continue;
     seen.add(key);
     reviews.push(entry.findings_review);
+  }
+  if (currentFindingsReview != null) {
+    const key = canonicalJson(currentFindingsReview);
+    if (!seen.has(key)) {
+      reviews.push(currentFindingsReview);
+    }
   }
   return reviews;
 }
@@ -3202,24 +3209,41 @@ export async function recordWorkflowHead(
           "the remote repair has no bound publication",
         );
       }
+      const currentFindings = await getPublicationFindingsReview(
+        storeRoot,
+        workflow.current_publication.review_id,
+      );
+      if (
+        currentFindings.findings_review != null &&
+        (currentFindings.workflow_id !== workflow.workflow_id ||
+          currentFindings.head_sha !== workflow.current_head_sha ||
+          currentFindings.revision !==
+            workflow.current_publication.awaiting_revision)
+      ) {
+        fail(
+          "WORKFLOW_FINDINGS_UNIDENTIFIED",
+          "the current findings review moved after the repair phase was selected",
+          { review_id: workflow.current_publication.review_id },
+        );
+      }
       const repairedReviews = distinctUnresolveFindingReviews(
         workflow.thread_unresolutions,
         workflow.current_publication.review_id,
+        currentFindings.findings_review,
       );
-      const findings =
-        repairedReviews.length === 0
-          ? [
-              await getPublicationFindingsReview(
-                storeRoot,
-                workflow.current_publication.review_id,
-              ),
-            ]
-          : repairedReviews.map((findingsReview) => ({
-              workflow_id: workflow.workflow_id,
-              head_sha: workflow.current_head_sha,
-              revision: workflow.current_publication.awaiting_revision,
-              findings_review: findingsReview,
-            }));
+      const findings = repairedReviews.map((findingsReview) => ({
+        workflow_id: workflow.workflow_id,
+        head_sha: workflow.current_head_sha,
+        revision: workflow.current_publication.awaiting_revision,
+        findings_review: findingsReview,
+      }));
+      if (findings.length === 0) {
+        fail(
+          "WORKFLOW_FINDINGS_UNIDENTIFIED",
+          "the remote repair has no current or drained findings review",
+          { review_id: workflow.current_publication.review_id },
+        );
+      }
       // The identity must come from the same publication revision whose
       // projection sent this workflow into the repair phase -- the revision
       // advanceRemoteWorkflow recorded as awaiting_revision in the mutation
@@ -4878,6 +4902,9 @@ export async function completeWorkflowAction(
           async (next) => {
             next.active_action.completed_at = now();
             next.active_action = null;
+            if (invalidated != null) {
+              next.current_publication.awaiting_revision = invalidated.revision;
+            }
             // Back to whichever wait owns the workflow now: the publication
             // wait re-derives the repair that was blocked, and with no
             // publication the gated head is still waiting to be pushed. The
