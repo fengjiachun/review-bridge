@@ -5427,10 +5427,7 @@ export async function advanceRemoteWorkflow(
       // complete fresh collection epoch.
       return publicWorkflow(workflow);
     }
-    if (
-      workflow.phase === "POST_READY" &&
-      projection.status === "CHANGES_REQUIRED"
-    ) {
+    if (workflow.phase === "POST_READY") {
       // A higher-priority blocker can mask an invalidated resolution in the
       // publication projection. Drain the workflow-owned invalidation before
       // routing any repair that records a successor head; otherwise that head
