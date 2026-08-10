@@ -3,6 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { threadActionExecutingProof } from "./server-input.mjs";
 import {
   defaultStoreRoot,
   exportHumanArbitration,
@@ -28,11 +29,13 @@ import {
   finalizePublicationGate,
   getAutonomousPreReady,
   getAutonomousTerminal,
+  getInvalidatedResolutionPlan,
   getPublication,
   getPublicationSummary,
   getThreadResolutionPlan,
   readObservationFile,
   recordAutomaticResolution,
+  recordAutomaticUnresolve,
   recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
@@ -58,6 +61,7 @@ import {
   planReturnToDraft,
   planThreadReply,
   planThreadResolution,
+  planThreadUnresolve,
   planWorkflowPush,
   recordCodexTaskObservation,
   recordDraftPullRequestObservation,
@@ -66,6 +70,7 @@ import {
   recordPushObservation,
   recordThreadReplyObservation,
   recordThreadResolutionObservation,
+  recordThreadUnresolveObservation,
   recordWorkflowHead,
   releaseWorkflowClaims,
   resumeAutonomousWorkflow,
@@ -489,7 +494,7 @@ if (role === "author") {
     {
       title: "Mark workflow action executing",
       description:
-        "Durably record EXECUTING immediately before the planned external write; a push additionally requires the pinned URL resolved to the authorized repository ID, a thread resolution requires the immediately preceding thread pre-read (thread ID, resolved flag, and -- while unresolved -- the exact comment watermark), and a mark-ready requires the immediately preceding pull-request pre-read (repository, number, both branches, head SHA, and draft flag), and a push additionally requires that pull request's draft state once one exists -- a visible pull request drops the push intent and routes to ENSURE_DRAFT_FOR_REPAIR rather than putting the new head in front of reviewers.",
+        "Durably record EXECUTING immediately before the planned external write; a push additionally requires the pinned URL resolved to the authorized repository ID, a thread resolution requires the immediately preceding thread pre-read (thread ID, resolved flag, and -- while unresolved -- the exact comment watermark), a compensating unresolve requires the exact authorized pull request, thread, invalidated watermark, and resolved flag, and a mark-ready requires the immediately preceding pull-request pre-read (repository, number, both branches, head SHA, and draft flag). A push additionally requires that pull request's draft state once one exists -- a visible pull request drops the push intent and routes to ENSURE_DRAFT_FOR_REPAIR rather than putting the new head in front of reviewers.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
@@ -515,13 +520,7 @@ if (role === "author") {
         input.expected_revision,
         input.action_id,
         input.thread_id != null
-          ? {
-              thread_id: input.thread_id,
-              is_resolved: input.is_resolved,
-              ...(input.thread_watermark == null
-                ? {}
-                : { thread_watermark: input.thread_watermark }),
-            }
+          ? threadActionExecutingProof(input)
           : input.pr_number != null
             ? {
                 repository_id: input.pr_repository_id,
@@ -684,6 +683,17 @@ if (role === "author") {
   );
 
   register(
+    "get_invalidated_resolution_plan",
+    {
+      title: "Get invalidated resolution plan",
+      description:
+        "Derive the one workflow-owned automatic resolution the current complete observation invalidates, including its exact old/new watermarks, follow-up comments, and safe or unsafe reason.",
+      inputSchema: { review_id: z.string() },
+    },
+    (input) => getInvalidatedResolutionPlan(storeRoot, input.review_id),
+  );
+
+  register(
     "plan_thread_reply",
     {
       title: "Plan thread reply",
@@ -824,6 +834,83 @@ if (role === "author") {
           actionId: input.action_id,
         },
       ),
+  );
+
+  register(
+    "plan_thread_unresolve",
+    {
+      title: "Plan compensating thread unresolve",
+      description:
+        "Persist an UNRESOLVE_REVIEW_THREAD intent only for the exact workflow-owned resolution the publication server currently reports invalid.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        thread_id: z.string(),
+      },
+    },
+    (input) =>
+      planThreadUnresolve(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        { threadId: input.thread_id },
+      ),
+  );
+
+  register(
+    "record_thread_unresolve_observation",
+    {
+      title: "Record thread unresolve observation",
+      description:
+        "Record the exact post-read for a compensating unresolve; an already-unresolved pre-read reconciles without issuing another mutation.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        action_id: z.string(),
+        outcome: z.enum(["UNRESOLVED", "OBSERVED_ALREADY_UNRESOLVED"]),
+        repository_id: z.number().int().positive(),
+        pr_number: z.number().int().positive(),
+        thread_id: z.string(),
+        is_resolved: z.boolean(),
+        thread_watermark: z.string(),
+      },
+    },
+    (input) =>
+      recordThreadUnresolveObservation(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        input.action_id,
+        {
+          outcome: input.outcome,
+          repositoryId: input.repository_id,
+          prNumber: input.pr_number,
+          threadId: input.thread_id,
+          isResolved: input.is_resolved,
+          threadWatermark: input.thread_watermark,
+        },
+      ),
+  );
+
+  register(
+    "record_automatic_unresolve",
+    {
+      title: "Record automatic unresolve",
+      description:
+        "Append the server-owned INVALIDATED and UNRESOLVED_FOR_REPAIR lifecycle events from the observed unresolve action, then clear the stale observation. Record a fresh complete GitHub snapshot before completing the workflow action. Idempotent for the same action.",
+      inputSchema: {
+        review_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        workflow_id: z.string(),
+        action_id: z.string(),
+      },
+    },
+    (input) =>
+      recordAutomaticUnresolve(storeRoot, input.review_id, {
+        expectedRevision: input.expected_revision,
+        workflowId: input.workflow_id,
+        actionId: input.action_id,
+      }),
   );
 
   register(

@@ -228,13 +228,11 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
     const threadResolutions = Array.isArray(workflow.thread_resolutions)
       ? workflow.thread_resolutions
       : [];
-    const resolvedThreads = new Set();
     for (const [index, resolution] of threadResolutions.entries()) {
       if (
         resolution?.number !== index + 1 ||
         typeof resolution.thread_id !== "string" ||
         resolution.thread_id === "" ||
-        resolvedThreads.has(resolution.thread_id) ||
         !["RESOLVED", "OBSERVED_PRE_RESOLVED"].includes(resolution.outcome) ||
         typeof resolution.action_id !== "string" ||
         resolution.action_id === "" ||
@@ -247,7 +245,80 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
       ) {
         fail("WORKFLOW_STATE_INVALID", "thread-resolution record is invalid");
       }
-      resolvedThreads.add(resolution.thread_id);
+    }
+    const threadUnresolutions = Array.isArray(workflow.thread_unresolutions)
+      ? workflow.thread_unresolutions
+      : [];
+    const unresolveRecords = new Set();
+    const unresolveActions = new Set();
+    for (const [index, unresolve] of threadUnresolutions.entries()) {
+      if (
+        unresolve?.number !== index + 1 ||
+        typeof unresolve.thread_id !== "string" ||
+        unresolve.thread_id === "" ||
+        typeof unresolve.record_id !== "string" ||
+        unresolve.record_id === "" ||
+        typeof unresolve.action_id !== "string" ||
+        unresolve.action_id === "" ||
+        !DIGEST_RE.test(unresolve.prior_watermark ?? "") ||
+        !DIGEST_RE.test(unresolve.new_watermark ?? "") ||
+        !["PINNED_CODEX_FOLLOW_UP", "THREAD_RESOLUTION_UNSAFE"].includes(
+          unresolve.reason,
+        ) ||
+        typeof unresolve.publication_review_id !== "string" ||
+        unresolve.publication_review_id === "" ||
+        !Number.isSafeInteger(unresolve.findings_review?.result_id) ||
+        unresolve.findings_review.result_id < 1 ||
+        !SHA_RE.test(unresolve.findings_review?.reviewed_head_sha ?? "")
+      ) {
+        fail("WORKFLOW_STATE_INVALID", "thread-unresolve record is invalid");
+      }
+      if (
+        unresolveRecords.has(unresolve.record_id) ||
+        unresolveActions.has(unresolve.action_id)
+      ) {
+        fail("WORKFLOW_STATE_INVALID", "thread-unresolve record is duplicated");
+      }
+      unresolveRecords.add(unresolve.record_id);
+      unresolveActions.add(unresolve.action_id);
+    }
+    const safeUnresolvesByThread = new Map();
+    for (const unresolve of threadUnresolutions) {
+      if (unresolve.reason !== "PINNED_CODEX_FOLLOW_UP") continue;
+      if (
+        !threadResolutions.some(
+          (resolution) =>
+            resolution.thread_id === unresolve.thread_id &&
+            resolution.action_id === unresolve.record_id &&
+            resolution.outcome === "RESOLVED",
+        )
+      ) {
+        fail(
+          "WORKFLOW_STATE_INVALID",
+          "a safe thread unresolve must name this workflow's proven resolution",
+        );
+      }
+      safeUnresolvesByThread.set(
+        unresolve.thread_id,
+        (safeUnresolvesByThread.get(unresolve.thread_id) ?? 0) + 1,
+      );
+    }
+    for (const threadId of new Set([
+      ...threadReplies.map((entry) => entry.thread_id),
+      ...threadResolutions.map((entry) => entry.thread_id),
+    ])) {
+      const allowed = (safeUnresolvesByThread.get(threadId) ?? 0) + 1;
+      if (
+        threadReplies.filter((entry) => entry.thread_id === threadId).length >
+          allowed ||
+        threadResolutions.filter((entry) => entry.thread_id === threadId)
+          .length > allowed
+      ) {
+        fail(
+          "WORKFLOW_STATE_INVALID",
+          "repeating a thread action requires a completed safe unresolve",
+        );
+      }
     }
     // The one in-flight action a publication is allowed to read: a thread
     // resolution this workflow has already observed as its own transition.
@@ -317,6 +388,52 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
         post_read_observed_at: response.observed_at,
       };
     }
+    let activeUnresolve = null;
+    if (
+      action?.kind === "UNRESOLVE_REVIEW_THREAD" &&
+      action.status === "OBSERVED"
+    ) {
+      const target = action.target;
+      const response = action.provider_response;
+      if (
+        typeof action.action_id !== "string" ||
+        action.action_id === "" ||
+        typeof target?.review_id !== "string" ||
+        target.review_id === "" ||
+        typeof target.thread_id !== "string" ||
+        target.thread_id === "" ||
+        typeof target.record_id !== "string" ||
+        target.record_id === "" ||
+        !DIGEST_RE.test(target.prior_watermark ?? "") ||
+        !DIGEST_RE.test(target.new_watermark ?? "") ||
+        !["PINNED_CODEX_FOLLOW_UP", "THREAD_RESOLUTION_UNSAFE"].includes(
+          target.reason,
+        ) ||
+        !Number.isSafeInteger(target.findings_review?.result_id) ||
+        !SHA_RE.test(target.findings_review?.reviewed_head_sha ?? "") ||
+        action.executing_proof?.thread_id !== target.thread_id ||
+        action.executing_proof.thread_watermark !== target.new_watermark ||
+        response?.thread_id !== target.thread_id ||
+        response.thread_watermark !== target.new_watermark ||
+        response.is_resolved !== false ||
+        typeof response.observed_at !== "string" ||
+        response.observed_at === ""
+      ) {
+        fail("WORKFLOW_STATE_INVALID", "thread-unresolve action evidence is invalid");
+      }
+      activeUnresolve = {
+        action_id: action.action_id,
+        review_id: target.review_id,
+        thread_id: target.thread_id,
+        record_id: target.record_id,
+        prior_watermark: target.prior_watermark,
+        new_watermark: target.new_watermark,
+        follow_up_comments: structuredClone(target.follow_up_comments),
+        reason: target.reason,
+        findings_review: structuredClone(target.findings_review),
+        outcome: response.outcome,
+      };
+    }
     return {
       workflow_id: workflow.workflow_id,
       revision: workflow.revision,
@@ -344,7 +461,18 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
         head_sha: resolution.head_sha,
         publication_review_id: resolution.publication_review_id,
       })),
+      thread_unresolutions: threadUnresolutions.map((unresolve) => ({
+        thread_id: unresolve.thread_id,
+        record_id: unresolve.record_id,
+        action_id: unresolve.action_id,
+        prior_watermark: unresolve.prior_watermark,
+        new_watermark: unresolve.new_watermark,
+        reason: unresolve.reason,
+        publication_review_id: unresolve.publication_review_id,
+        findings_review: structuredClone(unresolve.findings_review),
+      })),
       active_resolution: activeResolution,
+      active_unresolve: activeUnresolve,
       base_sha: workflow.base_sha,
       topic_branch: workflow.topic_branch,
       current_head_sha: workflow.current_head_sha,

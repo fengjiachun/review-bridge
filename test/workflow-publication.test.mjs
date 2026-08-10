@@ -15,12 +15,15 @@ import {
   finalizePublicationGate,
   getAutonomousPreReady,
   getAutonomousTerminal,
+  getInvalidatedResolutionPlan,
   getPublication,
   getPublicationSummary,
   getThreadResolutionPlan,
   recordAutomaticResolution,
+  recordAutomaticUnresolve,
   recordCodexReviewRequest,
   recordGithubSnapshot,
+  projectUnresolveCompletionEvidence,
   startPublication,
   threadWatermark,
   verifyPublicationGate,
@@ -46,6 +49,7 @@ import {
   planReturnToDraft,
   planThreadReply,
   planThreadResolution,
+  planThreadUnresolve,
   planWorkflowPush,
   recordCodexTaskObservation,
   recordDraftPullRequestObservation,
@@ -54,6 +58,7 @@ import {
   recordPushObservation,
   recordThreadReplyObservation,
   recordThreadResolutionObservation,
+  recordThreadUnresolveObservation,
   recordWorkflowHead,
   releaseWorkflowClaims,
   resumeAutonomousWorkflow,
@@ -86,6 +91,30 @@ function git(cwd, ...args) {
   });
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();
+}
+
+function retimeObservation(payload, at) {
+  delete payload.recorded_at;
+  payload.observed_at = iso(at);
+  for (const collection of [
+    payload.pull_request.collection,
+    payload.required_checks.collection,
+    payload.codex_review.collection,
+    payload.review_threads.collection,
+  ]) {
+    collection.collected_at = iso(at);
+    for (const source of [
+      ...(collection.sources ?? []),
+      ...(collection.policy_sources ?? []),
+      ...(collection.run_sources ?? []),
+    ]) {
+      source.collected_at = iso(at);
+    }
+  }
+  for (const ancestry of payload.review_threads.ancestry ?? []) {
+    ancestry.collected_at = iso(at);
+  }
+  return payload;
 }
 
 async function fixture() {
@@ -1183,7 +1212,14 @@ async function reachObservedThreadResolution(
   // A fresh observation carries the reply as a thread comment by the human
   // operator account. Condition 7 admits exactly that recorded comment, so
   // the thread stays eligible; the same comment unrecorded would refuse.
-  const repliedAt = Date.now();
+  const repliedPublication = await getPublication(
+    state.store,
+    second.reviewId,
+  );
+  const repliedAt = Math.max(
+    Date.now(),
+    Date.parse(repliedPublication.created_at) + 1_000,
+  );
   const repliedObservation = draftObservation(state, secondHead, {
     at: repliedAt,
     requestId: 100,
@@ -1390,6 +1426,7 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     state,
     workflow,
     second,
+    secondHead,
     codex,
     workflowPath,
     repliedObservation,
@@ -1606,7 +1643,7 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     actor: codex,
     review: null,
   });
-  await recordGithubSnapshot(
+  const movedSnapshot = await recordGithubSnapshot(
     state.store,
     second.reviewId,
     { expectedRevision: withRecord.revision + 1, observation: movedObservation },
@@ -1619,6 +1656,737 @@ test("an addressed finding's thread becomes eligible in the next publication's p
   );
   assert.equal(invalidated.status, "CHANGES_REQUIRED");
   assert.equal(invalidated.blocking_reason, "THREAD_RESOLUTION_INVALIDATED");
+
+  const invalidationPlan = await getInvalidatedResolutionPlan(
+    state.store,
+    second.reviewId,
+  );
+  assert.deepEqual(
+    {
+      actionable: invalidationPlan.actionable,
+      thread_id: invalidationPlan.thread_id,
+      record_id: invalidationPlan.record_id,
+      prior_watermark: invalidationPlan.prior_watermark,
+      new_watermark: invalidationPlan.new_watermark,
+      reason: invalidationPlan.reason,
+      follow_up_comments: invalidationPlan.follow_up_comments,
+    },
+    {
+      actionable: true,
+      thread_id: "PRRT_1",
+      record_id: resolutionPlanned.action.action_id,
+      prior_watermark: watermark,
+      new_watermark: threadWatermark(movedThread),
+      reason: "PINNED_CODEX_FOLLOW_UP",
+      follow_up_comments: [
+        {
+          comment_id: 903,
+          actor: { id: CODEX_ACTOR_ID, type: "Bot" },
+          created_at: iso(movedAt - 1_000),
+        },
+      ],
+    },
+  );
+  const unsafeStore = path.join(state.root, "unsafe-unresolve-store");
+  await fsp.cp(state.store, unsafeStore, { recursive: true });
+  const unsafeState = { ...state, store: unsafeStore };
+  await editPublication(unsafeState, second.reviewId, (ledger) => {
+    const comment = ledger.latest_observation.review_threads.threads[0].comments.at(-1);
+    comment.actor = { id: 777, type: "User", login: "participant" };
+  });
+  const unsafePlan = await getInvalidatedResolutionPlan(
+    unsafeStore,
+    second.reviewId,
+  );
+  assert.equal(unsafePlan.reason, "THREAD_RESOLUTION_UNSAFE");
+  const unsafeMovedObservation = structuredClone(
+    (await getPublication(unsafeStore, second.reviewId)).latest_observation,
+  );
+  const unsafeWorkflow = await advanceRemoteWorkflow(
+    unsafeStore,
+    workflow.workflow_id,
+    readyWorkflow.revision,
+  );
+  const unsafePlanned = await planThreadUnresolve(
+    unsafeStore,
+    workflow.workflow_id,
+    unsafeWorkflow.revision,
+    { threadId: "PRRT_1" },
+  );
+  const unsafeExecuting = await markWorkflowActionExecuting(
+    unsafeStore,
+    workflow.workflow_id,
+    unsafePlanned.workflow.revision,
+    unsafePlanned.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      thread_id: "PRRT_1",
+      thread_watermark: unsafePlan.new_watermark,
+      is_resolved: false,
+    },
+  );
+  const unsafeObserved = await recordThreadUnresolveObservation(
+    unsafeStore,
+    workflow.workflow_id,
+    unsafeExecuting.revision,
+    unsafePlanned.action.action_id,
+    {
+      outcome: "OBSERVED_ALREADY_UNRESOLVED",
+      repositoryId: REPOSITORY_ID,
+      prNumber: PR_NUMBER,
+      threadId: "PRRT_1",
+      isResolved: false,
+      threadWatermark: unsafePlan.new_watermark,
+    },
+  );
+  const unsafeUnresolved = await recordAutomaticUnresolve(
+    unsafeStore,
+    second.reviewId,
+    {
+      expectedRevision: withRecord.revision + 2,
+      workflowId: workflow.workflow_id,
+      actionId: unsafePlanned.action.action_id,
+    },
+  );
+  const unsafeRefreshAt =
+    Date.parse(unsafeUnresolved.resolution_lifecycle.at(-1).at) + 10;
+  const unsafeRefresh = structuredClone(unsafeMovedObservation);
+  retimeObservation(unsafeRefresh, unsafeRefreshAt);
+  unsafeRefresh.review_threads.threads[0].is_resolved = false;
+  unsafeRefresh.review_threads.unresolved_count = 1;
+  await recordGithubSnapshot(
+    unsafeStore,
+    second.reviewId,
+    {
+      expectedRevision: unsafeUnresolved.revision,
+      observation: unsafeRefresh,
+    },
+    { clock: () => unsafeRefreshAt },
+  );
+  const unsafePaused = await completeWorkflowAction(
+    unsafeStore,
+    workflow.workflow_id,
+    unsafeObserved.revision,
+    unsafePlanned.action.action_id,
+  );
+  assert.equal(unsafePaused.status, "PAUSED");
+  assert.equal(unsafePaused.phase, "PAUSED_HUMAN");
+  assert.equal(unsafePaused.pause.reason_code, "THREAD_RESOLUTION_UNSAFE");
+  const unresolving = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    readyWorkflow.revision,
+  );
+  assert.equal(unresolving.phase, "RESOLVE_CODEX_THREADS");
+  const unresolvePlanned = await planThreadUnresolve(
+    state.store,
+    workflow.workflow_id,
+    unresolving.revision,
+    { threadId: "PRRT_1" },
+  );
+  assert.equal(
+    unresolvePlanned.action.required_capability,
+    "UNRESOLVE_INVALIDATED_CODEX_THREADS",
+  );
+  const clearedStore = path.join(state.root, "cleared-unresolve-store");
+  await fsp.cp(state.store, clearedStore, { recursive: true });
+  await editPublication(
+    { ...state, store: clearedStore },
+    second.reviewId,
+    (ledger) => {
+      const thread = ledger.latest_observation.review_threads.threads[0];
+      thread.comments.pop();
+      thread.comment_count = 2;
+    },
+  );
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      clearedStore,
+      workflow.workflow_id,
+      unresolvePlanned.workflow.revision,
+      unresolvePlanned.action.action_id,
+      {
+        repository_id: REPOSITORY_ID,
+        pr_number: PR_NUMBER,
+        thread_id: "PRRT_1",
+        thread_watermark: invalidationPlan.new_watermark,
+        is_resolved: false,
+      },
+    ),
+    (error) => {
+      assert.equal(error.code, "THREAD_RESOLUTION_NOT_INVALIDATED");
+      assert.equal(error.details.phase, "WAIT_PUBLICATION");
+      return true;
+    },
+  );
+  assert.equal(
+    (await getAutonomousWorkflow(clearedStore, workflow.workflow_id))
+      .active_action,
+    null,
+  );
+  const advancedStore = path.join(state.root, "advanced-unresolve-store");
+  await fsp.cp(state.store, advancedStore, { recursive: true });
+  await editPublication(
+    { ...state, store: advancedStore },
+    second.reviewId,
+    (ledger) => {
+      const thread = ledger.latest_observation.review_threads.threads[0];
+      thread.comment_count = 4;
+      thread.comments.push({
+        id: "PRRC_4",
+        database_id: 904,
+        created_at: iso(movedAt + 1),
+        updated_at: iso(movedAt + 1),
+        actor: codex,
+        review: null,
+      });
+    },
+  );
+  const advancedPlan = await getInvalidatedResolutionPlan(
+    advancedStore,
+    second.reviewId,
+  );
+  assert.notEqual(advancedPlan.new_watermark, invalidationPlan.new_watermark);
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      advancedStore,
+      workflow.workflow_id,
+      unresolvePlanned.workflow.revision,
+      unresolvePlanned.action.action_id,
+      {
+        repository_id: REPOSITORY_ID,
+        pr_number: PR_NUMBER,
+        thread_id: "PRRT_1",
+        thread_watermark: advancedPlan.new_watermark,
+        is_resolved: true,
+      },
+    ),
+    (error) => {
+      assert.equal(error.code, "THREAD_RESOLUTION_NOT_INVALIDATED");
+      assert.equal(error.details.phase, "WAIT_PUBLICATION");
+      return true;
+    },
+  );
+  assert.equal(
+    (await getAutonomousWorkflow(advancedStore, workflow.workflow_id))
+      .active_action,
+    null,
+  );
+  // The provider pre-read may be newer than the persisted publication even
+  // after that publication passed revalidation. Treat its moved watermark as
+  // the same stale intent: no provider write happened, so abandon and wait for
+  // a snapshot that can produce the replacement plan.
+  const liveAdvancedStore = path.join(
+    state.root,
+    "live-advanced-unresolve-store",
+  );
+  await fsp.cp(state.store, liveAdvancedStore, { recursive: true });
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      liveAdvancedStore,
+      workflow.workflow_id,
+      unresolvePlanned.workflow.revision,
+      unresolvePlanned.action.action_id,
+      {
+        repository_id: REPOSITORY_ID,
+        pr_number: PR_NUMBER,
+        thread_id: "PRRT_1",
+        thread_watermark: advancedPlan.new_watermark,
+        is_resolved: true,
+      },
+    ),
+    (error) => {
+      assert.equal(error.code, "THREAD_RESOLUTION_NOT_INVALIDATED");
+      assert.equal(
+        error.details.action_abandoned,
+        unresolvePlanned.action.action_id,
+      );
+      assert.equal(error.details.phase, "WAIT_PUBLICATION");
+      assert.equal(
+        error.details.planned_watermark,
+        invalidationPlan.new_watermark,
+      );
+      assert.equal(error.details.live_watermark, advancedPlan.new_watermark);
+      return true;
+    },
+  );
+  assert.equal(
+    (await getAutonomousWorkflow(liveAdvancedStore, workflow.workflow_id))
+      .active_action,
+    null,
+  );
+  const unresolveExecuting = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    unresolvePlanned.workflow.revision,
+    unresolvePlanned.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      thread_id: "PRRT_1",
+      thread_watermark: invalidationPlan.new_watermark,
+      is_resolved: true,
+    },
+  );
+  await assert.rejects(
+    recordThreadUnresolveObservation(
+      state.store,
+      workflow.workflow_id,
+      unresolveExecuting.revision,
+      unresolvePlanned.action.action_id,
+      {
+        outcome: "OBSERVED_ALREADY_UNRESOLVED",
+        repositoryId: REPOSITORY_ID,
+        prNumber: PR_NUMBER,
+        threadId: "PRRT_1",
+        isResolved: false,
+        threadWatermark: invalidationPlan.new_watermark,
+      },
+    ),
+    (error) => error.code === "WORKFLOW_ACTION_INVALID",
+  );
+  const unresolveObserved = await recordThreadUnresolveObservation(
+    state.store,
+    workflow.workflow_id,
+    unresolveExecuting.revision,
+    unresolvePlanned.action.action_id,
+    {
+      outcome: "UNRESOLVED",
+      repositoryId: REPOSITORY_ID,
+      prNumber: PR_NUMBER,
+      threadId: "PRRT_1",
+      isResolved: false,
+      threadWatermark: invalidationPlan.new_watermark,
+    },
+  );
+  const recoveredStore = path.join(state.root, "recovered-unresolve-store");
+  await fsp.cp(state.store, recoveredStore, { recursive: true });
+  const beforeRecovery = await getPublication(recoveredStore, second.reviewId);
+  const postObservedRecovery = structuredClone(
+    beforeRecovery.latest_observation,
+  );
+  retimeObservation(postObservedRecovery, movedAt + 500);
+  const recoveryThread = postObservedRecovery.review_threads.threads[0];
+  recoveryThread.is_resolved = false;
+  recoveryThread.comments.push({
+    id: "PRRC_recovery_follow_up",
+    database_id: 905,
+    created_at: iso(movedAt + 400),
+    updated_at: iso(movedAt + 400),
+    actor: codex,
+    review: null,
+  });
+  recoveryThread.comment_count = recoveryThread.comments.length;
+  postObservedRecovery.review_threads.unresolved_count =
+    postObservedRecovery.review_threads.threads.filter(
+      (thread) => thread.is_resolved === false,
+    ).length;
+  const recoveredSnapshot = await recordGithubSnapshot(
+    recoveredStore,
+    second.reviewId,
+    {
+      expectedRevision: beforeRecovery.revision,
+      observation: postObservedRecovery,
+    },
+    { clock: () => movedAt + 510 },
+  );
+  const recoveredUnresolve = await recordAutomaticUnresolve(
+    recoveredStore,
+    second.reviewId,
+    {
+      expectedRevision: recoveredSnapshot.revision,
+      workflowId: workflow.workflow_id,
+      actionId: unresolvePlanned.action.action_id,
+    },
+    { clock: () => movedAt + 520 },
+  );
+  assert.deepEqual(
+    recoveredUnresolve.resolution_lifecycle.map((event) => event.kind),
+    ["INVALIDATED", "UNRESOLVED_FOR_REPAIR"],
+  );
+  const terminalStore = path.join(state.root, "terminal-unresolve-store");
+  await fsp.cp(state.store, terminalStore, { recursive: true });
+  const terminalObservation = structuredClone(movedObservation);
+  terminalObservation.observed_at = iso(movedAt + 1_000);
+  terminalObservation.pull_request.state = "CLOSED";
+  const terminalPublication = await recordGithubSnapshot(
+    terminalStore,
+    second.reviewId,
+    {
+      expectedRevision: movedSnapshot.revision,
+      observation: terminalObservation,
+    },
+    { clock: () => movedAt + 1_010 },
+  );
+  assert.equal(terminalPublication.terminal.status, "CLOSED");
+  const terminalCompletion = await completeWorkflowAction(
+    terminalStore,
+    workflow.workflow_id,
+    unresolveObserved.revision,
+    unresolvePlanned.action.action_id,
+  );
+  assert.equal(terminalCompletion.phase, "WAIT_PUBLICATION");
+  assert.equal(terminalCompletion.active_action, null);
+  assert.equal(terminalCompletion.thread_unresolutions.length, 0);
+  await assert.rejects(
+    completeWorkflowAction(
+      state.store,
+      workflow.workflow_id,
+      unresolveObserved.revision,
+      unresolvePlanned.action.action_id,
+    ),
+    (error) => error.code === "WORKFLOW_UNRESOLVE_RECORD_MISSING",
+  );
+  const withUnresolve = await recordAutomaticUnresolve(
+    state.store,
+    second.reviewId,
+    {
+      expectedRevision: withRecord.revision + 2,
+      workflowId: workflow.workflow_id,
+      actionId: unresolvePlanned.action.action_id,
+    },
+    { clock: () => movedAt + 30 },
+  );
+  assert.deepEqual(
+    withUnresolve.resolution_lifecycle.map((event) => ({
+      number: event.number,
+      kind: event.kind,
+      record_id: event.record_id,
+      action_id: event.action_id,
+    })),
+    [
+      {
+        number: 1,
+        kind: "INVALIDATED",
+        record_id: resolutionPlanned.action.action_id,
+        action_id: undefined,
+      },
+      {
+        number: 2,
+        kind: "UNRESOLVED_FOR_REPAIR",
+        record_id: resolutionPlanned.action.action_id,
+        action_id: unresolvePlanned.action.action_id,
+      },
+    ],
+  );
+  assert.equal(withUnresolve.latest_observation, null);
+  const repeatedUnresolve = await recordAutomaticUnresolve(
+    state.store,
+    second.reviewId,
+    {
+      expectedRevision: withUnresolve.revision,
+      workflowId: workflow.workflow_id,
+      actionId: unresolvePlanned.action.action_id,
+    },
+  );
+  assert.equal(repeatedUnresolve.revision, withUnresolve.revision);
+  await assert.rejects(
+    completeWorkflowAction(
+      state.store,
+      workflow.workflow_id,
+      unresolveObserved.revision,
+      unresolvePlanned.action.action_id,
+    ),
+    (error) => error.code === "WORKFLOW_UNRESOLVE_REFRESH_MISSING",
+  );
+  const refreshedObservation = structuredClone(movedObservation);
+  retimeObservation(refreshedObservation, movedAt + 35);
+  refreshedObservation.review_threads.threads[0].is_resolved = false;
+  refreshedObservation.review_threads.unresolved_count = 1;
+  const refreshedPublication = await recordGithubSnapshot(
+    state.store,
+    second.reviewId,
+    {
+      expectedRevision: withUnresolve.revision,
+      observation: refreshedObservation,
+    },
+    { clock: () => movedAt + 40 },
+  );
+  assert.ok(
+    Date.parse(refreshedPublication.latest_observation.recorded_at) >
+      Date.parse(withUnresolve.resolution_lifecycle[1].at),
+  );
+  const atDraftRepair = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    unresolveObserved.revision,
+    unresolvePlanned.action.action_id,
+  );
+  assert.equal(atDraftRepair.phase, "ENSURE_DRAFT_FOR_REPAIR");
+  assert.equal(atDraftRepair.thread_unresolutions.length, 1);
+  const stillAtDraftRepair = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    atDraftRepair.revision,
+  );
+  assert.equal(stillAtDraftRepair.phase, "ENSURE_DRAFT_FOR_REPAIR");
+  const draftPlanned = await planReturnToDraft(
+    state.store,
+    workflow.workflow_id,
+    stillAtDraftRepair.revision,
+  );
+  const draftExecuting = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    draftPlanned.workflow.revision,
+    draftPlanned.action.action_id,
+    {
+      repository_id: REPOSITORY_ID,
+      pr_number: PR_NUMBER,
+      base_branch: "main",
+      head_branch: TOPIC_BRANCH,
+      is_draft: true,
+    },
+  );
+  const draftObserved = await recordReturnToDraftObservation(
+    state.store,
+    workflow.workflow_id,
+    draftExecuting.revision,
+    draftPlanned.action.action_id,
+    {
+      outcome: "OBSERVED_ALREADY_DRAFT",
+      repositoryId: REPOSITORY_ID,
+      prNumber: PR_NUMBER,
+      baseBranch: "main",
+      headBranch: TOPIC_BRANCH,
+      isDraft: true,
+    },
+  );
+  const repair = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    draftObserved.revision,
+    draftPlanned.action.action_id,
+  );
+  assert.equal(repair.phase, "ADDRESS_REMOTE_FINDINGS");
+
+  const successorHead = await commit(
+    state.repository,
+    "export const value = 4;\n",
+  );
+  const recordedRepair = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    repair.revision,
+    successorHead,
+  );
+  assert.deepEqual(
+    recordedRepair.addressed_findings.at(-1).addressed_by,
+    [successorHead],
+  );
+  const third = await gateAndPublishHead(
+    state,
+    recordedRepair,
+    successorHead,
+    "three",
+  );
+  const successorAt = Date.now() + 10_000;
+  const { workflow: successorWaiting } = await reachRemoteWait(
+    state,
+    third.workflow,
+    third.reviewId,
+    successorHead,
+    successorAt,
+    (payload) => {
+      const openThread = structuredClone(movedThread);
+      openThread.is_resolved = false;
+      payload.review_threads.total_count = 1;
+      payload.review_threads.unresolved_count = 1;
+      payload.review_threads.threads = [openThread];
+      payload.review_threads.ancestry = [
+        {
+          finding_head_sha:
+            openThread.comments[0].review.reviewed_head_sha,
+          status: "AHEAD",
+          descends: true,
+          endpoint: "GET /compare/finding...successor",
+          collected_at: iso(successorAt + 1_500),
+        },
+      ];
+      return payload;
+    },
+  );
+  const successorPlan = await getThreadResolutionPlan(
+    state.store,
+    third.reviewId,
+  );
+  assert.equal(successorPlan.threads[0].eligible, true);
+  assert.deepEqual(successorPlan.threads[0].addressed_by, [
+    secondHead,
+    successorHead,
+  ]);
+  const successorResolving = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    successorWaiting.revision,
+  );
+  await assert.rejects(
+    planThreadResolution(
+      state.store,
+      workflow.workflow_id,
+      successorResolving.revision,
+      { threadId: "PRRT_1" },
+    ),
+    (error) => error.code === "WORKFLOW_THREAD_REPLY_ALREADY_USED",
+  );
+  const successorReplyPlanned = await planThreadReply(
+    state.store,
+    workflow.workflow_id,
+    successorResolving.revision,
+    { threadId: "PRRT_1", actorId: 555, actorType: "User" },
+  );
+  const successorReplyExecuting = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    successorReplyPlanned.workflow.revision,
+    successorReplyPlanned.action.action_id,
+  );
+  const successorReplyObserved = await recordThreadReplyObservation(
+    state.store,
+    workflow.workflow_id,
+    successorReplyExecuting.revision,
+    successorReplyPlanned.action.action_id,
+    {
+      matchingCommentIds: [904],
+      commentId: 904,
+      threadId: "PRRT_1",
+      actorId: 555,
+      actorType: "User",
+      body: successorReplyPlanned.dispatch.body,
+    },
+  );
+  const successorReplied = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    successorReplyObserved.revision,
+    successorReplyPlanned.action.action_id,
+  );
+  const successorReplyAt = Math.max(successorAt + 5_000, movedAt + 2_000);
+  const successorObservation = draftObservation(state, successorHead, {
+    at: successorReplyAt,
+    requestId: 100,
+    requestAt: successorAt + 1_000,
+  });
+  const successorThread = structuredClone(movedThread);
+  successorThread.is_resolved = false;
+  successorThread.comment_count = 4;
+  successorThread.comments.push({
+    id: "PRRC_4",
+    database_id: 904,
+    created_at: iso(successorReplyAt - 1_000),
+    updated_at: iso(successorReplyAt - 1_000),
+    actor: { id: 555, type: "User", login: "operator" },
+    review: null,
+  });
+  successorObservation.review_threads.total_count = 1;
+  successorObservation.review_threads.unresolved_count = 1;
+  successorObservation.review_threads.threads = [successorThread];
+  successorObservation.review_threads.ancestry = [
+    {
+      finding_head_sha: successorThread.comments[0].review.reviewed_head_sha,
+      status: "AHEAD",
+      descends: true,
+      endpoint: "GET /compare/finding...successor",
+      collected_at: iso(successorReplyAt - 400),
+    },
+  ];
+  const successorSnapshot = await recordGithubSnapshot(
+    state.store,
+    third.reviewId,
+    { expectedRevision: 3, observation: successorObservation },
+    { clock: () => successorReplyAt + 10 },
+  );
+  await assert.rejects(
+    planThreadReply(
+      state.store,
+      workflow.workflow_id,
+      successorReplied.revision,
+      { threadId: "PRRT_1", actorId: 555, actorType: "User" },
+    ),
+    (error) => error.code === "WORKFLOW_THREAD_ALREADY_ANSWERED",
+  );
+  const currentSuccessorPlan = await getThreadResolutionPlan(
+    state.store,
+    third.reviewId,
+  );
+  const successorWatermark =
+    currentSuccessorPlan.threads[0].thread_watermark;
+  const successorResolutionPlanned = await planThreadResolution(
+    state.store,
+    workflow.workflow_id,
+    successorReplied.revision,
+    { threadId: "PRRT_1" },
+  );
+  const successorResolutionExecuting = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    successorResolutionPlanned.workflow.revision,
+    successorResolutionPlanned.action.action_id,
+    {
+      thread_id: "PRRT_1",
+      is_resolved: false,
+      thread_watermark: successorWatermark,
+    },
+  );
+  const successorResolutionObserved = await recordThreadResolutionObservation(
+    state.store,
+    workflow.workflow_id,
+    successorResolutionExecuting.revision,
+    successorResolutionPlanned.action.action_id,
+    {
+      outcome: "RESOLVED",
+      threadId: "PRRT_1",
+      isResolved: true,
+      threadWatermark: successorWatermark,
+      resolvedById: 555,
+      resolvedByType: "User",
+    },
+  );
+  const withSuccessor = await recordAutomaticResolution(
+    state.store,
+    third.reviewId,
+    {
+      expectedRevision: successorSnapshot.revision,
+      workflowId: workflow.workflow_id,
+      actionId: successorResolutionPlanned.action.action_id,
+    },
+    { clock: () => successorReplyAt + 20 },
+  );
+  assert.deepEqual(
+    withSuccessor.automatic_resolutions.map((record) => record.action_id),
+    [resolutionPlanned.action.action_id, successorResolutionPlanned.action.action_id],
+  );
+  assert.deepEqual(
+    withSuccessor.resolution_lifecycle.map((event) => event.kind),
+    ["INVALIDATED", "UNRESOLVED_FOR_REPAIR", "SUPERSEDES"],
+  );
+  assert.equal(withSuccessor.resolution_lifecycle[2].invalidation_event, 1);
+  assert.equal(withSuccessor.resolution_lifecycle[2].unresolve_event, 2);
+  const successorResolved = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    successorResolutionObserved.revision,
+    successorResolutionPlanned.action.action_id,
+  );
+  assert.equal(successorResolved.thread_resolutions.length, 2);
+  const finalAt = successorReplyAt + 10_000;
+  const finalObservation = structuredClone(successorObservation);
+  finalObservation.observed_at = iso(finalAt);
+  finalObservation.review_threads.unresolved_count = 0;
+  finalObservation.review_threads.threads[0].is_resolved = true;
+  await recordGithubSnapshot(
+    state.store,
+    third.reviewId,
+    { expectedRevision: withSuccessor.revision, observation: finalObservation },
+    { clock: () => finalAt + 10 },
+  );
+  const successorReady = await getAutonomousPreReady(
+    state.store,
+    third.reviewId,
+    { clock: () => finalAt + 20 },
+  );
+  assert.equal(successorReady.status, "READY_TO_MARK");
 });
 
 test("a repair head cannot be recorded when the publication no longer names a findings review", async (t) => {
@@ -6050,6 +6818,273 @@ function supersedeEvent({ number, threadId = "PRRT_1", predecessorId, successorI
   };
 }
 
+test("an unresolve refresh preserves every unaffected active proof", () => {
+  const at = Date.now();
+  const eventAt = at + 1_000;
+  const observedAt = eventAt + 1_000;
+  const headSha = "b".repeat(40);
+  const targetThread = resolvedThread(headSha, { threadId: "PRRT_target" });
+  const unaffectedThread = resolvedThread(headSha, {
+    threadId: "PRRT_unaffected",
+  });
+  const targetRecord = resolutionRecord({
+    number: 1,
+    actionId: "act-target",
+    threadId: targetThread.id,
+    watermark: threadWatermark(targetThread),
+    headSha,
+    recordedRevision: 3,
+  });
+  const unaffectedRecord = resolutionRecord({
+    number: 2,
+    actionId: "act-unaffected",
+    threadId: unaffectedThread.id,
+    watermark: threadWatermark(unaffectedThread),
+    headSha,
+    recordedRevision: 4,
+  });
+  targetThread.comment_count = 2;
+  targetThread.comments.push({
+    id: "PRRC_target_follow_up",
+    database_id: 902,
+    created_at: iso(observedAt - 100),
+    updated_at: iso(observedAt - 100),
+    actor: codexActor(),
+    review: null,
+  });
+  const targetNewWatermark = threadWatermark(targetThread);
+  const payload = observation({
+    at: observedAt,
+    baseSha: "a".repeat(40),
+    headSha,
+    requestId: 100,
+    requestAt: at,
+  });
+  payload.recorded_at = iso(observedAt + 10);
+  payload.review_threads.total_count = 2;
+  payload.review_threads.unresolved_count = 1;
+  targetThread.is_resolved = false;
+  payload.review_threads.threads = [targetThread, unaffectedThread];
+  const ledger = {
+    review_id: "rb-test-unresolve-refresh",
+    terminal: null,
+    target: { codex_actor: codexActor() },
+    latest_observation: payload,
+    automatic_resolutions: [targetRecord, unaffectedRecord],
+    resolution_lifecycle: [
+      {
+        kind: "INVALIDATED",
+        number: 1,
+        thread_id: targetThread.id,
+        record_id: targetRecord.action_id,
+        prior_watermark: targetRecord.thread_watermark,
+        new_watermark: targetNewWatermark,
+        follow_up_comments: [
+          {
+            comment_id: 902,
+            actor: codexActor(),
+            created_at: targetThread.comments.at(-1).created_at,
+          },
+        ],
+        reason: "PINNED_CODEX_FOLLOW_UP",
+        at: iso(eventAt),
+      },
+      {
+        kind: "UNRESOLVED_FOR_REPAIR",
+        number: 2,
+        thread_id: targetThread.id,
+        record_id: targetRecord.action_id,
+        action_id: "unresolve-target",
+        at: iso(eventAt),
+      },
+    ],
+  };
+  const binding = { thread_replies: [] };
+  const target = {
+    recordId: targetRecord.action_id,
+    actionId: "unresolve-target",
+    newWatermark: targetNewWatermark,
+  };
+  const complete = projectUnresolveCompletionEvidence(
+    ledger,
+    binding,
+    target,
+  );
+  assert.equal(complete.observation_refreshed, true);
+  assert.deepEqual(complete.concurrent_invalidations, []);
+  assert.deepEqual(complete.blockers, []);
+
+  const advancedTarget = structuredClone(ledger);
+  const advancedTargetThread =
+    advancedTarget.latest_observation.review_threads.threads[0];
+  advancedTargetThread.comments.push({
+    id: "PRRC_TARGET_LATER",
+    database_id: 999,
+    created_at: iso(observedAt + 1),
+    updated_at: iso(observedAt + 1),
+    actor: codexActor(),
+    review: null,
+  });
+  advancedTargetThread.comment_count = advancedTargetThread.comments.length;
+  const advancedTargetEvidence = projectUnresolveCompletionEvidence(
+    advancedTarget,
+    binding,
+    target,
+  );
+  assert.equal(advancedTargetEvidence.observation_refreshed, true);
+  assert.deepEqual(advancedTargetEvidence.concurrent_invalidations, []);
+  assert.equal(advancedTargetEvidence.target_unsafe, false);
+  assert.deepEqual(advancedTargetEvidence.blockers, []);
+
+  const unsafeAdvancedTarget = structuredClone(advancedTarget);
+  unsafeAdvancedTarget.latest_observation.review_threads.threads[0].comments.push(
+    {
+      id: "PRRC_TARGET_HUMAN",
+      database_id: 1_000,
+      created_at: iso(observedAt + 2),
+      updated_at: iso(observedAt + 2),
+      actor: { id: 777, type: "User", login: "participant" },
+      review: null,
+    },
+  );
+  const unsafeTargetEvidence = projectUnresolveCompletionEvidence(
+    unsafeAdvancedTarget,
+    binding,
+    target,
+  );
+  assert.equal(unsafeTargetEvidence.observation_refreshed, true);
+  assert.equal(unsafeTargetEvidence.target_unsafe, true);
+  assert.deepEqual(unsafeTargetEvidence.blockers, []);
+
+  const missingInvalidationEvidence = structuredClone(advancedTarget);
+  missingInvalidationEvidence.latest_observation.review_threads.threads[0].comments =
+    missingInvalidationEvidence.latest_observation.review_threads.threads[0].comments.filter(
+      (comment) => comment.database_id !== 902,
+    );
+  const missingTargetEvidence = projectUnresolveCompletionEvidence(
+    missingInvalidationEvidence,
+    binding,
+    target,
+  );
+  assert.equal(missingTargetEvidence.observation_refreshed, false);
+  assert.deepEqual(missingTargetEvidence.blockers, [
+    {
+      reason: "THREAD_INVALIDATION_EVIDENCE_MISSING",
+      thread_id: targetThread.id,
+      record_id: targetRecord.action_id,
+    },
+  ]);
+
+  const resolvedTarget = structuredClone(ledger);
+  resolvedTarget.latest_observation.review_threads.threads[0].is_resolved = true;
+  const targetBlocked = projectUnresolveCompletionEvidence(
+    resolvedTarget,
+    binding,
+    target,
+  );
+  assert.equal(targetBlocked.observation_refreshed, false);
+  assert.deepEqual(targetBlocked.blockers, [
+    {
+      reason: "THREAD_RESOLVED",
+      thread_id: targetThread.id,
+      record_id: targetRecord.action_id,
+    },
+  ]);
+
+  const incomplete = structuredClone(ledger);
+  incomplete.latest_observation.review_threads.threads[1]
+    .comments_pagination_complete = false;
+  const blocked = projectUnresolveCompletionEvidence(
+    incomplete,
+    binding,
+    target,
+  );
+  assert.equal(blocked.observation_refreshed, false);
+  assert.deepEqual(blocked.blockers, [
+    {
+      reason: "THREAD_PAGINATION_INCOMPLETE",
+      thread_id: unaffectedThread.id,
+      record_id: unaffectedRecord.action_id,
+    },
+  ]);
+
+  const concurrent = structuredClone(ledger);
+  concurrent.latest_observation.review_threads.threads[1].comments[0]
+    .updated_at = iso(observedAt + 1);
+  const queued = projectUnresolveCompletionEvidence(
+    concurrent,
+    binding,
+    target,
+  );
+  assert.equal(queued.observation_refreshed, true);
+  assert.deepEqual(queued.blockers, []);
+  assert.deepEqual(queued.concurrent_invalidations, [
+    {
+      reason: "THREAD_WATERMARK_MISMATCH",
+      thread_id: unaffectedThread.id,
+      record_id: unaffectedRecord.action_id,
+    },
+  ]);
+
+  const drained = structuredClone(concurrent);
+  drained.latest_observation.review_threads.threads[1].is_resolved = false;
+  const secondWatermark = threadWatermark(
+    drained.latest_observation.review_threads.threads[1],
+  );
+  drained.resolution_lifecycle.push(
+    {
+      kind: "INVALIDATED",
+      number: 3,
+      thread_id: unaffectedThread.id,
+      record_id: unaffectedRecord.action_id,
+      prior_watermark: unaffectedRecord.thread_watermark,
+      new_watermark: secondWatermark,
+      follow_up_comments: [],
+      reason: "PINNED_CODEX_FOLLOW_UP",
+      at: iso(eventAt),
+    },
+    {
+      kind: "UNRESOLVED_FOR_REPAIR",
+      number: 4,
+      thread_id: unaffectedThread.id,
+      record_id: unaffectedRecord.action_id,
+      action_id: "unresolve-unaffected",
+      at: iso(eventAt),
+    },
+  );
+  const afterSecond = projectUnresolveCompletionEvidence(
+    drained,
+    {
+      thread_replies: [],
+      thread_unresolutions: [
+        {
+          publication_review_id: ledger.review_id,
+          record_id: targetRecord.action_id,
+        },
+      ],
+    },
+    {
+      recordId: unaffectedRecord.action_id,
+      actionId: "unresolve-unaffected",
+      newWatermark: secondWatermark,
+    },
+  );
+  assert.equal(afterSecond.observation_refreshed, true);
+  assert.deepEqual(afterSecond.blockers, []);
+  assert.deepEqual(afterSecond.concurrent_invalidations, []);
+
+  const stale = structuredClone(ledger);
+  stale.latest_observation.pull_request.collection.sources[0].collected_at =
+    iso(eventAt);
+  const staleEvidence = projectUnresolveCompletionEvidence(
+    stale,
+    binding,
+    target,
+  );
+  assert.equal(staleEvidence.observation_refreshed, false);
+  assert.equal(staleEvidence.blockers[0].reason, "OBSERVATION_NOT_FRESH");
+});
+
 test("a newer MERGE_READY revision with one pre-ready source stays POST_READY", async (t) => {
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
@@ -7817,7 +8852,10 @@ test("historical proof source lock contention propagates retryable PUBLICATION_B
   }
 });
 
-async function reachCompletedPreResolvedPostReady(t) {
+async function reachCompletedPreResolvedPostReady(
+  t,
+  { outcome = "OBSERVED_PRE_RESOLVED" } = {},
+) {
   const {
     state,
     workflow,
@@ -7828,9 +8866,27 @@ async function reachCompletedPreResolvedPostReady(t) {
     resolveAt,
     resolutionPlanned,
     resolutionObserved,
-  } = await reachObservedThreadResolution(t, {
-    outcome: "OBSERVED_PRE_RESOLVED",
-  });
+  } = await reachObservedThreadResolution(t, { outcome });
+
+  let beforeResolvedSnapshot;
+  if (outcome === "RESOLVED") {
+    const beforeRecord = await getPublication(state.store, second.reviewId);
+    beforeResolvedSnapshot = await recordAutomaticResolution(
+      state.store,
+      second.reviewId,
+      {
+        expectedRevision: beforeRecord.revision,
+        workflowId: workflow.workflow_id,
+        actionId: resolutionPlanned.action.action_id,
+      },
+      { clock: () => resolveAt + 1_000 },
+    );
+  } else {
+    beforeResolvedSnapshot = await getPublication(
+      state.store,
+      second.reviewId,
+    );
+  }
 
   const resolved = await completeWorkflowAction(
     state.store,
@@ -7839,14 +8895,11 @@ async function reachCompletedPreResolvedPostReady(t) {
     resolutionPlanned.action.action_id,
   );
   assert.equal(resolved.thread_resolutions.length, 1);
-  assert.equal(
-    resolved.thread_resolutions[0].outcome,
-    "OBSERVED_PRE_RESOLVED",
-  );
+  assert.equal(resolved.thread_resolutions[0].outcome, outcome);
   assert.equal(
     (await getPublication(state.store, second.reviewId)).automatic_resolutions
       .length,
-    0,
+    outcome === "RESOLVED" ? 1 : 0,
   );
 
   const resolvedAt = resolveAt + 20_000;
@@ -7854,10 +8907,6 @@ async function reachCompletedPreResolvedPostReady(t) {
   resolvedObservation.observed_at = iso(resolvedAt);
   resolvedObservation.review_threads.unresolved_count = 0;
   resolvedObservation.review_threads.threads[0].is_resolved = true;
-  const beforeResolvedSnapshot = await getPublication(
-    state.store,
-    second.reviewId,
-  );
   const recordedResolved = await recordGithubSnapshot(
     state.store,
     second.reviewId,
@@ -7932,7 +8981,7 @@ async function reachCompletedPreResolvedPostReady(t) {
 
   return {
     state,
-    workflow,
+    workflow: postReady,
     second,
     secondHead,
     workflowPath,
@@ -7941,6 +8990,58 @@ async function reachCompletedPreResolvedPostReady(t) {
     postReadyAt,
   };
 }
+
+test("post-ready drains an invalidated resolution before current-head findings", async (t) => {
+  const {
+    state,
+    workflow,
+    second,
+    resolvedObservation,
+    recordedPostReady,
+    postReadyAt,
+  } = await reachCompletedPreResolvedPostReady(t, { outcome: "RESOLVED" });
+  const movedObservation = structuredClone(resolvedObservation);
+  retimeObservation(movedObservation, postReadyAt + 2_000);
+  movedObservation.pull_request.is_draft = false;
+  const thread = movedObservation.review_threads.threads[0];
+  thread.comments.push({
+    id: "PRRC_FOLLOW_UP",
+    database_id: 903,
+    created_at: iso(postReadyAt + 1_000),
+    updated_at: iso(postReadyAt + 1_000),
+    actor: codexActor(),
+    review: null,
+  });
+  thread.comment_count = thread.comments.length;
+  findingsResult(movedObservation, digest("current-head finding"));
+  const finding = movedObservation.codex_review.results[0];
+  finding.result_id = 102;
+  finding.attached_review_comments[0].comment_id = 990;
+  await recordGithubSnapshot(
+    state.store,
+    second.reviewId,
+    {
+      expectedRevision: recordedPostReady.revision,
+      observation: movedObservation,
+    },
+    { clock: () => postReadyAt + 2_010 },
+  );
+
+  const terminal = await getAutonomousTerminal(state.store, second.reviewId);
+  assert.equal(terminal.status, "EVIDENCE_INCOMPLETE");
+  assert.equal(terminal.blocking_reason, "BASE_BRANCH_EVIDENCE_INCOHERENT");
+  const invalidated = await getInvalidatedResolutionPlan(
+    state.store,
+    second.reviewId,
+  );
+  assert.equal(invalidated.actionable, true, JSON.stringify(invalidated));
+  const resolving = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(resolving.phase, "RESOLVE_CODEX_THREADS");
+});
 
 async function assertPreResolvedTerminalAndGateBlocked(
   state,
@@ -10080,11 +11181,16 @@ test("two distinct ancestor source publications exercise newest-to-oldest acquis
       reviewId: firstPublication.reviewId,
       domain: "publication",
     });
-    consumer = getAutonomousTerminal(state.store, currentPublication.reviewId, {
-      clock: () => currentReadyAt + 20,
-    });
+    consumer = getAutonomousTerminal(
+      state.store,
+      currentPublication.reviewId,
+      { clock: () => currentReadyAt + 20 },
+    ).then(
+      (result) => ({ result, error: null }),
+      (error) => ({ result: null, error }),
+    );
     let newestHeldByConsumer = false;
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + 5_000;
     while (Date.now() < deadline && !newestHeldByConsumer) {
       try {
         const releaseProbe = await acquireStateLock({
@@ -10116,8 +11222,11 @@ test("two distinct ancestor source publications exercise newest-to-oldest acquis
     );
     await releaseOldest();
     releaseOldest = null;
-    const result = await consumer;
+    const { result, error } = await consumer;
     consumer = null;
+    if (error != null) {
+      throw error;
+    }
     assert.equal(result.status, "MERGE_READY");
     assert.deepEqual(result.blockers, []);
   } finally {
@@ -10125,7 +11234,7 @@ test("two distinct ancestor source publications exercise newest-to-oldest acquis
       await releaseOldest();
     }
     if (consumer != null) {
-      await consumer.catch(() => {});
+      await consumer;
     }
   }
 

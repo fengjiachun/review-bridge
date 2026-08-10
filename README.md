@@ -365,14 +365,16 @@ IMPLEMENTING
        ├─ machine finding      -> ADDRESS_REMOTE_FINDINGS ─┐
        ├─ required check fails -> ADDRESS_CHECK_FAILURE  ──┤-> COMMIT_HEAD
        ├─ base gap             -> UPDATE_FROM_BASE       ──┘   -> new local review
-       ├─ ambiguity, conflict, invalidation, or no progress -> PAUSED_HUMAN
+       ├─ ambiguity, conflict, unsafe invalidation, or no progress -> PAUSED_HUMAN
        ├─ any head to push while the pull request is out of draft
        │    -> ENSURE_DRAFT_FOR_REPAIR -> back to WAIT_PUBLICATION
        │       (recording a head refuses on the same evidence)
        ├─ eligible Codex finding thread -> RESOLVE_CODEX_THREADS
        │    -> recorded reply -> proven resolution -> back to WAIT_PUBLICATION
+       │    -> later pinned-Codex follow-up -> proven unresolve
+       │       -> return to draft -> ADDRESS_REMOTE_FINDINGS
        │    (a publication that goes terminal mid-resolution closes the
-       │     action without a record and pauses instead)
+       │     action without a resolution or unresolution record and pauses)
        └─ every other invariant passes -> PRE_READY
             -> MARK_PR_READY on the re-read clearance -> POST_READY
                  -> fresh post-ready observation
