@@ -209,6 +209,22 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
     assert.match(snapshot.description, /never retype the observation inline/);
 
     const reviewerTools = await reviewer.listTools();
+    const submitRereview = reviewerTools.tools.find(
+      (tool) => tool.name === "submit_rereview",
+    );
+    const decisionSchema =
+      submitRereview.inputSchema.properties.decisions.items;
+    assert.ok(decisionSchema.properties.verification);
+    assert.equal(decisionSchema.required.includes("verification"), false);
+    assert.match(
+      decisionSchema.properties.verification.description,
+      /Conclusions are not verification/,
+    );
+    assert.match(
+      submitRereview.description,
+      /enforces only its presence and length/,
+    );
+
     const readArtifact = reviewerTools.tools.find(
       (tool) => tool.name === "read_review_artifact",
     );

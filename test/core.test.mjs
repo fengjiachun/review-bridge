@@ -431,6 +431,8 @@ test("successor review binds a clean parent gate and exposes only the exact delt
         finding_id: "F-001",
         decision: "rebuttal_accepted",
         rationale: "The requirement confirms the null contract.",
+        verification:
+          "Read the requirement and app.js; both define null as the successor result.",
       },
     ],
     [],
@@ -1096,6 +1098,166 @@ test("two-round fixed finding reaches a local gate", async (t) => {
   assert.equal((await getReview(store, prepared.id)).status, "LOCAL_GATE_PASSED");
 });
 
+test("rereview rebuttals require verification without breaking old ledgers", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "export const value = 1;\n",
+  );
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  });
+  await submitInitialReview(store, prepared.id, [
+    {
+      severity: "major",
+      title: "Missing behavior test",
+      explanation: "The exported value has no focused test.",
+    },
+    {
+      severity: "major",
+      title: "Internal constant is undocumented",
+      explanation: "The constant needs a public contract.",
+    },
+  ]);
+  await submitResolutions(store, prepared.id, [
+    {
+      finding_id: "F-001",
+      disposition: "fixed",
+      rationale: "Added the focused assertion.",
+    },
+    {
+      finding_id: "F-002",
+      disposition: "rejected",
+      rationale: "The value is an internal constant.",
+    },
+  ]);
+  await prepareRereview(store, prepared.id);
+
+  const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
+  const beforeRejectedSubmission = await fsp.readFile(reviewPath, "utf8");
+  await assert.rejects(
+    submitRereview(
+      store,
+      prepared.id,
+      [
+        {
+          finding_id: "F-001",
+          decision: "resolved",
+          rationale: "The assertion covers the behavior.",
+        },
+        {
+          finding_id: "F-002",
+          decision: "rebuttal_accepted",
+          rationale: "The internal contract does not require documentation.",
+        },
+      ],
+      [],
+    ),
+    /decision\.verification must be a non-empty string/,
+  );
+  assert.equal(
+    await fsp.readFile(reviewPath, "utf8"),
+    beforeRejectedSubmission,
+  );
+  await assert.rejects(
+    submitRereview(
+      store,
+      prepared.id,
+      [
+        {
+          finding_id: "F-001",
+          decision: "resolved",
+          rationale: "The assertion covers the behavior.",
+        },
+        {
+          finding_id: "F-002",
+          decision: "rebuttal_accepted",
+          rationale: "The internal contract does not require documentation.",
+          verification: "x".repeat(20_001),
+        },
+      ],
+      [],
+    ),
+    /decision\.verification exceeds 20000 characters/,
+  );
+  assert.equal(
+    await fsp.readFile(reviewPath, "utf8"),
+    beforeRejectedSubmission,
+  );
+
+  const verification =
+    "Read app.js and its callers; the value is not exported from the package.";
+  const result = await submitRereview(
+    store,
+    prepared.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "resolved",
+        rationale: "The assertion covers the behavior.",
+      },
+      {
+        finding_id: "F-002",
+        decision: "rebuttal_accepted",
+        rationale: "The internal contract does not require documentation.",
+        verification,
+      },
+    ],
+    [
+      {
+        severity: "minor",
+        title: "New edge case",
+        explanation: "A separate edge case still needs a decision.",
+      },
+    ],
+  );
+  assert.equal(result.status, "HUMAN_REQUIRED");
+
+  const publicResult = await getReview(store, prepared.id);
+  assert.equal(publicResult.rereview_decisions[0].verification, "");
+  assert.equal(publicResult.rereview_decisions[1].verification, verification);
+  const exported = await exportHumanArbitration(
+    store,
+    prepared.id,
+    result.state_version,
+  );
+  const rebuttal = exported.arbitration.resolved_findings.find(
+    ({ finding }) => finding.id === "F-002",
+  );
+  assert.equal(rebuttal.rereview_decision.verification, verification);
+  assert.equal(exported.markdown.includes(verification), true);
+
+  const legacyLedger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  for (const decision of legacyLedger.rereview_decisions) {
+    delete decision.verification;
+  }
+  await fsp.writeFile(reviewPath, `${JSON.stringify(legacyLedger, null, 2)}\n`);
+  const legacyReview = await getReview(store, prepared.id);
+  assert.equal(
+    Object.hasOwn(legacyReview.rereview_decisions[1], "verification"),
+    false,
+  );
+  const legacyExport = await exportHumanArbitration(
+    store,
+    prepared.id,
+    result.state_version,
+  );
+  assert.equal(
+    Object.hasOwn(
+      legacyExport.arbitration.resolved_findings.find(
+        ({ finding }) => finding.id === "F-002",
+      ).rereview_decision,
+      "verification",
+    ),
+    false,
+  );
+});
+
 test("unresolved round-two finding escalates to a human", async (t) => {
   const { root, repository, store } = await fixture();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
@@ -1446,6 +1608,8 @@ test("compact finding histograms distinguish active and all-time severity", asyn
         finding_id: "F-002",
         decision: "rebuttal_accepted",
         rationale: "Evidence accepted.",
+        verification:
+          "Read the cited contract and observed that it excludes this internal path.",
       },
     ],
     [

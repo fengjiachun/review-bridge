@@ -1857,12 +1857,24 @@ async function submitRereviewWhileLocked(
         "rereview decision must be resolved, rebuttal_accepted, or still_open",
       );
     }
+    const rationale = assertString(input.rationale, "decision.rationale", {
+      max: 20_000,
+    });
+    const verification =
+      decision === "rebuttal_accepted"
+        ? assertString(input.verification, "decision.verification", {
+            max: 20_000,
+          })
+        : typeof input.verification === "string"
+          ? assertString(input.verification, "decision.verification", {
+              max: 20_000,
+            })
+          : "";
     const record = {
       finding_id: finding.id,
       decision,
-      rationale: assertString(input.rationale, "decision.rationale", {
-        max: 20_000,
-      }),
+      rationale,
+      verification,
       submitted_at: now(),
     };
     review.rereview_decisions.push(record);

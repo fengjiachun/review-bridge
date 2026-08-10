@@ -1624,7 +1624,7 @@ if (role === "author") {
     {
       title: "Submit round-two review",
       description:
-        "Decide every prior finding and report any new findings. Any unresolved or new finding after round two escalates to a human.",
+        "Decide every prior finding and report any new findings. A rebuttal_accepted decision requires replayable verification; the server enforces only its presence and length, not its truth. Any unresolved or new finding after round two escalates to a human.",
       inputSchema: {
         review_id: z.string(),
         decisions: z.array(
@@ -1636,6 +1636,12 @@ if (role === "author") {
               "still_open",
             ]),
             rationale: z.string(),
+            verification: z
+              .string()
+              .optional()
+              .describe(
+                "What you ran or read and what you observed — a probe test, a mutation, a walk of the claimed state, or a direct read of the cited code — concrete enough that an auditor can replay it. Conclusions are not verification.",
+              ),
           }),
         ),
         new_findings: z.array(findingSchema),
