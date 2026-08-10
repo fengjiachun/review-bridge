@@ -3,8 +3,11 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import {
   finalizeLocalGate,
+  prepareRereview,
   prepareReview,
   submitInitialReview,
+  submitRereview,
+  submitResolutions,
 } from "../../src/core.mjs";
 import {
   getPublication,
@@ -49,6 +52,7 @@ import {
   digest,
   iso,
   observation,
+  retimeObservation,
 } from "./github-observation.mjs";
 import {
   commit,
@@ -93,12 +97,14 @@ export function workflowInput(repository, baseSha) {
  * Run one head through local review, gate, push, and draft PR. The head is
  * recorded here unless a repair loop already recorded it.
  */
-export async function gateAndPublishHead(state, workflow, headSha, label) {
+export async function gateAndPublishHead(
+  state,
+  workflow,
+  headSha,
+  label,
+  { localFinding = null } = {},
+) {
   const summary = await getAutonomousWorkflowSummary(
-    state.store,
-    workflow.workflow_id,
-  );
-  const workflowState = await getAutonomousWorkflow(
     state.store,
     workflow.workflow_id,
   );
@@ -156,12 +162,50 @@ export async function gateAndPublishHead(state, workflow, headSha, label) {
     planned.action.action_id,
   );
 
-  await submitInitialReview(state.store, review.id, [], "CODEX_TASK");
-  const clean = await advanceLocalWorkflow(
+  await submitInitialReview(
+    state.store,
+    review.id,
+    localFinding == null ? [] : [localFinding.finding],
+    "CODEX_TASK",
+  );
+  let clean = await advanceLocalWorkflow(
     state.store,
     workflow.workflow_id,
     dispatched.revision,
   );
+  if (localFinding != null) {
+    headSha = await commit(state.repository, localFinding.fixedContent);
+    const fixed = await recordWorkflowHead(
+      state.store,
+      workflow.workflow_id,
+      clean.revision,
+      headSha,
+    );
+    await submitResolutions(state.store, review.id, [localFinding.resolution]);
+    const responded = await advanceLocalWorkflow(
+      state.store,
+      workflow.workflow_id,
+      fixed.revision,
+    );
+    await prepareRereview(state.store, review.id);
+    const rereview = await advanceLocalWorkflow(
+      state.store,
+      workflow.workflow_id,
+      responded.revision,
+    );
+    await submitRereview(
+      state.store,
+      review.id,
+      [localFinding.rereview],
+      [],
+      "CODEX_TASK",
+    );
+    clean = await advanceLocalWorkflow(
+      state.store,
+      workflow.workflow_id,
+      rereview.revision,
+    );
+  }
   await finalizeLocalGate(state.store, review.id);
   const gated = await advanceLocalWorkflow(
     state.store,
@@ -170,14 +214,23 @@ export async function gateAndPublishHead(state, workflow, headSha, label) {
   );
   assert.equal(gated.phase, "LOCAL_GATE_PASSED");
 
+  return publishGatedHead(state, gated, headSha, review.id);
+}
+
+/** Push a locally gated head and create or update its draft pull request. */
+export async function publishGatedHead(state, gated, headSha, reviewId) {
+  const workflowState = await getAutonomousWorkflow(
+    state.store,
+    gated.workflow_id,
+  );
   const pushPlanned = await planWorkflowPush(
     state.store,
-    workflow.workflow_id,
+    gated.workflow_id,
     gated.revision,
   );
   const pushExecuting = await markWorkflowActionExecuting(
     state.store,
-    workflow.workflow_id,
+    gated.workflow_id,
     pushPlanned.workflow.revision,
     pushPlanned.action.action_id,
     {
@@ -190,7 +243,7 @@ export async function gateAndPublishHead(state, workflow, headSha, label) {
   );
   const pushObserved = await recordPushObservation(
     state.store,
-    workflow.workflow_id,
+    gated.workflow_id,
     pushExecuting.revision,
     pushPlanned.action.action_id,
     {
@@ -201,26 +254,26 @@ export async function gateAndPublishHead(state, workflow, headSha, label) {
   );
   const pushed = await completeWorkflowAction(
     state.store,
-    workflow.workflow_id,
+    gated.workflow_id,
     pushObserved.revision,
     pushPlanned.action.action_id,
   );
 
   const prPlanned = await planDraftPullRequest(
     state.store,
-    workflow.workflow_id,
+    gated.workflow_id,
     pushed.revision,
     { creatorActorId: 555, creatorActorType: "User" },
   );
   const prExecuting = await markWorkflowActionExecuting(
     state.store,
-    workflow.workflow_id,
+    gated.workflow_id,
     prPlanned.workflow.revision,
     prPlanned.action.action_id,
   );
   const prObserved = await recordDraftPullRequestObservation(
     state.store,
-    workflow.workflow_id,
+    gated.workflow_id,
     prExecuting.revision,
     prPlanned.action.action_id,
     {
@@ -240,12 +293,12 @@ export async function gateAndPublishHead(state, workflow, headSha, label) {
   );
   const atPublication = await completeWorkflowAction(
     state.store,
-    workflow.workflow_id,
+    gated.workflow_id,
     prObserved.revision,
     prPlanned.action.action_id,
   );
   assert.equal(atPublication.phase, "START_PUBLICATION");
-  return { workflow: atPublication, reviewId: review.id };
+  return { workflow: atPublication, reviewId, headSha };
 }
 
 export function startInput(state, reviewId, workflow, startedAt) {
@@ -362,6 +415,7 @@ export async function reachObservedThreadResolution(
     // factory receives { firstHead } so a test can root the thread in the
     // same finding review that raised PRRT_1.
     firstPublicationThreads = null,
+    firstHeadPublisher = gateAndPublishHead,
   } = {},
 ) {
   const state = await fixture();
@@ -370,8 +424,9 @@ export async function reachObservedThreadResolution(
     state.store,
     workflowInput(state.repository, state.baseSha),
   );
-  const firstHead = await commit(state.repository, "export const value = 2;\n");
-  const first = await gateAndPublishHead(state, workflow, firstHead, "one");
+  let firstHead = await commit(state.repository, "export const value = 2;\n");
+  const first = await firstHeadPublisher(state, workflow, firstHead, "one");
+  firstHead = first.headSha ?? firstHead;
   const extraFirstThreads =
     firstPublicationThreads == null
       ? []
@@ -812,7 +867,10 @@ export function readyObservation(state, headSha, options) {
 }
 
 /** Walk a workflow through mark-ready into POST_READY. */
-export async function reachPostReady(t, { startedAtOffset = 0 } = {}) {
+export async function reachPostReady(
+  t,
+  { startedAtOffset = 0, markReadyRecovery = null } = {},
+) {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(
@@ -860,27 +918,37 @@ export async function reachPostReady(t, { startedAtOffset = 0 } = {}) {
       is_draft: true,
     },
   );
-  const observed = await recordMarkReadyObservation(
-    state.store,
-    workflow.workflow_id,
-    executing.revision,
-    planned.action.action_id,
-    {
-      outcome: "MARKED_READY",
-      repositoryId: REPOSITORY_ID,
-      prNumber: PR_NUMBER,
-      baseBranch: "main",
-      headBranch: TOPIC_BRANCH,
+  let ready;
+  if (markReadyRecovery == null) {
+    const observed = await recordMarkReadyObservation(
+      state.store,
+      workflow.workflow_id,
+      executing.revision,
+      planned.action.action_id,
+      {
+        outcome: "MARKED_READY",
+        repositoryId: REPOSITORY_ID,
+        prNumber: PR_NUMBER,
+        baseBranch: "main",
+        headBranch: TOPIC_BRANCH,
+        headSha,
+        isDraft: false,
+      },
+    );
+    ready = await completeWorkflowAction(
+      state.store,
+      workflow.workflow_id,
+      observed.revision,
+      planned.action.action_id,
+    );
+  } else {
+    ready = await markReadyRecovery({
+      state,
+      workflowId: workflow.workflow_id,
+      reviewId,
       headSha,
-      isDraft: false,
-    },
-  );
-  const ready = await completeWorkflowAction(
-    state.store,
-    workflow.workflow_id,
-    observed.revision,
-    planned.action.action_id,
-  );
+    });
+  }
   assert.equal(ready.phase, "POST_READY");
   return { state, workflow: ready, reviewId, headSha, at, clearanceRevision: clearance.revision };
 }
@@ -1438,7 +1506,7 @@ export async function reachRepairAncestorProof(t, { extraProofs = [] } = {}) {
 }
 export async function reachCompletedPreResolvedPostReady(
   t,
-  { outcome = "OBSERVED_PRE_RESOLVED" } = {},
+  { outcome = "OBSERVED_PRE_RESOLVED", firstHeadPublisher } = {},
 ) {
   const {
     state,
@@ -1450,7 +1518,10 @@ export async function reachCompletedPreResolvedPostReady(
     resolveAt,
     resolutionPlanned,
     resolutionObserved,
-  } = await reachObservedThreadResolution(t, { outcome });
+  } = await reachObservedThreadResolution(t, {
+    outcome,
+    ...(firstHeadPublisher == null ? {} : { firstHeadPublisher }),
+  });
 
   let beforeResolvedSnapshot;
   if (outcome === "RESOLVED") {
@@ -1549,9 +1620,12 @@ export async function reachCompletedPreResolvedPostReady(
   );
   assert.equal(postReady.phase, "POST_READY");
 
-  const postReadyAt = resolvedAt + 10_000;
+  const postReadyAt = Math.max(
+    resolvedAt + 10_000,
+    Date.parse(postReady.ready_marks.at(-1).recorded_at) + 2_000,
+  );
   const postReadyObservation = structuredClone(resolvedObservation);
-  postReadyObservation.observed_at = iso(postReadyAt);
+  retimeObservation(postReadyObservation, postReadyAt);
   postReadyObservation.pull_request.is_draft = false;
   const recordedPostReady = await recordGithubSnapshot(
     state.store,

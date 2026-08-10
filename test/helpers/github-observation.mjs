@@ -8,6 +8,36 @@ export function iso(milliseconds) {
 export function digest(value) {
   return createHash("sha256").update(value).digest("hex");
 }
+
+export function retimeObservation(observation, at) {
+  delete observation.recorded_at;
+  observation.observed_at = iso(at);
+  for (const [collection, collectedAt] of [
+    [observation.pull_request.collection, at - 700],
+    [observation.required_checks.collection, at - 600],
+    [observation.codex_review.collection, at - 500],
+    [observation.review_threads.collection, at - 400],
+  ]) {
+    collection.collected_at = iso(collectedAt);
+    for (const source of [
+      ...(collection.sources ?? []),
+      ...(collection.policy_sources ?? []),
+      ...(collection.run_sources ?? []),
+    ]) {
+      source.collected_at = iso(
+        source.kind === "BASE_BRANCH_METADATA"
+          ? at - 900
+          : source.kind === "BRANCH_METADATA"
+            ? at - 800
+            : collectedAt,
+      );
+    }
+  }
+  for (const ancestry of observation.review_threads.ancestry ?? []) {
+    ancestry.collected_at = iso(at - 400);
+  }
+  return observation;
+}
 export function completeSource(kind, collectedAt, extra = {}) {
   return {
     kind,
@@ -271,4 +301,3 @@ export function observationV2(options, requestId) {
   }
   return value;
 }
-
