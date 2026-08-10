@@ -617,9 +617,10 @@ For either mode:
     `gh pr merge --match-head-commit <head_sha>`. Never reuse a finalize result,
     direct file read, cached verification, or older revision.
 
-The fourteen publication tools are `authorize_remote_publication`,
+The fifteen publication tools are `authorize_remote_publication`,
 `start_publication`, `get_publication`, `get_publication_summary`,
-`get_autonomous_pre_ready`, `get_thread_resolution_plan`,
+`get_autonomous_pre_ready`, `get_autonomous_terminal`,
+`get_thread_resolution_plan`,
 `get_invalidated_resolution_plan`,
 `record_codex_review_request`, `record_github_snapshot`,
 `record_automatic_resolution`, `record_automatic_unresolve`,
