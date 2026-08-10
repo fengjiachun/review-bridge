@@ -56,6 +56,12 @@ build and is not a patch to Hermes bundled skills.
 7. For round two call `submit_rereview`, deciding every previous finding as
    `resolved`, `rebuttal_accepted`, or `still_open`, and report new findings
    separately. Any open or new finding escalates to human arbitration.
+   Every `rebuttal_accepted` decision must include `verification`: what you ran
+   or read and what you observed, such as a probe test, a mutation, a walk of
+   the claimed state, or a direct read of the cited code, concrete enough that
+   an auditor can replay it. Conclusions are not verification. The server
+   enforces only presence and length, not whether the verification is true.
+   `verification` is optional for `resolved` and `still_open` decisions.
 
 The immutable snapshot and Review Bridge ledger are the source of truth. Do not
 substitute the live working tree or inherited chat context.

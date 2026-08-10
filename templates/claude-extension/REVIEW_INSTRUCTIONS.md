@@ -50,7 +50,13 @@ When the user asks to review a pending Codex task:
    actionable issue remains.
 9. On round two, decide every previous finding:
    - `resolved`: the code now fixes the issue.
-   - `rebuttal_accepted`: Codex's evidence shows no change is required.
+   - `rebuttal_accepted`: Codex's evidence shows no change is required. Include
+     `verification`: what you ran or read and what you observed, such as a probe
+     test, a mutation, a walk of the claimed state, or a direct read of the
+     cited code, concrete enough that an auditor can replay it. Conclusions are
+     not verification. The server enforces only presence and length, not
+     whether the verification is true. `verification` is optional for
+     `resolved` and `still_open` decisions.
    - `still_open`: the concern remains.
 10. Report new findings separately. Any open or new finding in round two sends
    the task to human arbitration.
