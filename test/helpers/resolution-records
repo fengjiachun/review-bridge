@@ -1,0 +1,106 @@
+import { digest, iso } from "./github-observation.mjs";
+import { CODEX_ACTOR_ID } from "./publication-chain";
+
+export function codexActor() {
+  return { id: CODEX_ACTOR_ID, type: "Bot", login: "chatgpt-codex-connector[bot]" };
+}
+
+/** A resolved Codex-rooted thread whose root review examined the gated head. */
+export function resolvedThread(headSha, { threadId = "PRRT_1", comments = null } = {}) {
+  const codex = codexActor();
+  const at = Date.now();
+  const root = {
+    id: "PRRC_1",
+    database_id: 900,
+    created_at: iso(at - 5_000),
+    updated_at: iso(at - 5_000),
+    actor: codex,
+    review: {
+      id: "PRR_1",
+      database_id: 101,
+      state: "COMMENTED",
+      reviewed_head_sha: headSha,
+      actor: codex,
+    },
+  };
+  const all = comments ?? [root];
+  return {
+    id: threadId,
+    is_resolved: true,
+    is_outdated: false,
+    path: null,
+    line: null,
+    comment_count: all.length,
+    comments_pagination_complete: true,
+    provenance_complete: true,
+    comments: all,
+  };
+}
+
+/** A server-owned automatic-resolution record in the stored shape. */
+export function resolutionRecord({
+  number,
+  actionId,
+  threadId = "PRRT_1",
+  watermark,
+  headSha,
+  recordedRevision,
+}) {
+  const at = Date.now();
+  return {
+    number,
+    action_id: actionId,
+    thread_id: threadId,
+    thread_watermark: watermark,
+    eligibility_sha256: digest(`eligibility-${actionId}`),
+    head_sha: headSha,
+    actor: { id: 555, type: "User" },
+    reply_comment_id: 901,
+    pre_read: { observed_at: iso(at - 3_000), is_resolved: false },
+    post_read: {
+      observed_at: iso(at - 2_000),
+      is_resolved: true,
+      resolved_by: { id: 555, type: "User" },
+    },
+    recorded_at: iso(at - 1_000),
+    recorded_revision: recordedRevision,
+  };
+}
+
+export function invalidatedEvent({ number, threadId = "PRRT_1", recordId, priorWatermark, newWatermark }) {
+  return {
+    kind: "INVALIDATED",
+    number,
+    thread_id: threadId,
+    record_id: recordId,
+    prior_watermark: priorWatermark,
+    new_watermark: newWatermark,
+    follow_up_comments: [],
+    reason: "pinned codex feedback",
+    at: iso(Date.now()),
+  };
+}
+
+export function unresolveEvent({ number, threadId = "PRRT_1", recordId }) {
+  return {
+    kind: "UNRESOLVED_FOR_REPAIR",
+    number,
+    thread_id: threadId,
+    record_id: recordId,
+    action_id: `unresolve-${recordId}`,
+    at: iso(Date.now()),
+  };
+}
+
+export function supersedeEvent({ number, threadId = "PRRT_1", predecessorId, successorId, invalidationEvent, unresolveEvent }) {
+  return {
+    kind: "SUPERSEDES",
+    number,
+    thread_id: threadId,
+    predecessor_id: predecessorId,
+    successor_id: successorId,
+    invalidation_event: invalidationEvent,
+    unresolve_event: unresolveEvent,
+    at: iso(Date.now()),
+  };
+}
