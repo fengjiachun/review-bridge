@@ -1,0 +1,104 @@
+import fsp from "node:fs/promises";
+import {
+  getPublication,
+  recordAutomaticUnresolve,
+  recordGithubSnapshot,
+} from "../../src/publication.mjs";
+import {
+  completeWorkflowAction,
+  getAutonomousWorkflow,
+  recordMarkReadyObservation,
+  recordThreadUnresolveObservation,
+} from "../../src/workflow.mjs";
+import { retimeObservation } from "./github-observation.mjs";
+
+const [store, workflowId, providerPath] = process.argv.slice(2);
+const provider = JSON.parse(await fsp.readFile(providerPath, "utf8"));
+const workflow = await getAutonomousWorkflow(store, workflowId);
+const action = workflow.active_action;
+
+if (provider.write_count !== 1 || action?.status !== "EXECUTING") {
+  throw new Error("recovery requires one accepted write and an executing intent");
+}
+
+let recovered;
+if (action.kind === "MARK_PR_READY" && provider.kind === action.kind) {
+  const observed = await recordMarkReadyObservation(
+    store,
+    workflowId,
+    workflow.revision,
+    action.action_id,
+    {
+      outcome: "MARKED_READY",
+      repositoryId: provider.repository_id,
+      prNumber: provider.pr_number,
+      baseBranch: provider.base_branch,
+      headBranch: provider.head_branch,
+      headSha: provider.head_sha,
+      isDraft: provider.is_draft,
+    },
+  );
+  recovered = await completeWorkflowAction(
+    store,
+    workflowId,
+    observed.revision,
+    action.action_id,
+  );
+} else if (
+  action.kind === "UNRESOLVE_REVIEW_THREAD" &&
+  provider.kind === action.kind
+) {
+  const observed = await recordThreadUnresolveObservation(
+    store,
+    workflowId,
+    workflow.revision,
+    action.action_id,
+    {
+      outcome: "UNRESOLVED",
+      repositoryId: provider.repository_id,
+      prNumber: provider.pr_number,
+      threadId: provider.thread_id,
+      isResolved: false,
+      threadWatermark: provider.thread_watermark,
+    },
+  );
+  const publication = await getPublication(store, action.target.review_id);
+  const withLifecycle = await recordAutomaticUnresolve(
+    store,
+    action.target.review_id,
+    {
+      expectedRevision: publication.revision,
+      workflowId,
+      actionId: action.action_id,
+    },
+  );
+  const refreshAt =
+    Date.parse(withLifecycle.resolution_lifecycle.at(-1).at) + 1_000;
+  const refresh = structuredClone(provider.observation);
+  retimeObservation(refresh, refreshAt);
+  const thread = refresh.review_threads.threads.find(
+    (entry) => entry.id === provider.thread_id,
+  );
+  thread.is_resolved = false;
+  refresh.review_threads.unresolved_count =
+    refresh.review_threads.threads.filter(
+      (entry) => entry.is_resolved === false,
+    ).length;
+  await recordGithubSnapshot(
+    store,
+    action.target.review_id,
+    { expectedRevision: withLifecycle.revision, observation: refresh },
+    { clock: () => refreshAt + 10 },
+  );
+  recovered = await completeWorkflowAction(
+    store,
+    workflowId,
+    observed.revision,
+    action.action_id,
+  );
+} else {
+  throw new Error("provider state does not match the persisted intent");
+}
+
+provider.recovered_phase = recovered.phase;
+await fsp.writeFile(providerPath, `${JSON.stringify(provider, null, 2)}\n`);
