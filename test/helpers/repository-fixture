@@ -1,0 +1,52 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+export const TOPIC_BRANCH = "agent/workflow-core";
+
+export function git(cwd, ...args) {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+export async function fixture() {
+  const root = await fsp.mkdtemp(
+    path.join(os.tmpdir(), "review-bridge-remote-"),
+  );
+  const repository = path.join(root, "repo");
+  const store = path.join(root, "store");
+  await fsp.mkdir(repository);
+  git(repository, "init", "-b", "main");
+  git(repository, "config", "user.name", "Review Bridge Test");
+  git(repository, "config", "user.email", "review-bridge@example.invalid");
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "export const value = 1;\n",
+  );
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "base");
+  git(
+    repository,
+    "remote",
+    "add",
+    "origin",
+    "ssh://git@github.com/example/review-bridge.git",
+  );
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  git(repository, "switch", "-c", TOPIC_BRANCH);
+  return { root, repository, store, baseSha };
+}
+
+export async function commit(repository, content) {
+  await fsp.writeFile(path.join(repository, "app.js"), content);
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "change");
+  return git(repository, "rev-parse", "HEAD");
+}
