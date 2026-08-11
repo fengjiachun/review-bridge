@@ -3,7 +3,7 @@
 [![CI](https://github.com/fengjiachun/review-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/fengjiachun/review-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
-[![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey.svg)](#platform-support)
+[![Platform](https://img.shields.io/badge/platform-macOS%2013%2B%20%7C%20Linux-lightgrey.svg)](#platform-support)
 
 A manually triggered code-review handoff between a Codex author and an
 explicitly bound reviewer: Claude Desktop, a fresh Codex task, a Hermes
@@ -46,12 +46,14 @@ endorsed by, or sponsored by OpenAI or Anthropic.
 
 ## Platform support
 
-Review Bridge supports macOS 13 Ventura or newer. The Claude Desktop extension
-manifest is Darwin-only; Linux and Windows are not currently supported or
-tested. State locking uses the macOS system tools `/usr/bin/lockf` and
-`/bin/ps`.
+Review Bridge supports macOS 13 Ventura or newer and Linux. The Claude Desktop
+extension manifest remains Darwin-only; the Codex and Hermes integrations run
+on both supported platforms. Windows is not supported or tested. State locking
+uses `/usr/bin/lockf` on macOS, `/usr/bin/flock` on Linux, and `/bin/ps` on
+both.
 
-Node.js 18 or newer is required. CI verifies each change on macOS with Node 20.
+Node.js 18 or newer is required. CI verifies each change on macOS and Ubuntu
+with Node 20.
 The GitHub publication collector also requires an authenticated
 [GitHub CLI](https://cli.github.com/) (`gh auth status`).
 
@@ -631,9 +633,9 @@ release policy.
 
 ## Develop
 
-Requirements: macOS 13 Ventura or newer with `/usr/bin/lockf` and `/bin/ps`,
-Node.js 18 or newer, npm, and Git. `npm run verify:build` additionally requires
-`unzip`.
+Requirements: macOS 13 Ventura or newer with `/usr/bin/lockf` and `/bin/ps`, or
+Linux with `/usr/bin/flock` and `/bin/ps`; Node.js 18 or newer; npm; and Git.
+`npm run verify:build` additionally requires `unzip`.
 
 ```bash
 npm ci

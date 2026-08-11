@@ -14,10 +14,28 @@ const LOCK_POLL_MS = 100;
 const LOCK_HELPER_COMMAND_TIMEOUT_MS = 5_000;
 const PROCESS_PROBE_TIMEOUT_MS = 2_000;
 const LOCK_HELPER_ARGUMENT = "--state-lock-helper";
-const LOCKF_PATH = "/usr/bin/lockf";
+const PLATFORM_LOCK_CONSTANTS = {
+  darwin: {
+    lockfPath: "/usr/bin/lockf",
+    lockfArguments: ["-s", "-k", "-t", "0"],
+    processStartFormat: "darwin-ps-lstart-c-utc-v1",
+  },
+  linux: {
+    lockfPath: "/usr/bin/flock",
+    lockfArguments: ["-n", "-E", "75"],
+    processStartFormat: "linux-ps-lstart-c-utc-v1",
+  },
+}[process.platform];
+if (PLATFORM_LOCK_CONSTANTS == null) {
+  throw new Error(`unsupported storage lock platform: ${process.platform}`);
+}
+const {
+  lockfPath: LOCKF_PATH,
+  lockfArguments: LOCKF_ARGUMENTS,
+  processStartFormat: PROCESS_START_FORMAT,
+} = PLATFORM_LOCK_CONSTANTS;
 const LOCKF_BUSY_EXIT = 75;
 const PS_PATH = "/bin/ps";
-const PROCESS_START_FORMAT = "darwin-ps-lstart-c-utc-v1";
 const STORAGE_MODULE_PATH = fileURLToPath(import.meta.url);
 const execFileAsync = promisify(execFile);
 let ownProcessStartTimePromise;
@@ -282,11 +300,17 @@ function processStartTimeSync(pid) {
   if (
     result.status === 0 &&
     typeof result.stdout === "string" &&
-    result.stdout.trim() !== ""
+    processStartTimeIsValid(result.stdout.trim())
   ) {
     return result.stdout.trim();
   }
   return null;
+}
+
+function processStartTimeIsValid(value) {
+  return /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ( [1-9]|[12][0-9]|3[01]) ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] [0-9]{4}$/.test(
+    value,
+  );
 }
 
 async function ownProcessStartTime() {
@@ -301,10 +325,10 @@ async function ownProcessStartTime() {
     },
   ).then(({ stdout }) => {
     const value = stdout.trim();
-    if (value === "") {
+    if (!processStartTimeIsValid(value)) {
       throw new StoreError(
         "LOCK_RUNTIME_UNAVAILABLE",
-        `${PS_PATH} did not return this process's start time`,
+        `${PS_PATH} did not return a valid start time for this process`,
         { path: PS_PATH },
       );
     }
@@ -715,10 +739,7 @@ function spawnHolderProcess(coordinatorPath) {
   const child = spawn(
     LOCKF_PATH,
     [
-      "-s",
-      "-k",
-      "-t",
-      "0",
+      ...LOCKF_ARGUMENTS,
       coordinatorPath,
       process.execPath,
       STORAGE_MODULE_PATH,
