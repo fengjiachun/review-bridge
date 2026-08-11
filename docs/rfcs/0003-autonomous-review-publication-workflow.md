@@ -1303,10 +1303,11 @@ from that exhausted pause, requires a value greater than both the current
 budget and used-cycle count, and appends `REMOTE_CYCLE_BUDGET_EXTENDED` with the
 old value, new value, count, operator label, rationale, and event timestamp.
 The tool does not resume the workflow. The operator separately invokes the
-ordinary resume path, which returns to the pending repair phase. The budget is
-workflow state rather than authorization state, so neither its initial value
-nor an extension changes `workflow_authorization_sha256` or invalidates a gate
-bound to that digest.
+ordinary resume path, which refuses while the used-cycle count still meets or
+exceeds the budget and otherwise returns to the pending repair phase. The
+budget is workflow state rather than authorization state, so neither its
+initial value nor an extension changes `workflow_authorization_sha256` or
+invalidates a gate bound to that digest.
 
 ## Security considerations
 

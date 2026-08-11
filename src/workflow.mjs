@@ -5886,6 +5886,15 @@ export async function resumeAutonomousWorkflow(
         "human-required local review must use human arbitration",
       );
     }
+    if (
+      workflow.pause?.reason_code === "REMOTE_CYCLE_BUDGET_EXHAUSTED" &&
+      remoteCycleCount(workflow) >= workflow.remote_cycle_budget
+    ) {
+      fail(
+        "WORKFLOW_RESUME_INVALID",
+        "the exhausted remote cycle budget must be extended before resuming",
+      );
+    }
     // A history rewrite is the one remedy this workflow structurally cannot
     // accept: every recorded head must be a descendant of the last, so a
     // rewritten head is rejected however the workflow resumes. Say so instead

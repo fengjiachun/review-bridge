@@ -1919,6 +1919,19 @@ test("the remote cycle budget pauses before another repair and can be auditedly 
   assert.deepEqual(evidence.remote_attempts, paused.remote_attempts);
 
   await assert.rejects(
+    resumeAutonomousWorkflow(
+      state.store,
+      workflow.workflow_id,
+      paused.revision,
+      {
+        operatorLabel: "Test Operator",
+        rationale: "Try to bypass the extension.",
+      },
+    ),
+    (error) => error.code === "WORKFLOW_RESUME_INVALID",
+  );
+
+  await assert.rejects(
     extendRemoteCycleBudget(
       state.store,
       workflow.workflow_id,
