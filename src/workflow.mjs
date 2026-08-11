@@ -43,6 +43,7 @@ export const AUTONOMOUS_CAPABILITIES = Object.freeze([
   "RESOLVE_ELIGIBLE_CODEX_THREADS",
   "UNRESOLVE_INVALIDATED_CODEX_THREADS",
 ]);
+export const DEFAULT_REMOTE_CYCLE_BUDGET = 12;
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
@@ -118,6 +119,12 @@ function assertPositiveInteger(value, name) {
     throw new TypeError(`${name} must be a positive safe integer`);
   }
   return value;
+}
+
+function remoteCycleCount(workflow) {
+  return workflow.remote_attempts.filter(
+    (attempt) => attempt.diverted_at == null,
+  ).length;
 }
 
 function assertSha(value, name) {
@@ -1383,6 +1390,10 @@ function validateWorkflow(workflow) {
   ) {
     fail("WORKFLOW_STATE_INVALID", "workflow arrays are malformed");
   }
+  assertPositiveInteger(
+    workflow.remote_cycle_budget,
+    "workflow.remote_cycle_budget",
+  );
   for (const attempt of workflow.remote_attempts) {
     assertObject(attempt, "workflow.remote_attempts entry");
     assertPositiveInteger(attempt.number, "remote attempt number");
@@ -1845,6 +1856,7 @@ function validateWorkflow(workflow) {
  */
 const REMOTE_FIELD_DEFAULTS = Object.freeze({
   remote_attempts: [],
+  remote_cycle_budget: DEFAULT_REMOTE_CYCLE_BUDGET,
   current_publication: null,
   addressed_findings: [],
   thread_replies: [],
@@ -2208,6 +2220,8 @@ function auditedWorkflowState(workflow) {
     pull_request: workflow.pull_request,
     attempts: workflow.attempts,
     remote_attempts: workflow.remote_attempts ?? [],
+    remote_cycle_budget:
+      workflow.remote_cycle_budget ?? DEFAULT_REMOTE_CYCLE_BUDGET,
     addressed_findings: workflow.addressed_findings ?? [],
     thread_replies: workflow.thread_replies ?? [],
     thread_resolutions: workflow.thread_resolutions ?? [],
@@ -2415,6 +2429,7 @@ function requireWorkflowAuditBinding(workflow, audit) {
     pull_request: null,
     attempts: [],
     remote_attempts: [],
+    remote_cycle_budget: workflow.remote_cycle_budget,
     addressed_findings: [],
     thread_replies: [],
     thread_resolutions: [],
@@ -2443,6 +2458,8 @@ function requireWorkflowAuditBinding(workflow, audit) {
     canonicalJson(workflow.attempts) !== canonicalJson(lastState.attempts) ||
     canonicalJson(workflow.remote_attempts ?? []) !==
       canonicalJson(lastState.remote_attempts ?? []) ||
+    workflow.remote_cycle_budget !==
+      (lastState.remote_cycle_budget ?? DEFAULT_REMOTE_CYCLE_BUDGET) ||
     canonicalJson(workflow.addressed_findings ?? []) !==
       canonicalJson(lastState.addressed_findings ?? []) ||
     canonicalJson(workflow.thread_replies ?? []) !==
@@ -2509,6 +2526,7 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "pull_request",
     "attempts",
     "remote_attempts",
+    "remote_cycle_budget",
     "addressed_findings",
     "thread_replies",
     "thread_resolutions",
@@ -2860,6 +2878,8 @@ function workflowSummary(workflow) {
     current_review: workflow.current_review,
     current_publication: workflow.current_publication,
     remote_attempts: workflow.remote_attempts,
+    remote_cycle_budget: workflow.remote_cycle_budget,
+    remote_cycle_count: remoteCycleCount(workflow),
     addressed_findings: workflow.addressed_findings,
     thread_replies: workflow.thread_replies,
     thread_resolutions: workflow.thread_resolutions,
@@ -2892,6 +2912,7 @@ export async function startAutonomousWorkflow(
     operatorLabel,
     capabilities,
     publicationTarget,
+    remoteCycleBudget = DEFAULT_REMOTE_CYCLE_BUDGET,
   },
 ) {
   assertString(baseRef, "base_ref", { max: 1024 });
@@ -2901,6 +2922,7 @@ export async function startAutonomousWorkflow(
   assertString(topicBranch, "topic_branch", { max: 1024 });
   assertString(operatorLabel, "operator_label", { max: 1024 });
   const normalizedCapabilities = assertCapabilities(capabilities);
+  assertPositiveInteger(remoteCycleBudget, "remote_cycle_budget");
   const normalizedTarget = validatePublicationTarget(
     publicationTarget,
     topicBranch,
@@ -2991,6 +3013,7 @@ export async function startAutonomousWorkflow(
     pull_request: null,
     attempts: [],
     remote_attempts: [],
+    remote_cycle_budget: remoteCycleBudget,
     addressed_findings: [],
     thread_replies: [],
     thread_resolutions: [],
@@ -5647,7 +5670,12 @@ export async function advanceRemoteWorkflow(
             attempt.tree_sha === tree),
       ) ?? null;
     const stalled = repeated != null;
-    if (stalled || pauseReason != null) {
+    const cycleBudgetExhausted =
+      !stalled &&
+      pauseReason == null &&
+      repairPhase != null &&
+      remoteCycleCount(workflow) >= workflow.remote_cycle_budget;
+    if (stalled || pauseReason != null || cycleBudgetExhausted) {
       // Resume where the operator's remedy is actually possible. A reason
       // that names its own resume phase wins, because that mapping exists
       // exactly for remedies the repair phase would bypass -- an exposed
@@ -5681,7 +5709,11 @@ export async function advanceRemoteWorkflow(
             next.status = "PAUSED";
             next.phase = "PAUSED_HUMAN";
             next.pause = {
-              reason_code: pauseReason ?? "NO_PROGRESS",
+              reason_code:
+                pauseReason ??
+                (cycleBudgetExhausted
+                  ? "REMOTE_CYCLE_BUDGET_EXHAUSTED"
+                  : "NO_PROGRESS"),
               blocked_action: "WAIT_PUBLICATION",
               evidence: JSON.stringify({
                 review_id: reviewId,
@@ -5696,6 +5728,13 @@ export async function advanceRemoteWorkflow(
                 blockers: projection.blockers.slice(0, MAX_LISTED_BLOCKERS),
                 head_sha: workflow.current_head_sha,
                 tree_sha: tree,
+                ...(cycleBudgetExhausted
+                  ? {
+                      remote_cycle_budget: workflow.remote_cycle_budget,
+                      remote_cycle_count: remoteCycleCount(workflow),
+                      remote_attempts: workflow.remote_attempts,
+                    }
+                  : {}),
                 ...(stalled
                   ? { previous_remote_attempt: repeated }
                   : {}),
@@ -5915,6 +5954,53 @@ export async function resumeAutonomousWorkflow(
           pause_reason_code: pauseReasonCode,
           rationale,
           resumed_phase: resumedPhase,
+        },
+      ),
+    );
+  });
+}
+
+export async function extendRemoteCycleBudget(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  { newBudget, operatorLabel, rationale },
+) {
+  assertPositiveInteger(newBudget, "new_budget");
+  assertString(operatorLabel, "operator_label", { max: 1024 });
+  assertString(rationale, "rationale");
+  return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
+    requireRevision(workflow, expectedRevision);
+    if (
+      workflow.status !== "PAUSED" ||
+      workflow.pause?.reason_code !== "REMOTE_CYCLE_BUDGET_EXHAUSTED"
+    ) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "remote cycle budget can only be extended from its exhausted pause",
+      );
+    }
+    const oldBudget = workflow.remote_cycle_budget;
+    const usedCycles = remoteCycleCount(workflow);
+    if (newBudget <= oldBudget || newBudget <= usedCycles) {
+      throw new TypeError(
+        "new_budget must exceed both the current budget and used remote cycles",
+      );
+    }
+    return publicWorkflow(
+      await saveActionMutation(
+        paths,
+        workflow,
+        "REMOTE_CYCLE_BUDGET_EXTENDED",
+        async (next) => {
+          next.remote_cycle_budget = newBudget;
+        },
+        {
+          old_budget: oldBudget,
+          new_budget: newBudget,
+          remote_cycle_count: usedCycles,
+          operator_label: operatorLabel,
+          rationale,
         },
       ),
     );

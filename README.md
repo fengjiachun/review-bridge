@@ -433,6 +433,14 @@ tree match *any* earlier recorded attempt pauses `NO_PROGRESS`, so an
 oscillating tree or an alternating blocker cannot walk around the check by
 never repeating adjacently.
 
+The workflow also defaults to a 12-cycle remote-repair budget. The count is
+projected from non-diverted `remote_attempts`; exhausting it pauses with
+`REMOTE_CYCLE_BUDGET_EXHAUSTED` and the complete attempt chain before another
+repair starts. `extend_remote_cycle_budget` records an explicit increase in the
+workflow audit, after which the operator uses the ordinary resume path. The
+budget is mutable workflow state, not part of the immutable authorization
+digest, and older ledgers that lack it load with the default.
+
 This release closes eligible Codex finding threads with a recorded reply and a
 server-owned resolution proof, and marks the cleared pull request ready: the
 mark-ready intent records which observation cleared the head, and the

@@ -1256,6 +1256,7 @@ Pause reasons include:
 - `AUTHORIZATION_REQUIRED`;
 - `PERMISSION_REQUIRED`; and
 - `NO_PROGRESS`.
+- `REMOTE_CYCLE_BUDGET_EXHAUSTED`.
 
 An operator may explicitly cancel an active or paused workflow. Cancellation
 prevents further automatic writes but does not delete commits, branches, pull
@@ -1285,6 +1286,27 @@ It pauses with `NO_PROGRESS` when either:
 The fingerprint is diagnostic, not a review verdict. A changed title or
 timestamp does not count as progress. The operator can inspect the recorded
 attempt chain before deciding how to continue.
+
+The workflow also stores a positive `remote_cycle_budget`, defaulting to 12 for
+new and preexisting schema-version-1 ledgers. Its used count is projected from
+`remote_attempts` entries that were not marked `diverted_at`: those entries are
+the repairs the workflow actually entered. The observed successful
+convergences motivating issue #44 ran for 10 or more rounds, so 12 preserves
+that range with margin while bounding an unwatched run. Before starting a
+repair beyond the budget, the server pauses with
+`REMOTE_CYCLE_BUDGET_EXHAUSTED` and includes the complete attempt chain. This
+is an unattended-spend stop, not a review verdict; it never converts,
+suppresses, or resolves a finding.
+
+`extend_remote_cycle_budget` is the only budget mutation. It is accepted only
+from that exhausted pause, requires a value greater than both the current
+budget and used-cycle count, and appends `REMOTE_CYCLE_BUDGET_EXTENDED` with the
+old value, new value, count, operator label, rationale, and event timestamp.
+The tool does not resume the workflow. The operator separately invokes the
+ordinary resume path, which returns to the pending repair phase. The budget is
+workflow state rather than authorization state, so neither its initial value
+nor an extension changes `workflow_authorization_sha256` or invalidates a gate
+bound to that digest.
 
 ## Security considerations
 
@@ -1342,8 +1364,9 @@ The main risks and controls are:
   publication authorization for merge purposes.
 - **Credential expansion**: the MCP server still has no GitHub or Codex task
   credentials.
-- **Unbounded automation**: no-progress detection and explicit pause reasons
-  stop loops that cannot demonstrate progress.
+- **Unbounded automation**: no-progress detection stops exact repetition, and
+  the default remote-cycle budget stops drifting oscillation for operator
+  inspection before it can spend without bound.
 - **Unintended publication**: autonomous authorization names the repository,
   base, topic branch, stable GitHub base and head repository IDs, push remote,
   and exact permitted writes; every action rechecks

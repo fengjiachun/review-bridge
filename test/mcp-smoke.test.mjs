@@ -56,6 +56,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
     "cancel_autonomous_workflow",
     "complete_workflow_action",
     "export_human_arbitration",
+    "extend_remote_cycle_budget",
     "finalize_local_gate",
     "finalize_publication_gate",
     "get_autonomous_pre_ready",
@@ -154,6 +155,11 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
     assert.ok(
       startWorkflow.inputSchema.required.includes("publication_target"),
     );
+    assert.ok(startWorkflow.inputSchema.properties.remote_cycle_budget);
+    assert.equal(
+      startWorkflow.inputSchema.required.includes("remote_cycle_budget"),
+      false,
+    );
     const planDispatch = authorTools.tools.find(
       (tool) => tool.name === "plan_codex_task_dispatch",
     );
@@ -181,6 +187,16 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
     );
     assert.deepEqual(resumeWorkflow.inputSchema.required.sort(), [
       "expected_revision",
+      "operator_label",
+      "rationale",
+      "workflow_id",
+    ]);
+    const extendBudget = authorTools.tools.find(
+      (tool) => tool.name === "extend_remote_cycle_budget",
+    );
+    assert.deepEqual(extendBudget.inputSchema.required.sort(), [
+      "expected_revision",
+      "new_budget",
       "operator_label",
       "rationale",
       "workflow_id",
