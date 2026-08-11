@@ -1,6 +1,6 @@
 {
   "name": "review-bridge",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Coordinate isolated local review and audited GitHub publication.",
   "author": {
     "name": "Review Bridge contributors"
