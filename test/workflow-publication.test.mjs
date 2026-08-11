@@ -9559,11 +9559,13 @@ test("two distinct ancestor source publications exercise newest-to-oldest acquis
   assert.match(terminal.resolution_sha256, /^[0-9a-f]{64}$/);
 
   // Newest-to-oldest lock order. Hold the oldest ancestor's lock, start a
-  // consumer asynchronously, and poll with bounded competing acquisitions of
-  // the newest ancestor: while the consumer is blocked on the oldest lock it
-  // must already hold the newest one, so every competing newest acquisition
-  // returns retryable PUBLICATION_BUSY. A reversed implementation would
-  // attempt the oldest first, never reach the newest, and fail the poll.
+  // consumer asynchronously, and observe the newest ancestor's lock record:
+  // while the consumer is blocked on the oldest lock it must already hold the
+  // newest one. A reversed implementation completes with PUBLICATION_BUSY on
+  // the oldest source without ever creating the newest source's lock record.
+  // Waiting for either event avoids a fixed scheduling deadline: under a busy
+  // macOS runner the consumer can legitimately take more than five seconds to
+  // reach the source locks.
   let releaseOldest = null;
   let consumer = null;
   try {
@@ -9572,38 +9574,35 @@ test("two distinct ancestor source publications exercise newest-to-oldest acquis
       reviewId: firstPublication.reviewId,
       domain: "publication",
     });
+    let consumerSettled = false;
     consumer = getAutonomousTerminal(
       state.store,
       currentPublication.reviewId,
       { clock: () => currentReadyAt + 20 },
-    ).then(
-      (result) => ({ result, error: null }),
-      (error) => ({ result: null, error }),
-    );
+    )
+      .then(
+        (result) => ({ result, error: null }),
+        (error) => ({ result: null, error }),
+      )
+      .finally(() => {
+        consumerSettled = true;
+      });
     let newestHeldByConsumer = false;
-    const deadline = Date.now() + 5_000;
-    while (Date.now() < deadline && !newestHeldByConsumer) {
+    const newestLockPath = path.join(
+      path.dirname(oldPath),
+      ".publication-state.lock",
+    );
+    while (!consumerSettled && !newestHeldByConsumer) {
       try {
-        const releaseProbe = await acquireStateLock({
-          directory: path.join(state.store, "reviews", oldPublication.reviewId),
-          reviewId: oldPublication.reviewId,
-          domain: "publication",
-          waitMs: 100,
-        });
-        // The consumer never held the newest source: either it has not
-        // reached the sources yet (retry) or the acquisition order is
-        // reversed (deadline expires below).
-        await releaseProbe();
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        const lockRecord = JSON.parse(await fsp.readFile(newestLockPath, "utf8"));
+        assert.equal(lockRecord.domain, "publication");
+        assert.equal(lockRecord.review_id, oldPublication.reviewId);
+        newestHeldByConsumer = true;
       } catch (error) {
-        if (
-          error?.code === "PUBLICATION_BUSY" &&
-          error?.details?.retryable === true
-        ) {
-          newestHeldByConsumer = true;
-        } else {
+        if (error?.code !== "ENOENT") {
           throw error;
         }
+        await new Promise((resolve) => setTimeout(resolve, 10));
       }
     }
     assert.equal(
