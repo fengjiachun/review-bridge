@@ -12,7 +12,21 @@ import {
   withStateLock,
 } from "../src/storage.mjs";
 
-const PROCESS_START_FORMAT = "darwin-ps-lstart-c-utc-v1";
+const PLATFORM_LOCK_CONSTANTS = {
+  darwin: {
+    lockfPath: "/usr/bin/lockf",
+    lockfArguments: ["-s", "-k", "-t", "0"],
+    killedHelperExitStatus: 70,
+    processStartFormat: "darwin-ps-lstart-c-utc-v1",
+  },
+  linux: {
+    lockfPath: "/usr/bin/flock",
+    lockfArguments: ["-n", "-E", "75"],
+    killedHelperExitStatus: 137,
+    processStartFormat: "linux-ps-lstart-c-utc-v1",
+  },
+}[process.platform];
+const PROCESS_START_FORMAT = PLATFORM_LOCK_CONSTANTS.processStartFormat;
 const STORAGE_MODULE_URL = new URL("../src/storage.mjs", import.meta.url).href;
 const STORAGE_MODULE_PATH = fileURLToPath(STORAGE_MODULE_URL);
 
@@ -89,6 +103,12 @@ async function waitForProcessExit(pid, timeoutMs = 1_000) {
       }
       throw error;
     }
+    const status = spawnSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], {
+      encoding: "utf8",
+    });
+    if (status.status !== 0 || status.stdout.trim().startsWith("Z")) {
+      return;
+    }
     if (Date.now() >= deadline) {
       assert.fail(`process ${pid} did not exit within ${timeoutMs}ms`);
     }
@@ -116,7 +136,9 @@ function stateLockProcesses(coordinatorPath) {
     }));
   const lockfRows = rows.filter(
     (row) =>
-      row.command.startsWith("/usr/bin/lockf ") &&
+      row.command.startsWith(
+        `${PLATFORM_LOCK_CONSTANTS.lockfPath} ${PLATFORM_LOCK_CONSTANTS.lockfArguments.join(" ")} `,
+      ) &&
       row.command.includes(` ${coordinatorPath} `),
   );
   assert.equal(lockfRows.length, 1);
@@ -133,6 +155,48 @@ function stateLockProcesses(coordinatorPath) {
     lockfPid: lockfRows[0].pid,
   };
 }
+
+test(
+  "storage selects the lock constants for the current platform",
+  async (t) => {
+    const root = await temporaryDirectory(t, "review-bridge-lock-platform-");
+    const coordinatorPath = path.join(root, ".review-state.lock.guard");
+    const release = await acquireStateLock({
+      directory: root,
+      reviewId: "rb-test",
+      domain: "review",
+    });
+    stateLockProcesses(coordinatorPath);
+    const record = JSON.parse(
+      await fsp.readFile(path.join(root, ".review-state.lock"), "utf8"),
+    );
+    assert.equal(record.process_start_time_format, PROCESS_START_FORMAT);
+    await release();
+  },
+);
+
+test("storage rejects an unknown platform at module load", () => {
+  const child = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      [
+        'Object.defineProperty(process, "platform", { value: "plan9" });',
+        "await import(process.env.REVIEW_BRIDGE_TEST_STORAGE_MODULE);",
+      ].join("\n"),
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        REVIEW_BRIDGE_TEST_STORAGE_MODULE: STORAGE_MODULE_URL,
+      },
+    },
+  );
+  assert.notEqual(child.status, 0);
+  assert.match(child.stderr, /unsupported storage lock platform: plan9/);
+});
 
 test("atomic writes are durable private replacements", async (t) => {
   const root = await temporaryDirectory(t, "review-bridge-store-");
@@ -325,7 +389,7 @@ test("a stale heartbeat never steals a matching live process identity", async (t
   await fsp.unlink(lockPath);
 });
 
-test("an inconclusive owner probe fails closed without changing the record", async (t) => {
+test("inconclusive owner probes fail closed without changing the record", async (t) => {
   const root = await temporaryDirectory(t, "review-bridge-lock-owner-unknown-");
   const lockPath = path.join(root, ".review-state.lock");
   const hookPath = path.join(root, "fail-owner-probe.cjs");
@@ -350,7 +414,10 @@ test("an inconclusive owner probe fails closed without changing the record", asy
       '    file === "/bin/ps" &&',
       "    args.includes(process.env.REVIEW_BRIDGE_TEST_UNKNOWN_PID)",
       "  ) {",
-      "    return { status: 1, stdout: '', stderr: 'injected probe failure' };",
+      '    if (process.env.REVIEW_BRIDGE_TEST_PROBE_FAILURE === "exit") {',
+      "      return { status: 1, stdout: '', stderr: 'injected probe failure' };",
+      "    }",
+      "    return { status: 0, stdout: 'not a process start time\\n', stderr: '' };",
       "  }",
       "  return originalSpawnSync.call(this, file, args, ...rest);",
       "};",
@@ -368,22 +435,31 @@ test("an inconclusive owner probe fails closed without changing the record", asy
     .join(" ");
   process.env.REVIEW_BRIDGE_TEST_UNKNOWN_PID = String(stale.pid);
   try {
-    await assert.rejects(
-      acquireStateLock({
-        directory: root,
-        reviewId: "rb-test",
-        domain: "review",
-        staleMs: 1_000,
-        heartbeatMs: 100,
-      }),
-      (error) =>
-        error instanceof StoreError &&
-        error.code === "LOCK_OWNER_UNKNOWN" &&
-        error.details.retryable === false &&
-        error.details.path === lockPath &&
-        error.details.pid === stale.pid,
-    );
+    for (const failure of ["exit", "unparseable"]) {
+      process.env.REVIEW_BRIDGE_TEST_PROBE_FAILURE = failure;
+      await assert.rejects(
+        acquireStateLock({
+          directory: root,
+          reviewId: "rb-test",
+          domain: "review",
+          staleMs: 1_000,
+          heartbeatMs: 100,
+        }),
+        (error) =>
+          error instanceof StoreError &&
+          error.code === "LOCK_OWNER_UNKNOWN" &&
+          error.details.retryable === false &&
+          error.details.path === lockPath &&
+          error.details.pid === stale.pid,
+        failure,
+      );
+      assert.deepEqual(
+        JSON.parse(await fsp.readFile(lockPath, "utf8")),
+        stale,
+      );
+    }
   } finally {
+    delete process.env.REVIEW_BRIDGE_TEST_PROBE_FAILURE;
     if (previousNodeOptions == null) {
       delete process.env.NODE_OPTIONS;
     } else {
@@ -395,10 +471,40 @@ test("an inconclusive owner probe fails closed without changing the record", asy
       process.env.REVIEW_BRIDGE_TEST_UNKNOWN_PID = previousUnknownPid;
     }
   }
-  assert.deepEqual(
-    JSON.parse(await fsp.readFile(lockPath, "utf8")),
-    stale,
+  await fsp.unlink(lockPath);
+});
+
+test("a process start format mismatch fails closed", async (t) => {
+  const root = await temporaryDirectory(
+    t,
+    "review-bridge-lock-format-mismatch-",
   );
+  const lockPath = path.join(root, ".review-state.lock");
+  const release = await acquireStateLock({
+    directory: root,
+    reviewId: "rb-test",
+    domain: "review",
+  });
+  const stale = JSON.parse(await fsp.readFile(lockPath, "utf8"));
+  await release();
+  stale.process_start_time_format = "other-ps-format-v1";
+  stale.heartbeat_at = "2000-01-01T00:00:00.000Z";
+  await writeLockRecord(lockPath, stale);
+
+  await assert.rejects(
+    acquireStateLock({
+      directory: root,
+      reviewId: "rb-test",
+      domain: "review",
+      staleMs: 1_000,
+      heartbeatMs: 100,
+    }),
+    (error) =>
+      error instanceof StoreError &&
+      error.code === "LOCK_RECORD_INVALID" &&
+      error.details.path === lockPath,
+  );
+  assert.deepEqual(JSON.parse(await fsp.readFile(lockPath, "utf8")), stale);
   await fsp.unlink(lockPath);
 });
 
@@ -679,11 +785,11 @@ test("a transient heartbeat failure does not poison release", async (t) => {
       domain: "review",
       heartbeatMs: 20,
     });
-    const { helperPid } = stateLockProcesses(coordinatorPath);
+    const { lockfPid } = stateLockProcesses(coordinatorPath);
     await fsp.chmod(lockPath, 0o644);
     // A heartbeat that observes the wrong mode makes the helper report an
-    // error and exit, so the helper's exit proves the failure happened.
-    await waitForProcessExit(helperPid, 5_000);
+    // error and exit. Waiting for the wrapper also proves it reaped the helper.
+    await waitForProcessExit(lockfPid, 5_000);
     await fsp.chmod(lockPath, 0o600);
     await release();
   });
@@ -705,9 +811,9 @@ test("an untrustworthy heartbeat remains caller-visible after repair", async (t)
     heartbeatMs: 20,
   });
   const original = JSON.parse(await fsp.readFile(lockPath, "utf8"));
-  const { helperPid } = stateLockProcesses(coordinatorPath);
+  const { lockfPid } = stateLockProcesses(coordinatorPath);
   await fsp.writeFile(lockPath, "not json\n", { mode: 0o600 });
-  await waitForProcessExit(helperPid);
+  await waitForProcessExit(lockfPid);
   await writeLockRecord(lockPath, original);
 
   const warnings = await captureWarnings(async () => {
@@ -882,7 +988,12 @@ test("helper exit preserves live-owner exclusion and token-safe cleanup", async 
     warnings.map(({ options }) => options?.code),
     ["REVIEW_BRIDGE_LOCK_CLEANUP"],
   );
-  assert.match(warnings[0].warning, /\/usr\/bin\/lockf exited with status 70/);
+  assert.match(
+    warnings[0].warning,
+    new RegExp(
+      `${PLATFORM_LOCK_CONSTANTS.lockfPath} exited with status ${PLATFORM_LOCK_CONSTANTS.killedHelperExitStatus}`,
+    ),
+  );
   assert.equal(await exists(lockPath), false);
   const releaseNext = await acquireStateLock({
     directory: root,
@@ -922,7 +1033,11 @@ test("a failed final cleanup is non-retryable and caller-visible", async (t) => 
           assert.equal(error.code, "LOCK_CLEANUP_FAILED");
           assert.equal(error.details.retryable, false);
           assert.equal(error.details.path, lockPath);
-          assert.equal(error.details.cause_code, "LOCK_COORDINATOR_INVALID");
+          assert.ok(
+            ["LOCK_COORDINATOR_INVALID", "STORE_MODE_MISMATCH"].includes(
+              error.details.cause_code,
+            ),
+          );
           assert.equal(error.details.state_may_have_changed, true);
           return true;
         },
@@ -965,8 +1080,8 @@ test("a hung helper is killed as one process group before cleanup", async (t) =>
     /LOCK_HELPER_TIMEOUT: state-lock helper did not respond within 5000ms/,
   );
   assert.doesNotMatch(warnings[0].warning, /LOCK_HELPER_KILL_FAILED/);
-  await waitForProcessExit(helperPid);
   await waitForProcessExit(lockfPid);
+  await waitForProcessExit(helperPid);
   assert.equal(await exists(lockPath), false);
 });
 

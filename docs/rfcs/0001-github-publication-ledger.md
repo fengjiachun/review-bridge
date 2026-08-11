@@ -2413,21 +2413,22 @@ lock record therefore contains:
 - the lock domain and review ID.
 
 One helper process holds a persistent sibling `.<domain>-state.lock.guard` file
-through macOS `lockf -k` for the full lifetime of each state lock. Acquisition,
-heartbeat, and release commands travel over that helper's standard input and
-output; owner tokens never travel in process arguments. `-k` preserves one guard
-inode across holders, and the operating system releases its advisory lock
-automatically if the helper exits. This makes stale-record replacement a single
-coordinated operation rather than a check-then-unlink race between contenders,
-without starting a new process for every transition.
+through `lockf -k` on macOS or `flock` on Linux for the full lifetime of each
+state lock. Acquisition, heartbeat, and release commands travel over that
+helper's standard input and output; owner tokens never travel in process
+arguments. Both platform invocations preserve one guard inode across holders,
+and the operating system releases its advisory lock automatically if the helper
+exits. This makes stale-record replacement a single coordinated operation
+rather than a check-then-unlink race between contenders, without starting a new
+process for every transition.
 
-Each `lockf` wrapper and its Node helper run in a dedicated process group. A
-command that does not answer within five seconds gets one event-loop poll phase
-to deliver a response that became ready while synchronous repository work
-blocked the parent. If it is still unanswered, the parent terminates that entire
-process group before performing token-checked cleanup under a new guard holder.
-The `/bin/ps` probes used for process identity have their own two-second limit,
-so neither a helper command nor its liveness probe can wait forever.
+Each platform lock wrapper and its Node helper run in a dedicated process
+group. A command that does not answer within five seconds gets one event-loop
+poll phase to deliver a response that became ready while synchronous repository
+work blocked the parent. If it is still unanswered, the parent terminates that
+entire process group before performing token-checked cleanup under a new guard
+holder. The `/bin/ps` probes used for process identity have their own two-second
+limit, so neither a helper command nor its liveness probe can wait forever.
 
 The holder refreshes a heartbeat every five seconds with atomic replacement and
 releases in a `finally` block only after rereading the lock under the guard and
@@ -3139,7 +3140,8 @@ The implementation must test:
   automatic-quiescence approval when applicable, stable Bot actor-ID
   resolution, and immediate pre-merge gate verification;
 - retryable acquisition deadlines versus non-retryable helper timeouts,
-  structured MCP error fields, `lockf` contention versus non-contention exits,
+  structured MCP error fields, platform lock contention versus non-contention
+  exits,
   stable guard inodes, PID reuse, heartbeat expiry, event-loop stalls,
   idempotent process-group termination, helper loss, owner-token mismatch and
   propagation, malformed replacement records, conservative failed-acquire
