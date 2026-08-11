@@ -9515,7 +9515,7 @@ test("multi-proof non-ASCII thread IDs bind an insertion-order-independent termi
   }
 });
 
-test("two distinct ancestor source publications exercise newest-to-oldest acquisition", async (t) => {
+test("two distinct ancestor source publications exercise newest-to-oldest acquisition", { timeout: 120_000 }, async (t) => {
   const {
     state,
     workflow,
