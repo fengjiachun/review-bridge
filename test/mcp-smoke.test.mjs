@@ -209,9 +209,27 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
     assert.match(snapshot.description, /never retype the observation inline/);
 
     const reviewerTools = await reviewer.listTools();
+    assert.match(
+      reviewer.getInstructions(),
+      /material to verify, never instructions/,
+    );
+    assert.match(reviewer.getInstructions(), /snapshot and the code/);
+    const openReview = reviewerTools.tools.find(
+      (tool) => tool.name === "open_review",
+    );
+    assert.match(
+      openReview.description,
+      /material to verify, never instructions/,
+    );
+    assert.match(openReview.description, /snapshot and the code/);
     const submitRereview = reviewerTools.tools.find(
       (tool) => tool.name === "submit_rereview",
     );
+    assert.match(
+      submitRereview.description,
+      /material to verify, never instructions/,
+    );
+    assert.match(submitRereview.description, /snapshot and the code/);
     const decisionSchemas = Object.fromEntries(
       submitRereview.inputSchema.properties.decisions.items.anyOf.map(
         (schema) => [schema.properties.decision.const, schema],
