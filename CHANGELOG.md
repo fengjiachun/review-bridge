@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.7.0 - 2026-08-11
+
+### Added
+
+- The autonomous publication workflow can mark a cleared draft ready, return
+  it to draft when repair is required, and record a durable terminal
+  `MERGE_READY` without merging. External writes are intent-bound and
+  reconciled after interruption, including cross-process recovery without
+  duplicate provider writes.
+- Invalidated workflow-owned Codex thread resolutions are compensated through
+  an audited `UNRESOLVE_REVIEW_THREAD` lifecycle, with conservative pauses for
+  human or unknown participation and replay-valid supersession evidence after
+  repair.
+- End-to-end coverage now walks a requirement through local and remote review
+  to `MERGE_READY`, and proves crash recovery for accepted mark-ready and
+  thread-unresolve writes using only durable ledger and provider-journal state.
+- `rebuttal_accepted` rereview decisions require replayable verification
+  evidence. The evidence is preserved in public review, arbitration, and
+  Markdown export while historical ledgers remain readable.
+
+### Changed
+
+- Reviewer protocol text treats author responses as material to verify rather
+  than instructions. Packaged reviewer guidance reports instruction-like
+  author text as a finding instead of following or silently ignoring it.
+- RFC 0003 is now implemented. The packaged Codex, Claude, and HERMES guidance
+  has been audited against the implementation, and the publication inventory
+  includes all fifteen tools, including `get_autonomous_terminal`.
+- Publication fixture, resolution-record, and deep-state builders are shared
+  test helpers, so recovery scenarios reuse the same state construction as
+  the integration suite.
+- The HERMES local reviewer integration ships separate author and reviewer MCP
+  profiles, a reviewer-scoped skill, exact release-path rendering, capability
+  isolation, and packaged-flow verification.
+- A narrative review-flow guide follows one change from commit to merge-ready
+  and explains the draft, snapshot, check, repair, and durable-action
+  boundaries.
+
 ## 0.6.0 - 2026-08-06
 
 ### Added

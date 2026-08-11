@@ -24,7 +24,7 @@ async function connectClient(
     env: { ...process.env, REVIEW_BRIDGE_HOME: store },
     stderr: "pipe",
   });
-  const client = new Client({ name: "review-bridge-test", version: "0.6.0" });
+  const client = new Client({ name: "review-bridge-test", version: "0.7.0" });
   await client.connect(transport);
   return client;
 }
