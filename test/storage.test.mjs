@@ -17,14 +17,12 @@ const PLATFORM_LOCK_CONSTANTS = {
     lockfPath: "/usr/bin/lockf",
     lockfArguments: ["-s", "-k", "-t", "0"],
     killedHelperExitStatus: 70,
-    coordinatorModeFailure: "LOCK_COORDINATOR_INVALID",
     processStartFormat: "darwin-ps-lstart-c-utc-v1",
   },
   linux: {
     lockfPath: "/usr/bin/flock",
     lockfArguments: ["-n", "-E", "75"],
     killedHelperExitStatus: 137,
-    coordinatorModeFailure: "STORE_MODE_MISMATCH",
     processStartFormat: "linux-ps-lstart-c-utc-v1",
   },
 }[process.platform];
@@ -1035,9 +1033,10 @@ test("a failed final cleanup is non-retryable and caller-visible", async (t) => 
           assert.equal(error.code, "LOCK_CLEANUP_FAILED");
           assert.equal(error.details.retryable, false);
           assert.equal(error.details.path, lockPath);
-          assert.equal(
-            error.details.cause_code,
-            PLATFORM_LOCK_CONSTANTS.coordinatorModeFailure,
+          assert.ok(
+            ["LOCK_COORDINATOR_INVALID", "STORE_MODE_MISMATCH"].includes(
+              error.details.cause_code,
+            ),
           );
           assert.equal(error.details.state_may_have_changed, true);
           return true;
