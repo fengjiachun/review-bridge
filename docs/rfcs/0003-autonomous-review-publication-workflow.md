@@ -758,6 +758,19 @@ recovery with linear audit-log growth. A budget pause
 stores the count and digest rather than duplicating the chain inside `pause`;
 the complete chain remains available in the workflow summary.
 
+The workflow also stores a positive `change_size_budget`, defaulting to 2000.
+Each immutable review snapshot records added lines, deleted lines, and their
+sum as derived from its stored patch. At the internal 75% warning threshold,
+the driver must report the sum and remaining headroom and state whether it will
+continue or split; the warning does not block or pause. When the sum exceeds
+the workflow budget, binding the review pauses
+`CHANGE_SIZE_BUDGET_EXCEEDED` before any reviewer task is dispatched.
+`extend_change_size_budget` is the only mutation;
+it requires an audited operator label and rationale, must admit the measured
+total, does not resume the workflow, and does not change the authorization
+digest. Older workflow ledgers take the default. Manual reviews expose the
+same measurement against the default but proceed regardless of size.
+
 ### Publication
 
 Only `LOCAL_GATE` publication is part of the autonomous path. `REMOTE_ONLY`

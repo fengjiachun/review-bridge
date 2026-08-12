@@ -56,6 +56,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
     "cancel_autonomous_workflow",
     "complete_workflow_action",
     "export_human_arbitration",
+    "extend_change_size_budget",
     "extend_local_cycle_budget",
     "extend_remote_cycle_budget",
     "finalize_local_gate",
@@ -158,8 +159,13 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
     );
     assert.ok(startWorkflow.inputSchema.properties.remote_cycle_budget);
     assert.ok(startWorkflow.inputSchema.properties.local_cycle_budget);
+    assert.ok(startWorkflow.inputSchema.properties.change_size_budget);
     assert.equal(
       startWorkflow.inputSchema.required.includes("local_cycle_budget"),
+      false,
+    );
+    assert.equal(
+      startWorkflow.inputSchema.required.includes("change_size_budget"),
       false,
     );
     assert.equal(
@@ -211,6 +217,16 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       (tool) => tool.name === "extend_local_cycle_budget",
     );
     assert.deepEqual(extendLocalBudget.inputSchema.required.sort(), [
+      "expected_revision",
+      "new_budget",
+      "operator_label",
+      "rationale",
+      "workflow_id",
+    ]);
+    const extendChangeSizeBudget = authorTools.tools.find(
+      (tool) => tool.name === "extend_change_size_budget",
+    );
+    assert.deepEqual(extendChangeSizeBudget.inputSchema.required.sort(), [
       "expected_revision",
       "new_budget",
       "operator_label",

@@ -4,7 +4,9 @@ import { constants as fsConstants } from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import {
+  changeSizeReport,
   continuationFindingFingerprint,
+  DEFAULT_CHANGE_SIZE_BUDGET,
   getReviewSnapshot,
 } from "./core.mjs";
 import {
@@ -48,6 +50,7 @@ export const AUTONOMOUS_CAPABILITIES = Object.freeze([
 ]);
 export const DEFAULT_REMOTE_CYCLE_BUDGET = 12;
 export const DEFAULT_LOCAL_CYCLE_BUDGET = 12;
+export { DEFAULT_CHANGE_SIZE_BUDGET };
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
@@ -953,6 +956,29 @@ function validateCurrentReview(workflow) {
   if (review.head_sha !== null) {
     assertSha(review.head_sha, "workflow.current_review.head_sha");
   }
+  if (review.change_size != null) {
+    const changeSize = assertObject(
+      review.change_size,
+      "workflow.current_review.change_size",
+    );
+    for (const field of ["added_lines", "deleted_lines", "total_lines"]) {
+      if (!Number.isSafeInteger(changeSize[field]) || changeSize[field] < 0) {
+        fail(
+          "WORKFLOW_STATE_INVALID",
+          `workflow.current_review.change_size.${field} is invalid`,
+        );
+      }
+    }
+    if (
+      changeSize.total_lines !==
+      changeSize.added_lines + changeSize.deleted_lines
+    ) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "workflow current review change size total is invalid",
+      );
+    }
+  }
 
   if (workflow.reviewer_task != null) {
     const task = assertObject(
@@ -1278,7 +1304,14 @@ function createWorkflowId() {
 }
 
 function publicWorkflow(workflow) {
-  return structuredClone(workflow);
+  const result = structuredClone(workflow);
+  if (result.current_review?.change_size != null) {
+    result.current_review.change_size = changeSizeReport(
+      result.current_review.change_size,
+      result.change_size_budget ?? DEFAULT_CHANGE_SIZE_BUDGET,
+    );
+  }
+  return result;
 }
 
 async function readCanonicalSecureJson(filePath, maxBytes, code) {
@@ -1408,6 +1441,10 @@ function validateWorkflow(workflow) {
   assertPositiveInteger(
     workflow.local_cycle_budget,
     "workflow.local_cycle_budget",
+  );
+  assertPositiveInteger(
+    workflow.change_size_budget,
+    "workflow.change_size_budget",
   );
   for (const [index, cycle] of workflow.local_review_cycles.entries()) {
     assertObject(cycle, "workflow.local_review_cycles entry");
@@ -1903,6 +1940,7 @@ function validateWorkflow(workflow) {
 const COMPAT_FIELD_DEFAULTS = Object.freeze({
   local_review_cycles: [],
   local_cycle_budget: DEFAULT_LOCAL_CYCLE_BUDGET,
+  change_size_budget: DEFAULT_CHANGE_SIZE_BUDGET,
   remote_attempts: [],
   remote_cycle_budget: DEFAULT_REMOTE_CYCLE_BUDGET,
   current_publication: null,
@@ -2312,6 +2350,8 @@ function auditedWorkflowState(workflow, previousWorkflow = null) {
     local_review_cycles_sha256: localReviewCyclesDigest(workflow),
     local_cycle_budget:
       workflow.local_cycle_budget ?? DEFAULT_LOCAL_CYCLE_BUDGET,
+    change_size_budget:
+      workflow.change_size_budget ?? DEFAULT_CHANGE_SIZE_BUDGET,
     remote_attempts: workflow.remote_attempts ?? [],
     remote_cycle_budget:
       workflow.remote_cycle_budget ?? DEFAULT_REMOTE_CYCLE_BUDGET,
@@ -2531,6 +2571,7 @@ function requireWorkflowAuditBinding(workflow, audit) {
       local_review_cycles: [],
     }),
     local_cycle_budget: workflow.local_cycle_budget,
+    change_size_budget: workflow.change_size_budget,
     remote_attempts: [],
     remote_cycle_budget: workflow.remote_cycle_budget,
     addressed_findings: [],
@@ -2564,6 +2605,8 @@ function requireWorkflowAuditBinding(workflow, audit) {
         sha256(canonicalJson(lastState.local_review_cycles ?? []))) ||
     workflow.local_cycle_budget !==
       (lastState.local_cycle_budget ?? DEFAULT_LOCAL_CYCLE_BUDGET) ||
+    workflow.change_size_budget !==
+      (lastState.change_size_budget ?? DEFAULT_CHANGE_SIZE_BUDGET) ||
     canonicalJson(workflow.remote_attempts ?? []) !==
       canonicalJson(lastState.remote_attempts ?? []) ||
     workflow.remote_cycle_budget !==
@@ -2634,6 +2677,7 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "pull_request",
     "attempts",
     "local_cycle_budget",
+    "change_size_budget",
     "remote_attempts",
     "remote_cycle_budget",
     "addressed_findings",
@@ -3036,6 +3080,13 @@ function nextAction(workflow) {
 }
 
 function workflowSummary(workflow) {
+  const currentReview = structuredClone(workflow.current_review);
+  if (currentReview?.change_size != null) {
+    currentReview.change_size = changeSizeReport(
+      currentReview.change_size,
+      workflow.change_size_budget,
+    );
+  }
   return {
     workflow_id: workflow.workflow_id,
     revision: workflow.revision,
@@ -3047,11 +3098,12 @@ function workflowSummary(workflow) {
     base_sha: workflow.base_sha,
     topic_branch: workflow.topic_branch,
     current_head_sha: workflow.current_head_sha,
-    current_review: workflow.current_review,
+    current_review: currentReview,
     current_publication: workflow.current_publication,
     local_review_cycles: workflow.local_review_cycles,
     local_cycle_budget: workflow.local_cycle_budget,
     local_cycle_count: localCycleCount(workflow),
+    change_size_budget: workflow.change_size_budget,
     remote_attempts: workflow.remote_attempts,
     remote_cycle_budget: workflow.remote_cycle_budget,
     remote_cycle_count: remoteCycleCount(workflow),
@@ -3089,6 +3141,7 @@ export async function startAutonomousWorkflow(
     publicationTarget,
     localCycleBudget = DEFAULT_LOCAL_CYCLE_BUDGET,
     remoteCycleBudget = DEFAULT_REMOTE_CYCLE_BUDGET,
+    changeSizeBudget = DEFAULT_CHANGE_SIZE_BUDGET,
   },
 ) {
   assertString(baseRef, "base_ref", { max: 1024 });
@@ -3100,6 +3153,7 @@ export async function startAutonomousWorkflow(
   const normalizedCapabilities = assertCapabilities(capabilities);
   assertPositiveInteger(localCycleBudget, "local_cycle_budget");
   assertPositiveInteger(remoteCycleBudget, "remote_cycle_budget");
+  assertPositiveInteger(changeSizeBudget, "change_size_budget");
   const normalizedTarget = validatePublicationTarget(
     publicationTarget,
     topicBranch,
@@ -3191,6 +3245,7 @@ export async function startAutonomousWorkflow(
     attempts: [],
     local_review_cycles: [],
     local_cycle_budget: localCycleBudget,
+    change_size_budget: changeSizeBudget,
     remote_attempts: [],
     remote_cycle_budget: remoteCycleBudget,
     addressed_findings: [],
@@ -3618,8 +3673,26 @@ export async function bindWorkflowReview(
           },
         );
       }
+      const changeSize = summary.current_snapshot.change_size;
+      if (changeSize == null) {
+        fail(
+          "WORKFLOW_REVIEW_MISMATCH",
+          "local review does not report its immutable change size",
+        );
+      }
+      const measuredChangeSize = {
+        added_lines: changeSize.added_lines,
+        deleted_lines: changeSize.deleted_lines,
+        total_lines: changeSize.total_lines,
+      };
+      const changeSizeExceeded =
+        measuredChangeSize.total_lines > workflow.change_size_budget;
+      const saveBoundReview = changeSizeExceeded
+        ? (mutate) =>
+            saveActionMutation(paths, workflow, "WORKFLOW_PAUSED", mutate)
+        : (mutate) => saveMutation(paths, workflow, mutate);
       return publicWorkflow(
-        await saveMutation(paths, workflow, async (next) => {
+        await saveBoundReview(async (next) => {
           next.attempts.at(-1).review_id = reviewId;
           next.current_review = {
             review_id: reviewId,
@@ -3628,6 +3701,7 @@ export async function bindWorkflowReview(
             strategy: summary.review_strategy,
             snapshot_hash: summary.current_snapshot.snapshot_hash,
             head_sha: summary.current_snapshot.head_sha,
+            change_size: measuredChangeSize,
           };
           if (isContinuationFollowup) {
             next.local_review_cycles.at(-1).followup_review_id = reviewId;
@@ -3636,7 +3710,21 @@ export async function bindWorkflowReview(
           // its own fresh reviewer task. Releasing the previous binding is what
           // lets the next dispatch be planned at all.
           next.reviewer_task = null;
-          next.phase = "DISPATCH_CODEX_REVIEWER";
+          if (changeSizeExceeded) {
+            next.status = "PAUSED";
+            next.phase = "PAUSED_HUMAN";
+            next.pause = {
+              reason_code: "CHANGE_SIZE_BUDGET_EXCEEDED",
+              blocked_action: "DISPATCH_CODEX_REVIEWER",
+              resume_phase: "DISPATCH_CODEX_REVIEWER",
+              review_id: reviewId,
+              change_size_budget: next.change_size_budget,
+              change_size: measuredChangeSize,
+              paused_at: now(),
+            };
+          } else {
+            next.phase = "DISPATCH_CODEX_REVIEWER";
+          }
         }),
       );
     });
@@ -6177,6 +6265,16 @@ export async function resumeAutonomousWorkflow(
         "the exhausted local cycle budget must be extended before resuming",
       );
     }
+    if (
+      workflow.pause?.reason_code === "CHANGE_SIZE_BUDGET_EXCEEDED" &&
+      workflow.current_review?.change_size?.total_lines >
+        workflow.change_size_budget
+    ) {
+      fail(
+        "WORKFLOW_RESUME_INVALID",
+        "the exceeded change-size budget must be extended before resuming",
+      );
+    }
     // A history rewrite is the one remedy this workflow structurally cannot
     // accept: every recorded head must be a descendant of the last, so a
     // rewritten head is rejected however the workflow resumes. Say so instead
@@ -6290,6 +6388,57 @@ export async function extendLocalCycleBudget(
           old_budget: oldBudget,
           new_budget: newBudget,
           local_cycle_count: usedCycles,
+          operator_label: operatorLabel,
+          rationale,
+        },
+      ),
+    );
+  });
+}
+
+export async function extendChangeSizeBudget(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  { newBudget, operatorLabel, rationale },
+) {
+  assertPositiveInteger(newBudget, "new_budget");
+  assertString(operatorLabel, "operator_label", { max: 1024 });
+  assertString(rationale, "rationale");
+  return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
+    requireRevision(workflow, expectedRevision);
+    if (
+      workflow.status !== "PAUSED" ||
+      workflow.pause?.reason_code !== "CHANGE_SIZE_BUDGET_EXCEEDED"
+    ) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "change-size budget can only be extended from its exceeded pause",
+      );
+    }
+    const oldBudget = workflow.change_size_budget;
+    const measuredSize = workflow.current_review?.change_size?.total_lines;
+    if (
+      !Number.isSafeInteger(measuredSize) ||
+      newBudget <= oldBudget ||
+      newBudget < measuredSize
+    ) {
+      throw new TypeError(
+        "new_budget must exceed the current budget and admit the measured change size",
+      );
+    }
+    return publicWorkflow(
+      await saveActionMutation(
+        paths,
+        workflow,
+        "CHANGE_SIZE_BUDGET_EXTENDED",
+        async (next) => {
+          next.change_size_budget = newBudget;
+        },
+        {
+          old_budget: oldBudget,
+          new_budget: newBudget,
+          measured_change_size: measuredSize,
           operator_label: operatorLabel,
           rationale,
         },

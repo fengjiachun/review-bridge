@@ -60,6 +60,14 @@ isolated Hermes profile — and a manual snapshot may also capture uncommitted
 working-tree state; the workflow never has any, since step 1 required a clean
 tree.
 
+Before dispatch, the immutable patch is measured as added plus deleted lines.
+At 75% of the current budget, the driver reports the total and remaining
+headroom and states whether it will continue or split; this warning does not
+block. The autonomous workflow pauses for an operator decision when the total
+exceeds its default 2000-line budget, so no reviewer context is spent before a
+split is discussed. A manual review reports the same measurement but proceeds,
+because the operator is already present.
+
 Note that this gate attests **snapshot consistency**, not test results:
 finalizing it re-checks that the tree still matches what the reviewer saw.
 The deterministic test gate lives later, in step 5, where CI results are
