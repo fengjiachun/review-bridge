@@ -437,7 +437,7 @@ assert.match(workflowSkill, /is not a fork of the\s+author task/);
 assert.match(workflowSkill, /Never call reviewer tools from the author task/);
 assert.match(
   workflowSkill,
-  /ID, severity, one-line summary, and location/,
+  /ID, severity, one-line summary,\s+and location/,
 );
 assert.match(
   workflowSkill,
