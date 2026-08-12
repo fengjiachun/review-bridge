@@ -460,11 +460,15 @@ assert.match(
 assert.match(workflowSkill, /rereview is rebuttal-only and no\s+code commit was required/);
 assert.match(
   workflowSkill,
-  /submission mixes `fixed` and `human_required`[\s\S]*moves\s+directly to `HUMAN_REQUIRED` without capturing a rereview round/,
+  /Any author `human_required` resolution moves directly to `HUMAN_REQUIRED`\s+without capturing a rereview round/,
 );
 assert.match(
   workflowSkill,
-  /no rereview round captured\s+its files or commit[\s\S]*Do not infer that metadata from the workspace or\s+session text/,
+  /If the state is instead `HUMAN_REQUIRED`[\s\S]*stop and follow the human-arbitration flow/,
+);
+assert.match(
+  workflowSkill,
+  /When at least one of those resolutions is `fixed`[\s\S]*no\s+rereview round captured its files or commit[\s\S]*Do not infer that metadata from\s+the workspace or session text/,
 );
 assert.match(
   workflowSkill,

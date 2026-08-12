@@ -288,10 +288,11 @@ operator is already watching. When a round reports findings, it presents each
 finding's ID, severity, one-line summary, and location. When it submits author
 resolutions, it presents each persisted disposition. For fixed resolutions
 that proceed to rereview, it derives the affected files and fix commit from the
-immutable preceding and latest review rounds. A mixed `fixed` and
-`human_required` submission moves directly to `HUMAN_REQUIRED`, so no rereview
-round binds the fixed files or commit; the driver explicitly reports that
-metadata as unavailable instead of inferring it. After rereview, it presents
+immutable preceding and latest review rounds. Any author `human_required`
+resolution moves directly to `HUMAN_REQUIRED` and stops for arbitration. When
+that submission also contains a fixed resolution, no rereview round binds its
+files or commit, so the driver explicitly reports that metadata as unavailable
+instead of inferring it. After rereview, it presents
 every per-finding decision and any new finding. It states why a review reached
 `HUMAN_REQUIRED`, or presents the carried-findings list before continuing from
 `CONTINUABLE_FINDINGS` in a fresh full review.
