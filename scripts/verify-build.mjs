@@ -372,6 +372,10 @@ const workflowSkillPath = path.join(
 );
 assert.ok(await fsp.stat(workflowSkillPath));
 const workflowSkill = await fsp.readFile(workflowSkillPath, "utf8");
+const packagedReadme = await fsp.readFile(
+  path.join(outputRoot, "README.md"),
+  "utf8",
+);
 assert.match(
   workflowSkill,
   /Resolve it to an\n   immutable commit SHA before creating or committing publication changes/,
@@ -431,6 +435,72 @@ assert.match(workflowSkill, /Choose `reviewer_provider` explicitly/);
 assert.match(workflowSkill, /newly created Codex task/);
 assert.match(workflowSkill, /is not a fork of the\s+author task/);
 assert.match(workflowSkill, /Never call reviewer tools from the author task/);
+assert.match(
+  workflowSkill,
+  /ID, severity, one-line summary,\s+and location/,
+);
+assert.match(
+  workflowSkill,
+  /persisted\s+disposition, rationale, and evidence from its `resolutions`/,
+);
+assert.match(workflowSkill, /every per-finding decision and any new finding/);
+assert.match(workflowSkill, /state the escalation and why it needs a human/);
+assert.match(
+  workflowSkill,
+  /After\s+`prepare_rereview` captures the result, call `get_review` again/,
+);
+assert.match(
+  workflowSkill,
+  /compare the preceding and latest rounds'\s+authoritative `head_sha` values with `git diff --name-only` to derive the\s+actual fix files/,
+);
+assert.match(
+  workflowSkill,
+  /require a new commit only when at least\s+one resolution is `fixed`/,
+);
+assert.match(workflowSkill, /rereview is rebuttal-only and no\s+code commit was required/);
+assert.match(
+  workflowSkill,
+  /Any author `human_required` resolution moves directly to `HUMAN_REQUIRED`\s+without capturing a rereview round/,
+);
+assert.match(
+  workflowSkill,
+  /If the state is instead `HUMAN_REQUIRED`[\s\S]*stop and follow the human-arbitration flow/,
+);
+assert.match(
+  workflowSkill,
+  /When at least one of those resolutions is `fixed`[\s\S]*no\s+rereview round captured its files or commit[\s\S]*Do not infer that metadata from\s+the workspace or session text/,
+);
+assert.match(
+  workflowSkill,
+  /`CONTINUABLE_FINDINGS`, present the source ledger's `OPEN`\s+`findings`/,
+);
+assert.match(workflowSkill, /read its `carried_findings` as the continuation scope/);
+assert.match(
+  workflowSkill,
+  /When a round reports findings, call `get_review`/,
+);
+assert.match(
+  workflowSkill,
+  /When rereview\s+completes, call `get_review` again/,
+);
+assert.match(
+  workflowSkill,
+  /After\s+`submit_resolutions`, call `get_review` again/,
+);
+assert.match(workflowSkill, /persisted disposition from its\s+`resolutions`/);
+assert.match(
+  workflowSkill,
+  /`rereview_decisions` and `findings`/,
+);
+assert.match(
+  workflowSkill,
+  /Session narration is operator observability only/,
+);
+assert.match(packagedReadme, /### Operator narration/);
+assert.match(
+  packagedReadme,
+  /This narration is observability, not evidence/,
+);
 assert.match(workflowSkill, /For `SUCCESSOR`/);
 assert.match(workflowSkill, /A `timed_out` result is expected/);
 assert.match(

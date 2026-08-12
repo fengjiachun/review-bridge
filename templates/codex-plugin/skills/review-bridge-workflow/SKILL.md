@@ -73,15 +73,36 @@ gap returns the ready pull request to draft before any repair.
    This remeasures each newly captured rereview snapshot. If it pauses
    `CHANGE_SIZE_BUDGET_EXCEEDED`, report the new total and headroom; extend the
    budget only after an explicit operator decision, then resume separately.
-   Address findings and record any committed descendant fix head before
-   submitting resolutions. Round two reuses the same reviewer task. A
-   contested `HUMAN_REQUIRED` review pauses the workflow. New uncontested
-   round-two findings enter `ADDRESS_LOCAL_FINDINGS`; address them on a changed
-   committed head and let the next new `FULL` review inspect its carried bare
-   finding descriptions independently. Never add a third model round to the
-   same review ID. If the workflow pauses `LOCAL_CYCLE_BUDGET_EXHAUSTED`, show
-   the complete `local_review_cycles` chain to the operator; only an explicit
-   decision may call `extend_local_cycle_budget`, followed separately by
+   When a round reports findings, call `get_review` and narrate every finding
+   from its authoritative `findings` with the ID, severity, one-line summary,
+   and location. Address the findings and, when any disposition is `fixed`,
+   record a committed descendant fix head before submitting resolutions. After
+   `submit_resolutions`, call `get_review` again and narrate each persisted
+   disposition, rationale, and evidence from its `resolutions`. After
+   `prepare_rereview` captures the result, call `get_review` again. When any
+   disposition was `fixed`, compare the preceding and latest rounds'
+   authoritative `head_sha` values with `git diff --name-only` to derive the
+   actual fix files, and narrate those files with the latest `head_sha` as the
+   fix commit. For a rebuttal-only
+   rereview, state that no code commit was required. Round two
+   reuses the same reviewer task. When its result arrives, call `get_review`
+   again and narrate every per-finding decision and any new finding from its
+   `rereview_decisions` and `findings`. A contested `HUMAN_REQUIRED`
+   review pauses the workflow; state the escalation and why it needs a human.
+   Any author `human_required` resolution moves directly to `HUMAN_REQUIRED`
+   without capturing a rereview round. Narrate the persisted resolutions and
+   escalation reason, then stop for human arbitration. If the same submission
+   also contains a fixed resolution, state that its files and commit are not
+   yet bound in the ledger; never infer them from the workspace or session
+   text.
+   New uncontested round-two findings enter `ADDRESS_LOCAL_FINDINGS`; present
+   the source ledger's `OPEN` findings, address them on a changed committed
+   head, and let the next new `FULL` review inspect its `carried_findings`
+   independently. Never add a third model round to the
+   same review ID. If the
+   workflow pauses `LOCAL_CYCLE_BUDGET_EXHAUSTED`, show the complete
+   `local_review_cycles` chain to the operator; only an explicit decision may
+   call `extend_local_cycle_budget`, followed separately by
    `resume_autonomous_workflow`.
 8. For `PLAN_PUSH`, call `plan_workflow_push`; it verifies the clean
    checked-out HEAD still equals the gated workflow head and binds the
@@ -471,19 +492,43 @@ waiting for its reviewer.
 ## Handle findings
 
 1. Call `get_review_summary` first. If it reports `REVIEW_SUBMITTED`, call
-   `get_review` once to load the full findings and evidence.
+   `get_review` once to load the full findings and evidence. Present every
+   finding from the ledger's `findings` with its ID, severity, one-line summary,
+   and location.
 2. Address every open finding. For each finding choose exactly one:
    - `fixed`: change the code and verify the fix.
    - `rejected`: provide concrete technical evidence.
    - `human_required`: stop and request human arbitration.
-3. Call `submit_resolutions` with one entry for every finding.
-4. If the state is `AUTHOR_RESPONDED`, call `prepare_rereview`.
+3. Call `submit_resolutions` with one entry for every finding, then call
+   `get_review` again. Present every persisted disposition from its
+   `resolutions`, including its rationale and evidence.
+4. If the state is `AUTHOR_RESPONDED`, require a new commit only when at least
+   one resolution is `fixed`, then call `prepare_rereview` and `get_review`
+   again. For fixed resolutions, compare the preceding and latest rounds'
+   authoritative `head_sha` values with `git diff --name-only` to derive the
+   actual fix files, and present them with the latest `head_sha` as the
+   committed fix head. If every
+   resolution is `rejected`, report that the rereview is rebuttal-only and no
+   code commit was required.
+   If the state is instead `HUMAN_REQUIRED`, report the escalation reason and
+   all persisted resolutions, then stop and follow the human-arbitration flow.
+   When at least one of those resolutions is `fixed`, also state that no
+   rereview round captured its files or commit. Do not infer that metadata from
+   the workspace or session text.
 5. Record the new summary's `state_version`, report `WAITING_FOR_REREVIEW`,
    resume the same reviewer context, and use `wait_for_review_state` to observe
    the next transition. Treat `timed_out` as an expected in-progress result and
-   continue with the same `state_version` as described above.
+   continue with the same `state_version` as described above. When rereview
+   completes, call `get_review` again. Present every per-finding decision and
+   any new finding from its `rereview_decisions` and `findings`. If it reaches
+   `HUMAN_REQUIRED`, state the concrete escalation reason from the full ledger.
+   If it reaches `CONTINUABLE_FINDINGS`, present the source ledger's `OPEN`
+   `findings` before starting the fresh full review. After creating that review,
+   read its `carried_findings` as the continuation scope.
 
 Keep fixes surgical. Do not mark a finding fixed without verification evidence.
+Session narration is operator observability only. Never use it as review
+evidence or as a substitute for reading and mutating the ledger.
 
 ## Lock contention
 
