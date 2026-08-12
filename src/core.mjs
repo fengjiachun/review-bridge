@@ -120,6 +120,16 @@ function runGit(repositoryPath, args, options = {}) {
   return result.stdout;
 }
 
+async function resolveRepositoryRoot(repositoryPath) {
+  const requestedPath = path.resolve(
+    assertString(repositoryPath, "repository_path", { max: 4096 }),
+  );
+  const topLevel = runGit(requestedPath, ["rev-parse", "--show-toplevel"], {
+    encoding: "utf8",
+  }).trim();
+  return fsp.realpath(topLevel);
+}
+
 async function atomicWriteJson(filePath, value) {
   await atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -444,11 +454,7 @@ async function buildSnapshot({
   roundRoot,
   writeFiles,
 }) {
-  const requestedPath = path.resolve(assertString(repositoryPath, "repository_path", { max: 4096 }));
-  const topLevel = runGit(requestedPath, ["rev-parse", "--show-toplevel"], {
-    encoding: "utf8",
-  }).trim();
-  const repository = await fsp.realpath(topLevel);
+  const repository = await resolveRepositoryRoot(repositoryPath);
   const baseSha = runGit(repository, ["rev-parse", "--verify", `${baseRef}^{commit}`], {
     encoding: "utf8",
   }).trim();
@@ -1295,6 +1301,7 @@ export async function prepareReview(
     }
   }
   assertReviewerProvider(reviewerProvider);
+  const repositoryRoot = await resolveRepositoryRoot(repositoryPath);
   const continuedReview =
     continuedFromReviewId == null
       ? null
@@ -1302,7 +1309,7 @@ export async function prepareReview(
   if (
     continuedReview != null &&
     (continuedReview.status !== "CONTINUABLE_FINDINGS" ||
-      continuedReview.repository_path !== (await fsp.realpath(repositoryPath)) ||
+      continuedReview.repository_path !== repositoryRoot ||
       continuedReview.requirement !== requirement ||
       continuedReview.implementation_scope !== implementationScope ||
       reviewerProviderFor(continuedReview) !== reviewerProvider)

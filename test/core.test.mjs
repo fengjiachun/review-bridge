@@ -1381,8 +1381,10 @@ test("carried findings are reviewer scope hints without author rationale", async
     /must descend from the source head/,
   );
   git(repository, "switch", "main");
+  const nestedDirectory = path.join(repository, "nested");
+  await fsp.mkdir(nestedDirectory);
   const prepared = await prepareReview(store, {
-    repositoryPath: repository,
+    repositoryPath: nestedDirectory,
     baseRef: baseSha,
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
@@ -1390,6 +1392,7 @@ test("carried findings are reviewer scope hints without author rationale", async
     continuedFromReviewId: source.id,
   });
   const opened = await openReview(store, prepared.id);
+  assert.equal(opened.repository_path, await fsp.realpath(repository));
   assert.equal(opened.review_strategy.mode, "FULL");
   assert.equal(opened.carried_findings.length, 1);
   assert.equal(opened.carried_findings[0].continued_from_review_id, source.id);
