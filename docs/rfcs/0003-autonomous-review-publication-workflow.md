@@ -752,9 +752,9 @@ audited operator label and rationale, does not resume the workflow, and does
 not change the authorization digest.
 
 The workflow ledger is the durable complete continuation chain. Every audit
-state binds its canonical SHA-256 digest; only an event that changes the chain
-also stores the full recovery copy. This preserves crash recovery without
-repeating the growing chain in every intervening action event. A budget pause
+state binds its canonical SHA-256 digest; an event that changes the chain stores
+only an append-or-patch delta for the latest cycle. This preserves crash
+recovery with linear audit-log growth. A budget pause
 stores the count and digest rather than duplicating the chain inside `pause`;
 the complete chain remains available in the workflow summary.
 

@@ -2262,6 +2262,44 @@ function localReviewCyclesDigest(workflow) {
   return sha256(canonicalJson(workflow.local_review_cycles ?? []));
 }
 
+function localReviewCycleUpdate(previousWorkflow, workflow) {
+  if (previousWorkflow == null) return null;
+  const previous = previousWorkflow.local_review_cycles ?? [];
+  const current = workflow.local_review_cycles ?? [];
+  if (canonicalJson(previous) === canonicalJson(current)) return null;
+  if (
+    current.length === previous.length + 1 &&
+    canonicalJson(current.slice(0, -1)) === canonicalJson(previous)
+  ) {
+    return { kind: "APPEND", cycle: current.at(-1) };
+  }
+  if (
+    current.length === previous.length &&
+    current.length > 0 &&
+    canonicalJson(current.slice(0, -1)) ===
+      canonicalJson(previous.slice(0, -1)) &&
+    canonicalJson({
+      ...current.at(-1),
+      addressed_head_sha: previous.at(-1).addressed_head_sha,
+      followup_review_id: previous.at(-1).followup_review_id,
+    }) === canonicalJson(previous.at(-1))
+  ) {
+    const changes = {};
+    for (const field of ["addressed_head_sha", "followup_review_id"]) {
+      if (current.at(-1)[field] !== previous.at(-1)[field]) {
+        changes[field] = current.at(-1)[field];
+      }
+    }
+    if (Object.keys(changes).length > 0) {
+      return { kind: "PATCH_LATEST", number: current.length, changes };
+    }
+  }
+  fail(
+    "WORKFLOW_STATE_INVALID",
+    "local review cycle mutations must append or patch only the latest cycle",
+  );
+}
+
 function auditedWorkflowState(workflow, previousWorkflow = null) {
   const state = {
     revision: workflow.revision,
@@ -2293,12 +2331,9 @@ function auditedWorkflowState(workflow, previousWorkflow = null) {
     claims: workflow.claims,
     claim_release: workflow.claim_release ?? null,
   };
-  if (
-    previousWorkflow != null &&
-    localReviewCyclesDigest(previousWorkflow) !==
-      state.local_review_cycles_sha256
-  ) {
-    state.local_review_cycles = workflow.local_review_cycles ?? [];
+  const cycleUpdate = localReviewCycleUpdate(previousWorkflow, workflow);
+  if (cycleUpdate != null) {
+    state.local_review_cycle_update = cycleUpdate;
   }
   return state;
 }
@@ -2630,6 +2665,52 @@ async function reconcileWorkflowAudit(paths, workflow) {
     recovered.local_review_cycles = structuredClone(
       lastEvent.workflow_state.local_review_cycles,
     );
+  } else if (lastEvent.workflow_state.local_review_cycle_update != null) {
+    const update = lastEvent.workflow_state.local_review_cycle_update;
+    assertObject(update, "audit local review cycle update");
+    if (update.kind === "APPEND") {
+      assertObject(update.cycle, "audit local review cycle");
+      if (update.cycle.number !== recovered.local_review_cycles.length + 1) {
+        fail(
+          "WORKFLOW_AUDIT_CORRUPT",
+          "appended local review cycle number is invalid",
+        );
+      }
+      recovered.local_review_cycles.push(structuredClone(update.cycle));
+    } else if (update.kind === "PATCH_LATEST") {
+      if (
+        recovered.local_review_cycles.length === 0 ||
+        update.number !== recovered.local_review_cycles.length
+      ) {
+        fail(
+          "WORKFLOW_AUDIT_CORRUPT",
+          "patched local review cycle number is invalid",
+        );
+      }
+      assertObject(update.changes, "audit local review cycle changes");
+      const fields = Object.keys(update.changes);
+      if (
+        fields.length === 0 ||
+        fields.some(
+          (field) =>
+            field !== "addressed_head_sha" && field !== "followup_review_id",
+        )
+      ) {
+        fail(
+          "WORKFLOW_AUDIT_CORRUPT",
+          "patched local review cycle fields are invalid",
+        );
+      }
+      Object.assign(
+        recovered.local_review_cycles.at(-1),
+        structuredClone(update.changes),
+      );
+    } else {
+      fail(
+        "WORKFLOW_AUDIT_CORRUPT",
+        "local review cycle update kind is invalid",
+      );
+    }
   }
   if (
     localReviewCyclesDigest(recovered) !==

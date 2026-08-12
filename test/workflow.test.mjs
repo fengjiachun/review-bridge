@@ -2769,6 +2769,12 @@ test("uncontested rereview findings continue through a FULL review and obey the 
     [{ severity: "major", title: "Initial defect", explanation: "Fix it." }],
     "CODEX_TASK",
   );
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    started.workflow_id,
+    "workflow.json",
+  );
   workflow = await advanceLocalWorkflow(
     state.store,
     started.workflow_id,
@@ -2812,11 +2818,14 @@ test("uncontested rereview findings continue through a FULL review and obey the 
     })),
     "CODEX_TASK",
   );
+  const beforeAppend = await fsp.readFile(workflowPath);
   workflow = await advanceLocalWorkflow(
     state.store,
     started.workflow_id,
     workflow.revision,
   );
+  await fsp.writeFile(workflowPath, beforeAppend, { mode: 0o600 });
+  workflow = await getAutonomousWorkflow(state.store, started.workflow_id);
   assert.equal(workflow.phase, "ADDRESS_LOCAL_FINDINGS");
   assert.equal(
     workflow.local_review_cycles.filter((cycle) => cycle.addressed_head_sha != null)
@@ -2835,12 +2844,15 @@ test("uncontested rereview findings continue through a FULL review and obey the 
     state.repository,
     "export const value = 4;\n",
   );
+  const beforePatch = await fsp.readFile(workflowPath);
   workflow = await recordWorkflowHead(
     state.store,
     started.workflow_id,
     workflow.revision,
     continuationHead,
   );
+  await fsp.writeFile(workflowPath, beforePatch, { mode: 0o600 });
+  workflow = await getAutonomousWorkflow(state.store, started.workflow_id);
   assert.equal(workflow.phase, "PREPARE_LOCAL_REVIEW");
   assert.equal(
     workflow.local_review_cycles.filter((cycle) => cycle.addressed_head_sha != null)
@@ -2886,12 +2898,23 @@ test("uncontested rereview findings continue through a FULL review and obey the 
     .map(JSON.parse);
   assert.ok(
     auditAfterDispatch.some(
-      (event) => event.workflow_state.local_review_cycles?.length === 1,
+      (event) =>
+        event.workflow_state.local_review_cycle_update?.kind === "APPEND" &&
+        event.workflow_state.local_review_cycle_update.cycle.findings.length ===
+          100,
     ),
   );
-  assert.equal(
-    "local_review_cycles" in auditAfterDispatch.at(-1).workflow_state,
-    false,
+  assert.ok(
+    auditAfterDispatch.some(
+      (event) =>
+        event.workflow_state.local_review_cycle_update?.kind ===
+        "PATCH_LATEST",
+    ),
+  );
+  assert.ok(
+    auditAfterDispatch.every(
+      (event) => !("local_review_cycles" in event.workflow_state),
+    ),
   );
   assert.match(
     auditAfterDispatch.at(-1).workflow_state.local_review_cycles_sha256,
@@ -2974,6 +2997,160 @@ test("uncontested rereview findings continue through a FULL review and obey the 
   );
   assert.equal(workflow.phase, "ADDRESS_LOCAL_FINDINGS");
   assert.equal(workflow.local_cycle_budget, 2);
+});
+
+test("twelve maximum-count local continuation cycles fit the action audit", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const started = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  let head = await commitImplementation(state.repository);
+  let workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    started.revision,
+    head,
+  );
+  let review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  ({ completed: workflow } = await dispatchReviewer(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  ));
+
+  for (let cycle = 1; cycle <= 12; cycle += 1) {
+    await submitInitialReview(
+      state.store,
+      review.id,
+      [{ severity: "major", title: `Defect ${cycle}`, explanation: "Fix it." }],
+      "CODEX_TASK",
+    );
+    workflow = await advanceLocalWorkflow(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+    );
+    head = await commitImplementation(
+      state.repository,
+      `export const value = ${cycle * 2 + 2};\n`,
+    );
+    workflow = await recordWorkflowHead(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      head,
+    );
+    await submitResolutions(state.store, review.id, [
+      { finding_id: "F-001", disposition: "fixed", rationale: "Fixed." },
+    ]);
+    workflow = await advanceLocalWorkflow(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+    );
+    await prepareRereview(state.store, review.id);
+    workflow = await advanceLocalWorkflow(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+    );
+    await submitRereview(
+      state.store,
+      review.id,
+      [{ finding_id: "F-001", decision: "resolved", rationale: "Verified." }],
+      Array.from({ length: 100 }, (_, index) => ({
+        severity: "minor",
+        title: `Cycle ${cycle} edge ${index + 1}`,
+        explanation: "A distinct edge case remains.",
+      })),
+      "CODEX_TASK",
+    );
+    workflow = await advanceLocalWorkflow(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+    );
+    assert.equal(workflow.phase, "ADDRESS_LOCAL_FINDINGS");
+
+    head = await commitImplementation(
+      state.repository,
+      `export const value = ${cycle * 2 + 3};\n`,
+    );
+    workflow = await recordWorkflowHead(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      head,
+    );
+    const followup = await prepareReview(state.store, {
+      repositoryPath: state.repository,
+      baseRef: state.baseSha,
+      requirement: started.requirement,
+      implementationScope: started.implementation_scope,
+      reviewerProvider: "CODEX_TASK",
+      forceFullReview: true,
+      continuedFromReviewId: review.id,
+    });
+    workflow = await bindWorkflowReview(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      followup.id,
+    );
+    review = followup;
+    if (cycle < 12) {
+      ({ completed: workflow } = await dispatchReviewer(
+        state.store,
+        started.workflow_id,
+        workflow.revision,
+        review.id,
+      ));
+    }
+  }
+
+  assert.equal(workflow.local_review_cycles.length, 12);
+  const auditPath = path.join(
+    state.store,
+    "workflows",
+    started.workflow_id,
+    "action-audit.jsonl",
+  );
+  const auditBytes = await fsp.readFile(auditPath);
+  const events = auditBytes.toString("utf8").trim().split("\n").map(JSON.parse);
+  const updates = events
+    .map((event) => event.workflow_state.local_review_cycle_update)
+    .filter(Boolean);
+  assert.equal(updates.filter((update) => update.kind === "APPEND").length, 12);
+  assert.equal(
+    updates.filter((update) => update.kind === "PATCH_LATEST").length,
+    24,
+  );
+  assert.ok(
+    events.every(
+      (event) => !("local_review_cycles" in event.workflow_state),
+    ),
+  );
+  assert.ok(
+    events.every(
+      (event) => Buffer.byteLength(canonicalJson(event)) <= 256 * 1024,
+    ),
+  );
+  assert.ok(auditBytes.length < 4 * 1024 * 1024 - 2 * (256 * 1024 + 1));
 });
 
 test("author responses retain the findings phase after unrecorded head drift", async (t) => {

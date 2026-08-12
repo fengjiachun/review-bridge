@@ -450,8 +450,9 @@ exhaustion pauses with `LOCAL_CYCLE_BUDGET_EXHAUSTED` and the complete
 continuation chain before another repair starts. `extend_local_cycle_budget`
 records an explicit increase. The workflow ledger retains that complete chain;
 ordinary audit events bind its digest, while an event that changes the chain
-also carries the recovery copy, avoiding quadratic audit-log growth. The remote count is
-projected from non-diverted `remote_attempts`; exhausting it pauses with
+carries only an append-or-patch delta for the latest cycle, keeping audit-log
+growth linear. The remote count is projected from non-diverted
+`remote_attempts`; exhausting it pauses with
 `REMOTE_CYCLE_BUDGET_EXHAUSTED` and the complete attempt chain before another
 repair starts. `extend_remote_cycle_budget` records an explicit increase in the
 workflow audit, after which the operator uses the ordinary resume path. The
