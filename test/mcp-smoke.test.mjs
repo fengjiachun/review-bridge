@@ -56,6 +56,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
     "cancel_autonomous_workflow",
     "complete_workflow_action",
     "export_human_arbitration",
+    "extend_local_cycle_budget",
     "extend_remote_cycle_budget",
     "finalize_local_gate",
     "finalize_publication_gate",
@@ -156,6 +157,11 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       startWorkflow.inputSchema.required.includes("publication_target"),
     );
     assert.ok(startWorkflow.inputSchema.properties.remote_cycle_budget);
+    assert.ok(startWorkflow.inputSchema.properties.local_cycle_budget);
+    assert.equal(
+      startWorkflow.inputSchema.required.includes("local_cycle_budget"),
+      false,
+    );
     assert.equal(
       startWorkflow.inputSchema.required.includes("remote_cycle_budget"),
       false,
@@ -201,6 +207,20 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       "rationale",
       "workflow_id",
     ]);
+    const extendLocalBudget = authorTools.tools.find(
+      (tool) => tool.name === "extend_local_cycle_budget",
+    );
+    assert.deepEqual(extendLocalBudget.inputSchema.required.sort(), [
+      "expected_revision",
+      "new_budget",
+      "operator_label",
+      "rationale",
+      "workflow_id",
+    ]);
+    const prepareReview = authorTools.tools.find(
+      (tool) => tool.name === "prepare_review",
+    );
+    assert.ok(prepareReview.inputSchema.properties.continued_from_review_id);
 
     const arbitrationExport = authorTools.tools.find(
       (tool) => tool.name === "export_human_arbitration",

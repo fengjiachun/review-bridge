@@ -36,6 +36,7 @@ import {
   bindWorkflowReview,
   cancelAutonomousWorkflow,
   completeWorkflowAction,
+  DEFAULT_LOCAL_CYCLE_BUDGET,
   DEFAULT_REMOTE_CYCLE_BUDGET,
   extendRemoteCycleBudget,
   getAutonomousWorkflow,
@@ -1822,7 +1823,7 @@ test("a repeated blocker at the cycle budget requires extension before repair", 
   assert.equal(progressing.phase, "PREPARE_LOCAL_REVIEW");
 });
 
-test("a workflow written before the remote fields stays readable and cancellable", async (t) => {
+test("a workflow written before the cycle fields stays readable and cancellable", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(
@@ -1831,7 +1832,7 @@ test("a workflow written before the remote fields stays readable and cancellable
   );
 
   // Reproduce a ledger written before this change: schema version 1 with
-  // neither remote field. A released v0.5.0 workflow looks exactly like this.
+  // neither cycle field. A released v0.5.0 workflow looks exactly like this.
   const workflowPath = path.join(
     state.store,
     "workflows",
@@ -1840,6 +1841,8 @@ test("a workflow written before the remote fields stays readable and cancellable
   );
   const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
   assert.equal(stored.version, 1);
+  delete stored.local_review_cycles;
+  delete stored.local_cycle_budget;
   delete stored.remote_attempts;
   delete stored.remote_cycle_budget;
   delete stored.current_publication;
@@ -1850,6 +1853,9 @@ test("a workflow written before the remote fields stays readable and cancellable
     workflow.workflow_id,
   );
   assert.equal(summary.status, "ACTIVE");
+  assert.deepEqual(summary.local_review_cycles, []);
+  assert.equal(summary.local_cycle_budget, DEFAULT_LOCAL_CYCLE_BUDGET);
+  assert.equal(summary.local_cycle_count, 0);
   assert.deepEqual(summary.remote_attempts, []);
   assert.equal(summary.remote_cycle_budget, DEFAULT_REMOTE_CYCLE_BUDGET);
   assert.equal(summary.remote_cycle_count, 0);

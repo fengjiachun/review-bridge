@@ -39,8 +39,10 @@ gap returns the ready pull request to draft before any repair.
    it without rewriting published history, require a clean worktree, and call
    `record_workflow_head` with the full `HEAD`.
 4. For `PREPARE_LOCAL_REVIEW`, call `prepare_review` with the workflow's full
-   base SHA, exact requirement and scope, and `CODEX_TASK`; then call
-   `bind_workflow_review` at the workflow's current revision.
+   base SHA, exact requirement and scope, and `CODEX_TASK`. If the latest
+   `local_review_cycles` entry has an addressed head but no follow-up review,
+   also pass its `continued_from_review_id` and `force_full_review: true`.
+   Then call `bind_workflow_review` at the workflow's current revision.
 5. For `PLAN_CODEX_TASK_DISPATCH`, call `plan_codex_task_dispatch`. Persist
    `EXECUTING` with `mark_workflow_action_executing` immediately before task
    creation. Create a fresh non-forked Codex task whose title and prompt equal
@@ -59,8 +61,14 @@ gap returns the ready pull request to draft before any repair.
 7. Use `advance_local_workflow` after every local-review ledger transition.
    Address findings and record any committed descendant fix head before
    submitting resolutions. Round two reuses the same reviewer task. A
-   `HUMAN_REQUIRED` review pauses the workflow and must not create a third
-   model round.
+   contested `HUMAN_REQUIRED` review pauses the workflow. New uncontested
+   round-two findings enter `ADDRESS_LOCAL_FINDINGS`; address them on a changed
+   committed head and let the next new `FULL` review inspect its carried bare
+   finding descriptions independently. Never add a third model round to the
+   same review ID. If the workflow pauses `LOCAL_CYCLE_BUDGET_EXHAUSTED`, show
+   the complete `local_review_cycles` chain to the operator; only an explicit
+   decision may call `extend_local_cycle_budget`, followed separately by
+   `resume_autonomous_workflow`.
 8. For `PLAN_PUSH`, call `plan_workflow_push`; it verifies the clean
    checked-out HEAD still equals the gated workflow head and binds the
    remote's single push URL into the intent; a push URL that embeds

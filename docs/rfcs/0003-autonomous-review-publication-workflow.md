@@ -654,7 +654,9 @@ IMPLEMENTING
        │               -> COMMIT_AND_VERIFY_LOCAL_FIXES
        │               -> PREPARE_REREVIEW
        │               -> WAIT_LOCAL_REREVIEW
-       ├─ open/new after round two -> PAUSED_HUMAN
+       ├─ prior still open after round two -> PAUSED_HUMAN
+       ├─ only new after round two -> ADDRESS_LOCAL_FINDINGS
+       │                              -> NEW_FULL_REVIEW
        └─ CLEAN -> FINALIZE_LOCAL_GATE
                     -> PUBLISH_GATED_HEAD
                     -> START_PUBLICATION
@@ -724,11 +726,30 @@ The existing two-round protocol remains unchanged:
 - any code changed while addressing findings must be committed, and the
   working tree must be clean, before `prepare_rereview`;
 - round two reuses the same reviewer task;
-- any open or new finding after round two becomes `HUMAN_REQUIRED`; and
+- any prior finding that remains open after round two becomes
+  `HUMAN_REQUIRED`;
+- if every prior finding is resolved or its rebuttal is accepted and round two
+  reports only new findings, the review becomes `CONTINUABLE_FINDINGS`; and
 - the controller does not create a third model round for that `review_id`.
 
 `HUMAN_REQUIRED` pauses the workflow and exports the exact arbitration packet.
 It does not automatically start another review with the same head.
+
+`CONTINUABLE_FINDINGS` enters `ADDRESS_LOCAL_FINDINGS`. The workflow records a
+persistent chain containing the source review ID, each open finding ID and
+description fingerprint, the changed committed head that claims to address
+them, and the follow-up review ID. The follow-up must be a new `FULL` review;
+it exposes the source findings' bare descriptions as scope hints, without
+author rationale or a forced per-finding disposition. That review must reach
+`CLEAN` through its ordinary independent review path.
+
+The workflow stores a positive `local_cycle_budget`, defaulting to 12. A local
+cycle is counted when its addressed head is recorded. If another continuation
+would exceed the budget, the server pauses
+`LOCAL_CYCLE_BUDGET_EXHAUSTED` with the complete chain before repair.
+`extend_local_cycle_budget` is the only budget mutation; it requires an
+audited operator label and rationale, does not resume the workflow, and does
+not change the authorization digest.
 
 ### Publication
 
@@ -1530,7 +1551,9 @@ issued or credited.
 - findings fixed and accepted in round two;
 - rejected finding accepted with evidence;
 - `human_required` author response;
-- open or new finding after round two;
+- open prior finding after round two;
+- uncontested new finding continuation through a new `FULL` review;
+- local-cycle budget exhaustion and audited extension;
 - new head using a valid `SUCCESSOR`;
 - invalid successor preconditions falling back to `FULL`;
 - missing, duplicate, or undiscoverable mandatory reviewer dispatch marker; and
