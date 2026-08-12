@@ -10,12 +10,13 @@ const projectRoot = path.resolve(
 );
 
 test("release metadata stays aligned with package.json", async () => {
-  const [workflow, security, packageJson, plugin, extension] = await Promise.all([
+  const [workflow, security, readme, packageJson, plugin, extension] = await Promise.all([
     fsp.readFile(
       path.join(projectRoot, ".github", "workflows", "ci.yml"),
       "utf8",
     ),
     fsp.readFile(path.join(projectRoot, "SECURITY.md"), "utf8"),
+    fsp.readFile(path.join(projectRoot, "README.md"), "utf8"),
     fsp
       .readFile(path.join(projectRoot, "package.json"), "utf8")
       .then(JSON.parse),
@@ -58,4 +59,12 @@ test("release metadata stays aligned with package.json", async () => {
   );
   assert.equal(plugin.version, packageJson.version);
   assert.equal(extension.version, packageJson.version);
+  const readmeVersions = readme.match(/\bv\d+\.\d+\.\d+\b/g) ?? [];
+  assert.ok(
+    readmeVersions.length > 0,
+    "README must state the release version in its install commands",
+  );
+  for (const version of readmeVersions) {
+    assert.equal(version, `v${packageJson.version}`);
+  }
 });

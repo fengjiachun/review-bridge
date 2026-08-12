@@ -9,7 +9,7 @@ Use the Review Bridge author tools to coordinate a manual, two-round review with
 Claude Desktop or a fresh Codex reviewer task, or an explicitly authorized
 remote-only GitHub publication.
 
-## Autonomous local workflow
+## Autonomous workflow
 
 The schema-version-1 autonomous workflow is opt-in and currently advances
 through the local `CODEX_TASK` gate, the reconciled push of the gated head,
