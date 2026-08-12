@@ -1242,6 +1242,72 @@ test("legacy bound reviews backfill change size before reviewer dispatch", async
   assert.equal(result.workflow.current_review.change_size.total_lines, 2002);
 });
 
+test("legacy change-size backfill rejects a same-head review transition", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const workflowRoot = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+  );
+  const workflowPath = path.join(workflowRoot, "workflow.json");
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  delete stored.current_review.change_size;
+  const legacyEvent = workflowAuditEvent(stored, {
+    sequence: 1,
+    previousEventSha256: null,
+    eventId: "c".repeat(32),
+    at: stored.updated_at,
+  });
+  await fsp.writeFile(
+    path.join(workflowRoot, "action-audit.jsonl"),
+    legacyEvent.bytes,
+    { mode: 0o600 },
+  );
+  await fsp.writeFile(
+    path.join(workflowRoot, "action-audit-head.json"),
+    `${canonicalJson({
+      version: 1,
+      workflow_id: workflow.workflow_id,
+      committed_bytes: legacyEvent.bytes.length,
+      next_sequence: 2,
+      last_event_sha256: legacyEvent.event.event_sha256,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  stored.action_audit = {
+    next_sequence: 2,
+    last_event_sha256: legacyEvent.event.event_sha256,
+  };
+  await fsp.writeFile(workflowPath, `${canonicalJson(stored)}\n`, {
+    mode: 0o600,
+  });
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [{ severity: "major", title: "Defect", explanation: "Fix it." }],
+    "CODEX_TASK",
+  );
+
+  await assert.rejects(
+    planCodexTaskDispatch(
+      state.store,
+      workflow.workflow_id,
+      stored.revision,
+      review.id,
+    ),
+    /bound review cannot backfill its immutable change size/,
+  );
+  const unchanged = await getAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(unchanged.revision, stored.revision);
+  assert.equal(unchanged.active_action, null);
+  assert.equal(unchanged.current_review.change_size, undefined);
+});
+
 test("an oversized rereview snapshot pauses before reviewer reuse", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

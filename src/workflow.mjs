@@ -3833,7 +3833,12 @@ export async function planCodexTaskDispatch(
           review.requirement !== workflow.requirement ||
           review.implementation_scope !== workflow.implementation_scope ||
           review.reviewer_provider !== "CODEX_TASK" ||
+          summary.status !== "WAITING_FOR_REVIEW" ||
+          summary.state_version !== workflow.current_review.state_version ||
+          summary.current_snapshot?.snapshot_hash !==
+            workflow.current_review.snapshot_hash ||
           summary.current_snapshot?.head_sha !== workflow.current_head_sha ||
+          summary.current_snapshot?.head_sha !== workflow.current_review.head_sha ||
           changeSize == null
         ) {
           fail(
