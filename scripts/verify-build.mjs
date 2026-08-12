@@ -445,7 +445,19 @@ assert.match(
 );
 assert.match(workflowSkill, /every per-finding decision and any new finding/);
 assert.match(workflowSkill, /state the escalation and why it needs a human/);
-assert.match(workflowSkill, /full ledger's\s+`carried_findings` list/);
+assert.match(
+  workflowSkill,
+  /After\s+`prepare_rereview` captures the descendant, call `get_review` again/,
+);
+assert.match(
+  workflowSkill,
+  /latest round's authoritative `changed_files` and `head_sha`/,
+);
+assert.match(
+  workflowSkill,
+  /`CONTINUABLE_FINDINGS`, present the source ledger's `OPEN`\s+`findings`/,
+);
+assert.match(workflowSkill, /read its `carried_findings` as the continuation scope/);
 assert.match(
   workflowSkill,
   /When a round reports findings, call `get_review`/,

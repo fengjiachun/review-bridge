@@ -78,16 +78,18 @@ gap returns the ready pull request to draft before any repair.
    and location. Address the findings and record
    any committed descendant fix head before submitting resolutions. After
    `submit_resolutions`, call `get_review` again and narrate each persisted
-   disposition from its `resolutions`, plus the files and commit that actually
-   changed. Round two
+   disposition, rationale, and evidence from its `resolutions`. After
+   `prepare_rereview` captures the descendant, call `get_review` again and
+   narrate the latest round's authoritative `changed_files` and `head_sha` as
+   the actual fix. Round two
    reuses the same reviewer task. When its result arrives, call `get_review`
    again and narrate every per-finding decision and any new finding from its
    `rereview_decisions` and `findings`. A contested `HUMAN_REQUIRED`
    review pauses the workflow; state the escalation and why it needs a human.
    New uncontested round-two findings enter `ADDRESS_LOCAL_FINDINGS`; present
-   the full ledger's `carried_findings` list, address them on a changed
-   committed head, and let the next new `FULL` review inspect its carried bare
-   finding descriptions independently. Never add a third model round to the
+   the source ledger's `OPEN` findings, address them on a changed committed
+   head, and let the next new `FULL` review inspect its `carried_findings`
+   independently. Never add a third model round to the
    same review ID. If the
    workflow pauses `LOCAL_CYCLE_BUDGET_EXHAUSTED`, show the complete
    `local_review_cycles` chain to the operator; only an explicit decision may
@@ -490,9 +492,11 @@ waiting for its reviewer.
    - `human_required`: stop and request human arbitration.
 3. Call `submit_resolutions` with one entry for every finding, then call
    `get_review` again. Present every persisted disposition from its
-   `resolutions` and what actually changed, including the affected files and
-   committed head.
-4. If the state is `AUTHOR_RESPONDED`, call `prepare_rereview`.
+   `resolutions`, including its rationale and evidence.
+4. If the state is `AUTHOR_RESPONDED`, require the fix commit, call
+   `prepare_rereview`, then call `get_review` again. Present the latest round's
+   authoritative `changed_files` and `head_sha` as the affected files and
+   committed fix head.
 5. Record the new summary's `state_version`, report `WAITING_FOR_REREVIEW`,
    resume the same reviewer context, and use `wait_for_review_state` to observe
    the next transition. Treat `timed_out` as an expected in-progress result and
@@ -500,8 +504,9 @@ waiting for its reviewer.
    completes, call `get_review` again. Present every per-finding decision and
    any new finding from its `rereview_decisions` and `findings`. If it reaches
    `HUMAN_REQUIRED`, state the concrete escalation reason from the full ledger.
-   If it reaches `CONTINUABLE_FINDINGS`, present the full ledger's
-   `carried_findings` list before starting the fresh full review.
+   If it reaches `CONTINUABLE_FINDINGS`, present the source ledger's `OPEN`
+   `findings` before starting the fresh full review. After creating that review,
+   read its `carried_findings` as the continuation scope.
 
 Keep fixes surgical. Do not mark a finding fixed without verification evidence.
 Session narration is operator observability only. Never use it as review
