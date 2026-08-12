@@ -9592,7 +9592,29 @@ test("two distinct ancestor source publications exercise newest-to-oldest acquis
       path.dirname(oldPath),
       ".publication-state.lock",
     );
+    const lockObservationDeadline = Date.now() + 60_000;
+    const waitForNextPoll = () =>
+      new Promise((resolve, reject) => {
+        let timer;
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(t.signal.reason ?? new Error("test aborted"));
+        };
+        if (t.signal.aborted) {
+          onAbort();
+          return;
+        }
+        timer = setTimeout(() => {
+          t.signal.removeEventListener("abort", onAbort);
+          resolve();
+        }, 10);
+        t.signal.addEventListener("abort", onAbort, { once: true });
+      });
     while (!consumerSettled && !newestHeldByConsumer) {
+      assert.ok(
+        Date.now() < lockObservationDeadline,
+        "timed out waiting for the consumer to acquire the newest ancestor source",
+      );
       try {
         const lockRecord = JSON.parse(await fsp.readFile(newestLockPath, "utf8"));
         assert.equal(lockRecord.domain, "publication");
@@ -9602,7 +9624,7 @@ test("two distinct ancestor source publications exercise newest-to-oldest acquis
         if (error?.code !== "ENOENT") {
           throw error;
         }
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await waitForNextPoll();
       }
     }
     assert.equal(
