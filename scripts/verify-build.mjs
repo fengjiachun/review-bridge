@@ -460,6 +460,14 @@ assert.match(
 assert.match(workflowSkill, /rereview is rebuttal-only and no\s+code commit was required/);
 assert.match(
   workflowSkill,
+  /submission mixes `fixed` and `human_required`[\s\S]*moves\s+directly to `HUMAN_REQUIRED` without capturing a rereview round/,
+);
+assert.match(
+  workflowSkill,
+  /no rereview round captured\s+its files or commit[\s\S]*Do not infer that metadata from the workspace or\s+session text/,
+);
+assert.match(
+  workflowSkill,
   /`CONTINUABLE_FINDINGS`, present the source ledger's `OPEN`\s+`findings`/,
 );
 assert.match(workflowSkill, /read its `carried_findings` as the continuation scope/);

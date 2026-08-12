@@ -89,6 +89,10 @@ gap returns the ready pull request to draft before any repair.
    again and narrate every per-finding decision and any new finding from its
    `rereview_decisions` and `findings`. A contested `HUMAN_REQUIRED`
    review pauses the workflow; state the escalation and why it needs a human.
+   If one resolution submission mixes `fixed` and `human_required`, it moves
+   directly to `HUMAN_REQUIRED` without capturing a rereview round. Narrate the
+   persisted fixed resolution, but state that its files and commit are not yet
+   bound in the ledger; never infer them from the workspace or session text.
    New uncontested round-two findings enter `ADDRESS_LOCAL_FINDINGS`; present
    the source ledger's `OPEN` findings, address them on a changed committed
    head, and let the next new `FULL` review inspect its `carried_findings`
@@ -504,6 +508,11 @@ waiting for its reviewer.
    committed fix head. If every
    resolution is `rejected`, report that the rereview is rebuttal-only and no
    code commit was required.
+   If the state is instead `HUMAN_REQUIRED` because the submission mixed
+   `fixed` and `human_required` resolutions, report the escalation reason and
+   the persisted fixed resolution, but state that no rereview round captured
+   its files or commit. Do not infer that metadata from the workspace or
+   session text.
 5. Record the new summary's `state_version`, report `WAITING_FOR_REREVIEW`,
    resume the same reviewer context, and use `wait_for_review_state` to observe
    the next transition. Treat `timed_out` as an expected in-progress result and
