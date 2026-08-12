@@ -1,13 +1,21 @@
 # Review Bridge
 
 [![CI](https://github.com/fengjiachun/review-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/fengjiachun/review-bridge/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/fengjiachun/review-bridge)](https://github.com/fengjiachun/review-bridge/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B%20%7C%20Linux-lightgrey.svg)](#platform-support)
 
-A manually triggered code-review handoff between a Codex author and an
-explicitly bound reviewer: Claude Desktop, a fresh Codex task, a Hermes
-profile, or GitHub Codex in remote-only publication mode.
+A code-review handoff between an author task and an explicitly bound
+reviewer: Claude Desktop, a fresh Codex task, a Hermes profile, or GitHub
+Codex in remote-only publication mode. An explicitly authorized autonomous
+workflow can drive the full path — local gate, draft pull request, remote
+review, thread closure, ready-for-review — and stops at a recorded
+`MERGE_READY`. Nothing starts without an operator instruction, and merging
+stays a human decision.
+
+Any MCP client can drive the author role (`--role author`). Codex is the
+packaged author driver, so the walkthroughs below use it.
 
 A local review runs like this:
 
@@ -355,10 +363,11 @@ WAITING_FOR_REVIEW
 CLEAN -> snapshot recheck -> LOCAL_GATE_PASSED
 ```
 
-## Autonomous local workflow
+## Autonomous workflow
 
-An explicitly authorized schema-version-1 workflow can persist the local half
-of RFC 0003:
+An explicitly authorized schema-version-1 workflow persists RFC 0003's
+autonomous path, from implementation through the local gate and draft
+publication to the recorded terminal state:
 
 ```text
 IMPLEMENTING
