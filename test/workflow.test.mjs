@@ -973,7 +973,7 @@ test("Codex task dispatch is marker-bound and cannot skip action states", async 
   )
     .trim()
     .split("\n")
-    .map(JSON.parse);
+    .map((line) => JSON.parse(line));
   assert.deepEqual(
     audit.map((event) => event.event),
     [
@@ -2802,16 +2802,14 @@ test("uncontested rereview findings continue through a FULL review and obey the 
     state.store,
     source.id,
     [{ finding_id: "F-001", decision: "resolved", rationale: "Verified." }],
-    [
-      {
-        severity: "minor",
-        title: "New edge case",
-        explanation: "The rereview found a separate edge case.",
-        recommendation: "Cover it.",
-        path: "app.js",
-        line: 1,
-      },
-    ],
+    Array.from({ length: 100 }, (_, index) => ({
+      severity: "minor",
+      title: `New edge case ${index + 1}`,
+      explanation: `The rereview found separate edge case ${index + 1}.`,
+      recommendation: "Cover it.",
+      path: "app.js",
+      line: 1,
+    })),
     "CODEX_TASK",
   );
   workflow = await advanceLocalWorkflow(
@@ -2830,6 +2828,7 @@ test("uncontested rereview findings continue through a FULL review and obey the 
     workflow.local_review_cycles[0].continued_from_review_id,
     source.id,
   );
+  assert.equal(workflow.local_review_cycles[0].findings.length, 100);
   assert.equal(workflow.local_review_cycles[0].findings[0].finding_id, "F-002");
 
   const continuationHead = await commitImplementation(
@@ -2859,7 +2858,7 @@ test("uncontested rereview findings continue through a FULL review and obey the 
   });
   const opened = await openReview(state.store, followup.id, "CODEX_TASK");
   assert.equal(opened.review_strategy.mode, "FULL");
-  assert.equal(opened.carried_findings.length, 1);
+  assert.equal(opened.carried_findings.length, 100);
   assert.equal(opened.carried_findings[0].finding_id, "F-002");
   assert.equal("rationale" in opened.carried_findings[0], false);
   workflow = await bindWorkflowReview(
@@ -2875,6 +2874,29 @@ test("uncontested rereview findings continue through a FULL review and obey the 
     workflow.revision,
     followup.id,
   ));
+  const auditPath = path.join(
+    state.store,
+    "workflows",
+    started.workflow_id,
+    "action-audit.jsonl",
+  );
+  const auditAfterDispatch = (await fsp.readFile(auditPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+  assert.ok(
+    auditAfterDispatch.some(
+      (event) => event.workflow_state.local_review_cycles?.length === 1,
+    ),
+  );
+  assert.equal(
+    "local_review_cycles" in auditAfterDispatch.at(-1).workflow_state,
+    false,
+  );
+  assert.match(
+    auditAfterDispatch.at(-1).workflow_state.local_review_cycles_sha256,
+    /^[0-9a-f]{64}$/,
+  );
 
   await submitInitialReview(
     state.store,
@@ -2926,6 +2948,11 @@ test("uncontested rereview findings continue through a FULL review and obey the 
   assert.equal(workflow.status, "PAUSED");
   assert.equal(workflow.pause.reason_code, "LOCAL_CYCLE_BUDGET_EXHAUSTED");
   assert.equal(workflow.local_review_cycles.length, 2);
+  assert.equal("local_review_cycles" in workflow.pause, false);
+  assert.equal(
+    workflow.pause.local_review_cycles_sha256,
+    sha256(canonicalJson(workflow.local_review_cycles)),
+  );
   await assert.rejects(
     resumeAutonomousWorkflow(state.store, started.workflow_id, workflow.revision, {
       operatorLabel: "Test Operator",

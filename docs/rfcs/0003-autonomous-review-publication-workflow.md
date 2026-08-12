@@ -751,6 +751,13 @@ would exceed the budget, the server pauses
 audited operator label and rationale, does not resume the workflow, and does
 not change the authorization digest.
 
+The workflow ledger is the durable complete continuation chain. Every audit
+state binds its canonical SHA-256 digest; only an event that changes the chain
+also stores the full recovery copy. This preserves crash recovery without
+repeating the growing chain in every intervening action event. A budget pause
+stores the count and digest rather than duplicating the chain inside `pause`;
+the complete chain remains available in the workflow summary.
+
 ### Publication
 
 Only `LOCAL_GATE` publication is part of the autonomous path. `REMOTE_ONLY`

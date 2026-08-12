@@ -2258,8 +2258,12 @@ async function readAudit(paths, workflowId) {
   }
 }
 
-function auditedWorkflowState(workflow) {
-  return {
+function localReviewCyclesDigest(workflow) {
+  return sha256(canonicalJson(workflow.local_review_cycles ?? []));
+}
+
+function auditedWorkflowState(workflow, previousWorkflow = null) {
+  const state = {
     revision: workflow.revision,
     updated_at: workflow.updated_at,
     status: workflow.status,
@@ -2267,7 +2271,7 @@ function auditedWorkflowState(workflow) {
     current_head_sha: workflow.current_head_sha,
     pull_request: workflow.pull_request,
     attempts: workflow.attempts,
-    local_review_cycles: workflow.local_review_cycles ?? [],
+    local_review_cycles_sha256: localReviewCyclesDigest(workflow),
     local_cycle_budget:
       workflow.local_cycle_budget ?? DEFAULT_LOCAL_CYCLE_BUDGET,
     remote_attempts: workflow.remote_attempts ?? [],
@@ -2289,6 +2293,14 @@ function auditedWorkflowState(workflow) {
     claims: workflow.claims,
     claim_release: workflow.claim_release ?? null,
   };
+  if (
+    previousWorkflow != null &&
+    localReviewCyclesDigest(previousWorkflow) !==
+      state.local_review_cycles_sha256
+  ) {
+    state.local_review_cycles = workflow.local_review_cycles ?? [];
+  }
+  return state;
 }
 
 function prepareAuditEvent(
@@ -2317,7 +2329,7 @@ function prepareAuditEvent(
       workflowState.active_action?.action_id ??
       workflow.active_action?.action_id ??
       null,
-    workflow_state: auditedWorkflowState(workflowState),
+    workflow_state: auditedWorkflowState(workflowState, workflow),
   };
   const auditEvent = {
     ...unsigned,
@@ -2480,6 +2492,9 @@ function requireWorkflowAuditBinding(workflow, audit) {
     pull_request: null,
     attempts: [],
     local_review_cycles: [],
+    local_review_cycles_sha256: localReviewCyclesDigest({
+      local_review_cycles: [],
+    }),
     local_cycle_budget: workflow.local_cycle_budget,
     remote_attempts: [],
     remote_cycle_budget: workflow.remote_cycle_budget,
@@ -2509,8 +2524,9 @@ function requireWorkflowAuditBinding(workflow, audit) {
     canonicalJson(workflow.pull_request) !==
       canonicalJson(lastState.pull_request) ||
     canonicalJson(workflow.attempts) !== canonicalJson(lastState.attempts) ||
-    canonicalJson(workflow.local_review_cycles ?? []) !==
-      canonicalJson(lastState.local_review_cycles ?? []) ||
+    localReviewCyclesDigest(workflow) !==
+      (lastState.local_review_cycles_sha256 ??
+        sha256(canonicalJson(lastState.local_review_cycles ?? []))) ||
     workflow.local_cycle_budget !==
       (lastState.local_cycle_budget ?? DEFAULT_LOCAL_CYCLE_BUDGET) ||
     canonicalJson(workflow.remote_attempts ?? []) !==
@@ -2582,7 +2598,6 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "current_head_sha",
     "pull_request",
     "attempts",
-    "local_review_cycles",
     "local_cycle_budget",
     "remote_attempts",
     "remote_cycle_budget",
@@ -2609,6 +2624,23 @@ async function reconcileWorkflowAudit(paths, workflow) {
         (field in COMPAT_FIELD_DEFAULTS
           ? COMPAT_FIELD_DEFAULTS[field]
           : lastEvent.workflow_state[field]),
+    );
+  }
+  if (lastEvent.workflow_state.local_review_cycles != null) {
+    recovered.local_review_cycles = structuredClone(
+      lastEvent.workflow_state.local_review_cycles,
+    );
+  }
+  if (
+    localReviewCyclesDigest(recovered) !==
+    (lastEvent.workflow_state.local_review_cycles_sha256 ??
+      sha256(
+        canonicalJson(lastEvent.workflow_state.local_review_cycles ?? []),
+      ))
+  ) {
+    fail(
+      "WORKFLOW_AUDIT_CORRUPT",
+      "workflow local review cycles do not match the committed audit chain",
     );
   }
   recovered.action_audit = {
@@ -5321,7 +5353,8 @@ export async function advanceLocalWorkflow(
               review_id: reviewId,
               review_state_version: summary.state_version,
               local_cycle_budget: next.local_cycle_budget,
-              local_review_cycles: structuredClone(next.local_review_cycles),
+              local_cycle_count: localCycleCount(next),
+              local_review_cycles_sha256: localReviewCyclesDigest(next),
               paused_at: now(),
             };
           } else {
