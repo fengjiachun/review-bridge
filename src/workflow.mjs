@@ -3823,34 +3823,11 @@ export async function planCodexTaskDispatch(
         workflow.current_review?.review_id === reviewId &&
         workflow.current_review.change_size == null
       ) {
-        await requireReviewBinding(storeRoot, workflow, reviewId);
-        const { review, summary } = await getReviewSnapshot(storeRoot, reviewId);
-        requireCleanReviewRound(review);
-        const changeSize = summary.current_snapshot?.change_size;
-        if (
-          review.repository_path !== workflow.repository.path ||
-          review.base_ref !== workflow.base_sha ||
-          review.requirement !== workflow.requirement ||
-          review.implementation_scope !== workflow.implementation_scope ||
-          review.reviewer_provider !== "CODEX_TASK" ||
-          summary.status !== "WAITING_FOR_REVIEW" ||
-          summary.state_version !== workflow.current_review.state_version ||
-          summary.current_snapshot?.snapshot_hash !==
-            workflow.current_review.snapshot_hash ||
-          summary.current_snapshot?.head_sha !== workflow.current_head_sha ||
-          summary.current_snapshot?.head_sha !== workflow.current_review.head_sha ||
-          changeSize == null
-        ) {
-          fail(
-            "WORKFLOW_REVIEW_MISMATCH",
-            "bound review cannot backfill its immutable change size",
-          );
-        }
-        const measuredChangeSize = {
-          added_lines: changeSize.added_lines,
-          deleted_lines: changeSize.deleted_lines,
-          total_lines: changeSize.total_lines,
-        };
+        const measuredChangeSize = await legacyReviewChangeSize(
+          storeRoot,
+          workflow,
+          reviewId,
+        );
         if (measuredChangeSize.total_lines > workflow.change_size_budget) {
           const paused = await saveActionMutation(
             paths,
@@ -3910,6 +3887,37 @@ export async function planCodexTaskDispatch(
       },
     },
   );
+}
+
+async function legacyReviewChangeSize(storeRoot, workflow, reviewId) {
+  await requireReviewBinding(storeRoot, workflow, reviewId);
+  const { review, summary } = await getReviewSnapshot(storeRoot, reviewId);
+  requireCleanReviewRound(review);
+  const changeSize = summary.current_snapshot?.change_size;
+  if (
+    review.repository_path !== workflow.repository.path ||
+    review.base_ref !== workflow.base_sha ||
+    review.requirement !== workflow.requirement ||
+    review.implementation_scope !== workflow.implementation_scope ||
+    review.reviewer_provider !== "CODEX_TASK" ||
+    summary.status !== "WAITING_FOR_REVIEW" ||
+    summary.state_version !== workflow.current_review.state_version ||
+    summary.current_snapshot?.snapshot_hash !==
+      workflow.current_review.snapshot_hash ||
+    summary.current_snapshot?.head_sha !== workflow.current_head_sha ||
+    summary.current_snapshot?.head_sha !== workflow.current_review.head_sha ||
+    changeSize == null
+  ) {
+    fail(
+      "WORKFLOW_REVIEW_MISMATCH",
+      "bound review cannot backfill its immutable change size",
+    );
+  }
+  return {
+    added_lines: changeSize.added_lines,
+    deleted_lines: changeSize.deleted_lines,
+    total_lines: changeSize.total_lines,
+  };
 }
 
 export async function planWorkflowPush(
@@ -4439,6 +4447,48 @@ export async function markWorkflowActionExecuting(
       fail("WORKFLOW_ACTION_STATE_INVALID", "action must be PLANNED");
     }
     const spec = ACTION_KIND_SPECS[action.kind];
+    let measuredChangeSize = null;
+    if (
+      action.kind === "CREATE_CODEX_REVIEWER_TASK" &&
+      workflow.current_review?.change_size == null
+    ) {
+      measuredChangeSize = await legacyReviewChangeSize(
+        storeRoot,
+        workflow,
+        action.target.review_id,
+      );
+      if (measuredChangeSize.total_lines > workflow.change_size_budget) {
+        const paused = await saveActionMutation(
+          paths,
+          workflow,
+          "WORKFLOW_PAUSED",
+          async (next) => {
+            next.current_review.change_size = measuredChangeSize;
+            next.active_action = null;
+            next.status = "PAUSED";
+            next.phase = "PAUSED_HUMAN";
+            next.pause = {
+              reason_code: "CHANGE_SIZE_BUDGET_EXCEEDED",
+              blocked_action: "DISPATCH_CODEX_REVIEWER",
+              resume_phase: "DISPATCH_CODEX_REVIEWER",
+              review_id: action.target.review_id,
+              change_size_budget: next.change_size_budget,
+              change_size: measuredChangeSize,
+              paused_at: now(),
+            };
+          },
+        );
+        fail(
+          "WORKFLOW_CHANGE_SIZE_BUDGET_EXCEEDED",
+          "the change-size budget must be extended before reviewer dispatch",
+          {
+            action_abandoned: action.action_id,
+            workflow_revision: paused.revision,
+            phase: paused.phase,
+          },
+        );
+      }
+    }
     // Some intents are only as good as evidence that lives outside the
     // workflow ledger and can move under them between planning and the call.
     // This is the last durable point before the external write, so it is
@@ -4539,6 +4589,9 @@ export async function markWorkflowActionExecuting(
         workflow,
         "ACTION_EXECUTING",
         async (next) => {
+          if (measuredChangeSize != null) {
+            next.current_review.change_size = measuredChangeSize;
+          }
           next.active_action.status = "EXECUTING";
           next.active_action.executing_at = now();
           next.active_action.executing_proof =

@@ -1242,6 +1242,115 @@ test("legacy bound reviews backfill change size before reviewer dispatch", async
   assert.equal(result.workflow.current_review.change_size.total_lines, 2002);
 });
 
+test("legacy planned reviewer dispatch rechecks change size before execution", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const started = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, { changeSizeBudget: 3000 }),
+  );
+  const content = `${Array.from(
+    { length: 2001 },
+    (_, index) => `export const value${index} = ${index};`,
+  ).join("\n")}\n`;
+  const headSha = await commitImplementation(state.repository, content);
+  let workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    started.revision,
+    headSha,
+  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  const planned = await planCodexTaskDispatch(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+
+  const workflowRoot = path.join(
+    state.store,
+    "workflows",
+    started.workflow_id,
+  );
+  const workflowPath = path.join(workflowRoot, "workflow.json");
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  delete stored.change_size_budget;
+  delete stored.current_review.change_size;
+  const reviewPath = path.join(
+    state.store,
+    "reviews",
+    review.id,
+    "review.json",
+  );
+  const legacyReview = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  delete legacyReview.rounds[0].change_size;
+  await fsp.writeFile(reviewPath, `${canonicalJson(legacyReview)}\n`, {
+    mode: 0o600,
+  });
+  const legacyEvent = workflowAuditEvent(stored, {
+    sequence: 1,
+    previousEventSha256: null,
+    eventId: "d".repeat(32),
+    at: stored.updated_at,
+  });
+  await fsp.writeFile(
+    path.join(workflowRoot, "action-audit.jsonl"),
+    legacyEvent.bytes,
+    { mode: 0o600 },
+  );
+  await fsp.writeFile(
+    path.join(workflowRoot, "action-audit-head.json"),
+    `${canonicalJson({
+      version: 1,
+      workflow_id: started.workflow_id,
+      committed_bytes: legacyEvent.bytes.length,
+      next_sequence: 2,
+      last_event_sha256: legacyEvent.event.event_sha256,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  stored.action_audit = {
+    next_sequence: 2,
+    last_event_sha256: legacyEvent.event.event_sha256,
+  };
+  await fsp.writeFile(workflowPath, `${canonicalJson(stored)}\n`, {
+    mode: 0o600,
+  });
+
+  await assert.rejects(
+    markWorkflowActionExecuting(
+      state.store,
+      started.workflow_id,
+      stored.revision,
+      planned.action.action_id,
+    ),
+    /change-size budget must be extended before reviewer dispatch/,
+  );
+  const paused = await getAutonomousWorkflow(
+    state.store,
+    started.workflow_id,
+  );
+  assert.equal(paused.revision, stored.revision + 1);
+  assert.equal(paused.status, "PAUSED");
+  assert.equal(paused.active_action, null);
+  assert.equal(paused.pause.reason_code, "CHANGE_SIZE_BUDGET_EXCEEDED");
+  assert.equal(paused.pause.change_size_budget, 2000);
+  assert.equal(paused.current_review.change_size.total_lines, 2002);
+});
+
 test("legacy change-size backfill rejects a same-head review transition", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
