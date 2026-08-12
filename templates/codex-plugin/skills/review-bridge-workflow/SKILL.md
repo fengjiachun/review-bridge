@@ -272,6 +272,14 @@ gap returns the ready pull request to draft before any repair.
     rewrite — that last one cannot be resumed, because every workflow head must
     descend from the last, so it ends in cancellation. Never waive, remove, or
     rename a required check, and never rebase or force-push to resolve one.
+
+    The remote repair loop also has a server-owned cycle budget, defaulting to
+    12 and counted from non-diverted `remote_attempts`. When the workflow pauses
+    `REMOTE_CYCLE_BUDGET_EXHAUSTED`, present the complete recorded attempt chain
+    to the operator. Only after an explicit operator decision call
+    `extend_remote_cycle_budget` with the larger value, label, and rationale;
+    then call `resume_autonomous_workflow`. Extension is audited, does not
+    resume by itself, and does not change the authorization digest.
 15. At `PRE_READY`, call `plan_mark_pull_request_ready`. It refuses unless the
     publication's own projection is `READY_TO_MARK` on this exact head, and it
     records which observation cleared it. A refusal here changes nothing —

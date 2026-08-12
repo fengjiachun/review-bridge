@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add a default 12-cycle autonomous remote-repair budget that pauses with the
+  full attempt chain, plus an audited author tool for explicit extensions.
+
 ## 0.7.0 - 2026-08-11
 
 ### Added

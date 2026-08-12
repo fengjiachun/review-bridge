@@ -36,6 +36,8 @@ import {
   bindWorkflowReview,
   cancelAutonomousWorkflow,
   completeWorkflowAction,
+  DEFAULT_REMOTE_CYCLE_BUDGET,
+  extendRemoteCycleBudget,
   getAutonomousWorkflow,
   getAutonomousWorkflowSummary,
   listAutonomousWorkflows,
@@ -1706,12 +1708,15 @@ test("a snapshot recorded after entering repair refuses the head even with the s
   );
 });
 
-test("a repeated blocker without a tree change pauses NO_PROGRESS", async (t) => {
+test("a repeated blocker at the cycle budget requires extension before repair", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(
     state.store,
-    workflowInput(state.repository, state.baseSha),
+    {
+      ...workflowInput(state.repository, state.baseSha),
+      remoteCycleBudget: 1,
+    },
   );
   const firstHead = await commit(state.repository, "export const value = 2;\n");
   const first = await gateAndPublishHead(state, workflow, firstHead, "one");
@@ -1760,10 +1765,16 @@ test("a repeated blocker without a tree change pauses NO_PROGRESS", async (t) =>
     waitingAgain.revision,
   );
   assert.equal(stalled.status, "PAUSED");
-  assert.equal(stalled.pause.reason_code, "NO_PROGRESS");
+  assert.equal(
+    stalled.pause.reason_code,
+    "REMOTE_CYCLE_BUDGET_EXHAUSTED",
+  );
   assert.equal(stalled.remote_attempts.length, 2);
   const evidence = JSON.parse(stalled.pause.evidence);
   assert.equal(evidence.head_sha, secondHead);
+  assert.equal(evidence.remote_cycle_budget, 1);
+  assert.equal(evidence.remote_cycle_count, 2);
+  assert.deepEqual(evidence.remote_attempts, stalled.remote_attempts);
   assert.equal(evidence.previous_remote_attempt.head_sha, firstHead);
   assert.equal(
     evidence.previous_remote_attempt.tree_sha,
@@ -1774,10 +1785,29 @@ test("a repeated blocker without a tree change pauses NO_PROGRESS", async (t) =>
   // where a head can be recorded. Resuming into WAIT_PUBLICATION would make
   // record_workflow_head fail and re-derive the same stall forever.
   assert.equal(stalled.pause.resume_phase, "ADDRESS_REMOTE_FINDINGS");
-  const resumed = await resumeAutonomousWorkflow(
+  await assert.rejects(
+    resumeAutonomousWorkflow(
+      state.store,
+      workflow.workflow_id,
+      stalled.revision,
+      { operatorLabel: "Test Operator", rationale: "try to bypass the budget" },
+    ),
+    (error) => error.code === "WORKFLOW_RESUME_INVALID",
+  );
+  const extended = await extendRemoteCycleBudget(
     state.store,
     workflow.workflow_id,
     stalled.revision,
+    {
+      newBudget: 3,
+      operatorLabel: "Test Operator",
+      rationale: "allow one real fix after the repeated blocker",
+    },
+  );
+  const resumed = await resumeAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    extended.revision,
     { operatorLabel: "Test Operator", rationale: "apply a real fix" },
   );
   assert.equal(resumed.status, "ACTIVE");
@@ -1811,6 +1841,7 @@ test("a workflow written before the remote fields stays readable and cancellable
   const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
   assert.equal(stored.version, 1);
   delete stored.remote_attempts;
+  delete stored.remote_cycle_budget;
   delete stored.current_publication;
   await atomicWriteCanonicalJson(workflowPath, stored);
 
@@ -1820,6 +1851,8 @@ test("a workflow written before the remote fields stays readable and cancellable
   );
   assert.equal(summary.status, "ACTIVE");
   assert.deepEqual(summary.remote_attempts, []);
+  assert.equal(summary.remote_cycle_budget, DEFAULT_REMOTE_CYCLE_BUDGET);
+  assert.equal(summary.remote_cycle_count, 0);
   assert.equal(summary.current_publication, null);
 
   // The store-wide claim scan validates every ledger, so an unreadable one
@@ -1838,6 +1871,156 @@ test("a workflow written before the remote fields stays readable and cancellable
     { operatorLabel: "Test Operator", rationale: "cleanup" },
   );
   assert.equal(cancelled.status, "CANCELLED");
+});
+
+test("the remote cycle budget pauses before another repair and can be auditedly extended", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    {
+      ...workflowInput(state.repository, state.baseSha),
+      remoteCycleBudget: 1,
+    },
+  );
+  const authorizationDigest =
+    workflow.authorization.workflow_authorization_sha256;
+  assert.equal(workflow.authorization.remote_cycle_budget, undefined);
+
+  const firstHead = await commit(state.repository, "export const value = 2;\n");
+  const first = await gateAndPublishHead(state, workflow, firstHead, "one");
+  const { workflow: firstWait } = await reachRemoteWait(
+    state,
+    first.workflow,
+    first.reviewId,
+    firstHead,
+    Date.now(),
+    (payload) => findingsResult(payload),
+  );
+  const firstRepair = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    firstWait.revision,
+  );
+  assert.equal(firstRepair.phase, "ADDRESS_REMOTE_FINDINGS");
+  assert.equal(firstRepair.remote_attempts.length, 1);
+
+  const secondHead = await commit(state.repository, "export const value = 3;\n");
+  const recorded = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    firstRepair.revision,
+    secondHead,
+  );
+  const second = await gateAndPublishHead(
+    state,
+    { workflow_id: workflow.workflow_id, revision: recorded.revision },
+    secondHead,
+    "two",
+  );
+  const { workflow: secondWait } = await reachRemoteWait(
+    state,
+    second.workflow,
+    second.reviewId,
+    secondHead,
+    Date.now(),
+    (payload) => findingsResult(payload, digest("different finding")),
+  );
+  const paused = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    secondWait.revision,
+  );
+  assert.equal(paused.status, "PAUSED");
+  assert.equal(
+    paused.pause.reason_code,
+    "REMOTE_CYCLE_BUDGET_EXHAUSTED",
+  );
+  assert.equal(paused.pause.resume_phase, "ADDRESS_REMOTE_FINDINGS");
+  assert.equal(paused.remote_attempts.length, 1);
+  const evidence = JSON.parse(paused.pause.evidence);
+  assert.equal(evidence.remote_cycle_budget, 1);
+  assert.equal(evidence.remote_cycle_count, 1);
+  assert.deepEqual(evidence.remote_attempts, paused.remote_attempts);
+
+  await assert.rejects(
+    resumeAutonomousWorkflow(
+      state.store,
+      workflow.workflow_id,
+      paused.revision,
+      {
+        operatorLabel: "Test Operator",
+        rationale: "Try to bypass the extension.",
+      },
+    ),
+    (error) => error.code === "WORKFLOW_RESUME_INVALID",
+  );
+
+  await assert.rejects(
+    extendRemoteCycleBudget(
+      state.store,
+      workflow.workflow_id,
+      paused.revision,
+      {
+        newBudget: 1,
+        operatorLabel: "Test Operator",
+        rationale: "No actual extension.",
+      },
+    ),
+    /must exceed both/,
+  );
+  const extended = await extendRemoteCycleBudget(
+    state.store,
+    workflow.workflow_id,
+    paused.revision,
+    {
+      newBudget: 2,
+      operatorLabel: "Test Operator",
+      rationale: "The attempt chain shows useful progress.",
+    },
+  );
+  assert.equal(extended.status, "PAUSED");
+  assert.equal(extended.remote_cycle_budget, 2);
+  assert.equal(
+    extended.authorization.workflow_authorization_sha256,
+    authorizationDigest,
+  );
+
+  const audit = (
+    await fsp.readFile(
+      path.join(
+        state.store,
+        "workflows",
+        workflow.workflow_id,
+        "action-audit.jsonl",
+      ),
+      "utf8",
+    )
+  )
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+  assert.equal(audit.at(-1).event, "REMOTE_CYCLE_BUDGET_EXTENDED");
+  assert.deepEqual(audit.at(-1).metadata, {
+    new_budget: 2,
+    old_budget: 1,
+    operator_label: "Test Operator",
+    rationale: "The attempt chain shows useful progress.",
+    remote_cycle_count: 1,
+  });
+
+  const resumed = await resumeAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    extended.revision,
+    {
+      operatorLabel: "Test Operator",
+      rationale: "Continue within the extended budget.",
+    },
+  );
+  assert.equal(resumed.status, "ACTIVE");
+  assert.equal(resumed.phase, "ADDRESS_REMOTE_FINDINGS");
+  assert.equal(resumed.remote_cycle_budget, 2);
 });
 
 test("a different finding after a real change is progress, not a stall", async (t) => {
@@ -9357,7 +9540,7 @@ test("multi-proof non-ASCII thread IDs bind an insertion-order-independent termi
   }
 });
 
-test("two distinct ancestor source publications exercise newest-to-oldest acquisition", async (t) => {
+test("two distinct ancestor source publications exercise newest-to-oldest acquisition", { timeout: 120_000 }, async (t) => {
   const {
     state,
     workflow,
@@ -9401,11 +9584,13 @@ test("two distinct ancestor source publications exercise newest-to-oldest acquis
   assert.match(terminal.resolution_sha256, /^[0-9a-f]{64}$/);
 
   // Newest-to-oldest lock order. Hold the oldest ancestor's lock, start a
-  // consumer asynchronously, and poll with bounded competing acquisitions of
-  // the newest ancestor: while the consumer is blocked on the oldest lock it
-  // must already hold the newest one, so every competing newest acquisition
-  // returns retryable PUBLICATION_BUSY. A reversed implementation would
-  // attempt the oldest first, never reach the newest, and fail the poll.
+  // consumer asynchronously, and observe the newest ancestor's lock record:
+  // while the consumer is blocked on the oldest lock it must already hold the
+  // newest one. A reversed implementation completes with PUBLICATION_BUSY on
+  // the oldest source without ever creating the newest source's lock record.
+  // Waiting for either event avoids a fixed scheduling deadline: under a busy
+  // macOS runner the consumer can legitimately take more than five seconds to
+  // reach the source locks.
   let releaseOldest = null;
   let consumer = null;
   try {
@@ -9414,38 +9599,57 @@ test("two distinct ancestor source publications exercise newest-to-oldest acquis
       reviewId: firstPublication.reviewId,
       domain: "publication",
     });
+    let consumerSettled = false;
     consumer = getAutonomousTerminal(
       state.store,
       currentPublication.reviewId,
       { clock: () => currentReadyAt + 20 },
-    ).then(
-      (result) => ({ result, error: null }),
-      (error) => ({ result: null, error }),
-    );
+    )
+      .then(
+        (result) => ({ result, error: null }),
+        (error) => ({ result: null, error }),
+      )
+      .finally(() => {
+        consumerSettled = true;
+      });
     let newestHeldByConsumer = false;
-    const deadline = Date.now() + 5_000;
-    while (Date.now() < deadline && !newestHeldByConsumer) {
+    const newestLockPath = path.join(
+      path.dirname(oldPath),
+      ".publication-state.lock",
+    );
+    const lockObservationDeadline = Date.now() + 60_000;
+    const waitForNextPoll = () =>
+      new Promise((resolve, reject) => {
+        let timer;
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(t.signal.reason ?? new Error("test aborted"));
+        };
+        if (t.signal.aborted) {
+          onAbort();
+          return;
+        }
+        timer = setTimeout(() => {
+          t.signal.removeEventListener("abort", onAbort);
+          resolve();
+        }, 10);
+        t.signal.addEventListener("abort", onAbort, { once: true });
+      });
+    while (!consumerSettled && !newestHeldByConsumer) {
+      assert.ok(
+        Date.now() < lockObservationDeadline,
+        "timed out waiting for the consumer to acquire the newest ancestor source",
+      );
       try {
-        const releaseProbe = await acquireStateLock({
-          directory: path.join(state.store, "reviews", oldPublication.reviewId),
-          reviewId: oldPublication.reviewId,
-          domain: "publication",
-          waitMs: 100,
-        });
-        // The consumer never held the newest source: either it has not
-        // reached the sources yet (retry) or the acquisition order is
-        // reversed (deadline expires below).
-        await releaseProbe();
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        const lockRecord = JSON.parse(await fsp.readFile(newestLockPath, "utf8"));
+        assert.equal(lockRecord.domain, "publication");
+        assert.equal(lockRecord.review_id, oldPublication.reviewId);
+        newestHeldByConsumer = true;
       } catch (error) {
-        if (
-          error?.code === "PUBLICATION_BUSY" &&
-          error?.details?.retryable === true
-        ) {
-          newestHeldByConsumer = true;
-        } else {
+        if (error?.code !== "ENOENT") {
           throw error;
         }
+        await waitForNextPoll();
       }
     }
     assert.equal(

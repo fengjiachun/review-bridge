@@ -49,6 +49,7 @@ import {
   bindWorkflowReview,
   cancelAutonomousWorkflow,
   completeWorkflowAction,
+  extendRemoteCycleBudget,
   getAutonomousWorkflow,
   getAutonomousWorkflowSummary,
   listAutonomousWorkflows,
@@ -223,6 +224,7 @@ if (role === "author") {
         operator_label: z.string(),
         capabilities: z.array(z.enum(AUTONOMOUS_CAPABILITIES)),
         publication_target: workflowPublicationTargetSchema,
+        remote_cycle_budget: z.number().int().positive().optional(),
       },
     },
     (input) =>
@@ -236,6 +238,7 @@ if (role === "author") {
         operatorLabel: input.operator_label,
         capabilities: input.capabilities,
         publicationTarget: input.publication_target,
+        remoteCycleBudget: input.remote_cycle_budget,
       }),
   );
 
@@ -348,6 +351,33 @@ if (role === "author") {
           reasonCode: input.reason_code,
           blockedAction: input.blocked_action,
           evidence: input.evidence,
+        },
+      ),
+  );
+
+  register(
+    "extend_remote_cycle_budget",
+    {
+      title: "Extend remote cycle budget",
+      description:
+        "Explicitly raise an exhausted autonomous remote-cycle budget without resuming the workflow or changing its authorization digest.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        new_budget: z.number().int().positive(),
+        operator_label: z.string(),
+        rationale: z.string(),
+      },
+    },
+    (input) =>
+      extendRemoteCycleBudget(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        {
+          newBudget: input.new_budget,
+          operatorLabel: input.operator_label,
+          rationale: input.rationale,
         },
       ),
   );
