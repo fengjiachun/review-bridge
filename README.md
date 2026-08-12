@@ -451,6 +451,9 @@ headroom; crossing it does not block, but the driver must state whether it will
 continue or split before dispatch. An oversized snapshot binds normally but
 pauses with
 `CHANGE_SIZE_BUDGET_EXCEEDED` before a reviewer task is dispatched.
+The same check runs again before an existing reviewer task is reused for a
+newly captured rereview snapshot. Pre-upgrade bound reviews derive any missing
+measurement from their immutable patch before dispatch.
 `extend_change_size_budget` records an explicit increase; the operator resumes
 separately after the new budget admits the measured total. Manual
 `prepare_review` reports the same measurement against the default but never

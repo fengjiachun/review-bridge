@@ -765,6 +765,10 @@ the driver must report the sum and remaining headroom and state whether it will
 continue or split; the warning does not block or pause. When the sum exceeds
 the workflow budget, binding the review pauses
 `CHANGE_SIZE_BUDGET_EXCEEDED` before any reviewer task is dispatched.
+The workflow repeats the check before reusing a reviewer task for a newly
+captured rereview snapshot. A pre-upgrade bound review with no stored
+measurement derives it from its immutable patch before dispatch and persists
+the result in workflow state.
 `extend_change_size_budget` is the only mutation;
 it requires an audited operator label and rationale, must admit the measured
 total, does not resume the workflow, and does not change the authorization

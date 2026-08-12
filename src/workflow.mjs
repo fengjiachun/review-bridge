@@ -3813,10 +3813,83 @@ export async function planCodexTaskDispatch(
   expectedRevision,
   reviewId,
 ) {
+  const preflight = await withWorkflowLock(
+    storeRoot,
+    workflowId,
+    async (workflow, paths) => {
+      requireRevision(workflow, expectedRevision);
+      if (
+        workflow.phase === "DISPATCH_CODEX_REVIEWER" &&
+        workflow.current_review?.review_id === reviewId &&
+        workflow.current_review.change_size == null
+      ) {
+        await requireReviewBinding(storeRoot, workflow, reviewId);
+        const { review, summary } = await getReviewSnapshot(storeRoot, reviewId);
+        requireCleanReviewRound(review);
+        const changeSize = summary.current_snapshot?.change_size;
+        if (
+          review.repository_path !== workflow.repository.path ||
+          review.base_ref !== workflow.base_sha ||
+          review.requirement !== workflow.requirement ||
+          review.implementation_scope !== workflow.implementation_scope ||
+          review.reviewer_provider !== "CODEX_TASK" ||
+          summary.current_snapshot?.head_sha !== workflow.current_head_sha ||
+          changeSize == null
+        ) {
+          fail(
+            "WORKFLOW_REVIEW_MISMATCH",
+            "bound review cannot backfill its immutable change size",
+          );
+        }
+        const measuredChangeSize = {
+          added_lines: changeSize.added_lines,
+          deleted_lines: changeSize.deleted_lines,
+          total_lines: changeSize.total_lines,
+        };
+        if (measuredChangeSize.total_lines > workflow.change_size_budget) {
+          const paused = await saveActionMutation(
+            paths,
+            workflow,
+            "WORKFLOW_PAUSED",
+            async (next) => {
+              next.current_review.change_size = measuredChangeSize;
+              next.status = "PAUSED";
+              next.phase = "PAUSED_HUMAN";
+              next.pause = {
+                reason_code: "CHANGE_SIZE_BUDGET_EXCEEDED",
+                blocked_action: "DISPATCH_CODEX_REVIEWER",
+                resume_phase: "DISPATCH_CODEX_REVIEWER",
+                review_id: reviewId,
+                change_size_budget: next.change_size_budget,
+                change_size: measuredChangeSize,
+                paused_at: now(),
+              };
+            },
+          );
+          return {
+            paused: {
+              workflow: publicWorkflow(paused),
+              action: null,
+              dispatch: null,
+            },
+            revision: paused.revision,
+          };
+        }
+        const backfilled = await saveMutation(paths, workflow, async (next) => {
+          next.current_review.change_size = measuredChangeSize;
+        });
+        return { paused: null, revision: backfilled.revision };
+      }
+      return { paused: null, revision: workflow.revision };
+    },
+  );
+  if (preflight.paused != null) {
+    return preflight.paused;
+  }
   return planWorkflowAction(
     storeRoot,
     workflowId,
-    expectedRevision,
+    preflight.revision,
     "CREATE_CODEX_REVIEWER_TASK",
     {
       planPhases: ["DISPATCH_CODEX_REVIEWER"],
@@ -5455,8 +5528,15 @@ export async function advanceLocalWorkflow(
     const localBudgetExhausted =
       summary.status === "CONTINUABLE_FINDINGS" &&
       localCycleCount(workflow) >= workflow.local_cycle_budget;
+    const snapshotChangeSize = summary.current_snapshot?.change_size;
+    const rereviewChangeSizeExceeded =
+      summary.status === "WAITING_FOR_REREVIEW" &&
+      snapshotChangeSize != null &&
+      snapshotChangeSize.total_lines > workflow.change_size_budget;
     const save =
-      summary.status === "HUMAN_REQUIRED" || localBudgetExhausted
+      summary.status === "HUMAN_REQUIRED" ||
+      localBudgetExhausted ||
+      rereviewChangeSizeExceeded
         ? (mutate) =>
             saveActionMutation(paths, workflow, "WORKFLOW_PAUSED", mutate)
         : (mutate) => saveMutation(paths, workflow, mutate);
@@ -5469,6 +5549,14 @@ export async function advanceLocalWorkflow(
           strategy: summary.review_strategy,
           snapshot_hash: summary.current_snapshot?.snapshot_hash ?? null,
           head_sha: snapshotHead,
+          change_size:
+            snapshotChangeSize == null
+              ? next.current_review.change_size
+              : {
+                  added_lines: snapshotChangeSize.added_lines,
+                  deleted_lines: snapshotChangeSize.deleted_lines,
+                  total_lines: snapshotChangeSize.total_lines,
+                },
         };
         next.progress_fingerprint = findingFingerprint(summary);
         const phases = {
@@ -5487,6 +5575,21 @@ export async function advanceLocalWorkflow(
             blocked_action: "LOCAL_REVIEW",
             review_id: reviewId,
             review_state_version: summary.state_version,
+            paused_at: now(),
+          };
+          return;
+        }
+        if (rereviewChangeSizeExceeded) {
+          next.status = "PAUSED";
+          next.phase = "PAUSED_HUMAN";
+          next.pause = {
+            reason_code: "CHANGE_SIZE_BUDGET_EXCEEDED",
+            blocked_action: "REVIEW_CODEX_REREVIEW",
+            resume_phase: "WAIT_LOCAL_REREVIEW",
+            review_id: reviewId,
+            review_state_version: summary.state_version,
+            change_size_budget: next.change_size_budget,
+            change_size: next.current_review.change_size,
             paused_at: now(),
           };
           return;

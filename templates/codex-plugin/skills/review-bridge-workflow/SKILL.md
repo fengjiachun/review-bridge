@@ -70,6 +70,9 @@ gap returns the ready pull request to draft before any repair.
    uniqueness cannot be proved, use `EXTERNAL_ACTION_INDETERMINATE`. Never
    review from the author task or discard the active intent.
 7. Use `advance_local_workflow` after every local-review ledger transition.
+   This remeasures each newly captured rereview snapshot. If it pauses
+   `CHANGE_SIZE_BUDGET_EXCEEDED`, report the new total and headroom; extend the
+   budget only after an explicit operator decision, then resume separately.
    Address findings and record any committed descendant fix head before
    submitting resolutions. Round two reuses the same reviewer task. A
    contested `HUMAN_REQUIRED` review pauses the workflow. New uncontested

@@ -1512,14 +1512,21 @@ export async function getReviewSnapshot(storeRoot, reviewId, operation = null) {
     if (round == null) {
       throw new Error("current review round is missing from its ledger");
     }
+    const patch = await fsp.readFile(
+      path.join(roundDirectory(storeRoot, reviewId, round.round), "patch.diff"),
+    );
     const snapshotHash = await snapshotHashFromReviewRound(
       storeRoot,
       reviewId,
       review,
       round,
+      patch,
     );
     if (snapshotHash !== round.snapshot_hash) {
       throw new Error("stored review patch does not match its snapshot commitment");
+    }
+    if (round.change_size == null) {
+      round.change_size = patchChangeSize(patch);
     }
     const snapshot = {
       review: publicReview(review),

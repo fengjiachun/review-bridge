@@ -1089,7 +1089,7 @@ if (role === "author") {
     {
       title: "Advance autonomous local review",
       description:
-        "Re-read the bound local-review ledger and advance the matching two-round CODEX_TASK state, continue uncontested new findings, or pause when required.",
+        "Re-read the bound local-review ledger, refresh each newly captured snapshot's change size, and advance the matching two-round CODEX_TASK state, continue uncontested new findings, or pause when required.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),

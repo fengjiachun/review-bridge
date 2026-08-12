@@ -1145,6 +1145,216 @@ test("change-size budget pauses before reviewer dispatch and extends auditedly",
   });
 });
 
+test("legacy bound reviews backfill change size before reviewer dispatch", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const started = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, { changeSizeBudget: 3000 }),
+  );
+  const content = `${Array.from(
+    { length: 2001 },
+    (_, index) => `export const value${index} = ${index};`,
+  ).join("\n")}\n`;
+  const headSha = await commitImplementation(state.repository, content);
+  let workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    started.revision,
+    headSha,
+  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  assert.equal(workflow.phase, "DISPATCH_CODEX_REVIEWER");
+
+  const workflowRoot = path.join(
+    state.store,
+    "workflows",
+    started.workflow_id,
+  );
+  const workflowPath = path.join(workflowRoot, "workflow.json");
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  delete stored.change_size_budget;
+  delete stored.current_review.change_size;
+  const reviewPath = path.join(
+    state.store,
+    "reviews",
+    review.id,
+    "review.json",
+  );
+  const legacyReview = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  delete legacyReview.rounds[0].change_size;
+  await fsp.writeFile(reviewPath, `${canonicalJson(legacyReview)}\n`, {
+    mode: 0o600,
+  });
+  const legacyEvent = workflowAuditEvent(stored, {
+    sequence: 1,
+    previousEventSha256: null,
+    eventId: "b".repeat(32),
+    at: stored.updated_at,
+  });
+  await fsp.writeFile(
+    path.join(workflowRoot, "action-audit.jsonl"),
+    legacyEvent.bytes,
+    { mode: 0o600 },
+  );
+  await fsp.writeFile(
+    path.join(workflowRoot, "action-audit-head.json"),
+    `${canonicalJson({
+      version: 1,
+      workflow_id: started.workflow_id,
+      committed_bytes: legacyEvent.bytes.length,
+      next_sequence: 2,
+      last_event_sha256: legacyEvent.event.event_sha256,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  stored.action_audit = {
+    next_sequence: 2,
+    last_event_sha256: legacyEvent.event.event_sha256,
+  };
+  await fsp.writeFile(workflowPath, `${canonicalJson(stored)}\n`, {
+    mode: 0o600,
+  });
+
+  const result = await planCodexTaskDispatch(
+    state.store,
+    started.workflow_id,
+    stored.revision,
+    review.id,
+  );
+  assert.equal(result.action, null);
+  assert.equal(result.dispatch, null);
+  assert.equal(result.workflow.status, "PAUSED");
+  assert.equal(result.workflow.pause.reason_code, "CHANGE_SIZE_BUDGET_EXCEEDED");
+  assert.equal(result.workflow.pause.change_size_budget, 2000);
+  assert.equal(result.workflow.current_review.change_size.total_lines, 2002);
+});
+
+test("an oversized rereview snapshot pauses before reviewer reuse", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const started = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, { changeSizeBudget: 3 }),
+  );
+  const headSha = await commitImplementation(state.repository);
+  let workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    started.revision,
+    headSha,
+  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  ({ completed: workflow } = await dispatchReviewer(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  ));
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [{ severity: "major", title: "Defect", explanation: "Fix it." }],
+    "CODEX_TASK",
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  const fixedHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    fixedHead,
+  );
+  await submitResolutions(state.store, review.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Fixed." },
+  ]);
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  await prepareRereview(state.store, review.id);
+  const reviewPath = path.join(
+    state.store,
+    "reviews",
+    review.id,
+    "review.json",
+  );
+  const legacyReview = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  delete legacyReview.rounds[1].change_size;
+  await fsp.writeFile(reviewPath, `${canonicalJson(legacyReview)}\n`, {
+    mode: 0o600,
+  });
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(workflow.status, "PAUSED");
+  assert.equal(workflow.pause.reason_code, "CHANGE_SIZE_BUDGET_EXCEEDED");
+  assert.equal(workflow.pause.blocked_action, "REVIEW_CODEX_REREVIEW");
+  assert.equal(workflow.pause.resume_phase, "WAIT_LOCAL_REREVIEW");
+  assert.deepEqual(workflow.current_review.change_size, {
+    added_lines: 5,
+    deleted_lines: 1,
+    total_lines: 6,
+    budget: 3,
+    warning_threshold: 3,
+    warning_threshold_crossed: true,
+    remaining_headroom: 0,
+    over_budget: true,
+  });
+  workflow = await extendChangeSizeBudget(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    {
+      newBudget: 6,
+      operatorLabel: "Test Operator",
+      rationale: "Keep the rereview cohesive.",
+    },
+  );
+  workflow = await resumeAutonomousWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    { operatorLabel: "Test Operator", rationale: "Continue rereview." },
+  );
+  assert.equal(workflow.status, "ACTIVE");
+  assert.equal(workflow.phase, "WAIT_LOCAL_REREVIEW");
+});
+
 test("active workflow phases stay bound to the audit chain from initial state onward", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
