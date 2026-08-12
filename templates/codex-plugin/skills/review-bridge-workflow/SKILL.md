@@ -35,14 +35,25 @@ gap returns the ready pull request to draft before any repair.
    the immutable base. Call `start_autonomous_workflow`, record its
    `workflow_id` and revision, and follow only the server-derived
    `next_action`.
-3. For `COMMIT_HEAD`, implement only the recorded requirement, test it, commit
+3. For `COMMIT_HEAD`, estimate added plus deleted lines before editing. Real
+   diffs commonly exceed estimates, so if the change is likely to approach the
+   workflow's `change_size_budget`, discuss splitting it before implementation.
+   Then implement only the recorded requirement, test it, commit
    it without rewriting published history, require a clean worktree, and call
    `record_workflow_head` with the full `HEAD`.
 4. For `PREPARE_LOCAL_REVIEW`, call `prepare_review` with the workflow's full
    base SHA, exact requirement and scope, and `CODEX_TASK`. If the latest
    `local_review_cycles` entry has an addressed head but no follow-up review,
    also pass its `continued_from_review_id` and `force_full_review: true`.
-   Then call `bind_workflow_review` at the workflow's current revision.
+   Then call `bind_workflow_review` at the workflow's current revision. If it
+   returns `current_review.change_size.warning_threshold_crossed`, state the
+   immutable total and `remaining_headroom` in the session and say whether the
+   change will continue as one unit or be split. The warning never blocks. If it
+   pauses `CHANGE_SIZE_BUDGET_EXCEEDED`, present the immutable added, deleted,
+   and total line counts and the current budget to the operator. No reviewer
+   task has been dispatched. Only an explicit decision may call
+   `extend_change_size_budget`; resume separately after the new budget admits
+   the measured total.
 5. For `PLAN_CODEX_TASK_DISPATCH`, call `plan_codex_task_dispatch`. Persist
    `EXECUTING` with `mark_workflow_action_executing` immediately before task
    creation. Create a fresh non-forked Codex task whose title and prompt equal
@@ -59,6 +70,9 @@ gap returns the ready pull request to draft before any repair.
    uniqueness cannot be proved, use `EXTERNAL_ACTION_INDETERMINATE`. Never
    review from the author task or discard the active intent.
 7. Use `advance_local_workflow` after every local-review ledger transition.
+   This remeasures each newly captured rereview snapshot. If it pauses
+   `CHANGE_SIZE_BUDGET_EXCEEDED`, report the new total and headroom; extend the
+   budget only after an explicit operator decision, then resume separately.
    Address findings and record any committed descendant fix head before
    submitting resolutions. Round two reuses the same reviewer task. A
    contested `HUMAN_REQUIRED` review pauses the workflow. New uncontested
@@ -424,7 +438,11 @@ explicitly requests cleanup.
    provider, and the optional verified parent from step 5.
 8. Call `get_review_summary`, record its `state_version`, and report the
    returned `review_id`, `reviewer_provider`, `review_strategy`, and state
-   `WAITING_FOR_REVIEW`.
+   `WAITING_FOR_REVIEW`. Also report `current_snapshot.change_size`: manual
+   review continues even when `over_budget` is true, because the operator is
+   already present to decide whether the change should be split. When
+   `warning_threshold_crossed` is true, state the total and
+   `remaining_headroom` and say whether the change will continue or split.
 9. Start a fresh reviewer context for every new `review_id`. For
    `CLAUDE_DESKTOP`, use a fresh Claude conversation. For `CODEX_TASK`, create
    a new Codex task rather than forking this task, and send it only the review

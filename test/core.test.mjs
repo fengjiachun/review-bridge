@@ -66,6 +66,107 @@ async function readAll(readChunk) {
   return content;
 }
 
+test("manual review reports immutable change size without blocking", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "export const numerator = 6;\nexport const denominator = 3;\n",
+  );
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "replace implementation");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Report deterministic change size.",
+    implementationScope: "Replace app.js.",
+  });
+  assert.equal(prepared.status, "WAITING_FOR_REVIEW");
+  assert.deepEqual(prepared.change_size, {
+    added_lines: 2,
+    deleted_lines: 3,
+    total_lines: 5,
+    budget: 2000,
+    warning_threshold: 1500,
+    warning_threshold_crossed: false,
+    remaining_headroom: 1995,
+    over_budget: false,
+  });
+  assert.deepEqual(prepared.rounds[0].change_size, {
+    added_lines: 2,
+    deleted_lines: 3,
+    total_lines: 5,
+  });
+  const summary = await getReviewSummary(store, prepared.id);
+  assert.deepEqual(summary.current_snapshot.change_size, {
+    added_lines: 2,
+    deleted_lines: 3,
+    total_lines: 5,
+    budget: 2000,
+    warning_threshold: 1500,
+    warning_threshold_crossed: false,
+    remaining_headroom: 1995,
+    over_budget: false,
+  });
+});
+
+test("manual review reports an over-budget change without blocking", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const lines = Array.from(
+    { length: 2001 },
+    (_, index) => `export const value${index} = ${index};`,
+  );
+  await fsp.writeFile(path.join(repository, "large.js"), `${lines.join("\n")}\n`);
+  git(repository, "add", "large.js");
+  git(repository, "commit", "-m", "add large implementation");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Report an over-budget manual review without blocking it.",
+    implementationScope: "Add large.js.",
+  });
+  assert.equal(prepared.status, "WAITING_FOR_REVIEW");
+  assert.deepEqual(prepared.change_size, {
+    added_lines: 2001,
+    deleted_lines: 0,
+    total_lines: 2001,
+    budget: 2000,
+    warning_threshold: 1500,
+    warning_threshold_crossed: true,
+    remaining_headroom: 0,
+    over_budget: true,
+  });
+});
+
+test("workflow snapshot reads reject a tampered change-size measurement", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "large.js"), "export const value = 1;\n");
+  git(repository, "add", "large.js");
+  git(repository, "commit", "-m", "add implementation");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Bind the immutable measurement.",
+    implementationScope: "Add large.js.",
+  });
+  const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  ledger.rounds[0].change_size.total_lines = 0;
+  await fsp.writeFile(reviewPath, `${JSON.stringify(ledger)}\n`, { mode: 0o600 });
+
+  await assert.rejects(
+    getReviewSnapshot(store, prepared.id),
+    /review change size does not match its immutable patch/,
+  );
+});
+
 test("review tasks bind one reviewer provider through the local gate", async (t) => {
   const { root, repository, store } = await fixture();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));

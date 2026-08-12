@@ -36,6 +36,7 @@ import {
   bindWorkflowReview,
   cancelAutonomousWorkflow,
   completeWorkflowAction,
+  DEFAULT_CHANGE_SIZE_BUDGET,
   DEFAULT_LOCAL_CYCLE_BUDGET,
   DEFAULT_REMOTE_CYCLE_BUDGET,
   extendRemoteCycleBudget,
@@ -1843,6 +1844,7 @@ test("a workflow written before the cycle fields stays readable and cancellable"
   assert.equal(stored.version, 1);
   delete stored.local_review_cycles;
   delete stored.local_cycle_budget;
+  delete stored.change_size_budget;
   delete stored.remote_attempts;
   delete stored.remote_cycle_budget;
   delete stored.current_publication;
@@ -1856,6 +1858,7 @@ test("a workflow written before the cycle fields stays readable and cancellable"
   assert.deepEqual(summary.local_review_cycles, []);
   assert.equal(summary.local_cycle_budget, DEFAULT_LOCAL_CYCLE_BUDGET);
   assert.equal(summary.local_cycle_count, 0);
+  assert.equal(summary.change_size_budget, DEFAULT_CHANGE_SIZE_BUDGET);
   assert.deepEqual(summary.remote_attempts, []);
   assert.equal(summary.remote_cycle_budget, DEFAULT_REMOTE_CYCLE_BUDGET);
   assert.equal(summary.remote_cycle_count, 0);

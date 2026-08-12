@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add an immutable added-plus-deleted line measurement and a default
+  2000-line autonomous change-size budget with a non-blocking 75% warning and
+  a pause before reviewer dispatch, plus an audited author tool for explicit
+  extensions. Manual review reports the measurement without blocking.
 - Add a default 12-cycle autonomous remote-repair budget that pauses with the
   full attempt chain, plus an audited author tool for explicit extensions.
 

@@ -49,6 +49,7 @@ import {
   bindWorkflowReview,
   cancelAutonomousWorkflow,
   completeWorkflowAction,
+  extendChangeSizeBudget,
   extendLocalCycleBudget,
   extendRemoteCycleBudget,
   getAutonomousWorkflow,
@@ -227,6 +228,7 @@ if (role === "author") {
         publication_target: workflowPublicationTargetSchema,
         local_cycle_budget: z.number().int().positive().optional(),
         remote_cycle_budget: z.number().int().positive().optional(),
+        change_size_budget: z.number().int().positive().optional(),
       },
     },
     (input) =>
@@ -242,6 +244,7 @@ if (role === "author") {
         publicationTarget: input.publication_target,
         localCycleBudget: input.local_cycle_budget,
         remoteCycleBudget: input.remote_cycle_budget,
+        changeSizeBudget: input.change_size_budget,
       }),
   );
 
@@ -309,7 +312,7 @@ if (role === "author") {
     {
       title: "Bind autonomous local review",
       description:
-        "Bind one new CODEX_TASK review only when its repository, requirement, scope, base, and head equal the workflow.",
+        "Bind one new CODEX_TASK review only when its repository, requirement, scope, base, and head equal the workflow, report warning-threshold headroom, and pause before dispatch when its immutable change size exceeds the workflow budget.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
@@ -354,6 +357,33 @@ if (role === "author") {
           reasonCode: input.reason_code,
           blockedAction: input.blocked_action,
           evidence: input.evidence,
+        },
+      ),
+  );
+
+  register(
+    "extend_change_size_budget",
+    {
+      title: "Extend change-size budget",
+      description:
+        "Explicitly raise an exceeded autonomous change-size budget without resuming the workflow or changing its authorization digest.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        new_budget: z.number().int().positive(),
+        operator_label: z.string(),
+        rationale: z.string(),
+      },
+    },
+    (input) =>
+      extendChangeSizeBudget(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        {
+          newBudget: input.new_budget,
+          operatorLabel: input.operator_label,
+          rationale: input.rationale,
         },
       ),
   );
@@ -1059,7 +1089,7 @@ if (role === "author") {
     {
       title: "Advance autonomous local review",
       description:
-        "Re-read the bound local-review ledger and advance the matching two-round CODEX_TASK state, continue uncontested new findings, or pause when required.",
+        "Re-read the bound local-review ledger, refresh each newly captured snapshot's change size, and advance the matching two-round CODEX_TASK state, continue uncontested new findings, or pause when required.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
@@ -1180,7 +1210,7 @@ if (role === "author") {
     {
       title: "Prepare local review",
       description:
-        "Capture an immutable Git snapshot, requirement, implementation scope, patch, test context, and explicit reviewer provider. Without parent_review_id the server selects a verifiable successor parent itself and records how it was selected; pass force_full_review to demand a full-patch review. For a continuable local cycle, pass continued_from_review_id with force_full_review to carry only the source findings as scope hints.",
+        "Capture an immutable Git snapshot, requirement, implementation scope, patch, added-plus-deleted line measurement, warning-threshold headroom, test context, and explicit reviewer provider. Manual preparation reports the measurement against the default budget without blocking. Without parent_review_id the server selects a verifiable successor parent itself and records how it was selected; pass force_full_review to demand a full-patch review. For a continuable local cycle, pass continued_from_review_id with force_full_review to carry only the source findings as scope hints.",
       inputSchema: {
         repository_path: z.string(),
         base_ref: z.string(),

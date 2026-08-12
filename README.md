@@ -444,6 +444,22 @@ tree match *any* earlier recorded attempt pauses `NO_PROGRESS`, so an
 oscillating tree or an alternating blocker cannot walk around the check by
 never repeating adjacently.
 
+The autonomous workflow also defaults to a 2000-line change-size budget,
+measured as added plus deleted lines from the immutable snapshot patch. An
+internal warning threshold at 75% reports the measured total and remaining
+headroom; crossing it does not block, but the driver must state whether it will
+continue or split before dispatch. An oversized snapshot binds normally but
+pauses with
+`CHANGE_SIZE_BUDGET_EXCEEDED` before a reviewer task is dispatched.
+The same check runs again before an existing reviewer task is reused for a
+newly captured rereview snapshot. Pre-upgrade bound reviews derive any missing
+measurement from their immutable patch before dispatch.
+`extend_change_size_budget` records an explicit increase; the operator resumes
+separately after the new budget admits the measured total. Manual
+`prepare_review` reports the same measurement against the default but never
+blocks. Estimating and discussing a split before writing remains a driver
+obligation because no snapshot exists yet.
+
 The local continuation and remote repair loops each default to a 12-cycle
 budget. Local cycles are counted when an addressed head is recorded;
 exhaustion pauses with `LOCAL_CYCLE_BUDGET_EXHAUSTED` and the complete
@@ -455,8 +471,8 @@ growth linear. The remote count is projected from non-diverted
 `remote_attempts`; exhausting it pauses with
 `REMOTE_CYCLE_BUDGET_EXHAUSTED` and the complete attempt chain before another
 repair starts. `extend_remote_cycle_budget` records an explicit increase in the
-workflow audit, after which the operator uses the ordinary resume path. The
-Both budgets are mutable workflow state, not part of the immutable
+workflow audit, after which the operator uses the ordinary resume path. All
+three budgets are mutable workflow state, not part of the immutable
 authorization digest, and older ledgers that lack them load with the defaults.
 
 This release closes eligible Codex finding threads with a recorded reply and a

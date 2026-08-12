@@ -11,6 +11,7 @@ import {
 } from "./storage.mjs";
 
 export const MAX_ROUNDS = 2;
+export const DEFAULT_CHANGE_SIZE_BUDGET = 2000;
 export const REVIEWER_PROVIDERS = Object.freeze([
   "CLAUDE_DESKTOP",
   "CODEX_TASK",
@@ -446,6 +447,44 @@ function appendUntrackedDiff(repositoryPath, relativePath) {
   return Buffer.from(output);
 }
 
+function patchChangeSize(patch) {
+  let inHunk = false;
+  let addedLines = 0;
+  let deletedLines = 0;
+  for (const line of patch.toString("utf8").split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      inHunk = false;
+    } else if (line.startsWith("@@ ")) {
+      inHunk = true;
+    } else if (inHunk && line.startsWith("+")) {
+      addedLines += 1;
+    } else if (inHunk && line.startsWith("-")) {
+      deletedLines += 1;
+    }
+  }
+  return {
+    added_lines: addedLines,
+    deleted_lines: deletedLines,
+    total_lines: addedLines + deletedLines,
+  };
+}
+
+export function changeSizeReport(
+  changeSize,
+  budget = DEFAULT_CHANGE_SIZE_BUDGET,
+) {
+  if (changeSize == null) return null;
+  const warningThreshold = Math.ceil(budget * 0.75);
+  return {
+    ...changeSize,
+    budget,
+    warning_threshold: warningThreshold,
+    warning_threshold_crossed: changeSize.total_lines >= warningThreshold,
+    remaining_headroom: Math.max(0, budget - changeSize.total_lines),
+    over_budget: changeSize.total_lines > budget,
+  };
+}
+
 async function buildSnapshot({
   repositoryPath,
   baseRef,
@@ -591,6 +630,7 @@ async function buildSnapshot({
     overlays,
     worktree_clean: worktreeClean,
     patch_bytes: patch.length,
+    change_size: patchChangeSize(patch),
   };
 
   if (writeFiles) {
@@ -635,6 +675,12 @@ async function snapshotHashFromReviewRound(
     ));
   if (patch.length !== round.patch_bytes) {
     throw new Error("review patch length does not match its ledger");
+  }
+  if (
+    round.change_size != null &&
+    canonicalJson(round.change_size) !== canonicalJson(patchChangeSize(patch))
+  ) {
+    throw new Error("review change size does not match its immutable patch");
   }
   const hash = crypto.createHash("sha256");
   hash.update(
@@ -952,6 +998,7 @@ function publicReview(review) {
     },
     current_round: review.current_round,
     max_rounds: review.max_rounds,
+    change_size: changeSizeReport(review.rounds?.at(-1)?.change_size),
     rounds: review.rounds,
     findings: review.findings,
     resolutions: review.resolutions,
@@ -1051,6 +1098,7 @@ function reviewSummary(review) {
             deleted_file_count: currentSnapshot.deleted_files.length,
             overlay_count: currentSnapshot.overlays.length,
             patch_bytes: currentSnapshot.patch_bytes,
+            change_size: changeSizeReport(currentSnapshot.change_size),
           },
     findings: {
       total: review.findings.length,
@@ -1458,6 +1506,28 @@ export async function getReviewSummary(storeRoot, reviewId) {
 export async function getReviewSnapshot(storeRoot, reviewId, operation = null) {
   return withReviewMutationLock(storeRoot, reviewId, async () => {
     const review = await loadReview(storeRoot, reviewId);
+    const round = review.rounds?.find(
+      (entry) => entry.round === review.current_round,
+    );
+    if (round == null) {
+      throw new Error("current review round is missing from its ledger");
+    }
+    const patch = await fsp.readFile(
+      path.join(roundDirectory(storeRoot, reviewId, round.round), "patch.diff"),
+    );
+    const snapshotHash = await snapshotHashFromReviewRound(
+      storeRoot,
+      reviewId,
+      review,
+      round,
+      patch,
+    );
+    if (snapshotHash !== round.snapshot_hash) {
+      throw new Error("stored review patch does not match its snapshot commitment");
+    }
+    if (round.change_size == null) {
+      round.change_size = patchChangeSize(patch);
+    }
     const snapshot = {
       review: publicReview(review),
       summary: reviewSummary(review),
@@ -2357,6 +2427,7 @@ function roundDescriptor(round) {
     deleted_file_count: round.deleted_files.length,
     overlay_count: round.overlays.length,
     patch_bytes: round.patch_bytes,
+    change_size: changeSizeReport(round.change_size),
     worktree_clean: round.worktree_clean,
     successor:
       round.successor == null
