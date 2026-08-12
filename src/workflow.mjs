@@ -5671,7 +5671,6 @@ export async function advanceRemoteWorkflow(
       ) ?? null;
     const stalled = repeated != null;
     const cycleBudgetExhausted =
-      !stalled &&
       pauseReason == null &&
       repairPhase != null &&
       remoteCycleCount(workflow) >= workflow.remote_cycle_budget;
@@ -5730,9 +5729,9 @@ export async function advanceRemoteWorkflow(
                 tree_sha: tree,
                 ...(cycleBudgetExhausted
                   ? {
-                      remote_cycle_budget: workflow.remote_cycle_budget,
-                      remote_cycle_count: remoteCycleCount(workflow),
-                      remote_attempts: workflow.remote_attempts,
+                      remote_cycle_budget: next.remote_cycle_budget,
+                      remote_cycle_count: remoteCycleCount(next),
+                      remote_attempts: next.remote_attempts,
                     }
                   : {}),
                 ...(stalled

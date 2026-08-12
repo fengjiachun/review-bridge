@@ -1708,7 +1708,7 @@ test("a snapshot recorded after entering repair refuses the head even with the s
   );
 });
 
-test("a repeated blocker without a tree change pauses NO_PROGRESS", async (t) => {
+test("a repeated blocker at the cycle budget requires extension before repair", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const workflow = await startAutonomousWorkflow(
@@ -1765,10 +1765,16 @@ test("a repeated blocker without a tree change pauses NO_PROGRESS", async (t) =>
     waitingAgain.revision,
   );
   assert.equal(stalled.status, "PAUSED");
-  assert.equal(stalled.pause.reason_code, "NO_PROGRESS");
+  assert.equal(
+    stalled.pause.reason_code,
+    "REMOTE_CYCLE_BUDGET_EXHAUSTED",
+  );
   assert.equal(stalled.remote_attempts.length, 2);
   const evidence = JSON.parse(stalled.pause.evidence);
   assert.equal(evidence.head_sha, secondHead);
+  assert.equal(evidence.remote_cycle_budget, 1);
+  assert.equal(evidence.remote_cycle_count, 2);
+  assert.deepEqual(evidence.remote_attempts, stalled.remote_attempts);
   assert.equal(evidence.previous_remote_attempt.head_sha, firstHead);
   assert.equal(
     evidence.previous_remote_attempt.tree_sha,
@@ -1779,10 +1785,29 @@ test("a repeated blocker without a tree change pauses NO_PROGRESS", async (t) =>
   // where a head can be recorded. Resuming into WAIT_PUBLICATION would make
   // record_workflow_head fail and re-derive the same stall forever.
   assert.equal(stalled.pause.resume_phase, "ADDRESS_REMOTE_FINDINGS");
-  const resumed = await resumeAutonomousWorkflow(
+  await assert.rejects(
+    resumeAutonomousWorkflow(
+      state.store,
+      workflow.workflow_id,
+      stalled.revision,
+      { operatorLabel: "Test Operator", rationale: "try to bypass the budget" },
+    ),
+    (error) => error.code === "WORKFLOW_RESUME_INVALID",
+  );
+  const extended = await extendRemoteCycleBudget(
     state.store,
     workflow.workflow_id,
     stalled.revision,
+    {
+      newBudget: 3,
+      operatorLabel: "Test Operator",
+      rationale: "allow one real fix after the repeated blocker",
+    },
+  );
+  const resumed = await resumeAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    extended.revision,
     { operatorLabel: "Test Operator", rationale: "apply a real fix" },
   );
   assert.equal(resumed.status, "ACTIVE");
