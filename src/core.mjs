@@ -120,6 +120,16 @@ function runGit(repositoryPath, args, options = {}) {
   return result.stdout;
 }
 
+async function resolveRepositoryRoot(repositoryPath) {
+  const requestedPath = path.resolve(
+    assertString(repositoryPath, "repository_path", { max: 4096 }),
+  );
+  const topLevel = runGit(requestedPath, ["rev-parse", "--show-toplevel"], {
+    encoding: "utf8",
+  }).trim();
+  return fsp.realpath(topLevel);
+}
+
 async function atomicWriteJson(filePath, value) {
   await atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -444,11 +454,7 @@ async function buildSnapshot({
   roundRoot,
   writeFiles,
 }) {
-  const requestedPath = path.resolve(assertString(repositoryPath, "repository_path", { max: 4096 }));
-  const topLevel = runGit(requestedPath, ["rev-parse", "--show-toplevel"], {
-    encoding: "utf8",
-  }).trim();
-  const repository = await fsp.realpath(topLevel);
+  const repository = await resolveRepositoryRoot(repositoryPath);
   const baseSha = runGit(repository, ["rev-parse", "--verify", `${baseRef}^{commit}`], {
     encoding: "utf8",
   }).trim();
@@ -950,6 +956,7 @@ function publicReview(review) {
     findings: review.findings,
     resolutions: review.resolutions,
     rereview_decisions: review.rereview_decisions,
+    carried_findings: review.carried_findings ?? [],
     clean_snapshot_hash: review.clean_snapshot_hash ?? null,
     history: review.history,
   };
@@ -964,6 +971,7 @@ function actionRequired(status) {
     CLEAN: "FINALIZE_LOCAL_GATE",
     LOCAL_GATE_PASSED: "PUBLISH",
     HUMAN_REQUIRED: "HUMAN_ARBITRATION",
+    CONTINUABLE_FINDINGS: "ADDRESS_LOCAL_FINDINGS",
   };
   return actions[status] ?? "INSPECT_REVIEW";
 }
@@ -980,6 +988,35 @@ const RESOLVED_FINDING_STATUSES = new Set([
   "RESOLVED",
   "REBUTTAL_ACCEPTED",
 ]);
+
+export function continuationFindingFingerprint(finding) {
+  return sha256(
+    canonicalJson({
+      severity: finding.severity,
+      title: finding.title,
+      explanation: finding.explanation,
+      recommendation: finding.recommendation ?? "",
+      path: finding.path ?? null,
+      line: finding.line ?? null,
+    }),
+  );
+}
+
+function continuationFindings(review) {
+  return review.findings
+    .filter((finding) => finding.status === "OPEN")
+    .map((finding) => ({
+      continued_from_review_id: review.id,
+      finding_id: finding.id,
+      fingerprint_sha256: continuationFindingFingerprint(finding),
+      severity: finding.severity,
+      title: finding.title,
+      explanation: finding.explanation,
+      recommendation: finding.recommendation ?? "",
+      ...(finding.path == null ? {} : { path: finding.path }),
+      ...(finding.line == null ? {} : { line: finding.line }),
+    }));
+}
 
 function reviewSummary(review) {
   const currentSnapshot = review.rounds.at(-1) ?? null;
@@ -1244,6 +1281,7 @@ export async function prepareReview(
     implementationScope,
     parentReviewId = null,
     forceFullReview = false,
+    continuedFromReviewId = null,
     reviewerProvider = "CLAUDE_DESKTOP",
   },
 ) {
@@ -1253,7 +1291,38 @@ export async function prepareReview(
   if (parentReviewId != null) {
     assertReviewId(parentReviewId);
   }
+  if (continuedFromReviewId != null) {
+    assertReviewId(continuedFromReviewId);
+    if (!forceFullReview) {
+      throw new Error("continued review must set force_full_review");
+    }
+    if (parentReviewId != null) {
+      throw new Error("continued review cannot set parent_review_id");
+    }
+  }
   assertReviewerProvider(reviewerProvider);
+  const repositoryRoot = await resolveRepositoryRoot(repositoryPath);
+  const continuedReview =
+    continuedFromReviewId == null
+      ? null
+      : await loadReview(storeRoot, continuedFromReviewId);
+  if (
+    continuedReview != null &&
+    (continuedReview.status !== "CONTINUABLE_FINDINGS" ||
+      continuedReview.repository_path !== repositoryRoot ||
+      continuedReview.requirement !== requirement ||
+      continuedReview.implementation_scope !== implementationScope ||
+      reviewerProviderFor(continuedReview) !== reviewerProvider)
+  ) {
+    throw new Error(
+      "continued review does not match the repository, requirement, provider, base, scope, and continuable state",
+    );
+  }
+  const carriedFindings =
+    continuedReview == null ? [] : continuationFindings(continuedReview);
+  if (continuedReview != null && carriedFindings.length === 0) {
+    throw new Error("continued review has no open findings");
+  }
   const id = createReviewId();
   const root = reviewDirectory(storeRoot, id);
   await fsp.mkdir(root, { recursive: true, mode: 0o700 });
@@ -1267,6 +1336,33 @@ export async function prepareReview(
       roundRoot,
       writeFiles: true,
     });
+    if (
+      continuedReview != null &&
+      manifest.base_sha !== continuedReview.rounds[0]?.base_sha
+    ) {
+      throw new Error("continued review must preserve the immutable source base");
+    }
+    if (
+      continuedReview != null &&
+      manifest.head_sha === continuedReview.rounds.at(-1)?.head_sha
+    ) {
+      throw new Error("continued review head must change");
+    }
+    if (continuedReview != null) {
+      const sourceHead = continuedReview.rounds.at(-1)?.head_sha;
+      const ancestry = spawnSync(
+        "git",
+        ["merge-base", "--is-ancestor", sourceHead, manifest.head_sha],
+        {
+          cwd: manifest.repository_path,
+          encoding: "utf8",
+          env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+        },
+      );
+      if (ancestry.error || ancestry.status !== 0) {
+        throw new Error("continued review head must descend from the source head");
+      }
+    }
     const successorResult = await resolveReviewStrategy({
       storeRoot,
       parentReviewId,
@@ -1296,6 +1392,7 @@ export async function prepareReview(
       findings: [],
       resolutions: [],
       rereview_decisions: [],
+      carried_findings: carriedFindings,
       history: [
         {
           at: timestamp,
@@ -1845,7 +1942,7 @@ async function submitRereviewWhileLocked(
   if (byId.size !== awaiting.length || decisionInputs.length !== awaiting.length) {
     throw new Error("provide exactly one rereview decision for every author response");
   }
-  let unresolved = false;
+  let contested = false;
   for (const finding of awaiting) {
     const input = byId.get(finding.id);
     if (!input) {
@@ -1884,7 +1981,7 @@ async function submitRereviewWhileLocked(
       finding.status = "REBUTTAL_ACCEPTED";
     } else {
       finding.status = "STILL_OPEN";
-      unresolved = true;
+      contested = true;
     }
   }
 
@@ -1897,15 +1994,19 @@ async function submitRereviewWhileLocked(
     ),
   );
   review.findings.push(...newFindings);
-  if (newFindings.length > 0) {
-    unresolved = true;
-  }
-
-  if (unresolved) {
+  if (contested) {
     review.status = "HUMAN_REQUIRED";
     review.history.push({
       at: now(),
       event: "REREVIEW_UNRESOLVED",
+      round: review.current_round,
+      new_findings: newFindings.length,
+    });
+  } else if (newFindings.length > 0) {
+    review.status = "CONTINUABLE_FINDINGS";
+    review.history.push({
+      at: now(),
+      event: "REREVIEW_CONTINUABLE_FINDINGS",
       round: review.current_round,
       new_findings: newFindings.length,
     });

@@ -3,7 +3,10 @@ import crypto from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { getReviewSnapshot } from "./core.mjs";
+import {
+  continuationFindingFingerprint,
+  getReviewSnapshot,
+} from "./core.mjs";
 import {
   getAutonomousPreReady,
   getAutonomousTerminal,
@@ -44,6 +47,7 @@ export const AUTONOMOUS_CAPABILITIES = Object.freeze([
   "UNRESOLVE_INVALIDATED_CODEX_THREADS",
 ]);
 export const DEFAULT_REMOTE_CYCLE_BUDGET = 12;
+export const DEFAULT_LOCAL_CYCLE_BUDGET = 12;
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
@@ -124,6 +128,12 @@ function assertPositiveInteger(value, name) {
 function remoteCycleCount(workflow) {
   return workflow.remote_attempts.filter(
     (attempt) => attempt.diverted_at == null,
+  ).length;
+}
+
+function localCycleCount(workflow) {
+  return workflow.local_review_cycles.filter(
+    (cycle) => cycle.addressed_head_sha != null,
   ).length;
 }
 
@@ -1382,6 +1392,7 @@ function validateWorkflow(workflow) {
     !Array.isArray(workflow.attempts) ||
     !Array.isArray(workflow.claims) ||
     !Array.isArray(workflow.remote_attempts) ||
+    !Array.isArray(workflow.local_review_cycles) ||
     !Array.isArray(workflow.addressed_findings) ||
     !Array.isArray(workflow.thread_replies) ||
     !Array.isArray(workflow.thread_resolutions) ||
@@ -1394,6 +1405,41 @@ function validateWorkflow(workflow) {
     workflow.remote_cycle_budget,
     "workflow.remote_cycle_budget",
   );
+  assertPositiveInteger(
+    workflow.local_cycle_budget,
+    "workflow.local_cycle_budget",
+  );
+  for (const [index, cycle] of workflow.local_review_cycles.entries()) {
+    assertObject(cycle, "workflow.local_review_cycles entry");
+    if (cycle.number !== index + 1) {
+      fail("WORKFLOW_STATE_INVALID", "local cycle numbers must be sequential");
+    }
+    assertString(cycle.continued_from_review_id, "local cycle source review_id", {
+      max: 1024,
+    });
+    if (!Array.isArray(cycle.findings) || cycle.findings.length === 0) {
+      fail("WORKFLOW_STATE_INVALID", "local cycle findings must be non-empty");
+    }
+    for (const finding of cycle.findings) {
+      assertObject(finding, "local cycle finding");
+      assertString(finding.finding_id, "local cycle finding_id", { max: 1024 });
+      if (!DIGEST_RE.test(finding.fingerprint_sha256 ?? "")) {
+        fail("WORKFLOW_STATE_INVALID", "local cycle finding digest is invalid");
+      }
+    }
+    if (cycle.addressed_head_sha != null) {
+      assertSha(cycle.addressed_head_sha, "local cycle addressed_head_sha");
+    }
+    if (cycle.followup_review_id != null) {
+      assertString(cycle.followup_review_id, "local cycle followup_review_id", {
+        max: 1024,
+      });
+      if (cycle.addressed_head_sha == null) {
+        fail("WORKFLOW_STATE_INVALID", "local cycle follow-up lacks an addressed head");
+      }
+    }
+    assertTimestamp(cycle.recorded_at, "local cycle recorded_at");
+  }
   for (const attempt of workflow.remote_attempts) {
     assertObject(attempt, "workflow.remote_attempts entry");
     assertPositiveInteger(attempt.number, "remote attempt number");
@@ -1854,7 +1900,9 @@ function validateWorkflow(workflow) {
  * cancelled, and because the store-wide claim scan validates every ledger, one
  * such workflow would block starts on unrelated branches.
  */
-const REMOTE_FIELD_DEFAULTS = Object.freeze({
+const COMPAT_FIELD_DEFAULTS = Object.freeze({
+  local_review_cycles: [],
+  local_cycle_budget: DEFAULT_LOCAL_CYCLE_BUDGET,
   remote_attempts: [],
   remote_cycle_budget: DEFAULT_REMOTE_CYCLE_BUDGET,
   current_publication: null,
@@ -1866,11 +1914,11 @@ const REMOTE_FIELD_DEFAULTS = Object.freeze({
   terminal: null,
 });
 
-function withRemoteFieldDefaults(workflow) {
+function withCompatFieldDefaults(workflow) {
   if (workflow == null || typeof workflow !== "object") {
     return workflow;
   }
-  for (const [field, value] of Object.entries(REMOTE_FIELD_DEFAULTS)) {
+  for (const [field, value] of Object.entries(COMPAT_FIELD_DEFAULTS)) {
     if (workflow[field] === undefined) {
       workflow[field] = structuredClone(value);
     }
@@ -1881,7 +1929,7 @@ function withRemoteFieldDefaults(workflow) {
 async function readWorkflowRaw(paths) {
   try {
     const workflow = validateWorkflow(
-      withRemoteFieldDefaults(
+      withCompatFieldDefaults(
         await readCanonicalSecureJson(
           paths.workflow,
           MAX_WORKFLOW_BYTES,
@@ -2210,8 +2258,50 @@ async function readAudit(paths, workflowId) {
   }
 }
 
-function auditedWorkflowState(workflow) {
-  return {
+function localReviewCyclesDigest(workflow) {
+  return sha256(canonicalJson(workflow.local_review_cycles ?? []));
+}
+
+function localReviewCycleUpdate(previousWorkflow, workflow) {
+  if (previousWorkflow == null) return null;
+  const previous = previousWorkflow.local_review_cycles ?? [];
+  const current = workflow.local_review_cycles ?? [];
+  if (canonicalJson(previous) === canonicalJson(current)) return null;
+  if (
+    current.length === previous.length + 1 &&
+    canonicalJson(current.slice(0, -1)) === canonicalJson(previous)
+  ) {
+    return { kind: "APPEND", cycle: current.at(-1) };
+  }
+  if (
+    current.length === previous.length &&
+    current.length > 0 &&
+    canonicalJson(current.slice(0, -1)) ===
+      canonicalJson(previous.slice(0, -1)) &&
+    canonicalJson({
+      ...current.at(-1),
+      addressed_head_sha: previous.at(-1).addressed_head_sha,
+      followup_review_id: previous.at(-1).followup_review_id,
+    }) === canonicalJson(previous.at(-1))
+  ) {
+    const changes = {};
+    for (const field of ["addressed_head_sha", "followup_review_id"]) {
+      if (current.at(-1)[field] !== previous.at(-1)[field]) {
+        changes[field] = current.at(-1)[field];
+      }
+    }
+    if (Object.keys(changes).length > 0) {
+      return { kind: "PATCH_LATEST", number: current.length, changes };
+    }
+  }
+  fail(
+    "WORKFLOW_STATE_INVALID",
+    "local review cycle mutations must append or patch only the latest cycle",
+  );
+}
+
+function auditedWorkflowState(workflow, previousWorkflow = null) {
+  const state = {
     revision: workflow.revision,
     updated_at: workflow.updated_at,
     status: workflow.status,
@@ -2219,6 +2309,9 @@ function auditedWorkflowState(workflow) {
     current_head_sha: workflow.current_head_sha,
     pull_request: workflow.pull_request,
     attempts: workflow.attempts,
+    local_review_cycles_sha256: localReviewCyclesDigest(workflow),
+    local_cycle_budget:
+      workflow.local_cycle_budget ?? DEFAULT_LOCAL_CYCLE_BUDGET,
     remote_attempts: workflow.remote_attempts ?? [],
     remote_cycle_budget:
       workflow.remote_cycle_budget ?? DEFAULT_REMOTE_CYCLE_BUDGET,
@@ -2238,6 +2331,11 @@ function auditedWorkflowState(workflow) {
     claims: workflow.claims,
     claim_release: workflow.claim_release ?? null,
   };
+  const cycleUpdate = localReviewCycleUpdate(previousWorkflow, workflow);
+  if (cycleUpdate != null) {
+    state.local_review_cycle_update = cycleUpdate;
+  }
+  return state;
 }
 
 function prepareAuditEvent(
@@ -2266,7 +2364,7 @@ function prepareAuditEvent(
       workflowState.active_action?.action_id ??
       workflow.active_action?.action_id ??
       null,
-    workflow_state: auditedWorkflowState(workflowState),
+    workflow_state: auditedWorkflowState(workflowState, workflow),
   };
   const auditEvent = {
     ...unsigned,
@@ -2428,6 +2526,11 @@ function requireWorkflowAuditBinding(workflow, audit) {
     current_head_sha: null,
     pull_request: null,
     attempts: [],
+    local_review_cycles: [],
+    local_review_cycles_sha256: localReviewCyclesDigest({
+      local_review_cycles: [],
+    }),
+    local_cycle_budget: workflow.local_cycle_budget,
     remote_attempts: [],
     remote_cycle_budget: workflow.remote_cycle_budget,
     addressed_findings: [],
@@ -2456,6 +2559,11 @@ function requireWorkflowAuditBinding(workflow, audit) {
     canonicalJson(workflow.pull_request) !==
       canonicalJson(lastState.pull_request) ||
     canonicalJson(workflow.attempts) !== canonicalJson(lastState.attempts) ||
+    localReviewCyclesDigest(workflow) !==
+      (lastState.local_review_cycles_sha256 ??
+        sha256(canonicalJson(lastState.local_review_cycles ?? []))) ||
+    workflow.local_cycle_budget !==
+      (lastState.local_cycle_budget ?? DEFAULT_LOCAL_CYCLE_BUDGET) ||
     canonicalJson(workflow.remote_attempts ?? []) !==
       canonicalJson(lastState.remote_attempts ?? []) ||
     workflow.remote_cycle_budget !==
@@ -2525,6 +2633,7 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "current_head_sha",
     "pull_request",
     "attempts",
+    "local_cycle_budget",
     "remote_attempts",
     "remote_cycle_budget",
     "addressed_findings",
@@ -2543,13 +2652,76 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "claims",
     "claim_release",
   ]) {
-    // An audit event committed before the remote fields existed carries none
+    // An audit event committed before these compatibility fields existed carries none
     // of them, so recovery restores their defaults instead of undefined.
     recovered[field] = structuredClone(
       lastEvent.workflow_state[field] ??
-        (field in REMOTE_FIELD_DEFAULTS
-          ? REMOTE_FIELD_DEFAULTS[field]
+        (field in COMPAT_FIELD_DEFAULTS
+          ? COMPAT_FIELD_DEFAULTS[field]
           : lastEvent.workflow_state[field]),
+    );
+  }
+  if (lastEvent.workflow_state.local_review_cycles != null) {
+    recovered.local_review_cycles = structuredClone(
+      lastEvent.workflow_state.local_review_cycles,
+    );
+  } else if (lastEvent.workflow_state.local_review_cycle_update != null) {
+    const update = lastEvent.workflow_state.local_review_cycle_update;
+    assertObject(update, "audit local review cycle update");
+    if (update.kind === "APPEND") {
+      assertObject(update.cycle, "audit local review cycle");
+      if (update.cycle.number !== recovered.local_review_cycles.length + 1) {
+        fail(
+          "WORKFLOW_AUDIT_CORRUPT",
+          "appended local review cycle number is invalid",
+        );
+      }
+      recovered.local_review_cycles.push(structuredClone(update.cycle));
+    } else if (update.kind === "PATCH_LATEST") {
+      if (
+        recovered.local_review_cycles.length === 0 ||
+        update.number !== recovered.local_review_cycles.length
+      ) {
+        fail(
+          "WORKFLOW_AUDIT_CORRUPT",
+          "patched local review cycle number is invalid",
+        );
+      }
+      assertObject(update.changes, "audit local review cycle changes");
+      const fields = Object.keys(update.changes);
+      if (
+        fields.length === 0 ||
+        fields.some(
+          (field) =>
+            field !== "addressed_head_sha" && field !== "followup_review_id",
+        )
+      ) {
+        fail(
+          "WORKFLOW_AUDIT_CORRUPT",
+          "patched local review cycle fields are invalid",
+        );
+      }
+      Object.assign(
+        recovered.local_review_cycles.at(-1),
+        structuredClone(update.changes),
+      );
+    } else {
+      fail(
+        "WORKFLOW_AUDIT_CORRUPT",
+        "local review cycle update kind is invalid",
+      );
+    }
+  }
+  if (
+    localReviewCyclesDigest(recovered) !==
+    (lastEvent.workflow_state.local_review_cycles_sha256 ??
+      sha256(
+        canonicalJson(lastEvent.workflow_state.local_review_cycles ?? []),
+      ))
+  ) {
+    fail(
+      "WORKFLOW_AUDIT_CORRUPT",
+      "workflow local review cycles do not match the committed audit chain",
     );
   }
   recovered.action_audit = {
@@ -2877,6 +3049,9 @@ function workflowSummary(workflow) {
     current_head_sha: workflow.current_head_sha,
     current_review: workflow.current_review,
     current_publication: workflow.current_publication,
+    local_review_cycles: workflow.local_review_cycles,
+    local_cycle_budget: workflow.local_cycle_budget,
+    local_cycle_count: localCycleCount(workflow),
     remote_attempts: workflow.remote_attempts,
     remote_cycle_budget: workflow.remote_cycle_budget,
     remote_cycle_count: remoteCycleCount(workflow),
@@ -2912,6 +3087,7 @@ export async function startAutonomousWorkflow(
     operatorLabel,
     capabilities,
     publicationTarget,
+    localCycleBudget = DEFAULT_LOCAL_CYCLE_BUDGET,
     remoteCycleBudget = DEFAULT_REMOTE_CYCLE_BUDGET,
   },
 ) {
@@ -2922,6 +3098,7 @@ export async function startAutonomousWorkflow(
   assertString(topicBranch, "topic_branch", { max: 1024 });
   assertString(operatorLabel, "operator_label", { max: 1024 });
   const normalizedCapabilities = assertCapabilities(capabilities);
+  assertPositiveInteger(localCycleBudget, "local_cycle_budget");
   assertPositiveInteger(remoteCycleBudget, "remote_cycle_budget");
   const normalizedTarget = validatePublicationTarget(
     publicationTarget,
@@ -3012,6 +3189,8 @@ export async function startAutonomousWorkflow(
     reviewer_task: null,
     pull_request: null,
     attempts: [],
+    local_review_cycles: [],
+    local_cycle_budget: localCycleBudget,
     remote_attempts: [],
     remote_cycle_budget: remoteCycleBudget,
     addressed_findings: [],
@@ -3218,6 +3397,11 @@ export async function recordWorkflowHead(
         );
       }
     }
+    const pendingLocalContinuation =
+      workflow.phase === "ADDRESS_LOCAL_FINDINGS" &&
+      workflow.local_review_cycles.at(-1)?.continued_from_review_id ===
+        workflow.current_review?.review_id &&
+      workflow.local_review_cycles.at(-1)?.addressed_head_sha == null;
     const saveRecordedHead = async (addressedFindings) =>
       publicWorkflow(
         await saveMutation(paths, workflow, async (next) => {
@@ -3243,7 +3427,10 @@ export async function recordWorkflowHead(
           // The publication ledger stays on disk as history but can no longer
           // authorize this workflow; the repaired head starts a fresh cycle.
           next.current_publication = null;
-          if (next.phase !== "ADDRESS_LOCAL_FINDINGS") {
+          if (pendingLocalContinuation) {
+            next.local_review_cycles.at(-1).addressed_head_sha = headSha;
+            next.phase = "PREPARE_LOCAL_REVIEW";
+          } else if (next.phase !== "ADDRESS_LOCAL_FINDINGS") {
             next.phase = "PREPARE_LOCAL_REVIEW";
           }
         }),
@@ -3376,6 +3563,38 @@ export async function bindWorkflowReview(
           "local review does not match the workflow repository, requirement, provider, base, head, and state",
         );
       }
+      const pendingLocalContinuation = workflow.local_review_cycles.at(-1);
+      const isContinuationFollowup =
+        pendingLocalContinuation?.addressed_head_sha ===
+          workflow.current_head_sha &&
+        pendingLocalContinuation?.followup_review_id == null;
+      if (isContinuationFollowup) {
+        const carried = (review.carried_findings ?? []).map((finding) => ({
+          continued_from_review_id: finding.continued_from_review_id,
+          finding_id: finding.finding_id,
+          fingerprint_sha256: finding.fingerprint_sha256,
+        }));
+        const expected = pendingLocalContinuation.findings.map((finding) => ({
+          continued_from_review_id:
+            pendingLocalContinuation.continued_from_review_id,
+          finding_id: finding.finding_id,
+          fingerprint_sha256: finding.fingerprint_sha256,
+        }));
+        if (
+          summary.review_strategy.mode !== "FULL" ||
+          canonicalJson(carried) !== canonicalJson(expected)
+        ) {
+          fail(
+            "WORKFLOW_REVIEW_MISMATCH",
+            "continued local review must be FULL and carry the exact source findings",
+          );
+        }
+      } else if ((review.carried_findings ?? []).length > 0) {
+        fail(
+          "WORKFLOW_REVIEW_MISMATCH",
+          "local review carries findings without a pending continuation",
+        );
+      }
       // One review may serve one workflow. The exclusive binding marker is
       // written under the review mutation lock, so a second workflow whose
       // scope also matches this review fails closed instead of adopting a
@@ -3410,6 +3629,9 @@ export async function bindWorkflowReview(
             snapshot_hash: summary.current_snapshot.snapshot_hash,
             head_sha: summary.current_snapshot.head_sha,
           };
+          if (isContinuationFollowup) {
+            next.local_review_cycles.at(-1).followup_review_id = reviewId;
+          }
           // A repaired head binds a different review, and every review ID gets
           // its own fresh reviewer task. Releasing the previous binding is what
           // lets the next dispatch be planned at all.
@@ -5093,7 +5315,11 @@ export async function advanceLocalWorkflow(
         "HUMAN_REQUIRED",
       ]),
       PREPARE_REREVIEW: new Set(["WAITING_FOR_REREVIEW"]),
-      WAIT_LOCAL_REREVIEW: new Set(["CLEAN", "HUMAN_REQUIRED"]),
+      WAIT_LOCAL_REREVIEW: new Set([
+        "CLEAN",
+        "CONTINUABLE_FINDINGS",
+        "HUMAN_REQUIRED",
+      ]),
       FINALIZE_LOCAL_GATE: new Set(["LOCAL_GATE_PASSED"]),
     }[workflow.phase];
     if (legalStatuses == null || !legalStatuses.has(summary.status)) {
@@ -5104,7 +5330,12 @@ export async function advanceLocalWorkflow(
     }
     const snapshotHead = summary.current_snapshot?.head_sha ?? null;
     if (
-      ["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW", "CLEAN"].includes(
+      [
+        "WAITING_FOR_REVIEW",
+        "WAITING_FOR_REREVIEW",
+        "CLEAN",
+        "CONTINUABLE_FINDINGS",
+      ].includes(
         summary.status,
       ) &&
       snapshotHead !== workflow.current_head_sha
@@ -5133,8 +5364,11 @@ export async function advanceLocalWorkflow(
         );
       }
     }
+    const localBudgetExhausted =
+      summary.status === "CONTINUABLE_FINDINGS" &&
+      localCycleCount(workflow) >= workflow.local_cycle_budget;
     const save =
-      summary.status === "HUMAN_REQUIRED"
+      summary.status === "HUMAN_REQUIRED" || localBudgetExhausted
         ? (mutate) =>
             saveActionMutation(paths, workflow, "WORKFLOW_PAUSED", mutate)
         : (mutate) => saveMutation(paths, workflow, mutate);
@@ -5167,6 +5401,46 @@ export async function advanceLocalWorkflow(
             review_state_version: summary.state_version,
             paused_at: now(),
           };
+          return;
+        }
+        if (summary.status === "CONTINUABLE_FINDINGS") {
+          const findings = review.findings
+            .filter((finding) => finding.status === "OPEN")
+            .map((finding) => ({
+              finding_id: finding.id,
+              fingerprint_sha256: continuationFindingFingerprint(finding),
+            }));
+          if (findings.length === 0) {
+            fail(
+              "WORKFLOW_REVIEW_STATE_INVALID",
+              "continuable local review has no open findings",
+            );
+          }
+          next.local_review_cycles.push({
+            number: next.local_review_cycles.length + 1,
+            continued_from_review_id: reviewId,
+            findings,
+            addressed_head_sha: null,
+            followup_review_id: null,
+            recorded_at: now(),
+          });
+          if (localBudgetExhausted) {
+            next.status = "PAUSED";
+            next.phase = "PAUSED_HUMAN";
+            next.pause = {
+              reason_code: "LOCAL_CYCLE_BUDGET_EXHAUSTED",
+              blocked_action: "ADDRESS_LOCAL_FINDINGS",
+              resume_phase: "ADDRESS_LOCAL_FINDINGS",
+              review_id: reviewId,
+              review_state_version: summary.state_version,
+              local_cycle_budget: next.local_cycle_budget,
+              local_cycle_count: localCycleCount(next),
+              local_review_cycles_sha256: localReviewCyclesDigest(next),
+              paused_at: now(),
+            };
+          } else {
+            next.phase = "ADDRESS_LOCAL_FINDINGS";
+          }
           return;
         }
         const phase = phases[summary.status];
@@ -5894,6 +6168,15 @@ export async function resumeAutonomousWorkflow(
         "the exhausted remote cycle budget must be extended before resuming",
       );
     }
+    if (
+      workflow.pause?.reason_code === "LOCAL_CYCLE_BUDGET_EXHAUSTED" &&
+      localCycleCount(workflow) >= workflow.local_cycle_budget
+    ) {
+      fail(
+        "WORKFLOW_RESUME_INVALID",
+        "the exhausted local cycle budget must be extended before resuming",
+      );
+    }
     // A history rewrite is the one remedy this workflow structurally cannot
     // accept: every recorded head must be a descendant of the last, so a
     // rewritten head is rejected however the workflow resumes. Say so instead
@@ -5962,6 +6245,53 @@ export async function resumeAutonomousWorkflow(
           pause_reason_code: pauseReasonCode,
           rationale,
           resumed_phase: resumedPhase,
+        },
+      ),
+    );
+  });
+}
+
+export async function extendLocalCycleBudget(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  { newBudget, operatorLabel, rationale },
+) {
+  assertPositiveInteger(newBudget, "new_budget");
+  assertString(operatorLabel, "operator_label", { max: 1024 });
+  assertString(rationale, "rationale");
+  return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
+    requireRevision(workflow, expectedRevision);
+    if (
+      workflow.status !== "PAUSED" ||
+      workflow.pause?.reason_code !== "LOCAL_CYCLE_BUDGET_EXHAUSTED"
+    ) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "local cycle budget can only be extended from its exhausted pause",
+      );
+    }
+    const oldBudget = workflow.local_cycle_budget;
+    const usedCycles = localCycleCount(workflow);
+    if (newBudget <= oldBudget || newBudget <= usedCycles) {
+      throw new TypeError(
+        "new_budget must exceed both the current budget and used local cycles",
+      );
+    }
+    return publicWorkflow(
+      await saveActionMutation(
+        paths,
+        workflow,
+        "LOCAL_CYCLE_BUDGET_EXTENDED",
+        async (next) => {
+          next.local_cycle_budget = newBudget;
+        },
+        {
+          old_budget: oldBudget,
+          new_budget: newBudget,
+          local_cycle_count: usedCycles,
+          operator_label: operatorLabel,
+          rationale,
         },
       ),
     );

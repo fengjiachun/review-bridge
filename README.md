@@ -19,8 +19,10 @@ A local review runs like this:
 3. If the reviewer submits no findings, the review is already `CLEAN` and you
    finalize it. Otherwise you go back to the author task, **answer every
    finding**, and prepare round two.
-4. The review ends in `LOCAL_GATE_PASSED`, or in `HUMAN_REQUIRED` when a
-   finding still stands after round two.
+4. A prior finding that still stands after round two becomes
+   `HUMAN_REQUIRED`. Uncontested new findings become `CONTINUABLE_FINDINGS`
+   and are addressed in a fresh full review; a clean review can then reach
+   `LOCAL_GATE_PASSED`.
 
 New to the project? [How Review Bridge reviews a change](docs/review-flow.md)
 walks one change from commit to merge-ready and explains why each step exists.
@@ -255,7 +257,11 @@ Resume the same reviewer context for round two. The final state is one of:
   not test results: the deterministic check gate lives in the publication
   layer, where a failing required check blocks `MERGE_READY` on provider
   evidence rather than on the author's word.
-- `HUMAN_REQUIRED`: a finding remains or a new finding appears after round two.
+- `CONTINUABLE_FINDINGS`: all prior findings were accepted, but round two found
+  a new issue. Commit a changed head and call `prepare_review` with
+  `continued_from_review_id` and `force_full_review: true`; the fresh reviewer
+  receives only the bare finding descriptions as scope hints.
+- `HUMAN_REQUIRED`: a prior finding remains contested after round two.
 
 For `HUMAN_REQUIRED`, call `get_review_summary`, then pass its exact
 `state_version` to `export_human_arbitration`. The read-only export fails if the
@@ -342,8 +348,9 @@ WAITING_FOR_REVIEW
                    ├─ human_required ──────────> HUMAN_REQUIRED
                    └─ fixed/rejected -> AUTHOR_RESPONDED
                                           -> WAITING_FOR_REREVIEW
-                                               ├─ all accepted -> CLEAN
-                                               └─ open/new -> HUMAN_REQUIRED
+                                               ├─ all accepted, no new -> CLEAN
+                                               ├─ only new -> CONTINUABLE_FINDINGS
+                                               └─ prior still open -> HUMAN_REQUIRED
 
 CLEAN -> snapshot recheck -> LOCAL_GATE_PASSED
 ```
@@ -409,8 +416,12 @@ ledger — so an admitted workflow can always persist an operator cancellation.
 
 The compact workflow summary is the controller's source of truth for the next
 action. A missing or ambiguous Codex task pauses rather than falling back to
-the author task. Round-two `HUMAN_REQUIRED` also pauses and never creates a
-third model round. Cancellation retains claims until an explicit,
+the author task. A contested round-two finding becomes `HUMAN_REQUIRED` and
+pauses. Uncontested new round-two findings become `CONTINUABLE_FINDINGS`: the
+workflow records their IDs and fingerprints, enters `ADDRESS_LOCAL_FINDINGS`,
+requires a changed committed head, and binds a new `FULL` review carrying only
+the source finding descriptions as scope hints. No review ID receives a third
+model round. Cancellation retains claims until an explicit,
 exactly-reconciled release proves each branch and head ref absent — and each
 bound pull request closed — with a fresh observation bound to the current
 workflow revision and canonical claim target.
@@ -433,13 +444,20 @@ tree match *any* earlier recorded attempt pauses `NO_PROGRESS`, so an
 oscillating tree or an alternating blocker cannot walk around the check by
 never repeating adjacently.
 
-The workflow also defaults to a 12-cycle remote-repair budget. The count is
-projected from non-diverted `remote_attempts`; exhausting it pauses with
+The local continuation and remote repair loops each default to a 12-cycle
+budget. Local cycles are counted when an addressed head is recorded;
+exhaustion pauses with `LOCAL_CYCLE_BUDGET_EXHAUSTED` and the complete
+continuation chain before another repair starts. `extend_local_cycle_budget`
+records an explicit increase. The workflow ledger retains that complete chain;
+ordinary audit events bind its digest, while an event that changes the chain
+carries only an append-or-patch delta for the latest cycle, keeping audit-log
+growth linear. The remote count is projected from non-diverted
+`remote_attempts`; exhausting it pauses with
 `REMOTE_CYCLE_BUDGET_EXHAUSTED` and the complete attempt chain before another
 repair starts. `extend_remote_cycle_budget` records an explicit increase in the
 workflow audit, after which the operator uses the ordinary resume path. The
-budget is mutable workflow state, not part of the immutable authorization
-digest, and older ledgers that lack it load with the default.
+Both budgets are mutable workflow state, not part of the immutable
+authorization digest, and older ledgers that lack them load with the defaults.
 
 This release closes eligible Codex finding threads with a recorded reply and a
 server-owned resolution proof, and marks the cleared pull request ready: the

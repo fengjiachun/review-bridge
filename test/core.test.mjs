@@ -1198,8 +1198,8 @@ test("rereview rebuttals require verification without breaking old ledgers", asy
     [
       {
         finding_id: "F-001",
-        decision: "resolved",
-        rationale: "The assertion covers the behavior.",
+        decision: "still_open",
+        rationale: "The assertion still misses another behavior.",
       },
       {
         finding_id: "F-002",
@@ -1256,6 +1256,149 @@ test("rereview rebuttals require verification without breaking old ledgers", asy
     ),
     false,
   );
+});
+
+test("new findings after an uncontested rereview are continuable", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  });
+  await submitInitialReview(store, prepared.id, [
+    { severity: "major", title: "Missing test", explanation: "Add a test." },
+  ]);
+  await submitResolutions(store, prepared.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await prepareRereview(store, prepared.id);
+  const result = await submitRereview(
+    store,
+    prepared.id,
+    [{ finding_id: "F-001", decision: "resolved", rationale: "The test exists." }],
+    [
+      {
+        severity: "minor",
+        title: "New edge case",
+        explanation: "A separate edge case still needs a decision.",
+      },
+    ],
+  );
+  assert.equal(result.status, "CONTINUABLE_FINDINGS");
+  assert.equal(result.findings.at(-1).status, "OPEN");
+  await assert.rejects(
+    exportHumanArbitration(store, prepared.id, result.state_version),
+    /does not require human arbitration/,
+  );
+});
+
+test("carried findings are reviewer scope hints without author rationale", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "first change");
+  const source = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  });
+  await submitInitialReview(store, source.id, [
+    { severity: "major", title: "Missing test", explanation: "Add a test." },
+  ]);
+  await submitResolutions(store, source.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await prepareRereview(store, source.id);
+  await submitRereview(
+    store,
+    source.id,
+    [{ finding_id: "F-001", decision: "resolved", rationale: "The test exists." }],
+    [
+      {
+        severity: "minor",
+        title: "New edge case",
+        explanation: "A separate edge case still needs a decision.",
+        recommendation: "Cover the edge case.",
+        path: "app.js",
+        line: 1,
+      },
+    ],
+  );
+  await assert.rejects(
+    prepareReview(store, {
+      repositoryPath: repository,
+      baseRef: baseSha,
+      requirement: "Expose a stable value.",
+      implementationScope: "Change app.js.",
+      forceFullReview: true,
+      continuedFromReviewId: source.id,
+    }),
+    /continued review head must change/,
+  );
+  await assert.rejects(
+    prepareReview(store, {
+      repositoryPath: repository,
+      baseRef: baseSha,
+      requirement: "Expose a stable value.",
+      implementationScope: "Change app.js.",
+      continuedFromReviewId: source.id,
+    }),
+    /must set force_full_review/,
+  );
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "address edge case");
+  await assert.rejects(
+    prepareReview(store, {
+      repositoryPath: repository,
+      baseRef: "HEAD~1",
+      requirement: "Expose a stable value.",
+      implementationScope: "Change app.js.",
+      forceFullReview: true,
+      continuedFromReviewId: source.id,
+    }),
+    /must preserve the immutable source base/,
+  );
+  git(repository, "switch", "-c", "sibling-continuation", baseSha);
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 3;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "unrelated sibling change");
+  await assert.rejects(
+    prepareReview(store, {
+      repositoryPath: repository,
+      baseRef: baseSha,
+      requirement: "Expose a stable value.",
+      implementationScope: "Change app.js.",
+      forceFullReview: true,
+      continuedFromReviewId: source.id,
+    }),
+    /must descend from the source head/,
+  );
+  git(repository, "switch", "main");
+  const nestedDirectory = path.join(repository, "nested");
+  await fsp.mkdir(nestedDirectory);
+  const prepared = await prepareReview(store, {
+    repositoryPath: nestedDirectory,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    forceFullReview: true,
+    continuedFromReviewId: source.id,
+  });
+  const opened = await openReview(store, prepared.id);
+  assert.equal(opened.repository_path, await fsp.realpath(repository));
+  assert.equal(opened.review_strategy.mode, "FULL");
+  assert.equal(opened.carried_findings.length, 1);
+  assert.equal(opened.carried_findings[0].continued_from_review_id, source.id);
+  assert.equal(opened.carried_findings[0].finding_id, "F-002");
+  assert.equal(opened.carried_findings[0].title, "New edge case");
+  assert.equal("rationale" in opened.carried_findings[0], false);
 });
 
 test("unresolved round-two finding escalates to a human", async (t) => {
@@ -1633,26 +1776,10 @@ test("compact finding histograms distinguish active and all-time severity", asyn
     summary.active_findings.map((finding) => finding.id),
     ["F-003"],
   );
-  const exported = await exportHumanArbitration(
-    store,
-    prepared.id,
-    summary.state_version,
-  );
-  assert.deepEqual(
-    exported.arbitration.active_findings.map(({ finding }) => finding.id),
-    ["F-003"],
-  );
-  assert.deepEqual(
-    exported.arbitration.resolved_findings.map(({ finding }) => finding.id),
-    ["F-001", "F-002"],
-  );
-  assert.ok(
-    exported.markdown.indexOf('"id": "F-003"') <
-      exported.markdown.indexOf("## Resolved findings"),
-  );
-  assert.ok(
-    exported.markdown.indexOf('"id": "F-001"') >
-      exported.markdown.indexOf("## Resolved findings"),
+  assert.equal(summary.status, "CONTINUABLE_FINDINGS");
+  await assert.rejects(
+    exportHumanArbitration(store, prepared.id, summary.state_version),
+    /does not require human arbitration/,
   );
 });
 
