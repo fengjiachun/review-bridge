@@ -441,7 +441,7 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /each disposition and the files and commit that actually changed/,
+  /persisted\s+disposition from its\s+`resolutions`, plus the files and commit that actually\s+changed/,
 );
 assert.match(workflowSkill, /every per-finding decision and any new finding/);
 assert.match(workflowSkill, /state the escalation and why it needs a human/);

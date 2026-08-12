@@ -85,9 +85,10 @@ gap returns the ready pull request to draft before any repair.
    `rereview_decisions` and `findings`. A contested `HUMAN_REQUIRED`
    review pauses the workflow; state the escalation and why it needs a human.
    New uncontested round-two findings enter `ADDRESS_LOCAL_FINDINGS`; present
-   the full ledger's `carried_findings` list, address them on a changed committed head, and let
-   the next new `FULL` review inspect its carried bare finding descriptions
-   independently. Never add a third model round to the same review ID. If the
+   the full ledger's `carried_findings` list, address them on a changed
+   committed head, and let the next new `FULL` review inspect its carried bare
+   finding descriptions independently. Never add a third model round to the
+   same review ID. If the
    workflow pauses `LOCAL_CYCLE_BUDGET_EXHAUSTED`, show the complete
    `local_review_cycles` chain to the operator; only an explicit decision may
    call `extend_local_cycle_budget`, followed separately by
