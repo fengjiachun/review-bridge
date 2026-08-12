@@ -447,12 +447,17 @@ assert.match(workflowSkill, /every per-finding decision and any new finding/);
 assert.match(workflowSkill, /state the escalation and why it needs a human/);
 assert.match(
   workflowSkill,
-  /After\s+`prepare_rereview` captures the descendant, call `get_review` again/,
+  /After\s+`prepare_rereview` captures the result, call `get_review` again/,
 );
 assert.match(
   workflowSkill,
-  /latest round's authoritative `changed_files` and `head_sha`/,
+  /compare the preceding and latest rounds'\s+authoritative `head_sha` values with `git diff --name-only` to derive the\s+actual fix files/,
 );
+assert.match(
+  workflowSkill,
+  /require a new commit only when at least\s+one resolution is `fixed`/,
+);
+assert.match(workflowSkill, /rereview is rebuttal-only and no\s+code commit was required/);
 assert.match(
   workflowSkill,
   /`CONTINUABLE_FINDINGS`, present the source ledger's `OPEN`\s+`findings`/,

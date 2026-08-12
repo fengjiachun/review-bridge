@@ -75,13 +75,16 @@ gap returns the ready pull request to draft before any repair.
    budget only after an explicit operator decision, then resume separately.
    When a round reports findings, call `get_review` and narrate every finding
    from its authoritative `findings` with the ID, severity, one-line summary,
-   and location. Address the findings and record
-   any committed descendant fix head before submitting resolutions. After
+   and location. Address the findings and, when any disposition is `fixed`,
+   record a committed descendant fix head before submitting resolutions. After
    `submit_resolutions`, call `get_review` again and narrate each persisted
    disposition, rationale, and evidence from its `resolutions`. After
-   `prepare_rereview` captures the descendant, call `get_review` again and
-   narrate the latest round's authoritative `changed_files` and `head_sha` as
-   the actual fix. Round two
+   `prepare_rereview` captures the result, call `get_review` again. When any
+   disposition was `fixed`, compare the preceding and latest rounds'
+   authoritative `head_sha` values with `git diff --name-only` to derive the
+   actual fix files, and narrate those files with the latest `head_sha` as the
+   fix commit. For a rebuttal-only
+   rereview, state that no code commit was required. Round two
    reuses the same reviewer task. When its result arrives, call `get_review`
    again and narrate every per-finding decision and any new finding from its
    `rereview_decisions` and `findings`. A contested `HUMAN_REQUIRED`
@@ -493,10 +496,14 @@ waiting for its reviewer.
 3. Call `submit_resolutions` with one entry for every finding, then call
    `get_review` again. Present every persisted disposition from its
    `resolutions`, including its rationale and evidence.
-4. If the state is `AUTHOR_RESPONDED`, require the fix commit, call
-   `prepare_rereview`, then call `get_review` again. Present the latest round's
-   authoritative `changed_files` and `head_sha` as the affected files and
-   committed fix head.
+4. If the state is `AUTHOR_RESPONDED`, require a new commit only when at least
+   one resolution is `fixed`, then call `prepare_rereview` and `get_review`
+   again. For fixed resolutions, compare the preceding and latest rounds'
+   authoritative `head_sha` values with `git diff --name-only` to derive the
+   actual fix files, and present them with the latest `head_sha` as the
+   committed fix head. If every
+   resolution is `rejected`, report that the rereview is rebuttal-only and no
+   code commit was required.
 5. Record the new summary's `state_version`, report `WAITING_FOR_REREVIEW`,
    resume the same reviewer context, and use `wait_for_review_state` to observe
    the next transition. Treat `timed_out` as an expected in-progress result and
