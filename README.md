@@ -285,7 +285,10 @@ or presents the carried-findings list before continuing from
 `CONTINUABLE_FINDINGS` in a fresh full review.
 
 This narration is observability, not evidence. The review ledger remains the
-sole source of truth; session text never advances or proves review state.
+sole source of truth: the driver reads the full review ledger after findings
+and completed rereviews, and narrates from its findings, resolutions, rereview
+decisions, and carried findings. Session text never advances or proves review
+state.
 
 ## Successor reviews
 

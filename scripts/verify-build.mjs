@@ -445,7 +445,24 @@ assert.match(
 );
 assert.match(workflowSkill, /every per-finding decision and any new finding/);
 assert.match(workflowSkill, /state the escalation and why it needs a human/);
-assert.match(workflowSkill, /present the carried-findings list/);
+assert.match(workflowSkill, /full ledger's\s+`carried_findings` list/);
+assert.match(
+  workflowSkill,
+  /When a round reports findings, call `get_review`/,
+);
+assert.match(
+  workflowSkill,
+  /When rereview\s+completes, call `get_review` again/,
+);
+assert.match(
+  workflowSkill,
+  /After\s+`submit_resolutions`, call `get_review` again/,
+);
+assert.match(workflowSkill, /persisted disposition from its\s+`resolutions`/);
+assert.match(
+  workflowSkill,
+  /`rereview_decisions` and `findings`/,
+);
 assert.match(
   workflowSkill,
   /Session narration is operator observability only/,
