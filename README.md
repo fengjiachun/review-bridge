@@ -273,6 +273,20 @@ with their author resolutions and rereview decisions. Its deterministic
 reviewer. Exporting does not change the ledger, consume a review round, contact
 another model, or authorize publication.
 
+### Operator narration
+
+The author-side driver narrates local review progress in the session the
+operator is already watching. When a round reports findings, it presents each
+finding's ID, severity, one-line summary, and location. When it submits author
+resolutions, it presents each disposition and what actually changed, including
+the affected files and commit. After rereview, it presents every per-finding
+decision and any new finding. It states why a review reached `HUMAN_REQUIRED`,
+or presents the carried-findings list before continuing from
+`CONTINUABLE_FINDINGS` in a fresh full review.
+
+This narration is observability, not evidence. The review ledger remains the
+sole source of truth; session text never advances or proves review state.
+
 ## Successor reviews
 
 Start a fresh reviewer context for each new `review_id`; a round-two rereview

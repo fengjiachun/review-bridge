@@ -73,15 +73,20 @@ gap returns the ready pull request to draft before any repair.
    This remeasures each newly captured rereview snapshot. If it pauses
    `CHANGE_SIZE_BUDGET_EXCEEDED`, report the new total and headroom; extend the
    budget only after an explicit operator decision, then resume separately.
-   Address findings and record any committed descendant fix head before
-   submitting resolutions. Round two reuses the same reviewer task. A
-   contested `HUMAN_REQUIRED` review pauses the workflow. New uncontested
-   round-two findings enter `ADDRESS_LOCAL_FINDINGS`; address them on a changed
-   committed head and let the next new `FULL` review inspect its carried bare
-   finding descriptions independently. Never add a third model round to the
-   same review ID. If the workflow pauses `LOCAL_CYCLE_BUDGET_EXHAUSTED`, show
-   the complete `local_review_cycles` chain to the operator; only an explicit
-   decision may call `extend_local_cycle_budget`, followed separately by
+   When a round reports findings, narrate every finding in the session with its
+   ID, severity, one-line summary, and location. Address the findings and record
+   any committed descendant fix head before submitting resolutions; narrate
+   each disposition and the files and commit that actually changed. Round two
+   reuses the same reviewer task. When its result arrives, narrate every
+   per-finding decision and any new finding. A contested `HUMAN_REQUIRED`
+   review pauses the workflow; state the escalation and why it needs a human.
+   New uncontested round-two findings enter `ADDRESS_LOCAL_FINDINGS`; present
+   the carried-findings list, address them on a changed committed head, and let
+   the next new `FULL` review inspect its carried bare finding descriptions
+   independently. Never add a third model round to the same review ID. If the
+   workflow pauses `LOCAL_CYCLE_BUDGET_EXHAUSTED`, show the complete
+   `local_review_cycles` chain to the operator; only an explicit decision may
+   call `extend_local_cycle_budget`, followed separately by
    `resume_autonomous_workflow`.
 8. For `PLAN_PUSH`, call `plan_workflow_push`; it verifies the clean
    checked-out HEAD still equals the gated workflow head and binds the
@@ -471,19 +476,28 @@ waiting for its reviewer.
 ## Handle findings
 
 1. Call `get_review_summary` first. If it reports `REVIEW_SUBMITTED`, call
-   `get_review` once to load the full findings and evidence.
+   `get_review` once to load the full findings and evidence. Present every
+   finding in the session with its ID, severity, one-line summary, and location.
 2. Address every open finding. For each finding choose exactly one:
    - `fixed`: change the code and verify the fix.
    - `rejected`: provide concrete technical evidence.
    - `human_required`: stop and request human arbitration.
-3. Call `submit_resolutions` with one entry for every finding.
+3. Before calling `submit_resolutions`, present every disposition and what
+   actually changed, including the affected files and committed head. Then
+   call `submit_resolutions` with one entry for every finding.
 4. If the state is `AUTHOR_RESPONDED`, call `prepare_rereview`.
 5. Record the new summary's `state_version`, report `WAITING_FOR_REREVIEW`,
    resume the same reviewer context, and use `wait_for_review_state` to observe
    the next transition. Treat `timed_out` as an expected in-progress result and
-   continue with the same `state_version` as described above.
+   continue with the same `state_version` as described above. When rereview
+   completes, present every per-finding decision and any new finding. If it
+   reaches `HUMAN_REQUIRED`, state the escalation and why it needs a human. If
+   it reaches `CONTINUABLE_FINDINGS`, present the carried-findings list before
+   starting the fresh full review.
 
 Keep fixes surgical. Do not mark a finding fixed without verification evidence.
+Session narration is operator observability only. Never use it as review
+evidence or as a substitute for reading and mutating the ledger.
 
 ## Lock contention
 

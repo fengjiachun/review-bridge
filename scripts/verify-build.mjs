@@ -372,6 +372,10 @@ const workflowSkillPath = path.join(
 );
 assert.ok(await fsp.stat(workflowSkillPath));
 const workflowSkill = await fsp.readFile(workflowSkillPath, "utf8");
+const packagedReadme = await fsp.readFile(
+  path.join(outputRoot, "README.md"),
+  "utf8",
+);
 assert.match(
   workflowSkill,
   /Resolve it to an\n   immutable commit SHA before creating or committing publication changes/,
@@ -431,6 +435,26 @@ assert.match(workflowSkill, /Choose `reviewer_provider` explicitly/);
 assert.match(workflowSkill, /newly created Codex task/);
 assert.match(workflowSkill, /is not a fork of the\s+author task/);
 assert.match(workflowSkill, /Never call reviewer tools from the author task/);
+assert.match(
+  workflowSkill,
+  /ID, severity, one-line summary, and location/,
+);
+assert.match(
+  workflowSkill,
+  /each disposition and the files and commit that actually changed/,
+);
+assert.match(workflowSkill, /every per-finding decision and any new finding/);
+assert.match(workflowSkill, /state the escalation and why it needs a human/);
+assert.match(workflowSkill, /present the carried-findings list/);
+assert.match(
+  workflowSkill,
+  /Session narration is operator observability only/,
+);
+assert.match(packagedReadme, /### Operator narration/);
+assert.match(
+  packagedReadme,
+  /This narration is observability, not evidence/,
+);
 assert.match(workflowSkill, /For `SUCCESSOR`/);
 assert.match(workflowSkill, /A `timed_out` result is expected/);
 assert.match(
