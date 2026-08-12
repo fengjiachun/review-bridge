@@ -1365,6 +1365,22 @@ test("carried findings are reviewer scope hints without author rationale", async
     }),
     /must preserve the immutable source base/,
   );
+  git(repository, "switch", "-c", "sibling-continuation", baseSha);
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 3;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "unrelated sibling change");
+  await assert.rejects(
+    prepareReview(store, {
+      repositoryPath: repository,
+      baseRef: baseSha,
+      requirement: "Expose a stable value.",
+      implementationScope: "Change app.js.",
+      forceFullReview: true,
+      continuedFromReviewId: source.id,
+    }),
+    /must descend from the source head/,
+  );
+  git(repository, "switch", "main");
   const prepared = await prepareReview(store, {
     repositoryPath: repository,
     baseRef: baseSha,

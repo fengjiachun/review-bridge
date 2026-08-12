@@ -1341,6 +1341,21 @@ export async function prepareReview(
     ) {
       throw new Error("continued review head must change");
     }
+    if (continuedReview != null) {
+      const sourceHead = continuedReview.rounds.at(-1)?.head_sha;
+      const ancestry = spawnSync(
+        "git",
+        ["merge-base", "--is-ancestor", sourceHead, manifest.head_sha],
+        {
+          cwd: manifest.repository_path,
+          encoding: "utf8",
+          env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+        },
+      );
+      if (ancestry.error || ancestry.status !== 0) {
+        throw new Error("continued review head must descend from the source head");
+      }
+    }
     const successorResult = await resolveReviewStrategy({
       storeRoot,
       parentReviewId,
