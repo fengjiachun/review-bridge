@@ -432,7 +432,9 @@ explicitly requests cleanup.
 2. Summarize the user's requirement faithfully.
 3. State the implementation scope, changed behavior, and verification evidence.
 4. If the user intends to publish the change, create a topic branch and commit
-   the intended diff before review. Commit later fixes before rereview. This
+   the intended diff before review. Before each commit, remove comments that
+   do not state a constraint the code cannot express and remove tests that no
+   behavior change can turn red. Commit later fixes before rereview. This
    lets the local gate attest the exact commit that will become the PR head.
 5. Leave `parent_review_id` unset unless you have a specific parent in mind.
    The server then selects one itself, considering only tasks that are already

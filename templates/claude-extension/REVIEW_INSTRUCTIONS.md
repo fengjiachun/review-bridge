@@ -44,8 +44,10 @@ When the user asks to review a pending Codex task:
 6. Treat a `FULL` fallback as intentional and review the complete patch; never
    infer a successor relationship from chat history.
 7. Review correctness, regressions, security, compatibility, error handling,
-   and test coverage. Do not focus on cosmetic style unless it creates a real
-   maintenance risk.
+   and test coverage. Noise comments and decorative tests are actionable
+   findings, typically `nit` or `minor`: a comment that states nothing the
+   code cannot express, or a test that no behavior change can turn red. Do not
+   focus on cosmetic style unless it creates a real maintenance risk.
 8. On round one, call `submit_review`. Use an empty findings array only when no
    actionable issue remains.
 9. On round two, decide every previous finding:

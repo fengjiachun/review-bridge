@@ -489,17 +489,22 @@ test("noise comments and decorative tests are contracted on both ends", async ()
       ),
     ),
   );
+  // Both author paths — autonomous COMMIT_HEAD and the manual Prepare flow —
+  // must carry the obligation, so one occurrence is a silent exemption.
+  const countOf = (text, phrase) => text.split(phrase).length - 1;
   assert.ok(
-    workflowSkill.includes(
+    countOf(
+      workflowSkill,
       "remove comments that do not state a constraint the code cannot express",
-    ),
-    "author cleanup obligation for noise comments is missing",
+    ) >= 2,
+    "noise-comment cleanup must cover both the autonomous and manual author paths",
   );
   assert.ok(
-    workflowSkill.includes(
+    countOf(
+      workflowSkill,
       "remove tests that no behavior change can turn red",
-    ),
-    "author cleanup obligation for decorative tests is missing",
+    ) >= 2,
+    "decorative-test cleanup must cover both the autonomous and manual author paths",
   );
   for (const file of [
     path.join(
@@ -516,6 +521,7 @@ test("noise comments and decorative tests are contracted on both ends", async ()
       "review-bridge-reviewer",
       "SKILL.md",
     ),
+    path.join("templates", "claude-extension", "REVIEW_INSTRUCTIONS.md"),
   ]) {
     const reviewerSkill = flatten(await readRequired(file));
     assert.ok(
