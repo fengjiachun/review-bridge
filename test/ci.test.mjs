@@ -68,3 +68,11 @@ test("release metadata stays aligned with package.json", async () => {
     assert.equal(version, `v${packageJson.version}`);
   }
 });
+
+test("CI serializes test files to bound durable-write pressure", async () => {
+  const workflow = await fsp.readFile(
+    path.join(projectRoot, ".github", "workflows", "ci.yml"),
+    "utf8",
+  );
+  assert.match(workflow, /npm test -- --test-concurrency=1/);
+});
