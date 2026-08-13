@@ -474,6 +474,63 @@ test("Hermes reviewer skill is reviewer-scoped and preserves artifact-reading ru
   assert.match(skill, /next_offset/);
 });
 
+test("noise comments and decorative tests are contracted on both ends", async () => {
+  // Wrap-tolerant: the skills hard-wrap prose, so compare on flattened text
+  // rather than pinning line breaks.
+  const flatten = (text) => text.replace(/\s+/g, " ");
+  const workflowSkill = flatten(
+    await readRequired(
+      path.join(
+        "templates",
+        "codex-plugin",
+        "skills",
+        "review-bridge-workflow",
+        "SKILL.md",
+      ),
+    ),
+  );
+  assert.ok(
+    workflowSkill.includes(
+      "remove comments that do not state a constraint the code cannot express",
+    ),
+    "author cleanup obligation for noise comments is missing",
+  );
+  assert.ok(
+    workflowSkill.includes(
+      "remove tests that no behavior change can turn red",
+    ),
+    "author cleanup obligation for decorative tests is missing",
+  );
+  for (const file of [
+    path.join(
+      "templates",
+      "codex-plugin",
+      "skills",
+      "review-bridge-reviewer",
+      "SKILL.md",
+    ),
+    path.join(
+      "templates",
+      "hermes",
+      "skills",
+      "review-bridge-reviewer",
+      "SKILL.md",
+    ),
+  ]) {
+    const reviewerSkill = flatten(await readRequired(file));
+    assert.ok(
+      reviewerSkill.includes(
+        "Noise comments and decorative tests are actionable findings",
+      ),
+      `${file} does not list noise comments and decorative tests as findings`,
+    );
+    assert.ok(
+      reviewerSkill.includes("a test that no behavior change can turn red"),
+      `${file} does not state the mutation criterion for decorative tests`,
+    );
+  }
+});
+
 test("Codex workflow skill documents manual Hermes provider selection and handoff", async () => {
   const skill = await readRequired(
     path.join(

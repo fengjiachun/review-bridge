@@ -38,9 +38,12 @@ gap returns the ready pull request to draft before any repair.
 3. For `COMMIT_HEAD`, estimate added plus deleted lines before editing. Real
    diffs commonly exceed estimates, so if the change is likely to approach the
    workflow's `change_size_budget`, discuss splitting it before implementation.
-   Then implement only the recorded requirement, test it, commit
-   it without rewriting published history, require a clean worktree, and call
-   `record_workflow_head` with the full `HEAD`.
+   Then implement only the recorded requirement and test it. Before
+   committing, remove comments that do not state a constraint the code cannot
+   express — a comment narrating the diff, the fix process, or addressed
+   review feedback is noise — and remove tests that no behavior change can
+   turn red. Then commit without rewriting published history, require a clean
+   worktree, and call `record_workflow_head` with the full `HEAD`.
 4. For `PREPARE_LOCAL_REVIEW`, call `prepare_review` with the workflow's full
    base SHA, exact requirement and scope, and `CODEX_TASK`. If the latest
    `local_review_cycles` entry has an addressed head but no follow-up review,
