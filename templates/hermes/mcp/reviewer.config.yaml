@@ -2,10 +2,10 @@
 #
 # Merge this snippet's server entry into the reviewer Hermes profile's
 # top-level mcp_servers mapping. Render the placeholder paths within one
-# exact Review Bridge release/build (v0.8.0) before use:
+# exact Review Bridge release/build (v0.8.1) before use:
 #   - __REVIEW_BRIDGE_RELEASE_PATH__ -> absolute path of the versioned
 #     hermes-integration directory, for example
-#     /opt/review-bridge-v0.8.0/hermes-integration
+#     /opt/review-bridge-v0.8.1/hermes-integration
 #   - __REVIEW_BRIDGE_HOME__        -> absolute path of the shared store used
 #     by every Review Bridge participant (same value as the author profile)
 #

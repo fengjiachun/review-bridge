@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.1 - 2026-08-13
+
+### Changed
+
+- Pin the driver-dispatched Hermes reviewer contract to a fresh isolated
+  profile, the `HERMES` provider binding, and the exact reviewer prompt while
+  keeping verification resilient to documentation list renumbering.
+- Require pre-commit cleanup of noise comments, decorative tests, and other
+  review-only residue at every workflow commit path, with packaged contract
+  checks covering both author and reviewer guidance.
+
 ## 0.8.0 - 2026-08-13
 
 ### Added
