@@ -581,9 +581,9 @@ workflow above continues to accept `CODEX_TASK` dispatch only.
 3. Call `submit_resolutions` with one entry for every finding, then call
    `get_review` again. Present every persisted disposition from its
    `resolutions`, including its rationale and evidence.
-4. If the state is `AUTHOR_RESPONDED`, require a new commit — after the
-   pre-commit cleanup — only when at least
-   one resolution is `fixed`, then call `prepare_rereview` and `get_review`
+4. If the state is `AUTHOR_RESPONDED`, require a new commit only when at least
+   one resolution is `fixed` — after the pre-commit cleanup — then call
+   `prepare_rereview` and `get_review`
    again. For fixed resolutions, compare the preceding and latest rounds'
    authoritative `head_sha` values with `git diff --name-only` to derive the
    actual fix files, and present them with the latest `head_sha` as the
