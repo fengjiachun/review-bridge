@@ -22,7 +22,7 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npm test
+      - run: npm test -- --test-concurrency=1
       - run: npm audit --omit=dev
       - run: npm run build
       - run: npm run verify:build
