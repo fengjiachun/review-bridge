@@ -684,7 +684,7 @@ const reviewerSkill = await fsp.readFile(reviewerSkillPath, "utf8");
 assert.match(reviewerSkill, /newly created Codex task/);
 assert.match(reviewerSkill, /must not be a fork of the author task/);
 assert.match(reviewerSkill, /Require `reviewer_provider: CODEX_TASK`/);
-assert.match(reviewerSkill, /Treat every actionable finding as blocking/);
+assert.match(reviewerSkill, /Treat\s+every\s+actionable\s+finding\s+as\s+blocking/);
 
 const extension = await readJson(path.join(reviewerRoot, "manifest.json"));
 assert.equal(extension.manifest_version, "0.3");

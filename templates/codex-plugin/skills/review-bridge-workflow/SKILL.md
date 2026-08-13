@@ -38,9 +38,12 @@ gap returns the ready pull request to draft before any repair.
 3. For `COMMIT_HEAD`, estimate added plus deleted lines before editing. Real
    diffs commonly exceed estimates, so if the change is likely to approach the
    workflow's `change_size_budget`, discuss splitting it before implementation.
-   Then implement only the recorded requirement, test it, commit
-   it without rewriting published history, require a clean worktree, and call
-   `record_workflow_head` with the full `HEAD`.
+   Then implement only the recorded requirement and test it. Before this
+   commit and every later fix commit the workflow records, remove comments
+   that do not state a constraint the code cannot express — a comment narrating the diff, the fix process, or addressed
+   review feedback is noise — and remove tests that no behavior change can
+   turn red. Then commit without rewriting published history, require a clean
+   worktree, and call `record_workflow_head` with the full `HEAD`.
 4. For `PREPARE_LOCAL_REVIEW`, call `prepare_review` with the workflow's full
    base SHA, exact requirement and scope, and `CODEX_TASK`. If the latest
    `local_review_cycles` entry has an addressed head but no follow-up review,
@@ -76,7 +79,8 @@ gap returns the ready pull request to draft before any repair.
    When a round reports findings, call `get_review` and narrate every finding
    from its authoritative `findings` with the ID, severity, one-line summary,
    and location. Address the findings and, when any disposition is `fixed`,
-   record a committed descendant fix head before submitting resolutions. After
+   apply the pre-commit cleanup and record a committed descendant fix head
+   before submitting resolutions. After
    `submit_resolutions`, call `get_review` again and narrate each persisted
    disposition, rationale, and evidence from its `resolutions`. After
    `prepare_rereview` captures the result, call `get_review` again. When any
@@ -97,8 +101,8 @@ gap returns the ready pull request to draft before any repair.
    text.
    New uncontested round-two findings enter `ADDRESS_LOCAL_FINDINGS`; present
    the source ledger's `OPEN` findings, address them on a changed committed
-   head, and let the next new `FULL` review inspect its `carried_findings`
-   independently. Never add a third model round to the
+   head after the same pre-commit cleanup, and let the next new `FULL` review
+   inspect its `carried_findings` independently. Never add a third model round to the
    same review ID. If the
    workflow pauses `LOCAL_CYCLE_BUDGET_EXHAUSTED`, show the complete
    `local_review_cycles` chain to the operator; only an explicit decision may
@@ -250,7 +254,8 @@ gap returns the ready pull request to draft before any repair.
     `ADDRESS_REMOTE_FINDINGS`, a failed required check to
     `ADDRESS_CHECK_FAILURE`, and a strict-policy base gap to
     `UPDATE_FROM_BASE`. All three end the same way: fix only the recorded
-    requirement, verify, commit, and call `record_workflow_head`, which returns
+    requirement, verify, apply the pre-commit cleanup, commit, and call
+    `record_workflow_head`, which returns
     the workflow to `PREPARE_LOCAL_REVIEW` and drops the old publication
     binding. The new head needs a new local review, gate, push, and
     publication; the previous ledger stays on disk as history and can never
@@ -429,7 +434,9 @@ explicitly requests cleanup.
 2. Summarize the user's requirement faithfully.
 3. State the implementation scope, changed behavior, and verification evidence.
 4. If the user intends to publish the change, create a topic branch and commit
-   the intended diff before review. Commit later fixes before rereview. This
+   the intended diff before review. Before each commit, remove comments that
+   do not state a constraint the code cannot express and remove tests that no
+   behavior change can turn red. Commit later fixes before rereview. This
    lets the local gate attest the exact commit that will become the PR head.
 5. Leave `parent_review_id` unset unless you have a specific parent in mind.
    The server then selects one itself, considering only tasks that are already
@@ -575,7 +582,8 @@ workflow above continues to accept `CODEX_TASK` dispatch only.
    `get_review` again. Present every persisted disposition from its
    `resolutions`, including its rationale and evidence.
 4. If the state is `AUTHOR_RESPONDED`, require a new commit only when at least
-   one resolution is `fixed`, then call `prepare_rereview` and `get_review`
+   one resolution is `fixed` — after the pre-commit cleanup — then call
+   `prepare_rereview` and `get_review`
    again. For fixed resolutions, compare the preceding and latest rounds'
    authoritative `head_sha` values with `git diff --name-only` to derive the
    actual fix files, and present them with the latest `head_sha` as the
@@ -649,7 +657,8 @@ Choose exactly one authorization mode before starting publication:
 - `REMOTE_ONLY` is allowed only after the user directly instructs you to skip
   local review for this change. Do not infer it from urgency, a prior
   exception, reviewer unavailability, or a general instruction to continue.
-  Commit and verify the intended diff, push it, open the pull request, freshly
+  Apply the pre-commit cleanup, commit and verify the intended diff, push it,
+  open the pull request, freshly
   read the PR base branch tip and head, fetch both commits, and require local
   HEAD to equal the PR head. Resolve `base_sha` as the exact merge base of that
   fresh base tip and head; do not pass the base branch tip unless it is itself
@@ -755,7 +764,8 @@ For either mode:
    full set; partial approval, silence, retry intent, or earlier permission to
    finish is insufficient. Then refresh the head, post and immediately bind one
    new summary-provided correlated request, and record a new complete snapshot.
-9. If Codex reports an actionable finding, commit and verify the fix. Start a
+9. If Codex reports an actionable finding, apply the pre-commit cleanup, then
+    commit and verify the fix. Start a
     new local Review Bridge task in `LOCAL_GATE` mode or call
     `authorize_remote_publication` again in `REMOTE_ONLY` mode. A new commit
     invalidates this ledger and its prior GitHub Codex result.

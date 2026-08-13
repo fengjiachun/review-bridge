@@ -474,6 +474,83 @@ test("Hermes reviewer skill is reviewer-scoped and preserves artifact-reading ru
   assert.match(skill, /next_offset/);
 });
 
+test("noise comments and decorative tests are contracted on both ends", async () => {
+  // Wrap-tolerant: the skills hard-wrap prose, so compare on flattened text
+  // rather than pinning line breaks.
+  const flatten = (text) => text.replace(/\s+/g, " ");
+  const workflowSkill = flatten(
+    await readRequired(
+      path.join(
+        "templates",
+        "codex-plugin",
+        "skills",
+        "review-bridge-workflow",
+        "SKILL.md",
+      ),
+    ),
+  );
+  // Both author paths — autonomous COMMIT_HEAD and the manual Prepare flow —
+  // must carry the obligation, so one occurrence is a silent exemption.
+  const countOf = (text, phrase) => text.split(phrase).length - 1;
+  assert.ok(
+    countOf(
+      workflowSkill,
+      "remove comments that do not state a constraint the code cannot express",
+    ) >= 2,
+    "noise-comment cleanup must cover both the autonomous and manual author paths",
+  );
+  assert.ok(
+    countOf(
+      workflowSkill,
+      "remove tests that no behavior change can turn red",
+    ) >= 2,
+    "decorative-test cleanup must cover both the autonomous and manual author paths",
+  );
+  assert.ok(
+    workflowSkill.includes("every later fix commit the workflow records"),
+    "the cleanup obligation must scope to fix commits, not only COMMIT_HEAD",
+  );
+  assert.ok(
+    countOf(workflowSkill, "pre-commit cleanup") >= 6,
+    "every commit instruction site must reference the pre-commit cleanup: the step-7 fix head, ADDRESS_LOCAL_FINDINGS, the step-12 repair phases, the manual rereview fix, and both REMOTE_ONLY commit paths",
+  );
+  for (const file of [
+    path.join(
+      "templates",
+      "codex-plugin",
+      "skills",
+      "review-bridge-reviewer",
+      "SKILL.md",
+    ),
+    path.join(
+      "templates",
+      "hermes",
+      "skills",
+      "review-bridge-reviewer",
+      "SKILL.md",
+    ),
+    path.join("templates", "claude-extension", "REVIEW_INSTRUCTIONS.md"),
+  ]) {
+    const reviewerSkill = flatten(await readRequired(file));
+    assert.ok(
+      reviewerSkill.includes(
+        "Noise comments and decorative tests are actionable findings",
+      ),
+      `${file} does not list noise comments and decorative tests as findings`,
+    );
+    assert.ok(
+      reviewerSkill.includes(
+        "a comment that states nothing the code cannot express",
+      ),
+      `${file} does not state the noise-comment criterion`,
+    );
+    assert.ok(
+      reviewerSkill.includes("a test that no behavior change can turn red"),
+      `${file} does not state the mutation criterion for decorative tests`,
+    );
+  }
+});
+
 test("Codex workflow skill documents manual Hermes provider selection and handoff", async () => {
   const skill = await readRequired(
     path.join(
