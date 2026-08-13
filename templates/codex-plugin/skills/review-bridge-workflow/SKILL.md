@@ -38,9 +38,9 @@ gap returns the ready pull request to draft before any repair.
 3. For `COMMIT_HEAD`, estimate added plus deleted lines before editing. Real
    diffs commonly exceed estimates, so if the change is likely to approach the
    workflow's `change_size_budget`, discuss splitting it before implementation.
-   Then implement only the recorded requirement and test it. Before
-   committing, remove comments that do not state a constraint the code cannot
-   express — a comment narrating the diff, the fix process, or addressed
+   Then implement only the recorded requirement and test it. Before this
+   commit and every later fix commit the workflow records, remove comments
+   that do not state a constraint the code cannot express — a comment narrating the diff, the fix process, or addressed
    review feedback is noise — and remove tests that no behavior change can
    turn red. Then commit without rewriting published history, require a clean
    worktree, and call `record_workflow_head` with the full `HEAD`.
@@ -79,7 +79,8 @@ gap returns the ready pull request to draft before any repair.
    When a round reports findings, call `get_review` and narrate every finding
    from its authoritative `findings` with the ID, severity, one-line summary,
    and location. Address the findings and, when any disposition is `fixed`,
-   record a committed descendant fix head before submitting resolutions. After
+   apply the pre-commit cleanup and record a committed descendant fix head
+   before submitting resolutions. After
    `submit_resolutions`, call `get_review` again and narrate each persisted
    disposition, rationale, and evidence from its `resolutions`. After
    `prepare_rereview` captures the result, call `get_review` again. When any
@@ -100,8 +101,8 @@ gap returns the ready pull request to draft before any repair.
    text.
    New uncontested round-two findings enter `ADDRESS_LOCAL_FINDINGS`; present
    the source ledger's `OPEN` findings, address them on a changed committed
-   head, and let the next new `FULL` review inspect its `carried_findings`
-   independently. Never add a third model round to the
+   head after the same pre-commit cleanup, and let the next new `FULL` review
+   inspect its `carried_findings` independently. Never add a third model round to the
    same review ID. If the
    workflow pauses `LOCAL_CYCLE_BUDGET_EXHAUSTED`, show the complete
    `local_review_cycles` chain to the operator; only an explicit decision may
@@ -253,7 +254,8 @@ gap returns the ready pull request to draft before any repair.
     `ADDRESS_REMOTE_FINDINGS`, a failed required check to
     `ADDRESS_CHECK_FAILURE`, and a strict-policy base gap to
     `UPDATE_FROM_BASE`. All three end the same way: fix only the recorded
-    requirement, verify, commit, and call `record_workflow_head`, which returns
+    requirement, verify, apply the pre-commit cleanup, commit, and call
+    `record_workflow_head`, which returns
     the workflow to `PREPARE_LOCAL_REVIEW` and drops the old publication
     binding. The new head needs a new local review, gate, push, and
     publication; the previous ledger stays on disk as history and can never

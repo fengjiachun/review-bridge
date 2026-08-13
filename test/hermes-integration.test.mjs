@@ -506,6 +506,14 @@ test("noise comments and decorative tests are contracted on both ends", async ()
     ) >= 2,
     "decorative-test cleanup must cover both the autonomous and manual author paths",
   );
+  assert.ok(
+    workflowSkill.includes("every later fix commit the workflow records"),
+    "the cleanup obligation must scope to fix commits, not only COMMIT_HEAD",
+  );
+  assert.ok(
+    countOf(workflowSkill, "pre-commit cleanup") >= 3,
+    "every autonomous repair path that records a head must reference the pre-commit cleanup",
+  );
   for (const file of [
     path.join(
       "templates",
