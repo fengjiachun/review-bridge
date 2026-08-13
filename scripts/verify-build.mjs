@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { assertDispatchContract } from "./dispatch-contract.mjs";
 import {
   parseHermesMcpSnippet,
   renderAndValidateHermesServerConfig,
@@ -425,6 +426,11 @@ assert.match(
 assert.match(workflowSkill, /get_review_summary/);
 assert.match(workflowSkill, /wait_for_review_state/);
 assert.match(workflowSkill, /export_human_arbitration/);
+assertDispatchContract(
+  workflowSkill,
+  "## Dispatching a HERMES review",
+  "packaged Codex workflow skill",
+);
 assert.match(
   workflowSkill,
   /Leave `parent_review_id` unset unless you have a specific parent in mind/,
@@ -834,6 +840,11 @@ assert.match(hermesReadme, /upgrade/i);
 assert.match(hermesReadme, /CODEX_TASK/);
 assert.match(hermesReadme, /provenance/i);
 assert.match(hermesReadme, /not cryptographic/i);
+assertDispatchContract(
+  hermesReadme,
+  "## Dispatch a review from the driver session",
+  "packaged Hermes README",
+);
 assert.match(
   hermesReadme,
   /Remote GitHub Codex publication is performed by the author\/publication side/,

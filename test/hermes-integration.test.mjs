@@ -7,6 +7,10 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import * as hermesConfig from "../scripts/hermes-config.mjs";
+import {
+  assertDispatchContract,
+  extractMarkdownSection,
+} from "../scripts/dispatch-contract.mjs";
 
 const { parseHermesMcpSnippet } = hermesConfig;
 
@@ -480,8 +484,10 @@ test("Codex workflow skill documents manual Hermes provider selection and handof
       "SKILL.md",
     ),
   );
+  // Keyed on each step's text rather than its number, so inserting a Prepare
+  // step renumbers the list without reading as a missing section.
   const providerSelection = skill.match(
-    /6\. Choose `reviewer_provider` explicitly:(?<body>[\s\S]*?)\n7\. Call `prepare_review`/,
+    /Choose `reviewer_provider` explicitly:(?<body>[\s\S]*?)\n\d+\. Call `prepare_review`/,
   );
   assert.ok(providerSelection, "manual reviewer provider section is missing");
   assert.match(
@@ -490,12 +496,74 @@ test("Codex workflow skill documents manual Hermes provider selection and handof
   );
 
   const reviewerHandoff = skill.match(
-    /9\. Start a fresh reviewer context(?<body>[\s\S]*?)\n10\. Require/,
+    /Start a fresh reviewer context(?<body>[\s\S]*?)\n\d+\. Require/,
   );
   assert.ok(reviewerHandoff, "manual reviewer handoff section is missing");
   assert.match(
     reviewerHandoff.groups.body,
     /For\s+`HERMES`,[^.]*fresh[^.]*Hermes reviewer (?:conversation|context)[\s\S]*?only the review\s+ID[\s\S]*?packaged\s+reviewer skill/i,
+  );
+});
+
+// The requirements themselves live in scripts/dispatch-contract.mjs, shared
+// with scripts/verify-build.mjs so the release check can never drift weaker
+// than this one. These are the source templates; that script asserts the same
+// contract against the packaged copies.
+const DISPATCH_SECTIONS = [
+  {
+    name: "Codex workflow skill",
+    file: path.join(
+      "templates",
+      "codex-plugin",
+      "skills",
+      "review-bridge-workflow",
+      "SKILL.md",
+    ),
+    heading: "## Dispatching a HERMES review",
+  },
+  {
+    name: "Hermes README",
+    file: path.join("templates", "hermes", "README.md"),
+    heading: "## Dispatch a review from the driver session",
+  },
+];
+
+test("author-side contract pins the driver-dispatched HERMES launch and its discipline", async () => {
+  for (const { name, file, heading } of DISPATCH_SECTIONS) {
+    assertDispatchContract(await readRequired(file), heading, name);
+  }
+});
+
+// Without a forward pointer, a reader working through the manual handoff in
+// order finishes it by asking the operator and never reaches the section that
+// lets the driver session dispatch the reviewer itself. Both surfaces need one.
+test("both author-side surfaces point a linear reader to the dispatch section", async () => {
+  const skill = await readRequired(
+    path.join(
+      "templates",
+      "codex-plugin",
+      "skills",
+      "review-bridge-workflow",
+      "SKILL.md",
+    ),
+  );
+  // Keyed on the step's text, not its number: Prepare is renumbered whenever a
+  // step is inserted, and that must not read as a missing handoff.
+  const reviewerHandoff = skill.match(
+    /Start a fresh reviewer context(?<body>[\s\S]*?)\n\d+\. /,
+  );
+  assert.ok(reviewerHandoff, "manual reviewer handoff section is missing");
+  assert.match(
+    reviewerHandoff.groups.body.replace(/\s+/g, " "),
+    /follow Dispatching a HERMES review below/,
+  );
+
+  const readme = await readRequired(path.join("templates", "hermes", "README.md"));
+  const manualReview = extractMarkdownSection(readme, "## Review");
+  assert.ok(manualReview, "Hermes README is missing its manual Review section");
+  assert.match(
+    manualReview.replace(/\s+/g, " "),
+    /[Ss]ee Dispatch a review from the driver session below/,
   );
 });
 
@@ -627,6 +695,12 @@ test("verify-build validates packaged Hermes artifacts, HERMES binding, isolatio
   assert.match(verify, /mkdtemp/);
   assert.match(verify, /hermesReviewer.*listTools/s);
   assert.match(verify, /hermesAuthor/s);
+  // The packaged copies of the dispatch contract are checked on release
+  // builds; without these calls that check exists only in CI, against the
+  // source templates.
+  assert.match(verify, /from "\.\/dispatch-contract\.mjs"/);
+  assert.match(verify, /assertDispatchContract\(\s*workflowSkill/);
+  assert.match(verify, /assertDispatchContract\(\s*hermesReadme/);
   // Version consistency with the release metadata.
   assert.match(verify, /releaseVersion/);
   assert.match(verify, /package\.json/);
