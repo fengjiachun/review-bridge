@@ -484,8 +484,10 @@ test("Codex workflow skill documents manual Hermes provider selection and handof
       "SKILL.md",
     ),
   );
+  // Keyed on each step's text rather than its number, so inserting a Prepare
+  // step renumbers the list without reading as a missing section.
   const providerSelection = skill.match(
-    /6\. Choose `reviewer_provider` explicitly:(?<body>[\s\S]*?)\n7\. Call `prepare_review`/,
+    /Choose `reviewer_provider` explicitly:(?<body>[\s\S]*?)\n\d+\. Call `prepare_review`/,
   );
   assert.ok(providerSelection, "manual reviewer provider section is missing");
   assert.match(
@@ -494,7 +496,7 @@ test("Codex workflow skill documents manual Hermes provider selection and handof
   );
 
   const reviewerHandoff = skill.match(
-    /9\. Start a fresh reviewer context(?<body>[\s\S]*?)\n10\. Require/,
+    /Start a fresh reviewer context(?<body>[\s\S]*?)\n\d+\. Require/,
   );
   assert.ok(reviewerHandoff, "manual reviewer handoff section is missing");
   assert.match(
