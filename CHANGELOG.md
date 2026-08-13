@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 - 2026-08-13
+
+### Added
 
 - Add an immutable added-plus-deleted line measurement and a default
   2000-line autonomous change-size budget with a non-blocking 75% warning and
@@ -8,6 +10,18 @@
   extensions. Manual review reports the measurement without blocking.
 - Add a default 12-cycle autonomous remote-repair budget that pauses with the
   full attempt chain, plus an audited author tool for explicit extensions.
+- Add Linux storage locking through `flock` while preserving the existing
+  macOS `lockf` behavior and cross-process safety checks.
+- Continue an autonomous local review on a fresh FULL review when round two
+  closes every earlier finding and reports only new, uncontested findings.
+
+### Changed
+
+- Author-facing workflow summaries now narrate persisted review progress,
+  finding resolutions, escalations, and the next required action without
+  treating generated narration as workflow state.
+- CI serializes test files on macOS and Linux to bound concurrent durable-write
+  pressure while retaining the full platform matrix.
 
 ## 0.7.0 - 2026-08-11
 
