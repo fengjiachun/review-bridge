@@ -80,6 +80,79 @@ to `HERMES`. The context must not be a fork of the author task or profile and
 must have no authoring history for the change. A round-two rereview may reuse
 the same reviewer context for that review ID.
 
+## Dispatch a review from the driver session
+
+The driver session authoring the change — a Codex task, or a Hermes instance
+in the author profile — can dispatch this review itself instead of asking the
+operator to start the reviewer by hand. The reviewer isolation the section
+above requires is unchanged; only who performs the launch changes.
+
+1. From the author side, call `prepare_review` with
+   `reviewer_provider: HERMES` against an immutable base SHA and a committed
+   head, and record the returned review ID and `state_version`.
+2. Launch a fresh instance in the reviewer profile from the shell, handing it
+   the reviewer request below as its single query:
+
+   ```bash
+   hermes -p <reviewer-profile> chat -q '<the reviewer request below>'
+   ```
+
+   > Independently review Review Bridge task `<review_id>` using the packaged
+   > Hermes reviewer skill. Require `reviewer_provider: HERMES`, follow the
+   > review strategy, and submit every actionable finding.
+
+   Single-quote that request: it contains backticks, and a double-quoted shell
+   string would execute them instead of passing them through. Pass it as one
+   line with `<review_id>` substituted. Run the launch so it does not block
+   step 3 — background it or use a separate terminal — and capture its stderr,
+   where Hermes prints a `session_id:` line on exit.
+3. Wait for the verdict with `wait_for_review_state` on the recorded
+   `state_version`. Its bounded wait returns `timed_out` while the review is
+   still in progress, which is expected; call it again with the same
+   `state_version`. Unlike the one-shot `-z` mode, `chat -q` does not
+   auto-approve tool prompts, so an unattended launch can stall on one; if the
+   wait keeps timing out, read the launch output before assuming the review is
+   merely slow. When the review is submitted, report every finding in the
+   driver session with its ID, severity, one-line summary, and location, and
+   report each disposition after the author records it — reading both from the
+   review ledger rather than from chat text.
+
+One new instance per review ID. Never resume or continue an existing Hermes
+session for a new review, never launch the author profile to review, and never
+pass any authoring history — the diff, the requirement discussion, the
+author's reasoning, or the driver session's transcript. That request is the
+whole handoff.
+
+Only a round-two rereview of the same review ID may resume the instance that
+produced round one, in the same shape as the launch:
+
+```bash
+hermes -p <reviewer-profile> chat --resume <session-id> -q '<rereview request>'
+```
+
+Send it the same review ID and a request to rereview the author's resolutions
+with the packaged reviewer skill.
+
+Launch it outside the repository under review. Hermes injects project context
+from the working directory — the first of `.hermes.md`, `AGENTS.md`,
+`CLAUDE.md`, or `.cursorrules` that it finds wins, and the first two are
+collected from the git root down rather than from that directory alone — so a
+reviewer started in the authoring worktree inherits whatever rules the
+workspace carries for its author. Pass `--in <directory outside the
+worktree>` when the driver session's shell is inside it, and prefer a
+directory in no repository at all, since one inside another repository
+inherits that repository's rules instead. The reviewer process needs no
+checkout of its own: its tools read the change from the immutable snapshot and
+from the author's repository by recorded path, never from its own working
+directory. Its `SOUL.md`, memory, and skills come from the reviewer profile's
+Hermes home, which `-p` already separates.
+
+This is the operator-present manual flow, and the operator's presence is what
+attests that the reviewer was launched this way. Review Bridge records the
+review's `HERMES` binding; it observes nothing about how the instance was
+started, and this section adds no mechanism that would. Local autonomous task
+creation still accepts `CODEX_TASK` dispatch only.
+
 ## Upgrade
 
 Build the new exact release tag into a new versioned directory and run its full

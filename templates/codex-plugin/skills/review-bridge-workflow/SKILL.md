@@ -6,8 +6,8 @@ description: Use when preparing local code for an isolated reviewer, handling fi
 # Review Bridge workflow
 
 Use the Review Bridge author tools to coordinate a manual, two-round review with
-Claude Desktop or a fresh Codex reviewer task, or an explicitly authorized
-remote-only GitHub publication.
+Claude Desktop, a fresh Codex reviewer task, or a fresh Hermes reviewer
+instance — or an explicitly authorized remote-only GitHub publication.
 
 ## Autonomous workflow
 
@@ -470,8 +470,9 @@ explicitly requests cleanup.
    ID and a request to follow the packaged reviewer skill. For `HERMES`, start
    a fresh, independent Hermes reviewer context in the packaged Hermes reviewer
    profile, and send it only the review ID and a request to follow the packaged
-   reviewer skill. A round-two rereview of the same ID may stay in that reviewer
-   context.
+   reviewer skill; to launch that context from this session's shell, follow
+   Dispatching a HERMES review below. A round-two rereview of the same ID may
+   stay in that reviewer context.
 10. Require the reviewer to follow the returned strategy. For `SUCCESSOR`, it
     must read `successor.json` and all of `successor.diff` and inspect changed
     files plus relevant callers, contracts, and tests; it expands to
@@ -488,6 +489,77 @@ explicitly requests cleanup.
 
 In local-review mode, do not push or open a pull request while the task is
 waiting for its reviewer.
+
+## Dispatching a HERMES review
+
+This driver session can dispatch the `HERMES` reviewer itself rather than
+asking the operator to start it by hand. Nothing else moves: Prepare, Handle
+findings, and Finish still own the review, and this section adds only the
+shell launch between them.
+
+1. Follow Prepare through `get_review_summary`, choosing `HERMES` at its
+   provider step. Record the returned `review_id` and `state_version` and
+   report the summary exactly as Prepare requires.
+2. Launch a fresh Hermes instance in the reviewer profile from the shell,
+   handing it the reviewer request below as its single query:
+
+   ```bash
+   hermes -p <reviewer-profile> chat -q '<the reviewer request below>'
+   ```
+
+   > Independently review Review Bridge task `<review_id>` using the packaged
+   > Hermes reviewer skill. Require `reviewer_provider: HERMES`, follow the
+   > review strategy, and submit every actionable finding.
+
+   Single-quote that request: it contains backticks, and a double-quoted
+   shell string would execute them instead of passing them through. Pass it as
+   one line with `<review_id>` substituted. Run the launch so it does not
+   block step 3 — background it or use a separate terminal — and capture its
+   stderr, where Hermes prints a `session_id:` line on exit.
+3. Wait with `wait_for_review_state` on the recorded `state_version`, treating
+   `timed_out` as the expected in-progress result described in Prepare. Unlike
+   the one-shot `-z` mode, `chat -q` does not auto-approve tool prompts, so an
+   unattended launch can stall on one; if the wait keeps timing out, read the
+   launch output before assuming the review is merely slow. When the state
+   changes, hand the review to Handle findings, which owns narrating every
+   finding from the ledger and, after `submit_resolutions`, every persisted
+   disposition.
+
+The launch discipline is fixed. One new instance per `review_id`: never resume
+or continue an existing Hermes session for a new review, never launch the
+author profile to review, and never pass any authoring history — not the diff
+you wrote, the requirement discussion, your reasoning, or this session's
+transcript. That request is the whole handoff.
+
+Only a round-two rereview of the same `review_id` may resume the instance that
+produced round one, in the same shape as the launch:
+
+```bash
+hermes -p <reviewer-profile> chat --resume <session-id> -q '<rereview request>'
+```
+
+Send it the same review ID and a request to rereview the author's resolutions
+with the packaged reviewer skill.
+
+Launch it outside the repository under review. Hermes injects project context
+from the working directory — the first of `.hermes.md`, `AGENTS.md`,
+`CLAUDE.md`, or `.cursorrules` that it finds wins, and the first two are
+collected from the git root down rather than from that directory alone — so a
+reviewer started in the authoring worktree inherits whatever rules the
+workspace carries for its author. Pass `--in <directory outside the
+worktree>` when this session's shell is inside it, and prefer a directory in
+no repository at all, since one inside another repository inherits that
+repository's rules instead. The reviewer process needs no checkout of its own:
+its tools read the change from the immutable snapshot and from the author's
+repository by recorded path, never from its own working directory. Its
+`SOUL.md`, memory, and skills come from the reviewer profile's Hermes home,
+which `-p` already separates.
+
+This is the operator-present manual flow, and the operator's presence is what
+attests that the reviewer was launched this way. Review Bridge records the
+review's `HERMES` binding; it observes nothing about how the instance was
+started, and this section adds no mechanism that would. The autonomous
+workflow above continues to accept `CODEX_TASK` dispatch only.
 
 ## Handle findings
 
