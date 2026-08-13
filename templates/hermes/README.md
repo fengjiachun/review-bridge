@@ -78,7 +78,9 @@ In the reviewer profile, start a fresh, independent Hermes context and ask it
 to follow the packaged reviewer skill for the pending Review Bridge task bound
 to `HERMES`. The context must not be a fork of the author task or profile and
 must have no authoring history for the change. A round-two rereview may reuse
-the same reviewer context for that review ID.
+the same reviewer context for that review ID. To have the driver session start
+that context from the shell instead of starting it yourself, see Dispatch a
+review from the driver session below.
 
 ## Dispatch a review from the driver session
 
