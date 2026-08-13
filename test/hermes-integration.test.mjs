@@ -531,6 +531,12 @@ test("noise comments and decorative tests are contracted on both ends", async ()
       `${file} does not list noise comments and decorative tests as findings`,
     );
     assert.ok(
+      reviewerSkill.includes(
+        "a comment that states nothing the code cannot express",
+      ),
+      `${file} does not state the noise-comment criterion`,
+    );
+    assert.ok(
       reviewerSkill.includes("a test that no behavior change can turn red"),
       `${file} does not state the mutation criterion for decorative tests`,
     );
