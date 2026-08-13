@@ -511,8 +511,8 @@ test("noise comments and decorative tests are contracted on both ends", async ()
     "the cleanup obligation must scope to fix commits, not only COMMIT_HEAD",
   );
   assert.ok(
-    countOf(workflowSkill, "pre-commit cleanup") >= 3,
-    "every autonomous repair path that records a head must reference the pre-commit cleanup",
+    countOf(workflowSkill, "pre-commit cleanup") >= 6,
+    "every commit instruction site must reference the pre-commit cleanup: the step-7 fix head, ADDRESS_LOCAL_FINDINGS, the step-12 repair phases, the manual rereview fix, and both REMOTE_ONLY commit paths",
   );
   for (const file of [
     path.join(
