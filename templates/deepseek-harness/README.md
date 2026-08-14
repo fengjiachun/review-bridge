@@ -97,7 +97,14 @@ dsh --profile <reviewer-profile> --dump-config
 
 Require exactly one `@deepseek-ai/dsh-mcp-client` entry, whose `args` carry
 `--role reviewer --reviewer-provider DEEPSEEK_HARNESS`, and no second Review
-Bridge server. Then confirm the model-facing surface is exactly:
+Bridge server. The composed tree does not list tool names, so confirm those
+with a one-shot run from a directory outside any repository under review:
+
+```bash
+dsh --profile <reviewer-profile> 'List every tool available to you whose name begins with mcp__. Print only those names, one per line, and call no tool.'
+```
+
+Require exactly:
 
 ```text
 mcp__review-bridge-reviewer__list_pending_reviews

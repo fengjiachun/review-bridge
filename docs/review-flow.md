@@ -56,9 +56,9 @@ means `CLEAN`.
 The autonomous workflow always dispatches this review to a brand-new **Codex
 task**, reconciled by a correlation marker. On the manual path you choose the
 reviewer — a fresh Claude Desktop conversation, a new Codex task, or an
-isolated Hermes profile — and a manual snapshot may also capture uncommitted
-working-tree state; the workflow never has any, since step 1 required a clean
-tree.
+isolated Hermes or DeepSeek Harness profile — and a manual snapshot may also
+capture uncommitted working-tree state; the workflow never has any, since step
+1 required a clean tree.
 
 Before dispatch, the immutable patch is measured as added plus deleted lines.
 At 75% of the current budget, the driver reports the total and remaining
@@ -213,7 +213,7 @@ from it.
 
 **Templates are packaging, not the capability boundary.** The repository
 ships install templates for a Codex plugin, a Claude Desktop reviewer
-extension, and Hermes profiles. The author side is the same server started
+extension, and Hermes and DeepSeek Harness profiles. The author side is the same server started
 with `--role author`, and any MCP client — Claude Code included — can drive
 it; a small script importing the modules directly works too.
 
@@ -221,7 +221,7 @@ it; a small script importing the modules directly works too.
 
 ## What works today, and what is still open
 
-Everything above is implemented and tested: local review with three isolated
+Everything above is implemented and tested: local review with four isolated
 reviewer providers, publication with baseline and atomic observations, the
 thread reply-and-resolve loop, mark-ready, return-to-draft, and the terminal
 record.
