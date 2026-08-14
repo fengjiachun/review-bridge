@@ -294,9 +294,12 @@ fresh session that has no authoring history for the change:
 > Review Bridge reviewer skill. Require `reviewer_provider: DEEPSEEK_HARNESS`,
 > follow the review strategy, and submit every actionable finding.
 
-Configured Hermes MCP tools are profile-scoped and auto-injected, so this
-reviewer context is independent only when its profile contains the
-reviewer-only MCP server and no Review Bridge author/publication server.
+Either profile-based reviewer is independent only when its profile contains the
+reviewer-only MCP server and no Review Bridge author/publication server:
+configured Hermes MCP tools are profile-scoped and auto-injected, and a
+DeepSeek Harness profile registers the tools of every MCP server it configures.
+A DeepSeek Harness reviewer profile must also scope its skill and
+workspace-instruction roots, which the packaged snippet does.
 
 If the reviewer submitted no findings, the review is already `CLEAN` and its
 next action is `FINALIZE_LOCAL_GATE`; there is nothing to answer and
@@ -306,7 +309,11 @@ Otherwise, back in Codex:
 
 > Read the reviewer's findings, address each one, and prepare round two.
 
-Resume the same reviewer context for round two. The final state is one of:
+Resume the same reviewer context for round two where the provider allows it. A
+`DEEPSEEK_HARNESS` reviewer cannot: every headless run starts a fresh session,
+so launch a new one with the same review ID and a request to rereview the
+author's resolutions. It rebuilds the round from `open_review`, which serves
+every round-one finding and every author resolution. The final state is one of:
 
 - `LOCAL_GATE_PASSED`: the reviewer found no remaining issue and the working tree
   still matches the reviewed snapshot. The gate attests snapshot consistency,
