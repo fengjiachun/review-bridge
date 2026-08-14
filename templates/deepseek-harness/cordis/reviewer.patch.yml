@@ -29,9 +29,15 @@
 # Project AGENTS.md and CLAUDE.md files are still read from the launch
 # directory up to the project root, which is why the reviewer is launched
 # outside the repository under review.
+#
+# A patch replaces the whole `config` key rather than merging into it, so this
+# entry must restate every value the base layer set. `maxBytes` is required and
+# has no default; 65536 is the base layer's prompt budget, and this profile only
+# repeats it rather than choosing differently.
 - id: agent-instructions
   config:
     dshHome: __REVIEW_BRIDGE_RELEASE_PATH__
+    maxBytes: 65536
 
 - insert:
     - id: mcp-review-bridge-reviewer

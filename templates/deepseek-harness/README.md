@@ -50,18 +50,16 @@ is why they are part of the snippet rather than install prose.
 1. Check out the exact `v0.8.1` tag, run `npm ci`, `npm test`, `npm run build`,
    and `npm run verify:build`. Keep the resulting
    `dist/review-bridge-v0.8.1/deepseek-harness` directory in place.
-2. Create dedicated author and reviewer profiles. Both must list the headless
-   bundle, because the driver-dispatched launch below is a one-shot headless
-   run:
-
-   ```bash
-   dsh plugin --profile <reviewer-profile> install
-   ```
-
-   Then set that profile's `package.json` `dsh.profile.bundles` to
-   `["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"]`. Do not copy an
-   existing profile directory after installing either Review Bridge entry,
-   because that would carry the opposite role's server into the new profile.
+2. Create dedicated author and reviewer profile directories under
+   `$DSH_HOME/profiles/<name>`. Each needs a `package.json` whose
+   `dsh.profile.bundles` is
+   `["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"]`, an empty
+   `cordis.patch.yml` holding `[]`, and the `pnpm-workspace.yaml` a profile
+   ships with. The headless bundle is what makes the driver-dispatched launch
+   below a one-shot run; a profile without it boots whatever surface its
+   bundles do select and never reads the task. Do not copy an existing profile
+   directory after installing either Review Bridge entry, because that would
+   carry the opposite role's server into the new profile.
 3. Render both snippets before installing them:
    - `__REVIEW_BRIDGE_RELEASE_PATH__` → the absolute path of the versioned
      `deepseek-harness` directory, ending in

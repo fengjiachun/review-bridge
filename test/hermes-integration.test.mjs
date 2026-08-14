@@ -78,7 +78,7 @@ async function listSourceToolNames(role, store) {
   }
 }
 
-test("Hermes MCP snippet parser preserves scalar types and quoted hashes", () => {
+test("MCP snippet parser preserves scalar types and quoted hashes", () => {
   const parsed = parseMcpSnippet(`
 config:
   enabled: true
@@ -117,7 +117,7 @@ for (const [name, yaml] of [
   ["mixed mapping and list", "root:\n  values:\n    key: value\n    - one\n"],
   ["unconsumed root mapping", "- one\nkey: value\n"],
 ]) {
-  test(`Hermes MCP snippet parser rejects ${name}`, () => {
+  test(`MCP snippet parser rejects ${name}`, () => {
     assert.throws(() => parseMcpSnippet(yaml));
   });
 }
@@ -144,12 +144,60 @@ for (const [name, value] of [
   ["document end", "..."],
   ["null scalar", "null"],
 ]) {
-  test(`Hermes MCP snippet parser rejects unsupported ${name} syntax`, () => {
+  test(`MCP snippet parser rejects unsupported ${name} syntax`, () => {
     assert.throws(() => parseMcpSnippet(`value: ${value}\n`));
   });
 }
 
-test("Hermes MCP snippet parser rejects duplicate keys at every level", () => {
+test("MCP snippet parser reads mappings nested in block sequences", () => {
+  // The cordis patch shape the DeepSeek Harness snippets use: an entry array
+  // whose items are mappings, one of which nests another such array.
+  assert.deepEqual(
+    parseMcpSnippet(`
+- id: first
+  config:
+    flag: true
+- insert:
+    - id: second
+      name: '@scope/plugin'
+      config:
+        args:
+          - --role
+          - reviewer
+`),
+    [
+      { id: "first", config: { flag: true } },
+      {
+        insert: [
+          {
+            id: "second",
+            name: "@scope/plugin",
+            config: { args: ["--role", "reviewer"] },
+          },
+        ],
+      },
+    ],
+  );
+});
+
+for (const [name, yaml] of [
+  // A dash item is a mapping only when its first key is followed by a space or
+  // ends the line; these near-misses must stay scalars and be rejected as
+  // before rather than parsed as one-key mappings.
+  ["colon without a space", "- id:value\n"],
+  ["a second mapping value on the dash line", "- id: first: second\n"],
+  ["a mapping item over-indented from its dash", "- id: first\n    name: second\n"],
+]) {
+  test(`MCP snippet parser rejects ${name} in a block sequence`, () => {
+    assert.throws(() => parseMcpSnippet(yaml));
+  });
+}
+
+test("MCP snippet parser keeps a quoted scalar that looks like a mapping", () => {
+  assert.deepEqual(parseMcpSnippet(`- "id: value"\n`), ["id: value"]);
+});
+
+test("MCP snippet parser rejects duplicate keys at every level", () => {
   for (const yaml of [
     "value: one\nvalue: two\n",
     "root:\n  value: one\n  value: two\n",
@@ -694,6 +742,9 @@ test("Hermes install and release artifacts use the 0.8.1 release identity", asyn
     hermesReadme,
     hermesAuthorConfig,
     hermesReviewerConfig,
+    deepseekReadme,
+    deepseekAuthorPatch,
+    deepseekReviewerPatch,
     changelog,
   ] = await Promise.all([
     readRequired("package.json"),
@@ -709,6 +760,13 @@ test("Hermes install and release artifacts use the 0.8.1 release identity", asyn
     readRequired(path.join("templates", "hermes", "README.md")),
     readRequired(path.join("templates", "hermes", "mcp", "author.config.yaml")),
     readRequired(path.join("templates", "hermes", "mcp", "reviewer.config.yaml")),
+    readRequired(path.join("templates", "deepseek-harness", "README.md")),
+    readRequired(
+      path.join("templates", "deepseek-harness", "cordis", "author.patch.yml"),
+    ),
+    readRequired(
+      path.join("templates", "deepseek-harness", "cordis", "reviewer.patch.yml"),
+    ),
     readRequired("CHANGELOG.md"),
   ]);
 
@@ -732,6 +790,9 @@ test("Hermes install and release artifacts use the 0.8.1 release identity", asyn
     hermesReadme,
     hermesAuthorConfig,
     hermesReviewerConfig,
+    deepseekReadme,
+    deepseekAuthorPatch,
+    deepseekReviewerPatch,
   ]) {
     assert.doesNotMatch(currentReleaseText, /v0\.5\.0|0\.5\.0/);
   }
@@ -742,6 +803,12 @@ test("Hermes install and release artifacts use the 0.8.1 release identity", asyn
   assert.match(hermesReadme, /v0\.8\.1/);
   assert.match(hermesAuthorConfig, /v0\.8\.1/);
   assert.match(hermesReviewerConfig, /v0\.8\.1/);
+  assert.match(deepseekReadme, /exact `v0\.8\.1` tag/);
+  assert.match(deepseekAuthorPatch, /v0\.8\.1/);
+  assert.match(deepseekReviewerPatch, /v0\.8\.1/);
+  // The DeepSeek Harness plugin API is a developer preview, so the pinned
+  // runtime release belongs to this identity too.
+  assert.match(deepseekReadme, /@deepseek-ai\/dsh@0\.1\.0-rc\.6/);
 
   const currentChangelog = changelog.match(
     /^## 0\.8\.1[^\n]*\n(?<body>[\s\S]*?)(?=^## )/m,
@@ -876,6 +943,70 @@ async function readDeepseekSnippet(role) {
   );
 }
 
+test("DeepSeek Harness client validation rejects the ways a snippet can go wrong", () => {
+  const releasePath = path.join(path.sep, "opt", "deepseek-harness");
+  const reviewBridgeHome = path.join(path.sep, "var", "lib", "review-bridge");
+  const entry = {
+    id: "mcp-review-bridge-reviewer",
+    name: "@deepseek-ai/dsh-mcp-client",
+    config: {
+      serverName: "review-bridge-reviewer",
+      transport: "stdio",
+      command: "node",
+      args: [`${RELEASE_PATH_PLACEHOLDER}/server/server.mjs`],
+      env: { REVIEW_BRIDGE_HOME: STORE_PLACEHOLDER },
+      failOnStartupError: true,
+    },
+  };
+  const rendered = mcpSnippets.renderAndValidateDeepSeekHarnessClient(entry, {
+    releasePath,
+    reviewBridgeHome,
+  });
+  assert.equal(
+    rendered.config.args[0],
+    path.join(releasePath, "server", "server.mjs"),
+  );
+  assert.equal(rendered.config.env.REVIEW_BRIDGE_HOME, reviewBridgeHome);
+
+  const reject = (config, pattern) =>
+    assert.throws(
+      () =>
+        mcpSnippets.renderAndValidateDeepSeekHarnessClient(
+          { ...entry, config: { ...entry.config, ...config } },
+          { releasePath, reviewBridgeHome },
+        ),
+      pattern,
+    );
+  reject({ transport: "streamable-http" }, /stdio/i);
+  // A network transport would take the reviewer off this machine even with the
+  // stdio keys still present.
+  reject({ url: "https://example.invalid/mcp" }, /cannot set url/i);
+  reject({ headers: { Authorization: "token" } }, /cannot set headers/i);
+  reject({ command: "sh" }, /must be node/i);
+  reject({ args: ["server/server.mjs"] }, /absolute release path/i);
+  reject({ env: { REVIEW_BRIDGE_HOME: "relative-store" } }, /REVIEW_BRIDGE_HOME/i);
+  reject({ failOnStartupError: false }, /fail on startup error/i);
+  reject({ serverName: "" }, /serverName/i);
+  reject({ command: "__UNKNOWN_PLACEHOLDER__" }, /placeholder/i);
+  assert.throws(
+    () =>
+      mcpSnippets.renderAndValidateDeepSeekHarnessClient(entry, {
+        releasePath: "relative-release",
+        reviewBridgeHome,
+      }),
+    /absolute/i,
+  );
+
+  // A snippet that inserts a second client is how the opposite role's server
+  // would reach a profile, so the extractor refuses to pick one of them.
+  assert.throws(() => deepSeekHarnessClientEntry({}), /entry array/i);
+  assert.throws(() => deepSeekHarnessClientEntry([]), /found 0/);
+  assert.throws(
+    () => deepSeekHarnessClientEntry([{ insert: [entry, entry] }]),
+    /found 2/,
+  );
+});
+
 test("DeepSeek Harness reviewer snippet binds DEEPSEEK_HARNESS with an exact release path", async (t) => {
   const store = await fsp.mkdtemp(
     path.join(os.tmpdir(), "review-bridge-deepseek-template-"),
@@ -924,6 +1055,11 @@ test("DeepSeek Harness reviewer snippet closes the two host-level scopes", async
   const instructions = entries.find((entry) => entry.id === "agent-instructions");
   assert.ok(instructions, "reviewer snippet does not scope workspace instructions");
   assert.equal(instructions.config.dshHome, RELEASE_PATH_PLACEHOLDER);
+  // A patch replaces `config` wholesale rather than merging into it, so this
+  // entry has to restate the required prompt budget the base layer set. A
+  // dropped key does not fail here or at release; it fails when an operator
+  // first boots the profile.
+  assert.equal(typeof instructions.config.maxBytes, "number");
   // Pointing that scope at the release directory is only sound while the
   // template ships no instruction file of its own for it to pick up.
   await assert.rejects(fsp.stat(path.join(deepseekTemplates, "AGENTS.md")));

@@ -932,6 +932,9 @@ const deepseekInstructionPatch = parsedDeepseekReviewer.find(
   (entry) => entry.id === "agent-instructions",
 );
 assert.equal(deepseekInstructionPatch.config.dshHome, releasePathPlaceholder);
+// A patch replaces `config` wholesale, so a restated entry that drops a
+// required key fails at the operator's first launch rather than here.
+assert.equal(typeof deepseekInstructionPatch.config.maxBytes, "number");
 // That patch is only sound while this directory carries no user-global
 // instruction file for the reviewer to inherit.
 await assert.rejects(fsp.stat(path.join(deepseekHarness, "AGENTS.md")));
