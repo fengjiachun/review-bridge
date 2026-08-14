@@ -51,15 +51,17 @@ is why they are part of the snippet rather than install prose.
    and `npm run verify:build`. Keep the resulting
    `dist/review-bridge-v0.8.1/deepseek-harness` directory in place.
 2. Create dedicated author and reviewer profile directories under
-   `$DSH_HOME/profiles/<name>`. Each needs a `package.json` whose
-   `dsh.profile.bundles` is
-   `["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"]`, an empty
-   `cordis.patch.yml` holding `[]`, and the `pnpm-workspace.yaml` a profile
-   ships with. The headless bundle is what makes the driver-dispatched launch
-   below a one-shot run; a profile without it boots whatever surface its
-   bundles do select and never reads the task. Do not copy an existing profile
-   directory after installing either Review Bridge entry, because that would
-   carry the opposite role's server into the new profile.
+   `$DSH_HOME/profiles/<name>`. Each needs a `package.json` carrying a
+   `dsh.profile.bundles` list, an empty `cordis.patch.yml` holding `[]`, and
+   the `pnpm-workspace.yaml` a profile ships with. The reviewer profile's
+   bundles must be `["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"]`:
+   the headless bundle is what makes the driver-dispatched launch below a
+   one-shot run, and a profile without it boots whatever surface its bundles
+   do select and never reads the task. The author profile takes whichever
+   surface you author in and needs no particular bundle from Review Bridge. Do
+   not copy an existing profile directory after installing either Review
+   Bridge entry, because that would carry the opposite role's server into the
+   new profile.
 3. Render both snippets before installing them:
    - `__REVIEW_BRIDGE_RELEASE_PATH__` → the absolute path of the versioned
      `deepseek-harness` directory, ending in
@@ -74,10 +76,11 @@ is why they are part of the snippet rather than install prose.
 5. Append the rendered entry from `cordis/author.patch.yml` to the author
    profile's `cordis.patch.yml`. It starts the server with only `--role
    author`.
-6. Copy the entire `skills/review-bridge-reviewer` directory into this
-   directory's `skills` root if you relocated it; the reviewer snippet points
-   `customSkillDirs` at that path. Do not edit or replace a DeepSeek
-   Harness-bundled skill.
+6. Leave `skills/review-bridge-reviewer` where it is. Unlike the Hermes
+   integration, nothing is copied into the profile: the rendered reviewer
+   snippet points `customSkillDirs` at this directory's `skills` root, so the
+   reviewer loads the skill from the same versioned directory it runs the
+   server from. Do not edit it or replace a DeepSeek Harness-bundled skill.
 
 The rendered server path and shared store must be absolute; do not replace the
 placeholders with relative paths, shell interpolation, a floating `main`
