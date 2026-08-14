@@ -16,6 +16,7 @@ export const REVIEWER_PROVIDERS = Object.freeze([
   "CLAUDE_DESKTOP",
   "CODEX_TASK",
   "HERMES",
+  "DEEPSEEK_HARNESS",
 ]);
 const MAX_GIT_OUTPUT = 64 * 1024 * 1024;
 const MAX_OVERLAY_BYTES = 10 * 1024 * 1024;
@@ -55,7 +56,7 @@ function assertReviewId(reviewId) {
 function assertReviewerProvider(value) {
   if (!REVIEWER_PROVIDERS.includes(value)) {
     throw new Error(
-      "reviewer_provider must be CLAUDE_DESKTOP, CODEX_TASK, or HERMES",
+      `reviewer_provider must be one of ${REVIEWER_PROVIDERS.join(", ")}`,
     );
   }
   return value;

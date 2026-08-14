@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { REVIEWER_PROVIDERS } from "../src/core.mjs";
 
 const serverPath = path.resolve("src/server.mjs");
 
@@ -132,7 +133,7 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
     assert.ok(prepare.inputSchema.properties.parent_review_id);
     assert.deepEqual(
       prepare.inputSchema.properties.reviewer_provider.enum,
-      ["CLAUDE_DESKTOP", "CODEX_TASK", "HERMES"],
+      ["CLAUDE_DESKTOP", "CODEX_TASK", "HERMES", "DEEPSEEK_HARNESS"],
     );
     assert.ok(prepare.inputSchema.required.includes("reviewer_provider"));
 
@@ -334,20 +335,12 @@ test("reviewer processes list only tasks bound to their provider", async (t) => 
   const store = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-mcp-"));
   t.after(() => fsp.rm(store, { recursive: true, force: true }));
   const reviewsRoot = path.join(store, "reviews");
-  const tasks = [
-    {
-      id: "rb-2026-07-26T000000-000Z-c0dec0de",
-      reviewer_provider: "CODEX_TASK",
-    },
-    {
-      id: "rb-2026-07-26T000000-000Z-c1a0de01",
-      reviewer_provider: "CLAUDE_DESKTOP",
-    },
-    {
-      id: "rb-2026-07-26T000000-000Z-c2a0de02",
-      reviewer_provider: "HERMES",
-    },
-  ];
+  // One waiting review per provider, so the matrix widens with the enum
+  // instead of leaving a new provider silently uncovered.
+  const tasks = REVIEWER_PROVIDERS.map((reviewer_provider, index) => ({
+    id: `rb-2026-07-26T000000-000Z-c${index}a0de0${index}`,
+    reviewer_provider,
+  }));
   for (const task of tasks) {
     const reviewRoot = path.join(reviewsRoot, task.id);
     await fsp.mkdir(reviewRoot, { recursive: true, mode: 0o700 });
@@ -362,40 +355,24 @@ test("reviewer processes list only tasks bound to their provider", async (t) => 
     );
   }
 
-  const codex = await connectClient("reviewer", store, "CODEX_TASK");
-  const claude = await connectClient(
-    "reviewer",
-    store,
-    "CLAUDE_DESKTOP",
+  const clients = await Promise.all(
+    tasks.map((task) =>
+      connectClient("reviewer", store, task.reviewer_provider),
+    ),
   );
-  const hermes = await connectClient("reviewer", store, "HERMES");
   try {
-    const codexPending = await codex.callTool({
-      name: "list_pending_reviews",
-      arguments: {},
-    });
-    const claudePending = await claude.callTool({
-      name: "list_pending_reviews",
-      arguments: {},
-    });
-    const hermesPending = await hermes.callTool({
-      name: "list_pending_reviews",
-      arguments: {},
-    });
-    assert.deepEqual(
-      JSON.parse(codexPending.content[0].text).map((review) => review.id),
-      [tasks[0].id],
-    );
-    assert.deepEqual(
-      JSON.parse(claudePending.content[0].text).map((review) => review.id),
-      [tasks[1].id],
-    );
-    assert.deepEqual(
-      JSON.parse(hermesPending.content[0].text).map((review) => review.id),
-      [tasks[2].id],
-    );
+    for (const [index, client] of clients.entries()) {
+      const pending = await client.callTool({
+        name: "list_pending_reviews",
+        arguments: {},
+      });
+      assert.deepEqual(
+        JSON.parse(pending.content[0].text).map((review) => review.id),
+        [tasks[index].id],
+      );
+    }
   } finally {
-    await Promise.all([codex.close(), claude.close(), hermes.close()]);
+    await Promise.all(clients.map((client) => client.close()));
   }
 });
 
@@ -411,7 +388,10 @@ test("reviewer CLI diagnostics enumerate all three reviewer providers", async (t
     },
   );
   assert.equal(spawn.status, 2);
-  assert.match(spawn.stderr, /CLAUDE_DESKTOP\|CODEX_TASK\|HERMES/);
+  assert.match(
+    spawn.stderr,
+    /CLAUDE_DESKTOP\|CODEX_TASK\|HERMES\|DEEPSEEK_HARNESS/,
+  );
 });
 
 test("MCP errors preserve StoreError code and retryability details", async (t) => {

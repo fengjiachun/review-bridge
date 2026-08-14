@@ -1,0 +1,59 @@
+# Review Bridge DeepSeek Harness reviewer profile patch snippet.
+#
+# Merge these entries into the reviewer profile's `cordis.patch.yml`, which is
+# a top-level YAML array of loader patch entries. Render the placeholder path
+# within one exact Review Bridge release/build (v0.8.1) before use:
+#   - __REVIEW_BRIDGE_RELEASE_PATH__ -> absolute path of the versioned
+#     deepseek-harness directory, for example
+#     /opt/review-bridge-v0.8.1/deepseek-harness
+#   - __REVIEW_BRIDGE_HOME__        -> absolute path of the shared store used
+#     by every Review Bridge participant (same value as the author profile)
+#
+# The reviewer profile must never receive the author/publication server.
+
+# Skill roots are host-level in DeepSeek Harness, not profile-level: the
+# default set reaches <projectRoot>/.dsh/skills, <projectRoot>/.agents/skills,
+# $DSH_HOME/skills, and $DSH_AGENTS_HOME/skills, so a reviewer would otherwise
+# inherit every unrelated skill installed on the machine. Restrict the provider
+# to the packaged Review Bridge reviewer skill alone.
+- id: skill-filesystem
+  config:
+    includeDefaultRoots: false
+    customSkillDirs:
+      - __REVIEW_BRIDGE_RELEASE_PATH__/skills
+
+# The workspace-instruction loader reads one user-global $DSH_HOME/AGENTS.md
+# that every profile on the machine shares, the author profile included.
+# Pointing its home at the packaged release directory empties that scope: the
+# build packages no AGENTS.md there and the release check keeps it that way.
+# Project AGENTS.md and CLAUDE.md files are still read from the launch
+# directory up to the project root, which is why the reviewer is launched
+# outside the repository under review.
+#
+# A patch replaces the whole `config` key rather than merging into it, so this
+# entry must restate every value the base layer set. `maxBytes` is required and
+# has no default; 65536 is the base layer's prompt budget, and this profile only
+# repeats it rather than choosing differently.
+- id: agent-instructions
+  config:
+    dshHome: __REVIEW_BRIDGE_RELEASE_PATH__
+    maxBytes: 65536
+
+- insert:
+    - id: mcp-review-bridge-reviewer
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: review-bridge-reviewer
+        transport: stdio
+        command: node
+        args:
+          - __REVIEW_BRIDGE_RELEASE_PATH__/server/server.mjs
+          - --role
+          - reviewer
+          - --reviewer-provider
+          - DEEPSEEK_HARNESS
+        env:
+          REVIEW_BRIDGE_HOME: __REVIEW_BRIDGE_HOME__
+        # A reviewer with no tools would otherwise start and improvise; the
+        # default is to activate with none when the server fails to connect.
+        failOnStartupError: true

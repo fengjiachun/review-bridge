@@ -18,6 +18,7 @@ import {
   prepareReview,
   readReviewArtifact,
   readSnapshotFile,
+  REVIEWER_PROVIDERS,
   searchSnapshot,
   submitInitialReview,
   submitRereview,
@@ -257,7 +258,7 @@ test("review preparation rejects unknown reviewer providers", async (t) => {
       implementationScope: "Reject unsupported providers.",
       reviewerProvider: "OTHER",
     }),
-    /reviewer_provider must be CLAUDE_DESKTOP, CODEX_TASK, or HERMES/,
+    /reviewer_provider must be one of CLAUDE_DESKTOP, CODEX_TASK, HERMES, DEEPSEEK_HARNESS/,
   );
 });
 
@@ -349,6 +350,71 @@ test("HERMES reviews bind one reviewer provider through the local gate", async (
   await submitInitialReview(store, prepared.id, [], "HERMES");
   const finalized = await finalizeLocalGate(store, prepared.id);
   assert.equal(finalized.gate.reviewer_provider, "HERMES");
+});
+
+test("DEEPSEEK_HARNESS reviews reject every other bound provider", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "export function divide(a, b) {\n  if (b === 0) return null;\n  return a / b;\n}\n",
+  );
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "handle zero divisor");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Return null when dividing by zero.",
+    implementationScope: "Guard the zero-divisor case.",
+    reviewerProvider: "DEEPSEEK_HARNESS",
+  });
+
+  assert.equal(prepared.reviewer_provider, "DEEPSEEK_HARNESS");
+  assert.deepEqual(
+    (await listReviews(store, null, "DEEPSEEK_HARNESS")).map(
+      (review) => review.id,
+    ),
+    [prepared.id],
+  );
+
+  // Sweeping the enum rather than naming the other three keeps a later
+  // provider from being admitted here without anyone noticing.
+  const others = REVIEWER_PROVIDERS.filter(
+    (provider) => provider !== "DEEPSEEK_HARNESS",
+  );
+  assert.ok(others.length >= 3);
+  for (const provider of others) {
+    const mismatch = /reviewer provider mismatch/;
+    await assert.rejects(openReview(store, prepared.id, provider), mismatch);
+    await assert.rejects(
+      readReviewArtifact(store, prepared.id, 1, "patch.diff", 0, 65_536, provider),
+      mismatch,
+    );
+    await assert.rejects(
+      readSnapshotFile(store, prepared.id, 1, "app.js", 0, 65_536, provider),
+      mismatch,
+    );
+    await assert.rejects(
+      searchSnapshot(store, prepared.id, 1, "divide", null, 100, provider),
+      mismatch,
+    );
+    await assert.rejects(
+      submitInitialReview(store, prepared.id, [], provider),
+      mismatch,
+    );
+    assert.deepEqual(await listReviews(store, null, provider), []);
+  }
+
+  assert.equal(
+    (await openReview(store, prepared.id, "DEEPSEEK_HARNESS")).id,
+    prepared.id,
+  );
+  await submitInitialReview(store, prepared.id, [], "DEEPSEEK_HARNESS");
+  const finalized = await finalizeLocalGate(store, prepared.id);
+  assert.equal(finalized.gate.reviewer_provider, "DEEPSEEK_HARNESS");
 });
 
 test("legacy review records default their reviewer provider to Claude", async (t) => {

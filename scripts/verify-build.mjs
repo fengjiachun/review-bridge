@@ -7,11 +7,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { assertDispatchContract } from "./dispatch-contract.mjs";
 import {
-  parseHermesMcpSnippet,
+  assertDispatchContract,
+  DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
+  HERMES_DISPATCH_CONTRACT,
+} from "./dispatch-contract.mjs";
+import {
+  deepSeekHarnessClientEntry,
+  parseMcpSnippet,
+  renderAndValidateDeepSeekHarnessClient,
   renderAndValidateHermesServerConfig,
-} from "./hermes-config.mjs";
+} from "./mcp-snippets.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const rootPackage = JSON.parse(
@@ -39,6 +45,8 @@ const reviewerRoot = path.join(outputRoot, "claude-extension-source");
 const reviewerServer = path.join(reviewerRoot, "server", "server.mjs");
 const hermesIntegration = path.join(outputRoot, "hermes-integration");
 const hermesServer = path.join(hermesIntegration, "server", "server.mjs");
+const deepseekHarness = path.join(outputRoot, "deepseek-harness");
+const deepseekServer = path.join(deepseekHarness, "server", "server.mjs");
 const mcpb = path.join(
   outputRoot,
   `review-bridge-reviewer-v${releaseVersion}.mcpb`,
@@ -88,6 +96,26 @@ async function connectHermesConfig(serverConfig, store) {
   });
   const client = new Client({
     name: "review-bridge-hermes-build-verifier",
+    version: releaseVersion,
+  });
+  await client.connect(transport);
+  return client;
+}
+
+async function connectDeepSeekHarnessConfig(clientEntry, store) {
+  const rendered = renderAndValidateDeepSeekHarnessClient(clientEntry, {
+    releasePath: deepseekHarness,
+    reviewBridgeHome: store,
+  });
+  assert.equal(rendered.config.args[0], deepseekServer);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: rendered.config.args,
+    env: { ...process.env, ...rendered.config.env },
+    stderr: "pipe",
+  });
+  const client = new Client({
+    name: "review-bridge-deepseek-harness-build-verifier",
     version: releaseVersion,
   });
   await client.connect(transport);
@@ -430,6 +458,13 @@ assertDispatchContract(
   workflowSkill,
   "## Dispatching a HERMES review",
   "packaged Codex workflow skill",
+  HERMES_DISPATCH_CONTRACT,
+);
+assertDispatchContract(
+  workflowSkill,
+  "## Dispatching a DEEPSEEK_HARNESS review",
+  "packaged Codex workflow skill",
+  DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
 );
 assert.match(
   workflowSkill,
@@ -723,7 +758,7 @@ const hermesReviewerConfig = await fsp.readFile(
   path.join(hermesIntegration, "mcp", "reviewer.config.yaml"),
   "utf8",
 );
-const parsedHermesReviewer = parseHermesMcpSnippet(hermesReviewerConfig);
+const parsedHermesReviewer = parseMcpSnippet(hermesReviewerConfig);
 assert.deepEqual(Object.keys(parsedHermesReviewer), ["mcp_servers"]);
 assert.deepEqual(Object.keys(parsedHermesReviewer.mcp_servers), [
   "review-bridge-reviewer",
@@ -769,7 +804,7 @@ const hermesAuthorConfig = await fsp.readFile(
   path.join(hermesIntegration, "mcp", "author.config.yaml"),
   "utf8",
 );
-const parsedHermesAuthor = parseHermesMcpSnippet(hermesAuthorConfig);
+const parsedHermesAuthor = parseMcpSnippet(hermesAuthorConfig);
 assert.deepEqual(Object.keys(parsedHermesAuthor), ["mcp_servers"]);
 assert.deepEqual(Object.keys(parsedHermesAuthor.mcp_servers), [
   "review-bridge-author",
@@ -844,12 +879,146 @@ assertDispatchContract(
   hermesReadme,
   "## Dispatch a review from the driver session",
   "packaged Hermes README",
+  HERMES_DISPATCH_CONTRACT,
 );
 assert.match(
   hermesReadme,
   /Remote GitHub Codex publication is performed by the author\/publication side/,
 );
 assert.ok(await fsp.stat(hermesServer));
+
+// DeepSeek Harness profile integration artifact.
+const deepseekRuntimePackage = await readJson(
+  path.join(deepseekHarness, "package.json"),
+);
+assert.equal(deepseekRuntimePackage.version, releaseVersion);
+const parsedDeepseekReviewer = parseMcpSnippet(
+  await fsp.readFile(
+    path.join(deepseekHarness, "cordis", "reviewer.patch.yml"),
+    "utf8",
+  ),
+);
+const deepseekReviewerClient = deepSeekHarnessClientEntry(
+  parsedDeepseekReviewer,
+);
+assert.equal(
+  deepseekReviewerClient.config.serverName,
+  "review-bridge-reviewer",
+);
+assert.equal(deepseekReviewerClient.config.transport, "stdio");
+assert.equal(deepseekReviewerClient.config.command, "node");
+assert.deepEqual(deepseekReviewerClient.config.args, [
+  `${releasePathPlaceholder}/server/server.mjs`,
+  "--role",
+  "reviewer",
+  "--reviewer-provider",
+  "DEEPSEEK_HARNESS",
+]);
+assert.deepEqual(deepseekReviewerClient.config.env, {
+  REVIEW_BRIDGE_HOME: storePlaceholder,
+});
+assert.equal(deepseekReviewerClient.config.failOnStartupError, true);
+// The two host-level scopes the reviewer profile cannot separate on its own.
+// Losing either entry would silently hand the reviewer the machine's other
+// skills, or the author profile's user-global instructions.
+const deepseekSkillPatch = parsedDeepseekReviewer.find(
+  (entry) => entry.id === "skill-filesystem",
+);
+assert.equal(deepseekSkillPatch.config.includeDefaultRoots, false);
+assert.deepEqual(deepseekSkillPatch.config.customSkillDirs, [
+  `${releasePathPlaceholder}/skills`,
+]);
+const deepseekInstructionPatch = parsedDeepseekReviewer.find(
+  (entry) => entry.id === "agent-instructions",
+);
+assert.equal(deepseekInstructionPatch.config.dshHome, releasePathPlaceholder);
+// A patch replaces `config` wholesale, so a restated entry that drops a
+// required key fails at the operator's first launch rather than here.
+assert.equal(typeof deepseekInstructionPatch.config.maxBytes, "number");
+// That patch is only sound while this directory carries no user-global
+// instruction file for the reviewer to inherit.
+await assert.rejects(fsp.stat(path.join(deepseekHarness, "AGENTS.md")));
+const parsedDeepseekAuthor = parseMcpSnippet(
+  await fsp.readFile(
+    path.join(deepseekHarness, "cordis", "author.patch.yml"),
+    "utf8",
+  ),
+);
+const deepseekAuthorClient = deepSeekHarnessClientEntry(parsedDeepseekAuthor);
+assert.equal(deepseekAuthorClient.config.serverName, "review-bridge-author");
+assert.deepEqual(deepseekAuthorClient.config.args, [
+  `${releasePathPlaceholder}/server/server.mjs`,
+  "--role",
+  "author",
+]);
+assert.deepEqual(deepseekAuthorClient.config.env, {
+  REVIEW_BRIDGE_HOME: storePlaceholder,
+});
+// The author snippet must never restrict tools or bind a reviewer provider.
+assert.equal("tools" in deepseekAuthorClient.config, false);
+assert.equal(
+  deepseekAuthorClient.config.args.includes("--reviewer-provider"),
+  false,
+);
+assert.equal(
+  parsedDeepseekAuthor.some((entry) =>
+    ["skill-filesystem", "agent-instructions"].includes(entry.id),
+  ),
+  false,
+);
+const deepseekConfigValues = scalarValues([
+  parsedDeepseekReviewer,
+  parsedDeepseekAuthor,
+]).join("\n");
+assert.doesNotMatch(deepseekConfigValues, /\$\(|`|\$\{/);
+assert.doesNotMatch(
+  deepseekConfigValues,
+  /github_pat_|ghp_|GITHUB_TOKEN|GH_TOKEN|Bearer\s+\S/i,
+);
+const deepseekSkill = await fsp.readFile(
+  path.join(deepseekHarness, "skills", "review-bridge-reviewer", "SKILL.md"),
+  "utf8",
+);
+assert.match(deepseekSkill, /fresh DeepSeek Harness reviewer/i);
+assert.match(deepseekSkill, /reviewer_provider:\s*DEEPSEEK_HARNESS/);
+assert.match(deepseekSkill, /successor\.json/);
+assert.match(deepseekSkill, /successor\.diff/);
+assert.match(deepseekSkill, /patch\.diff/);
+assert.match(deepseekSkill, /patch_index/);
+assert.match(deepseekSkill, /reviewer-scoped/i);
+assert.match(deepseekSkill, /submit tools update the\s+review ledger/is);
+// Round two never inherits round one here, so the skill has to say where the
+// decision material comes from instead.
+assert.match(deepseekSkill, /session that did not perform round one/i);
+assert.doesNotMatch(deepseekSkill, /read-only Review Bridge reviewer tools/i);
+assert.doesNotMatch(deepseekSkill, /\bprepare_review\b|\bstart_publication\b/);
+const deepseekReadme = await fsp.readFile(
+  path.join(deepseekHarness, "README.md"),
+  "utf8",
+);
+assert.match(deepseekReadme, /separate profiles/i);
+assert.match(deepseekReadme, /REVIEW_BRIDGE_HOME/);
+assert.match(deepseekReadme, /absolute path/i);
+assert.match(deepseekReadme, /__REVIEW_BRIDGE_RELEASE_PATH__/);
+assert.ok(deepseekReadme.includes(`v${releaseVersion}`));
+// The DeepSeek Harness plugin API is a developer preview, so the snippets are
+// only meaningful against the release they were verified on.
+assert.match(deepseekReadme, /@deepseek-ai\/dsh@0\.1\.0-rc\.6/);
+assert.match(deepseekReadme, /upgrade/i);
+assert.match(deepseekReadme, /CODEX_TASK/);
+assert.match(deepseekReadme, /provenance/i);
+assert.match(deepseekReadme, /not cryptographic/i);
+assertDispatchContract(
+  deepseekReadme,
+  "## Dispatch a review from the driver session",
+  "packaged DeepSeek Harness README",
+  DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
+);
+assert.match(
+  deepseekReadme,
+  /Remote GitHub Codex publication is performed by the author\/publication side/,
+);
+assert.ok(await fsp.stat(deepseekServer));
 
 const [mcpbBytes, dxtBytes] = await Promise.all([fsp.readFile(mcpb), fsp.readFile(dxt)]);
 assert.equal(
@@ -954,6 +1123,14 @@ try {
   const hermesAuthor = await connectHermesConfig(hermesAuthorServer, store);
   const hermesReviewer = await connectHermesConfig(
     hermesReviewerServer,
+    store,
+  );
+  const deepseekAuthor = await connectDeepSeekHarnessConfig(
+    deepseekAuthorClient,
+    store,
+  );
+  const deepseekReviewer = await connectDeepSeekHarnessConfig(
+    deepseekReviewerClient,
     store,
   );
   try {
@@ -1285,8 +1462,60 @@ try {
       review_id: hermesReview.id,
     });
     assert.equal(hermesGate.gate.reviewer_provider, "HERMES");
+
+    // Packaged DEEPSEEK_HARNESS reviewer: the seven reviewer tools come from
+    // the server's role alone here, because this client has no allowlist to
+    // fall back on.
+    const [deepseekTools, deepseekAuthorTools] = await Promise.all([
+      deepseekReviewer.listTools(),
+      deepseekAuthor.listTools(),
+    ]);
+    assert.deepEqual(
+      deepseekTools.tools.map((tool) => tool.name).sort(),
+      reviewerToolNames,
+    );
+    assert.deepEqual(
+      deepseekAuthorTools.tools.map((tool) => tool.name).sort(),
+      codexAuthorTools.tools.map((tool) => tool.name).sort(),
+    );
+    for (const tool of reviewerToolNames) {
+      assert.equal(
+        deepseekAuthorTools.tools.some((candidate) => candidate.name === tool),
+        false,
+      );
+    }
+    const deepseekReview = await call(deepseekAuthor, "prepare_review", {
+      repository_path: repository,
+      base_ref: baseSha,
+      requirement: "Change the exported value to 2.",
+      implementation_scope: "Update value.js and add a focused test.",
+      reviewer_provider: "DEEPSEEK_HARNESS",
+    });
+    assert.equal(deepseekReview.reviewer_provider, "DEEPSEEK_HARNESS");
+    await assert.rejects(
+      call(hermesReviewer, "open_review", { review_id: deepseekReview.id }),
+      /reviewer provider mismatch/,
+    );
+    await assert.rejects(
+      call(deepseekReviewer, "open_review", { review_id: hermesReview.id }),
+      /reviewer provider mismatch/,
+    );
+    const deepseekOpened = await call(deepseekReviewer, "open_review", {
+      review_id: deepseekReview.id,
+    });
+    assert.equal(deepseekOpened.current_snapshot.changed_files[0], "value.js");
+    await call(deepseekReviewer, "submit_review", {
+      review_id: deepseekReview.id,
+      findings: [],
+    });
+    const deepseekGate = await call(deepseekAuthor, "finalize_local_gate", {
+      review_id: deepseekReview.id,
+    });
+    assert.equal(deepseekGate.gate.reviewer_provider, "DEEPSEEK_HARNESS");
   } finally {
     await Promise.all([
+      deepseekReviewer.close(),
+      deepseekAuthor.close(),
       hermesReviewer.close(),
       hermesAuthor.close(),
       codexReviewer.close(),
@@ -1299,5 +1528,5 @@ try {
 }
 
 process.stdout.write(
-  "Packaged Codex author, Codex reviewer, Claude, and Hermes clients completed full, successor, local publication, remote-only publication, and Hermes role-isolation flows.\n",
+  "Packaged Codex author, Codex reviewer, Claude, Hermes, and DeepSeek Harness clients completed full, successor, local publication, remote-only publication, and per-provider role-isolation flows.\n",
 );

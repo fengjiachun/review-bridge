@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add `DEEPSEEK_HARNESS` as a fourth local reviewer provider, with a packaged
+  `deepseek-harness/` integration carrying separate author and reviewer cordis
+  patch snippets, a Review Bridge-owned reviewer skill, and a driver-dispatch
+  contract checked in CI and at release. The reviewer snippet also closes the
+  two DeepSeek Harness scopes that are host-level rather than profile-level:
+  skill discovery and the user-global `AGENTS.md`. Its round-two rereview runs
+  in a new session deciding from the ledger, because a headless run always
+  starts a fresh one. Autonomous local task creation remains `CODEX_TASK`-only.
+
 ## 0.8.1 - 2026-08-13
 
 ### Changed
