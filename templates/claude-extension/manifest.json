@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "review-bridge-reviewer",
   "display_name": "Review Bridge Reviewer",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "Review immutable Codex code snapshots and return structured findings.",
   "long_description": "Lists review tasks prepared by Codex, lets Claude inspect a verified successor delta or full patch plus the immutable source snapshot, and submits a structured initial review or round-two verdict.",
   "author": {

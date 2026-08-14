@@ -1,7 +1,7 @@
 # Review Bridge for DeepSeek Harness
 
 This directory is the self-contained DeepSeek Harness integration for Review
-Bridge v0.8.1. It contains the packaged server runtime, separate author and
+Bridge v0.9.0. It contains the packaged server runtime, separate author and
 reviewer profile patch snippets, and a Review Bridge-owned reviewer skill. The
 reviewer snippet runs `node <absolute-versioned-path>/server/server.mjs --role
 reviewer --reviewer-provider DEEPSEEK_HARNESS`; the author snippet runs the
@@ -47,9 +47,9 @@ is why they are part of the snippet rather than install prose.
 
 ## Install
 
-1. Check out the exact `v0.8.1` tag, run `npm ci`, `npm test`, `npm run build`,
+1. Check out the exact `v0.9.0` tag, run `npm ci`, `npm test`, `npm run build`,
    and `npm run verify:build`. Keep the resulting
-   `dist/review-bridge-v0.8.1/deepseek-harness` directory in place.
+   `dist/review-bridge-v0.9.0/deepseek-harness` directory in place.
 2. Create dedicated author and reviewer profile directories under
    `$DSH_HOME/profiles/<name>`. Each needs a `package.json` carrying a
    `dsh.profile.bundles` list, an empty `cordis.patch.yml` holding `[]`, and
@@ -65,7 +65,7 @@ is why they are part of the snippet rather than install prose.
 3. Render both snippets before installing them:
    - `__REVIEW_BRIDGE_RELEASE_PATH__` → the absolute path of the versioned
      `deepseek-harness` directory, ending in
-     `review-bridge-v0.8.1/deepseek-harness`.
+     `review-bridge-v0.9.0/deepseek-harness`.
    - `__REVIEW_BRIDGE_HOME__` → the absolute path of the shared store used by
      every Review Bridge participant.
 4. Append the rendered entries from `cordis/reviewer.patch.yml` to the reviewer
@@ -122,7 +122,7 @@ mcp__review-bridge-reviewer__submit_rereview
 The reviewer profile must have no Review Bridge author/publication server or
 tools. The author profile must have no Review Bridge reviewer server and must
 retain the full author tool surface. Both rendered snippets must contain the
-same absolute `REVIEW_BRIDGE_HOME` and the same absolute v0.8.1 integration
+same absolute `REVIEW_BRIDGE_HOME` and the same absolute v0.9.0 integration
 path.
 
 ## Review
