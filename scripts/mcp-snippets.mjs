@@ -119,10 +119,12 @@ function parseScalar(value, line) {
   return value;
 }
 
-// Parse only the Review Bridge-owned Hermes snippet grammar: mappings with
-// unquoted identifier keys, nested by exactly two spaces, and lists of scalar
-// values. Unsupported YAML features are rejected instead of approximated.
-export function parseHermesMcpSnippet(text) {
+// Parse only the Review Bridge-owned snippet grammar: mappings with unquoted
+// identifier keys, nested by exactly two spaces, and lists whose items are
+// scalars or mappings. Unsupported YAML features are rejected instead of
+// approximated. Both packaged snippet shapes parse here — the Hermes
+// `mcp_servers` mapping and the DeepSeek Harness cordis patch array.
+export function parseMcpSnippet(text) {
   const lines = [];
   for (const [index, raw] of text.split(/\r?\n/).entries()) {
     const number = index + 1;
@@ -138,11 +140,21 @@ export function parseHermesMcpSnippet(text) {
         `indentation must use exact ${INDENT_WIDTH}-space levels`,
       );
     }
-    lines.push({
-      indent,
-      number,
-      text: withoutComment.slice(indent),
-    });
+    const text = withoutComment.slice(indent);
+    // A block-sequence item holding a mapping puts that mapping's first key on
+    // the dash line. Split it into a sequence marker plus an ordinary mapping
+    // line one level in, so the block parsers below need no second notion of
+    // where a nested mapping starts.
+    if (/^- [A-Za-z0-9_-]+:(?: |$)/.test(text)) {
+      lines.push({ indent, number, text: "-", sequence: true });
+      lines.push({
+        indent: indent + INDENT_WIDTH,
+        number,
+        text: text.slice(2),
+      });
+      continue;
+    }
+    lines.push({ indent, number, text });
   }
   if (lines.length === 0) throw syntaxError(null, "snippet is empty");
   if (lines[0].indent !== 0) {
@@ -150,7 +162,8 @@ export function parseHermesMcpSnippet(text) {
   }
 
   let position = 0;
-  const isListItem = (line) => /^-(?: |$)/.test(line.text);
+  const isListItem = (line) =>
+    line.sequence === true || /^-(?: |$)/.test(line.text);
 
   function parseBlock(expectedIndent) {
     const first = lines[position];
@@ -175,6 +188,11 @@ export function parseHermesMcpSnippet(text) {
       }
       if (!isListItem(line)) {
         throw syntaxError(line, "cannot mix mapping and list entries");
+      }
+      if (line.sequence) {
+        position += 1;
+        values.push(parseBlock(expectedIndent + INDENT_WIDTH));
+        continue;
       }
       if (!line.text.startsWith("- ") || line.text.slice(2).startsWith(" ")) {
         throw syntaxError(line, "list items require one space after '-'");
@@ -360,6 +378,93 @@ export function renderAndValidateHermesServerConfig(
     ) {
       throw new Error(`Hermes tools.${field} must be a boolean`);
     }
+  }
+  return rendered;
+}
+
+// The DeepSeek Harness snippets are cordis patch layers, so the packaged file
+// is an entry array rather than a server mapping. Pull the one MCP client
+// entry out of it, rejecting a snippet that declares more than one — a second
+// client entry is how the opposite role's server would reach the profile.
+export function deepSeekHarnessClientEntry(entries) {
+  if (!Array.isArray(entries)) {
+    throw new Error("DeepSeek Harness patch snippet must be an entry array");
+  }
+  const inserted = entries.flatMap((entry) =>
+    Array.isArray(entry?.insert) ? entry.insert : [],
+  );
+  const clients = inserted.filter(
+    (entry) => entry?.name === "@deepseek-ai/dsh-mcp-client",
+  );
+  if (clients.length !== 1) {
+    throw new Error(
+      `DeepSeek Harness patch snippet must insert exactly one MCP client, found ${clients.length}`,
+    );
+  }
+  return clients[0];
+}
+
+export function renderAndValidateDeepSeekHarnessClient(
+  entry,
+  { releasePath, reviewBridgeHome },
+) {
+  if (typeof releasePath !== "string" || !path.isAbsolute(releasePath)) {
+    throw new Error("DeepSeek Harness exact release path must be absolute");
+  }
+  if (
+    typeof reviewBridgeHome !== "string" ||
+    !path.isAbsolute(reviewBridgeHome)
+  ) {
+    throw new Error("REVIEW_BRIDGE_HOME must be absolute");
+  }
+
+  const rendered = renderValue(entry, { releasePath, reviewBridgeHome });
+  assertNoPlaceholder(rendered);
+
+  const config = rendered.config;
+  if (!config || typeof config !== "object") {
+    throw new Error("DeepSeek Harness MCP client entry requires a config");
+  }
+  // A network transport would take the reviewer's tools off this machine and
+  // out of the operator's sight, so the packaged snippet may only spawn the
+  // packaged server over stdio.
+  if (config.transport !== "stdio") {
+    throw new Error("DeepSeek Harness MCP client transport must be stdio");
+  }
+  for (const field of ["url", "headers"]) {
+    if (Object.hasOwn(config, field)) {
+      throw new Error(`stdio DeepSeek Harness client cannot set ${field}`);
+    }
+  }
+  if (typeof config.serverName !== "string" || config.serverName === "") {
+    throw new Error("DeepSeek Harness serverName must be a non-empty string");
+  }
+  if (config.command !== "node") {
+    throw new Error("DeepSeek Harness MCP server command must be node");
+  }
+  if (
+    !Array.isArray(config.args) ||
+    config.args.some((arg) => typeof arg !== "string")
+  ) {
+    throw new Error("DeepSeek Harness MCP server args must be a list of strings");
+  }
+  const expectedServerPath = path.join(releasePath, "server", "server.mjs");
+  if (config.args[0] !== expectedServerPath) {
+    throw new Error(
+      "DeepSeek Harness MCP server path must use the exact absolute release path",
+    );
+  }
+  if (
+    !config.env ||
+    config.env.REVIEW_BRIDGE_HOME !== reviewBridgeHome ||
+    !path.isAbsolute(config.env.REVIEW_BRIDGE_HOME)
+  ) {
+    throw new Error("rendered REVIEW_BRIDGE_HOME must be the exact absolute path");
+  }
+  // Without this the client activates with no tools when the server fails to
+  // start, leaving a reviewer that improvises instead of stopping.
+  if (config.failOnStartupError !== true) {
+    throw new Error("DeepSeek Harness client must fail on startup error");
   }
   return rendered;
 }

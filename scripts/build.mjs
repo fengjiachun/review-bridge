@@ -48,6 +48,7 @@ const codexMarketplace = path.join(outputRoot, "codex-marketplace");
 const codexPlugin = path.join(codexMarketplace, "plugins", "review-bridge");
 const claudeSource = path.join(outputRoot, "claude-extension-source");
 const hermesIntegration = path.join(outputRoot, "hermes-integration");
+const deepseekHarness = path.join(outputRoot, "deepseek-harness");
 const mcpbOutput = path.join(
   outputRoot,
   `review-bridge-reviewer-v${releaseVersion}.mcpb`,
@@ -161,6 +162,21 @@ await fsp.cp(
 await fsp.copyFile(path.join(projectRoot, "LICENSE"), path.join(hermesIntegration, "LICENSE"));
 await copyServer(hermesIntegration);
 await installRuntime(hermesIntegration);
+
+// DeepSeek Harness profile integration: reviewer/author cordis patch
+// snippets, the Review Bridge-owned reviewer skill, and
+// install/upgrade/isolation docs, packaged with the same server runtime.
+await fsp.cp(
+  path.join(projectRoot, "templates", "deepseek-harness"),
+  deepseekHarness,
+  { recursive: true },
+);
+await fsp.copyFile(
+  path.join(projectRoot, "LICENSE"),
+  path.join(deepseekHarness, "LICENSE"),
+);
+await copyServer(deepseekHarness);
+await installRuntime(deepseekHarness);
 
 const mcpbCli = path.join(projectRoot, "node_modules", ".bin", "mcpb");
 run(mcpbCli, ["validate", claudeSource], projectRoot);

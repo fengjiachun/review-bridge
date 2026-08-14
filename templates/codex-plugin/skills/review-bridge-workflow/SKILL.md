@@ -460,6 +460,8 @@ explicitly requests cleanup.
      author task and has no authoring history for the change.
    - `HERMES` for a fresh, independent Hermes reviewer context using the
      packaged Hermes reviewer profile.
+   - `DEEPSEEK_HARNESS` for a fresh DeepSeek Harness session using the
+     packaged DeepSeek Harness reviewer profile.
    Never call reviewer tools from the author task; provider binding and task
    separation are workflow attestations, not authenticated model identity.
 7. Call `prepare_review` with the base SHA captured in step 1, the selected
@@ -478,8 +480,13 @@ explicitly requests cleanup.
    a fresh, independent Hermes reviewer context in the packaged Hermes reviewer
    profile, and send it only the review ID and a request to follow the packaged
    reviewer skill; to launch that context from this session's shell, follow
-   Dispatching a HERMES review below. A round-two rereview of the same ID may
-   stay in that reviewer context.
+   Dispatching a HERMES review below. For `DEEPSEEK_HARNESS`, start a fresh
+   session in the packaged DeepSeek Harness reviewer profile on the same terms;
+   to launch it from this session's shell, follow Dispatching a
+   DEEPSEEK_HARNESS review below. A round-two rereview of the same ID may stay
+   in that reviewer context where the provider allows it, and is otherwise a
+   fresh context deciding from the ledger — the reviewer skill requires the
+   same evidence either way.
 10. Require the reviewer to follow the returned strategy. For `SUCCESSOR`, it
     must read `successor.json` and all of `successor.diff` and inspect changed
     files plus relevant callers, contracts, and tests; it expands to
@@ -566,6 +573,89 @@ This is the operator-present manual flow, and the operator's presence is what
 attests that the reviewer was launched this way. Review Bridge records the
 review's `HERMES` binding; it observes nothing about how the instance was
 started, and this section adds no mechanism that would. The autonomous
+workflow above continues to accept `CODEX_TASK` dispatch only.
+
+## Dispatching a DEEPSEEK_HARNESS review
+
+This driver session can dispatch the `DEEPSEEK_HARNESS` reviewer itself rather
+than asking the operator to start it by hand. Nothing else moves: Prepare,
+Handle findings, and Finish still own the review, and this section adds only
+the shell launch between them.
+
+1. Follow Prepare through `get_review_summary`, choosing `DEEPSEEK_HARNESS` at
+   its provider step. Record the returned `review_id` and `state_version` and
+   report the summary exactly as Prepare requires.
+2. Launch a fresh headless run in the reviewer profile from the shell, handing
+   it the reviewer request below as its single task:
+
+   ```bash
+   dsh --profile <reviewer-profile> '<the reviewer request below>'
+   ```
+
+   > Independently review Review Bridge task `<review_id>` using the packaged
+   > Review Bridge reviewer skill. Require `reviewer_provider:
+   > DEEPSEEK_HARNESS`, follow the review strategy, and submit every
+   > actionable finding.
+
+   Single-quote that request: it contains backticks, and a double-quoted
+   shell string would execute them instead of passing them through. Pass it as
+   one line with `<review_id>` substituted. `headless` is a profile name rather
+   than a subcommand, so the reviewer profile's own bundle list selects the
+   one-shot runner and the word never appears on this command line; writing it
+   after the profile would prepend it to the reviewer request instead. Run the
+   launch so it does not block step 3 — background it or use a separate
+   terminal.
+3. Wait with `wait_for_review_state` on the recorded `state_version`, treating
+   `timed_out` as the expected in-progress result described in Prepare. The
+   headless run prints only the reviewer's final message on stdout and stays
+   silent on stderr unless it failed, so a nonzero exit is the signal to read
+   its output before assuming the review is merely slow. When the state
+   changes, hand the review to Handle findings, which owns narrating every
+   finding from the ledger and, after `submit_resolutions`, every persisted
+   disposition.
+
+The launch discipline is fixed. One new session per `review_id`: never
+continue an existing DeepSeek Harness session for a new review, never launch
+the author profile to review, and never pass any authoring history — not the
+diff you wrote, the requirement discussion, your reasoning, or this session's
+transcript. That request is the whole handoff.
+
+A round-two rereview of the same `review_id` is another launch in the same
+shape, carrying the same review ID and a request to rereview the author's
+resolutions with the packaged reviewer skill:
+
+```bash
+dsh --profile <reviewer-profile> '<the rereview request>'
+```
+
+That round runs in a session that did not perform round one, and there is no
+session id to capture: the headless runner mints a fresh session per
+invocation and exposes no way to name or resume one. Round two is
+reconstructed from the ledger instead, which `open_review` serves whole —
+every round-one finding with its explanation, recommendation, and status, and
+every author resolution with its rationale and evidence. The reviewer skill
+already requires each `rebuttal_accepted` decision to carry verification the
+reviewer performed itself rather than recalled, so the evidence bar is the one
+a resumed context would have faced.
+
+Launch it outside the repository under review. The invoking directory is the
+session's workspace root, and DeepSeek Harness loads `AGENTS.md` and
+`CLAUDE.md` from the project root — the nearest `.git` ancestor — down to that
+directory, so a reviewer started in the authoring worktree inherits whatever
+rules the workspace carries for its author. No flag that redirects the
+workspace root exists, so run the launch from a directory outside the
+worktree, and prefer a directory in no repository at all, since one inside
+another repository inherits that repository's rules instead. The reviewer
+process needs no checkout of its own: its tools read the change from the
+immutable snapshot and from the author's repository by recorded path, never
+from its own working directory. Its skills and user-global instructions come
+from the packaged reviewer profile snippet, which scopes both to the release
+directory.
+
+This is the operator-present manual flow, and the operator's presence is what
+attests that the reviewer was launched this way. Review Bridge records the
+review's `DEEPSEEK_HARNESS` binding; it observes nothing about how the session
+was started, and this section adds no mechanism that would. The autonomous
 workflow above continues to accept `CODEX_TASK` dispatch only.
 
 ## Handle findings

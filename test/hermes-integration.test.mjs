@@ -6,13 +6,16 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import * as hermesConfig from "../scripts/hermes-config.mjs";
+import { REVIEWER_PROVIDERS } from "../src/core.mjs";
+import * as mcpSnippets from "../scripts/mcp-snippets.mjs";
 import {
   assertDispatchContract,
+  DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
   extractMarkdownSection,
+  HERMES_DISPATCH_CONTRACT,
 } from "../scripts/dispatch-contract.mjs";
 
-const { parseHermesMcpSnippet } = hermesConfig;
+const { deepSeekHarnessClientEntry, parseMcpSnippet } = mcpSnippets;
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -76,7 +79,7 @@ async function listSourceToolNames(role, store) {
 }
 
 test("Hermes MCP snippet parser preserves scalar types and quoted hashes", () => {
-  const parsed = parseHermesMcpSnippet(`
+  const parsed = parseMcpSnippet(`
 config:
   enabled: true
   timeout: 300
@@ -115,7 +118,7 @@ for (const [name, yaml] of [
   ["unconsumed root mapping", "- one\nkey: value\n"],
 ]) {
   test(`Hermes MCP snippet parser rejects ${name}`, () => {
-    assert.throws(() => parseHermesMcpSnippet(yaml));
+    assert.throws(() => parseMcpSnippet(yaml));
   });
 }
 
@@ -142,7 +145,7 @@ for (const [name, value] of [
   ["null scalar", "null"],
 ]) {
   test(`Hermes MCP snippet parser rejects unsupported ${name} syntax`, () => {
-    assert.throws(() => parseHermesMcpSnippet(`value: ${value}\n`));
+    assert.throws(() => parseMcpSnippet(`value: ${value}\n`));
   });
 }
 
@@ -151,12 +154,12 @@ test("Hermes MCP snippet parser rejects duplicate keys at every level", () => {
     "value: one\nvalue: two\n",
     "root:\n  value: one\n  value: two\n",
   ]) {
-    assert.throws(() => parseHermesMcpSnippet(yaml), /duplicate/i);
+    assert.throws(() => parseMcpSnippet(yaml), /duplicate/i);
   }
 });
 
 test("Hermes config rendering requires resolved absolute release and store paths", () => {
-  const server = parseHermesMcpSnippet(`
+  const server = parseMcpSnippet(`
 server:
   command: node
   args:
@@ -174,7 +177,7 @@ server:
     "hermes-integration",
   );
   const reviewBridgeHome = path.join(path.sep, "var", "lib", "review-bridge");
-  const rendered = hermesConfig.renderAndValidateHermesServerConfig(server, {
+  const rendered = mcpSnippets.renderAndValidateHermesServerConfig(server, {
     releasePath,
     reviewBridgeHome,
   });
@@ -186,7 +189,7 @@ server:
 
   assert.throws(
     () =>
-      hermesConfig.renderAndValidateHermesServerConfig(server, {
+      mcpSnippets.renderAndValidateHermesServerConfig(server, {
         releasePath: "relative-release",
         reviewBridgeHome,
       }),
@@ -194,7 +197,7 @@ server:
   );
   assert.throws(
     () =>
-      hermesConfig.renderAndValidateHermesServerConfig(server, {
+      mcpSnippets.renderAndValidateHermesServerConfig(server, {
         releasePath,
         reviewBridgeHome: "relative-store",
       }),
@@ -202,7 +205,7 @@ server:
   );
   assert.throws(
     () =>
-      hermesConfig.renderAndValidateHermesServerConfig(
+      mcpSnippets.renderAndValidateHermesServerConfig(
         { ...server, command: "__UNKNOWN_PLACEHOLDER__" },
         { releasePath, reviewBridgeHome },
     ),
@@ -210,7 +213,7 @@ server:
   );
   assert.throws(
     () =>
-      hermesConfig.renderAndValidateHermesServerConfig(
+      mcpSnippets.renderAndValidateHermesServerConfig(
         { ...server, args: ["server/server.mjs"] },
         { releasePath, reviewBridgeHome },
       ),
@@ -218,7 +221,7 @@ server:
   );
   assert.throws(
     () =>
-      hermesConfig.renderAndValidateHermesServerConfig(
+      mcpSnippets.renderAndValidateHermesServerConfig(
         { ...server, env: { REVIEW_BRIDGE_HOME: "relative-store" } },
         { releasePath, reviewBridgeHome },
       ),
@@ -234,7 +237,7 @@ test("Hermes config semantic validation rejects quoted booleans and numbers", ()
     ["true", '"300"', "60"],
     ["true", "300", '"60"'],
   ]) {
-    const server = parseHermesMcpSnippet(`
+    const server = parseMcpSnippet(`
 server:
   command: node
   args:
@@ -247,7 +250,7 @@ server:
 `).server;
     assert.throws(
       () =>
-        hermesConfig.renderAndValidateHermesServerConfig(server, {
+        mcpSnippets.renderAndValidateHermesServerConfig(server, {
           releasePath,
           reviewBridgeHome,
         }),
@@ -255,7 +258,7 @@ server:
     );
   }
 
-  const quotedToolBoolean = parseHermesMcpSnippet(`
+  const quotedToolBoolean = parseMcpSnippet(`
 server:
   command: node
   args:
@@ -270,7 +273,7 @@ server:
 `).server;
   assert.throws(
     () =>
-      hermesConfig.renderAndValidateHermesServerConfig(quotedToolBoolean, {
+      mcpSnippets.renderAndValidateHermesServerConfig(quotedToolBoolean, {
         releasePath,
         reviewBridgeHome,
       }),
@@ -284,7 +287,7 @@ test("Hermes config rejects exponent forms that PyYAML resolves as strings", () 
   for (const timeout of ["3e2", "3e+2", "3.0e2"]) {
     assert.throws(
       () => {
-        const server = parseHermesMcpSnippet(`
+        const server = parseMcpSnippet(`
 server:
   command: node
   args:
@@ -295,7 +298,7 @@ server:
   timeout: ${timeout}
   connect_timeout: 60
 `).server;
-        hermesConfig.renderAndValidateHermesServerConfig(server, {
+        mcpSnippets.renderAndValidateHermesServerConfig(server, {
           releasePath,
           reviewBridgeHome,
         });
@@ -314,7 +317,7 @@ test("Hermes reviewer MCP snippet binds HERMES with an exact release path and on
   const yaml = await readRequired(
     path.join("templates", "hermes", "mcp", "reviewer.config.yaml"),
   );
-  const parsed = parseHermesMcpSnippet(yaml);
+  const parsed = parseMcpSnippet(yaml);
   const servers = parsed.mcp_servers;
   assert.deepEqual(Object.keys(servers), ["review-bridge-reviewer"]);
   const server = servers["review-bridge-reviewer"];
@@ -368,7 +371,7 @@ test("Hermes author MCP snippet is separate, unfiltered, and starts only --role 
   const yaml = await readRequired(
     path.join("templates", "hermes", "mcp", "author.config.yaml"),
   );
-  const parsed = parseHermesMcpSnippet(yaml);
+  const parsed = parseMcpSnippet(yaml);
   const servers = parsed.mcp_servers;
   assert.deepEqual(Object.keys(servers), ["review-bridge-author"]);
   const server = servers["review-bridge-author"];
@@ -414,8 +417,8 @@ test("Hermes snippets share one REVIEW_BRIDGE_HOME and keep secrets and shell in
     path.join("templates", "hermes", "mcp", "author.config.yaml"),
   );
   const parsed = [
-    parseHermesMcpSnippet(reviewer),
-    parseHermesMcpSnippet(author),
+    parseMcpSnippet(reviewer),
+    parseMcpSnippet(author),
   ];
   const values = parsed.flatMap(scalarValues);
   assert.equal(values.filter((value) => value === STORE_PLACEHOLDER).length, 2);
@@ -586,28 +589,43 @@ test("Codex workflow skill documents manual Hermes provider selection and handof
 // with scripts/verify-build.mjs so the release check can never drift weaker
 // than this one. These are the source templates; that script asserts the same
 // contract against the packaged copies.
+const WORKFLOW_SKILL = path.join(
+  "templates",
+  "codex-plugin",
+  "skills",
+  "review-bridge-workflow",
+  "SKILL.md",
+);
 const DISPATCH_SECTIONS = [
   {
-    name: "Codex workflow skill",
-    file: path.join(
-      "templates",
-      "codex-plugin",
-      "skills",
-      "review-bridge-workflow",
-      "SKILL.md",
-    ),
+    name: "Codex workflow skill (HERMES)",
+    file: WORKFLOW_SKILL,
     heading: "## Dispatching a HERMES review",
+    contract: HERMES_DISPATCH_CONTRACT,
   },
   {
     name: "Hermes README",
     file: path.join("templates", "hermes", "README.md"),
     heading: "## Dispatch a review from the driver session",
+    contract: HERMES_DISPATCH_CONTRACT,
+  },
+  {
+    name: "Codex workflow skill (DEEPSEEK_HARNESS)",
+    file: WORKFLOW_SKILL,
+    heading: "## Dispatching a DEEPSEEK_HARNESS review",
+    contract: DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
+  },
+  {
+    name: "DeepSeek Harness README",
+    file: path.join("templates", "deepseek-harness", "README.md"),
+    heading: "## Dispatch a review from the driver session",
+    contract: DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
   },
 ];
 
-test("author-side contract pins the driver-dispatched HERMES launch and its discipline", async () => {
-  for (const { name, file, heading } of DISPATCH_SECTIONS) {
-    assertDispatchContract(await readRequired(file), heading, name);
+test("author-side contract pins each driver-dispatched launch and its discipline", async () => {
+  for (const { name, file, heading, contract } of DISPATCH_SECTIONS) {
+    assertDispatchContract(await readRequired(file), heading, name, contract);
   }
 });
 
@@ -778,6 +796,14 @@ test("verify-build validates packaged Hermes artifacts, HERMES binding, isolatio
   assert.match(verify, /from "\.\/dispatch-contract\.mjs"/);
   assert.match(verify, /assertDispatchContract\(\s*workflowSkill/);
   assert.match(verify, /assertDispatchContract\(\s*hermesReadme/);
+  assert.match(verify, /assertDispatchContract\(\s*deepseekReadme/);
+  // The DeepSeek Harness artifact is checked on release builds too, or its
+  // packaged snippets ship unverified while the source templates pass CI.
+  assert.match(verify, /deepseek-harness/);
+  assert.match(verify, /renderAndValidateDeepSeekHarnessClient/);
+  assert.match(verify, /"DEEPSEEK_HARNESS"/);
+  assert.match(verify, /deepseekReviewer.*listTools/s);
+  assert.match(verify, /deepseekAuthor/s);
   // Version consistency with the release metadata.
   assert.match(verify, /releaseVersion/);
   assert.match(verify, /package\.json/);
@@ -814,7 +840,7 @@ test("root README provider isolation covers Hermes in security and troubleshooti
     ["Security and scope", security.groups.body],
     ["Troubleshooting", troubleshooting.groups.body],
   ]) {
-    for (const provider of ["CLAUDE_DESKTOP", "CODEX_TASK", "HERMES"]) {
+    for (const provider of REVIEWER_PROVIDERS) {
       assert.ok(
         section.includes("`" + provider + "`"),
         `${name} omits ${provider}`,
@@ -823,15 +849,166 @@ test("root README provider isolation covers Hermes in security and troubleshooti
   }
 
   assert.match(
-    security.groups.body,
+    security.groups.body.replace(/\s+/g, " "),
     /mismatched reviewer processes cannot list, read, or submit it/i,
   );
   assert.match(
-    troubleshooting.groups.body,
-    /immutably bound to\s+one provider[\s\S]*?reviewer cannot list\s+or open\s+a review bound to either of the other providers/i,
+    troubleshooting.groups.body.replace(/\s+/g, " "),
+    /immutably bound to one provider[\s\S]*?reviewer cannot list or open a review bound to any of the other providers/i,
   );
   assert.match(
     readme,
     /Autonomous local task creation remains `CODEX_TASK`-only\./,
   );
+});
+
+const deepseekTemplates = path.join(
+  projectRoot,
+  "templates",
+  "deepseek-harness",
+);
+
+async function readDeepseekSnippet(role) {
+  return parseMcpSnippet(
+    await readRequired(
+      path.join("templates", "deepseek-harness", "cordis", `${role}.patch.yml`),
+    ),
+  );
+}
+
+test("DeepSeek Harness reviewer snippet binds DEEPSEEK_HARNESS with an exact release path", async (t) => {
+  const store = await fsp.mkdtemp(
+    path.join(os.tmpdir(), "review-bridge-deepseek-template-"),
+  );
+  t.after(() => fsp.rm(store, { recursive: true, force: true }));
+  const entries = await readDeepseekSnippet("reviewer");
+  const client = deepSeekHarnessClientEntry(entries);
+  assert.equal(client.config.serverName, "review-bridge-reviewer");
+  assert.equal(client.config.transport, "stdio");
+  assert.equal(client.config.command, "node");
+  // args[0] is the placeholder the README requires rendering to an absolute
+  // path within one exact build; it must not be a floating
+  // `./server/server.mjs` or shell interpolation.
+  assert.equal(
+    client.config.args[0],
+    `${RELEASE_PATH_PLACEHOLDER}/server/server.mjs`,
+  );
+  assert.deepEqual(client.config.args.slice(1), [
+    "--role",
+    "reviewer",
+    "--reviewer-provider",
+    "DEEPSEEK_HARNESS",
+  ]);
+  assert.deepEqual(client.config.env, {
+    REVIEW_BRIDGE_HOME: STORE_PLACEHOLDER,
+  });
+  assert.equal(client.config.failOnStartupError, true);
+  // This client has no tool allowlist to fall back on, so the seven-tool
+  // surface is the server role's alone.
+  assert.equal("tools" in client.config, false);
+  assert.deepEqual(await listSourceToolNames("reviewer", store), REVIEWER_TOOLS);
+  assert.doesNotMatch(scalarValues(entries).join("\n"), /\$\(|`|\$\{/);
+});
+
+test("DeepSeek Harness reviewer snippet closes the two host-level scopes", async () => {
+  const entries = await readDeepseekSnippet("reviewer");
+  // Skill discovery and the user-global instruction file are shared across
+  // every profile on the machine, so a reviewer profile alone does not isolate
+  // them the way a separate Hermes profile does.
+  const skills = entries.find((entry) => entry.id === "skill-filesystem");
+  assert.ok(skills, "reviewer snippet does not restrict skill discovery");
+  assert.equal(skills.config.includeDefaultRoots, false);
+  assert.deepEqual(skills.config.customSkillDirs, [
+    `${RELEASE_PATH_PLACEHOLDER}/skills`,
+  ]);
+  const instructions = entries.find((entry) => entry.id === "agent-instructions");
+  assert.ok(instructions, "reviewer snippet does not scope workspace instructions");
+  assert.equal(instructions.config.dshHome, RELEASE_PATH_PLACEHOLDER);
+  // Pointing that scope at the release directory is only sound while the
+  // template ships no instruction file of its own for it to pick up.
+  await assert.rejects(fsp.stat(path.join(deepseekTemplates, "AGENTS.md")));
+});
+
+test("DeepSeek Harness author snippet keeps the full author surface and no binding", async () => {
+  const entries = await readDeepseekSnippet("author");
+  const client = deepSeekHarnessClientEntry(entries);
+  assert.equal(client.config.serverName, "review-bridge-author");
+  assert.deepEqual(client.config.args, [
+    `${RELEASE_PATH_PLACEHOLDER}/server/server.mjs`,
+    "--role",
+    "author",
+  ]);
+  assert.equal("tools" in client.config, false);
+  assert.equal(client.config.args.includes("--reviewer-provider"), false);
+  // The reviewer's scope restrictions belong to the reviewer profile only; an
+  // author that inherited them would lose its own workspace context.
+  assert.equal(
+    entries.some((entry) =>
+      ["skill-filesystem", "agent-instructions"].includes(entry.id),
+    ),
+    false,
+  );
+});
+
+test("DeepSeek Harness snippets share one REVIEW_BRIDGE_HOME and keep secrets out", async () => {
+  const parsed = [
+    await readDeepseekSnippet("reviewer"),
+    await readDeepseekSnippet("author"),
+  ];
+  const values = parsed.flatMap(scalarValues);
+  assert.equal(values.filter((value) => value === STORE_PLACEHOLDER).length, 2);
+  assert.doesNotMatch(
+    values.join("\n"),
+    /github_pat_|ghp_|GITHUB_TOKEN|GH_TOKEN|Bearer\s+\S/i,
+  );
+  assert.doesNotMatch(values.join("\n"), /\$\(|`|\$\{/);
+});
+
+test("DeepSeek Harness reviewer skill is reviewer-scoped and states where round two gets its material", async (t) => {
+  const store = await fsp.mkdtemp(
+    path.join(os.tmpdir(), "review-bridge-deepseek-template-"),
+  );
+  t.after(() => fsp.rm(store, { recursive: true, force: true }));
+  const skill = await readRequired(
+    path.join(
+      "templates",
+      "deepseek-harness",
+      "skills",
+      "review-bridge-reviewer",
+      "SKILL.md",
+    ),
+  );
+  assert.match(skill, /fresh DeepSeek Harness reviewer/i);
+  assert.match(skill, /reviewer_provider:\s*DEEPSEEK_HARNESS/);
+  assert.match(skill, /reviewer-scoped/i);
+  assert.match(skill, /submit tools update the\s+review ledger/is);
+  assert.doesNotMatch(skill, /read-only Review Bridge reviewer tools/i);
+  for (const tool of REVIEWER_TOOLS) {
+    assert.match(skill, new RegExp(`\\b${tool}\\b`));
+  }
+  for (const tool of await listSourceToolNames("author", store)) {
+    assert.doesNotMatch(skill, new RegExp(`\\b${tool}\\b`));
+  }
+  assert.match(skill, /successor\.json/);
+  assert.match(skill, /successor\.diff/);
+  assert.match(skill, /patch\.diff/);
+  assert.match(skill, /patch_index/);
+  // The #62 noise dimension and the #41 verification duty, which the other two
+  // reviewer skills also carry.
+  assert.match(skill, /Noise comments and decorative tests/);
+  assert.match(skill, /Conclusions are not verification/);
+  // Unique to this provider: round two is a different session, so the skill
+  // must say what it decides from and that recall is not evidence.
+  assert.match(skill, /session that did not perform round one/);
+  assert.match(skill, /re-run\s+whatever verification/is);
+});
+
+test("the DeepSeek Harness template is packaged and documented like the others", async () => {
+  const build = await readRequired(path.join("scripts", "build.mjs"));
+  assert.match(build, /templates.*"deepseek-harness"/s);
+  assert.match(build, /copyServer\(deepseekHarness\)/);
+  assert.match(build, /installRuntime\(deepseekHarness\)/);
+  const readme = await readRequired("README.md");
+  assert.match(readme, /deepseek-harness/);
+  assert.match(readme, /`DEEPSEEK_HARNESS`/);
 });

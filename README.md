@@ -7,10 +7,11 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B%20%7C%20Linux-lightgrey.svg)](#platform-support)
 
 A code-review handoff between an author task and an explicitly bound
-reviewer: Claude Desktop, a fresh Codex task, a Hermes profile, or GitHub
-Codex in remote-only publication mode. An explicitly authorized autonomous
-workflow can drive the full path — local gate, draft pull request, remote
-review, thread closure, ready-for-review — and stops at a recorded
+reviewer: Claude Desktop, a fresh Codex task, a Hermes profile, a DeepSeek
+Harness profile, or GitHub Codex in remote-only publication mode. An
+explicitly authorized autonomous workflow can drive the full path — local
+gate, draft pull request, remote review, thread closure, ready-for-review —
+and stops at a recorded
 `MERGE_READY`. Nothing starts without an operator instruction, and merging
 stays a human decision.
 
@@ -22,8 +23,9 @@ A local review runs like this:
 1. You finish a change in a Codex task and ask it to prepare a review. Review
    Bridge captures an **immutable snapshot** of the diff and the changed files.
 2. You open a **fresh reviewer context** — a new Claude Desktop conversation,
-   a brand-new Codex task, or an isolated Hermes reviewer profile/context —
-   which inspects the immutable snapshot and submits structured findings.
+   a brand-new Codex task, or an isolated Hermes or DeepSeek Harness reviewer
+   profile — which inspects the immutable snapshot and submits structured
+   findings.
 3. If the reviewer submits no findings, the review is already `CLEAN` and you
    finalize it. Otherwise you go back to the author task, **answer every
    finding**, and prepare round two.
@@ -44,6 +46,7 @@ endorsed by, or sponsored by OpenAI or Anthropic.
 - [Platform support](#platform-support)
 - [Install](#install)
 - [Hermes reviewer profile](#hermes-reviewer-profile)
+- [DeepSeek Harness reviewer profile](#deepseek-harness-reviewer-profile)
 - [Use](#use)
 - [Successor reviews](#successor-reviews)
 - [State machine](#state-machine)
@@ -76,6 +79,7 @@ The client integrations install differently:
 | Claude Desktop reviewer extension | Prebuilt `.mcpb` on the [latest release](https://github.com/fengjiachun/review-bridge/releases/latest) |
 | Codex plugin (author + `CODEX_TASK` reviewer) | Build from a clone at the same release tag — the marketplace directory is not published as a release asset |
 | Hermes reviewer and author profiles | `hermes-integration/` inside the same build output — see [Hermes reviewer profile](#hermes-reviewer-profile) |
+| DeepSeek Harness reviewer and author profiles | `deepseek-harness/` inside the same build output — see [DeepSeek Harness reviewer profile](#deepseek-harness-reviewer-profile) |
 
 Install every process that shares a store from the same Review Bridge build. Do
 not mix a locking-enabled build with artifacts from an earlier release; earlier
@@ -174,6 +178,39 @@ identity. Autonomous local task creation remains `CODEX_TASK`-only. After a
 local HERMES gate passes, remote GitHub Codex publication remains an
 author/publication-side operation.
 
+### DeepSeek Harness reviewer profile
+
+DeepSeek Harness is a supported local reviewer provider. The build output
+contains `deepseek-harness/`, which packages the same server runtime plus:
+
+- `cordis/reviewer.patch.yml` — a reviewer-only profile patch snippet.
+- `cordis/author.patch.yml` — a separate author-only profile patch snippet.
+- `skills/review-bridge-reviewer/SKILL.md` — the Review Bridge-owned DeepSeek
+  Harness reviewer skill.
+- `README.md` — install, upgrade, and profile-isolation instructions.
+
+Every MCP server a profile configures registers its tools for that profile's
+model, so **author and reviewer MUST live in separate profiles**, on the same
+terms as Hermes. Two further scopes are host-level rather than profile-level —
+skill discovery and the user-global `AGENTS.md` — and the packaged reviewer
+snippet restricts both to the release directory so the reviewer inherits
+neither the machine's other skills nor the author's guidance.
+
+Pin `@deepseek-ai/dsh@0.1.0-rc.6`, the release these snippets were verified
+against; its plugin configuration is a developer preview and will move. Run
+`npm run verify:build`, then render `__REVIEW_BRIDGE_RELEASE_PATH__` to the
+absolute, versioned `review-bridge-v0.8.1/deepseek-harness` directory and
+`__REVIEW_BRIDGE_HOME__` to one explicit absolute shared store. Append each
+snippet's entries to only its matching profile's `cordis.patch.yml`. The
+packaged `deepseek-harness/README.md` gives the complete install, profile tool
+checks, and atomic upgrade procedure.
+
+`DEEPSEEK_HARNESS` records configured reviewer provenance; it is not
+cryptographic model identity. Autonomous local task creation remains
+`CODEX_TASK`-only. A round-two rereview runs in a new session rather than a
+resumed one, because a headless run always starts a fresh session; the reviewer
+decides from the ledger `open_review` serves and re-runs its own verification.
+
 ### Build output
 
 `npm run build` writes everything under `dist/review-bridge-v0.8.1/`:
@@ -185,6 +222,10 @@ author/publication-side operation.
 - `claude-extension-source/` — inspectable source of the Claude extension.
 - `hermes-integration/` — Hermes profile MCP config snippets (separate author
   and reviewer), the Review Bridge-owned Hermes reviewer skill, and
+  install/upgrade/isolation documentation, with the same packaged server
+  runtime.
+- `deepseek-harness/` — DeepSeek Harness cordis patch snippets (separate author
+  and reviewer), the Review Bridge-owned DeepSeek Harness reviewer skill, and
   install/upgrade/isolation documentation, with the same packaged server
   runtime.
 - `review-bridge-source-v0.8.1.zip` — source archive of the built commit, for
@@ -245,6 +286,13 @@ independent context that has no authoring history for the change:
 > Independently review Review Bridge task `<review_id>` using the packaged
 > Hermes reviewer skill. Require `reviewer_provider: HERMES`, follow the review
 > strategy, and submit every actionable finding.
+
+For a `DEEPSEEK_HARNESS` review, use the dedicated reviewer profile and start a
+fresh session that has no authoring history for the change:
+
+> Independently review Review Bridge task `<review_id>` using the packaged
+> Review Bridge reviewer skill. Require `reviewer_provider: DEEPSEEK_HARNESS`,
+> follow the review strategy, and submit every actionable finding.
 
 Configured Hermes MCP tools are profile-scoped and auto-injected, so this
 reviewer context is independent only when its profile contains the
@@ -660,7 +708,8 @@ Ledger](docs/rfcs/0001-github-publication-ledger.md).
   repository, pushing code, or creating pull requests.
 - Author and reviewer roles run as separate MCP processes with different tool
   lists. Each local review is immutably bound to `CLAUDE_DESKTOP`, `CODEX_TASK`,
-  or `HERMES`; mismatched reviewer processes cannot list, read, or submit it.
+  `HERMES`, or `DEEPSEEK_HARNESS`; mismatched reviewer processes cannot list,
+  read, or submit it.
 - Working-tree overlays are copied into the private review store. Unchanged
   files are read from the captured Git object ID.
 - Files larger than 10 MiB are recorded but not copied into the snapshot.
@@ -780,8 +829,8 @@ still missing, confirm the extension's data directory matches the Codex
 `REVIEW_BRIDGE_HOME`.
 
 **A reviewer cannot see a pending review** — each review is immutably bound to
-one provider. A `CLAUDE_DESKTOP`, `CODEX_TASK`, or `HERMES` reviewer cannot list
-or open a review bound to either of the other providers.
+one provider. A `CLAUDE_DESKTOP`, `CODEX_TASK`, `HERMES`, or `DEEPSEEK_HARNESS`
+reviewer cannot list or open a review bound to any of the other providers.
 
 ## License
 

@@ -1,0 +1,29 @@
+# Review Bridge DeepSeek Harness author profile patch snippet.
+#
+# Merge this entry into the author profile's `cordis.patch.yml`, which is a
+# top-level YAML array of loader patch entries. Render the placeholder path
+# within one exact Review Bridge release/build (v0.8.1) before use:
+#   - __REVIEW_BRIDGE_RELEASE_PATH__ -> absolute path of the versioned
+#     deepseek-harness directory, for example
+#     /opt/review-bridge-v0.8.1/deepseek-harness
+#   - __REVIEW_BRIDGE_HOME__        -> absolute path of the shared store used
+#     by every Review Bridge participant (same value as the reviewer profile)
+#
+# This entry carries no tool restriction, so the author profile keeps the full
+# author and publication surface as that surface evolves. The author profile
+# must never receive the reviewer server or a provider binding.
+
+- insert:
+    - id: mcp-review-bridge-author
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: review-bridge-author
+        transport: stdio
+        command: node
+        args:
+          - __REVIEW_BRIDGE_RELEASE_PATH__/server/server.mjs
+          - --role
+          - author
+        env:
+          REVIEW_BRIDGE_HOME: __REVIEW_BRIDGE_HOME__
+        failOnStartupError: true
