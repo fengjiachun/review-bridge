@@ -678,6 +678,42 @@ test("a missing or truncated audit artifact is damage, not an empty log", async 
   );
 });
 
+test("only one interrupted append may sit past the cursor", async (t) => {
+  const store = await emptyStore(t);
+  const events = [
+    auditEvent("WORKFLOW_PAUSED", {
+      pause: { reason_code: "LOCAL_CYCLE_BUDGET_EXHAUSTED" },
+    }),
+    auditEvent("LOCAL_CYCLE_BUDGET_EXTENDED", {}),
+    auditEvent("CHANGE_SIZE_BUDGET_EXTENDED", {}),
+  ];
+  // One whole event past the cursor is an ordinary interrupted append.
+  await writeWorkflow(store, "rbwf-2026-08-16T000000-000Z-c3c3c3c3", {
+    workflow: { status: "ACTIVE" },
+    events: events.slice(0, 2),
+    committedLines: 1,
+  });
+  // Two are not: the cursor and the log have diverged.
+  await writeWorkflow(store, "rbwf-2026-08-17T000000-000Z-d4d4d4d4", {
+    workflow: { status: "ACTIVE" },
+    events,
+    committedLines: 1,
+  });
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.workflows_counted, 2);
+  assert.equal(scorecard.corpus.audit_logs_skipped, 1);
+  assert.deepEqual(scorecard.skipped_audit_logs, [
+    {
+      id: "rbwf-2026-08-17T000000-000Z-d4d4d4d4",
+      reason: "audit crash tail is ambiguous",
+    },
+  ]);
+  // Only the tolerated one contributes, and only its committed event.
+  assert.equal(scorecard.workflows.budget_pauses.LOCAL_CYCLE_BUDGET_EXHAUSTED, 1);
+  assert.equal(scorecard.workflows.budget_extensions.LOCAL_CYCLE_BUDGET_EXTENDED, 0);
+});
+
 test("a rebuttal awaiting a decision is counted, not dropped", async (t) => {
   const store = await emptyStore(t);
   await writeReview(

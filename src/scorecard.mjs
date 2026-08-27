@@ -275,6 +275,15 @@ async function readCommittedAuditEvents(directory) {
   if (raw.length < head.committed_bytes) {
     return { events: [], reason: "audit log is shorter than its cursor" };
   }
+  // An interrupted append leaves at most one event past the cursor: a partial
+  // line, or one whole line. More than that means the cursor and the log have
+  // diverged, and the committed part is then an arbitrary prefix of what the
+  // workflow actually recorded.
+  const tail = raw.subarray(head.committed_bytes);
+  const newlines = tail.filter((byte) => byte === 0x0a).length;
+  if (newlines > 1 || (newlines === 1 && tail.at(-1) !== 0x0a)) {
+    return { events: [], reason: "audit crash tail is ambiguous" };
+  }
   const events = [];
   // committed_bytes counts bytes, so the cut is made on the buffer. Slicing the
   // decoded string would run past the boundary by one position per multi-byte
@@ -506,9 +515,10 @@ const COUNTING_RULES = [
   "  workflow numbers are not split by provider.",
   "- Audit logs are read only up to `action-audit-head.json`'s `committed_bytes`,",
   "  measured in bytes, so an uncommitted append never reaches the counts. The",
-  "  hash chain is not verified here. An audit log that does not parse",
-  "  contributes no events at all rather than a prefix, and is listed under",
-  "  Skipped; the workflow ledger beside it still counts.",
+  "  hash chain is not verified here. An audit log that does not parse, is",
+  "  missing, is shorter than its cursor, or carries more than one interrupted",
+  "  append past it contributes no events at all rather than a prefix, and is",
+  "  listed under Skipped; the workflow ledger beside it still counts.",
   "- A ledger that does not parse, or does not match the shape above, is listed",
   "  under Skipped and left untouched. A directory holding no ledger of its kind",
   "  is counted separately: a remote-only publication never creates a local",
