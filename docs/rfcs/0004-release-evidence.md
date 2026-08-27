@@ -83,9 +83,12 @@ verifier runs in two modes sharing one requirement list:
   machine only:
   - the tag exists, is reachable from the default branch, and points at the
     release commit the pre-flight verified;
-  - the published release's assets match the digests of a local
-    `verify-build` output for the same tag (`SHA256SUMS.txt` agrees in both
-    directions: no missing asset, no unexplained extra);
+  - the published release's assets match a local `verify-build` output for
+    the same tag. The checksum manifest is validated by content — the
+    published `SHA256SUMS.txt` must equal the locally generated one — and is
+    then excluded from the payload set, because a manifest cannot list a
+    stable checksum of itself. The remaining assets must agree with that
+    manifest in both directions: no missing asset, no unexplained extra;
   - the merge-integrity check below.
 
 ### Merge-integrity check
@@ -192,10 +195,14 @@ re-run, and the loud mismatch on divergent history.
 
 Rollout is one implementation change: the collector/verifier scripts, their
 tests, and the release-process documentation update. The first real exercise
-is retroactive — record `v0.9.0` and its predecessors, which both validates
-the design against history and would have caught the untagged `v0.6.0`. When
-the shipped implementation matches this document, the status line flips to
-`Implemented` in the change that makes it true.
+is retroactive — record every historical release whose tag exists, and
+report the ones whose tag does not. `v0.6.0` cannot be recorded, and that is
+the point: the verifier's loud report of the missing tag is exactly the
+catch this RFC exists for. No backfill exception is added; creating a
+historical tag remains an ordinary human release action outside this
+document, after which that version records normally. When the shipped
+implementation matches this document, the status line flips to `Implemented`
+in the change that makes it true.
 
 ## Unresolved questions
 
