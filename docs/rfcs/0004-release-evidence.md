@@ -73,7 +73,7 @@ verifier runs in two modes sharing one requirement list:
   alone, so it can also run in CI on the release pull request:
   - the top CHANGELOG entry names the version `package.json` carries, and the
     existing release-metadata alignment assertions hold;
-  - the CHANGELOG entries newer than the previous extant tag — one entry
+  - the CHANGELOG entries newer than the previous extant tag (or all entries, for the repository's first tagged release, whose range starts at the repository root) — one entry
     normally, several when an intermediate release was never tagged — taken
     together reconcile with the merge commits between that tag and the
     release commit: every claimed change maps to a merged pull request in
@@ -100,9 +100,13 @@ verifier runs in two modes sharing one requirement list:
 
     Local discovery reads merge commits, so it assumes the merge-commit
     history the merge-integrity check below already requires; a squash- or
-    rebase-merged pull request is invisible to it. The authoritative
-    reconciliation is the final phase's, which discovers the merged set from
-    GitHub's facts.
+    rebase-merged pull request is invisible to it. The two comparison
+    directions therefore carry different weight in pre-flight: a locally
+    visible merge that no entry claims fails, because a local merge commit
+    is ground truth for presence — but a claimed pull request that local
+    discovery cannot find is deferred, not failed, because local history
+    cannot prove absence. The final phase settles deferred claims from
+    GitHub's facts, which is the authoritative reconciliation.
 - **Final** (`--final`), after tag and release are published — requires the
   authenticated GitHub CLI and the store, so it runs on the operator's
   machine only:
@@ -149,7 +153,9 @@ carries:
 - the repository identity (numeric GitHub repository ID and full name);
 - version, tag name, tag target SHA, release commit SHA;
 - the range boundary the claims and pull requests were reconciled against:
-  the previous extant tag's name and target SHA at verification time;
+  the previous extant tag's name and target SHA at verification time, or an
+  explicit root sentinel for the repository's first tagged release, whose
+  range starts at the repository root — never an implicit null;
 - one digest per reconciled CHANGELOG entry, keyed by version, committing
   the complete claim set the verification actually used;
 - the pull-request list of the range, each entry carrying its merge SHA and
