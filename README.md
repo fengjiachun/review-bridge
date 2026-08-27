@@ -698,6 +698,16 @@ The packaged Codex plugin also includes
 `scripts/inspect-publication-audit.mjs <review_id>` for read-only, full-chain
 offline audit validation.
 
+`scripts/review-scorecard.mjs` aggregates the ledgers already in the configured
+store into one report: findings by severity, author dispositions crossed with
+reviewer decisions, rebuttal outcomes before and after the verification
+obligation, rounds to CLEAN, continuations, workflow budget events, and human
+arbitration escalations, each per reviewer provider and overall. It prints
+markdown, or JSON with `--json`, and states every counting rule in the report
+itself so a number can be replayed against the ledgers it came from. It reads
+one store, writes nothing, sends nothing anywhere, and lists a ledger it cannot
+parse as skipped rather than repairing it.
+
 ### Head-SHA discipline
 
 Before requesting GitHub review, both the local branch head and PR head must
