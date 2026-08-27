@@ -1,5 +1,6 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { REVIEWER_PROVIDERS } from "./core.mjs";
 import { DEFAULT_CHANGE_SIZE_BUDGET } from "./workflow.mjs";
 
 export const SCORECARD_SCHEMA_VERSION = 1;
@@ -106,6 +107,15 @@ function reviewDefect(review) {
     return `unknown status ${JSON.stringify(review.status)}`;
   }
   if (!Number.isInteger(review.current_round)) return "missing current_round";
+  // Absent means a ledger older than the field. Any other unknown value would
+  // become a bucket of its own — and a non-string one would break the sort, or
+  // the name of the aggregate row would collide with it.
+  if (
+    review.reviewer_provider != null &&
+    !REVIEWER_PROVIDERS.includes(review.reviewer_provider)
+  ) {
+    return `unknown reviewer_provider ${JSON.stringify(review.reviewer_provider)}`;
+  }
   for (const key of ["findings", "resolutions", "rereview_decisions", "history"]) {
     if (!Array.isArray(review[key])) return `${key} is not an array`;
   }

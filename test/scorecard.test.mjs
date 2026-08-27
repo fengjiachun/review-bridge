@@ -678,6 +678,51 @@ test("a missing or truncated audit artifact is damage, not an empty log", async 
   );
 });
 
+test("an unsupported reviewer provider is skipped, not made a bucket", async (t) => {
+  const store = await emptyStore(t);
+  // A non-string provider would break the provider sort and abort the report.
+  await writeReview(
+    store,
+    "rb-2026-08-18T000000-000Z-e5e5e5e5",
+    reviewLedger({
+      id: "rb-2026-08-18T000000-000Z-e5e5e5e5",
+      status: "CLEAN",
+      provider: 7,
+    }),
+  );
+  // "ALL" is the name of the aggregate row, so it would be counted twice.
+  await writeReview(
+    store,
+    "rb-2026-08-19T000000-000Z-f6f6f6f6",
+    reviewLedger({
+      id: "rb-2026-08-19T000000-000Z-f6f6f6f6",
+      status: "CLEAN",
+      provider: "ALL",
+      findings: [finding("F-001", "major", "OPEN")],
+    }),
+  );
+  await writeReview(
+    store,
+    "rb-2026-08-20T000000-000Z-a7a7a7a7",
+    reviewLedger({
+      id: "rb-2026-08-20T000000-000Z-a7a7a7a7",
+      status: "CLEAN",
+      provider: "HERMES",
+    }),
+  );
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.reviews_counted, 1);
+  assert.equal(scorecard.corpus.reviews_skipped, 2);
+  assert.deepEqual(
+    scorecard.skipped.map(({ reason }) => reason),
+    ['unknown reviewer_provider 7', 'unknown reviewer_provider "ALL"'],
+  );
+  assert.deepEqual(Object.keys(scorecard.providers), ["ALL", "HERMES"]);
+  assert.equal(scorecard.providers.ALL.reviews, 1);
+  assert.equal(scorecard.providers.ALL.findings, 0);
+});
+
 test("only one interrupted append may sit past the cursor", async (t) => {
   const store = await emptyStore(t);
   const events = [
