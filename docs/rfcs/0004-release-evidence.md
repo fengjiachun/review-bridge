@@ -131,20 +131,27 @@ carries:
 
 - the repository identity (numeric GitHub repository ID and full name);
 - version, tag name, tag target SHA, release commit SHA;
+- the range boundary the claims and pull requests were reconciled against:
+  the previous extant tag's name and target SHA at verification time;
 - one digest per reconciled CHANGELOG entry, keyed by version, committing
   the complete claim set the verification actually used;
 - the pull-request list of the range, each entry carrying its merge SHA and
   either the terminal-record reference it matched, `unattested`, or
   `unverifiable`;
 - the asset digest list;
-- the observation identity (when it was collected and by which verifier
-  version), so every number in the record can be replayed against a fresh
-  observation.
+- the observation reference: the collected observation is itself persisted
+  beside the record, and the record carries its path and content digest
+  along with the collection time and verifier version. The exact evidence
+  behind the record can be re-read, and a recollected observation is
+  distinguishable from the original by digest.
 
 One record per version. A re-run against an existing record compares and
-reports; it never silently overwrites. A mismatch against an existing record
-is a loud failure — history changed after it was recorded — and resolving it
-is operator work.
+reports; it never silently overwrites. The comparison replays the record's
+own range boundary, so a historical tag backfilled later — the permitted
+human action — narrows nothing retroactively: the changed boundary is
+reported as superseded, never as divergence. A genuine mismatch against an
+existing record is a loud failure — history changed after it was recorded —
+and resolving it is operator work.
 
 ### What the record is, and is not
 
