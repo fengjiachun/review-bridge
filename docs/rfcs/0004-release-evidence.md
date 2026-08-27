@@ -73,11 +73,15 @@ verifier runs in two modes sharing one requirement list:
   alone, so it can also run in CI on the release pull request:
   - the top CHANGELOG entry names the version `package.json` carries, and the
     existing release-metadata alignment assertions hold;
-  - the CHANGELOG entry's claimed contents reconcile with the merge commits
-    between the previous release tag and the release commit — every claimed
-    change maps to a merged pull request in the range, and every merged pull
-    request in the range is either represented or explicitly listed as
-    internal-only.
+  - the CHANGELOG entries newer than the previous extant tag — one entry
+    normally, several when an intermediate release was never tagged — taken
+    together reconcile with the merge commits between that tag and the
+    release commit: every claimed change maps to a merged pull request in
+    the range, and every merged pull request in the range is either
+    represented in one of those entries or explicitly listed as
+    internal-only. A missing intermediate tag therefore widens the claim set
+    along with the commit range instead of turning the intermediate
+    release's merges into false mismatches.
 - **Final** (`--final`), after tag and release are published — requires the
   authenticated GitHub CLI and the store, so it runs on the operator's
   machine only:
@@ -107,9 +111,16 @@ merge commits for workflow-driven pull requests.
 
 ### The evidence record
 
-On a passing `--final` run the verifier appends
-`releases/<version>.json` to the store:
+The store serves multiple repositories — the review APIs accept arbitrary
+repository paths against one `REVIEW_BRIDGE_HOME` — so release records are
+namespaced by a stable repository identity: on a passing `--final` run the
+verifier appends `releases/<repository-id>/<version>.json`, keyed by the
+numeric GitHub repository ID the observation was collected from, the same
+identity the publication push fencing already resolves. Two repositories
+releasing the same version never address the same record. The record
+carries:
 
+- the repository identity (numeric GitHub repository ID and full name);
 - version, tag name, tag target SHA, release commit SHA;
 - the digest of the CHANGELOG entry it verified;
 - the pull-request list of the range, each entry carrying its merge SHA and
