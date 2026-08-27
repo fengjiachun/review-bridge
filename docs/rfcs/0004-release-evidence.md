@@ -168,10 +168,12 @@ carries:
   `unverifiable`;
 - the asset digest list;
 - the observation reference: the collected observation is itself persisted
-  beside the record, and the record carries its path and content digest
-  along with the collection time and verifier version. The exact evidence
-  behind the record can be re-read, and a recollected observation is
-  distinguishable from the original by digest.
+  content-addressed — its filename is its own content digest, written with
+  no-overwrite semantics before the record is appended — and the record
+  carries that path and digest along with the collection time and verifier
+  version. A re-run's fresh collection lands under its own digest and can
+  never replace the referenced bytes; identical content is idempotent. The
+  exact evidence behind the record stays re-readable.
 
 One record per version. A re-run against an existing record compares and
 reports; it never silently overwrites. The comparison replays the record's
