@@ -1,6 +1,6 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { REVIEWER_PROVIDERS } from "./core.mjs";
+import { MAX_ROUNDS, REVIEWER_PROVIDERS } from "./core.mjs";
 import { DEFAULT_CHANGE_SIZE_BUDGET } from "./workflow.mjs";
 
 export const SCORECARD_SCHEMA_VERSION = 1;
@@ -111,7 +111,16 @@ function reviewDefect(review, directoryName) {
   if (!REVIEW_STATUSES.includes(review.status)) {
     return `unknown status ${JSON.stringify(review.status)}`;
   }
-  if (!Number.isInteger(review.current_round)) return "missing current_round";
+  // Only rounds the store can hold: a clean review outside this range would
+  // land in a rounds_to_clean bucket the report never prints, leaving the
+  // clean total disagreeing with the per-round columns beside it.
+  if (
+    !Number.isInteger(review.current_round) ||
+    review.current_round < 1 ||
+    review.current_round > MAX_ROUNDS
+  ) {
+    return `current_round is not between 1 and ${MAX_ROUNDS}`;
+  }
   // Absent means a ledger older than the field. Any other unknown value would
   // become a bucket of its own — and a non-string one would break the sort, or
   // the name of the aggregate row would collide with it.
@@ -142,6 +151,19 @@ function reviewDefect(review, directoryName) {
   for (const decision of review.rereview_decisions) {
     if (!DECISIONS.includes(decision?.decision)) {
       return `unknown rereview decision ${JSON.stringify(decision?.decision)}`;
+    }
+  }
+  // Findings are matched to their response by ID. A repeated ID would give
+  // every copy the same resolution and decision, multiplying one author
+  // response across the disposition and rebuttal totals; a repeated response
+  // would instead be silently dropped when it is indexed.
+  for (const [key, entries] of [
+    ["finding", review.findings.map((finding) => finding.id)],
+    ["resolution", review.resolutions.map((resolution) => resolution.finding_id)],
+    ["rereview decision", review.rereview_decisions.map((d) => d.finding_id)],
+  ]) {
+    if (new Set(entries).size !== entries.length) {
+      return `${key} IDs are not unique`;
     }
   }
   return null;
@@ -341,7 +363,14 @@ async function readCommittedAuditEvents(directory, workflowId) {
   // committed_bytes counts bytes, so the cut is made on the buffer. Slicing the
   // decoded string would run past the boundary by one position per multi-byte
   // character and swallow part of an uncommitted append.
-  const committed = raw.subarray(0, head.committed_bytes).toString("utf8");
+  const committedBytes = raw.subarray(0, head.committed_bytes);
+  // A cursor stopping one byte short of an event's newline leaves a tail the
+  // ambiguity check accepts and a prefix that still parses, so the boundary
+  // itself has to be checked.
+  if (committedBytes.length > 0 && committedBytes.at(-1) !== 0x0a) {
+    return { events: [], reason: "committed audit prefix is not newline terminated" };
+  }
+  const committed = committedBytes.toString("utf8");
   const lines = committed.split("\n");
   // Only the trailing newline may leave an empty element. A blank line between
   // events is damage, and skipping it would read the log as healthy.

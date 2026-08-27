@@ -888,6 +888,79 @@ test("a malformed repair-cycle entry is a defect, not a cycle", async (t) => {
   assert.equal(scorecard.workflows.remote_attempts.counted, 0);
 });
 
+test("repeated IDs and impossible rounds are defects", async (t) => {
+  const store = await emptyStore(t);
+  // One author response reachable from two findings would be counted twice.
+  const duplicated = reviewLedger({
+    id: "rb-2026-09-06T000000-000Z-f6a6b6c6",
+    status: "HUMAN_REQUIRED",
+    provider: "CODEX_TASK",
+    currentRound: 2,
+    findings: [
+      finding("F-001", "major", "AUTHOR_REJECTED"),
+      finding("F-001", "major", "AUTHOR_REJECTED"),
+    ],
+    resolutions: [{ finding_id: "F-001", disposition: "rejected", rationale: "no" }],
+    decisions: [{ finding_id: "F-001", decision: "still_open", rationale: "held", verification: "" }],
+  });
+  await writeReview(store, "rb-2026-09-06T000000-000Z-f6a6b6c6", duplicated);
+  // A clean review in a round the report never prints.
+  await writeReview(
+    store,
+    "rb-2026-09-07T000000-000Z-a7b7c7d7",
+    reviewLedger({
+      id: "rb-2026-09-07T000000-000Z-a7b7c7d7",
+      status: "CLEAN",
+      provider: "HERMES",
+      currentRound: 3,
+    }),
+  );
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.reviews_counted, 0);
+  assert.deepEqual(
+    scorecard.skipped.map(({ reason }) => reason),
+    ["finding IDs are not unique", "current_round is not between 1 and 2"],
+  );
+  assert.equal(scorecard.providers.ALL.rebuttals.after_obligation.rebuttals, 0);
+  assert.deepEqual(scorecard.providers.ALL.rounds_to_clean, {});
+});
+
+test("the committed prefix must stop on an event boundary", async (t) => {
+  const store = await emptyStore(t);
+  const id = "rbwf-2026-09-08T000000-000Z-b8c8d8e8";
+  await writeWorkflow(store, id, {
+    workflow: { status: "ACTIVE" },
+    events: [
+      auditEvent("WORKFLOW_PAUSED", {
+        pause: { reason_code: "LOCAL_CYCLE_BUDGET_EXHAUSTED" },
+      }),
+    ],
+  });
+  const directory = path.join(store, "workflows", id);
+  const log = await fsp.readFile(path.join(directory, "action-audit.jsonl"));
+  // One byte short of the event's newline: the tail holds a single newline and
+  // passes the ambiguity check, and the prefix still parses.
+  await fsp.writeFile(
+    path.join(directory, "action-audit-head.json"),
+    `${JSON.stringify({
+      version: 1,
+      workflow_id: id,
+      committed_bytes: log.length - 1,
+      next_sequence: 2,
+      last_event_sha256: null,
+    })}\n`,
+  );
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.audit_logs_skipped, 1);
+  assert.equal(
+    scorecard.skipped_audit_logs[0].reason,
+    "committed audit prefix is not newline terminated",
+  );
+  assert.equal(scorecard.workflows.budget_pauses.LOCAL_CYCLE_BUDGET_EXHAUSTED, 0);
+});
+
 test("a blank line between committed events is damage", async (t) => {
   const store = await emptyStore(t);
   const id = "rbwf-2026-09-05T000000-000Z-e5f5a5b5";
