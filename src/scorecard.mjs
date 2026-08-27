@@ -119,6 +119,11 @@ function reviewDefect(review) {
   for (const key of ["findings", "resolutions", "rereview_decisions", "history"]) {
     if (!Array.isArray(review[key])) return `${key} is not an array`;
   }
+  // Absent on ledgers older than the field; anything else present must be an
+  // array, or its `length` would be read as a count of carried findings.
+  if (review.carried_findings != null && !Array.isArray(review.carried_findings)) {
+    return "carried_findings is not an array";
+  }
   for (const finding of review.findings) {
     if (!SEVERITIES.includes(finding?.severity)) {
       return `unknown finding severity ${JSON.stringify(finding?.severity)}`;
@@ -137,11 +142,17 @@ function reviewDefect(review) {
   return null;
 }
 
-function workflowDefect(workflow) {
+function workflowDefect(workflow, directoryName) {
   if (workflow == null || typeof workflow !== "object") {
     return "not a JSON object";
   }
   if (typeof workflow.workflow_id !== "string") return "missing workflow_id";
+  // The audit log is read from the enclosing directory, so a ledger that names
+  // a different workflow would splice one workflow's cycles onto another's
+  // events. The server refuses the same mismatch.
+  if (workflow.workflow_id !== directoryName) {
+    return "workflow ID does not match its store directory";
+  }
   if (!WORKFLOW_STATUSES.includes(workflow.status)) {
     return `unknown status ${JSON.stringify(workflow.status)}`;
   }
@@ -404,7 +415,7 @@ export async function buildScorecard(storeRoot, { generatedAt } = {}) {
   const skippedWorkflows = [...workflowLedgers.skipped];
   const skippedAuditLogs = [];
   for (const { id, record } of workflowLedgers.records) {
-    const defect = workflowDefect(record);
+    const defect = workflowDefect(record, id);
     if (defect != null) {
       skippedWorkflows.push({ id, reason: defect });
       continue;

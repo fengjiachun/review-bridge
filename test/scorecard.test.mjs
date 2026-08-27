@@ -723,6 +723,59 @@ test("an unsupported reviewer provider is skipped, not made a bucket", async (t)
   assert.equal(scorecard.providers.ALL.findings, 0);
 });
 
+test("a ledger spliced into the wrong directory is skipped", async (t) => {
+  const store = await emptyStore(t);
+  await writeWorkflow(store, "rbwf-2026-08-21T000000-000Z-b8b8b8b8", {
+    workflow: { status: "MERGE_READY", remote_attempts: [{ number: 1, diverted_at: null }] },
+    events: [
+      auditEvent("WORKFLOW_PAUSED", {
+        pause: { reason_code: "REMOTE_CYCLE_BUDGET_EXHAUSTED" },
+      }),
+    ],
+  });
+  // Rename the ledger's own id so it no longer matches its directory, leaving
+  // the audit log of the directory it sits in.
+  const ledgerPath = path.join(
+    store,
+    "workflows",
+    "rbwf-2026-08-21T000000-000Z-b8b8b8b8",
+    "workflow.json",
+  );
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  ledger.workflow_id = "rbwf-2026-08-22T000000-000Z-c9c9c9c9";
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`);
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.workflows_counted, 0);
+  assert.equal(scorecard.corpus.workflows_skipped, 1);
+  assert.equal(
+    scorecard.skipped_workflows[0].reason,
+    "workflow ID does not match its store directory",
+  );
+  assert.equal(scorecard.workflows.remote_attempts.recorded, 0);
+  assert.equal(scorecard.workflows.budget_pauses.REMOTE_CYCLE_BUDGET_EXHAUSTED, 0);
+});
+
+test("a non-array carried_findings is a defect, not four continuations", async (t) => {
+  const store = await emptyStore(t);
+  const ledger = reviewLedger({
+    id: "rb-2026-08-23T000000-000Z-d0d0d0d0",
+    status: "CLEAN",
+    provider: "HERMES",
+  });
+  ledger.carried_findings = "oops";
+  await writeReview(store, "rb-2026-08-23T000000-000Z-d0d0d0d0", ledger);
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.reviews_counted, 0);
+  assert.deepEqual(
+    scorecard.skipped.map(({ reason }) => reason),
+    ["carried_findings is not an array"],
+  );
+  assert.equal(scorecard.providers.ALL.continuations_started, 0);
+  assert.equal(scorecard.providers.ALL.carried_findings, 0);
+});
+
 test("only one interrupted append may sit past the cursor", async (t) => {
   const store = await emptyStore(t);
   const events = [
