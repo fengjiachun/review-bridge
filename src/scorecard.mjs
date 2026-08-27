@@ -164,10 +164,28 @@ function workflowDefect(workflow, directoryName) {
   for (const key of ["local_review_cycles", "remote_attempts"]) {
     if (workflow[key] == null) continue;
     if (!Array.isArray(workflow[key])) return `${key} is not an array`;
-    // Every entry is one repair cycle. A non-object entry would still be
-    // counted as one, because the fields distinguishing them read as absent.
-    if (workflow[key].some((entry) => entry == null || typeof entry !== "object")) {
-      return `${key} holds an entry that is not an object`;
+    for (const entry of workflow[key]) {
+      const defect = repairEntryDefect(entry);
+      if (defect != null) return `${key} holds an entry that ${defect}`;
+    }
+  }
+  return null;
+}
+
+// Each entry counts as one repair cycle simply by existing, and two of its
+// fields decide which counter it lands in. Requiring its number and the types
+// of those fields is what makes it a cycle rather than any object at all; the
+// writer's remaining schema is not reproduced here.
+function repairEntryDefect(entry) {
+  if (entry == null || typeof entry !== "object" || Array.isArray(entry)) {
+    return "is not an object";
+  }
+  if (!Number.isInteger(entry.number) || entry.number < 1) {
+    return "has no cycle number";
+  }
+  for (const field of ["addressed_head_sha", "followup_review_id", "diverted_at"]) {
+    if (entry[field] != null && typeof entry[field] !== "string") {
+      return `has a non-string ${field}`;
     }
   }
   return null;
@@ -324,8 +342,14 @@ async function readCommittedAuditEvents(directory, workflowId) {
   // decoded string would run past the boundary by one position per multi-byte
   // character and swallow part of an uncommitted append.
   const committed = raw.subarray(0, head.committed_bytes).toString("utf8");
-  for (const line of committed.split("\n")) {
-    if (line === "") continue;
+  const lines = committed.split("\n");
+  // Only the trailing newline may leave an empty element. A blank line between
+  // events is damage, and skipping it would read the log as healthy.
+  if (lines.at(-1) === "") lines.pop();
+  for (const line of lines) {
+    if (line === "") {
+      return { events: [], reason: "audit log has a blank committed line" };
+    }
     let event;
     try {
       event = JSON.parse(line);

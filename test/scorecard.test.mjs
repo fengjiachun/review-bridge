@@ -857,26 +857,73 @@ test("an audit event naming another workflow is not counted here", async (t) => 
 
 test("a malformed repair-cycle entry is a defect, not a cycle", async (t) => {
   const store = await emptyStore(t);
-  await writeWorkflow(store, "rbwf-2026-08-28T000000-000Z-c5c5c5c5", {
-    workflow: { status: "ACTIVE", local_review_cycles: [null], remote_attempts: [] },
-    events: [],
-  });
-  await writeWorkflow(store, "rbwf-2026-08-29T000000-000Z-d6d6d6d6", {
-    workflow: { status: "ACTIVE", remote_attempts: ["nope"] },
-    events: [],
-  });
+  const cases = [
+    ["rbwf-2026-08-28T000000-000Z-c5c5c5c5", { local_review_cycles: [null] },
+      "local_review_cycles holds an entry that is not an object"],
+    ["rbwf-2026-08-29T000000-000Z-d6d6d6d6", { remote_attempts: ["nope"] },
+      "remote_attempts holds an entry that is not an object"],
+    // An empty object and an array are both `typeof "object"`, so neither is
+    // excluded by object-ness alone.
+    ["rbwf-2026-09-01T000000-000Z-a1b1c1d1", { local_review_cycles: [{}] },
+      "local_review_cycles holds an entry that has no cycle number"],
+    ["rbwf-2026-09-02T000000-000Z-b2c2d2e2", { remote_attempts: [[]] },
+      "remote_attempts holds an entry that is not an object"],
+    ["rbwf-2026-09-03T000000-000Z-c3d3e3f3", { remote_attempts: [{ number: 1, diverted_at: 7 }] },
+      "remote_attempts holds an entry that has a non-string diverted_at"],
+    ["rbwf-2026-09-04T000000-000Z-d4e4f4a4",
+      { local_review_cycles: [{ number: 1, addressed_head_sha: 7 }] },
+      "local_review_cycles holds an entry that has a non-string addressed_head_sha"],
+  ];
+  for (const [id, workflow] of cases) {
+    await writeWorkflow(store, id, { workflow: { status: "ACTIVE", ...workflow }, events: [] });
+  }
 
   const scorecard = await buildScorecard(store);
   assert.equal(scorecard.corpus.workflows_counted, 0);
   assert.deepEqual(
     scorecard.skipped_workflows.map(({ reason }) => reason),
-    [
-      "local_review_cycles holds an entry that is not an object",
-      "remote_attempts holds an entry that is not an object",
-    ],
+    cases.map(([, , reason]) => reason),
   );
   assert.equal(scorecard.workflows.local_cycles.started, 0);
   assert.equal(scorecard.workflows.remote_attempts.counted, 0);
+});
+
+test("a blank line between committed events is damage", async (t) => {
+  const store = await emptyStore(t);
+  const id = "rbwf-2026-09-05T000000-000Z-e5f5a5b5";
+  await writeWorkflow(store, id, {
+    workflow: { status: "ACTIVE" },
+    events: [
+      auditEvent("WORKFLOW_PAUSED", {
+        pause: { reason_code: "LOCAL_CYCLE_BUDGET_EXHAUSTED" },
+      }),
+      auditEvent("LOCAL_CYCLE_BUDGET_EXTENDED", {}),
+    ],
+  });
+  const directory = path.join(store, "workflows", id);
+  const log = await fsp.readFile(path.join(directory, "action-audit.jsonl"), "utf8");
+  const [first, second] = log.split("\n");
+  const blanked = `${first}\n\n${second}\n`;
+  await fsp.writeFile(path.join(directory, "action-audit.jsonl"), blanked);
+  await fsp.writeFile(
+    path.join(directory, "action-audit-head.json"),
+    `${JSON.stringify({
+      version: 1,
+      workflow_id: id,
+      committed_bytes: Buffer.byteLength(blanked),
+      next_sequence: 3,
+      last_event_sha256: null,
+    })}\n`,
+  );
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.audit_logs_skipped, 1);
+  assert.equal(
+    scorecard.skipped_audit_logs[0].reason,
+    "audit log has a blank committed line",
+  );
+  assert.equal(scorecard.workflows.budget_pauses.LOCAL_CYCLE_BUDGET_EXHAUSTED, 0);
+  assert.equal(scorecard.workflows.budget_extensions.LOCAL_CYCLE_BUDGET_EXTENDED, 0);
 });
 
 test("only one interrupted append may sit past the cursor", async (t) => {
