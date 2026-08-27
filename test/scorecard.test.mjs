@@ -640,6 +640,80 @@ test("a damaged audit log contributes no events and is reported apart", async (t
   );
 });
 
+test("a missing or truncated audit artifact is damage, not an empty log", async (t) => {
+  const store = await emptyStore(t);
+  const write = async (id, mutate) => {
+    await writeWorkflow(store, id, {
+      workflow: { status: "ACTIVE" },
+      events: [
+        auditEvent("WORKFLOW_PAUSED", {
+          pause: { reason_code: "LOCAL_CYCLE_BUDGET_EXHAUSTED" },
+        }),
+      ],
+    });
+    await mutate(path.join(store, "workflows", id));
+  };
+  await write("rbwf-2026-08-12T000000-000Z-eeeeeeee", (directory) =>
+    fsp.rm(path.join(directory, "action-audit-head.json")),
+  );
+  await write("rbwf-2026-08-13T000000-000Z-ffffffff", (directory) =>
+    fsp.rm(path.join(directory, "action-audit.jsonl")),
+  );
+  // The head still points past the end after the log loses its last event.
+  await write("rbwf-2026-08-14T000000-000Z-a1a1a1a1", async (directory) => {
+    await fsp.writeFile(path.join(directory, "action-audit.jsonl"), "");
+  });
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.workflows_counted, 3);
+  assert.equal(scorecard.corpus.audit_logs_skipped, 3);
+  assert.equal(scorecard.workflows.budget_pauses.LOCAL_CYCLE_BUDGET_EXHAUSTED, 0);
+  assert.deepEqual(
+    scorecard.skipped_audit_logs.map(({ reason }) => reason),
+    [
+      "audit artifact is missing",
+      "audit artifact is missing",
+      "audit log is shorter than its cursor",
+    ],
+  );
+});
+
+test("a rebuttal awaiting a decision is counted, not dropped", async (t) => {
+  const store = await emptyStore(t);
+  await writeReview(
+    store,
+    "rb-2026-08-15T000000-000Z-b2b2b2b2",
+    reviewLedger({
+      id: "rb-2026-08-15T000000-000Z-b2b2b2b2",
+      status: "AUTHOR_RESPONDED",
+      provider: "CODEX_TASK",
+      findings: [
+        finding("F-001", "major", "AUTHOR_REJECTED"),
+        finding("F-002", "minor", "AUTHOR_FIXED"),
+      ],
+      resolutions: [
+        { finding_id: "F-001", disposition: "rejected", rationale: "intended" },
+        { finding_id: "F-002", disposition: "fixed", rationale: "changed" },
+      ],
+    }),
+  );
+
+  const scorecard = await buildScorecard(store);
+  const codex = scorecard.providers.CODEX_TASK;
+  assert.equal(codex.rebuttals_pending, 1);
+  assert.equal(scorecard.providers.ALL.rebuttals_pending, 1);
+  // A pending rebuttal has no decision record, so it enters neither bucket and
+  // cannot move the rate.
+  assert.equal(codex.rebuttals.before_obligation.rebuttals, 0);
+  assert.equal(codex.rebuttals.after_obligation.rebuttals, 0);
+  assert.equal(codex.rebuttals.after_obligation.overturn_rate, null);
+  assert.equal(codex.disposition_outcomes.rejected.undecided, 1);
+  assert.match(
+    renderScorecardMarkdown(scorecard),
+    /Awaiting a reviewer decision and therefore in neither bucket: CODEX_TASK 1\./,
+  );
+});
+
 test("an empty store renders a report that states its counting rules", async (t) => {
   const store = await emptyStore(t);
   const scorecard = await buildScorecard(store, {

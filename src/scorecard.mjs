@@ -71,6 +71,7 @@ function emptyStats() {
         },
       ]),
     ),
+    rebuttals_pending: 0,
     continuable_findings: 0,
     continuations_started: 0,
     carried_findings: 0,
@@ -185,7 +186,15 @@ function countReview(stats, review) {
     const decision = decisionByFinding.get(finding.id);
     const outcome = decision?.decision ?? "undecided";
     stats.disposition_outcomes[resolution.disposition][outcome] += 1;
-    if (resolution.disposition !== "rejected" || decision == null) continue;
+    if (resolution.disposition !== "rejected") continue;
+    // A rebuttal the reviewer has not decided yet has no decision record, so
+    // it cannot sit on either side of the obligation. It is counted here
+    // instead of being dropped, which would make the buckets' denominator
+    // depend on how far each review happens to have got.
+    if (decision == null) {
+      stats.rebuttals_pending += 1;
+      continue;
+    }
     const bucket =
       "verification" in decision ? "after_obligation" : "before_obligation";
     const rebuttals = stats.rebuttals[bucket];
@@ -240,23 +249,31 @@ async function readJsonLedgers(root, fileName) {
 // beyond that is a torn append and is not evidence of anything.
 async function readCommittedAuditEvents(directory) {
   let head;
+  let raw;
   try {
+    // Starting a workflow writes both artifacts, so a missing one is damage,
+    // not a workflow that has yet to record anything. The server's own reader
+    // fails WORKFLOW_AUDIT_CORRUPT on either.
     head = JSON.parse(
       await fsp.readFile(path.join(directory, "action-audit-head.json"), "utf8"),
     );
+    raw = await fsp.readFile(path.join(directory, "action-audit.jsonl"));
   } catch (error) {
-    if (error?.code === "ENOENT") return { events: [], reason: null };
-    return { events: [], reason: `unreadable audit head: ${error.message}` };
+    return {
+      events: [],
+      reason:
+        error?.code === "ENOENT"
+          ? "audit artifact is missing"
+          : `unreadable audit artifact: ${error.message}`,
+    };
   }
   if (!Number.isInteger(head?.committed_bytes) || head.committed_bytes < 0) {
     return { events: [], reason: "audit head has no committed_bytes" };
   }
-  let raw;
-  try {
-    raw = await fsp.readFile(path.join(directory, "action-audit.jsonl"));
-  } catch (error) {
-    if (error?.code === "ENOENT") return { events: [], reason: null };
-    return { events: [], reason: `unreadable audit log: ${error.message}` };
+  // subarray clamps, so without this a log truncated at an earlier event
+  // boundary would parse cleanly and contribute an arbitrary subset.
+  if (raw.length < head.committed_bytes) {
+    return { events: [], reason: "audit log is shorter than its cursor" };
   }
   const events = [];
   // committed_bytes counts bytes, so the cut is made on the buffer. Slicing the
@@ -419,6 +436,17 @@ function percent(rate) {
   return rate == null ? "n/a" : `${(rate * 100).toFixed(1)}%`;
 }
 
+function pendingRebuttals(scorecard) {
+  const pending = Object.entries(scorecard.providers).filter(
+    ([provider, stats]) => provider !== OVERALL && stats.rebuttals_pending > 0,
+  );
+  return pending.length === 0
+    ? "Every rebuttal in the corpus has a reviewer decision."
+    : `Awaiting a reviewer decision and therefore in neither bucket: ${pending
+        .map(([provider, stats]) => `${provider} ${stats.rebuttals_pending}`)
+        .join(", ")}.`;
+}
+
 // The obligation arrived on a date, but providers were added on other dates.
 // Where no single provider spans both buckets, the difference between them is
 // not a before-and-after for one reviewer, and the report has to say so.
@@ -457,6 +485,11 @@ const COUNTING_RULES = [
   "  **sustained** when the reviewer decided `rebuttal_accepted`, **overturned**",
   "  when the reviewer decided `still_open`, and counted under `resolved` when",
   "  the reviewer decided `resolved`. Overturn rate is overturned / rebuttals.",
+  "- The buckets below count only rebuttals the reviewer has already decided. A",
+  "  rebuttal still awaiting a decision has no decision record and so cannot sit",
+  "  on either side of the obligation; it is counted separately under the table",
+  "  rather than dropped, which would tie the denominator to how far each review",
+  "  happens to have got.",
   "- The verification obligation is bucketed by field presence, not by date: a",
   "  decision record written before it has no `verification` key at all, and",
   "  every record written after it has one, empty when the decision did not",
@@ -589,6 +622,7 @@ export function renderScorecardMarkdown(scorecard) {
         ]).filter((row) => row[2] > 0),
       ),
     ),
+    pendingRebuttals(scorecard),
     obligationComparability(scorecard),
     "## Local review continuations",
     table(
