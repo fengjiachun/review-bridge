@@ -776,6 +776,76 @@ test("a non-array carried_findings is a defect, not four continuations", async (
   assert.equal(scorecard.providers.ALL.carried_findings, 0);
 });
 
+test("ledgers and audit heads must name the directory they sit in", async (t) => {
+  const store = await emptyStore(t);
+  // The same review ledger copied into a second directory.
+  const shared = reviewLedger({
+    id: "rb-2026-08-24T000000-000Z-e1e1e1e1",
+    status: "CLEAN",
+    provider: "HERMES",
+    findings: [finding("F-001", "blocker", "RESOLVED")],
+  });
+  await writeReview(store, "rb-2026-08-24T000000-000Z-e1e1e1e1", shared);
+  await writeReview(store, "rb-2026-08-25T000000-000Z-f2f2f2f2", shared);
+  // An audit head carrying another workflow's id.
+  await writeWorkflow(store, "rbwf-2026-08-26T000000-000Z-a3a3a3a3", {
+    workflow: { status: "ACTIVE" },
+    events: [
+      auditEvent("WORKFLOW_PAUSED", {
+        pause: { reason_code: "LOCAL_CYCLE_BUDGET_EXHAUSTED" },
+      }),
+    ],
+  });
+  const headPath = path.join(
+    store,
+    "workflows",
+    "rbwf-2026-08-26T000000-000Z-a3a3a3a3",
+    "action-audit-head.json",
+  );
+  const head = JSON.parse(await fsp.readFile(headPath, "utf8"));
+  head.workflow_id = "rbwf-2026-08-27T000000-000Z-b4b4b4b4";
+  await fsp.writeFile(headPath, `${JSON.stringify(head)}\n`);
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.reviews_counted, 1);
+  assert.equal(scorecard.corpus.reviews_skipped, 1);
+  assert.equal(
+    scorecard.skipped[0].reason,
+    "review ID does not match its store directory",
+  );
+  assert.equal(scorecard.providers.ALL.findings, 1);
+  assert.equal(scorecard.corpus.audit_logs_skipped, 1);
+  assert.equal(
+    scorecard.skipped_audit_logs[0].reason,
+    "audit head names a different workflow",
+  );
+  assert.equal(scorecard.workflows.budget_pauses.LOCAL_CYCLE_BUDGET_EXHAUSTED, 0);
+});
+
+test("a malformed repair-cycle entry is a defect, not a cycle", async (t) => {
+  const store = await emptyStore(t);
+  await writeWorkflow(store, "rbwf-2026-08-28T000000-000Z-c5c5c5c5", {
+    workflow: { status: "ACTIVE", local_review_cycles: [null], remote_attempts: [] },
+    events: [],
+  });
+  await writeWorkflow(store, "rbwf-2026-08-29T000000-000Z-d6d6d6d6", {
+    workflow: { status: "ACTIVE", remote_attempts: ["nope"] },
+    events: [],
+  });
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.workflows_counted, 0);
+  assert.deepEqual(
+    scorecard.skipped_workflows.map(({ reason }) => reason),
+    [
+      "local_review_cycles holds an entry that is not an object",
+      "remote_attempts holds an entry that is not an object",
+    ],
+  );
+  assert.equal(scorecard.workflows.local_cycles.started, 0);
+  assert.equal(scorecard.workflows.remote_attempts.counted, 0);
+});
+
 test("only one interrupted append may sit past the cursor", async (t) => {
   const store = await emptyStore(t);
   const events = [

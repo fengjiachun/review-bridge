@@ -100,9 +100,14 @@ function emptyWorkflowStats() {
 
 // A ledger the aggregation cannot count without guessing is skipped whole,
 // so a single bad record never silently distorts a column.
-function reviewDefect(review) {
+function reviewDefect(review, directoryName) {
   if (review == null || typeof review !== "object") return "not a JSON object";
   if (typeof review.id !== "string") return "missing id";
+  // Two directories holding the same ledger would otherwise contribute the
+  // same findings and outcomes twice.
+  if (review.id !== directoryName) {
+    return "review ID does not match its store directory";
+  }
   if (!REVIEW_STATUSES.includes(review.status)) {
     return `unknown status ${JSON.stringify(review.status)}`;
   }
@@ -157,8 +162,12 @@ function workflowDefect(workflow, directoryName) {
     return `unknown status ${JSON.stringify(workflow.status)}`;
   }
   for (const key of ["local_review_cycles", "remote_attempts"]) {
-    if (workflow[key] != null && !Array.isArray(workflow[key])) {
-      return `${key} is not an array`;
+    if (workflow[key] == null) continue;
+    if (!Array.isArray(workflow[key])) return `${key} is not an array`;
+    // Every entry is one repair cycle. A non-object entry would still be
+    // counted as one, because the fields distinguishing them read as absent.
+    if (workflow[key].some((entry) => entry == null || typeof entry !== "object")) {
+      return `${key} holds an entry that is not an object`;
     }
   }
   return null;
@@ -268,7 +277,7 @@ async function readJsonLedgers(root, fileName) {
 
 // Only the first `committed_bytes` of the audit log are committed; a tail
 // beyond that is a torn append and is not evidence of anything.
-async function readCommittedAuditEvents(directory) {
+async function readCommittedAuditEvents(directory, workflowId) {
   let head;
   let raw;
   try {
@@ -290,6 +299,11 @@ async function readCommittedAuditEvents(directory) {
   }
   if (!Number.isInteger(head?.committed_bytes) || head.committed_bytes < 0) {
     return { events: [], reason: "audit head has no committed_bytes" };
+  }
+  // A head belonging to another workflow can still land on a byte boundary
+  // this log accepts, silently cutting it short.
+  if (head.workflow_id !== workflowId) {
+    return { events: [], reason: "audit head names a different workflow" };
   }
   // subarray clamps, so without this a log truncated at an earlier event
   // boundary would parse cleanly and contribute an arbitrary subset.
@@ -391,7 +405,7 @@ export async function buildScorecard(storeRoot, { generatedAt } = {}) {
   let earliest = null;
   let latest = null;
   for (const { id, record } of reviewLedgers.records) {
-    const defect = reviewDefect(record);
+    const defect = reviewDefect(record, id);
     if (defect != null) {
       skipped.push({ id, reason: defect });
       continue;
@@ -424,7 +438,10 @@ export async function buildScorecard(storeRoot, { generatedAt } = {}) {
     // The audit log is a separate artifact from the workflow ledger: a damaged
     // one contributes no events at all rather than an arbitrary prefix, but it
     // does not disqualify the ledger that parsed.
-    const audit = await readCommittedAuditEvents(path.join(workflowsRoot, id));
+    const audit = await readCommittedAuditEvents(
+      path.join(workflowsRoot, id),
+      id,
+    );
     if (audit.reason != null) skippedAuditLogs.push({ id, reason: audit.reason });
     countWorkflowAudit(workflows, audit.events);
   }
