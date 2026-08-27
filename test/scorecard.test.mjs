@@ -542,6 +542,104 @@ test("workflow budget events come from the committed audit log", async (t) => {
   });
 });
 
+test("the committed cut is made in bytes, not in characters", async (t) => {
+  const store = await emptyStore(t);
+  await writeWorkflow(store, "rbwf-2026-08-09T000000-000Z-bbbbbbbb", {
+    workflow: { status: "PAUSED" },
+    events: [
+      // A rationale in a non-Latin script makes the byte length of this event
+      // exceed its length in UTF-16 code units.
+      {
+        version: 1,
+        event: "WORKFLOW_PAUSED",
+        metadata: { rationale: "预算超出的说明文本".repeat(8) },
+        workflow_state: { pause: { reason_code: "LOCAL_CYCLE_BUDGET_EXHAUSTED" } },
+      },
+      { version: 1, event: "REMOTE_CYCLE_BUDGET_EXTENDED", workflow_state: {} },
+    ],
+    committedLines: 1,
+  });
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.audit_logs_skipped, 0);
+  assert.equal(scorecard.workflows.budget_pauses.LOCAL_CYCLE_BUDGET_EXHAUSTED, 1);
+  assert.equal(
+    scorecard.workflows.budget_extensions.REMOTE_CYCLE_BUDGET_EXTENDED,
+    0,
+  );
+});
+
+test("a change size backfilled by a later event still measures its snapshot", async (t) => {
+  const store = await emptyStore(t);
+  const identity = { review_id: "rb-legacy", snapshot_hash: "legacy-hash" };
+  await writeWorkflow(store, "rbwf-2026-08-10T000000-000Z-cccccccc", {
+    workflow: { status: "ACTIVE" },
+    events: [
+      // A legacy dispatch records the review before it records a size, then
+      // backfills the size in a later event.
+      auditEvent("ACTION_PLANNED", {
+        change_size_budget: 2000,
+        current_review: { ...identity },
+      }),
+      auditEvent("WORKFLOW_STATE_UPDATED", {
+        change_size_budget: 2000,
+        current_review: {
+          ...identity,
+          change_size: { added_lines: 2400, deleted_lines: 0, total_lines: 2400 },
+        },
+      }),
+    ],
+  });
+
+  const { workflows } = await buildScorecard(store);
+  assert.deepEqual(workflows.change_size, {
+    snapshots_measured: 1,
+    snapshots_without_change_size: 0,
+    warning_threshold_crossed: 1,
+    over_budget: 1,
+  });
+});
+
+test("a damaged audit log contributes no events and is reported apart", async (t) => {
+  const store = await emptyStore(t);
+  const directory = path.join(store, "workflows", "rbwf-2026-08-11T000000-000Z-dddddddd");
+  await writeWorkflow(store, "rbwf-2026-08-11T000000-000Z-dddddddd", {
+    workflow: { status: "ACTIVE", remote_attempts: [{ number: 1, diverted_at: null }] },
+    events: [
+      auditEvent("WORKFLOW_PAUSED", {
+        pause: { reason_code: "REMOTE_CYCLE_BUDGET_EXHAUSTED" },
+      }),
+    ],
+  });
+  const log = await fsp.readFile(path.join(directory, "action-audit.jsonl"), "utf8");
+  const torn = `${log}{"event":"CHANGE_SIZE_BUDGET_EXTENDED"\n`;
+  await fsp.writeFile(path.join(directory, "action-audit.jsonl"), torn);
+  await fsp.writeFile(
+    path.join(directory, "action-audit-head.json"),
+    `${JSON.stringify({
+      version: 1,
+      workflow_id: "rbwf-2026-08-11T000000-000Z-dddddddd",
+      committed_bytes: Buffer.byteLength(torn),
+      next_sequence: 3,
+      last_event_sha256: null,
+    })}\n`,
+  );
+
+  const scorecard = await buildScorecard(store);
+  // The workflow ledger parsed, so the workflow itself still counts.
+  assert.equal(scorecard.corpus.workflows_counted, 1);
+  assert.equal(scorecard.corpus.workflows_skipped, 0);
+  assert.equal(scorecard.workflows.remote_attempts.recorded, 1);
+  // Its audit log did not, so none of its events do.
+  assert.equal(scorecard.corpus.audit_logs_skipped, 1);
+  assert.equal(scorecard.workflows.budget_pauses.REMOTE_CYCLE_BUDGET_EXHAUSTED, 0);
+  assert.match(scorecard.skipped_audit_logs[0].reason, /^unparseable audit line: /);
+  assert.match(
+    renderScorecardMarkdown(scorecard),
+    /workflows\/rbwf-2026-08-11T000000-000Z-dddddddd\/action-audit\.jsonl/,
+  );
+});
+
 test("an empty store renders a report that states its counting rules", async (t) => {
   const store = await emptyStore(t);
   const scorecard = await buildScorecard(store, {

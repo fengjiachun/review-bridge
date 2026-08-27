@@ -253,18 +253,24 @@ async function readCommittedAuditEvents(directory) {
   }
   let raw;
   try {
-    raw = await fsp.readFile(path.join(directory, "action-audit.jsonl"), "utf8");
+    raw = await fsp.readFile(path.join(directory, "action-audit.jsonl"));
   } catch (error) {
     if (error?.code === "ENOENT") return { events: [], reason: null };
     return { events: [], reason: `unreadable audit log: ${error.message}` };
   }
   const events = [];
-  for (const line of raw.slice(0, head.committed_bytes).split("\n")) {
+  // committed_bytes counts bytes, so the cut is made on the buffer. Slicing the
+  // decoded string would run past the boundary by one position per multi-byte
+  // character and swallow part of an uncommitted append.
+  const committed = raw.subarray(0, head.committed_bytes).toString("utf8");
+  for (const line of committed.split("\n")) {
     if (line === "") continue;
     try {
       events.push(JSON.parse(line));
     } catch (error) {
-      return { events, reason: `unparseable audit line: ${error.message}` };
+      // A prefix of a damaged log is an arbitrary subset of the workflow's
+      // pauses and extensions, so none of it is returned.
+      return { events: [], reason: `unparseable audit line: ${error.message}` };
     }
   }
   return { events, reason: null };
@@ -287,14 +293,17 @@ function countWorkflowAudit(stats, events) {
     const review = state?.current_review;
     if (review == null) continue;
     const key = `${review.review_id}:${review.snapshot_hash}`;
-    if (measured.has(key) || unmeasurable.has(key)) continue;
+    if (measured.has(key)) continue;
     const totalLines = review.change_size?.total_lines;
-    // Ledgers written before the audited state carried a change size cannot
-    // be measured; counting them as zero would read as "no large snapshot".
+    // A legacy dispatch backfills the change size in a later event, so an
+    // unmeasurable snapshot is provisional: it is measured from the first
+    // event that carries a size, and counting it as zero meanwhile would
+    // read as "no large snapshot".
     if (!Number.isInteger(totalLines)) {
       unmeasurable.add(key);
       continue;
     }
+    unmeasurable.delete(key);
     measured.set(key, {
       totalLines,
       budget: state.change_size_budget ?? DEFAULT_CHANGE_SIZE_BUDGET,
@@ -357,6 +366,7 @@ export async function buildScorecard(storeRoot, { generatedAt } = {}) {
   const workflowLedgers = await readJsonLedgers(workflowsRoot, "workflow.json");
   const workflows = emptyWorkflowStats();
   const skippedWorkflows = [...workflowLedgers.skipped];
+  const skippedAuditLogs = [];
   for (const { id, record } of workflowLedgers.records) {
     const defect = workflowDefect(record);
     if (defect != null) {
@@ -364,8 +374,11 @@ export async function buildScorecard(storeRoot, { generatedAt } = {}) {
       continue;
     }
     countWorkflow(workflows, record);
+    // The audit log is a separate artifact from the workflow ledger: a damaged
+    // one contributes no events at all rather than an arbitrary prefix, but it
+    // does not disqualify the ledger that parsed.
     const audit = await readCommittedAuditEvents(path.join(workflowsRoot, id));
-    if (audit.reason != null) skippedWorkflows.push({ id, reason: audit.reason });
+    if (audit.reason != null) skippedAuditLogs.push({ id, reason: audit.reason });
     countWorkflowAudit(workflows, audit.events);
   }
 
@@ -380,6 +393,7 @@ export async function buildScorecard(storeRoot, { generatedAt } = {}) {
       workflows_counted: workflows.workflows,
       workflows_skipped: skippedWorkflows.length,
       workflow_directories_without_ledger: workflowLedgers.absent,
+      audit_logs_skipped: skippedAuditLogs.length,
       earliest_review_created_at: earliest,
       latest_review_created_at: latest,
     },
@@ -389,6 +403,7 @@ export async function buildScorecard(storeRoot, { generatedAt } = {}) {
     workflows,
     skipped,
     skipped_workflows: skippedWorkflows,
+    skipped_audit_logs: skippedAuditLogs,
   };
 }
 
@@ -449,14 +464,18 @@ const COUNTING_RULES = [
   "- Size-warning crossings are not persisted; they are recomputed as",
   "  `total_lines >= ceil(change_size_budget * 0.75)` over each distinct review",
   "  snapshot in a workflow's committed audit log, against the budget in force",
-  "  the first time that snapshot appears. Over-budget snapshots are counted in",
-  "  the warning row too, matching `changeSizeReport`.",
+  "  the first event that records a size for it — a legacy dispatch backfills",
+  "  that size later, and the backfilled value counts. Over-budget snapshots are",
+  "  counted in the warning row too, matching `changeSizeReport`.",
   "- Budget exhaustions count `WORKFLOW_PAUSED` audit events by",
   "  `workflow_state.pause.reason_code`; extensions count the `*_BUDGET_EXTENDED`",
   "  audit events. Workflows are dispatched to `CODEX_TASK` by construction, so",
   "  workflow numbers are not split by provider.",
-  "- Audit logs are read only up to `action-audit-head.json`'s `committed_bytes`.",
-  "  The hash chain is not verified here.",
+  "- Audit logs are read only up to `action-audit-head.json`'s `committed_bytes`,",
+  "  measured in bytes, so an uncommitted append never reaches the counts. The",
+  "  hash chain is not verified here. An audit log that does not parse",
+  "  contributes no events at all rather than a prefix, and is listed under",
+  "  Skipped; the workflow ledger beside it still counts.",
   "- A ledger that does not parse, or does not match the shape above, is listed",
   "  under Skipped and left untouched. A directory holding no ledger of its kind",
   "  is counted separately: a remote-only publication never creates a local",
@@ -488,6 +507,7 @@ export function renderScorecardMarkdown(scorecard) {
         ],
       ],
     ),
+    `Audit logs skipped: ${corpus.audit_logs_skipped}.`,
     `Review \`created_at\` spans ${corpus.earliest_review_created_at ?? "n/a"} to ${corpus.latest_review_created_at ?? "n/a"}.`,
     "## Review outcomes",
     table(
@@ -637,20 +657,19 @@ export function renderScorecardMarkdown(scorecard) {
       ],
     ),
   ];
-  if (scorecard.skipped.length > 0 || scorecard.skipped_workflows.length > 0) {
-    sections.push(
-      "## Skipped",
-      table(
-        ["Ledger", "Reason"],
-        [
-          ...scorecard.skipped.map(({ id, reason }) => [`reviews/${id}`, reason]),
-          ...scorecard.skipped_workflows.map(({ id, reason }) => [
-            `workflows/${id}`,
-            reason,
-          ]),
-        ],
-      ),
-    );
+  const skippedRows = [
+    ...scorecard.skipped.map(({ id, reason }) => [`reviews/${id}`, reason]),
+    ...scorecard.skipped_workflows.map(({ id, reason }) => [
+      `workflows/${id}`,
+      reason,
+    ]),
+    ...scorecard.skipped_audit_logs.map(({ id, reason }) => [
+      `workflows/${id}/action-audit.jsonl`,
+      reason,
+    ]),
+  ];
+  if (skippedRows.length > 0) {
+    sections.push("## Skipped", table(["Ledger", "Reason"], skippedRows));
   }
   return `${sections.join("\n\n")}\n`;
 }
