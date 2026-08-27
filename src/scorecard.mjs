@@ -135,8 +135,22 @@ function reviewDefect(review, directoryName) {
   }
   // Absent on ledgers older than the field; anything else present must be an
   // array, or its `length` would be read as a count of carried findings.
-  if (review.carried_findings != null && !Array.isArray(review.carried_findings)) {
-    return "carried_findings is not an array";
+  if (review.carried_findings != null) {
+    if (!Array.isArray(review.carried_findings)) {
+      return "carried_findings is not an array";
+    }
+    // Each entry is one carried finding, counted by existing and reported by
+    // the review it came from.
+    for (const carried of review.carried_findings) {
+      if (
+        carried == null ||
+        typeof carried !== "object" ||
+        typeof carried.finding_id !== "string" ||
+        typeof carried.continued_from_review_id !== "string"
+      ) {
+        return "carried_findings holds an entry that is not a carried finding";
+      }
+    }
   }
   for (const finding of review.findings) {
     if (!SEVERITIES.includes(finding?.severity)) {
@@ -164,6 +178,21 @@ function reviewDefect(review, directoryName) {
   ]) {
     if (new Set(entries).size !== entries.length) {
       return `${key} IDs are not unique`;
+    }
+  }
+  // Uniqueness alone leaves a response free to name nothing: a decision for a
+  // finding that has no resolution is dropped on lookup while the finding it
+  // should have answered is reported as still awaiting one.
+  const findingIds = new Set(review.findings.map((finding) => finding.id));
+  for (const resolution of review.resolutions) {
+    if (!findingIds.has(resolution.finding_id)) {
+      return `a resolution names no finding: ${JSON.stringify(resolution.finding_id)}`;
+    }
+  }
+  const answered = new Set(review.resolutions.map((r) => r.finding_id));
+  for (const decision of review.rereview_decisions) {
+    if (!answered.has(decision.finding_id)) {
+      return `a rereview decision names no resolution: ${JSON.stringify(decision.finding_id)}`;
     }
   }
   return null;
@@ -393,6 +422,15 @@ async function readCommittedAuditEvents(directory, workflowId) {
       return { events: [], reason: "audit event names a different workflow" };
     }
     events.push(event);
+  }
+  // The cursor describes the committed region in three ways, and a head left
+  // behind by a stale write can agree on the byte count while disagreeing
+  // about which events those bytes are.
+  if (
+    head.next_sequence !== events.length + 1 ||
+    head.last_event_sha256 !== (events.at(-1)?.event_sha256 ?? null)
+  ) {
+    return { events: [], reason: "audit cursor disagrees with committed events" };
   }
   return { events, reason: null };
 }

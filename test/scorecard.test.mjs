@@ -85,19 +85,21 @@ async function writeWorkflow(storeRoot, id, { workflow, events, committedLines }
   const lines = events.map(
     (event) => `${JSON.stringify({ workflow_id: id, ...event })}\n`,
   );
-  const committed = lines.slice(0, committedLines ?? lines.length).join("");
+  const committedCount = committedLines ?? lines.length;
+  const committed = lines.slice(0, committedCount).join("");
   await fsp.writeFile(
     path.join(directory, "action-audit.jsonl"),
     lines.join(""),
   );
+  // A real head describes the committed region, not the whole file.
   await fsp.writeFile(
     path.join(directory, "action-audit-head.json"),
     `${JSON.stringify({
       version: 1,
       workflow_id: id,
       committed_bytes: Buffer.byteLength(committed),
-      next_sequence: events.length + 1,
-      last_event_sha256: null,
+      next_sequence: committedCount + 1,
+      last_event_sha256: events[committedCount - 1]?.event_sha256 ?? null,
     })}\n`,
   );
 }
@@ -924,6 +926,85 @@ test("repeated IDs and impossible rounds are defects", async (t) => {
   );
   assert.equal(scorecard.providers.ALL.rebuttals.after_obligation.rebuttals, 0);
   assert.deepEqual(scorecard.providers.ALL.rounds_to_clean, {});
+});
+
+test("a response must name what it answers", async (t) => {
+  const store = await emptyStore(t);
+  // The decision answers a finding that has no resolution, so it is dropped on
+  // lookup and F-001 reads as a rebuttal nobody has decided.
+  await writeReview(
+    store,
+    "rb-2026-09-09T000000-000Z-c9d9e9f9",
+    reviewLedger({
+      id: "rb-2026-09-09T000000-000Z-c9d9e9f9",
+      status: "HUMAN_REQUIRED",
+      provider: "CODEX_TASK",
+      currentRound: 2,
+      findings: [finding("F-001", "major", "AUTHOR_REJECTED"), finding("F-002", "nit", "OPEN")],
+      resolutions: [{ finding_id: "F-001", disposition: "rejected", rationale: "no" }],
+      decisions: [{ finding_id: "F-002", decision: "still_open", rationale: "held", verification: "" }],
+    }),
+  );
+  await writeReview(
+    store,
+    "rb-2026-09-10T000000-000Z-d0e0f0a0",
+    reviewLedger({
+      id: "rb-2026-09-10T000000-000Z-d0e0f0a0",
+      status: "CLEAN",
+      provider: "HERMES",
+      resolutions: [{ finding_id: "F-404", disposition: "fixed", rationale: "?" }],
+    }),
+  );
+  // carried_findings holding something that is not a carried finding.
+  const carried = reviewLedger({
+    id: "rb-2026-09-11T000000-000Z-e1f1a1b1",
+    status: "CLEAN",
+    provider: "HERMES",
+  });
+  carried.carried_findings = [null];
+  await writeReview(store, "rb-2026-09-11T000000-000Z-e1f1a1b1", carried);
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.reviews_counted, 0);
+  assert.deepEqual(
+    scorecard.skipped.map(({ reason }) => reason),
+    [
+      'a rereview decision names no resolution: "F-002"',
+      'a resolution names no finding: "F-404"',
+      "carried_findings holds an entry that is not a carried finding",
+    ],
+  );
+  assert.equal(scorecard.providers.ALL.rebuttals_pending, 0);
+  assert.equal(scorecard.providers.ALL.continuations_started, 0);
+});
+
+test("the cursor must describe the events it commits", async (t) => {
+  const store = await emptyStore(t);
+  const id = "rbwf-2026-09-12T000000-000Z-f2a2b2c2";
+  await writeWorkflow(store, id, {
+    workflow: { status: "ACTIVE" },
+    events: [
+      auditEvent("WORKFLOW_PAUSED", {
+        pause: { reason_code: "LOCAL_CYCLE_BUDGET_EXHAUSTED" },
+      }),
+      auditEvent("LOCAL_CYCLE_BUDGET_EXTENDED", {}),
+    ],
+  });
+  const directory = path.join(store, "workflows", id);
+  const headPath = path.join(directory, "action-audit-head.json");
+  const head = JSON.parse(await fsp.readFile(headPath, "utf8"));
+  // The byte count still lands on a real event boundary, but the sequence
+  // describes a cursor one event further on.
+  head.next_sequence = 4;
+  await fsp.writeFile(headPath, `${JSON.stringify(head)}\n`);
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.audit_logs_skipped, 1);
+  assert.equal(
+    scorecard.skipped_audit_logs[0].reason,
+    "audit cursor disagrees with committed events",
+  );
+  assert.equal(scorecard.workflows.budget_pauses.LOCAL_CYCLE_BUDGET_EXHAUSTED, 0);
 });
 
 test("the committed prefix must stop on an event boundary", async (t) => {
