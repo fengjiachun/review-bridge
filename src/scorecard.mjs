@@ -326,13 +326,20 @@ async function readCommittedAuditEvents(directory, workflowId) {
   const committed = raw.subarray(0, head.committed_bytes).toString("utf8");
   for (const line of committed.split("\n")) {
     if (line === "") continue;
+    let event;
     try {
-      events.push(JSON.parse(line));
+      event = JSON.parse(line);
     } catch (error) {
       // A prefix of a damaged log is an arbitrary subset of the workflow's
       // pauses and extensions, so none of it is returned.
       return { events: [], reason: `unparseable audit line: ${error.message}` };
     }
+    // The last of the three identities an artifact carries: without this, one
+    // workflow's pauses and extensions could be counted under another.
+    if (event?.workflow_id !== workflowId) {
+      return { events: [], reason: "audit event names a different workflow" };
+    }
+    events.push(event);
   }
   return { events, reason: null };
 }

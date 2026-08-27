@@ -80,7 +80,11 @@ async function writeWorkflow(storeRoot, id, { workflow, events, committedLines }
     path.join(directory, "workflow.json"),
     `${JSON.stringify({ version: 1, workflow_id: id, ...workflow })}\n`,
   );
-  const lines = events.map((event) => `${JSON.stringify(event)}\n`);
+  // Every real event names its workflow; an event may still override this to
+  // stand in for a copied or tampered log.
+  const lines = events.map(
+    (event) => `${JSON.stringify({ workflow_id: id, ...event })}\n`,
+  );
   const committed = lines.slice(0, committedLines ?? lines.length).join("");
   await fsp.writeFile(
     path.join(directory, "action-audit.jsonl"),
@@ -820,6 +824,35 @@ test("ledgers and audit heads must name the directory they sit in", async (t) =>
     "audit head names a different workflow",
   );
   assert.equal(scorecard.workflows.budget_pauses.LOCAL_CYCLE_BUDGET_EXHAUSTED, 0);
+});
+
+test("an audit event naming another workflow is not counted here", async (t) => {
+  const store = await emptyStore(t);
+  await writeWorkflow(store, "rbwf-2026-08-30T000000-000Z-e7e7e7e7", {
+    workflow: { status: "ACTIVE" },
+    events: [
+      auditEvent("WORKFLOW_PAUSED", {
+        pause: { reason_code: "LOCAL_CYCLE_BUDGET_EXHAUSTED" },
+      }),
+      // Copied from another workflow, under a head that names this one.
+      {
+        workflow_id: "rbwf-2026-08-31T000000-000Z-f8f8f8f8",
+        event: "CHANGE_SIZE_BUDGET_EXTENDED",
+        workflow_state: {},
+      },
+    ],
+  });
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.workflows_counted, 1);
+  assert.equal(scorecard.corpus.audit_logs_skipped, 1);
+  assert.equal(
+    scorecard.skipped_audit_logs[0].reason,
+    "audit event names a different workflow",
+  );
+  // The whole log is refused, so even the event that did belong is not counted.
+  assert.equal(scorecard.workflows.budget_pauses.LOCAL_CYCLE_BUDGET_EXHAUSTED, 0);
+  assert.equal(scorecard.workflows.budget_extensions.CHANGE_SIZE_BUDGET_EXTENDED, 0);
 });
 
 test("a malformed repair-cycle entry is a defect, not a cycle", async (t) => {
