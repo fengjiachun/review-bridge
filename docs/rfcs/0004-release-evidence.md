@@ -96,7 +96,12 @@ verifier runs in two modes sharing one requirement list:
     fails verification, so a new entry cannot borrow the legacy exemption by
     omission. The marker is ordinary CHANGELOG text: moving it is a visible
     edit, and the entry digests of recorded releases pin the text it
-    governed.
+    governed. The marker is always read from the default branch's CHANGELOG
+    at verification time, never from the historical text a tag carries —
+    adoption is a repository-level fact, and a tag created before the marker
+    existed cannot contain it. A historical tag therefore verifies under the
+    same cutoff as a fresh release, and the record pins the cutoff it
+    applied so a replay classifies entries exactly as the original run did.
 
     Local discovery reads merge commits, so it assumes the merge-commit
     history the merge-integrity check below already requires; a squash- or
@@ -179,9 +184,13 @@ One record per version. A re-run against an existing record compares and
 reports; it never silently overwrites. The comparison replays the record's
 own range boundary, so a historical tag backfilled later — the permitted
 human action — narrows nothing retroactively: the changed boundary is
-reported as superseded, never as divergence. A genuine mismatch against an
-existing record is a loud failure — history changed after it was recorded —
-and resolving it is operator work.
+reported as superseded, never as divergence. Equality is defined over the
+record's semantic fields — the identities, SHAs, boundary, reconciled sets,
+and digests — and excludes the per-run provenance (observation reference,
+collection time, verifier version), which a fresh collection renews by
+construction: new provenance is not history divergence. A genuine mismatch
+in the semantic fields is a loud failure — history changed after it was
+recorded — and resolving it is operator work.
 
 ### What the record is, and is not
 
