@@ -87,15 +87,32 @@ verifier runs in two modes sharing one requirement list:
     the pull-request number: every bullet in a reconciled entry names the
     pull requests it describes (for example `(#63)`), internal-only merges
     are listed under an explicit marker in the entry, and the check compares
-    the claimed number set against the merged set in the range. Entries
-    written before this convention existed cannot be reconciled mechanically
-    and are reported as `pre-convention` rather than failed — the same
-    visible-but-not-fatal treatment as unattested merges.
+    the claimed number set against the merged set in the range. The
+    exemption for history has a deterministic cutoff: a marker in the
+    CHANGELOG header names the first version whose entry must carry
+    references. Entries older than the marker are reported as
+    `pre-convention` — the same visible-but-not-fatal treatment as
+    unattested merges — while an entry at or after it that omits references
+    fails verification, so a new entry cannot borrow the legacy exemption by
+    omission. The marker is ordinary CHANGELOG text: moving it is a visible
+    edit, and the entry digests of recorded releases pin the text it
+    governed.
+
+    Local discovery reads merge commits, so it assumes the merge-commit
+    history the merge-integrity check below already requires; a squash- or
+    rebase-merged pull request is invisible to it. The authoritative
+    reconciliation is the final phase's, which discovers the merged set from
+    GitHub's facts.
 - **Final** (`--final`), after tag and release are published — requires the
   authenticated GitHub CLI and the store, so it runs on the operator's
   machine only:
   - the tag exists, is reachable from the default branch, and points at the
     release commit the pre-flight verified;
+  - the reconciliation re-runs against GitHub's merged-pull-request facts
+    for the range — the authoritative discovery, which also covers squash-
+    and rebase-merged pull requests that local history cannot reveal — so
+    the pre-flight result is exact for merge-commit-only history and an
+    approximation otherwise;
   - the published release's assets match a local `verify-build` output for
     the same tag. The checksum manifest is validated by content — the
     published `SHA256SUMS.txt` must equal the locally generated one — and is
