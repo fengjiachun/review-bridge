@@ -110,8 +110,13 @@ verifier runs in two modes sharing one requirement list:
 - **Final** (`--final`), after tag and release are published — requires the
   authenticated GitHub CLI and the store, so it runs on the operator's
   machine only:
-  - the tag exists, is reachable from the default branch, and points at the
-    release commit the pre-flight verified;
+  - the tag exists and is reachable from the default branch, and the final
+    phase reruns every pre-flight requirement against the peeled tag target
+    itself. Pre-flight persists nothing and claims no continuity with any
+    later run — it is early warning, not evidence; the CI copy checks a pull
+    request's head while the tag targets a merge commit, so the two need not
+    even agree on a SHA. The record rests solely on what the final phase
+    verified;
   - the reconciliation re-runs against GitHub's merged-pull-request facts
     for the range — the authoritative discovery, which also covers squash-
     and rebase-merged pull requests that local history cannot reveal — so
