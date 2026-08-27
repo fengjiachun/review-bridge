@@ -82,6 +82,15 @@ verifier runs in two modes sharing one requirement list:
     internal-only. A missing intermediate tag therefore widens the claim set
     along with the commit range instead of turning the intermediate
     release's merges into false mismatches.
+
+    Reconciliation is deterministic, never prose interpretation. Its unit is
+    the pull-request number: every bullet in a reconciled entry names the
+    pull requests it describes (for example `(#63)`), internal-only merges
+    are listed under an explicit marker in the entry, and the check compares
+    the claimed number set against the merged set in the range. Entries
+    written before this convention existed cannot be reconciled mechanically
+    and are reported as `pre-convention` rather than failed — the same
+    visible-but-not-fatal treatment as unattested merges.
 - **Final** (`--final`), after tag and release are published — requires the
   authenticated GitHub CLI and the store, so it runs on the operator's
   machine only:
@@ -122,7 +131,8 @@ carries:
 
 - the repository identity (numeric GitHub repository ID and full name);
 - version, tag name, tag target SHA, release commit SHA;
-- the digest of the CHANGELOG entry it verified;
+- one digest per reconciled CHANGELOG entry, keyed by version, committing
+  the complete claim set the verification actually used;
 - the pull-request list of the range, each entry carrying its merge SHA and
   either the terminal-record reference it matched, `unattested`, or
   `unverifiable`;
@@ -166,9 +176,11 @@ evidence for a new write.
 
 ## Drawbacks
 
-- The CHANGELOG reconciliation needs a convention for internal-only merges
-  (changes deliberately absent from the CHANGELOG), which is one more piece
-  of release discipline to document.
+- The CHANGELOG reconciliation needs two conventions — per-bullet
+  pull-request references, and an explicit internal-only list for merges
+  deliberately absent from the prose — which is more release discipline to
+  document, and entries older than the conventions stay `pre-convention`
+  forever unless rewritten.
 - The asset check depends on a local rebuild at the tag; a toolchain
   difference that changes bytes produces a false mismatch the operator must
   investigate rather than wave through.
@@ -220,5 +232,6 @@ in the change that makes it true.
 - Whether the pre-flight mode should be wired into the release pull request's
   CI or stay an operator command; CI wiring needs no store access, so it is
   possible, but it adds a release-PR-shaped special case to the workflow file.
-- Where the internal-only merge convention is stated (CHANGELOG header,
-  CONTRIBUTING, or the verifier's own documentation).
+- Where the CHANGELOG conventions — per-bullet pull-request references and
+  the internal-only list — are stated (CHANGELOG header, CONTRIBUTING, or
+  the verifier's own documentation).
