@@ -8,7 +8,9 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
+  ADVISORY_PANEL_CONTRACT,
   assertDispatchContract,
+  assertThirdPartyMaterialBoundary,
   DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
   HERMES_DISPATCH_CONTRACT,
 } from "./dispatch-contract.mjs";
@@ -466,6 +468,12 @@ assertDispatchContract(
   "packaged Codex workflow skill",
   DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
 );
+assertDispatchContract(
+  workflowSkill,
+  "## Advisory panel review of an external pull request",
+  "packaged Codex workflow skill",
+  ADVISORY_PANEL_CONTRACT,
+);
 assert.match(
   workflowSkill,
   /Leave `parent_review_id` unset unless you have a specific parent in mind/,
@@ -720,6 +728,7 @@ assert.match(reviewerSkill, /newly created Codex task/);
 assert.match(reviewerSkill, /must not be a fork of the author task/);
 assert.match(reviewerSkill, /Require `reviewer_provider: CODEX_TASK`/);
 assert.match(reviewerSkill, /Treat\s+every\s+actionable\s+finding\s+as\s+blocking/);
+assertThirdPartyMaterialBoundary(reviewerSkill, "packaged Codex reviewer skill");
 
 const extension = await readJson(path.join(reviewerRoot, "manifest.json"));
 assert.equal(extension.manifest_version, "0.3");
@@ -747,6 +756,10 @@ assert.match(
 assert.match(
   reviewInstructions,
   /For every review strategy, inspect relevant source beyond the patch with\s+`read_snapshot_file` and `search_snapshot`/,
+);
+assertThirdPartyMaterialBoundary(
+  reviewInstructions,
+  "packaged Claude review instructions",
 );
 
 // Hermes profile integration artifact.
@@ -860,6 +873,7 @@ assert.match(hermesSkill, /reviewer-scoped/i);
 assert.match(hermesSkill, /submit tools update the review\s+ledger/is);
 assert.doesNotMatch(hermesSkill, /read-only Review Bridge reviewer tools/i);
 assert.doesNotMatch(hermesSkill, /\bprepare_review\b|\bstart_publication\b/);
+assertThirdPartyMaterialBoundary(hermesSkill, "packaged Hermes reviewer skill");
 const hermesReadme = await fsp.readFile(
   path.join(hermesIntegration, "README.md"),
   "utf8",
@@ -992,6 +1006,10 @@ assert.match(deepseekSkill, /submit tools update the\s+review ledger/is);
 assert.match(deepseekSkill, /session that did not perform round one/i);
 assert.doesNotMatch(deepseekSkill, /read-only Review Bridge reviewer tools/i);
 assert.doesNotMatch(deepseekSkill, /\bprepare_review\b|\bstart_publication\b/);
+assertThirdPartyMaterialBoundary(
+  deepseekSkill,
+  "packaged DeepSeek Harness reviewer skill",
+);
 const deepseekReadme = await fsp.readFile(
   path.join(deepseekHarness, "README.md"),
   "utf8",

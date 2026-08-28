@@ -2840,3 +2840,281 @@ test("automatic parent selection prefers the nearest ancestor over the newest ga
   // The delta re-reviews only the unreviewed commit, not step 2 again.
   assert.deepEqual(child.rounds[0].successor.changed_files, ["step3.js"]);
 });
+
+// The advisory fence. Each refusal gets its own test, because deleting any one
+// of them must turn a test red: a category error here would mint a
+// LOCAL_GATE_PASSED attestation over code this operator never authored.
+async function advisoryFixture(t) {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "export function divide(a, b) {\n  return b === 0 ? 0 : a / b;\n}\n",
+  );
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "third-party change");
+  return { repository, store, baseSha };
+}
+
+async function prepareAdvisory(store, repository, baseSha, reviewerProvider) {
+  return prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement:
+      "PR title and description, quoted as the author's unverified claim.",
+    implementationScope: "Advisory panel review of an external pull request.",
+    reviewerProvider,
+    advisory: true,
+  });
+}
+
+test("advisory mode is persisted and reported without changing the gated default", async (t) => {
+  const { repository, store, baseSha } = await advisoryFixture(t);
+
+  const advisory = await prepareAdvisory(
+    store,
+    repository,
+    baseSha,
+    "CODEX_TASK",
+  );
+  assert.equal(advisory.advisory, true);
+  const advisorySummary = await getReviewSummary(store, advisory.id);
+  assert.equal(advisorySummary.advisory, true);
+  // The ledger, not the caller's memory, is what the refusals read.
+  const ledger = JSON.parse(
+    await fsp.readFile(
+      path.join(store, "reviews", advisory.id, "review.json"),
+      "utf8",
+    ),
+  );
+  assert.equal(ledger.advisory, true);
+
+  const gated = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Ordinary gated review.",
+    implementationScope: "Guard the divide.",
+  });
+  assert.equal(gated.advisory, false);
+  assert.equal(
+    (await getReviewSummary(store, gated.id)).advisory,
+    false,
+  );
+});
+
+test("a ledger written before advisory mode still gates", async (t) => {
+  const { repository, store, baseSha } = await advisoryFixture(t);
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Gate an old ledger.",
+    implementationScope: "Guard the divide.",
+  });
+  const ledgerPath = path.join(store, "reviews", prepared.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  delete ledger.advisory;
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`, {
+    mode: 0o600,
+  });
+
+  assert.equal((await getReviewSummary(store, prepared.id)).advisory, false);
+  await submitInitialReview(store, prepared.id, []);
+  const finalized = await finalizeLocalGate(store, prepared.id);
+  assert.equal(finalized.review.status, "LOCAL_GATE_PASSED");
+});
+
+test("advisory preparation refuses a non-boolean mode", async (t) => {
+  const { repository, store, baseSha } = await advisoryFixture(t);
+  await assert.rejects(
+    prepareReview(store, {
+      repositoryPath: repository,
+      baseRef: baseSha,
+      requirement: "Reject a typo that would silently gate.",
+      implementationScope: "Guard the divide.",
+      advisory: "true",
+    }),
+    /advisory must be a boolean/,
+  );
+});
+
+test("finalize_local_gate refuses an advisory review", async (t) => {
+  const { repository, store, baseSha } = await advisoryFixture(t);
+  const advisory = await prepareAdvisory(
+    store,
+    repository,
+    baseSha,
+    "CODEX_TASK",
+  );
+  // Zero findings is the sharpest case: the review is CLEAN, which is exactly
+  // the state finalization accepts, and the refusal is the only thing between
+  // it and an attestation over someone else's code.
+  const clean = await submitInitialReview(store, advisory.id, [], "CODEX_TASK");
+  assert.equal(clean.status, "CLEAN");
+  assert.equal(
+    (await getReviewSummary(store, advisory.id)).action_required,
+    "REPORT_ADVISORY_FINDINGS",
+  );
+  await assert.rejects(
+    finalizeLocalGate(store, advisory.id),
+    /an advisory review is a report, not a gate/,
+  );
+  assert.equal((await getReview(store, advisory.id)).status, "CLEAN");
+  await assert.rejects(
+    fsp.access(path.join(store, "reviews", advisory.id, "gate.json")),
+    { code: "ENOENT" },
+  );
+});
+
+test("submit_resolutions refuses an advisory review", async (t) => {
+  const { repository, store, baseSha } = await advisoryFixture(t);
+  const advisory = await prepareAdvisory(
+    store,
+    repository,
+    baseSha,
+    "CODEX_TASK",
+  );
+  const submitted = await submitInitialReview(
+    store,
+    advisory.id,
+    [
+      {
+        severity: "major",
+        title: "Zero divisor is swallowed",
+        explanation: "Returning 0 hides the invalid input from the caller.",
+        path: "app.js",
+        line: 2,
+      },
+    ],
+    "CODEX_TASK",
+  );
+  assert.equal(submitted.status, "REVIEW_SUBMITTED");
+  assert.equal(
+    (await getReviewSummary(store, advisory.id)).action_required,
+    "REPORT_ADVISORY_FINDINGS",
+  );
+  await assert.rejects(
+    submitResolutions(store, advisory.id, [
+      {
+        finding_id: "F-001",
+        disposition: "fixed",
+        rationale: "Answered on behalf of the external author.",
+      },
+    ]),
+    /an advisory review has no author loop/,
+  );
+  const after = await getReview(store, advisory.id);
+  assert.equal(after.status, "REVIEW_SUBMITTED");
+  assert.deepEqual(after.resolutions, []);
+  assert.equal(after.findings[0].status, "OPEN");
+});
+
+test("prepare_rereview refuses an advisory review", async (t) => {
+  const { repository, store, baseSha } = await advisoryFixture(t);
+  const advisory = await prepareAdvisory(
+    store,
+    repository,
+    baseSha,
+    "CODEX_TASK",
+  );
+  await submitInitialReview(
+    store,
+    advisory.id,
+    [
+      {
+        severity: "major",
+        title: "Zero divisor is swallowed",
+        explanation: "Returning 0 hides the invalid input from the caller.",
+        path: "app.js",
+        line: 2,
+      },
+    ],
+    "CODEX_TASK",
+  );
+  // AUTHOR_RESPONDED is unreachable for an advisory review, because the
+  // resolution refusal above already closed the only path to it. So what this
+  // pins is which refusal answers: without it the caller is told the review is
+  // in the wrong state, and the one-round-by-design rule stops being stated
+  // anywhere the caller can read it.
+  await assert.rejects(
+    prepareRereview(store, advisory.id),
+    /an advisory review is a single round by design/,
+  );
+  assert.equal((await getReview(store, advisory.id)).current_round, 1);
+});
+
+test("an advisory review still accepts the review it exists for", async (t) => {
+  const { repository, store, baseSha } = await advisoryFixture(t);
+  const advisory = await prepareAdvisory(store, repository, baseSha, "HERMES");
+  // Every panel member sees the same frozen bytes; the provider binding is the
+  // only thing that differs between them.
+  const second = await prepareAdvisory(
+    store,
+    repository,
+    baseSha,
+    "DEEPSEEK_HARNESS",
+  );
+  assert.equal(
+    (await getReviewSnapshot(store, advisory.id)).head_sha,
+    (await getReviewSnapshot(store, second.id)).head_sha,
+  );
+  const reviewed = await submitInitialReview(
+    store,
+    advisory.id,
+    [
+      {
+        severity: "minor",
+        title: "Silent zero divisor",
+        explanation: "The caller cannot distinguish 0/1 from 1/0.",
+        path: "app.js",
+        line: 2,
+      },
+    ],
+    "HERMES",
+  );
+  assert.equal(reviewed.status, "REVIEW_SUBMITTED");
+  assert.equal(reviewed.advisory, true);
+  assert.equal(reviewed.findings.length, 1);
+});
+
+test("the review summary exposes worktree cleanliness beside the snapshot hash", async (t) => {
+  const { repository, store, baseSha } = await advisoryFixture(t);
+  const clean = await prepareAdvisory(store, repository, baseSha, "CODEX_TASK");
+  const cleanSummary = await getReviewSummary(store, clean.id);
+  assert.equal(cleanSummary.current_snapshot.worktree_clean, true);
+
+  // A dirty worktree captured by two preparations produces equal hashes, so
+  // hash equality alone would clear a panel reviewing uncommitted overlays.
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "export function divide(a, b) {\n  return b === 0 ? null : a / b;\n}\n",
+  );
+  const first = await prepareAdvisory(store, repository, baseSha, "HERMES");
+  const second = await prepareAdvisory(
+    store,
+    repository,
+    baseSha,
+    "DEEPSEEK_HARNESS",
+  );
+  const firstSummary = await getReviewSummary(store, first.id);
+  const secondSummary = await getReviewSummary(store, second.id);
+  assert.equal(
+    firstSummary.current_snapshot.snapshot_hash,
+    secondSummary.current_snapshot.snapshot_hash,
+  );
+  assert.equal(firstSummary.current_snapshot.worktree_clean, false);
+  assert.equal(secondSummary.current_snapshot.worktree_clean, false);
+
+  // A round that records no flag reads as dirty. The check exists to refuse a
+  // panel, so the one direction it must never fail in is open.
+  const ledgerPath = path.join(store, "reviews", clean.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  delete ledger.rounds[0].worktree_clean;
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`, {
+    mode: 0o600,
+  });
+  assert.equal(
+    (await getReviewSummary(store, clean.id)).current_snapshot.worktree_clean,
+    false,
+  );
+});

@@ -9,7 +9,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { REVIEWER_PROVIDERS } from "../src/core.mjs";
 import * as mcpSnippets from "../scripts/mcp-snippets.mjs";
 import {
+  ADVISORY_PANEL_CONTRACT,
   assertDispatchContract,
+  assertThirdPartyMaterialBoundary,
   DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
   extractMarkdownSection,
   HERMES_DISPATCH_CONTRACT,
@@ -864,6 +866,21 @@ test("verify-build validates packaged Hermes artifacts, HERMES binding, isolatio
   assert.match(verify, /assertDispatchContract\(\s*workflowSkill/);
   assert.match(verify, /assertDispatchContract\(\s*hermesReadme/);
   assert.match(verify, /assertDispatchContract\(\s*deepseekReadme/);
+  // Both new #71 contracts land on packaged copies too: the panel section and
+  // the third-party boundary on all four reviewer surfaces.
+  assert.match(verify, /ADVISORY_PANEL_CONTRACT/);
+  for (const surface of [
+    "reviewerSkill",
+    "reviewInstructions",
+    "hermesSkill",
+    "deepseekSkill",
+  ]) {
+    assert.match(
+      verify,
+      new RegExp(`assertThirdPartyMaterialBoundary\\(\\s*${surface}`),
+      `verify-build does not bound third-party material on ${surface}`,
+    );
+  }
   // The DeepSeek Harness artifact is checked on release builds too, or its
   // packaged snippets ship unverified while the source templates pass CI.
   assert.match(verify, /deepseek-harness/);
@@ -1147,4 +1164,45 @@ test("the DeepSeek Harness template is packaged and documented like the others",
   const readme = await readRequired("README.md");
   assert.match(readme, /deepseek-harness/);
   assert.match(readme, /`DEEPSEEK_HARNESS`/);
+});
+
+// The advisory panel contract lives in scripts/dispatch-contract.mjs beside the
+// launch contracts, shared with scripts/verify-build.mjs so the release check
+// can never drift weaker than this one. This is the source template; that
+// script asserts the same contract against the packaged copy.
+test("the advisory panel section pins the fence, the dispatch asymmetry, and the report", async () => {
+  assertDispatchContract(
+    await readRequired(WORKFLOW_SKILL),
+    "## Advisory panel review of an external pull request",
+    "Codex workflow skill (advisory panel)",
+    ADVISORY_PANEL_CONTRACT,
+  );
+});
+
+// Every reviewer surface is a panel member, so every one has to carry the
+// boundary. Naming three of four would leave whichever provider was left out
+// reading a stranger's diff with no rule about what that text is.
+const REVIEWER_SURFACES = [
+  path.join(
+    "templates",
+    "codex-plugin",
+    "skills",
+    "review-bridge-reviewer",
+    "SKILL.md",
+  ),
+  path.join("templates", "hermes", "skills", "review-bridge-reviewer", "SKILL.md"),
+  path.join(
+    "templates",
+    "deepseek-harness",
+    "skills",
+    "review-bridge-reviewer",
+    "SKILL.md",
+  ),
+  path.join("templates", "claude-extension", "REVIEW_INSTRUCTIONS.md"),
+];
+
+test("every reviewer surface bounds third-party material", async () => {
+  for (const file of REVIEWER_SURFACES) {
+    assertThirdPartyMaterialBoundary(await readRequired(file), file);
+  }
 });

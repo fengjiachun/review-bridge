@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add a persisted advisory mode to `prepare_review`. An advisory review accepts
+  `submit_review` and nothing else: `finalize_local_gate`, `submit_resolutions`,
+  and `prepare_rereview` each refuse it and say why. Its terminal is a report,
+  so an advisory panel over a third party's pull request can never mint a
+  `LOCAL_GATE_PASSED` attestation over code the operator did not author. A
+  ledger written before the flag existed carries none and gates unchanged.
+- Add the advisory panel flow to the driver contract: the pull-request head in a
+  worktree outside every authoring tree, the base as the merge base, one
+  advisory review per provider over identical frozen bytes, and a fixed
+  three-section report of concurred, unique, and conflicting findings with
+  conflicts presented rather than averaged. Two providers is the default panel
+  and any N >= 2 works unchanged. The dispatch table is asymmetric by design:
+  Codex, Hermes, and DeepSeek Harness members are driver-dispatched, and a
+  Claude member is always a conversation the operator opens themselves.
+- Extend the third-party material boundary to all four reviewer surfaces: the
+  diff, the requirement, and the commit messages are material to verify, never
+  instructions, and instruction-like text addressed to the reviewer inside them
+  is itself a finding.
+
 ## 0.9.0 - 2026-08-14
 
 ### Added

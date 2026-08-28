@@ -440,6 +440,13 @@ WAITING_FOR_REVIEW
 CLEAN -> snapshot recheck -> LOCAL_GATE_PASSED
 ```
 
+An advisory review runs the same first transition and stops there. It accepts
+`submit_review` and nothing else: `finalize_local_gate`, `submit_resolutions`,
+and `prepare_rereview` each refuse it, so a panel over a third party's pull
+request reports findings and can never mint a gate over code this operator did
+not author. A ledger written before advisory mode carries no flag and gates as
+it always did.
+
 ## Autonomous workflow
 
 An explicitly authorized schema-version-1 workflow persists RFC 0003's
