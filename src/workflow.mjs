@@ -179,7 +179,11 @@ function recordChangeSizeWarningCrossing(next, totalLines) {
 // threshold-crossing measurement, and compatibility loading alone would let
 // that crossing admit one more round before anything records it. The pending
 // predicates therefore derive the crossing from the recorded measurement
-// whenever no warning has been recorded yet.
+// whenever no warning has been recorded yet. The threshold is deliberately
+// the budget now in force: the budget at measurement time survives only in
+// the audit stream, and where a pre-upgrade extension raised it past the
+// measurement, that extension was the audited decision the old contract
+// demanded for this size -- it is honored, not re-demanded.
 function changeSizeWarningCrossingTotal(workflow) {
   const recorded = workflow.change_size_warning?.total_lines;
   if (recorded != null) {
