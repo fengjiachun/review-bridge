@@ -238,7 +238,14 @@ export const ADVISORY_PANEL_CONTRACT = {
     // passed field unchanged. The panel's whole premise fails silently there.
     [
       "byte identity is proven by comparing snapshot hashes",
-      /require every one to equal the first member's, with `worktree_clean` true/,
+      /require every one to equal the first member's, and require `current_snapshot\.worktree_clean` on each/,
+    ],
+    // Equal hashes are agreement, not cleanliness: preparations that all
+    // capture one dirty worktree agree perfectly while the panel reviews
+    // uncommitted overlays. Losing this leaves one check standing for two.
+    [
+      "hash equality does not stand in for cleanliness",
+      /preparations that all capture one dirty worktree agree with each other perfectly/,
     ],
     [
       "why the passed fields are not enough on their own",

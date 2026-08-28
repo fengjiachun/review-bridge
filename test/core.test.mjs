@@ -3076,3 +3076,45 @@ test("an advisory review still accepts the review it exists for", async (t) => {
   assert.equal(reviewed.advisory, true);
   assert.equal(reviewed.findings.length, 1);
 });
+
+test("the review summary exposes worktree cleanliness beside the snapshot hash", async (t) => {
+  const { repository, store, baseSha } = await advisoryFixture(t);
+  const clean = await prepareAdvisory(store, repository, baseSha, "CODEX_TASK");
+  const cleanSummary = await getReviewSummary(store, clean.id);
+  assert.equal(cleanSummary.current_snapshot.worktree_clean, true);
+
+  // A dirty worktree captured by two preparations produces equal hashes, so
+  // hash equality alone would clear a panel reviewing uncommitted overlays.
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "export function divide(a, b) {\n  return b === 0 ? null : a / b;\n}\n",
+  );
+  const first = await prepareAdvisory(store, repository, baseSha, "HERMES");
+  const second = await prepareAdvisory(
+    store,
+    repository,
+    baseSha,
+    "DEEPSEEK_HARNESS",
+  );
+  const firstSummary = await getReviewSummary(store, first.id);
+  const secondSummary = await getReviewSummary(store, second.id);
+  assert.equal(
+    firstSummary.current_snapshot.snapshot_hash,
+    secondSummary.current_snapshot.snapshot_hash,
+  );
+  assert.equal(firstSummary.current_snapshot.worktree_clean, false);
+  assert.equal(secondSummary.current_snapshot.worktree_clean, false);
+
+  // A round that records no flag reads as dirty. The check exists to refuse a
+  // panel, so the one direction it must never fail in is open.
+  const ledgerPath = path.join(store, "reviews", clean.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  delete ledger.rounds[0].worktree_clean;
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`, {
+    mode: 0o600,
+  });
+  assert.equal(
+    (await getReviewSummary(store, clean.id)).current_snapshot.worktree_clean,
+    false,
+  );
+});

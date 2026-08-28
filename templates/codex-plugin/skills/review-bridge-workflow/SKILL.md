@@ -946,7 +946,12 @@ attests nothing.
 
    Then prove the bytes really are identical: read each member's
    `current_snapshot.snapshot_hash` from `get_review_summary` and require every
-   one to equal the first member's, with `worktree_clean` true throughout.
+   one to equal the first member's, and require
+   `current_snapshot.worktree_clean` on each. Both checks are needed, and
+   neither substitutes for the other: equal hashes prove two members hold the
+   same bytes, not that those bytes are the pull request's head, because
+   preparations that all capture one dirty worktree agree with each other
+   perfectly while the panel reviews uncommitted local overlays.
    Equal repository path, base, and head do not establish that on their own —
    snapshot capture folds in working-tree overlays, so a file modified or left
    untracked in the panel worktree between two sequential `prepare_review`

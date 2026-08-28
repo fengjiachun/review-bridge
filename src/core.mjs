@@ -1121,6 +1121,13 @@ function reviewSummary(review) {
             base_sha: currentSnapshot.base_sha,
             head_sha: currentSnapshot.head_sha,
             snapshot_hash: currentSnapshot.snapshot_hash,
+            // Equal hashes prove two snapshots are the same bytes, not that
+            // those bytes are the committed head: preparations that all capture
+            // one dirty worktree agree with each other. A caller comparing
+            // snapshots before dispatch needs both, so the flag travels with
+            // the hash. A round that records none reads as dirty, which refuses
+            // rather than admits.
+            worktree_clean: currentSnapshot.worktree_clean === true,
             changed_file_count: currentSnapshot.changed_files.length,
             deleted_file_count: currentSnapshot.deleted_files.length,
             overlay_count: currentSnapshot.overlays.length,
