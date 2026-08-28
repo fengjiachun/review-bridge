@@ -175,12 +175,29 @@ function recordChangeSizeWarningCrossing(next, totalLines) {
   };
 }
 
+// A ledger written before the warning field can already hold a bound,
+// threshold-crossing measurement, and compatibility loading alone would let
+// that crossing admit one more round before anything records it. The pending
+// predicates therefore derive the crossing from the recorded measurement
+// whenever no warning has been recorded yet.
+function changeSizeWarningCrossingTotal(workflow) {
+  const recorded = workflow.change_size_warning?.total_lines;
+  if (recorded != null) {
+    return recorded;
+  }
+  const measured = workflow.current_review?.change_size?.total_lines;
+  return Number.isSafeInteger(measured) &&
+    measured >= changeSizeWarningThreshold(workflow.change_size_budget)
+    ? measured
+    : null;
+}
+
 function changeSizeWarningPending(workflow) {
-  const warning = workflow.change_size_warning;
+  const crossingTotal = changeSizeWarningCrossingTotal(workflow);
+  const acknowledgment = workflow.change_size_warning?.acknowledgment;
   return (
-    warning != null &&
-    (warning.acknowledgment == null ||
-      warning.total_lines > warning.acknowledgment.total_lines)
+    crossingTotal != null &&
+    (acknowledgment == null || crossingTotal > acknowledgment.total_lines)
   );
 }
 
@@ -208,9 +225,9 @@ function requireAcknowledgedChangeSizeWarning(workflow) {
       "the crossed change-size warning requires a recorded split decision: call acknowledge_change_size_warning with continue or split before preparing the next review round",
       {
         required_action: "acknowledge_change_size_warning",
-        crossed_total_lines: workflow.change_size_warning.total_lines,
+        crossed_total_lines: changeSizeWarningCrossingTotal(workflow),
         acknowledged_total_lines:
-          workflow.change_size_warning.acknowledgment?.total_lines ?? null,
+          workflow.change_size_warning?.acknowledgment?.total_lines ?? null,
         change_size_budget: workflow.change_size_budget,
       },
     );
@@ -6839,15 +6856,18 @@ export async function acknowledgeChangeSizeWarning(
         "a change-size warning is acknowledged where the next round is prepared: from ADDRESS_LOCAL_FINDINGS or PREPARE_LOCAL_REVIEW on an active workflow",
       );
     }
-    const crossedTotal = workflow.change_size_warning.total_lines;
+    const crossedTotal = changeSizeWarningCrossingTotal(workflow);
     return publicWorkflow(
       await saveActionMutation(
         paths,
         workflow,
         "CHANGE_SIZE_WARNING_ACKNOWLEDGED",
         async (next) => {
+          // A pre-upgrade ledger reaches this acknowledgment with a derived
+          // crossing and no recorded warning; the record is created here.
           next.change_size_warning = {
-            ...next.change_size_warning,
+            total_lines: crossedTotal,
+            crossed_at: next.change_size_warning?.crossed_at ?? now(),
             acknowledgment: {
               decision,
               total_lines: crossedTotal,

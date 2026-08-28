@@ -2177,6 +2177,138 @@ test("a ledger written before the change-size warning field loads and operates",
   assert.equal(completed.phase, "WAIT_LOCAL_REVIEW");
 });
 
+test("a legacy ledger with a crossed measurement gates before the next round", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  // The default budget keeps the fabricated pre-upgrade audit event, which
+  // predates every compatibility field, consistent with the stored ledger.
+  const started = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const crossingLines = Array.from(
+    { length: 1600 },
+    (_, index) => `export const value${index} = ${index};`,
+  );
+  const headSha = await commitImplementation(
+    state.repository,
+    `${crossingLines.join("\n")}\n`,
+  );
+  let workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    started.revision,
+    headSha,
+  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  ({ completed: workflow } = await dispatchReviewer(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  ));
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [{ severity: "major", title: "Defect", explanation: "Fix it." }],
+    "CODEX_TASK",
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  crossingLines[0] = "export const firstValue = 0;";
+  const fixedHead = await commitImplementation(
+    state.repository,
+    `${crossingLines.join("\n")}\n`,
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    fixedHead,
+  );
+  await submitResolutions(state.store, review.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Fixed." },
+  ]);
+  // Rewrite the ledger as a pre-upgrade one: no warning field anywhere, while
+  // the bound measurement already crosses the warning threshold.
+  const workflowRoot = path.join(
+    state.store,
+    "workflows",
+    started.workflow_id,
+  );
+  const workflowPath = path.join(workflowRoot, "workflow.json");
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  delete stored.change_size_warning;
+  const legacyEvent = workflowAuditEvent(stored, {
+    sequence: 1,
+    previousEventSha256: null,
+    eventId: "c".repeat(32),
+    at: stored.updated_at,
+  });
+  await fsp.writeFile(
+    path.join(workflowRoot, "action-audit.jsonl"),
+    legacyEvent.bytes,
+    { mode: 0o600 },
+  );
+  await fsp.writeFile(
+    path.join(workflowRoot, "action-audit-head.json"),
+    `${canonicalJson({
+      version: 1,
+      workflow_id: started.workflow_id,
+      committed_bytes: legacyEvent.bytes.length,
+      next_sequence: 2,
+      last_event_sha256: legacyEvent.event.event_sha256,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  stored.action_audit = {
+    next_sequence: 2,
+    last_event_sha256: legacyEvent.event.event_sha256,
+  };
+  await fsp.writeFile(workflowPath, `${canonicalJson(stored)}\n`, {
+    mode: 0o600,
+  });
+  // The crossing is derived from the recorded measurement, so the very first
+  // post-upgrade gate check refuses instead of admitting one more round.
+  await assert.rejects(
+    advanceLocalWorkflow(state.store, started.workflow_id, stored.revision),
+    /WORKFLOW_CHANGE_SIZE_WARNING_UNACKNOWLEDGED/,
+  );
+  workflow = await acknowledgeChangeSizeWarning(
+    state.store,
+    started.workflow_id,
+    stored.revision,
+    {
+      decision: "continue",
+      rationale: "The pre-upgrade crossing is acknowledged as one unit.",
+      operatorLabel: "Test Operator",
+    },
+  );
+  assert.equal(workflow.change_size_warning.total_lines, 1601);
+  assert.equal(workflow.change_size_warning.acknowledgment.total_lines, 1601);
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(workflow.phase, "PREPARE_REREVIEW");
+});
+
 test("active workflow phases stay bound to the audit chain from initial state onward", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
