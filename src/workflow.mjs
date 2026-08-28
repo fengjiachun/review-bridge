@@ -6869,6 +6869,23 @@ export async function acknowledgeChangeSizeWarning(
         "a change-size warning is acknowledged where the next round is prepared: from ADDRESS_LOCAL_FINDINGS or PREPARE_LOCAL_REVIEW on an active workflow",
       );
     }
+    // ADDRESS_LOCAL_FINDINGS spans both sides of the author's response, and a
+    // split recorded before the response would be discharged by the ordinary
+    // finding-fix commit rather than by a cut. A split is accepted there only
+    // once the bound review's live state shows the response is complete; a
+    // continue decision has nothing to execute and needs no such fence.
+    if (decision === "split" && workflow.phase === "ADDRESS_LOCAL_FINDINGS") {
+      const { summary } = await getReviewSnapshot(
+        storeRoot,
+        workflow.current_review.review_id,
+      );
+      if (summary.status !== "AUTHOR_RESPONDED") {
+        fail(
+          "WORKFLOW_STATE_INVALID",
+          "a split is acknowledged after the findings are answered: the finding-fix commit would otherwise discharge the cut it promises",
+        );
+      }
+    }
     const crossedTotal = changeSizeWarningCrossingTotal(workflow);
     // The tree, not the head, is what a split promises to change: recording
     // it here is what lets the gate refuse a change-then-revert sequence.

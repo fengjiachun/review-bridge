@@ -773,7 +773,9 @@ A recorded `split` keeps refusing round preparation while the reviewed tree
 still equals the tree it was decided on — neither an empty descendant nor a
 change-then-revert sequence releases it. Recording the cut as a head whose
 tree differs releases it, as does re-acknowledging the decision as
-`continue`.
+`continue`. While findings are being addressed, a `split` is accepted only
+once the author's response is complete, so the ordinary finding-fix commit
+cannot discharge the promised cut.
 (This supersedes the original rule of issue #50 that the warning never
 blocks; the reversal and its field evidence are issue #79.) When the sum exceeds
 the workflow budget, binding the review pauses

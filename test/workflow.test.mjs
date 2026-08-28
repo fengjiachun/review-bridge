@@ -1585,6 +1585,21 @@ test("a crossed change-size warning refuses the next round until a recorded spli
     workflow.revision,
   );
   assert.equal(workflow.phase, "ADDRESS_LOCAL_FINDINGS");
+  // A split recorded before the response would be discharged by the ordinary
+  // finding-fix commit, so it is refused until the findings are answered.
+  await assert.rejects(
+    acknowledgeChangeSizeWarning(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      {
+        decision: "split",
+        rationale: "Premature: findings are not answered yet.",
+        operatorLabel: "Test Operator",
+      },
+    ),
+    /split is acknowledged after the findings are answered/,
+  );
   const fixedHead = await commitImplementation(
     state.repository,
     "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 6;\n",
