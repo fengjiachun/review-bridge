@@ -26,6 +26,7 @@ import {
   StoreError,
   withStateLock,
 } from "./storage.mjs";
+import { publicationRequiredInputs } from "./tool-inputs.mjs";
 import { readWorkflowBinding, WORKFLOW_ID_RE } from "./workflow-binding.mjs";
 
 const SUPPORTED_PUBLICATION_VERSIONS = [1, 2, 3];
@@ -6494,6 +6495,7 @@ export async function getPublicationSummary(
               : {}),
             required_request_refs: clone(closure.requests),
             required_ambiguous_results: clone(closure.results),
+            required_inputs: publicationRequiredInputs(nextAction),
             gate_state: gate.state,
             // Rounded down, so the reported window is never wider than the
             // one the expiry comparison enforces.

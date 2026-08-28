@@ -63,6 +63,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   rule is unchanged: a gate still expires five minutes after the oldest source
   collection in the observation it was minted over, which is why part of the
   window is already spent when the gate first exists. (#80)
+- Add `required_inputs` to `get_review_summary`, `get_publication_summary`,
+  `get_autonomous_workflow_summary`, and `list_autonomous_workflows`. It names
+  the calls the current action implies as `{tool: [[field, source], ...]}`,
+  generalizing the `required_request_refs` pattern to every state-changing
+  transition so a driver never discovers a schema by sending empty arguments and
+  reading the validation error. A pause reports the call its own reason code
+  needs. Transition semantics are unchanged. (#82)
 
 ### Changed
 

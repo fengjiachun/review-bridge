@@ -3,7 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { threadActionExecutingProof } from "./server-input.mjs";
+import { executingProof } from "./server-input.mjs";
 import {
   defaultStoreRoot,
   exportHumanArbitration,
@@ -255,7 +255,7 @@ if (role === "author") {
     {
       title: "List autonomous workflows",
       description:
-        "List compact autonomous workflow states without advancing them.",
+        "List compact autonomous workflow states, each with the required_inputs of its own next action, without advancing them.",
       inputSchema: {
         statuses: z
           .array(z.enum(["ACTIVE", "PAUSED", "CANCELLED", "MERGE_READY"]))
@@ -282,7 +282,7 @@ if (role === "author") {
     {
       title: "Get compact autonomous workflow status",
       description:
-        "Read the exact revision, phase, next action, bound head and review, recoverable active-action dispatch, and pause reason.",
+        "Read the exact revision, phase, next action, bound head and review, recoverable active-action dispatch, and pause reason. required_inputs names the calls next_action implies -- for a pause, the one its reason code needs -- as {tool: [[field, source], ...]}; call them from it instead of probing schemas with empty arguments.",
       inputSchema: { workflow_id: z.string() },
     },
     (input) => getAutonomousWorkflowSummary(storeRoot, input.workflow_id),
@@ -661,26 +661,7 @@ if (role === "author") {
         input.workflow_id,
         input.expected_revision,
         input.action_id,
-        input.thread_id != null
-          ? threadActionExecutingProof(input)
-          : input.pr_number != null
-            ? {
-                repository_id: input.pr_repository_id,
-                pr_number: input.pr_number,
-                base_branch: input.base_branch,
-                head_branch: input.head_branch,
-                head_sha: input.head_sha,
-                is_draft: input.is_draft,
-              }
-            : input.resolved_repository_id == null && input.resolved_url == null
-              ? null
-              : {
-                  resolved_repository_id: input.resolved_repository_id,
-                  resolved_url: input.resolved_url,
-                  ...(input.pull_request_is_draft == null
-                    ? {}
-                    : { pull_request_is_draft: input.pull_request_is_draft }),
-                },
+        executingProof(input),
       ),
   );
 
@@ -1287,7 +1268,7 @@ if (role === "author") {
     {
       title: "Get compact local review status",
       description:
-        "Read current state, next action, snapshot identity, and compact finding counts without returning the full review ledger.",
+        "Read current state, next action, snapshot identity, and compact finding counts without returning the full review ledger. required_inputs names the calls action_required implies as {tool: [[field, source], ...]}; call them from it instead of probing schemas with empty arguments.",
       inputSchema: { review_id: z.string() },
     },
     (input) => getReviewSummary(storeRoot, input.review_id),
@@ -1498,7 +1479,7 @@ if (role === "author") {
     {
       title: "Get compact GitHub publication status",
       description:
-        "Read the current revision, blocking reason, next action, gate state, remaining seconds on a finalized gate, and exact ambiguity acknowledgement sets without returning the full publication ledger or accessing GitHub.",
+        "Read the current revision, blocking reason, next action, gate state, remaining seconds on a finalized gate, and exact ambiguity acknowledgement sets without returning the full publication ledger or accessing GitHub. required_inputs names the calls next_action implies as {tool: [[field, source], ...]}; call them from it instead of probing schemas with empty arguments.",
       inputSchema: { review_id: z.string() },
     },
     (input) => getPublicationSummary(storeRoot, input.review_id),

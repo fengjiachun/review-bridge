@@ -37,6 +37,7 @@ import {
   workflowPaths,
   WORKFLOW_ID_RE,
 } from "./workflow-binding.mjs";
+import { workflowRequiredInputs } from "./tool-inputs.mjs";
 
 export const AUTONOMOUS_CAPABILITIES = Object.freeze([
   "EDIT_AND_TEST",
@@ -383,7 +384,7 @@ function workflowCorrelationMarker(markerPrefix, workflow, actionId) {
 // capability, the phase the action lives in, the ownership claim it rides
 // on, its target and provider-response contracts, and its completion effect
 // (implemented in completeWorkflowAction).
-const ACTION_KIND_SPECS = {
+export const ACTION_KIND_SPECS = {
   CREATE_CODEX_REVIEWER_TASK: {
     capability: "CREATE_CODEX_REVIEWER_TASKS",
     phase: "DISPATCH_CODEX_REVIEWER",
@@ -3328,6 +3329,7 @@ function nextAction(workflow) {
 }
 
 function workflowSummary(workflow) {
+  const action = nextAction(workflow);
   const currentReview = structuredClone(workflow.current_review);
   if (currentReview?.change_size != null) {
     currentReview.change_size = changeSizeReport(
@@ -3342,7 +3344,8 @@ function workflowSummary(workflow) {
     updated_at: workflow.updated_at,
     status: workflow.status,
     phase: workflow.phase,
-    next_action: nextAction(workflow),
+    next_action: action,
+    required_inputs: workflowRequiredInputs(action, workflow),
     base_sha: workflow.base_sha,
     topic_branch: workflow.topic_branch,
     current_head_sha: workflow.current_head_sha,
