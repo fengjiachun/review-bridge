@@ -68,6 +68,23 @@ function reviewerProviderFor(review) {
   );
 }
 
+// A ledger written before advisory mode existed carries no field, and a review
+// without one is an ordinary gated review.
+function isAdvisory(review) {
+  return review.advisory === true;
+}
+
+// The mechanical fence. An advisory review reports on code this operator did
+// not author and cannot answer for, so its terminal is a report: no gate, no
+// author loop, no second round. Each refusal is evaluated before the state
+// check it precedes, so the advisory reason is the one returned rather than a
+// state-machine message that says nothing about why the path is closed.
+function assertNotAdvisory(review, refusal) {
+  if (isAdvisory(review)) {
+    throw new Error(refusal);
+  }
+}
+
 function requireReviewerProvider(review, expectedProvider) {
   const provider = assertReviewerProvider(expectedProvider);
   const boundProvider = reviewerProviderFor(review);
@@ -991,6 +1008,7 @@ function publicReview(review) {
     requirement: review.requirement,
     implementation_scope: review.implementation_scope,
     reviewer_provider: reviewerProviderFor(review),
+    advisory: isAdvisory(review),
     review_strategy: review.review_strategy ?? {
       mode: "FULL",
       parent_review_id: null,
@@ -1010,7 +1028,14 @@ function publicReview(review) {
   };
 }
 
-function actionRequired(status) {
+function actionRequired(status, advisory = false) {
+  // An advisory review that has been reviewed is finished: both states it can
+  // reach after `WAITING_FOR_REVIEW` are terminal reports. Advertising the
+  // gated successors here would send a driver at the three paths the fence
+  // refuses.
+  if (advisory && ["REVIEW_SUBMITTED", "CLEAN"].includes(status)) {
+    return "REPORT_ADVISORY_FINDINGS";
+  }
   const actions = {
     WAITING_FOR_REVIEW: "REVIEWER_INITIAL_REVIEW",
     REVIEW_SUBMITTED: "AUTHOR_RESOLUTIONS",
@@ -1079,8 +1104,9 @@ function reviewSummary(review) {
     state_version: review.state_version ?? 0,
     current_round: review.current_round,
     max_rounds: review.max_rounds,
-    action_required: actionRequired(review.status),
+    action_required: actionRequired(review.status, isAdvisory(review)),
     reviewer_provider: reviewerProviderFor(review),
+    advisory: isAdvisory(review),
     review_strategy: review.review_strategy ?? {
       mode: "FULL",
       parent_review_id: null,
@@ -1332,6 +1358,7 @@ export async function prepareReview(
     forceFullReview = false,
     continuedFromReviewId = null,
     reviewerProvider = "CLAUDE_DESKTOP",
+    advisory = false,
   },
 ) {
   assertString(baseRef, "base_ref", { max: 1024 });
@@ -1350,6 +1377,11 @@ export async function prepareReview(
     }
   }
   assertReviewerProvider(reviewerProvider);
+  // Anything but a boolean is refused rather than read as false: a mode whose
+  // whole purpose is to close the gate must never be switched off by a typo.
+  if (typeof advisory !== "boolean") {
+    throw new Error("advisory must be a boolean");
+  }
   const repositoryRoot = await resolveRepositoryRoot(repositoryPath);
   const continuedReview =
     continuedFromReviewId == null
@@ -1433,6 +1465,7 @@ export async function prepareReview(
       requirement,
       implementation_scope: implementationScope,
       reviewer_provider: reviewerProvider,
+      advisory,
       review_strategy: successorResult.strategy,
       status: "WAITING_FOR_REVIEW",
       current_round: 1,
@@ -1827,6 +1860,10 @@ export async function submitResolutions(storeRoot, reviewId, inputs) {
 
 async function submitResolutionsWhileLocked(storeRoot, reviewId, inputs) {
   const review = await loadReview(storeRoot, reviewId);
+  assertNotAdvisory(
+    review,
+    "an advisory review has no author loop: its findings are reported to the external author on GitHub, outside this protocol, and no resolution recorded here would answer for their code",
+  );
   if (review.status !== "REVIEW_SUBMITTED") {
     throw new Error(
       `review is not waiting for author resolutions (status=${review.status})`,
@@ -1902,6 +1939,10 @@ export async function prepareRereview(storeRoot, reviewId) {
 
 async function prepareRereviewWhileLocked(storeRoot, reviewId) {
   const review = await loadReview(storeRoot, reviewId);
+  assertNotAdvisory(
+    review,
+    "an advisory review is a single round by design: a new push to the pull request is a new panel, not a second round on this review",
+  );
   if (review.status !== "AUTHOR_RESPONDED") {
     throw new Error(`review is not ready for rereview (status=${review.status})`);
   }
@@ -2108,6 +2149,10 @@ export async function finalizeLocalGate(storeRoot, reviewId) {
 
 async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
   const review = await loadReview(storeRoot, reviewId);
+  assertNotAdvisory(
+    review,
+    "an advisory review is a report, not a gate: it can never attest LOCAL_GATE_PASSED for code this operator did not author",
+  );
   if (review.status !== "CLEAN") {
     throw new Error(`only a CLEAN review can be finalized (status=${review.status})`);
   }

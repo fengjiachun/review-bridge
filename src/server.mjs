@@ -1210,7 +1210,7 @@ if (role === "author") {
     {
       title: "Prepare local review",
       description:
-        "Capture an immutable Git snapshot, requirement, implementation scope, patch, added-plus-deleted line measurement, warning-threshold headroom, test context, and explicit reviewer provider. Manual preparation reports the measurement against the default budget without blocking. Without parent_review_id the server selects a verifiable successor parent itself and records how it was selected; pass force_full_review to demand a full-patch review. For a continuable local cycle, pass continued_from_review_id with force_full_review to carry only the source findings as scope hints.",
+        "Capture an immutable Git snapshot, requirement, implementation scope, patch, added-plus-deleted line measurement, warning-threshold headroom, test context, and explicit reviewer provider. Manual preparation reports the measurement against the default budget without blocking. Without parent_review_id the server selects a verifiable successor parent itself and records how it was selected; pass force_full_review to demand a full-patch review. For a continuable local cycle, pass continued_from_review_id with force_full_review to carry only the source findings as scope hints. Pass advisory to persist a review whose terminal is a report: it accepts submit_review and nothing else, and finalize_local_gate, submit_resolutions, and prepare_rereview all refuse it, so an advisory panel over someone else's pull request can never mint a gate.",
       inputSchema: {
         repository_path: z.string(),
         base_ref: z.string(),
@@ -1220,6 +1220,7 @@ if (role === "author") {
         parent_review_id: z.string().optional(),
         force_full_review: z.boolean().optional(),
         continued_from_review_id: z.string().optional(),
+        advisory: z.boolean().optional(),
       },
     },
     (input) =>
@@ -1232,6 +1233,7 @@ if (role === "author") {
         parentReviewId: input.parent_review_id ?? null,
         forceFullReview: input.force_full_review === true,
         continuedFromReviewId: input.continued_from_review_id ?? null,
+        advisory: input.advisory === true,
       }),
   );
 
