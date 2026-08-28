@@ -6887,11 +6887,21 @@ export async function acknowledgeChangeSizeWarning(
       }
       // A response may be submitted before its fix commit is recorded; a
       // split accepted then would take the pre-fix tree as its target and be
-      // discharged by that owed commit. Fixed dispositions whose head has not
-      // moved past the reviewed snapshot still owe their tree change.
+      // discharged by that owed commit. Fixed dispositions whose recorded
+      // tree still equals the reviewed snapshot's tree -- an empty descendant
+      // moves only the head -- still owe their tree change.
+      const snapshotHead = summary.current_snapshot?.head_sha;
       if (
         review.findings.some((finding) => finding.status === "AUTHOR_FIXED") &&
-        workflow.current_head_sha === summary.current_snapshot?.head_sha
+        snapshotHead != null &&
+        runGit(workflow.repository.path, [
+          "rev-parse",
+          `${workflow.current_head_sha}^{tree}`,
+        ]).stdout.trim() ===
+          runGit(workflow.repository.path, [
+            "rev-parse",
+            `${snapshotHead}^{tree}`,
+          ]).stdout.trim()
       ) {
         fail(
           "WORKFLOW_STATE_INVALID",

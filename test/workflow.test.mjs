@@ -2097,6 +2097,29 @@ test("a split is refused while fixed resolutions await their recorded head", asy
     ),
     /record the descendant fix head before deciding the split/,
   );
+  // An empty descendant moves the head without the fix: the fence compares
+  // trees, so the split is still refused.
+  git(state.repository, "commit", "--allow-empty", "-m", "empty before fix");
+  const emptyFixHead = git(state.repository, "rev-parse", "HEAD");
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    emptyFixHead,
+  );
+  await assert.rejects(
+    acknowledgeChangeSizeWarning(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      {
+        decision: "split",
+        rationale: "Split behind an empty descendant.",
+        operatorLabel: "Test Operator",
+      },
+    ),
+    /record the descendant fix head before deciding the split/,
+  );
   const fixedHead = await commitImplementation(
     state.repository,
     "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 6;\n",
