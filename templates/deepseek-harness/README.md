@@ -236,4 +236,7 @@ its plugin configuration is still a developer preview.
 - Local autonomous task creation remains `CODEX_TASK`-only; the DeepSeek
   Harness reviewer never creates or advances local autonomous workflow tasks.
 - Remote GitHub Codex publication is performed by the author/publication side
-  only after the local DEEPSEEK_HARNESS reviewer gate has passed.
+  only after a local reviewer gate has passed. On a publish-bound change that
+  gate is a `CODEX_TASK` review by default, and a `DEEPSEEK_HARNESS` review is
+  the verification-shape second opinion beside it — how a change is tested,
+  pinned, and fixtured — rather than the gate that authorizes the publication.

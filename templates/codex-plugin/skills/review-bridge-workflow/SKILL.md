@@ -259,7 +259,12 @@ gap returns the ready pull request to draft before any repair.
     the workflow to `PREPARE_LOCAL_REVIEW` and drops the old publication
     binding. The new head needs a new local review, gate, push, and
     publication; the previous ledger stays on disk as history and can never
-    authorize it. Prefer letting the successor strategy stand for that review.
+    authorize it. That review is a successor by default: leave
+    `parent_review_id` unset and `force_full_review` off, and the server selects
+    the gate the repaired head descends from, so the reviewed unit is the repair
+    delta rather than the whole change again. A remote finding is the case
+    successor selection was built for — the parent gate, the parent head, and
+    strict descent are all already known.
 
     A repair phase is left only by recording a new head. If the blocker clears
     on its own — a required check that failed and then passed on a rerun with
@@ -449,11 +454,17 @@ explicitly requests cleanup.
    parent explicitly still requires the requirement to match exactly, because
    there a mismatch means you picked the wrong parent. The
    result reports `review_strategy.parent_selection` as `AUTOMATIC`,
-   `EXPLICIT`, or `NONE`. Pass `parent_review_id` to pin a specific parent, and
-   `force_full_review: true` to demand a full-patch review. Prefer letting a
-   verified `SUCCESSOR` stand: on a long-lived branch its delta is a small
-   fraction of the cumulative patch, and re-reviewing already-gated code costs
-   the reviewer far more context than it buys.
+   `EXPLICIT`, or `NONE`. Pass `parent_review_id` to pin a specific parent.
+   A verified `SUCCESSOR` is the default and stands: on a long-lived branch its
+   delta is a small fraction of the cumulative patch, and re-reviewing
+   already-gated code costs the reviewer far more context than it buys.
+   `force_full_review: true` is the deliberate exception, and two scenarios
+   name it. A continuation from `CONTINUABLE_FINDINGS` passes it beside
+   `continued_from_review_id`, which the server requires. An advisory panel
+   over an external pull request passes it because the reviewed unit is that
+   whole pull request and this store's own gates are no parent for it. Outside
+   those two, demanding a full patch buys a re-review of gated code, so state
+   the reason in the session before passing it.
 6. Choose `reviewer_provider` explicitly:
    - `CLAUDE_DESKTOP` for a fresh Claude Desktop conversation.
    - `CODEX_TASK` for a newly created Codex task that is not a fork of the
@@ -462,6 +473,19 @@ explicitly requests cleanup.
      packaged Hermes reviewer profile.
    - `DEEPSEEK_HARNESS` for a fresh DeepSeek Harness session using the
      packaged DeepSeek Harness reviewer profile.
+
+   For publish-bound work — any change that will go on to a publication
+   ledger — the local gate's provider is `CODEX_TASK` by default rather than a
+   per-review choice. The publication-side Codex pass reads the same code the
+   local gate already passed, and what it finds there costs a full remote round
+   to repair; the same defect found at the local gate costs one local round.
+   `DEEPSEEK_HARNESS` is the verification-shape second opinion beside that
+   gate — pins that match a substring, fixtures that do not cover the case, a
+   refusal test passing on a neighbour's message — which is the local
+   counterpart of the advisory panel below. Run it in addition to the
+   `CODEX_TASK` gate when the risk in a change is how it is verified; never as
+   the sole gate on a publication path.
+
    Never call reviewer tools from the author task; provider binding and task
    separation are workflow attestations, not authenticated model identity.
 7. Call `prepare_review` with the base SHA captured in step 1, the selected
@@ -743,7 +767,8 @@ Choose exactly one authorization mode before starting publication:
 
 - `LOCAL_GATE` is the default. Complete the local workflow through
   `LOCAL_GATE_PASSED`, confirm the clean local HEAD equals the finalized gate
-  head, then push and open a draft pull request.
+  head, then push and open a draft pull request. The gate that authorizes a
+  publication is a `CODEX_TASK` review by default, on the terms Prepare states.
 - `REMOTE_ONLY` is allowed only after the user directly instructs you to skip
   local review for this change. Do not infer it from urgency, a prior
   exception, reviewer unavailability, or a general instruction to continue.
@@ -858,11 +883,20 @@ For either mode:
     commit and verify the fix. Start a
     new local Review Bridge task in `LOCAL_GATE` mode or call
     `authorize_remote_publication` again in `REMOTE_ONLY` mode. A new commit
-    invalidates this ledger and its prior GitHub Codex result.
+    invalidates this ledger and its prior GitHub Codex result. In `LOCAL_GATE`
+    mode that task is a successor by default: leave `parent_review_id` unset
+    and `force_full_review` off, so its reviewed unit is the fix delta over the
+    head this publication already gated.
 10. After `MERGE_READY`, run the packaged collector once more with
     `--review-id <review_id>` for a final fresh GitHub observation and call
     `record_github_snapshot` with the printed `observation_path`, then call
-    `finalize_publication_gate`. Immediately before merge call `verify_publication_gate`;
+    `finalize_publication_gate`. The summary's `gate_expires_in_seconds` says
+    how much of that gate's window is left. It expires five minutes after the
+    oldest source collection in the observation it was minted over, not five
+    minutes after issuance, so part of the window is already spent when the gate
+    first exists. Read it before starting the merge: too little left means
+    collect a fresh observation and finalize again, not hurry.
+    Immediately before merge call `verify_publication_gate`;
     only `valid: true` authorizes the next operation. Merge with the returned full
     `head_sha` using a head-matching operation such as
     `gh pr merge --match-head-commit <head_sha>`. Never reuse a finalize result,

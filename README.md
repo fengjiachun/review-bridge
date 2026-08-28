@@ -663,7 +663,11 @@ remain completable.
 
 Use `get_publication_summary` for the compact current revision,
 `blocking_reason`, `next_action`, gate state, and exact ambiguity sets. It does
-not access GitHub or return the full ledger. When `next_action` is
+not access GitHub or return the full ledger. A finalized gate also reports
+`gate_expires_in_seconds`: the gate expires five minutes after the oldest source
+collection in the observation it was minted over, not five minutes after
+issuance, so part of that window is already spent when the gate first exists.
+When `next_action` is
 `POST_AND_RECORD_CODEX_REVIEW_REQUEST`, post the returned
 `codex_review_request.body` unchanged and bind the post with its
 `codex_review_request.request_id` when present. Adapter-version-1 ledgers

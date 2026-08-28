@@ -1475,7 +1475,7 @@ if (role === "author") {
     {
       title: "Get compact GitHub publication status",
       description:
-        "Read the current revision, blocking reason, next action, gate state, and exact ambiguity acknowledgement sets without returning the full publication ledger or accessing GitHub.",
+        "Read the current revision, blocking reason, next action, gate state, remaining seconds on a finalized gate, and exact ambiguity acknowledgement sets without returning the full publication ledger or accessing GitHub.",
       inputSchema: { review_id: z.string() },
     },
     (input) => getPublicationSummary(storeRoot, input.review_id),

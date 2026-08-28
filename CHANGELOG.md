@@ -44,6 +44,25 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   overall. It emits markdown or JSON, states every counting rule in the report
   so a number can be replayed, and skips a ledger it cannot parse rather than
   repairing it. (#70)
+- Report `gate_expires_in_seconds` in the publication summary, so the window
+  left on a finalized gate is readable before a merge is started. The expiry
+  rule is unchanged: a gate still expires five minutes after the oldest source
+  collection in the observation it was minted over, which is why part of the
+  window is already spent when the gate first exists. (#80)
+
+### Changed
+
+- State `CODEX_TASK` as the local gate's default reviewer provider for
+  publish-bound work in the driver contract, and give `DEEPSEEK_HARNESS` the
+  documented role of the verification-shape second opinion beside that gate
+  rather than the gate that authorizes a publication. Contract text only; every
+  provider keeps the capabilities it had. (#80)
+- Rewrite the driver contract's review strategy as successor-by-default. A
+  verified `SUCCESSOR` stands, including for the local review that answers a
+  publication finding, and `force_full_review: true` is the deliberate
+  exception named for its two scenarios: a continuation from
+  `CONTINUABLE_FINDINGS`, which the server requires it for, and an advisory
+  panel over an external pull request. (#80)
 
 ## 0.9.0 - 2026-08-14
 
