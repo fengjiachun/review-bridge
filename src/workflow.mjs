@@ -80,6 +80,11 @@ const MAX_ORDINARY_AUDIT_BYTES =
   MAX_AUDIT_BYTES -
   MAX_TERMINAL_AUDIT_EVENTS * (MAX_AUDIT_EVENT_BYTES + 1);
 const MAX_CANCELLATION_RATIONALE_BYTES = 32 * 1024;
+// The acknowledgment rationale is serialized twice per audit event -- once in
+// the workflow state and once in the event metadata -- so it must stay well
+// inside MAX_AUDIT_EVENT_BYTES or the demanded acknowledgment itself becomes
+// unrecordable.
+const MAX_ACKNOWLEDGMENT_RATIONALE_BYTES = 32 * 1024;
 const MAX_RECONCILIATION_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_CLOCK_SKEW_MS = 30 * 1000;
 
@@ -6768,6 +6773,11 @@ export async function acknowledgeChangeSizeWarning(
     throw new TypeError('decision must be "continue" or "split"');
   }
   assertString(rationale, "rationale");
+  assertCanonicalStringCapacity(
+    rationale,
+    "rationale",
+    MAX_ACKNOWLEDGMENT_RATIONALE_BYTES,
+  );
   assertString(operatorLabel, "operator_label", { max: 1024 });
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);

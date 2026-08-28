@@ -2050,6 +2050,19 @@ test("acknowledging without an unacknowledged crossing is refused", async (t) =>
     ),
     /decision must be "continue" or "split"/,
   );
+  await assert.rejects(
+    acknowledgeChangeSizeWarning(
+      state.store,
+      started.workflow_id,
+      started.revision,
+      {
+        decision: "continue",
+        rationale: "x".repeat(32 * 1024),
+        operatorLabel: "Test Operator",
+      },
+    ),
+    /rationale exceeds its canonical byte limit/,
+  );
 });
 
 test("a ledger written before the change-size warning field loads and operates", async (t) => {
