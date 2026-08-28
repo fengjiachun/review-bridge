@@ -28,7 +28,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   manual operator-present reviews stay report-only, and a later, strictly
   larger crossing re-arms the demand. A recorded split keeps the gate closed
   while it still targets the head it was decided on — the cut must land as a
-  new head, or the decision be re-acknowledged as `continue`. A ledger
+  head that changes the reviewed tree, or the decision be re-acknowledged as
+  `continue`. A ledger
   written before the field existed loads and gates unchanged. (#81)
 - Add a persisted advisory mode to `prepare_review`. An advisory review accepts
   `submit_review` and nothing else: `finalize_local_gate`, `submit_resolutions`,

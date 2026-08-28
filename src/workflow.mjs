@@ -3570,6 +3570,13 @@ export async function recordWorkflowHead(
       fail("WORKFLOW_NO_PROGRESS", "new committed head must change");
     }
     requireAncestor(repository.path, previousHead, headSha);
+    // A tree-identical descendant -- an empty commit -- records no cut: the
+    // pending split follows the head forward and keeps the gate closed until
+    // the reviewed tree actually changes.
+    const splitFollowsHead =
+      changeSizeSplitPending(workflow) &&
+      runGit(repository.path, ["rev-parse", `${headSha}^{tree}`]).stdout.trim() ===
+        runGit(repository.path, ["rev-parse", `${previousHead}^{tree}`]).stdout.trim();
     // The head this records is the head that gets pushed to the bound pull
     // request, so the rule that stops a repair from starting on a visible
     // pull request has to hold here too: the pull request may have been
@@ -3625,6 +3632,9 @@ export async function recordWorkflowHead(
             });
           }
           next.current_head_sha = headSha;
+          if (splitFollowsHead) {
+            next.change_size_warning.acknowledgment.head_sha = headSha;
+          }
           next.attempts.push({
             number: next.attempts.length + 1,
             head_sha: headSha,
