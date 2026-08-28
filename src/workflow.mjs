@@ -80,10 +80,11 @@ const MAX_ORDINARY_AUDIT_BYTES =
   MAX_AUDIT_BYTES -
   MAX_TERMINAL_AUDIT_EVENTS * (MAX_AUDIT_EVENT_BYTES + 1);
 const MAX_CANCELLATION_RATIONALE_BYTES = 32 * 1024;
-// The acknowledgment rationale is serialized twice per audit event -- once in
-// the workflow state and once in the event metadata -- so it must stay well
-// inside MAX_AUDIT_EVENT_BYTES or the demanded acknowledgment itself becomes
-// unrecordable.
+// The acknowledgment rationale lives only in its own audit event's metadata,
+// never in persistent workflow state -- auditedWorkflowState copies the state
+// into every later event, so a state-resident rationale would spend the
+// bounded audit log once per subsequent mutation. The cap keeps the demanded
+// acknowledgment itself inside MAX_AUDIT_EVENT_BYTES.
 const MAX_ACKNOWLEDGMENT_RATIONALE_BYTES = 32 * 1024;
 const MAX_RECONCILIATION_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_CLOCK_SKEW_MS = 30 * 1000;
@@ -1016,10 +1017,6 @@ function validateChangeSizeWarning(workflow) {
       "change-size warning acknowledgment decision is invalid",
     );
   }
-  assertString(
-    acknowledgment.rationale,
-    "workflow.change_size_warning.acknowledgment.rationale",
-  );
   assertPositiveInteger(
     acknowledgment.total_lines,
     "workflow.change_size_warning.acknowledgment.total_lines",
@@ -6813,7 +6810,6 @@ export async function acknowledgeChangeSizeWarning(
             ...next.change_size_warning,
             acknowledgment: {
               decision,
-              rationale,
               total_lines: crossedTotal,
               operator_label: operatorLabel,
               acknowledged_at: now(),
