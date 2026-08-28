@@ -225,8 +225,8 @@ function workflowDefect(workflow, directoryName) {
   for (const key of ["local_review_cycles", "remote_attempts"]) {
     if (workflow[key] == null) continue;
     if (!Array.isArray(workflow[key])) return `${key} is not an array`;
-    for (const entry of workflow[key]) {
-      const defect = repairEntryDefect(entry);
+    for (const [index, entry] of workflow[key].entries()) {
+      const defect = repairEntryDefect(entry, index);
       if (defect != null) return `${key} holds an entry that ${defect}`;
     }
   }
@@ -238,12 +238,14 @@ function workflowDefect(workflow, directoryName) {
 // they mean, not merely their type: an empty string is a value the counters
 // would read as "addressed", "followed up", or "diverted". The writer's
 // remaining schema is not reproduced here.
-function repairEntryDefect(entry) {
+function repairEntryDefect(entry, index) {
   if (entry == null || typeof entry !== "object" || Array.isArray(entry)) {
     return "is not an object";
   }
-  if (!Number.isInteger(entry.number) || entry.number < 1) {
-    return "has no cycle number";
+  // The number is the cycle's position, not just any positive integer: two
+  // entries both numbered 1 are two counted cycles with one identity.
+  if (entry.number !== index + 1) {
+    return "is not numbered by its position";
   }
   if (entry.addressed_head_sha != null && !/^[0-9a-f]{40}$/.test(entry.addressed_head_sha)) {
     return "has an addressed_head_sha that is not a commit";
@@ -262,6 +264,19 @@ function repairEntryDefect(entry) {
 
 function isTimestamp(value) {
   return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
+function isName(value) {
+  return typeof value === "string" && value !== "";
+}
+
+// The total is what every threshold is computed from, so it has to be a real
+// measurement: counting lines, and the sum of the two halves it reports.
+function isChangeSize({ added_lines: added, deleted_lines: deleted, total_lines: total }) {
+  return (
+    [added, deleted, total].every((n) => Number.isSafeInteger(n) && n >= 0) &&
+    total === added + deleted
+  );
 }
 
 function humanRequiredReason(review) {
@@ -454,6 +469,17 @@ async function readCommittedAuditEvents(directory, workflowId) {
     const budget = event.workflow_state?.change_size_budget;
     if (budget != null && (!Number.isInteger(budget) || budget < 1)) {
       return { events: [], reason: "audit event has an invalid change size budget" };
+    }
+    const review = event.workflow_state?.current_review;
+    if (review != null) {
+      // Snapshots are deduplicated by this pair, so an unidentified one would
+      // collapse distinct snapshots together and hide the later measurements.
+      if (!isName(review.review_id) || !isName(review.snapshot_hash)) {
+        return { events: [], reason: "audit event has an unidentified review snapshot" };
+      }
+      if (review.change_size != null && !isChangeSize(review.change_size)) {
+        return { events: [], reason: "audit event has an invalid change size" };
+      }
     }
     events.push(event);
   }

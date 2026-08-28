@@ -870,7 +870,7 @@ test("a malformed repair-cycle entry is a defect, not a cycle", async (t) => {
     // An empty object and an array are both `typeof "object"`, so neither is
     // excluded by object-ness alone.
     ["rbwf-2026-09-01T000000-000Z-a1b1c1d1", { local_review_cycles: [{}] },
-      "local_review_cycles holds an entry that has no cycle number"],
+      "local_review_cycles holds an entry that is not numbered by its position"],
     ["rbwf-2026-09-02T000000-000Z-b2c2d2e2", { remote_attempts: [[]] },
       "remote_attempts holds an entry that is not an object"],
     ["rbwf-2026-09-03T000000-000Z-c3d3e3f3", { remote_attempts: [{ number: 1, diverted_at: 7 }] },
@@ -1087,6 +1087,51 @@ test("missing IDs, offset timestamps, and a bad budget are all handled", async (
     "audit event has an invalid change size budget",
   );
   assert.equal(scorecard.workflows.change_size.snapshots_measured, 0);
+});
+
+test("a snapshot must be identified and its measurement real", async (t) => {
+  const store = await emptyStore(t);
+  const cases = [
+    ["rbwf-2026-09-22T000000-000Z-d2e2f2a2",
+      { review_id: "rb-x", change_size: { added_lines: 1, deleted_lines: 1, total_lines: 2 } },
+      "audit event has an unidentified review snapshot"],
+    ["rbwf-2026-09-23T000000-000Z-e3f3a3b3",
+      { review_id: "rb-x", snapshot_hash: "h", change_size: { added_lines: 0, deleted_lines: 0, total_lines: -1 } },
+      "audit event has an invalid change size"],
+    // A total that is not the sum of the halves it reports.
+    ["rbwf-2026-09-24T000000-000Z-f4a4b4c4",
+      { review_id: "rb-x", snapshot_hash: "h", change_size: { added_lines: 1, deleted_lines: 1, total_lines: 9000 } },
+      "audit event has an invalid change size"],
+  ];
+  for (const [id, current_review] of cases) {
+    await writeWorkflow(store, id, {
+      workflow: { status: "ACTIVE" },
+      events: [auditEvent("ACTION_PLANNED", { change_size_budget: 2000, current_review })],
+    });
+  }
+  // Two local cycles sharing one identity.
+  await writeWorkflow(store, "rbwf-2026-09-25T000000-000Z-a5b5c5d5", {
+    workflow: {
+      status: "ACTIVE",
+      local_review_cycles: [
+        { number: 1, addressed_head_sha: "a".repeat(40) },
+        { number: 1, addressed_head_sha: "b".repeat(40) },
+      ],
+    },
+    events: [],
+  });
+
+  const scorecard = await buildScorecard(store);
+  assert.deepEqual(
+    scorecard.skipped_audit_logs.map(({ reason }) => reason),
+    cases.map(([, , reason]) => reason),
+  );
+  assert.equal(scorecard.workflows.change_size.snapshots_measured, 0);
+  assert.deepEqual(
+    scorecard.skipped_workflows.map(({ reason }) => reason),
+    ["local_review_cycles holds an entry that is not numbered by its position"],
+  );
+  assert.equal(scorecard.workflows.local_cycles.started, 0);
 });
 
 test("the cursor must describe the events it commits", async (t) => {
