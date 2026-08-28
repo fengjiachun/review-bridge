@@ -13,6 +13,11 @@ import {
   observation,
 } from "./helpers/release-fixture.mjs";
 import { git } from "./helpers/repository-fixture";
+import {
+  digestOf,
+  writeContentAddressed,
+  writeNoOverwrite,
+} from "../scripts/release-store.mjs";
 
 const verifier = path.join(
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
@@ -59,6 +64,17 @@ async function releaseRepository() {
   git(repository, "add", ".");
   git(repository, "commit", "-m", "release 1.1.0");
   git(repository, "tag", "v1.1.0");
+  // The cutoff marker is read from the default branch, which the verifier
+  // resolves rather than guesses, so the fixture carries the remote refs a
+  // clone has.
+  git(repository, "remote", "add", "origin", repository);
+  git(repository, "update-ref", "refs/remotes/origin/main", "main");
+  git(
+    repository,
+    "symbolic-ref",
+    "refs/remotes/origin/HEAD",
+    "refs/remotes/origin/main",
+  );
   return {
     root,
     repository,
@@ -235,6 +251,85 @@ test("a version whose tag does not exist reports that and needs no local build",
     ["TAG_MISSING"],
   );
   assert.equal(result.report.record, null);
+});
+
+test("an unresolvable default branch is named, never guessed", async (t) => {
+  const fixture = await releaseRepository();
+  t.after(() => fsp.rm(fixture.root, { recursive: true, force: true }));
+  // A repository whose default branch cannot be resolved must say so. Guessing
+  // a likely name reports the cutoff marker missing whenever the guess is
+  // wrong, which names a problem the operator does not have.
+  git(fixture.repository, "remote", "remove", "origin");
+  git(fixture.repository, "update-ref", "-d", "refs/remotes/origin/HEAD");
+  const result = runVerifier(["--pre"], fixture.repository);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /remote names no default branch/);
+});
+
+test("the content-addressed write never replaces the bytes it stored", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-store-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, "observations");
+  const bytes = Buffer.from('{"observation":1}\n', "utf8");
+
+  const first = await writeContentAddressed(directory, bytes);
+  assert.equal(first.reused, false);
+  assert.equal(path.basename(first.path), `${digestOf(bytes)}.json`);
+  assert.deepEqual(await fsp.readFile(first.path), bytes);
+  assert.equal((await fsp.stat(first.path)).mode & 0o777, 0o600);
+
+  // Identical content is idempotent, because the name is the content.
+  const again = await writeContentAddressed(directory, bytes);
+  assert.deepEqual(
+    { path: again.path, sha256: again.sha256, reused: again.reused },
+    { path: first.path, sha256: first.sha256, reused: true },
+  );
+
+  // A different collection lands under its own name rather than over this one.
+  const other = Buffer.from('{"observation":2}\n', "utf8");
+  const second = await writeContentAddressed(directory, other);
+  assert.notEqual(second.path, first.path);
+  assert.deepEqual(await fsp.readFile(first.path), bytes);
+
+  // A file that no longer hashes to its name is not the evidence the name
+  // claims, so it is refused rather than reported as an idempotent re-run.
+  await fsp.writeFile(first.path, "damaged", { mode: 0o600 });
+  await assert.rejects(
+    writeContentAddressed(directory, bytes),
+    /does not hash to the name it is stored under/,
+  );
+});
+
+test("writeNoOverwrite refuses an existing path", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-store-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, "nested", "record.json");
+  await writeNoOverwrite(target, Buffer.from("first", "utf8"));
+  await assert.rejects(
+    writeNoOverwrite(target, Buffer.from("second", "utf8")),
+    (error) => error.code === "EEXIST",
+  );
+  assert.equal(await fsp.readFile(target, "utf8"), "first");
+});
+
+test("the collector refuses malformed arguments before reaching GitHub", () => {
+  const collector = path.join(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
+    "scripts",
+    "collect-release-observation.mjs",
+  );
+  const run = (args) =>
+    spawnSync(process.execPath, [collector, ...args], { encoding: "utf8" });
+  assert.equal(run(["--version", "nope"]).status, 2);
+  assert.match(run(["--version", "nope"]).stderr, /MAJOR\.MINOR\.PATCH/);
+  assert.equal(run([]).status, 2);
+  assert.equal(run(["--bogus", "x"]).status, 2);
+  assert.match(run(["--bogus", "x"]).stderr, /unknown argument --bogus/);
+  assert.equal(run(["--version"]).status, 2);
+  assert.match(run(["--version"]).stderr, /--version requires a value/);
+  const help = run(["--help"]);
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /Usage: collect-release-observation\.mjs/);
 });
 
 test("a malformed observation file fails without a stack trace", async (t) => {

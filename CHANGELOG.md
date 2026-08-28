@@ -16,7 +16,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   content-addressed in the store, and a two-phase verifier reconciles the
   CHANGELOG's claims against them, checks that every attested pull request
   merged the head its workflow recorded, and appends one immutable evidence
-  record per version. Nothing in it performs a release action.
+  record per version. Nothing in it performs a release action. (#73) (#74)
 - Add a persisted advisory mode to `prepare_review`. An advisory review accepts
   `submit_review` and nothing else: `finalize_local_gate`, `submit_resolutions`,
   and `prepare_rereview` each refuse it and say why. Its terminal is a report,

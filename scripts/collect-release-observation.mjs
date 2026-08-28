@@ -6,12 +6,10 @@
 // observation, whose filename is its own content digest.
 
 import { spawnSync } from "node:child_process";
-import crypto from "node:crypto";
-import fs from "node:fs";
-import fsp from "node:fs/promises";
 import path from "node:path";
 import { defaultStoreRoot } from "../src/core.mjs";
 import { canonicalJsonBytes, sha256 } from "../src/storage.mjs";
+import { writeContentAddressed } from "./release-store.mjs";
 import {
   compareVersions,
   normalizeReleaseObservation,
@@ -272,45 +270,18 @@ if (tagRef == null) {
 }
 
 const bytes = canonicalJsonBytes(normalizeReleaseObservation(observation));
-const digest = crypto.createHash("sha256").update(bytes).digest("hex");
-const relativePath = path.join(
-  "releases",
-  String(repository.id),
-  "observations",
-  `${digest}.json`,
+const stored = await writeContentAddressed(
+  path.join(storeRoot, "releases", String(repository.id), "observations"),
+  bytes,
 );
-const observationPath = path.join(storeRoot, relativePath);
-await fsp.mkdir(path.dirname(observationPath), { recursive: true, mode: 0o700 });
-try {
-  // No-overwrite: a re-run's fresh collection lands under its own digest and
-  // can never replace the bytes an existing record references. Identical
-  // content is idempotent, because the name is the content.
-  await fsp.writeFile(observationPath, bytes, { flag: "wx", mode: 0o600 });
-  const directory = await fsp.open(path.dirname(observationPath), fs.constants.O_RDONLY);
-  try {
-    await directory.sync();
-  } finally {
-    await directory.close();
-  }
-} catch (error) {
-  if (error?.code !== "EEXIST") {
-    throw error;
-  }
-  const existing = await fsp.readFile(observationPath);
-  if (crypto.createHash("sha256").update(existing).digest("hex") !== digest) {
-    process.stderr.write(
-      `${observationPath} does not hash to the name it is stored under; the stored observation is damaged\n`,
-    );
-    process.exit(1);
-  }
-}
 
 process.stdout.write(
   `${JSON.stringify(
     {
-      observation_path: observationPath,
-      store_relative_path: relativePath,
-      sha256: digest,
+      observation_path: stored.path,
+      store_relative_path: path.relative(storeRoot, stored.path),
+      sha256: stored.sha256,
+      reused: stored.reused,
       version,
       tag_exists: observation.tag.exists,
     },

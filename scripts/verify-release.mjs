@@ -8,12 +8,11 @@
 // It reads. The operator tags, publishes, and merges.
 
 import { spawnSync } from "node:child_process";
-import crypto from "node:crypto";
-import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { defaultStoreRoot } from "../src/core.mjs";
 import { canonicalJsonBytes, readSecureJson } from "../src/storage.mjs";
+import { digestOf, writeNoOverwrite } from "./release-store.mjs";
 import { MAX_WORKFLOW_BYTES, WORKFLOW_ID_RE } from "../src/workflow-binding.mjs";
 import {
   CHECKSUM_MANIFEST_NAME,
@@ -126,17 +125,39 @@ function readAt(repositoryPath, ref, files) {
 // The marker is a repository-level fact, so it is always read from the default
 // branch at verification time -- never from the historical text a tag carries,
 // which a tag created before the marker existed cannot hold.
-function defaultBranchCutoff(repositoryPath) {
+//
+// The branch is resolved, never guessed. A clone that has no `origin/HEAD` --
+// a CI checkout usually has none -- is asked of the remote instead, because
+// substituting a likely name reports the marker missing whenever the guess is
+// wrong, which names the wrong problem.
+function defaultBranchChangelog(repositoryPath) {
   const symbolic = git(
     repositoryPath,
     ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     { allowFailure: true },
-  );
-  const ref = symbolic?.trim() || "main";
-  return cutoffVersion(
-    git(repositoryPath, ["show", `${ref}:CHANGELOG.md`], {
+  )?.trim();
+  const branch =
+    symbolic?.replace(/^origin\//, "") ??
+    /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m.exec(
+      git(repositoryPath, ["ls-remote", "--symref", "origin", "HEAD"], {
+        allowFailure: true,
+      }) ?? "",
+    )?.[1];
+  if (branch == null) {
+    usageError(
+      `${repositoryPath} has no origin/HEAD and its remote names no default branch, so the pull-request reference cutoff cannot be read`,
+    );
+  }
+  for (const ref of [`origin/${branch}`, branch]) {
+    const text = git(repositoryPath, ["show", `${ref}:CHANGELOG.md`], {
       allowFailure: true,
-    }),
+    });
+    if (text != null) {
+      return text;
+    }
+  }
+  usageError(
+    `neither origin/${branch} nor ${branch} carries a CHANGELOG.md, so the pull-request reference cutoff cannot be read`,
   );
 }
 
@@ -243,17 +264,6 @@ async function collectAttestations(storeRoot, repositoryId) {
   return attestations;
 }
 
-async function writeNoOverwrite(filePath, bytes) {
-  await fsp.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  await fsp.writeFile(filePath, bytes, { flag: "wx", mode: 0o600 });
-  const directory = await fsp.open(path.dirname(filePath), fs.constants.O_RDONLY);
-  try {
-    await directory.sync();
-  } finally {
-    await directory.close();
-  }
-}
-
 const options = parseArguments(process.argv.slice(2));
 const repositoryPath = path.resolve(options.repo);
 const storeRoot = options.store ? path.resolve(options.store) : defaultStoreRoot();
@@ -274,7 +284,7 @@ if (options.phase === "PRE") {
     phase: "PRE",
     version,
     files,
-    cutoff: defaultBranchCutoff(repositoryPath),
+    cutoff: cutoffVersion(defaultBranchChangelog(repositoryPath)),
     previousVersion:
       range.kind === "ROOT" ? null : versionFromTagName(range.tag),
     mergedPullRequests: localMergedPullRequests(repositoryPath, range),
@@ -314,7 +324,7 @@ if (options.phase === "PRE") {
     phase: "FINAL",
     version: observation.version,
     files,
-    cutoff: defaultBranchCutoff(repositoryPath),
+    cutoff: cutoffVersion(defaultBranchChangelog(repositoryPath)),
     previousVersion:
       observation.range?.kind === "TAG"
         ? versionFromTagName(observation.range.tag)
@@ -325,7 +335,7 @@ if (options.phase === "PRE") {
     attestations: await collectAttestations(storeRoot, observation.repository.id),
     observationRef: {
       path: path.resolve(options.observation),
-      sha256: crypto.createHash("sha256").update(observationBytes).digest("hex"),
+      sha256: digestOf(observationBytes),
     },
     verifierVersion,
   });
