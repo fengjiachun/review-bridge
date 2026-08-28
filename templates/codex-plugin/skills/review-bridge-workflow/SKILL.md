@@ -942,9 +942,23 @@ attests nothing.
    what keeps the reviewed unit the whole pull request: without it the server
    searches this store's own gates for a successor parent, and a delta measured
    against locally gated work answers a question nobody asked about someone
-   else's branch. Report each `current_snapshot.change_size`: a large
-   external pull request never blocks an advisory panel, but the operator
-   should know what they are asking the panel to read.
+   else's branch.
+
+   Then prove the bytes really are identical: read each member's
+   `current_snapshot.snapshot_hash` from `get_review_summary` and require every
+   one to equal the first member's, with `worktree_clean` true throughout.
+   Equal repository path, base, and head do not establish that on their own —
+   snapshot capture folds in working-tree overlays, so a file modified or left
+   untracked in the panel worktree between two sequential `prepare_review`
+   calls gives those two members different bytes while every field you passed
+   stayed the same. The panel would then correlate findings across snapshots
+   that were never the same code, which is the one thing this flow claims not
+   to do. On a mismatch, discard the panel and recapture it from a clean
+   worktree rather than reasoning about which member saw what.
+
+   Report each `current_snapshot.change_size`: a large external pull request
+   never blocks an advisory panel, but the operator should know what they are
+   asking the panel to read.
 3. Put the pull request's own title and description in `requirement`, quoted
    and explicitly labelled as the author's unverified claim — for example,
    `Author's claim (unverified), PR #<number>: "<title>" / "<description>"`.

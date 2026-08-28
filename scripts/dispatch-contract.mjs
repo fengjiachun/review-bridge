@@ -232,6 +232,22 @@ export const ADVISORY_PANEL_CONTRACT = {
       "every member is prepared over the same bytes",
       /same base SHA, `advisory: true`, and `force_full_review: true`/,
     ],
+    // Equal path, base, and head do not establish byte identity: snapshot
+    // capture folds in working-tree overlays, so a worktree touched between two
+    // sequential preparations gives two members different bytes with every
+    // passed field unchanged. The panel's whole premise fails silently there.
+    [
+      "byte identity is proven by comparing snapshot hashes",
+      /require every one to equal the first member's, with `worktree_clean` true/,
+    ],
+    [
+      "why the passed fields are not enough on their own",
+      /snapshot capture folds in working-tree overlays/,
+    ],
+    [
+      "a mismatched panel is recaptured, not reasoned about",
+      /discard the panel and recapture it from a clean worktree/,
+    ],
     [
       "the pull request's own words are the author's unverified claim",
       /labelled as the author's unverified claim/,
