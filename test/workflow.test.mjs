@@ -1742,11 +1742,17 @@ test("a crossed change-size warning refuses the next round until a recorded spli
     (event) => event.event === "CHANGE_SIZE_WARNING_ACKNOWLEDGED",
   );
   assert.equal(acknowledgments.length, 3);
+  const fixedTree = git(state.repository, "rev-parse", `${fixedHead}^{tree}`);
+  const continuationTree = git(
+    state.repository,
+    "rev-parse",
+    `${continuationHead}^{tree}`,
+  );
   assert.deepEqual(acknowledgments[0].metadata, {
     decision: "continue",
     rationale: "The checkers belong with the change they verify.",
     crossed_total_lines: 6,
-    head_sha: fixedHead,
+    tree_sha: fixedTree,
     change_size_budget: 8,
     operator_label: "Test Operator",
   });
@@ -1754,7 +1760,7 @@ test("a crossed change-size warning refuses the next round until a recorded spli
     decision: "split",
     rationale: "Cut the checkers into a follow-up change after this round.",
     crossed_total_lines: 7,
-    head_sha: continuationHead,
+    tree_sha: continuationTree,
     change_size_budget: 8,
     operator_label: "Test Operator",
   });
@@ -1762,7 +1768,7 @@ test("a crossed change-size warning refuses the next round until a recorded spli
     decision: "continue",
     rationale: "The cut is not worth a re-review; continue as one unit.",
     crossed_total_lines: 7,
-    head_sha: continuationHead,
+    tree_sha: continuationTree,
     change_size_budget: 8,
     operator_label: "Test Operator",
   });
@@ -1934,9 +1940,27 @@ test("a split acknowledgment at the continuation bind can commit the intended cu
     workflow.revision,
     emptyHead,
   );
-  assert.equal(
-    workflow.change_size_warning.acknowledgment.head_sha,
-    emptyHead,
+  await assert.rejects(
+    bindWorkflowReview(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      staleFollowup.id,
+    ),
+    /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
+  );
+  // A change-then-revert sequence restores the decided tree and must not
+  // release the gate either.
+  await commitImplementation(state.repository, "export const detour = 1;\n");
+  const revertedHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 7;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    revertedHead,
   );
   await assert.rejects(
     bindWorkflowReview(

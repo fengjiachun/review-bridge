@@ -769,11 +769,11 @@ records the explicit split decision: `continue` with a stated reason or
 `split` with the intended cut, audited with the crossing's total. A crossing
 is new only when its total strictly exceeds every crossing recorded before
 it, so after a `continue` only a strictly larger crossing re-arms the demand.
-A recorded `split` keeps refusing round preparation while the head it was
-decided on is still current; recording the cut as a head that changes the
-reviewed tree releases it — a tree-identical descendant such as an empty
-commit only moves the pending split forward — as does re-acknowledging the
-decision as `continue`.
+A recorded `split` keeps refusing round preparation while the reviewed tree
+still equals the tree it was decided on — neither an empty descendant nor a
+change-then-revert sequence releases it. Recording the cut as a head whose
+tree differs releases it, as does re-acknowledging the decision as
+`continue`.
 (This supersedes the original rule of issue #50 that the warning never
 blocks; the reversal and its field evidence are issue #79.) When the sum exceeds
 the workflow budget, binding the review pauses

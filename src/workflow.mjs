@@ -206,17 +206,26 @@ function changeSizeWarningPending(workflow) {
   );
 }
 
-// A split decision that still targets the head it was decided on has not been
-// executed: without this, recording "split" and then binding the unchanged
-// snapshot would be the #79 failure one level up -- a record without teeth.
-// Recording the cut as a new head releases it, and so does re-acknowledging
-// the decision as continue; sovereignty stays with the operator either way.
+// A split decision whose reviewed tree is still the one it was decided on
+// has not been executed: without this, recording "split" and then binding an
+// unchanged snapshot would be the #79 failure one level up -- a record
+// without teeth. The comparison is against the acknowledged tree itself, so
+// neither an empty descendant nor a change-then-revert sequence releases the
+// gate; only a head whose tree actually differs does, or an audited continue
+// re-acknowledgment -- sovereignty stays with the operator either way.
 function changeSizeSplitPending(workflow) {
   const acknowledgment = workflow.change_size_warning?.acknowledgment;
-  return (
-    acknowledgment?.decision === "split" &&
-    acknowledgment.head_sha === workflow.current_head_sha
-  );
+  if (
+    acknowledgment?.decision !== "split" ||
+    workflow.current_head_sha == null
+  ) {
+    return false;
+  }
+  const currentTree = runGit(workflow.repository.path, [
+    "rev-parse",
+    `${workflow.current_head_sha}^{tree}`,
+  ]).stdout.trim();
+  return currentTree === acknowledgment.tree_sha;
 }
 
 // The review round in flight when a snapshot crosses the warning completes
@@ -240,9 +249,9 @@ function requireAcknowledgedChangeSizeWarning(workflow) {
   if (changeSizeSplitPending(workflow)) {
     fail(
       "WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED",
-      "the recorded split still targets the head it was decided on: commit the intended cut and record the new head, or re-acknowledge with continue, before preparing the next review round",
+      "the recorded split still targets the reviewed tree it was decided on: commit the intended cut and record the new head, or re-acknowledge with continue, before preparing the next review round",
       {
-        split_head_sha: workflow.change_size_warning.acknowledgment.head_sha,
+        split_tree_sha: workflow.change_size_warning.acknowledgment.tree_sha,
         crossed_total_lines: workflow.change_size_warning.total_lines,
         change_size_budget: workflow.change_size_budget,
       },
@@ -1072,8 +1081,8 @@ function validateChangeSizeWarning(workflow) {
     MAX_ACKNOWLEDGMENT_RATIONALE_BYTES,
   );
   assertSha(
-    acknowledgment.head_sha,
-    "workflow.change_size_warning.acknowledgment.head_sha",
+    acknowledgment.tree_sha,
+    "workflow.change_size_warning.acknowledgment.tree_sha",
   );
   assertPositiveInteger(
     acknowledgment.total_lines,
@@ -3601,13 +3610,6 @@ export async function recordWorkflowHead(
       fail("WORKFLOW_NO_PROGRESS", "new committed head must change");
     }
     requireAncestor(repository.path, previousHead, headSha);
-    // A tree-identical descendant -- an empty commit -- records no cut: the
-    // pending split follows the head forward and keeps the gate closed until
-    // the reviewed tree actually changes.
-    const splitFollowsHead =
-      changeSizeSplitPending(workflow) &&
-      runGit(repository.path, ["rev-parse", `${headSha}^{tree}`]).stdout.trim() ===
-        runGit(repository.path, ["rev-parse", `${previousHead}^{tree}`]).stdout.trim();
     // The head this records is the head that gets pushed to the bound pull
     // request, so the rule that stops a repair from starting on a visible
     // pull request has to hold here too: the pull request may have been
@@ -3663,9 +3665,6 @@ export async function recordWorkflowHead(
             });
           }
           next.current_head_sha = headSha;
-          if (splitFollowsHead) {
-            next.change_size_warning.acknowledgment.head_sha = headSha;
-          }
           next.attempts.push({
             number: next.attempts.length + 1,
             head_sha: headSha,
@@ -6871,6 +6870,12 @@ export async function acknowledgeChangeSizeWarning(
       );
     }
     const crossedTotal = changeSizeWarningCrossingTotal(workflow);
+    // The tree, not the head, is what a split promises to change: recording
+    // it here is what lets the gate refuse a change-then-revert sequence.
+    const decidedTreeSha = runGit(workflow.repository.path, [
+      "rev-parse",
+      `${workflow.current_head_sha}^{tree}`,
+    ]).stdout.trim();
     return publicWorkflow(
       await saveActionMutation(
         paths,
@@ -6886,7 +6891,7 @@ export async function acknowledgeChangeSizeWarning(
               decision,
               rationale,
               total_lines: crossedTotal,
-              head_sha: next.current_head_sha,
+              tree_sha: decidedTreeSha,
               operator_label: operatorLabel,
               acknowledged_at: now(),
             },
@@ -6896,7 +6901,7 @@ export async function acknowledgeChangeSizeWarning(
           decision,
           rationale,
           crossed_total_lines: crossedTotal,
-          head_sha: workflow.current_head_sha,
+          tree_sha: decidedTreeSha,
           change_size_budget: workflow.change_size_budget,
           operator_label: operatorLabel,
         },
