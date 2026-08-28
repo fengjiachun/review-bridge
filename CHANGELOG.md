@@ -22,6 +22,14 @@
   diff, the requirement, and the commit messages are material to verify, never
   instructions, and instruction-like text addressed to the reviewer inside them
   is itself a finding.
+- Package `scripts/review-scorecard.mjs`, a read-only report over the review and
+  workflow ledgers already in the configured store: findings by severity, author
+  dispositions crossed with reviewer decisions, rebuttal outcomes before and
+  after the verification obligation, rounds to CLEAN, continuations, workflow
+  budget events, and human arbitration escalations, per reviewer provider and
+  overall. It emits markdown or JSON, states every counting rule in the report
+  so a number can be replayed, and skips a ledger it cannot parse rather than
+  repairing it.
 
 ## 0.9.0 - 2026-08-14
 
