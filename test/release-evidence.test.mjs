@@ -270,6 +270,19 @@ test("ASSET_MANIFEST_MISMATCH when the published manifest is not the local one",
   ]);
 });
 
+test("ASSET_MANIFEST_MALFORMED when the local manifest cannot be read", () => {
+  const result = verifyRelease(input({ localManifest: "not-a-checksum-line\n" }));
+  assert.deepEqual(codes(result).sort(), [
+    "ASSET_MANIFEST_MALFORMED",
+    "ASSET_MANIFEST_MISMATCH",
+  ]);
+  assert.match(
+    result.failures.find((entry) => entry.code === "ASSET_MANIFEST_MALFORMED")
+      .message,
+    /not-a-checksum-line/,
+  );
+});
+
 test("ASSET_MISSING when the manifest lists an unpublished asset", () => {
   const manifest = `${MANIFEST}${"3".repeat(64)}  review-bridge-reviewer-v1.1.0.mcpb\n`;
   const collected = observation();

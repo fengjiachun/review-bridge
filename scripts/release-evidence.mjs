@@ -320,10 +320,7 @@ export function verifyAssets(published, localManifestText) {
           `the release publishes no ${CHECKSUM_MANIFEST_NAME}`,
         ),
       ],
-      assets: published.map((asset) => ({
-        name: asset.name,
-        sha256: asset.sha256,
-      })),
+      assets: assetDigests(published),
     };
   }
   if (manifest.sha256 !== sha256(localManifestText)) {
@@ -334,7 +331,22 @@ export function verifyAssets(published, localManifestText) {
       ),
     );
   }
-  const expected = parseChecksumManifest(localManifestText);
+  let expected;
+  try {
+    expected = parseChecksumManifest(localManifestText);
+  } catch (error) {
+    // A manifest whose format cannot be read leaves the payload comparison
+    // with nothing to compare against, and the report is the only place the
+    // operator learns why. Naming it keeps it in the structured failure list
+    // instead of leaving the caller a stack trace.
+    failures.push(
+      failure(
+        "ASSET_MANIFEST_MALFORMED",
+        `the local build's ${CHECKSUM_MANIFEST_NAME} is unreadable: ${error.message}`,
+      ),
+    );
+    return { failures, assets: assetDigests(published) };
+  }
   const payload = published.filter(
     (asset) => asset.name !== CHECKSUM_MANIFEST_NAME,
   );
@@ -367,12 +379,13 @@ export function verifyAssets(published, localManifestText) {
       );
     }
   }
-  return {
-    failures,
-    assets: published
-      .map((asset) => ({ name: asset.name, sha256: asset.sha256 }))
-      .sort((left, right) => left.name.localeCompare(right.name)),
-  };
+  return { failures, assets: assetDigests(published) };
+}
+
+function assetDigests(published) {
+  return published
+    .map((asset) => ({ name: asset.name, sha256: asset.sha256 }))
+    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 /**
