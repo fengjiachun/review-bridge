@@ -6875,7 +6875,7 @@ export async function acknowledgeChangeSizeWarning(
     // once the bound review's live state shows the response is complete; a
     // continue decision has nothing to execute and needs no such fence.
     if (decision === "split" && workflow.phase === "ADDRESS_LOCAL_FINDINGS") {
-      const { summary } = await getReviewSnapshot(
+      const { review, summary } = await getReviewSnapshot(
         storeRoot,
         workflow.current_review.review_id,
       );
@@ -6883,6 +6883,19 @@ export async function acknowledgeChangeSizeWarning(
         fail(
           "WORKFLOW_STATE_INVALID",
           "a split is acknowledged after the findings are answered: the finding-fix commit would otherwise discharge the cut it promises",
+        );
+      }
+      // A response may be submitted before its fix commit is recorded; a
+      // split accepted then would take the pre-fix tree as its target and be
+      // discharged by that owed commit. Fixed dispositions whose head has not
+      // moved past the reviewed snapshot still owe their tree change.
+      if (
+        review.findings.some((finding) => finding.status === "AUTHOR_FIXED") &&
+        workflow.current_head_sha === summary.current_snapshot?.head_sha
+      ) {
+        fail(
+          "WORKFLOW_STATE_INVALID",
+          "fixed resolutions await their recorded fix head: record the descendant fix head before deciding the split",
         );
       }
     }

@@ -2032,6 +2032,115 @@ test("a split acknowledgment at the continuation bind can commit the intended cu
   assert.equal(workflow.change_size_warning.acknowledgment.decision, "split");
 });
 
+test("a split is refused while fixed resolutions await their recorded head", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const started = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, { changeSizeBudget: 8 }),
+  );
+  const headSha = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\n",
+  );
+  let workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    started.revision,
+    headSha,
+  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  ({ completed: workflow } = await dispatchReviewer(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  ));
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [{ severity: "major", title: "Defect", explanation: "Fix it." }],
+    "CODEX_TASK",
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  // The response lands before its fix commit: the split's target would be the
+  // pre-fix tree, and the owed fix commit would discharge it.
+  await submitResolutions(state.store, review.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Fixed." },
+  ]);
+  await assert.rejects(
+    acknowledgeChangeSizeWarning(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      {
+        decision: "split",
+        rationale: "Split before the fix head lands.",
+        operatorLabel: "Test Operator",
+      },
+    ),
+    /record the descendant fix head before deciding the split/,
+  );
+  const fixedHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 6;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    fixedHead,
+  );
+  workflow = await acknowledgeChangeSizeWarning(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    {
+      decision: "split",
+      rationale: "Cut the constants back after the fix.",
+      operatorLabel: "Test Operator",
+    },
+  );
+  // The split now targets the post-fix tree, so entering the rereview round
+  // is refused until the cut lands.
+  await assert.rejects(
+    advanceLocalWorkflow(state.store, started.workflow_id, workflow.revision),
+    /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
+  );
+  const cutHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    cutHead,
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(workflow.phase, "PREPARE_REREVIEW");
+});
+
 test("extending the exceeded budget does not satisfy the pending warning acknowledgment", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
