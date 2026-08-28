@@ -184,25 +184,48 @@ function changeSizeWarningPending(workflow) {
   );
 }
 
+// A split decision that still targets the head it was decided on has not been
+// executed: without this, recording "split" and then binding the unchanged
+// snapshot would be the #79 failure one level up -- a record without teeth.
+// Recording the cut as a new head releases it, and so does re-acknowledging
+// the decision as continue; sovereignty stays with the operator either way.
+function changeSizeSplitPending(workflow) {
+  const acknowledgment = workflow.change_size_warning?.acknowledgment;
+  return (
+    acknowledgment?.decision === "split" &&
+    acknowledgment.head_sha === workflow.current_head_sha
+  );
+}
+
 // The review round in flight when a snapshot crosses the warning completes
 // normally; only the NEXT round's preparation stops here, while acting on a
 // split is still cheap. The ceiling pause CHANGE_SIZE_BUDGET_EXCEEDED is a
 // separate, unchanged mechanism.
 function requireAcknowledgedChangeSizeWarning(workflow) {
-  if (!changeSizeWarningPending(workflow)) {
-    return;
+  if (changeSizeWarningPending(workflow)) {
+    fail(
+      "WORKFLOW_CHANGE_SIZE_WARNING_UNACKNOWLEDGED",
+      "the crossed change-size warning requires a recorded split decision: call acknowledge_change_size_warning with continue or split before preparing the next review round",
+      {
+        required_action: "acknowledge_change_size_warning",
+        crossed_total_lines: workflow.change_size_warning.total_lines,
+        acknowledged_total_lines:
+          workflow.change_size_warning.acknowledgment?.total_lines ?? null,
+        change_size_budget: workflow.change_size_budget,
+      },
+    );
   }
-  fail(
-    "WORKFLOW_CHANGE_SIZE_WARNING_UNACKNOWLEDGED",
-    "the crossed change-size warning requires a recorded split decision: call acknowledge_change_size_warning with continue or split before preparing the next review round",
-    {
-      required_action: "acknowledge_change_size_warning",
-      crossed_total_lines: workflow.change_size_warning.total_lines,
-      acknowledged_total_lines:
-        workflow.change_size_warning.acknowledgment?.total_lines ?? null,
-      change_size_budget: workflow.change_size_budget,
-    },
-  );
+  if (changeSizeSplitPending(workflow)) {
+    fail(
+      "WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED",
+      "the recorded split still targets the head it was decided on: commit the intended cut and record the new head, or re-acknowledge with continue, before preparing the next review round",
+      {
+        split_head_sha: workflow.change_size_warning.acknowledgment.head_sha,
+        crossed_total_lines: workflow.change_size_warning.total_lines,
+        change_size_budget: workflow.change_size_budget,
+      },
+    );
+  }
 }
 
 function assertSha(value, name) {
@@ -1017,6 +1040,10 @@ function validateChangeSizeWarning(workflow) {
       "change-size warning acknowledgment decision is invalid",
     );
   }
+  assertSha(
+    acknowledgment.head_sha,
+    "workflow.change_size_warning.acknowledgment.head_sha",
+  );
   assertPositiveInteger(
     acknowledgment.total_lines,
     "workflow.change_size_warning.acknowledgment.total_lines",
@@ -6778,7 +6805,10 @@ export async function acknowledgeChangeSizeWarning(
   assertString(operatorLabel, "operator_label", { max: 1024 });
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
-    if (!changeSizeWarningPending(workflow)) {
+    if (
+      !changeSizeWarningPending(workflow) &&
+      !changeSizeSplitPending(workflow)
+    ) {
       fail(
         "WORKFLOW_STATE_INVALID",
         "workflow has no unacknowledged change-size warning crossing",
@@ -6811,6 +6841,7 @@ export async function acknowledgeChangeSizeWarning(
             acknowledgment: {
               decision,
               total_lines: crossedTotal,
+              head_sha: next.current_head_sha,
               operator_label: operatorLabel,
               acknowledged_at: now(),
             },
@@ -6820,6 +6851,7 @@ export async function acknowledgeChangeSizeWarning(
           decision,
           rationale,
           crossed_total_lines: crossedTotal,
+          head_sha: workflow.current_head_sha,
           change_size_budget: workflow.change_size_budget,
           operator_label: operatorLabel,
         },

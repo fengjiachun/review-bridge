@@ -769,6 +769,9 @@ records the explicit split decision: `continue` with a stated reason or
 `split` with the intended cut, audited with the crossing's total. A crossing
 is new only when its total strictly exceeds every crossing recorded before
 it, so after a `continue` only a strictly larger crossing re-arms the demand.
+A recorded `split` keeps refusing round preparation while the head it was
+decided on is still current; recording the cut as a new head releases it, as
+does re-acknowledging the decision as `continue`.
 (This supersedes the original rule of issue #50 that the warning never
 blocks; the reversal and its field evidence are issue #79.) When the sum exceeds
 the workflow budget, binding the review pauses

@@ -544,7 +544,9 @@ headroom. The review round in flight when a snapshot crosses it completes
 normally, but the workflow refuses to prepare the next round until
 `acknowledge_change_size_warning` records the explicit split decision —
 `continue` with a stated reason or `split` with the intended cut — and after
-a `continue`, a later, strictly larger crossing re-arms the demand. An
+a `continue`, a later, strictly larger crossing re-arms the demand. A
+recorded split keeps the gate closed until the cut lands as a new head or
+the decision is re-acknowledged as `continue`. An
 oversized snapshot binds normally but
 pauses with
 `CHANGE_SIZE_BUDGET_EXCEEDED` before a reviewer task is dispatched.

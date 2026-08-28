@@ -1695,6 +1695,28 @@ test("a crossed change-size warning refuses the next round until a recorded spli
   );
   assert.equal(workflow.change_size_warning.acknowledgment.decision, "split");
   assert.equal(workflow.change_size_warning.acknowledgment.total_lines, 7);
+  // A recorded split that still targets the head it was decided on keeps the
+  // gate closed: binding the unchanged snapshot would proceed without the cut.
+  await assert.rejects(
+    bindWorkflowReview(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      followup.id,
+    ),
+    /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
+  );
+  // Re-acknowledging the decision as continue releases it auditedly.
+  workflow = await acknowledgeChangeSizeWarning(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    {
+      decision: "continue",
+      rationale: "The cut is not worth a re-review; continue as one unit.",
+      operatorLabel: "Test Operator",
+    },
+  );
   // The follow-up snapshot measures the same 7 total lines: an equal-size
   // later snapshot is not a new crossing and must not re-arm the demand.
   workflow = await bindWorkflowReview(
@@ -1719,11 +1741,12 @@ test("a crossed change-size warning refuses the next round until a recorded spli
   const acknowledgments = audit.filter(
     (event) => event.event === "CHANGE_SIZE_WARNING_ACKNOWLEDGED",
   );
-  assert.equal(acknowledgments.length, 2);
+  assert.equal(acknowledgments.length, 3);
   assert.deepEqual(acknowledgments[0].metadata, {
     decision: "continue",
     rationale: "The checkers belong with the change they verify.",
     crossed_total_lines: 6,
+    head_sha: fixedHead,
     change_size_budget: 8,
     operator_label: "Test Operator",
   });
@@ -1731,6 +1754,15 @@ test("a crossed change-size warning refuses the next round until a recorded spli
     decision: "split",
     rationale: "Cut the checkers into a follow-up change after this round.",
     crossed_total_lines: 7,
+    head_sha: continuationHead,
+    change_size_budget: 8,
+    operator_label: "Test Operator",
+  });
+  assert.deepEqual(acknowledgments[2].metadata, {
+    decision: "continue",
+    rationale: "The cut is not worth a re-review; continue as one unit.",
+    crossed_total_lines: 7,
+    head_sha: continuationHead,
     change_size_budget: 8,
     operator_label: "Test Operator",
   });
@@ -1873,6 +1905,17 @@ test("a split acknowledgment at the continuation bind can commit the intended cu
       rationale: "Cut the constants back to the reviewed core.",
       operatorLabel: "Test Operator",
     },
+  );
+  // The recorded split still targets the current head, so the unchanged
+  // snapshot cannot be bound before the cut lands.
+  await assert.rejects(
+    bindWorkflowReview(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      staleFollowup.id,
+    ),
+    /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
   );
   // The intended cut is a descendant head committed from PREPARE_LOCAL_REVIEW;
   // the latest cycle's addressed head must follow it so the follow-up review
