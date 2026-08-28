@@ -14,12 +14,28 @@ export function digestOf(bytes) {
 
 /**
  * Create the file or fail. The caller sees EEXIST rather than a silently
- * replaced file, and the directory entry is durable before the write is
- * reported.
+ * replaced file.
+ *
+ * Content is flushed before the directory entry that names it, matching
+ * atomicWriteFile: syncing only the directory can leave a crash with a durable
+ * name over data that never reached disk, which on this path would be an
+ * evidence file that is not the evidence its name claims.
  */
 export async function writeNoOverwrite(filePath, bytes) {
   await fsp.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  await fsp.writeFile(filePath, bytes, { flag: "wx", mode: 0o600 });
+  const handle = await fsp.open(
+    filePath,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+    0o600,
+  );
+  try {
+    // Explicit, because the open mode is masked by the process umask.
+    await handle.chmod(0o600);
+    await handle.writeFile(bytes);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
   const directory = await fsp.open(path.dirname(filePath), fs.constants.O_RDONLY);
   try {
     await directory.sync();
