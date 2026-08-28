@@ -181,6 +181,11 @@ function reviewDefect(review, directoryName) {
     ["resolution", review.resolutions.map((resolution) => resolution.finding_id)],
     ["rereview decision", review.rereview_decisions.map((d) => d.finding_id)],
   ]) {
+    // A missing ID is `undefined` in all three lists at once, which is unique
+    // within each and matches across them, so the records read as linked.
+    if (entries.some((id) => typeof id !== "string" || id === "")) {
+      return `a ${key} has no ID`;
+    }
     if (new Set(entries).size !== entries.length) {
       return `${key} IDs are not unique`;
     }
@@ -443,6 +448,13 @@ async function readCommittedAuditEvents(directory, workflowId) {
     if (event.sequence !== events.length + 1) {
       return { events: [], reason: "audit event is out of sequence" };
     }
+    // Absent is legitimate — an audited state older than the field falls back
+    // to the default — but a present malformed budget makes every threshold
+    // NaN, which reads as a measured snapshot that crossed nothing.
+    const budget = event.workflow_state?.change_size_budget;
+    if (budget != null && (!Number.isInteger(budget) || budget < 1)) {
+      return { events: [], reason: "audit event has an invalid change size budget" };
+    }
     events.push(event);
   }
   // The cursor describes the committed region in three ways, and a head left
@@ -534,10 +546,13 @@ export async function buildScorecard(storeRoot, { generatedAt } = {}) {
     if (!providers.has(provider)) providers.set(provider, emptyStats());
     countReview(providers.get(provider), record);
     countReview(providers.get(OVERALL), record);
-    if (earliest == null || record.created_at < earliest) {
-      earliest = record.created_at;
+    // Compared as instants, not as text: RFC 3339 allows an offset, and two
+    // valid timestamps can sort the wrong way round as strings.
+    const at = Date.parse(record.created_at);
+    if (earliest == null || at < earliest.at) {
+      earliest = { at, text: record.created_at };
     }
-    if (latest == null || record.created_at > latest) latest = record.created_at;
+    if (latest == null || at > latest.at) latest = { at, text: record.created_at };
   }
   for (const stats of providers.values()) finalizeRebuttals(stats);
 
@@ -576,8 +591,8 @@ export async function buildScorecard(storeRoot, { generatedAt } = {}) {
       workflows_skipped: skippedWorkflows.length,
       workflow_directories_without_ledger: workflowLedgers.absent,
       audit_logs_skipped: skippedAuditLogs.length,
-      earliest_review_created_at: earliest,
-      latest_review_created_at: latest,
+      earliest_review_created_at: earliest?.text ?? null,
+      latest_review_created_at: latest?.text ?? null,
     },
     providers: Object.fromEntries(
       [...providers].sort(([a], [b]) => a.localeCompare(b)),

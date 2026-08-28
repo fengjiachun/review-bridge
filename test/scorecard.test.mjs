@@ -1025,6 +1025,70 @@ test("an out-of-sequence event and an unplaceable review are defects", async (t)
   assert.equal(scorecard.corpus.latest_review_created_at, null);
 });
 
+test("missing IDs, offset timestamps, and a bad budget are all handled", async (t) => {
+  const store = await emptyStore(t);
+  // Every ID absent: each list holds one `undefined`, unique within itself and
+  // matching across the others, so the records read as linked.
+  const idless = reviewLedger({
+    id: "rb-2026-09-18T000000-000Z-f8a8b8c8",
+    status: "HUMAN_REQUIRED",
+    provider: "CODEX_TASK",
+    currentRound: 2,
+    findings: [{ severity: "major", title: "t", explanation: "e", recommendation: "", status: "AUTHOR_REJECTED" }],
+    resolutions: [{ disposition: "rejected", rationale: "no" }],
+    decisions: [{ decision: "still_open", rationale: "held", verification: "" }],
+  });
+  await writeReview(store, "rb-2026-09-18T000000-000Z-f8a8b8c8", idless);
+  // Two valid timestamps that sort the wrong way round as strings: the second
+  // is the later instant despite comparing lower.
+  const early = reviewLedger({
+    id: "rb-2026-09-19T000000-000Z-a9b9c9d9",
+    status: "CLEAN",
+    provider: "HERMES",
+    createdAt: "2026-01-01T05:00:00Z",
+  });
+  const late = reviewLedger({
+    id: "rb-2026-09-20T000000-000Z-b0c0d0e0",
+    status: "CLEAN",
+    provider: "HERMES",
+    createdAt: "2026-01-01T00:00:00-10:00",
+  });
+  await writeReview(store, "rb-2026-09-19T000000-000Z-a9b9c9d9", early);
+  await writeReview(store, "rb-2026-09-20T000000-000Z-b0c0d0e0", late);
+  await writeWorkflow(store, "rbwf-2026-09-21T000000-000Z-c1d1e1f1", {
+    workflow: { status: "ACTIVE" },
+    events: [
+      auditEvent("WORKFLOW_PAUSED", {
+        pause: { reason_code: "CHANGE_SIZE_BUDGET_EXCEEDED" },
+        change_size_budget: "bad",
+        current_review: {
+          review_id: "rb-x",
+          snapshot_hash: "h",
+          change_size: { added_lines: 9000, deleted_lines: 0, total_lines: 9000 },
+        },
+      }),
+    ],
+  });
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.reviews_counted, 2);
+  assert.deepEqual(
+    scorecard.skipped.map(({ reason }) => reason),
+    ["a finding has no ID"],
+  );
+  assert.equal(scorecard.providers.ALL.disposition_outcomes.rejected.still_open, 0);
+  // The window is the two counted reviews as instants, so the offset one is latest.
+  assert.equal(scorecard.corpus.earliest_review_created_at, "2026-01-01T05:00:00Z");
+  assert.equal(scorecard.corpus.latest_review_created_at, "2026-01-01T00:00:00-10:00");
+  // A budget that cannot be compared must not read as a measured snapshot.
+  assert.equal(scorecard.corpus.audit_logs_skipped, 1);
+  assert.equal(
+    scorecard.skipped_audit_logs[0].reason,
+    "audit event has an invalid change size budget",
+  );
+  assert.equal(scorecard.workflows.change_size.snapshots_measured, 0);
+});
+
 test("the cursor must describe the events it commits", async (t) => {
   const store = await emptyStore(t);
   const id = "rbwf-2026-09-12T000000-000Z-f2a2b2c2";
