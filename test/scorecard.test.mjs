@@ -83,7 +83,8 @@ async function writeWorkflow(storeRoot, id, { workflow, events, committedLines }
   // Every real event names its workflow; an event may still override this to
   // stand in for a copied or tampered log.
   const lines = events.map(
-    (event) => `${JSON.stringify({ workflow_id: id, ...event })}\n`,
+    (event, index) =>
+      `${JSON.stringify({ workflow_id: id, sequence: index + 1, ...event })}\n`,
   );
   const committedCount = committedLines ?? lines.length;
   const committed = lines.slice(0, committedCount).join("");
@@ -104,8 +105,10 @@ async function writeWorkflow(storeRoot, id, { workflow, events, committedLines }
   );
 }
 
+// writeWorkflow supplies workflow_id and sequence; an event may still set
+// either itself to stand in for a copied or reordered log.
 function auditEvent(event, workflowState) {
-  return { version: 1, sequence: 1, event, workflow_state: workflowState };
+  return { version: 1, event, workflow_state: workflowState };
 }
 
 test("the aggregate matches a ledger the server itself wrote", async (t) => {
@@ -871,10 +874,19 @@ test("a malformed repair-cycle entry is a defect, not a cycle", async (t) => {
     ["rbwf-2026-09-02T000000-000Z-b2c2d2e2", { remote_attempts: [[]] },
       "remote_attempts holds an entry that is not an object"],
     ["rbwf-2026-09-03T000000-000Z-c3d3e3f3", { remote_attempts: [{ number: 1, diverted_at: 7 }] },
-      "remote_attempts holds an entry that has a non-string diverted_at"],
+      "remote_attempts holds an entry that has a diverted_at that is not a timestamp"],
     ["rbwf-2026-09-04T000000-000Z-d4e4f4a4",
       { local_review_cycles: [{ number: 1, addressed_head_sha: 7 }] },
-      "local_review_cycles holds an entry that has a non-string addressed_head_sha"],
+      "local_review_cycles holds an entry that has an addressed_head_sha that is not a commit"],
+    // Strings the counters would read as "addressed", "followed up", "diverted".
+    ["rbwf-2026-09-13T000000-000Z-a3b3c3d3",
+      { local_review_cycles: [{ number: 1, addressed_head_sha: "" }] },
+      "local_review_cycles holds an entry that has an addressed_head_sha that is not a commit"],
+    ["rbwf-2026-09-14T000000-000Z-b4c4d4e4",
+      { local_review_cycles: [{ number: 1, addressed_head_sha: "a".repeat(40), followup_review_id: "" }] },
+      "local_review_cycles holds an entry that has an empty followup_review_id"],
+    ["rbwf-2026-09-15T000000-000Z-c5d5e5f5", { remote_attempts: [{ number: 1, diverted_at: "" }] },
+      "remote_attempts holds an entry that has a diverted_at that is not a timestamp"],
   ];
   for (const [id, workflow] of cases) {
     await writeWorkflow(store, id, { workflow: { status: "ACTIVE", ...workflow }, events: [] });
@@ -976,6 +988,41 @@ test("a response must name what it answers", async (t) => {
   );
   assert.equal(scorecard.providers.ALL.rebuttals_pending, 0);
   assert.equal(scorecard.providers.ALL.continuations_started, 0);
+});
+
+test("an out-of-sequence event and an unplaceable review are defects", async (t) => {
+  const store = await emptyStore(t);
+  // Two events both claiming sequence 1: the cursor still totals correctly,
+  // but one event would be counted where another is missing.
+  await writeWorkflow(store, "rbwf-2026-09-16T000000-000Z-d6e6f6a6", {
+    workflow: { status: "ACTIVE" },
+    events: [
+      auditEvent("WORKFLOW_PAUSED", {
+        pause: { reason_code: "LOCAL_CYCLE_BUDGET_EXHAUSTED" },
+      }),
+      { ...auditEvent("LOCAL_CYCLE_BUDGET_EXTENDED", {}), sequence: 1 },
+    ],
+  });
+  const undateable = reviewLedger({
+    id: "rb-2026-09-17T000000-000Z-e7f7a7b7",
+    status: "CLEAN",
+    provider: "HERMES",
+  });
+  undateable.created_at = "zzz";
+  await writeReview(store, "rb-2026-09-17T000000-000Z-e7f7a7b7", undateable);
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.audit_logs_skipped, 1);
+  assert.equal(
+    scorecard.skipped_audit_logs[0].reason,
+    "audit event is out of sequence",
+  );
+  assert.equal(scorecard.workflows.budget_pauses.LOCAL_CYCLE_BUDGET_EXHAUSTED, 0);
+  assert.equal(scorecard.corpus.reviews_counted, 0);
+  assert.equal(scorecard.skipped[0].reason, 'created_at is not a timestamp: "zzz"');
+  // The published window must describe the reviews actually counted.
+  assert.equal(scorecard.corpus.earliest_review_created_at, null);
+  assert.equal(scorecard.corpus.latest_review_created_at, null);
 });
 
 test("the cursor must describe the events it commits", async (t) => {

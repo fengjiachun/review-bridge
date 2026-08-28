@@ -111,6 +111,11 @@ function reviewDefect(review, directoryName) {
   if (!REVIEW_STATUSES.includes(review.status)) {
     return `unknown status ${JSON.stringify(review.status)}`;
   }
+  // The report publishes the corpus window from this field, so a ledger it
+  // cannot place in time cannot be one of the reviews that window describes.
+  if (!isTimestamp(review.created_at)) {
+    return `created_at is not a timestamp: ${JSON.stringify(review.created_at)}`;
+  }
   // Only rounds the store can hold: a clean review outside this range would
   // land in a rounds_to_clean bucket the report never prints, leaving the
   // clean total disagreeing with the per-round columns beside it.
@@ -223,10 +228,11 @@ function workflowDefect(workflow, directoryName) {
   return null;
 }
 
-// Each entry counts as one repair cycle simply by existing, and two of its
-// fields decide which counter it lands in. Requiring its number and the types
-// of those fields is what makes it a cycle rather than any object at all; the
-// writer's remaining schema is not reproduced here.
+// Each entry counts as one repair cycle simply by existing, and three of its
+// fields decide which counter it lands in. Those three are checked for what
+// they mean, not merely their type: an empty string is a value the counters
+// would read as "addressed", "followed up", or "diverted". The writer's
+// remaining schema is not reproduced here.
 function repairEntryDefect(entry) {
   if (entry == null || typeof entry !== "object" || Array.isArray(entry)) {
     return "is not an object";
@@ -234,12 +240,23 @@ function repairEntryDefect(entry) {
   if (!Number.isInteger(entry.number) || entry.number < 1) {
     return "has no cycle number";
   }
-  for (const field of ["addressed_head_sha", "followup_review_id", "diverted_at"]) {
-    if (entry[field] != null && typeof entry[field] !== "string") {
-      return `has a non-string ${field}`;
-    }
+  if (entry.addressed_head_sha != null && !/^[0-9a-f]{40}$/.test(entry.addressed_head_sha)) {
+    return "has an addressed_head_sha that is not a commit";
+  }
+  if (
+    entry.followup_review_id != null &&
+    (typeof entry.followup_review_id !== "string" || entry.followup_review_id === "")
+  ) {
+    return "has an empty followup_review_id";
+  }
+  if (entry.diverted_at != null && !isTimestamp(entry.diverted_at)) {
+    return "has a diverted_at that is not a timestamp";
   }
   return null;
+}
+
+function isTimestamp(value) {
+  return typeof value === "string" && !Number.isNaN(Date.parse(value));
 }
 
 function humanRequiredReason(review) {
@@ -421,6 +438,11 @@ async function readCommittedAuditEvents(directory, workflowId) {
     if (event?.workflow_id !== workflowId) {
       return { events: [], reason: "audit event names a different workflow" };
     }
+    // A repeated or skipped sequence would let one event be counted twice, or
+    // hide that another is missing, while the cursor still totals correctly.
+    if (event.sequence !== events.length + 1) {
+      return { events: [], reason: "audit event is out of sequence" };
+    }
     events.push(event);
   }
   // The cursor describes the committed region in three ways, and a head left
@@ -512,12 +534,10 @@ export async function buildScorecard(storeRoot, { generatedAt } = {}) {
     if (!providers.has(provider)) providers.set(provider, emptyStats());
     countReview(providers.get(provider), record);
     countReview(providers.get(OVERALL), record);
-    if (typeof record.created_at === "string") {
-      if (earliest == null || record.created_at < earliest) {
-        earliest = record.created_at;
-      }
-      if (latest == null || record.created_at > latest) latest = record.created_at;
+    if (earliest == null || record.created_at < earliest) {
+      earliest = record.created_at;
     }
+    if (latest == null || record.created_at > latest) latest = record.created_at;
   }
   for (const stats of providers.values()) finalizeRebuttals(stats);
 
