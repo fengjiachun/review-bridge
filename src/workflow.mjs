@@ -80,12 +80,13 @@ const MAX_ORDINARY_AUDIT_BYTES =
   MAX_AUDIT_BYTES -
   MAX_TERMINAL_AUDIT_EVENTS * (MAX_AUDIT_EVENT_BYTES + 1);
 const MAX_CANCELLATION_RATIONALE_BYTES = 32 * 1024;
-// The acknowledgment rationale lives only in its own audit event's metadata,
-// never in persistent workflow state -- auditedWorkflowState copies the state
-// into every later event, so a state-resident rationale would spend the
-// bounded audit log once per subsequent mutation. The cap keeps the demanded
-// acknowledgment itself inside MAX_AUDIT_EVENT_BYTES.
-const MAX_ACKNOWLEDGMENT_RATIONALE_BYTES = 32 * 1024;
+// The acknowledgment rationale is the only durable description of the
+// operator-approved decision -- for a split, of the intended cut -- so a
+// controller restarted before the cut lands must be able to read it from the
+// workflow ledger. It therefore lives in persistent state, and the cap is
+// small because auditedWorkflowState copies that state into every later
+// audit event.
+const MAX_ACKNOWLEDGMENT_RATIONALE_BYTES = 2 * 1024;
 const MAX_RECONCILIATION_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_CLOCK_SKEW_MS = 30 * 1000;
 
@@ -1061,6 +1062,15 @@ function validateChangeSizeWarning(workflow) {
       "change-size warning acknowledgment decision is invalid",
     );
   }
+  assertString(
+    acknowledgment.rationale,
+    "workflow.change_size_warning.acknowledgment.rationale",
+  );
+  assertCanonicalStringCapacity(
+    acknowledgment.rationale,
+    "workflow.change_size_warning.acknowledgment.rationale",
+    MAX_ACKNOWLEDGMENT_RATIONALE_BYTES,
+  );
   assertSha(
     acknowledgment.head_sha,
     "workflow.change_size_warning.acknowledgment.head_sha",
@@ -6874,6 +6884,7 @@ export async function acknowledgeChangeSizeWarning(
             crossed_at: next.change_size_warning?.crossed_at ?? now(),
             acknowledgment: {
               decision,
+              rationale,
               total_lines: crossedTotal,
               head_sha: next.current_head_sha,
               operator_label: operatorLabel,

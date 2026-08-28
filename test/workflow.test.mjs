@@ -1906,6 +1906,13 @@ test("a split acknowledgment at the continuation bind can commit the intended cu
       operatorLabel: "Test Operator",
     },
   );
+  // The approved cut survives a restart: a controller reading only the
+  // ledger can recover what the split is supposed to remove.
+  const reloaded = await getAutonomousWorkflow(state.store, started.workflow_id);
+  assert.equal(
+    reloaded.change_size_warning.acknowledgment.rationale,
+    "Cut the constants back to the reviewed core.",
+  );
   // The recorded split still targets the current head, so the unchanged
   // snapshot cannot be bound before the cut lands.
   await assert.rejects(
