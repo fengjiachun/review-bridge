@@ -1736,6 +1736,190 @@ test("a crossed change-size warning refuses the next round until a recorded spli
   });
 });
 
+test("a split acknowledgment at the continuation bind can commit the intended cut", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const started = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, { changeSizeBudget: 8 }),
+  );
+  const headSha = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\n",
+  );
+  let workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    started.revision,
+    headSha,
+  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  ({ completed: workflow } = await dispatchReviewer(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  ));
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [{ severity: "major", title: "Defect", explanation: "Fix it." }],
+    "CODEX_TASK",
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  const fixedHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 6;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    fixedHead,
+  );
+  await submitResolutions(state.store, review.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Fixed." },
+  ]);
+  workflow = await acknowledgeChangeSizeWarning(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    {
+      decision: "continue",
+      rationale: "Finish the round before deciding the cut.",
+      operatorLabel: "Test Operator",
+    },
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  await prepareRereview(state.store, review.id);
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  await submitRereview(
+    state.store,
+    review.id,
+    [{ finding_id: "F-001", decision: "resolved", rationale: "Verified." }],
+    [
+      {
+        severity: "minor",
+        title: "Edge case",
+        explanation: "The rereview found a separate edge case.",
+      },
+    ],
+    "CODEX_TASK",
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  const addressedHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 7;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    addressedHead,
+  );
+  assert.equal(workflow.phase, "PREPARE_LOCAL_REVIEW");
+  const staleFollowup = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+    forceFullReview: true,
+    continuedFromReviewId: review.id,
+  });
+  await assert.rejects(
+    bindWorkflowReview(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      staleFollowup.id,
+    ),
+    /acknowledge_change_size_warning/,
+  );
+  workflow = await acknowledgeChangeSizeWarning(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    {
+      decision: "split",
+      rationale: "Cut the constants back to the reviewed core.",
+      operatorLabel: "Test Operator",
+    },
+  );
+  // The intended cut is a descendant head committed from PREPARE_LOCAL_REVIEW;
+  // the latest cycle's addressed head must follow it so the follow-up review
+  // still carries the open findings.
+  const cutHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    cutHead,
+  );
+  assert.equal(workflow.phase, "PREPARE_LOCAL_REVIEW");
+  assert.equal(workflow.current_head_sha, cutHead);
+  assert.equal(
+    workflow.local_review_cycles.at(-1).addressed_head_sha,
+    cutHead,
+  );
+  assert.equal(workflow.local_review_cycles.at(-1).followup_review_id, null);
+  const followup = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+    forceFullReview: true,
+    continuedFromReviewId: review.id,
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    followup.id,
+  );
+  assert.equal(workflow.status, "ACTIVE");
+  assert.equal(workflow.phase, "DISPATCH_CODEX_REVIEWER");
+  assert.equal(
+    workflow.local_review_cycles.at(-1).followup_review_id,
+    followup.id,
+  );
+  assert.equal(workflow.current_review.change_size.total_lines, 4);
+  assert.equal(workflow.change_size_warning.total_lines, 7);
+  assert.equal(workflow.change_size_warning.acknowledgment.decision, "split");
+});
+
 test("extending the exceeded budget does not satisfy the pending warning acknowledgment", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

@@ -65,6 +65,11 @@ const REMOTE_REPAIR_PHASES = Object.freeze([
 const HEAD_RECORDING_PHASES = Object.freeze([
   "IMPLEMENTING",
   "ADDRESS_LOCAL_FINDINGS",
+  // Nothing is bound or dispatched yet in PREPARE_LOCAL_REVIEW, so a head
+  // recorded here only moves what the next review will cover. This is the
+  // window a split acknowledgment needs to commit its intended cut before
+  // the next round is prepared.
+  "PREPARE_LOCAL_REVIEW",
   ...REMOTE_REPAIR_PHASES,
 ]);
 const MAX_LISTED_BLOCKERS = 50;
@@ -3568,6 +3573,14 @@ export async function recordWorkflowHead(
       workflow.local_review_cycles.at(-1)?.continued_from_review_id ===
         workflow.current_review?.review_id &&
       workflow.local_review_cycles.at(-1)?.addressed_head_sha == null;
+    // A head recorded from PREPARE_LOCAL_REVIEW refines an addressed head
+    // whose follow-up review is not yet bound. The latest cycle's addressed
+    // head must move with it, or the follow-up bind would no longer see a
+    // pending continuation and the carried open findings would be dropped.
+    const pendingFollowupRefinement =
+      workflow.phase === "PREPARE_LOCAL_REVIEW" &&
+      workflow.local_review_cycles.at(-1)?.addressed_head_sha != null &&
+      workflow.local_review_cycles.at(-1)?.followup_review_id == null;
     const saveRecordedHead = async (addressedFindings) =>
       publicWorkflow(
         await saveMutation(paths, workflow, async (next) => {
@@ -3593,7 +3606,7 @@ export async function recordWorkflowHead(
           // The publication ledger stays on disk as history but can no longer
           // authorize this workflow; the repaired head starts a fresh cycle.
           next.current_publication = null;
-          if (pendingLocalContinuation) {
+          if (pendingLocalContinuation || pendingFollowupRefinement) {
             next.local_review_cycles.at(-1).addressed_head_sha = headSha;
             next.phase = "PREPARE_LOCAL_REVIEW";
           } else if (next.phase !== "ADDRESS_LOCAL_FINDINGS") {

@@ -53,7 +53,10 @@ gap returns the ready pull request to draft before any repair.
    still demands its split decision: present the recorded crossing total, and
    only an explicit operator decision may call
    `acknowledge_change_size_warning` with `continue` and its stated reason or
-   `split` and the intended cut; then bind again. If the bind returns
+   `split` and the intended cut. After `continue`, bind again. After `split`,
+   commit the intended cut as a descendant head on the topic branch, call
+   `record_workflow_head`, prepare a fresh review over the reduced head with
+   the same continuation parameters, and bind that instead. If the bind returns
    `current_review.change_size.warning_threshold_crossed`, state the
    immutable total and `remaining_headroom` in the session. The round this
    snapshot starts proceeds unblocked, but the workflow refuses to prepare
@@ -90,7 +93,9 @@ gap returns the ready pull request to draft before any repair.
    crossed warning demands its split decision before the next round: state
    the crossing total, and only an explicit operator decision may call
    `acknowledge_change_size_warning` with `continue` and its stated reason
-   or `split` and the intended cut; then advance again.
+   or `split` and the intended cut. After `continue`, advance again; after
+   `split`, commit the intended cut as a descendant head and call
+   `record_workflow_head` before continuing.
    When a round reports findings, call `get_review` and narrate every finding
    from its authoritative `findings` with the ID, severity, one-line summary,
    and location. Address the findings and, when any disposition is `fixed`,
