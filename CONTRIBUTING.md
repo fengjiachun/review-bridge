@@ -50,3 +50,7 @@ node scripts/verify-release.mjs --final --observation <path> --build-dir dist/re
 The final phase needs the authenticated GitHub CLI and writes one evidence
 record per version into the private store. Both phases read only; tagging,
 publishing, and merging stay human work.
+
+The collector walks the release range to the commit total GitHub reports and
+refuses a walk that cannot account for it, so a range it cannot read whole is
+a loud failure rather than a short observation.

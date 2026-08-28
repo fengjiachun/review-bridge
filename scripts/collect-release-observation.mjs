@@ -7,6 +7,7 @@
 
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { defaultStoreRoot } from "../src/core.mjs";
 import { canonicalJsonBytes, sha256 } from "../src/storage.mjs";
 import { writeContentAddressed } from "./release-store.mjs";
@@ -102,35 +103,32 @@ function ghBytes(endpoint, cwd) {
   return result.stdout;
 }
 
-// The range's commit set, proven complete. A compare that cannot return every
-// commit it counted is refused rather than silently truncated: an unseen
-// commit is an unseen merged pull request.
-function rangeCommits(nameWithOwner, cwd, range, targetSha) {
-  if (range.kind === "ROOT") {
-    return ghPaged(
-      `/repos/${nameWithOwner}/commits?sha=${targetSha}&per_page=100`,
-      cwd,
-    );
+// The range's commit set, proven complete. A walk that cannot account for
+// every commit the comparison counted is refused rather than silently
+// truncated: an unseen commit is an unseen merged pull request.
+export function assertRangeComplete(commits, total, label) {
+  if (!Number.isSafeInteger(total) || total < 0) {
+    throw new Error(`${label} reported no commit total`);
   }
-  const comparison = gh(
-    `/repos/${nameWithOwner}/compare/${range.target_sha}...${targetSha}`,
-    cwd,
-  );
-  if (comparison.total_commits !== comparison.commits.length) {
+  if (commits.length !== total) {
     throw new Error(
-      `the range ${range.tag}...${targetSha} holds ${comparison.total_commits} commits; one comparison returns at most ${comparison.commits.length}`,
+      `${label} holds ${total} commits but the walk collected ${commits.length}`,
     );
   }
-  return comparison.commits;
+  return commits;
 }
 
 /**
  * GitHub's merged-pull-request facts are the authoritative discovery: a pull
  * request belongs to the range exactly when the commit its merge produced is
- * in the range, which holds for squash and rebase merges that leave no merge
- * commit behind for local history to find.
+ * in the range, which holds for the squash and rebase merges that leave no
+ * merge commit behind for local history to find.
+ *
+ * Pure over the fetched pages so the membership rule, the deduplication, and
+ * the merge-parent lookup that the record's merge-integrity check reads are
+ * decidable from fixtures.
  */
-function mergedPullRequests(nameWithOwner, cwd, commits) {
+export function mergedPullRequestsIn(commits, pullsByCommitSha) {
   const parentsBySha = new Map(
     commits.map((commit) => [
       commit.sha,
@@ -139,10 +137,7 @@ function mergedPullRequests(nameWithOwner, cwd, commits) {
   );
   const byNumber = new Map();
   for (const commit of commits) {
-    for (const pullRequest of gh(
-      `/repos/${nameWithOwner}/commits/${commit.sha}/pulls`,
-      cwd,
-    )) {
+    for (const pullRequest of pullsByCommitSha.get(commit.sha) ?? []) {
       if (
         pullRequest.merged_at == null ||
         !parentsBySha.has(pullRequest.merge_commit_sha) ||
@@ -162,9 +157,11 @@ function mergedPullRequests(nameWithOwner, cwd, commits) {
   return [...byNumber.values()].sort((left, right) => left.number - right.number);
 }
 
-function previousExtantTag(nameWithOwner, cwd, version) {
-  const candidates = ghPaged(`/repos/${nameWithOwner}/tags?per_page=100`, cwd)
-    .map((tag) => ({ name: tag.name, sha: tag.commit.sha }))
+// The previous extant tag by version order, never by the order GitHub lists
+// them. No earlier tag means the range starts at the repository root.
+export function selectPreviousTag(tags, version) {
+  const previous = tags
+    .map((tag) => ({ name: tag.name, sha: tag.commit?.sha }))
     .filter((tag) => {
       const tagged = versionFromTagName(tag.name);
       return tagged != null && compareVersions(tagged, version) < 0;
@@ -174,118 +171,183 @@ function previousExtantTag(nameWithOwner, cwd, version) {
         versionFromTagName(left.name),
         versionFromTagName(right.name),
       ),
-    );
-  const previous = candidates.at(-1);
+    )
+    .at(-1);
   return previous == null
     ? { kind: "ROOT" }
     : { kind: "TAG", tag: previous.name, target_sha: previous.sha };
 }
 
-const options = parseArguments(process.argv.slice(2));
-const repositoryPath = path.resolve(options.repo);
-const storeRoot = options.store ? path.resolve(options.store) : defaultStoreRoot();
-const version = options.version;
-const tagName = `v${version}`;
-const nameWithOwner = run(
-  "gh",
-  ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
-  repositoryPath,
-).trim();
-const repository = gh(`/repos/${nameWithOwner}`, repositoryPath);
-const collectedAt = new Date().toISOString();
-const tagRef = gh(
-  `/repos/${nameWithOwner}/git/ref/tags/${tagName}`,
-  repositoryPath,
-  { allowFailure: true },
-);
+// Compare reads from the tag's viewpoint, so IDENTICAL or AHEAD means every
+// commit the tag carries is reachable from the default branch.
+export function tagIsReachable(comparisonStatus) {
+  return ["ahead", "identical"].includes(String(comparisonStatus ?? ""));
+}
 
-let observation;
-if (tagRef == null) {
-  observation = {
-    schema: RELEASE_OBSERVATION_SCHEMA,
-    collected_at: collectedAt,
-    repository: { id: repository.id, full_name: repository.full_name },
-    version,
-    tag: { name: tagName, exists: false },
-  };
-} else {
-  const targetSha =
-    tagRef.object.type === "tag"
-      ? gh(`/repos/${nameWithOwner}/git/tags/${tagRef.object.sha}`, repositoryPath)
-          .object.sha
-      : tagRef.object.sha;
-  const reachability = gh(
-    `/repos/${nameWithOwner}/compare/${targetSha}...${repository.default_branch}`,
-    repositoryPath,
+// A comparison is page-bounded, so the range is walked to its reported total
+// rather than read from one response. A release whose range outgrows a single
+// page is exactly the case the RFC anticipates when an intermediate tag is
+// missing.
+const MAX_COMPARE_PAGES = 30;
+
+function comparedCommits(nameWithOwner, cwd, base, head, label) {
+  const commits = [];
+  let total = null;
+  for (let page = 1; page <= MAX_COMPARE_PAGES; page += 1) {
+    const comparison = gh(
+      `/repos/${nameWithOwner}/compare/${base}...${head}?per_page=100&page=${page}`,
+      cwd,
+    );
+    total = comparison.total_commits;
+    commits.push(...comparison.commits);
+    if (comparison.commits.length === 0 || commits.length >= total) {
+      break;
+    }
+  }
+  return assertRangeComplete(commits, total, label);
+}
+
+function rangeCommits(nameWithOwner, cwd, range, targetSha) {
+  return range.kind === "ROOT"
+    ? ghPaged(
+        `/repos/${nameWithOwner}/commits?sha=${targetSha}&per_page=100`,
+        cwd,
+      )
+    : comparedCommits(
+        nameWithOwner,
+        cwd,
+        range.target_sha,
+        targetSha,
+        `the range ${range.tag}...${targetSha}`,
+      );
+}
+
+function pullsByCommit(nameWithOwner, cwd, commits) {
+  return new Map(
+    commits.map((commit) => [
+      commit.sha,
+      gh(`/repos/${nameWithOwner}/commits/${commit.sha}/pulls`, cwd),
+    ]),
   );
-  const range = previousExtantTag(nameWithOwner, repositoryPath, version);
-  const commits = rangeCommits(nameWithOwner, repositoryPath, range, targetSha);
-  const release = gh(
-    `/repos/${nameWithOwner}/releases/tags/${tagName}`,
+}
+
+async function main() {
+  const options = parseArguments(process.argv.slice(2));
+  const repositoryPath = path.resolve(options.repo);
+  const storeRoot = options.store ? path.resolve(options.store) : defaultStoreRoot();
+  const version = options.version;
+  const tagName = `v${version}`;
+  const nameWithOwner = run(
+    "gh",
+    ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+    repositoryPath,
+  ).trim();
+  const repository = gh(`/repos/${nameWithOwner}`, repositoryPath);
+  const collectedAt = new Date().toISOString();
+  const tagRef = gh(
+    `/repos/${nameWithOwner}/git/ref/tags/${tagName}`,
     repositoryPath,
     { allowFailure: true },
   );
-  observation = {
-    schema: RELEASE_OBSERVATION_SCHEMA,
-    collected_at: collectedAt,
-    repository: { id: repository.id, full_name: repository.full_name },
-    version,
-    default_branch: repository.default_branch,
-    tag: {
-      name: tagName,
-      exists: true,
-      object_sha: tagRef.object.sha,
-      target_sha: targetSha,
-    },
-    tag_reachable_from_default_branch: ["ahead", "identical"].includes(
-      reachability.status,
-    ),
-    range,
-    merged_pull_requests: mergedPullRequests(
-      nameWithOwner,
+
+  let observation;
+  if (tagRef == null) {
+    observation = {
+      schema: RELEASE_OBSERVATION_SCHEMA,
+      collected_at: collectedAt,
+      repository: { id: repository.id, full_name: repository.full_name },
+      version,
+      tag: { name: tagName, exists: false },
+    };
+  } else {
+    const targetSha =
+      tagRef.object.type === "tag"
+        ? gh(`/repos/${nameWithOwner}/git/tags/${tagRef.object.sha}`, repositoryPath)
+            .object.sha
+        : tagRef.object.sha;
+    const reachability = gh(
+      `/repos/${nameWithOwner}/compare/${targetSha}...${repository.default_branch}`,
       repositoryPath,
-      commits,
-    ),
-    release:
-      release == null
-        ? { exists: false }
-        : {
-            exists: true,
-            id: release.id,
-            published_at: release.published_at,
-            assets: release.assets
-              .map((asset) => ({
-                name: asset.name,
-                size: asset.size,
-                sha256: sha256(
-                  ghBytes(
-                    `/repos/${nameWithOwner}/releases/assets/${asset.id}`,
-                    repositoryPath,
+    );
+    const range = selectPreviousTag(
+      ghPaged(`/repos/${nameWithOwner}/tags?per_page=100`, repositoryPath),
+      version,
+    );
+    const commits = rangeCommits(nameWithOwner, repositoryPath, range, targetSha);
+    const release = gh(
+      `/repos/${nameWithOwner}/releases/tags/${tagName}`,
+      repositoryPath,
+      { allowFailure: true },
+    );
+    observation = {
+      schema: RELEASE_OBSERVATION_SCHEMA,
+      collected_at: collectedAt,
+      repository: { id: repository.id, full_name: repository.full_name },
+      version,
+      default_branch: repository.default_branch,
+      tag: {
+        name: tagName,
+        exists: true,
+        object_sha: tagRef.object.sha,
+        target_sha: targetSha,
+      },
+      tag_reachable_from_default_branch: tagIsReachable(reachability.status),
+      range,
+      merged_pull_requests: mergedPullRequestsIn(
+        commits,
+        pullsByCommit(nameWithOwner, repositoryPath, commits),
+      ),
+      release:
+        release == null
+          ? { exists: false }
+          : {
+              exists: true,
+              id: release.id,
+              published_at: release.published_at,
+              assets: release.assets
+                .map((asset) => ({
+                  name: asset.name,
+                  size: asset.size,
+                  sha256: sha256(
+                    ghBytes(
+                      `/repos/${nameWithOwner}/releases/assets/${asset.id}`,
+                      repositoryPath,
+                    ),
                   ),
-                ),
-              }))
-              .sort((left, right) => left.name.localeCompare(right.name)),
-          },
-  };
+                }))
+                .sort((left, right) => left.name.localeCompare(right.name)),
+            },
+    };
+  }
+
+  const bytes = canonicalJsonBytes(normalizeReleaseObservation(observation));
+  const stored = await writeContentAddressed(
+    path.join(storeRoot, "releases", String(repository.id), "observations"),
+    bytes,
+  );
+
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        observation_path: stored.path,
+        store_relative_path: path.relative(storeRoot, stored.path),
+        sha256: stored.sha256,
+        reused: stored.reused,
+        version,
+        tag_exists: observation.tag.exists,
+      },
+      null,
+      2,
+    )}\n`,
+  );
 }
 
-const bytes = canonicalJsonBytes(normalizeReleaseObservation(observation));
-const stored = await writeContentAddressed(
-  path.join(storeRoot, "releases", String(repository.id), "observations"),
-  bytes,
-);
-
-process.stdout.write(
-  `${JSON.stringify(
-    {
-      observation_path: stored.path,
-      store_relative_path: path.relative(storeRoot, stored.path),
-      sha256: stored.sha256,
-      reused: stored.reused,
-      version,
-      tag_exists: observation.tag.exists,
-    },
-    null,
-    2,
-  )}\n`,
-);
+// Only when run as the command. Imported, this module is the pure discovery
+// logic above and nothing else runs, so a test can exercise the rules the
+// record pins without reaching GitHub.
+if (
+  process.argv[1] != null &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  await main();
+}

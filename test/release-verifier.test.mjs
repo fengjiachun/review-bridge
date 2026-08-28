@@ -18,6 +18,12 @@ import {
   writeContentAddressed,
   writeNoOverwrite,
 } from "../scripts/release-store.mjs";
+import {
+  assertRangeComplete,
+  mergedPullRequestsIn,
+  selectPreviousTag,
+  tagIsReachable,
+} from "../scripts/collect-release-observation.mjs";
 
 const verifier = path.join(
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
@@ -310,6 +316,98 @@ test("writeNoOverwrite refuses an existing path", async (t) => {
     (error) => error.code === "EEXIST",
   );
   assert.equal(await fsp.readFile(target, "utf8"), "first");
+});
+
+test("a merged pull request belongs to the range by the commit its merge produced", () => {
+  const commit = (sha, ...parents) => ({
+    sha,
+    parents: parents.map((parent) => ({ sha: parent })),
+  });
+  const commits = [
+    commit("m1", "base", "head1"),
+    commit("s2", "m1"),
+    commit("side", "m1"),
+  ];
+  const pulls = new Map([
+    // A merge commit: the second parent is the head its workflow attested.
+    ["m1", [{ number: 1, title: "merged", merged_at: "2026-01-01T00:00:00Z", merge_commit_sha: "m1" }]],
+    // A squash merge leaves one commit, which is still the merge GitHub
+    // reports, so local merge-commit discovery would miss it and this must not.
+    ["s2", [{ number: 2, title: "squashed", merged_at: "2026-01-02T00:00:00Z", merge_commit_sha: "s2" }]],
+    // Reachable from the range but merged somewhere else: not in the range.
+    ["side", [{ number: 3, title: "elsewhere", merged_at: "2026-01-03T00:00:00Z", merge_commit_sha: "outside" }]],
+  ]);
+  assert.deepEqual(
+    mergedPullRequestsIn(commits, pulls).map((entry) => [
+      entry.number,
+      entry.merge_sha,
+      entry.merge_parents,
+    ]),
+    [
+      [1, "m1", ["base", "head1"]],
+      [2, "s2", ["m1"]],
+    ],
+  );
+  // An unmerged pull request, and one seen twice, each resolve to nothing new.
+  assert.deepEqual(
+    mergedPullRequestsIn(
+      [commit("m1", "base", "head1")],
+      new Map([
+        [
+          "m1",
+          [
+            { number: 4, merged_at: null, merge_commit_sha: "m1" },
+            { number: 1, merged_at: "2026-01-01T00:00:00Z", merge_commit_sha: "m1" },
+            { number: 1, merged_at: "2026-01-01T00:00:00Z", merge_commit_sha: "m1" },
+          ],
+        ],
+      ]),
+    ).map((entry) => entry.number),
+    [1],
+  );
+});
+
+test("the range boundary is the previous tag by version, not by listing order", () => {
+  const tags = [
+    { name: "v0.10.0", commit: { sha: "a" } },
+    { name: "v0.9.0", commit: { sha: "b" } },
+    { name: "not-a-version", commit: { sha: "c" } },
+    { name: "v0.2.0", commit: { sha: "d" } },
+  ];
+  assert.deepEqual(selectPreviousTag(tags, "1.0.0"), {
+    kind: "TAG",
+    tag: "v0.10.0",
+    target_sha: "a",
+  });
+  // 0.9.0 sorts after 0.10.0 lexically and before it by version.
+  assert.deepEqual(selectPreviousTag(tags, "0.10.0"), {
+    kind: "TAG",
+    tag: "v0.9.0",
+    target_sha: "b",
+  });
+  assert.deepEqual(selectPreviousTag(tags, "0.1.0"), { kind: "ROOT" });
+  assert.deepEqual(selectPreviousTag([], "1.0.0"), { kind: "ROOT" });
+});
+
+test("a range walk that cannot account for its own total is refused", () => {
+  const commits = [{ sha: "a" }, { sha: "b" }];
+  assert.deepEqual(assertRangeComplete(commits, 2, "range"), commits);
+  assert.throws(
+    () => assertRangeComplete(commits, 3, "the range v1...v2"),
+    /the range v1\.\.\.v2 holds 3 commits but the walk collected 2/,
+  );
+  assert.throws(
+    () => assertRangeComplete(commits, undefined, "range"),
+    /reported no commit total/,
+  );
+});
+
+test("reachability accepts only the two statuses that prove descent", () => {
+  assert.equal(tagIsReachable("ahead"), true);
+  assert.equal(tagIsReachable("identical"), true);
+  assert.equal(tagIsReachable("behind"), false);
+  assert.equal(tagIsReachable("diverged"), false);
+  assert.equal(tagIsReachable(undefined), false);
 });
 
 test("the collector refuses malformed arguments before reaching GitHub", () => {

@@ -264,6 +264,36 @@ async function collectAttestations(storeRoot, repositoryId) {
   return attestations;
 }
 
+/**
+ * One record per version, appended once.
+ *
+ * The exclusive create is the decision, not a read beforehand: a read-then-write
+ * leaves a window in which a second run creates the record between the two, and
+ * the write is then the only thing that can answer. An existing record --
+ * whenever it appeared -- is compared and reported, never overwritten.
+ */
+async function appendRecord(recordPath, record) {
+  try {
+    await writeNoOverwrite(recordPath, canonicalJsonBytes(record));
+    return { status: "RECORDED", path: recordPath };
+  } catch (error) {
+    if (error?.code !== "EEXIST") {
+      throw error;
+    }
+  }
+  const existing = await readSecureJson(recordPath, {
+    allowMissing: true,
+    requiredMode: 0o600,
+    maxBytes: MAX_RECORD_BYTES,
+  });
+  if (existing == null) {
+    throw new Error(
+      `${recordPath} existed and then vanished; nothing was written, so re-run`,
+    );
+  }
+  return { ...compareReleaseRecords(existing, record), path: recordPath };
+}
+
 const options = parseArguments(process.argv.slice(2));
 const repositoryPath = path.resolve(options.repo);
 const storeRoot = options.store ? path.resolve(options.store) : defaultStoreRoot();
@@ -346,27 +376,13 @@ if (options.phase === "PRE") {
       String(observation.repository.id),
       `${observation.version}.json`,
     );
-    const existing = await readSecureJson(recordPath, {
-      allowMissing: true,
-      requiredMode: 0o600,
-      maxBytes: MAX_RECORD_BYTES,
-    });
-    if (existing == null) {
-      await writeNoOverwrite(recordPath, canonicalJsonBytes(result.record));
-      recordOutcome = { status: "RECORDED", path: recordPath };
-    } else {
-      // Never a silent overwrite: an existing record is compared and reported.
-      recordOutcome = {
-        ...compareReleaseRecords(existing, result.record),
-        path: recordPath,
-      };
-      if (recordOutcome.status === "DIVERGED") {
-        result.status = "FAILED";
-        result.failures.push({
-          code: "RELEASE_RECORD_DIVERGED",
-          message: recordOutcome.message,
-        });
-      }
+    recordOutcome = await appendRecord(recordPath, result.record);
+    if (recordOutcome.status === "DIVERGED") {
+      result.status = "FAILED";
+      result.failures.push({
+        code: "RELEASE_RECORD_DIVERGED",
+        message: recordOutcome.message,
+      });
     }
   }
 }
