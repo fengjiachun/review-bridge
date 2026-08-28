@@ -6781,16 +6781,25 @@ export async function acknowledgeChangeSizeWarning(
   assertString(operatorLabel, "operator_label", { max: 1024 });
   return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
     requireRevision(workflow, expectedRevision);
-    if (!["ACTIVE", "PAUSED"].includes(workflow.status)) {
-      fail(
-        "WORKFLOW_STATE_INVALID",
-        `cannot acknowledge a change-size warning on a ${workflow.status} workflow`,
-      );
-    }
     if (!changeSizeWarningPending(workflow)) {
       fail(
         "WORKFLOW_STATE_INVALID",
         "workflow has no unacknowledged change-size warning crossing",
+      );
+    }
+    // The decision is answered only where the gate refuses and where
+    // record_workflow_head can still commit a split's intended cut. Accepting
+    // it from any other state would record a cut that no permitted action
+    // could deliver -- a paused workflow answers its pause first.
+    if (
+      workflow.status !== "ACTIVE" ||
+      !["ADDRESS_LOCAL_FINDINGS", "PREPARE_LOCAL_REVIEW"].includes(
+        workflow.phase,
+      )
+    ) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "a change-size warning is acknowledged where the next round is prepared: from ADDRESS_LOCAL_FINDINGS or PREPARE_LOCAL_REVIEW on an active workflow",
       );
     }
     const crossedTotal = workflow.change_size_warning.total_lines;

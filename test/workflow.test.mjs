@@ -1949,6 +1949,22 @@ test("extending the exceeded budget does not satisfy the pending warning acknowl
   );
   assert.equal(workflow.pause.reason_code, "CHANGE_SIZE_BUDGET_EXCEEDED");
   assert.equal(workflow.change_size_warning.total_lines, 2);
+  // The pending crossing cannot be acknowledged from the ceiling pause: no
+  // permitted action could commit a split's cut there, so the pause is
+  // answered first and the decision is demanded again at the gate.
+  await assert.rejects(
+    acknowledgeChangeSizeWarning(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      {
+        decision: "split",
+        rationale: "Cut it while paused.",
+        operatorLabel: "Test Operator",
+      },
+    ),
+    /acknowledged where the next round is prepared/,
+  );
   workflow = await extendChangeSizeBudget(
     state.store,
     started.workflow_id,
