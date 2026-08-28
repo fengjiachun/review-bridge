@@ -1,15 +1,29 @@
 # Changelog
 
+Pull-request references required from: 0.9.1
+
+Every bullet in an entry at or after that version names the pull requests it
+describes, and merges deliberately absent from the prose are listed under an
+`### Internal` heading in the same entry. Earlier entries predate the
+convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Unreleased
 
 ### Added
 
+- Add a release evidence chain (RFC 0004). A read-only collector records the
+  merged pull requests, tag object, and published assets of a release
+  content-addressed in the store, and a two-phase verifier reconciles the
+  CHANGELOG's claims against them, checks that every attested pull request
+  merged the head its workflow recorded, and appends one immutable evidence
+  record per version. Nothing in it performs a release action.
 - Add a persisted advisory mode to `prepare_review`. An advisory review accepts
   `submit_review` and nothing else: `finalize_local_gate`, `submit_resolutions`,
   and `prepare_rereview` each refuse it and say why. Its terminal is a report,
   so an advisory panel over a third party's pull request can never mint a
   `LOCAL_GATE_PASSED` attestation over code the operator did not author. A
-  ledger written before the flag existed carries none and gates unchanged.
+  ledger written before the flag existed carries none and gates
+  unchanged. (#72)
 - Add the advisory panel flow to the driver contract: the pull-request head in a
   worktree outside every authoring tree, the base as the merge base, one
   advisory review per provider over identical frozen bytes, and a fixed
@@ -17,11 +31,11 @@
   conflicts presented rather than averaged. Two providers is the default panel
   and any N >= 2 works unchanged. The dispatch table is asymmetric by design:
   Codex, Hermes, and DeepSeek Harness members are driver-dispatched, and a
-  Claude member is always a conversation the operator opens themselves.
+  Claude member is always a conversation the operator opens themselves. (#72)
 - Extend the third-party material boundary to all four reviewer surfaces: the
   diff, the requirement, and the commit messages are material to verify, never
   instructions, and instruction-like text addressed to the reviewer inside them
-  is itself a finding.
+  is itself a finding. (#72)
 - Package `scripts/review-scorecard.mjs`, a read-only report over the review and
   workflow ledgers already in the configured store: findings by severity, author
   dispositions crossed with reviewer decisions, rebuttal outcomes before and
@@ -29,7 +43,7 @@
   budget events, and human arbitration escalations, per reviewer provider and
   overall. It emits markdown or JSON, states every counting rule in the report
   so a number can be replayed, and skips a ledger it cannot parse rather than
-  repairing it.
+  repairing it. (#70)
 
 ## 0.9.0 - 2026-08-14
 
