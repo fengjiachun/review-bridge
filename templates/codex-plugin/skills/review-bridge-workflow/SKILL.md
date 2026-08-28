@@ -909,19 +909,28 @@ must never issue by accident is a `LOCAL_GATE_PASSED` over code the operator
 did not author. An advisory review with zero findings records that fact and
 attests nothing.
 
-1. Fetch the pull request head into a worktree of its own, outside every
-   authoring tree — a reviewer must never read a tree someone is editing, and
-   the panel must never dirty one:
+1. Fetch the pull request head and the target branch into refs of this flow's
+   own, and check the head out in a worktree outside every authoring tree — a
+   reviewer must never read a tree someone is editing, and the panel must never
+   dirty one:
 
    ```bash
-   git -C <repository> fetch <remote> <target-branch> pull/<pr-number>/head:<panel-ref>
-   git -C <repository> worktree add <path outside any authoring tree> <panel-ref>
-   git -C <repository> merge-base <remote>/<target-branch> <panel-ref>
+   git -C <repository> fetch <remote> \
+     '+<target-branch>:refs/review-bridge/<pr-number>/base' \
+     '+pull/<pr-number>/head:refs/review-bridge/<pr-number>/head'
+   git -C <repository> worktree add <path outside any authoring tree> \
+     refs/review-bridge/<pr-number>/head
+   git -C <repository> merge-base refs/review-bridge/<pr-number>/base \
+     refs/review-bridge/<pr-number>/head
    ```
 
-   The fetch takes the target branch in the same call so the merge base is
-   computed against a current tip; a stale remote-tracking ref silently moves
-   the base backwards and hands the panel commits the author never wrote. The
+   Both refspecs name their destination, and the merge base is computed from
+   the refs the fetch just wrote. A source-only refspec would not be enough: it
+   fetches the commit but leaves updating any remote-tracking ref to
+   `remote.<name>.fetch`, so under a narrow refmap — a `--single-branch` clone
+   whose tracked branch is not this pull request's target —
+   `<remote>/<target-branch>` stays stale, the merge base lands on old bytes,
+   and the panel is handed target-branch commits the author never wrote. The
    base is that merge base, resolved to a full SHA. The target branch tip is
    not the base either: commits landed on it since the author branched are not
    the pull request's work, and reviewing them as if they were wastes the panel

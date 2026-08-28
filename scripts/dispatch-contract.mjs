@@ -209,11 +209,22 @@ export const ADVISORY_PANEL_CONTRACT = {
     // never dirty one.
     [
       "the head goes to a worktree outside every authoring tree",
-      /worktree of its own, outside every authoring tree/,
+      /worktree outside every authoring tree/,
     ],
     [
       "the base is the merge base, not the target branch tip",
       /target branch tip is not the base/,
+    ],
+    // A source-only refspec fetches the commit but leaves the remote-tracking
+    // ref to `remote.<name>.fetch`, so under a narrow refmap the merge base is
+    // computed against bytes the fetch never updated.
+    [
+      "the merge base is computed from the refs the fetch wrote",
+      /merge base is computed from the refs the fetch just wrote/,
+    ],
+    [
+      "why a source-only refspec is not enough",
+      /leaves updating any remote-tracking ref to `remote\.<name>\.fetch`/,
     ],
     // Identical frozen bytes is the whole basis for reading cross-model
     // disagreement as signal rather than noise.
@@ -277,7 +288,31 @@ export const ADVISORY_PANEL_CONTRACT = {
     ],
     ["a new push is a new panel", /A new push to the pull request is a new panel/],
   ],
-  structural: [],
+  structural: [
+    // Both refspecs name their destination, and the merge base operands are
+    // exactly those destinations. Written as one structural check because what
+    // matters is that the three lines agree, not their prose around them.
+    [
+      "match",
+      /\+<target-branch>:refs\/review-bridge\/<pr-number>\/base/,
+      "the target branch is not fetched into an explicit destination ref",
+    ],
+    [
+      "match",
+      /\+pull\/<pr-number>\/head:refs\/review-bridge\/<pr-number>\/head/,
+      "the pull request head is not fetched into an explicit destination ref",
+    ],
+    [
+      "match",
+      /merge-base refs\/review-bridge\/<pr-number>\/base \\\n *refs\/review-bridge\/<pr-number>\/head/,
+      "the merge base is not computed from the fetched destination refs",
+    ],
+    [
+      "doesNotMatch",
+      /merge-base <remote>\/<target-branch>/,
+      "the merge base regressed to a remote-tracking ref the fetch may not update",
+    ],
+  ],
 };
 
 // The #33 boundary extended to third-party material. Every reviewer surface is
