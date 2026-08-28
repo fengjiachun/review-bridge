@@ -5,6 +5,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import {
   changeSizeReport,
+  changeSizeWarningThreshold,
   continuationFindingFingerprint,
   DEFAULT_CHANGE_SIZE_BUDGET,
   getReviewSnapshot,
@@ -138,6 +139,59 @@ function localCycleCount(workflow) {
   return workflow.local_review_cycles.filter(
     (cycle) => cycle.addressed_head_sha != null,
   ).length;
+}
+
+// A snapshot crosses the change-size warning when its immutable total reaches
+// the warning threshold of the budget in force. A crossing is NEW only when
+// its total exceeds every crossing recorded before it, so re-measuring the
+// same snapshot, or shrinking, never re-arms the demand; after an
+// acknowledgment, only a strictly larger crossing demands a fresh decision
+// (issue #79, superseding the #50 rule that the warning never blocks).
+function recordChangeSizeWarningCrossing(next, totalLines) {
+  if (totalLines < changeSizeWarningThreshold(next.change_size_budget)) {
+    return;
+  }
+  if (
+    next.change_size_warning != null &&
+    totalLines <= next.change_size_warning.total_lines
+  ) {
+    return;
+  }
+  next.change_size_warning = {
+    total_lines: totalLines,
+    crossed_at: now(),
+    acknowledgment: next.change_size_warning?.acknowledgment ?? null,
+  };
+}
+
+function changeSizeWarningPending(workflow) {
+  const warning = workflow.change_size_warning;
+  return (
+    warning != null &&
+    (warning.acknowledgment == null ||
+      warning.total_lines > warning.acknowledgment.total_lines)
+  );
+}
+
+// The review round in flight when a snapshot crosses the warning completes
+// normally; only the NEXT round's preparation stops here, while acting on a
+// split is still cheap. The ceiling pause CHANGE_SIZE_BUDGET_EXCEEDED is a
+// separate, unchanged mechanism.
+function requireAcknowledgedChangeSizeWarning(workflow) {
+  if (!changeSizeWarningPending(workflow)) {
+    return;
+  }
+  fail(
+    "WORKFLOW_CHANGE_SIZE_WARNING_UNACKNOWLEDGED",
+    "the crossed change-size warning requires a recorded split decision: call acknowledge_change_size_warning with continue or split before preparing the next review round",
+    {
+      required_action: "acknowledge_change_size_warning",
+      crossed_total_lines: workflow.change_size_warning.total_lines,
+      acknowledged_total_lines:
+        workflow.change_size_warning.acknowledgment?.total_lines ?? null,
+      change_size_budget: workflow.change_size_budget,
+    },
+  );
 }
 
 function assertSha(value, name) {
@@ -922,6 +976,54 @@ function validateCurrentPublication(workflow) {
       "the bound publication head is not the current workflow head",
     );
   }
+}
+
+function validateChangeSizeWarning(workflow) {
+  if (workflow.change_size_warning == null) {
+    return;
+  }
+  const warning = assertObject(
+    workflow.change_size_warning,
+    "workflow.change_size_warning",
+  );
+  assertPositiveInteger(
+    warning.total_lines,
+    "workflow.change_size_warning.total_lines",
+  );
+  assertString(warning.crossed_at, "workflow.change_size_warning.crossed_at", {
+    max: 1024,
+  });
+  if (warning.acknowledgment == null) {
+    return;
+  }
+  const acknowledgment = assertObject(
+    warning.acknowledgment,
+    "workflow.change_size_warning.acknowledgment",
+  );
+  if (!["continue", "split"].includes(acknowledgment.decision)) {
+    fail(
+      "WORKFLOW_STATE_INVALID",
+      "change-size warning acknowledgment decision is invalid",
+    );
+  }
+  assertString(
+    acknowledgment.rationale,
+    "workflow.change_size_warning.acknowledgment.rationale",
+  );
+  assertPositiveInteger(
+    acknowledgment.total_lines,
+    "workflow.change_size_warning.acknowledgment.total_lines",
+  );
+  assertString(
+    acknowledgment.operator_label,
+    "workflow.change_size_warning.acknowledgment.operator_label",
+    { max: 1024 },
+  );
+  assertString(
+    acknowledgment.acknowledged_at,
+    "workflow.change_size_warning.acknowledgment.acknowledged_at",
+    { max: 1024 },
+  );
 }
 
 function validateCurrentReview(workflow) {
@@ -1914,6 +2016,7 @@ function validateWorkflow(workflow) {
       );
     }
   }
+  validateChangeSizeWarning(workflow);
   validateCurrentReview(workflow);
   validateActiveAction(workflow);
   assertObject(workflow.action_audit, "workflow.action_audit");
@@ -1941,6 +2044,7 @@ const COMPAT_FIELD_DEFAULTS = Object.freeze({
   local_review_cycles: [],
   local_cycle_budget: DEFAULT_LOCAL_CYCLE_BUDGET,
   change_size_budget: DEFAULT_CHANGE_SIZE_BUDGET,
+  change_size_warning: null,
   remote_attempts: [],
   remote_cycle_budget: DEFAULT_REMOTE_CYCLE_BUDGET,
   current_publication: null,
@@ -2352,6 +2456,7 @@ function auditedWorkflowState(workflow, previousWorkflow = null) {
       workflow.local_cycle_budget ?? DEFAULT_LOCAL_CYCLE_BUDGET,
     change_size_budget:
       workflow.change_size_budget ?? DEFAULT_CHANGE_SIZE_BUDGET,
+    change_size_warning: workflow.change_size_warning ?? null,
     remote_attempts: workflow.remote_attempts ?? [],
     remote_cycle_budget:
       workflow.remote_cycle_budget ?? DEFAULT_REMOTE_CYCLE_BUDGET,
@@ -2572,6 +2677,7 @@ function requireWorkflowAuditBinding(workflow, audit) {
     }),
     local_cycle_budget: workflow.local_cycle_budget,
     change_size_budget: workflow.change_size_budget,
+    change_size_warning: null,
     remote_attempts: [],
     remote_cycle_budget: workflow.remote_cycle_budget,
     addressed_findings: [],
@@ -2607,6 +2713,8 @@ function requireWorkflowAuditBinding(workflow, audit) {
       (lastState.local_cycle_budget ?? DEFAULT_LOCAL_CYCLE_BUDGET) ||
     workflow.change_size_budget !==
       (lastState.change_size_budget ?? DEFAULT_CHANGE_SIZE_BUDGET) ||
+    canonicalJson(workflow.change_size_warning ?? null) !==
+      canonicalJson(lastState.change_size_warning ?? null) ||
     canonicalJson(workflow.remote_attempts ?? []) !==
       canonicalJson(lastState.remote_attempts ?? []) ||
     workflow.remote_cycle_budget !==
@@ -2678,6 +2786,7 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "attempts",
     "local_cycle_budget",
     "change_size_budget",
+    "change_size_warning",
     "remote_attempts",
     "remote_cycle_budget",
     "addressed_findings",
@@ -3104,6 +3213,7 @@ function workflowSummary(workflow) {
     local_cycle_budget: workflow.local_cycle_budget,
     local_cycle_count: localCycleCount(workflow),
     change_size_budget: workflow.change_size_budget,
+    change_size_warning: structuredClone(workflow.change_size_warning ?? null),
     remote_attempts: workflow.remote_attempts,
     remote_cycle_budget: workflow.remote_cycle_budget,
     remote_cycle_count: remoteCycleCount(workflow),
@@ -3246,6 +3356,7 @@ export async function startAutonomousWorkflow(
     local_review_cycles: [],
     local_cycle_budget: localCycleBudget,
     change_size_budget: changeSizeBudget,
+    change_size_warning: null,
     remote_attempts: [],
     remote_cycle_budget: remoteCycleBudget,
     addressed_findings: [],
@@ -3598,6 +3709,7 @@ export async function bindWorkflowReview(
         `cannot bind a review in phase ${workflow.phase}`,
       );
     }
+    requireAcknowledgedChangeSizeWarning(workflow);
     // Validate and bind under the review mutation lock so a review verdict
     // submitted after this snapshot cannot be hidden behind a stale
     // WAITING_FOR_REVIEW binding that then dispatches a reviewer task.
@@ -3706,6 +3818,7 @@ export async function bindWorkflowReview(
           if (isContinuationFollowup) {
             next.local_review_cycles.at(-1).followup_review_id = reviewId;
           }
+          recordChangeSizeWarningCrossing(next, measuredChangeSize.total_lines);
           // A repaired head binds a different review, and every review ID gets
           // its own fresh reviewer task. Releasing the previous binding is what
           // lets the next dispatch be planned at all.
@@ -3835,6 +3948,10 @@ export async function planCodexTaskDispatch(
             "WORKFLOW_PAUSED",
             async (next) => {
               next.current_review.change_size = measuredChangeSize;
+              recordChangeSizeWarningCrossing(
+                next,
+                measuredChangeSize.total_lines,
+              );
               next.status = "PAUSED";
               next.phase = "PAUSED_HUMAN";
               next.pause = {
@@ -3859,6 +3976,7 @@ export async function planCodexTaskDispatch(
         }
         const backfilled = await saveMutation(paths, workflow, async (next) => {
           next.current_review.change_size = measuredChangeSize;
+          recordChangeSizeWarningCrossing(next, measuredChangeSize.total_lines);
         });
         return { paused: null, revision: backfilled.revision };
       }
@@ -4464,6 +4582,10 @@ export async function markWorkflowActionExecuting(
           "WORKFLOW_PAUSED",
           async (next) => {
             next.current_review.change_size = measuredChangeSize;
+            recordChangeSizeWarningCrossing(
+              next,
+              measuredChangeSize.total_lines,
+            );
             next.active_action = null;
             next.status = "PAUSED";
             next.phase = "PAUSED_HUMAN";
@@ -4591,6 +4713,10 @@ export async function markWorkflowActionExecuting(
         async (next) => {
           if (measuredChangeSize != null) {
             next.current_review.change_size = measuredChangeSize;
+            recordChangeSizeWarningCrossing(
+              next,
+              measuredChangeSize.total_lines,
+            );
           }
           next.active_action.status = "EXECUTING";
           next.active_action.executing_at = now();
@@ -5547,6 +5673,11 @@ export async function advanceLocalWorkflow(
         `review status ${summary.status} cannot advance workflow phase ${workflow.phase}`,
       );
     }
+    // Entering PREPARE_REREVIEW is what spends the next review round; the
+    // round whose snapshot crossed the warning has already completed by here.
+    if (summary.status === "AUTHOR_RESPONDED") {
+      requireAcknowledgedChangeSizeWarning(workflow);
+    }
     const snapshotHead = summary.current_snapshot?.head_sha ?? null;
     if (
       [
@@ -5616,6 +5747,12 @@ export async function advanceLocalWorkflow(
                   total_lines: snapshotChangeSize.total_lines,
                 },
         };
+        if (snapshotChangeSize != null) {
+          recordChangeSizeWarningCrossing(
+            next,
+            snapshotChangeSize.total_lines,
+          );
+        }
         next.progress_fingerprint = findingFingerprint(summary);
         const phases = {
           WAITING_FOR_REVIEW: "WAIT_LOCAL_REVIEW",
@@ -6602,6 +6739,61 @@ export async function extendChangeSizeBudget(
           measured_change_size: measuredSize,
           operator_label: operatorLabel,
           rationale,
+        },
+      ),
+    );
+  });
+}
+
+export async function acknowledgeChangeSizeWarning(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  { decision, rationale, operatorLabel },
+) {
+  if (!["continue", "split"].includes(decision)) {
+    throw new TypeError('decision must be "continue" or "split"');
+  }
+  assertString(rationale, "rationale");
+  assertString(operatorLabel, "operator_label", { max: 1024 });
+  return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
+    requireRevision(workflow, expectedRevision);
+    if (!["ACTIVE", "PAUSED"].includes(workflow.status)) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        `cannot acknowledge a change-size warning on a ${workflow.status} workflow`,
+      );
+    }
+    if (!changeSizeWarningPending(workflow)) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "workflow has no unacknowledged change-size warning crossing",
+      );
+    }
+    const crossedTotal = workflow.change_size_warning.total_lines;
+    return publicWorkflow(
+      await saveActionMutation(
+        paths,
+        workflow,
+        "CHANGE_SIZE_WARNING_ACKNOWLEDGED",
+        async (next) => {
+          next.change_size_warning = {
+            ...next.change_size_warning,
+            acknowledgment: {
+              decision,
+              rationale,
+              total_lines: crossedTotal,
+              operator_label: operatorLabel,
+              acknowledged_at: now(),
+            },
+          };
+        },
+        {
+          decision,
+          rationale,
+          crossed_total_lines: crossedTotal,
+          change_size_budget: workflow.change_size_budget,
+          operator_label: operatorLabel,
         },
       ),
     );

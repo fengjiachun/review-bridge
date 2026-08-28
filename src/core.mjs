@@ -487,12 +487,16 @@ function patchChangeSize(patch) {
   };
 }
 
+export function changeSizeWarningThreshold(budget) {
+  return Math.ceil(budget * 0.75);
+}
+
 export function changeSizeReport(
   changeSize,
   budget = DEFAULT_CHANGE_SIZE_BUDGET,
 ) {
   if (changeSize == null) return null;
-  const warningThreshold = Math.ceil(budget * 0.75);
+  const warningThreshold = changeSizeWarningThreshold(budget);
   return {
     ...changeSize,
     budget,
