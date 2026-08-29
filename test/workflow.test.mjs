@@ -2030,6 +2030,12 @@ test("a split acknowledgment at the continuation bind can commit the intended cu
   assert.equal(workflow.current_review.change_size.total_lines, 4);
   assert.equal(workflow.change_size_warning.total_lines, 7);
   assert.equal(workflow.change_size_warning.acknowledgment.decision, "split");
+  // Admitting the round over the differing tree marks the split executed, so
+  // later work that happens to restore the decided tree cannot re-trigger it.
+  assert.match(
+    workflow.change_size_warning.acknowledgment.executed_at,
+    /^\d{4}-\d{2}-\d{2}T/,
+  );
 });
 
 test("a split is refused while fixed resolutions await their recorded head", async (t) => {

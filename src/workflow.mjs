@@ -217,6 +217,7 @@ function changeSizeSplitPending(workflow) {
   const acknowledgment = workflow.change_size_warning?.acknowledgment;
   if (
     acknowledgment?.decision !== "split" ||
+    acknowledgment.executed_at != null ||
     workflow.current_head_sha == null
   ) {
     return false;
@@ -226,6 +227,21 @@ function changeSizeSplitPending(workflow) {
     `${workflow.current_head_sha}^{tree}`,
   ]).stdout.trim();
   return currentTree === acknowledgment.tree_sha;
+}
+
+// A gate that admits a round over a differing tree is what proves the split
+// executed. Marking it here, not at head recording, is deliberate: it keeps
+// change-then-revert games closed before any round is admitted, while later
+// legitimate work that happens to restore the decided tree can no longer
+// re-trigger an already-fulfilled split.
+function markChangeSizeSplitExecuted(next) {
+  const acknowledgment = next.change_size_warning?.acknowledgment;
+  if (
+    acknowledgment?.decision === "split" &&
+    acknowledgment.executed_at == null
+  ) {
+    acknowledgment.executed_at = now();
+  }
 }
 
 // The review round in flight when a snapshot crosses the warning completes
@@ -1088,6 +1104,13 @@ function validateChangeSizeWarning(workflow) {
     acknowledgment.total_lines,
     "workflow.change_size_warning.acknowledgment.total_lines",
   );
+  if (acknowledgment.executed_at != null) {
+    assertString(
+      acknowledgment.executed_at,
+      "workflow.change_size_warning.acknowledgment.executed_at",
+      { max: 1024 },
+    );
+  }
   assertString(
     acknowledgment.operator_label,
     "workflow.change_size_warning.acknowledgment.operator_label",
@@ -3901,6 +3924,7 @@ export async function bindWorkflowReview(
             next.local_review_cycles.at(-1).followup_review_id = reviewId;
           }
           recordChangeSizeWarningCrossing(next, measuredChangeSize.total_lines);
+          markChangeSizeSplitExecuted(next);
           // A repaired head binds a different review, and every review ID gets
           // its own fresh reviewer task. Releasing the previous binding is what
           // lets the next dispatch be planned at all.
@@ -5834,6 +5858,9 @@ export async function advanceLocalWorkflow(
             next,
             snapshotChangeSize.total_lines,
           );
+        }
+        if (summary.status === "AUTHOR_RESPONDED") {
+          markChangeSizeSplitExecuted(next);
         }
         next.progress_fingerprint = findingFingerprint(summary);
         const phases = {
