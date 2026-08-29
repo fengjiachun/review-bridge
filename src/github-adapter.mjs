@@ -9,6 +9,17 @@ import {
 
 const EXACT_REQUEST = "@codex review";
 const TRIGGER_SHAPE = /@codex\s+review\b/i;
+const APP_NOTICE_MARKERS = [
+  {
+    marker: "codex-pull-request-review-summary",
+    shape: /^<!--\s*codex-pull-request-review-summary\s*-->$/m,
+  },
+  {
+    marker: "codex-environment-notice",
+    shape:
+      /^To use Codex here, \[create an environment for this repo\]\(https:\/\/chatgpt\.com\/codex\/cloud\/settings\/environments\)\.$/,
+  },
+];
 const CLEAN_PREFIX = "Codex Review: Didn't find any major issues.";
 const CLEAN_MARKER = /\*\*Reviewed commit:\*\*\s*`([0-9a-f]{10,40})`/g;
 const FINDINGS_PREFIX = /###\s+💡\s+Codex Review/;
@@ -21,6 +32,16 @@ const REQUEST_MARKER_COUNT = Symbol("requestMarkerCount");
 
 function requestIdFromBody(body) {
   return codexRequestIdFromBody(body);
+}
+
+export function codexAppNoticeMarker(body) {
+  const trimmed = String(body ?? "").trim();
+  for (const { marker, shape } of APP_NOTICE_MARKERS) {
+    if (shape.test(trimmed)) {
+      return marker;
+    }
+  }
+  return null;
 }
 
 function digest(body) {
@@ -604,12 +625,13 @@ export function adaptCodexEvidence({
       for (const object of objects) {
         const body = String(object.body ?? "");
         const looksLikeResult = resultLooksCodex(kind, object);
-        const looksLikeRequest =
-          !looksLikeResult &&
-          (body === EXACT_REQUEST || TRIGGER_SHAPE.test(body));
         const isExpectedActor =
           object.user?.id === expectedActor.id &&
           object.user?.type === expectedActor.type;
+        const looksLikeRequest =
+          !looksLikeResult &&
+          !isExpectedActor &&
+          (body === EXACT_REQUEST || TRIGGER_SHAPE.test(body));
         if (
           kind === "PULL_REQUEST_REVIEW" &&
           isExpectedActor &&
@@ -774,6 +796,7 @@ export function adaptCodexEvidence({
   const unboundRequests = [];
   const unsupportedRequests = [];
   const foreignActorObjects = [];
+  const appNotices = [];
   const results = [];
   let incompleteRequest = false;
   const attachedExpectedCommentIds = new Set(
@@ -798,17 +821,28 @@ export function adaptCodexEvidence({
       const requestId =
         adapterVersion === 2 ? requestIdFromBody(body) : null;
       const looksLikeResult = resultLooksCodex(kind, object);
-      const looksLikeRequest =
-        !looksLikeResult &&
-        (body === EXACT_REQUEST || TRIGGER_SHAPE.test(body));
       const isExpectedActor =
         object.user?.id === expectedActor.id &&
         object.user?.type === expectedActor.type;
+      const looksLikeRequest =
+        !looksLikeResult &&
+        !isExpectedActor &&
+        (body === EXACT_REQUEST || TRIGGER_SHAPE.test(body));
+      const noticeMarker =
+        isExpectedActor && !looksLikeResult ? codexAppNoticeMarker(body) : null;
       if (
         kind === "PULL_REQUEST_REVIEW" &&
         isExpectedActor &&
         object.state === "PENDING"
       ) {
+        continue;
+      }
+      if (noticeMarker) {
+        appNotices.push({
+          ...baseFacts(kind, object),
+          body,
+          marker: noticeMarker,
+        });
         continue;
       }
       if (looksLikeRequest) {
@@ -939,6 +973,7 @@ export function adaptCodexEvidence({
     unbound_requests: unboundRequests,
     unsupported_requests: unsupportedRequests,
     foreign_actor_objects: foreignActorObjects,
+    app_notices: appNotices,
     results,
   };
 }

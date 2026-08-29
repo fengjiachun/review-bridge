@@ -44,6 +44,10 @@ import {
   observationV2,
 } from "./helpers/github-observation.mjs";
 
+const APP_SUMMARY_BODY =
+  "<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary";
+const UNKNOWN_APP_BODY = "Codex is thinking about this pull request.";
+
 function git(cwd, ...args) {
   const result = spawnSync("git", args, {
     cwd,
@@ -3899,6 +3903,60 @@ test("observation validation rejects incomplete provenance and unsafe check bind
         });
       },
     },
+    {
+      pattern: /codex_review\.app_notices\[0\] must be an object/,
+      mutate(value) {
+        value.codex_review.app_notices = [null];
+      },
+    },
+    {
+      pattern: /codex_review\.foreign_actor_objects\[0\] must be an object/,
+      mutate(value) {
+        value.codex_review.foreign_actor_objects = [null];
+      },
+    },
+    ...[
+      {
+        pattern: /app notice has wrong timestamp_field/,
+        notice: {
+          resource_kind: "PULL_REQUEST_REVIEW",
+          url: "https://github.com/owner/repo/pull/7#pullrequestreview-998",
+        },
+      },
+      {
+        pattern: /app notice must carry the pinned Codex actor/,
+        notice: { actor: { id: 7, type: "User" } },
+      },
+      {
+        pattern: /app notice body does not match its digest/,
+        notice: { body_sha256: "0".repeat(64) },
+      },
+      {
+        pattern: /app notice body does not carry its marker/,
+        notice: {
+          body: UNKNOWN_APP_BODY,
+          body_sha256: digest(UNKNOWN_APP_BODY),
+        },
+      },
+    ].map(({ pattern, notice }) => ({
+      pattern,
+      mutate(value) {
+        value.codex_review.app_notices = [
+          {
+            resource_id: 998,
+            resource_kind: "ISSUE_COMMENT",
+            url: "https://github.com/owner/repo/issues/7#issuecomment-998",
+            event_at: value.observed_at,
+            timestamp_field: "created_at",
+            actor: { id: 99, type: "Bot" },
+            body: APP_SUMMARY_BODY,
+            body_sha256: digest(APP_SUMMARY_BODY),
+            marker: "codex-pull-request-review-summary",
+            ...notice,
+          },
+        ];
+      },
+    })),
     {
       pattern: /commit status cannot claim an App ID/,
       mutate(value) {

@@ -8,6 +8,10 @@ import {
   isCodexRequestId,
 } from "./codex-request.mjs";
 import { loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
+// One derivation of the App's notice markers, shared with the adapter that
+// records them. A notice is only non-blocking because its body carries a
+// marker, so the claim has to be checked here against that body.
+import { codexAppNoticeMarker } from "./github-adapter.mjs";
 // One derivation of thread completeness, shared with the normalizer that
 // records it. Two copies of this rule would be two things to keep in step.
 import { threadProvenanceComplete } from "./github-observation.mjs";
@@ -912,6 +916,7 @@ function validateObservation(input, ledger, currentMs) {
     codexReview.unbound_requests ?? [],
     codexReview.unsupported_requests ?? [],
     codexReview.foreign_actor_objects ?? [],
+    codexReview.app_notices ?? [],
     codexReview.results ?? [],
   ];
   for (const [index, value] of arrays.entries()) {
@@ -1499,6 +1504,22 @@ function validateCodexPartitions(codexReview, ledger) {
     "codex_review.unsupported_requests",
   );
   const results = assertArray(codexReview.results ?? [], "codex_review.results");
+  const appNotices = assertArray(
+    codexReview.app_notices ?? [],
+    "codex_review.app_notices",
+  );
+  const foreignActorObjects = assertArray(
+    codexReview.foreign_actor_objects ?? [],
+    "codex_review.foreign_actor_objects",
+  );
+  for (const [name, items] of [
+    ["codex_review.app_notices", appNotices],
+    ["codex_review.foreign_actor_objects", foreignActorObjects],
+  ]) {
+    for (const [index, item] of items.entries()) {
+      assertObject(item, `${name}[${index}]`);
+    }
+  }
   validateRequestFacts(unbound, "codex_review.unbound_requests");
   validateRequestFacts(unsupported, "codex_review.unsupported_requests");
   for (const item of unbound) {
@@ -1555,7 +1576,8 @@ function validateCodexPartitions(codexReview, ledger) {
     ...unbound,
     ...unsupported,
     ...results.map((result) => ({ ...result, resource_id: result.result_id })),
-    ...(codexReview.foreign_actor_objects ?? []),
+    ...foreignActorObjects,
+    ...appNotices,
   ]) {
     allIdentities.push(resourceIdentity(item));
   }
@@ -1582,7 +1604,7 @@ function validateCodexPartitions(codexReview, ledger) {
     }
     assertSha(request.requested_head_sha, "request.requested_head_sha");
   }
-  for (const foreign of codexReview.foreign_actor_objects ?? []) {
+  for (const foreign of foreignActorObjects) {
     assertUrl(foreign.url, "foreign_actor_object.url");
     timestampMs(foreign.event_at, "foreign_actor_object.event_at");
     assertObject(foreign.actor, "foreign_actor_object.actor");
@@ -1598,6 +1620,41 @@ function validateCodexPartitions(codexReview, ledger) {
       );
     }
     assertDigest(foreign.body_sha256, "foreign_actor_object.body_sha256");
+  }
+  for (const notice of appNotices) {
+    assertUrl(notice.url, "app_notice.url");
+    timestampMs(notice.event_at, "app_notice.event_at");
+    if (
+      notice.timestamp_field !==
+      (notice.resource_kind === "PULL_REQUEST_REVIEW"
+        ? "submitted_at"
+        : "created_at")
+    ) {
+      fail("INVALID_INPUT", "app notice has wrong timestamp_field");
+    }
+    assertEnum(
+      notice.marker,
+      ["codex-pull-request-review-summary", "codex-environment-notice"],
+      "app_notice.marker",
+    );
+    assertDigest(notice.body_sha256, "app_notice.body_sha256");
+    assertString(notice.body, "app_notice.body");
+    if (sha256(Buffer.from(notice.body, "utf8")) !== notice.body_sha256) {
+      fail("INVALID_INPUT", "app notice body does not match its digest");
+    }
+    if (codexAppNoticeMarker(notice.body) !== notice.marker) {
+      fail("INVALID_INPUT", "app notice body does not carry its marker");
+    }
+    assertObject(notice.actor, "app_notice.actor");
+    if (
+      notice.actor.id !== ledger.target.codex_actor.id ||
+      notice.actor.type !== ledger.target.codex_actor.type
+    ) {
+      fail(
+        "INVALID_INPUT",
+        "app notice must carry the pinned Codex actor",
+      );
+    }
   }
   return baselineConflict
     ? "immutable Codex baseline object disappeared or changed"
