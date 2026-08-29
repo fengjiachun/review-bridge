@@ -13,6 +13,7 @@ const QUOTED_LINE = /^ {0,3}>/;
 const CODE_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const FENCE_CLOSER_TAIL = /^[ \t]*$/;
 const STRIPPED_LINE = "\u0000";
+const LINE_BREAK = /\r\n|\r|\n/;
 const APP_NOTICE_MARKERS = [
   {
     marker: "codex-pull-request-review-summary",
@@ -41,7 +42,7 @@ function requestIdFromBody(body) {
 function triggerScannableBody(body) {
   const scanned = [];
   let fence = null;
-  for (const line of body.split("\n")) {
+  for (const line of body.split(LINE_BREAK)) {
     const [, marker, info] = CODE_FENCE.exec(line) ?? [];
     let stripped = false;
     if (marker != null) {
