@@ -2130,6 +2130,24 @@ test("a split is refused while fixed resolutions await their recorded head", asy
     workflow.revision,
     fixedHead,
   );
+  // Uncommitted work could embody the owed fix itself, so a split is decided
+  // from a clean worktree only.
+  const dirtyPath = path.join(state.repository, "uncommitted-fix.js");
+  await fsp.writeFile(dirtyPath, "export const pending = 1;\n");
+  await assert.rejects(
+    acknowledgeChangeSizeWarning(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      {
+        decision: "split",
+        rationale: "Split over a dirty worktree.",
+        operatorLabel: "Test Operator",
+      },
+    ),
+    /working tree must be clean/,
+  );
+  await fsp.unlink(dirtyPath);
   workflow = await acknowledgeChangeSizeWarning(
     state.store,
     started.workflow_id,

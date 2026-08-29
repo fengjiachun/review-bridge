@@ -6874,6 +6874,12 @@ export async function acknowledgeChangeSizeWarning(
     // finding-fix commit rather than by a cut. A split is accepted there only
     // once the bound review's live state shows the response is complete; a
     // continue decision has nothing to execute and needs no such fence.
+    // Uncommitted work can embody exactly the owed fix whose later commit
+    // would discharge the promised cut, so a split is decided from a clean
+    // worktree only.
+    if (decision === "split") {
+      requireCleanRepository(workflow.repository.path);
+    }
     if (decision === "split" && workflow.phase === "ADDRESS_LOCAL_FINDINGS") {
       const { review, summary } = await getReviewSnapshot(
         storeRoot,
