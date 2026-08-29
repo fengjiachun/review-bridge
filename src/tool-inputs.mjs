@@ -31,6 +31,24 @@ const ADVANCE_LOCAL = {
 };
 const RECORD_HEAD = { record_workflow_head: COMMITTED_HEAD };
 
+// What an author response owes. The fix head is conditional: an all-rejected
+// response commits nothing, and a human_required one must not bind a commit no
+// round is left to inspect. The resolutions are what move the review to the
+// status the advance then consumes.
+const fixHead = (revision) => ({
+  record_workflow_head: [
+    WORKFLOW_ID,
+    revision,
+    ["head_sha", "the committed fix, required when any resolution is fixed"],
+  ],
+});
+const SUBMIT_RESOLUTIONS = {
+  submit_resolutions: [
+    ["review_id", "current_review.review_id"],
+    ["resolutions", "one entry per get_review active_findings[].id"],
+  ],
+};
+
 // The publication a workflow phase reaches through, addressed by its own
 // review ID and its own revision rather than the workflow's.
 const PUBLICATION_ID = ["review_id", "current_publication.review_id"];
@@ -165,8 +183,22 @@ export const PUBLICATION_ACTION_INPUTS = {
     verify_publication_gate: [["review_id", "review_id"]],
   },
   START_NEW_PUBLICATION_AUTHORIZATION: {
+    // This publication's ID is spent: its ledger exists, and start_publication
+    // requires one that does not. The remote-only path mints the replacement
+    // here; the local-gate path reaches its own through a fresh review.
+    authorize_remote_publication: [
+      ["repository_path", "the authoring repository"],
+      ["base_sha", "the base the pull request merges into"],
+      ["head_sha", "the head to publish"],
+      ["acknowledgement", "LOCAL_REVIEW_SKIPPED"],
+      ["operator_label", "the deciding human"],
+      ["rationale", "the deciding human"],
+    ],
     start_publication: [
-      ["review_id", "a new local gate or authorize_remote_publication"],
+      [
+        "review_id",
+        "the authorize_remote_publication result id, or a new local gate",
+      ],
       ...PUBLICATION_TARGET_INPUTS,
     ],
   },
@@ -193,10 +225,11 @@ export const WORKFLOW_ACTION_INPUTS = {
   // which the review's own state now rejects. Here the head recording precedes
   // it and writes the workflow, so the advance reads that revision again.
   ADDRESS_LOCAL_FINDINGS: {
-    ...RECORD_HEAD,
+    ...fixHead(WORKFLOW_REVISION),
+    ...SUBMIT_RESOLUTIONS,
     advance_local_workflow: [
       WORKFLOW_ID,
-      afterWrite(WORKFLOW_REVISION, "the recorded head"),
+      afterWrite(WORKFLOW_REVISION, "any recorded fix head"),
     ],
   },
   ADDRESS_REMOTE_FINDINGS: RECORD_HEAD,
@@ -524,9 +557,10 @@ export const WARNING_GATED_INPUTS = {
     ],
   },
   ADDRESS_LOCAL_FINDINGS: {
-    ...RECORD_HEAD,
+    ...fixHead(WORKFLOW_REVISION),
+    ...SUBMIT_RESOLUTIONS,
     acknowledge_change_size_warning: acknowledgeWarning(
-      afterWrite(WORKFLOW_REVISION, "the recorded head"),
+      afterWrite(WORKFLOW_REVISION, "any recorded fix head"),
     ),
     advance_local_workflow: [
       WORKFLOW_ID,
@@ -646,6 +680,7 @@ export function workflowRequiredInputs(
     continuesLocalCycle = false,
     changeSizeWarningPending = false,
     resolutionOwesRecord = false,
+    publicationTerminal = false,
   } = {},
 ) {
   const ownsClaims = (workflow.claims ?? []).some(
@@ -661,8 +696,22 @@ export function workflowRequiredInputs(
     return WARNING_GATED_INPUTS[nextAction];
   }
   // A pre-resolved observation claims no transition, so it has no record to
-  // make and the publication exposes none to name. It completes on its own.
-  if (nextAction === "COMPLETE_THREAD_RESOLUTION" && !resolutionOwesRecord) {
+  // make and the publication exposes none to name. A terminal publication
+  // refuses the write outright, and the server permits completion without it
+  // exactly there. Either way the action completes on its own.
+  if (
+    nextAction === "COMPLETE_THREAD_RESOLUTION" &&
+    (!resolutionOwesRecord || publicationTerminal)
+  ) {
+    return COMPLETE_ACTION;
+  }
+  // The same for the compensating unresolve: a terminal publication takes both
+  // the lifecycle record and the refreshed snapshot with it, and completion is
+  // permitted without either.
+  if (
+    nextAction === "RECORD_AND_COMPLETE_THREAD_UNRESOLVE" &&
+    publicationTerminal
+  ) {
     return COMPLETE_ACTION;
   }
   if (nextAction === "AWAIT_OPERATOR") {

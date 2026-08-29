@@ -9,6 +9,7 @@ import { startPublication } from "../src/publication.mjs";
 import { executingProof } from "../src/server-input.mjs";
 import {
   DECLARATION_TABLES,
+  PUBLICATION_ACTION_INPUTS,
   REVIEW_ACTION_INPUTS,
   WARNING_GATED_INPUTS,
   WORKFLOW_ACTION_INPUTS,
@@ -361,6 +362,7 @@ test("a continuation cycle declares the head alone", () => {
   assert.equal(continuesLocalCycle(workflow), false);
   assert.deepEqual(Object.keys(declared()), [
     "record_workflow_head",
+    "submit_resolutions",
     "advance_local_workflow",
   ]);
 });
@@ -426,6 +428,48 @@ test("a pre-resolved thread declares only its completion", () => {
   }
 });
 
+// A terminal publication refuses every write these two actions would otherwise
+// owe, and the server permits each to complete without them exactly there.
+test("a terminal publication declares only the completion", () => {
+  for (const action of [
+    "COMPLETE_THREAD_RESOLUTION",
+    "RECORD_AND_COMPLETE_THREAD_UNRESOLVE",
+  ]) {
+    assert.deepEqual(
+      Object.keys(
+        workflowRequiredInputs(
+          action,
+          {},
+          { resolutionOwesRecord: true, publicationTerminal: true },
+        ),
+      ),
+      ["complete_workflow_action"],
+      `${action} must not name a write a terminal ledger refuses`,
+    );
+    assert.ok(
+      Object.keys(
+        workflowRequiredInputs(action, {}, { resolutionOwesRecord: true }),
+      ).length > 1,
+      `${action} still owes its writes while the publication is mutable`,
+    );
+  }
+});
+
+// The replacement authorization a spent publication needs: start_publication
+// requires a review ID whose ledger does not exist yet, and this one's does.
+test("a spent publication declares how its replacement is minted", () => {
+  const declared =
+    PUBLICATION_ACTION_INPUTS.START_NEW_PUBLICATION_AUTHORIZATION;
+  assert.deepEqual(Object.keys(declared), [
+    "authorize_remote_publication",
+    "start_publication",
+  ]);
+  assert.match(
+    declared.start_publication.find(([field]) => field === "review_id")[1],
+    /authorize_remote_publication/,
+  );
+});
+
 // Selecting the right declaration is only half of it: the summary has to hand
 // every condition to the selection. A dropped one reads as "nothing special
 // here" and silently restores the declaration the condition exists to replace.
@@ -439,8 +483,10 @@ test("the summary passes every condition its declarations select on", () => {
     ready_marks: [],
     active_action: null,
   };
-  const declared = (workflow) =>
-    Object.keys(workflowSummary({ ...base, ...workflow }).required_inputs);
+  const declared = (workflow, conditions) =>
+    Object.keys(
+      workflowSummary({ ...base, ...workflow }, conditions).required_inputs,
+    );
   assert.deepEqual(
     declared({
       phase: "ADDRESS_LOCAL_FINDINGS",
@@ -471,6 +517,21 @@ test("the summary passes every condition its declarations select on", () => {
     }),
     ["complete_workflow_action"],
     "a pre-resolved thread must not be told to record",
+  );
+  assert.deepEqual(
+    declared(
+      {
+        phase: "RESOLVE_CODEX_THREADS",
+        active_action: {
+          kind: "RESOLVE_REVIEW_THREAD",
+          status: "OBSERVED",
+          provider_response: { outcome: "RESOLVED" },
+        },
+      },
+      { publicationTerminal: true },
+    ),
+    ["complete_workflow_action"],
+    "a terminal publication must not be told to write to it",
   );
 });
 

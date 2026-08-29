@@ -1221,6 +1221,15 @@ test("an addressed finding's thread becomes eligible in the next publication's p
     { clock: () => movedAt + 1_010 },
   );
   assert.equal(terminalPublication.terminal.status, "CLOSED");
+  // The lifecycle record and the refreshed snapshot both die with the ledger,
+  // so the summary must name neither.
+  assert.deepEqual(
+    Object.keys(
+      (await getAutonomousWorkflowSummary(terminalStore, workflow.workflow_id))
+        .required_inputs,
+    ),
+    ["complete_workflow_action"],
+  );
   const terminalCompletion = await completeWorkflowAction(
     terminalStore,
     workflow.workflow_id,
@@ -4156,6 +4165,15 @@ test("a resolution whose publication went terminal still closes its action", asy
       { clock: () => closedAt + 3_000 },
     ),
     (error) => error.code === "PUBLICATION_TERMINAL",
+  );
+  // What the summary declares has to follow that: naming the record would send
+  // a driver at the one call this ledger can no longer accept.
+  assert.deepEqual(
+    Object.keys(
+      (await getAutonomousWorkflowSummary(state.store, workflow.workflow_id))
+        .required_inputs,
+    ),
+    ["complete_workflow_action"],
   );
 
   // Holding the action open for a record that cannot exist would strand the

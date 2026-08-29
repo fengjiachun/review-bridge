@@ -3367,7 +3367,30 @@ function nextAction(workflow) {
  * calls its current state implies. Exported so the declarations can be held to
  * the conditions this projection selects them with.
  */
-export function workflowSummary(workflow) {
+/**
+ * Whether the publication an observed thread action is bound to has gone
+ * terminal. A terminal ledger refuses the writes such an action would
+ * otherwise owe, and completion is permitted exactly there, so the calls the
+ * state implies differ. Only the publication ledger holds it, which the
+ * synchronous projection cannot reach; the async read surfaces resolve it and
+ * hand it in.
+ */
+async function boundPublicationTerminal(storeRoot, workflow) {
+  const action = workflow.active_action;
+  if (
+    action?.status !== "OBSERVED" ||
+    !["RESOLVE_REVIEW_THREAD", "UNRESOLVE_REVIEW_THREAD"].includes(action.kind)
+  ) {
+    return false;
+  }
+  const ledger = await getPublication(storeRoot, action.target.review_id);
+  return ledger.terminal != null;
+}
+
+export function workflowSummary(
+  workflow,
+  { publicationTerminal = false } = {},
+) {
   const action = nextAction(workflow);
   const currentReview = structuredClone(workflow.current_review);
   if (currentReview?.change_size != null) {
@@ -3388,6 +3411,7 @@ export function workflowSummary(workflow) {
       continuesLocalCycle: continuesLocalCycle(workflow),
       changeSizeWarningPending: changeSizeWarningPending(workflow),
       resolutionOwesRecord: resolutionOwesRecord(workflow.active_action),
+      publicationTerminal,
     }),
     base_sha: workflow.base_sha,
     topic_branch: workflow.topic_branch,
@@ -3612,7 +3636,9 @@ export async function getAutonomousWorkflow(storeRoot, workflowId) {
 
 export async function getAutonomousWorkflowSummary(storeRoot, workflowId) {
   return withWorkflowLock(storeRoot, workflowId, async (workflow) =>
-    workflowSummary(workflow),
+    workflowSummary(workflow, {
+      publicationTerminal: await boundPublicationTerminal(storeRoot, workflow),
+    }),
   );
 }
 
@@ -3639,7 +3665,14 @@ export async function listAutonomousWorkflows(storeRoot, statuses = null) {
     try {
       const workflow = await getAutonomousWorkflow(storeRoot, entry.name);
       if (statusSet == null || statusSet.has(workflow.status)) {
-        result.push(workflowSummary(workflow));
+        result.push(
+          workflowSummary(workflow, {
+            publicationTerminal: await boundPublicationTerminal(
+              storeRoot,
+              workflow,
+            ),
+          }),
+        );
       }
     } catch (error) {
       if (

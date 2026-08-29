@@ -1617,6 +1617,7 @@ test("a crossed change-size warning refuses the next round until a recorded spli
     ),
     [
       "record_workflow_head",
+      "submit_resolutions",
       "acknowledge_change_size_warning",
       "advance_local_workflow",
     ],
@@ -4470,7 +4471,7 @@ test("uncontested rereview findings continue through a FULL review and obey the 
       (await getAutonomousWorkflowSummary(state.store, started.workflow_id))
         .required_inputs,
     ),
-    ["record_workflow_head", "advance_local_workflow"],
+    ["record_workflow_head", "submit_resolutions", "advance_local_workflow"],
   );
   const fixedHead = await commitImplementation(
     state.repository,
