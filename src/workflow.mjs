@@ -249,16 +249,18 @@ function changeSizeSplitPending(workflow, candidateTotalLines = null) {
   return patchChangeSize(patch).total_lines >= acknowledgment.total_lines;
 }
 
-// A gate that admits a round measuring smaller than the acknowledged
-// crossing is what proves the split executed. Marking it here, not at head
-// recording, is deliberate: it keeps pre-admission games closed, while later
-// growth of the successor work can no longer re-trigger an
+// An admitted round whose immutable measurement is below the acknowledged
+// crossing is what proves the split executed -- the stamp is tied to that
+// measurement, never to a fresh diff, so it happens at the bind (candidate
+// change_size) or when the rereview snapshot's change_size is observed.
+// Later growth of the successor work can no longer re-trigger an
 // already-fulfilled split.
-function markChangeSizeSplitExecuted(next) {
+function markChangeSizeSplitExecuted(next, admittedTotalLines) {
   const acknowledgment = next.change_size_warning?.acknowledgment;
   if (
     acknowledgment?.decision === "split" &&
-    acknowledgment.executed_at == null
+    acknowledgment.executed_at == null &&
+    admittedTotalLines < acknowledgment.total_lines
   ) {
     acknowledgment.executed_at = now();
   }
@@ -3955,7 +3957,7 @@ export async function bindWorkflowReview(
             next.local_review_cycles.at(-1).followup_review_id = reviewId;
           }
           recordChangeSizeWarningCrossing(next, measuredChangeSize.total_lines);
-          markChangeSizeSplitExecuted(next);
+          markChangeSizeSplitExecuted(next, measuredChangeSize.total_lines);
           // A repaired head binds a different review, and every review ID gets
           // its own fresh reviewer task. Releasing the previous binding is what
           // lets the next dispatch be planned at all.
@@ -5890,9 +5892,7 @@ export async function advanceLocalWorkflow(
             next,
             snapshotChangeSize.total_lines,
           );
-        }
-        if (summary.status === "AUTHOR_RESPONDED") {
-          markChangeSizeSplitExecuted(next);
+          markChangeSizeSplitExecuted(next, snapshotChangeSize.total_lines);
         }
         next.progress_fingerprint = findingFingerprint(summary);
         const phases = {

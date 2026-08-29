@@ -2131,6 +2131,19 @@ test("a premature split stays pending until the change shrinks below its crossin
     workflow.revision,
   );
   assert.equal(workflow.phase, "PREPARE_REREVIEW");
+  // The stamp waits for an immutable measurement: the gate's own diff never
+  // marks the split executed.
+  assert.equal(
+    workflow.change_size_warning.acknowledgment.executed_at ?? null,
+    null,
+  );
+  await prepareRereview(state.store, review.id);
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(workflow.phase, "WAIT_LOCAL_REREVIEW");
   assert.match(
     workflow.change_size_warning.acknowledgment.executed_at,
     /^\d{4}-\d{2}-\d{2}T/,
