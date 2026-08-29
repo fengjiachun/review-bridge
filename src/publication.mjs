@@ -1508,6 +1508,9 @@ function validateCodexPartitions(codexReview, ledger) {
     codexReview.app_notices ?? [],
     "codex_review.app_notices",
   );
+  for (const [index, notice] of appNotices.entries()) {
+    assertObject(notice, `codex_review.app_notices[${index}]`);
+  }
   validateRequestFacts(unbound, "codex_review.unbound_requests");
   validateRequestFacts(unsupported, "codex_review.unsupported_requests");
   for (const item of unbound) {

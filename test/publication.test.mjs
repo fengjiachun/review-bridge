@@ -3903,6 +3903,12 @@ test("observation validation rejects incomplete provenance and unsafe check bind
         });
       },
     },
+    {
+      pattern: /codex_review\.app_notices\[0\] must be an object/,
+      mutate(value) {
+        value.codex_review.app_notices = [null];
+      },
+    },
     ...[
       {
         pattern: /app notice has wrong timestamp_field/,
