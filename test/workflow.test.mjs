@@ -3189,6 +3189,107 @@ test("a rereview prepared before the advance names the ran-ahead wedge", async (
   );
 });
 
+test("a consumed continuation re-poll keeps the generic transition error", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const { completed } = await dispatchReviewer(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [
+      {
+        severity: "major",
+        title: "Fix the committed value",
+        explanation: "The committed value needs a second revision.",
+      },
+    ],
+    "CODEX_TASK",
+  );
+  const findings = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    completed.revision,
+  );
+  const fixedHead = await commitImplementation(
+    state.repository,
+    "export const value = 3;\n",
+  );
+  const fixed = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    findings.revision,
+    fixedHead,
+  );
+  await submitResolutions(state.store, review.id, [
+    {
+      finding_id: "F-001",
+      disposition: "fixed",
+      rationale: "Committed the requested value.",
+      evidence: "The new head contains the fix.",
+    },
+  ]);
+  const responded = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    fixed.revision,
+  );
+  await prepareRereview(state.store, review.id);
+  const waiting = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    responded.revision,
+  );
+  await submitRereview(
+    state.store,
+    review.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "resolved",
+        rationale: "The committed descendant fixes the finding.",
+      },
+    ],
+    [
+      {
+        severity: "minor",
+        title: "New edge case",
+        explanation: "The rereview found a separate edge case.",
+        recommendation: "Cover it.",
+        path: "app.js",
+        line: 1,
+      },
+    ],
+    "CODEX_TASK",
+  );
+  const continuation = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  assert.equal(continuation.phase, "ADDRESS_LOCAL_FINDINGS");
+  assert.equal(continuation.current_review.status, "CONTINUABLE_FINDINGS");
+
+  // Every transition was consumed in order, so a re-poll is not a
+  // ran-ahead wedge: it keeps the generic transition error.
+  await assert.rejects(
+    advanceLocalWorkflow(
+      state.store,
+      workflow.workflow_id,
+      continuation.revision,
+    ),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_REVIEW_TRANSITION_INVALID");
+      return true;
+    },
+  );
+});
+
 test("an author human-required resolution pauses without preparing round two", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

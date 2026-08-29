@@ -5542,11 +5542,12 @@ export async function advanceLocalWorkflow(
       FINALIZE_LOCAL_GATE: new Set(["LOCAL_GATE_PASSED"]),
     }[workflow.phase];
     if (legalStatuses == null || !legalStatuses.has(summary.status)) {
+      // CONTINUABLE_FINDINGS stays generic: a consumed continuation leaves
+      // the review in that status while the phase returns here, so it does
+      // not prove the review ran ahead.
       if (
         workflow.phase === "ADDRESS_LOCAL_FINDINGS" &&
-        ["WAITING_FOR_REREVIEW", "CLEAN", "CONTINUABLE_FINDINGS"].includes(
-          summary.status,
-        )
+        ["WAITING_FOR_REREVIEW", "CLEAN"].includes(summary.status)
       ) {
         fail(
           "WORKFLOW_REVIEW_RAN_AHEAD",
