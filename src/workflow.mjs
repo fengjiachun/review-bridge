@@ -5820,6 +5820,18 @@ export async function advanceLocalWorkflow(
       FINALIZE_LOCAL_GATE: new Set(["LOCAL_GATE_PASSED"]),
     }[workflow.phase];
     if (legalStatuses == null || !legalStatuses.has(summary.status)) {
+      // CONTINUABLE_FINDINGS stays generic: a consumed continuation leaves
+      // the review in that status while the phase returns here, so it does
+      // not prove the review ran ahead.
+      if (
+        workflow.phase === "ADDRESS_LOCAL_FINDINGS" &&
+        ["WAITING_FOR_REREVIEW", "CLEAN"].includes(summary.status)
+      ) {
+        fail(
+          "WORKFLOW_REVIEW_RAN_AHEAD",
+          "prepare_rereview was called before this advance consumed AUTHOR_RESPONDED, so the bound review ran ahead of the workflow; cancel the workflow, or arbitrate once the review reaches HUMAN_REQUIRED",
+        );
+      }
       fail(
         "WORKFLOW_REVIEW_TRANSITION_INVALID",
         `review status ${summary.status} cannot advance workflow phase ${workflow.phase}`,
