@@ -221,7 +221,7 @@ function changeSizeWarningPending(workflow) {
 // #79 failure one level up: a record without teeth. An audited continue
 // re-acknowledgment releases it without the cut, so sovereignty stays with
 // the operator.
-function changeSizeSplitPending(workflow) {
+function changeSizeSplitPending(workflow, candidateTotalLines = null) {
   const acknowledgment = workflow.change_size_warning?.acknowledgment;
   if (
     acknowledgment?.decision !== "split" ||
@@ -230,8 +230,11 @@ function changeSizeSplitPending(workflow) {
   ) {
     return false;
   }
+  if (candidateTotalLines != null) {
+    return candidateTotalLines >= acknowledgment.total_lines;
+  }
   // The same diff invocation the immutable snapshot measures, over the
-  // committed range so worktree state cannot influence the gate.
+  // committed range so uncommitted content cannot influence the gate.
   const patch = runGit(workflow.repository.path, [
     "-c",
     "core.quotePath=true",
@@ -279,7 +282,18 @@ function requireAcknowledgedChangeSizeWarning(workflow) {
       },
     );
   }
-  if (changeSizeSplitPending(workflow)) {
+}
+
+// At the bind gate the candidate snapshot's immutable change_size is the
+// authoritative quantity and must be passed in: a fresh committed-range diff
+// honors the worktree's current attribute rules, so attribute games could
+// make it diverge from what the admitted snapshot actually measures. Without
+// a candidate -- the AUTHOR_RESPONDED gate, or a legacy review with no
+// stored measurement -- the committed-range diff is the best available
+// proxy, and a snapshot that later measures larger records a fresh crossing
+// and re-arms the demand.
+function requireExecutedChangeSizeSplit(workflow, candidateTotalLines = null) {
+  if (changeSizeSplitPending(workflow, candidateTotalLines)) {
     fail(
       "WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED",
       "the recorded split has not shrunk the change below its acknowledged crossing: record the cut, or re-acknowledge with continue, before preparing the next review round",
@@ -3833,6 +3847,10 @@ export async function bindWorkflowReview(
     // WAITING_FOR_REVIEW binding that then dispatches a reviewer task.
     return getReviewSnapshot(storeRoot, reviewId, async ({ review, summary }) => {
       requireCleanReviewRound(review);
+      requireExecutedChangeSizeSplit(
+        workflow,
+        summary.current_snapshot?.change_size?.total_lines ?? null,
+      );
       const reviewRepository = await fsp.realpath(review.repository_path);
       if (
         reviewRepository !== workflow.repository.path ||
@@ -5796,6 +5814,7 @@ export async function advanceLocalWorkflow(
     // round whose snapshot crossed the warning has already completed by here.
     if (summary.status === "AUTHOR_RESPONDED") {
       requireAcknowledgedChangeSizeWarning(workflow);
+      requireExecutedChangeSizeSplit(workflow);
     }
     const snapshotHead = summary.current_snapshot?.head_sha ?? null;
     if (

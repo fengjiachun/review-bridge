@@ -1962,6 +1962,25 @@ test("a split acknowledgment at the continuation bind can commit the intended cu
     ),
     /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
   );
+  // Attribute rules that zero a fresh diff cannot release the split at the
+  // bind: the candidate snapshot's immutable measurement is the authority.
+  const attributesPath = path.join(
+    state.repository,
+    ".git",
+    "info",
+    "attributes",
+  );
+  await fsp.writeFile(attributesPath, "* -diff\n");
+  await assert.rejects(
+    bindWorkflowReview(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      staleFollowup.id,
+    ),
+    /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
+  );
+  await fsp.unlink(attributesPath);
   // The intended cut is a descendant head committed from PREPARE_LOCAL_REVIEW;
   // the latest cycle's addressed head must follow it so the follow-up review
   // still carries the open findings.
