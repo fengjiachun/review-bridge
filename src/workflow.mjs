@@ -185,7 +185,10 @@ function recordChangeSizeWarningCrossing(next, totalLines) {
 // the budget now in force: the budget at measurement time survives only in
 // the audit stream, and where a pre-upgrade extension raised it past the
 // measurement, that extension was the audited decision the old contract
-// demanded for this size -- it is honored, not re-demanded.
+// demanded for this size -- it is honored, not re-demanded. The same
+// grandfathering covers a round the old contract already admitted: a ledger
+// upgraded while in PREPARE_REREVIEW completes that round as a round in
+// flight, and the derived crossing gates the next preparation point.
 function changeSizeWarningCrossingTotal(workflow) {
   const recorded = workflow.change_size_warning?.total_lines;
   if (recorded != null) {
