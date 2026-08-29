@@ -9,8 +9,8 @@ import {
 
 const EXACT_REQUEST = "@codex review";
 const TRIGGER_SHAPE = /@codex\s+review\b/i;
-const QUOTED_LINE = /^\s{0,3}>/;
-const CODE_FENCE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
+const QUOTED_LINE = /^ {0,3}>/;
+const CODE_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const APP_NOTICE_MARKERS = [
   {
     marker: "codex-pull-request-review-summary",
