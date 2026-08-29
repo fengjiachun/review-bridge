@@ -1608,6 +1608,19 @@ test("a crossed change-size warning refuses the next round until a recorded spli
   );
   assert.equal(refused.status, "ACTIVE");
   assert.equal(refused.phase, "ADDRESS_LOCAL_FINDINGS");
+  // The advance the crossing refuses is what the summary would otherwise name
+  // on its own, so the acknowledgment that clears it belongs in the declaration.
+  assert.deepEqual(
+    Object.keys(
+      (await getAutonomousWorkflowSummary(state.store, started.workflow_id))
+        .required_inputs,
+    ),
+    [
+      "record_workflow_head",
+      "acknowledge_change_size_warning",
+      "advance_local_workflow",
+    ],
+  );
   workflow = await acknowledgeChangeSizeWarning(
     state.store,
     started.workflow_id,

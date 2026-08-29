@@ -490,6 +490,41 @@ export const WORKFLOW_ACTION_INPUTS = {
   },
 };
 
+// A crossed change-size warning gates the preparation of the next review
+// round: bind_workflow_review and advance_local_workflow both refuse until the
+// decision is recorded. Recording it writes the workflow, so the call it gates
+// re-reads the revision. Only the actions that reach one of those two calls
+// change; the warning blocks nothing else.
+const acknowledgeWarning = (revision) => [
+  WORKFLOW_ID,
+  revision,
+  ["decision", "the deciding human; continue or split"],
+  ["rationale", "the deciding human"],
+  ["operator_label", "the deciding human"],
+];
+
+export const WARNING_GATED_INPUTS = {
+  PREPARE_LOCAL_REVIEW: {
+    acknowledge_change_size_warning: acknowledgeWarning(WORKFLOW_REVISION),
+    prepare_review: WORKFLOW_ACTION_INPUTS.PREPARE_LOCAL_REVIEW.prepare_review,
+    bind_workflow_review: [
+      WORKFLOW_ID,
+      afterWrite(WORKFLOW_REVISION, "the acknowledgment"),
+      ["review_id", "the prepare_review result id"],
+    ],
+  },
+  ADDRESS_LOCAL_FINDINGS: {
+    ...RECORD_HEAD,
+    acknowledge_change_size_warning: acknowledgeWarning(
+      afterWrite(WORKFLOW_REVISION, "the recorded head"),
+    ),
+    advance_local_workflow: [
+      WORKFLOW_ID,
+      afterWrite(WORKFLOW_REVISION, "the acknowledgment"),
+    ],
+  },
+};
+
 // A stopped workflow advertises one next action for every reason it can hold,
 // so the reason is what says which call clears it. Keyed by pause reason code,
 // with PAUSED for every other reason, CANCELLED for the claims a cancelled
@@ -582,6 +617,7 @@ export const DECLARATION_TABLES = [
   REVIEW_ACTION_INPUTS,
   PUBLICATION_ACTION_INPUTS,
   WORKFLOW_ACTION_INPUTS,
+  WARNING_GATED_INPUTS,
   WORKFLOW_STOP_INPUTS,
 ];
 
@@ -596,7 +632,7 @@ export function publicationRequiredInputs(nextAction) {
 export function workflowRequiredInputs(
   nextAction,
   workflow,
-  continuesLocalCycle = false,
+  { continuesLocalCycle = false, changeSizeWarningPending = false } = {},
 ) {
   const ownsClaims = (workflow.claims ?? []).some(
     (entry) => entry.disposition === "ACTIVE",
@@ -606,6 +642,9 @@ export function workflowRequiredInputs(
   // author-resolution cycle owes an advance after the head.
   if (nextAction === "ADDRESS_LOCAL_FINDINGS" && continuesLocalCycle) {
     return RECORD_HEAD;
+  }
+  if (changeSizeWarningPending && WARNING_GATED_INPUTS[nextAction] != null) {
+    return WARNING_GATED_INPUTS[nextAction];
   }
   if (nextAction === "AWAIT_OPERATOR") {
     // A terminal run and a post-ready stop also wait on the operator without

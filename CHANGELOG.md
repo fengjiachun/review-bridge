@@ -69,7 +69,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   generalizing the `required_request_refs` pattern to every state-changing
   transition so a driver never discovers a schema by sending empty arguments and
   reading the validation error. A pause reports the call its own reason code
-  needs. Transition semantics are unchanged. (#82)
+  needs, and a crossed change-size warning reports the acknowledgment the next
+  round's preparation waits on. Transition semantics are unchanged. (#82)
 
 ### Changed
 

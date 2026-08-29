@@ -215,7 +215,13 @@ function changeSizeWarningCrossingTotal(workflow) {
     : null;
 }
 
-function changeSizeWarningPending(workflow) {
+/**
+ * Whether a crossed change-size warning still awaits its decision. The bind
+ * and the advance that prepare the next review round both refuse while it
+ * does, so a summary has to name the acknowledgment among the calls its state
+ * implies.
+ */
+export function changeSizeWarningPending(workflow) {
   const crossingTotal = changeSizeWarningCrossingTotal(workflow);
   const acknowledgment = workflow.change_size_warning?.acknowledgment;
   return (
@@ -3360,11 +3366,10 @@ function workflowSummary(workflow) {
     status: workflow.status,
     phase: workflow.phase,
     next_action: action,
-    required_inputs: workflowRequiredInputs(
-      action,
-      workflow,
-      continuesLocalCycle(workflow),
-    ),
+    required_inputs: workflowRequiredInputs(action, workflow, {
+      continuesLocalCycle: continuesLocalCycle(workflow),
+      changeSizeWarningPending: changeSizeWarningPending(workflow),
+    }),
     base_sha: workflow.base_sha,
     topic_branch: workflow.topic_branch,
     current_head_sha: workflow.current_head_sha,

@@ -10,11 +10,16 @@ import { executingProof } from "../src/server-input.mjs";
 import {
   DECLARATION_TABLES,
   REVIEW_ACTION_INPUTS,
+  WARNING_GATED_INPUTS,
   WORKFLOW_ACTION_INPUTS,
   WORKFLOW_STOP_INPUTS,
   workflowRequiredInputs,
 } from "../src/tool-inputs.mjs";
-import { ACTION_KIND_SPECS, continuesLocalCycle } from "../src/workflow.mjs";
+import {
+  ACTION_KIND_SPECS,
+  changeSizeWarningPending,
+  continuesLocalCycle,
+} from "../src/workflow.mjs";
 
 const serverPath = path.resolve("src/server.mjs");
 
@@ -342,11 +347,9 @@ test("a continuation cycle declares the head alone", () => {
     current_review: { review_id: "rb-first" },
   };
   const declared = () =>
-    workflowRequiredInputs(
-      "ADDRESS_LOCAL_FINDINGS",
-      workflow,
-      continuesLocalCycle(workflow),
-    );
+    workflowRequiredInputs("ADDRESS_LOCAL_FINDINGS", workflow, {
+      continuesLocalCycle: continuesLocalCycle(workflow),
+    });
   assert.equal(continuesLocalCycle(workflow), true);
   assert.deepEqual(Object.keys(declared()), ["record_workflow_head"]);
 
@@ -358,6 +361,36 @@ test("a continuation cycle declares the head alone", () => {
     "record_workflow_head",
     "advance_local_workflow",
   ]);
+});
+
+// A crossed change-size warning refuses the bind and the advance that prepare
+// the next round, so both actions have to name the acknowledgment that clears
+// it, and the call it gates has to re-read what the acknowledgment wrote.
+test("a pending change-size warning declares the acknowledgment", () => {
+  const crossed = {
+    phase: "PREPARE_LOCAL_REVIEW",
+    change_size_budget: 100,
+    change_size_warning: { total_lines: 90, acknowledgment: null },
+  };
+  assert.equal(changeSizeWarningPending(crossed), true);
+  for (const action of ["PREPARE_LOCAL_REVIEW", "ADDRESS_LOCAL_FINDINGS"]) {
+    const declared = workflowRequiredInputs(action, crossed, {
+      changeSizeWarningPending: changeSizeWarningPending(crossed),
+    });
+    assert.deepEqual(declared, WARNING_GATED_INPUTS[action]);
+    const gated =
+      declared.bind_workflow_review ?? declared.advance_local_workflow;
+    assert.match(
+      gated.find(([field]) => field === "expected_revision")[1],
+      /re-read after the acknowledgment/,
+    );
+    // Without the crossing the same action declares no acknowledgment.
+    assert.equal(
+      "acknowledge_change_size_warning" in
+        workflowRequiredInputs(action, crossed),
+      false,
+    );
+  }
 });
 
 // A declared sequence whose earlier call writes the ledger a later call
