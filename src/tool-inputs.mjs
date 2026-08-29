@@ -31,10 +31,11 @@ const ADVANCE_LOCAL = {
 };
 const RECORD_HEAD = { record_workflow_head: COMMITTED_HEAD };
 
-// What an author response owes. The fix head is conditional: an all-rejected
-// response commits nothing, and a human_required one must not bind a commit no
-// round is left to inspect. The resolutions are what move the review to the
-// status the advance then consumes.
+// What an author response owes. The fix head is conditional only on there
+// being a fix: an all-rejected response commits nothing. A submission that
+// also escalates still records the fix it made -- the escalation decides
+// whether a round inspects that head, not whether the work is bound. The
+// resolutions are what move the review to the status the advance consumes.
 const fixHead = (revision) => ({
   record_workflow_head: [
     WORKFLOW_ID,
