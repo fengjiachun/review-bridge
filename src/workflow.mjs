@@ -209,12 +209,13 @@ function changeSizeWarningPending(workflow) {
 
 // A split promises a smaller change, so its execution is judged by the same
 // quantity the warning crossed on: the measured size of the base..head
-// patch. Anything short of an actual cut -- an empty descendant, a
-// change-then-revert sequence, unrelated growth, or a still-owed finding-fix
-// commit -- leaves the measurement at or above the acknowledged crossing and
-// keeps the gate closed. Recording "split" and then proceeding unchanged
-// would be the #79 failure one level up: a record without teeth. Only a
-// round measuring smaller is admitted; an audited continue
+// patch. Nothing that fails to shrink the measurement releases the gate --
+// an empty descendant and a change-then-revert sequence never can, and
+// unrelated growth or a typical finding fix does not. A round measuring
+// below the acknowledged crossing is admitted whatever produced the
+// reduction: a change that has genuinely shrunk is the split's substance
+// delivered. Recording "split" and then proceeding unchanged would be the
+// #79 failure one level up: a record without teeth. An audited continue
 // re-acknowledgment releases it without the cut, so sovereignty stays with
 // the operator.
 function changeSizeSplitPending(workflow) {
@@ -6905,11 +6906,6 @@ export async function acknowledgeChangeSizeWarning(
         "a change-size warning is acknowledged where the next round is prepared: from ADDRESS_LOCAL_FINDINGS or PREPARE_LOCAL_REVIEW on an active workflow",
       );
     }
-    // ADDRESS_LOCAL_FINDINGS spans both sides of the author's response, and a
-    // split recorded before the response would be discharged by the ordinary
-    // finding-fix commit rather than by a cut. A split is accepted there only
-    // once the bound review's live state shows the response is complete; a
-    // continue decision has nothing to execute and needs no such fence.
     const crossedTotal = changeSizeWarningCrossingTotal(workflow);
     return publicWorkflow(
       await saveActionMutation(

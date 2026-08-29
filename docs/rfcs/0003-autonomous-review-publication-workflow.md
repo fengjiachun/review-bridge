@@ -770,11 +770,12 @@ records the explicit split decision: `continue` with a stated reason or
 is new only when its total strictly exceeds every crossing recorded before
 it, so after a `continue` only a strictly larger crossing re-arms the demand.
 A recorded `split` keeps refusing round preparation while the measured
-base-to-head change still reaches the acknowledged crossing total — an empty
-descendant, a change-then-revert sequence, unrelated growth, or the ordinary
-finding-fix commit all leave it pending. It is executed when a gate admits a
-round measuring smaller, and re-acknowledging the decision as `continue`
-releases it without the cut.
+base-to-head change still reaches the acknowledged crossing total — nothing
+that fails to shrink the measurement releases it, whether an empty
+descendant, a change-then-revert sequence, unrelated growth, or a typical
+finding-fix commit. It is executed when a gate admits a round measuring
+smaller, whatever produced the reduction, and re-acknowledging the decision
+as `continue` releases it without the cut.
 (This supersedes the original rule of issue #50 that the warning never
 blocks; the reversal and its field evidence are issue #79.) When the sum exceeds
 the workflow budget, binding the review pauses
