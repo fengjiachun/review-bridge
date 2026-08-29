@@ -52,12 +52,19 @@ const BUDGET_EXTENSION = [
   ["rationale", "the deciding human"],
 ];
 
+// A declared sequence whose earlier call writes the ledger a later call
+// addresses cannot reuse one revision for both: the write increments it. The
+// later call sources the revision it needs as a fresh read.
+const afterWrite = ([field, source], write) => [
+  field,
+  `${source}, re-read after ${write}`,
+];
+
 // An extension raises the budget and deliberately leaves the workflow paused on
-// the same reason, so a resume is the second call the pause needs and it reads
-// the revision the extension wrote.
+// the same reason, so a resume is the second call the pause needs.
 const RESUME_AFTER_EXTENSION = [
   WORKFLOW_ID,
-  ["expected_revision", "revision, re-read after the extension"],
+  afterWrite(WORKFLOW_REVISION, "the extension"),
   ["operator_label", "the deciding human"],
   ["rationale", "the deciding human"],
 ];
@@ -183,8 +190,15 @@ export const WORKFLOW_ACTION_INPUTS = {
   // A local-review ledger transition moves the review, never the workflow:
   // advance_local_workflow is what reads the new review state and moves the
   // phase. Without it the summary keeps naming the transition already made,
-  // which the review's own state now rejects.
-  ADDRESS_LOCAL_FINDINGS: { ...RECORD_HEAD, ...ADVANCE_LOCAL },
+  // which the review's own state now rejects. Here the head recording precedes
+  // it and writes the workflow, so the advance reads that revision again.
+  ADDRESS_LOCAL_FINDINGS: {
+    ...RECORD_HEAD,
+    advance_local_workflow: [
+      WORKFLOW_ID,
+      afterWrite(WORKFLOW_REVISION, "the recorded head"),
+    ],
+  },
   ADDRESS_REMOTE_FINDINGS: RECORD_HEAD,
   ADDRESS_CHECK_FAILURE: RECORD_HEAD,
   UPDATE_FROM_BASE: RECORD_HEAD,
@@ -402,7 +416,14 @@ export const WORKFLOW_ACTION_INPUTS = {
       WORKFLOW_ID,
       ACTION_ID,
     ],
-    record_github_snapshot: REFRESH_SNAPSHOT,
+    // Recording the unresolve writes the publication and clears its
+    // observation, which is what makes this snapshot mandatory and its
+    // revision a fresh read.
+    record_github_snapshot: [
+      PUBLICATION_ID,
+      afterWrite(PUBLICATION_REVISION, "the unresolve"),
+      ["observation_path", "the collector --out file"],
+    ],
     ...COMPLETE_ACTION,
   },
   PLAN_RETURN_TO_DRAFT: {

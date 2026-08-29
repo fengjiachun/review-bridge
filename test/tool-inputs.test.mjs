@@ -295,10 +295,10 @@ test("a budget pause declares the resume that follows the extension", () => {
 // request, which no field of the workflow ledger reports, so the pause declares
 // the cancellation that is then the only exit.
 test("an invalidated publication declares the cancellation too", () => {
-  assert.deepEqual(
-    Object.keys(WORKFLOW_STOP_INPUTS.PUBLICATION_INVALIDATED),
-    ["resume_autonomous_workflow", "cancel_autonomous_workflow"],
-  );
+  assert.deepEqual(Object.keys(WORKFLOW_STOP_INPUTS.PUBLICATION_INVALIDATED), [
+    "resume_autonomous_workflow",
+    "cancel_autonomous_workflow",
+  ]);
   for (const fields of Object.values(
     WORKFLOW_STOP_INPUTS.PUBLICATION_INVALIDATED,
   )) {
@@ -319,12 +319,49 @@ test("every local-review phase declares the advance that follows it", () => {
     "FINALIZE_LOCAL_GATE",
   ]) {
     assert.deepEqual(
-      WORKFLOW_ACTION_INPUTS[action].advance_local_workflow,
-      [
-        ["workflow_id", "workflow_id"],
-        ["expected_revision", "revision"],
-      ],
+      WORKFLOW_ACTION_INPUTS[action].advance_local_workflow?.map(
+        ([field]) => field,
+      ),
+      ["workflow_id", "expected_revision"],
       `${action} must declare advance_local_workflow`,
+    );
+  }
+});
+
+// A declared sequence whose earlier call writes the ledger a later call
+// addresses cannot hand both the same revision: the write increments it, and a
+// driver resolving the declaration once would send the consumed one.
+test("a call after a write in its own sequence re-reads the revision", () => {
+  const revisionSource = (calls, tool) =>
+    calls[tool].find(([field]) => field === "expected_revision")[1];
+  for (const [calls, tool] of [
+    [WORKFLOW_ACTION_INPUTS.ADDRESS_LOCAL_FINDINGS, "advance_local_workflow"],
+    [
+      WORKFLOW_ACTION_INPUTS.RECORD_AND_COMPLETE_THREAD_UNRESOLVE,
+      "record_github_snapshot",
+    ],
+    [
+      WORKFLOW_STOP_INPUTS.CHANGE_SIZE_BUDGET_EXCEEDED,
+      "resume_autonomous_workflow",
+    ],
+    [
+      WORKFLOW_STOP_INPUTS.LOCAL_CYCLE_BUDGET_EXHAUSTED,
+      "resume_autonomous_workflow",
+    ],
+    [
+      WORKFLOW_STOP_INPUTS.REMOTE_CYCLE_BUDGET_EXHAUSTED,
+      "resume_autonomous_workflow",
+    ],
+  ]) {
+    assert.match(revisionSource(calls, tool), /, re-read after /);
+  }
+  // The advance that follows a review-side transition is not in that class:
+  // prepare_rereview and finalize_local_gate write the review, so the workflow
+  // revision the summary reported still holds.
+  for (const action of ["PREPARE_REREVIEW", "FINALIZE_LOCAL_GATE"]) {
+    assert.equal(
+      revisionSource(WORKFLOW_ACTION_INPUTS[action], "advance_local_workflow"),
+      "revision",
     );
   }
 });
