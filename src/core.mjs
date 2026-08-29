@@ -465,7 +465,7 @@ function appendUntrackedDiff(repositoryPath, relativePath) {
   return Buffer.from(output);
 }
 
-function patchChangeSize(patch) {
+export function patchChangeSize(patch) {
   let inHunk = false;
   let addedLines = 0;
   let deletedLines = 0;

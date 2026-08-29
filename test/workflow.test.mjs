@@ -1585,21 +1585,6 @@ test("a crossed change-size warning refuses the next round until a recorded spli
     workflow.revision,
   );
   assert.equal(workflow.phase, "ADDRESS_LOCAL_FINDINGS");
-  // A split recorded before the response would be discharged by the ordinary
-  // finding-fix commit, so it is refused until the findings are answered.
-  await assert.rejects(
-    acknowledgeChangeSizeWarning(
-      state.store,
-      started.workflow_id,
-      workflow.revision,
-      {
-        decision: "split",
-        rationale: "Premature: findings are not answered yet.",
-        operatorLabel: "Test Operator",
-      },
-    ),
-    /split is acknowledged after the findings are answered/,
-  );
   const fixedHead = await commitImplementation(
     state.repository,
     "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 6;\n",
@@ -1757,17 +1742,10 @@ test("a crossed change-size warning refuses the next round until a recorded spli
     (event) => event.event === "CHANGE_SIZE_WARNING_ACKNOWLEDGED",
   );
   assert.equal(acknowledgments.length, 3);
-  const fixedTree = git(state.repository, "rev-parse", `${fixedHead}^{tree}`);
-  const continuationTree = git(
-    state.repository,
-    "rev-parse",
-    `${continuationHead}^{tree}`,
-  );
   assert.deepEqual(acknowledgments[0].metadata, {
     decision: "continue",
     rationale: "The checkers belong with the change they verify.",
     crossed_total_lines: 6,
-    tree_sha: fixedTree,
     change_size_budget: 8,
     operator_label: "Test Operator",
   });
@@ -1775,7 +1753,6 @@ test("a crossed change-size warning refuses the next round until a recorded spli
     decision: "split",
     rationale: "Cut the checkers into a follow-up change after this round.",
     crossed_total_lines: 7,
-    tree_sha: continuationTree,
     change_size_budget: 8,
     operator_label: "Test Operator",
   });
@@ -1783,7 +1760,6 @@ test("a crossed change-size warning refuses the next round until a recorded spli
     decision: "continue",
     rationale: "The cut is not worth a re-review; continue as one unit.",
     crossed_total_lines: 7,
-    tree_sha: continuationTree,
     change_size_budget: 8,
     operator_label: "Test Operator",
   });
@@ -1934,8 +1910,8 @@ test("a split acknowledgment at the continuation bind can commit the intended cu
     reloaded.change_size_warning.acknowledgment.rationale,
     "Cut the constants back to the reviewed core.",
   );
-  // The recorded split still targets the current head, so the unchanged
-  // snapshot cannot be bound before the cut lands.
+  // The recorded split has not shrunk the change, so the unchanged snapshot
+  // cannot be bound before the cut lands.
   await assert.rejects(
     bindWorkflowReview(
       state.store,
@@ -1945,8 +1921,8 @@ test("a split acknowledgment at the continuation bind can commit the intended cu
     ),
     /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
   );
-  // A tree-identical descendant records no cut: the pending split follows the
-  // empty commit's head and the gate stays closed.
+  // An empty descendant records no cut and leaves the measurement unchanged:
+  // the gate stays closed.
   git(state.repository, "commit", "--allow-empty", "-m", "empty descendant");
   const emptyHead = git(state.repository, "rev-parse", "HEAD");
   workflow = await recordWorkflowHead(
@@ -1964,7 +1940,7 @@ test("a split acknowledgment at the continuation bind can commit the intended cu
     ),
     /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
   );
-  // A change-then-revert sequence restores the decided tree and must not
+  // A change-then-revert sequence restores the same measurement and must not
   // release the gate either.
   await commitImplementation(state.repository, "export const detour = 1;\n");
   const revertedHead = await commitImplementation(
@@ -2030,15 +2006,15 @@ test("a split acknowledgment at the continuation bind can commit the intended cu
   assert.equal(workflow.current_review.change_size.total_lines, 4);
   assert.equal(workflow.change_size_warning.total_lines, 7);
   assert.equal(workflow.change_size_warning.acknowledgment.decision, "split");
-  // Admitting the round over the differing tree marks the split executed, so
-  // later work that happens to restore the decided tree cannot re-trigger it.
+  // Admitting the smaller round marks the split executed, so later growth of
+  // the successor work cannot re-trigger it.
   assert.match(
     workflow.change_size_warning.acknowledgment.executed_at,
     /^\d{4}-\d{2}-\d{2}T/,
   );
 });
 
-test("a split is refused while fixed resolutions await their recorded head", async (t) => {
+test("a premature split stays pending until the change shrinks below its crossing", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const started = await startAutonomousWorkflow(
@@ -2085,47 +2061,25 @@ test("a split is refused while fixed resolutions await their recorded head", asy
     started.workflow_id,
     workflow.revision,
   );
-  // The response lands before its fix commit: the split's target would be the
-  // pre-fix tree, and the owed fix commit would discharge it.
+  // The split is decided before the response's fix commit even exists. Its
+  // execution is judged by measured size, so the owed fix cannot discharge
+  // it on paper.
   await submitResolutions(state.store, review.id, [
     { finding_id: "F-001", disposition: "fixed", rationale: "Fixed." },
   ]);
-  await assert.rejects(
-    acknowledgeChangeSizeWarning(
-      state.store,
-      started.workflow_id,
-      workflow.revision,
-      {
-        decision: "split",
-        rationale: "Split before the fix head lands.",
-        operatorLabel: "Test Operator",
-      },
-    ),
-    /record the descendant fix head before deciding the split/,
-  );
-  // An empty descendant moves the head without the fix: the fence compares
-  // trees, so the split is still refused.
-  git(state.repository, "commit", "--allow-empty", "-m", "empty before fix");
-  const emptyFixHead = git(state.repository, "rev-parse", "HEAD");
-  workflow = await recordWorkflowHead(
+  workflow = await acknowledgeChangeSizeWarning(
     state.store,
     started.workflow_id,
     workflow.revision,
-    emptyFixHead,
+    {
+      decision: "split",
+      rationale: "Split before the fix head lands.",
+      operatorLabel: "Test Operator",
+    },
   );
-  await assert.rejects(
-    acknowledgeChangeSizeWarning(
-      state.store,
-      started.workflow_id,
-      workflow.revision,
-      {
-        decision: "split",
-        rationale: "Split behind an empty descendant.",
-        operatorLabel: "Test Operator",
-      },
-    ),
-    /record the descendant fix head before deciding the split/,
-  );
+  assert.equal(workflow.change_size_warning.acknowledgment.total_lines, 6);
+  // The finding fix grows the change to 7 total lines: still at or above the
+  // acknowledged crossing, so the split stays pending.
   const fixedHead = await commitImplementation(
     state.repository,
     "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 6;\n",
@@ -2136,40 +2090,12 @@ test("a split is refused while fixed resolutions await their recorded head", asy
     workflow.revision,
     fixedHead,
   );
-  // Uncommitted work could embody the owed fix itself, so a split is decided
-  // from a clean worktree only.
-  const dirtyPath = path.join(state.repository, "uncommitted-fix.js");
-  await fsp.writeFile(dirtyPath, "export const pending = 1;\n");
-  await assert.rejects(
-    acknowledgeChangeSizeWarning(
-      state.store,
-      started.workflow_id,
-      workflow.revision,
-      {
-        decision: "split",
-        rationale: "Split over a dirty worktree.",
-        operatorLabel: "Test Operator",
-      },
-    ),
-    /working tree must be clean/,
-  );
-  await fsp.unlink(dirtyPath);
-  workflow = await acknowledgeChangeSizeWarning(
-    state.store,
-    started.workflow_id,
-    workflow.revision,
-    {
-      decision: "split",
-      rationale: "Cut the constants back after the fix.",
-      operatorLabel: "Test Operator",
-    },
-  );
-  // The split now targets the post-fix tree, so entering the rereview round
-  // is refused until the cut lands.
   await assert.rejects(
     advanceLocalWorkflow(state.store, started.workflow_id, workflow.revision),
     /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
   );
+  // Only a head that shrinks the measured change below the acknowledged
+  // crossing executes the split.
   const cutHead = await commitImplementation(
     state.repository,
     "export const a = 1;\nexport const b = 2;\nexport const c = 3;\n",
@@ -2186,6 +2112,10 @@ test("a split is refused while fixed resolutions await their recorded head", asy
     workflow.revision,
   );
   assert.equal(workflow.phase, "PREPARE_REREVIEW");
+  assert.match(
+    workflow.change_size_warning.acknowledgment.executed_at,
+    /^\d{4}-\d{2}-\d{2}T/,
+  );
 });
 
 test("extending the exceeded budget does not satisfy the pending warning acknowledgment", async (t) => {
