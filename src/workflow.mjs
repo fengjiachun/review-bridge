@@ -48,6 +48,19 @@ export const AUTONOMOUS_CAPABILITIES = Object.freeze([
   "RESOLVE_ELIGIBLE_CODEX_THREADS",
   "UNRESOLVE_INVALIDATED_CODEX_THREADS",
 ]);
+export const AUTONOMOUS_PAUSE_REASON_CODES = Object.freeze([
+  "TASK_ORCHESTRATION_UNAVAILABLE",
+  "EXTERNAL_ACTION_INDETERMINATE",
+  "AUTHORIZATION_REQUIRED",
+  "PERMISSION_REQUIRED",
+  "NO_PROGRESS",
+  // Remote-loop judgements the server cannot derive: whether a failing check
+  // is actionable at all, and whether merging the fresh base produced a
+  // semantic conflict or would need a history rewrite.
+  "REQUIRED_CHECK_UNACTIONABLE",
+  "SEMANTIC_CONFLICT",
+  "HISTORY_REWRITE_REQUIRED",
+]);
 export const DEFAULT_REMOTE_CYCLE_BUDGET = 12;
 export const DEFAULT_LOCAL_CYCLE_BUDGET = 12;
 export { DEFAULT_CHANGE_SIZE_BUDGET };
@@ -6341,20 +6354,7 @@ export async function pauseAutonomousWorkflow(
   expectedRevision,
   { reasonCode, blockedAction, evidence },
 ) {
-  const allowedReasons = new Set([
-    "TASK_ORCHESTRATION_UNAVAILABLE",
-    "EXTERNAL_ACTION_INDETERMINATE",
-    "AUTHORIZATION_REQUIRED",
-    "PERMISSION_REQUIRED",
-    "NO_PROGRESS",
-    // Remote-loop judgements the server cannot derive: whether a failing check
-    // is actionable at all, and whether merging the fresh base produced a
-    // semantic conflict or would need a history rewrite.
-    "REQUIRED_CHECK_UNACTIONABLE",
-    "SEMANTIC_CONFLICT",
-    "HISTORY_REWRITE_REQUIRED",
-  ]);
-  if (!allowedReasons.has(reasonCode)) {
+  if (!AUTONOMOUS_PAUSE_REASON_CODES.includes(reasonCode)) {
     throw new TypeError("unsupported autonomous workflow pause reason");
   }
   assertString(blockedAction, "blocked_action", { max: 4096 });

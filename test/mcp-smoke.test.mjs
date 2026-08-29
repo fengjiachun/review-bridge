@@ -7,6 +7,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { REVIEWER_PROVIDERS } from "../src/core.mjs";
+import { AUTONOMOUS_PAUSE_REASON_CODES } from "../src/workflow.mjs";
 
 const serverPath = path.resolve("src/server.mjs");
 
@@ -203,6 +204,15 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       "operator_label",
       "rationale",
       "workflow_id",
+    ]);
+    // The registered enum is the only gate a driver meets; the core allowlist
+    // is the one it must agree with. Assert them equal so a reason the
+    // workflow accepts can never become unreachable through MCP.
+    const pauseWorkflow = authorTools.tools.find(
+      (tool) => tool.name === "pause_autonomous_workflow",
+    );
+    assert.deepEqual(pauseWorkflow.inputSchema.properties.reason_code.enum, [
+      ...AUTONOMOUS_PAUSE_REASON_CODES,
     ]);
     const extendBudget = authorTools.tools.find(
       (tool) => tool.name === "extend_remote_cycle_budget",
