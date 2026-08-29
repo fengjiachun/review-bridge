@@ -45,6 +45,7 @@ import {
   advanceLocalWorkflow,
   advanceRemoteWorkflow,
   AUTONOMOUS_CAPABILITIES,
+  AUTONOMOUS_PAUSE_REASON_CODES,
   bindWorkflowPublication,
   bindWorkflowReview,
   cancelAutonomousWorkflow,
@@ -333,17 +334,11 @@ if (role === "author") {
     {
       title: "Pause autonomous workflow",
       description:
-        "Fail closed when task orchestration, action reconciliation, authorization, permission, or progress evidence is unavailable.",
+        "Fail closed when task orchestration, action reconciliation, authorization, permission, or progress evidence is unavailable, or when a required check, a base merge, or a history rewrite needs a judgement the server cannot derive.",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
-        reason_code: z.enum([
-          "TASK_ORCHESTRATION_UNAVAILABLE",
-          "EXTERNAL_ACTION_INDETERMINATE",
-          "AUTHORIZATION_REQUIRED",
-          "PERMISSION_REQUIRED",
-          "NO_PROGRESS",
-        ]),
+        reason_code: z.enum(AUTONOMOUS_PAUSE_REASON_CODES),
         blocked_action: z.string(),
         evidence: z.string(),
       },
