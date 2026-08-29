@@ -3900,6 +3900,40 @@ test("observation validation rejects incomplete provenance and unsafe check bind
       },
     },
     {
+      pattern: /app notice has wrong timestamp_field/,
+      mutate(value) {
+        value.codex_review.app_notices = [
+          {
+            resource_id: 998,
+            resource_kind: "PULL_REQUEST_REVIEW",
+            url: "https://github.com/owner/repo/pull/7#pullrequestreview-998",
+            event_at: value.observed_at,
+            timestamp_field: "created_at",
+            actor: { id: 99, type: "Bot" },
+            body_sha256: "0".repeat(64),
+            marker: "codex-pull-request-review-summary",
+          },
+        ];
+      },
+    },
+    {
+      pattern: /app notice must carry the pinned Codex actor/,
+      mutate(value) {
+        value.codex_review.app_notices = [
+          {
+            resource_id: 997,
+            resource_kind: "ISSUE_COMMENT",
+            url: "https://github.com/owner/repo/issues/7#issuecomment-997",
+            event_at: value.observed_at,
+            timestamp_field: "created_at",
+            actor: { id: 7, type: "User" },
+            body_sha256: "0".repeat(64),
+            marker: "codex-environment-notice",
+          },
+        ];
+      },
+    },
+    {
       pattern: /commit status cannot claim an App ID/,
       mutate(value) {
         const source = value.required_checks.collection.run_sources.find(

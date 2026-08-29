@@ -1608,6 +1608,14 @@ function validateCodexPartitions(codexReview, ledger) {
   for (const notice of appNotices) {
     assertUrl(notice.url, "app_notice.url");
     timestampMs(notice.event_at, "app_notice.event_at");
+    if (
+      notice.timestamp_field !==
+      (notice.resource_kind === "PULL_REQUEST_REVIEW"
+        ? "submitted_at"
+        : "created_at")
+    ) {
+      fail("INVALID_INPUT", "app notice has wrong timestamp_field");
+    }
     assertEnum(
       notice.marker,
       ["codex-pull-request-review-summary", "codex-environment-notice"],
