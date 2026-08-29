@@ -256,12 +256,75 @@ test("a stopped workflow declares the call its own reason needs", () => {
 
 // A post-ready stop and a terminal run both wait on the operator while ACTIVE
 // or MERGE_READY. Resume refuses either, so neither may be told to call it.
+// What separates them is ownership: a terminal run still holds its claims.
 test("an unpaused operator stop declares no resume", () => {
+  const stop = (status, claims) =>
+    workflowRequiredInputs("AWAIT_OPERATOR", { status, pause: null, claims });
   for (const status of ["ACTIVE", "MERGE_READY"]) {
     assert.deepEqual(
-      workflowRequiredInputs("AWAIT_OPERATOR", { status, pause: null }),
+      stop(status, [{ disposition: "RELEASED" }]),
       {},
       `${status} must not advertise a call resume rejects`,
+    );
+  }
+  assert.deepEqual(
+    stop("MERGE_READY", [{ disposition: "ACTIVE" }]),
+    WORKFLOW_STOP_INPUTS.MERGE_READY,
+    "a terminal run still owes the release of the claims it holds",
+  );
+  assert.deepEqual(stop("ACTIVE", [{ disposition: "ACTIVE" }]), {});
+});
+
+// Every one of these pauses is cleared by two calls, not one: the extension
+// only raises the budget and leaves the workflow paused on the same reason.
+test("a budget pause declares the resume that follows the extension", () => {
+  for (const [reasonCode, extension] of [
+    ["CHANGE_SIZE_BUDGET_EXCEEDED", "extend_change_size_budget"],
+    ["LOCAL_CYCLE_BUDGET_EXHAUSTED", "extend_local_cycle_budget"],
+    ["REMOTE_CYCLE_BUDGET_EXHAUSTED", "extend_remote_cycle_budget"],
+  ]) {
+    assert.deepEqual(
+      Object.keys(WORKFLOW_STOP_INPUTS[reasonCode]),
+      [extension, "resume_autonomous_workflow"],
+      `${reasonCode} must declare its extension and then the resume`,
+    );
+  }
+});
+
+// Resume re-reads the bound publication and refuses a closed or merged pull
+// request, which no field of the workflow ledger reports, so the pause declares
+// the cancellation that is then the only exit.
+test("an invalidated publication declares the cancellation too", () => {
+  assert.deepEqual(
+    Object.keys(WORKFLOW_STOP_INPUTS.PUBLICATION_INVALIDATED),
+    ["resume_autonomous_workflow", "cancel_autonomous_workflow"],
+  );
+  for (const fields of Object.values(
+    WORKFLOW_STOP_INPUTS.PUBLICATION_INVALIDATED,
+  )) {
+    const rationale = fields.find(([field]) => field === "rationale")?.[1];
+    assert.match(rationale, /CLOSED or MERGED/);
+  }
+});
+
+// A local-review ledger transition moves the review, not the workflow. Every
+// phase that owes one owes advance_local_workflow after it, or the summary
+// keeps naming a transition the review state already rejects.
+test("every local-review phase declares the advance that follows it", () => {
+  for (const action of [
+    "ADDRESS_LOCAL_FINDINGS",
+    "WAIT_LOCAL_REVIEW",
+    "PREPARE_REREVIEW",
+    "WAIT_LOCAL_REREVIEW",
+    "FINALIZE_LOCAL_GATE",
+  ]) {
+    assert.deepEqual(
+      WORKFLOW_ACTION_INPUTS[action].advance_local_workflow,
+      [
+        ["workflow_id", "workflow_id"],
+        ["expected_revision", "revision"],
+      ],
+      `${action} must declare advance_local_workflow`,
     );
   }
 });

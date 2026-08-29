@@ -52,6 +52,16 @@ const BUDGET_EXTENSION = [
   ["rationale", "the deciding human"],
 ];
 
+// An extension raises the budget and deliberately leaves the workflow paused on
+// the same reason, so a resume is the second call the pause needs and it reads
+// the revision the extension wrote.
+const RESUME_AFTER_EXTENSION = [
+  WORKFLOW_ID,
+  ["expected_revision", "revision, re-read after the extension"],
+  ["operator_label", "the deciding human"],
+  ["rationale", "the deciding human"],
+];
+
 // The pull request identity every publication start binds, minus the review ID
 // that says which authorization is being published.
 const PUBLICATION_TARGET_INPUTS = [
@@ -170,7 +180,11 @@ for (const action of [
 
 export const WORKFLOW_ACTION_INPUTS = {
   COMMIT_HEAD: RECORD_HEAD,
-  ADDRESS_LOCAL_FINDINGS: RECORD_HEAD,
+  // A local-review ledger transition moves the review, never the workflow:
+  // advance_local_workflow is what reads the new review state and moves the
+  // phase. Without it the summary keeps naming the transition already made,
+  // which the review's own state now rejects.
+  ADDRESS_LOCAL_FINDINGS: { ...RECORD_HEAD, ...ADVANCE_LOCAL },
   ADDRESS_REMOTE_FINDINGS: RECORD_HEAD,
   ADDRESS_CHECK_FAILURE: RECORD_HEAD,
   UPDATE_FROM_BASE: RECORD_HEAD,
@@ -218,9 +232,11 @@ export const WORKFLOW_ACTION_INPUTS = {
   WAIT_LOCAL_REREVIEW: ADVANCE_LOCAL,
   PREPARE_REREVIEW: {
     prepare_rereview: [["review_id", "current_review.review_id"]],
+    ...ADVANCE_LOCAL,
   },
   FINALIZE_LOCAL_GATE: {
     finalize_local_gate: [["review_id", "current_review.review_id"]],
+    ...ADVANCE_LOCAL,
   },
   PLAN_PUSH: { plan_workflow_push: [WORKFLOW_ID, WORKFLOW_REVISION] },
   PUSH_TOPIC_BRANCH: {
@@ -455,13 +471,44 @@ export const WORKFLOW_ACTION_INPUTS = {
 
 // A stopped workflow advertises one next action for every reason it can hold,
 // so the reason is what says which call clears it. Keyed by pause reason code,
-// with PAUSED for every other reason and CANCELLED for the claims a cancelled
-// workflow still owns.
+// with PAUSED for every other reason, CANCELLED for the claims a cancelled
+// workflow still owns, and MERGE_READY for the ones a terminal run still owns.
 export const WORKFLOW_STOP_INPUTS = {
-  CHANGE_SIZE_BUDGET_EXCEEDED: { extend_change_size_budget: BUDGET_EXTENSION },
-  LOCAL_CYCLE_BUDGET_EXHAUSTED: { extend_local_cycle_budget: BUDGET_EXTENSION },
+  CHANGE_SIZE_BUDGET_EXCEEDED: {
+    extend_change_size_budget: BUDGET_EXTENSION,
+    resume_autonomous_workflow: RESUME_AFTER_EXTENSION,
+  },
+  LOCAL_CYCLE_BUDGET_EXHAUSTED: {
+    extend_local_cycle_budget: BUDGET_EXTENSION,
+    resume_autonomous_workflow: RESUME_AFTER_EXTENSION,
+  },
   REMOTE_CYCLE_BUDGET_EXHAUSTED: {
     extend_remote_cycle_budget: BUDGET_EXTENSION,
+    resume_autonomous_workflow: RESUME_AFTER_EXTENSION,
+  },
+  // Resume re-reads the bound publication and refuses a pull request that has
+  // closed or merged, and cancellation is the only exit left from there.
+  // Neither state is in the workflow ledger, so both calls are declared and the
+  // condition that picks between them is stated.
+  PUBLICATION_INVALIDATED: {
+    resume_autonomous_workflow: [
+      WORKFLOW_ID,
+      WORKFLOW_REVISION,
+      ["operator_label", "the deciding human"],
+      [
+        "rationale",
+        "the deciding human; refused once the bound pull request is CLOSED or MERGED",
+      ],
+    ],
+    cancel_autonomous_workflow: [
+      WORKFLOW_ID,
+      WORKFLOW_REVISION,
+      ["operator_label", "the deciding human"],
+      [
+        "rationale",
+        "the deciding human; the only exit once the bound pull request is CLOSED or MERGED",
+      ],
+    ],
   },
   HISTORY_REWRITE_REQUIRED: {
     cancel_autonomous_workflow: [
@@ -491,6 +538,21 @@ export const WORKFLOW_STOP_INPUTS = {
       ],
     ],
   },
+  // A terminal run still owns every branch and pull request it claimed, and the
+  // reconciliation has to postdate the recorded terminal entry, so the release
+  // is reachable only once the operator has merged and deleted what it claimed.
+  MERGE_READY: {
+    release_workflow_claims: [
+      WORKFLOW_ID,
+      WORKFLOW_REVISION,
+      ["operator_label", "the deciding human"],
+      ["rationale", "the deciding human"],
+      [
+        "reconciled_claims",
+        "one reconciliation per still-active get_autonomous_workflow claims[] entry, each observed after the merge that removed it",
+      ],
+    ],
+  },
 };
 
 // Every table a declaration can live in, so a test sweeping the declarations
@@ -511,11 +573,18 @@ export function publicationRequiredInputs(nextAction) {
 }
 
 export function workflowRequiredInputs(nextAction, workflow) {
+  const ownsClaims = (workflow.claims ?? []).some(
+    (entry) => entry.disposition === "ACTIVE",
+  );
   if (nextAction === "AWAIT_OPERATOR") {
-    // A post-ready stop and a terminal MERGE_READY run also wait on the
-    // operator without being paused, and resume refuses every workflow that is
-    // not PAUSED. Declaring it there would send a driver at a call that can
-    // only fail, so those states declare nothing to call.
+    // A terminal run and a post-ready stop also wait on the operator without
+    // being paused, and resume refuses every workflow that is not PAUSED.
+    // Declaring it there would send a driver at a call that can only fail. What
+    // a terminal run still owes is the release of the claims it holds; a
+    // post-ready stop owes nothing this server can be called for.
+    if (workflow.status === "MERGE_READY") {
+      return ownsClaims ? WORKFLOW_STOP_INPUTS.MERGE_READY : {};
+    }
     if (workflow.status !== "PAUSED") {
       return {};
     }
@@ -526,11 +595,7 @@ export function workflowRequiredInputs(nextAction, workflow) {
   }
   // A cancelled workflow still owns whatever it claimed; releasing those is the
   // only call left, and only while some claim is still active.
-  if (
-    nextAction === "NONE" &&
-    workflow.status === "CANCELLED" &&
-    (workflow.claims ?? []).some((entry) => entry.disposition === "ACTIVE")
-  ) {
+  if (nextAction === "NONE" && workflow.status === "CANCELLED" && ownsClaims) {
     return WORKFLOW_STOP_INPUTS.CANCELLED;
   }
   return WORKFLOW_ACTION_INPUTS[nextAction] ?? {};
