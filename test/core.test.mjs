@@ -144,6 +144,57 @@ test("manual review reports an over-budget change without blocking", async (t) =
   });
 });
 
+test("a manual review crossing the warning completes every round without acknowledgment", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const lines = Array.from(
+    { length: 1600 },
+    (_, index) => `export const value${index} = ${index};`,
+  );
+  await fsp.writeFile(path.join(repository, "large.js"), `${lines.join("\n")}\n`);
+  git(repository, "add", "large.js");
+  git(repository, "commit", "-m", "add large implementation");
+
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Keep the operator-present flow report-only past the warning.",
+    implementationScope: "Add large.js.",
+  });
+  assert.equal(prepared.change_size.warning_threshold_crossed, true);
+  assert.equal(prepared.change_size.over_budget, false);
+  await submitInitialReview(store, prepared.id, [
+    {
+      severity: "major",
+      title: "Rename the first constant",
+      explanation: "value0 needs a descriptive name.",
+    },
+  ]);
+  lines[0] = "export const firstValue = 0;";
+  await fsp.writeFile(path.join(repository, "large.js"), `${lines.join("\n")}\n`);
+  git(repository, "add", "large.js");
+  git(repository, "commit", "-m", "rename first constant");
+  await submitResolutions(store, prepared.id, [
+    {
+      finding_id: "F-001",
+      disposition: "fixed",
+      rationale: "Renamed the constant.",
+    },
+  ]);
+  const rereview = await prepareRereview(store, prepared.id);
+  assert.equal(rereview.status, "WAITING_FOR_REREVIEW");
+  await submitRereview(store, prepared.id, [
+    {
+      finding_id: "F-001",
+      decision: "resolved",
+      rationale: "The rename landed.",
+    },
+  ], []);
+  const gate = await finalizeLocalGate(store, prepared.id);
+  assert.equal(gate.review.status, "LOCAL_GATE_PASSED");
+});
+
 test("workflow snapshot reads reject a tampered change-size measurement", async (t) => {
   const { root, repository, store } = await fixture();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));

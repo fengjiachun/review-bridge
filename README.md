@@ -540,8 +540,15 @@ never repeating adjacently.
 The autonomous workflow also defaults to a 2000-line change-size budget,
 measured as added plus deleted lines from the immutable snapshot patch. An
 internal warning threshold at 75% reports the measured total and remaining
-headroom; crossing it does not block, but the driver must state whether it will
-continue or split before dispatch. An oversized snapshot binds normally but
+headroom. The review round in flight when a snapshot crosses it completes
+normally, but the workflow refuses to prepare the next round until
+`acknowledge_change_size_warning` records the explicit split decision —
+`continue` with a stated reason or `split` with the intended cut — and after
+a `continue`, a later, strictly larger crossing re-arms the demand. A
+recorded split keeps the gate closed until the cut shrinks the measured
+change below the acknowledged crossing, or
+the decision is re-acknowledged as `continue`. An
+oversized snapshot binds normally but
 pauses with
 `CHANGE_SIZE_BUDGET_EXCEEDED` before a reviewer task is dispatched.
 The same check runs again before an existing reviewer task is reused for a

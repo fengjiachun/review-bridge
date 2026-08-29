@@ -17,6 +17,20 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   CHANGELOG's claims against them, checks that every attested pull request
   merged the head its workflow recorded, and appends one immutable evidence
   record per version. Nothing in it performs a release action. (#73) (#74)
+- Escalate the autonomous change-size warning from narration to a decision
+  gate (#79, deliberately superseding the #50 rule that the warning never
+  blocks). After a snapshot crosses the warning threshold, the workflow
+  refuses to prepare the next review round — binding a fresh review or
+  entering `PREPARE_REREVIEW` — until the new audited
+  `acknowledge_change_size_warning` action records `continue` with a stated
+  reason or `split` with the intended cut. The round in flight completes
+  normally, the `CHANGE_SIZE_BUDGET_EXCEEDED` ceiling pause is unchanged,
+  manual operator-present reviews stay report-only, and a later, strictly
+  larger crossing re-arms the demand. A recorded split keeps the gate closed
+  until the cut shrinks the measured change below the acknowledged crossing,
+  or the decision is re-acknowledged
+  as `continue`. A ledger
+  written before the field existed loads and gates unchanged. (#81)
 - Add a persisted advisory mode to `prepare_review`. An advisory review accepts
   `submit_review` and nothing else: `finalize_local_gate`, `submit_resolutions`,
   and `prepare_rereview` each refuse it and say why. Its terminal is a report,

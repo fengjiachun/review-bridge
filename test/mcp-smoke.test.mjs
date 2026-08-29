@@ -49,6 +49,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
 
   assert.deepEqual(author, [
     "abandon_workflow_action",
+    "acknowledge_change_size_warning",
     "acknowledge_codex_review_ambiguity",
     "advance_local_workflow",
     "advance_remote_workflow",
@@ -243,6 +244,20 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       "operator_label",
       "rationale",
       "workflow_id",
+    ]);
+    const acknowledgeWarning = authorTools.tools.find(
+      (tool) => tool.name === "acknowledge_change_size_warning",
+    );
+    assert.deepEqual(acknowledgeWarning.inputSchema.required.sort(), [
+      "decision",
+      "expected_revision",
+      "operator_label",
+      "rationale",
+      "workflow_id",
+    ]);
+    assert.deepEqual(acknowledgeWarning.inputSchema.properties.decision.enum, [
+      "continue",
+      "split",
     ]);
     const prepareReview = authorTools.tools.find(
       (tool) => tool.name === "prepare_review",

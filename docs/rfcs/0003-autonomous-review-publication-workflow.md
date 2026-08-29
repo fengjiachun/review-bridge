@@ -761,18 +761,34 @@ the complete chain remains available in the workflow summary.
 The workflow also stores a positive `change_size_budget`, defaulting to 2000.
 Each immutable review snapshot records added lines, deleted lines, and their
 sum as derived from its stored patch. At the internal 75% warning threshold,
-the driver must report the sum and remaining headroom and state whether it will
-continue or split; the warning does not block or pause. When the sum exceeds
+the driver must report the sum and remaining headroom. The round whose
+snapshot crossed completes normally — the warning never interrupts a review
+in flight — but preparing the next round (binding a fresh review, or entering
+`PREPARE_REREVIEW`) is refused until `acknowledge_change_size_warning`
+records the explicit split decision: `continue` with a stated reason or
+`split` with the intended cut, audited with the crossing's total. A crossing
+is new only when its total strictly exceeds every crossing recorded before
+it, so after a `continue` only a strictly larger crossing re-arms the demand.
+A recorded `split` keeps refusing round preparation while the measured
+base-to-head change still reaches the acknowledged crossing total — nothing
+that fails to shrink the measurement releases it, whether an empty
+descendant, a change-then-revert sequence, unrelated growth, or a typical
+finding-fix commit. It is executed when a gate admits a round measuring
+smaller, whatever produced the reduction, and re-acknowledging the decision
+as `continue` releases it without the cut.
+(This supersedes the original rule of issue #50 that the warning never
+blocks; the reversal and its field evidence are issue #79.) When the sum exceeds
 the workflow budget, binding the review pauses
 `CHANGE_SIZE_BUDGET_EXCEEDED` before any reviewer task is dispatched.
 The workflow repeats the check before reusing a reviewer task for a newly
 captured rereview snapshot. A pre-upgrade bound review with no stored
 measurement derives it from its immutable patch before dispatch and persists
 the result in workflow state.
-`extend_change_size_budget` is the only mutation;
+`extend_change_size_budget` mutates the budget;
 it requires an audited operator label and rationale, must admit the measured
-total, does not resume the workflow, and does not change the authorization
-digest. Older workflow ledgers take the default. Manual reviews expose the
+total, does not resume the workflow, does not change the authorization
+digest, and does not satisfy a pending warning acknowledgment. Older workflow
+ledgers take the default. Manual reviews expose the
 same measurement against the default but proceed regardless of size.
 
 ### Publication

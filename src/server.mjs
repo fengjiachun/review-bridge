@@ -42,6 +42,7 @@ import {
   verifyPublicationGate,
 } from "./publication.mjs";
 import {
+  acknowledgeChangeSizeWarning,
   advanceLocalWorkflow,
   advanceRemoteWorkflow,
   AUTONOMOUS_CAPABILITIES,
@@ -379,6 +380,33 @@ if (role === "author") {
           newBudget: input.new_budget,
           operatorLabel: input.operator_label,
           rationale: input.rationale,
+        },
+      ),
+  );
+
+  register(
+    "acknowledge_change_size_warning",
+    {
+      title: "Acknowledge change-size warning",
+      description:
+        "Record the explicit split decision a crossed change-size warning demands before the workflow may prepare its next review round: continue with a stated reason, or split with the intended cut.",
+      inputSchema: {
+        workflow_id: z.string(),
+        expected_revision: z.number().int().positive(),
+        decision: z.enum(["continue", "split"]),
+        rationale: z.string(),
+        operator_label: z.string(),
+      },
+    },
+    (input) =>
+      acknowledgeChangeSizeWarning(
+        storeRoot,
+        input.workflow_id,
+        input.expected_revision,
+        {
+          decision: input.decision,
+          rationale: input.rationale,
+          operatorLabel: input.operator_label,
         },
       ),
   );

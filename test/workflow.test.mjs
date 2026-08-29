@@ -15,6 +15,7 @@ import {
   submitResolutions,
 } from "../src/core.mjs";
 import {
+  acknowledgeChangeSizeWarning,
   advanceLocalWorkflow,
   AUTONOMOUS_CAPABILITIES,
   bindWorkflowReview,
@@ -1528,6 +1529,948 @@ test("an oversized rereview snapshot pauses before reviewer reuse", async (t) =>
   );
   assert.equal(workflow.status, "ACTIVE");
   assert.equal(workflow.phase, "WAIT_LOCAL_REREVIEW");
+});
+
+test("a crossed change-size warning refuses the next round until a recorded split decision", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const started = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, { changeSizeBudget: 8 }),
+  );
+  // Base app.js is one line, so five replacement lines measure 5 added + 1
+  // deleted = 6 total, exactly the warning threshold ceil(8 * 0.75).
+  const headSha = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\n",
+  );
+  let workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    started.revision,
+    headSha,
+  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  assert.equal(workflow.status, "ACTIVE");
+  assert.equal(workflow.phase, "DISPATCH_CODEX_REVIEWER");
+  assert.equal(workflow.change_size_warning.total_lines, 6);
+  assert.equal(workflow.change_size_warning.acknowledgment, null);
+  ({ completed: workflow } = await dispatchReviewer(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  ));
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [{ severity: "major", title: "Defect", explanation: "Fix it." }],
+    "CODEX_TASK",
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(workflow.phase, "ADDRESS_LOCAL_FINDINGS");
+  const fixedHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 6;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    fixedHead,
+  );
+  await submitResolutions(state.store, review.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Fixed." },
+  ]);
+  await assert.rejects(
+    advanceLocalWorkflow(state.store, started.workflow_id, workflow.revision),
+    /WORKFLOW_CHANGE_SIZE_WARNING_UNACKNOWLEDGED.*acknowledge_change_size_warning/,
+  );
+  const refused = await getAutonomousWorkflow(
+    state.store,
+    started.workflow_id,
+  );
+  assert.equal(refused.status, "ACTIVE");
+  assert.equal(refused.phase, "ADDRESS_LOCAL_FINDINGS");
+  workflow = await acknowledgeChangeSizeWarning(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    {
+      decision: "continue",
+      rationale: "The checkers belong with the change they verify.",
+      operatorLabel: "Test Operator",
+    },
+  );
+  assert.deepEqual(workflow.change_size_warning.acknowledgment.decision, "continue");
+  assert.equal(workflow.change_size_warning.acknowledgment.total_lines, 6);
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(workflow.phase, "PREPARE_REREVIEW");
+  await prepareRereview(state.store, review.id);
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(workflow.phase, "WAIT_LOCAL_REREVIEW");
+  assert.equal(workflow.change_size_warning.total_lines, 7);
+  assert.equal(workflow.change_size_warning.acknowledgment.total_lines, 6);
+  await submitRereview(
+    state.store,
+    review.id,
+    [{ finding_id: "F-001", decision: "resolved", rationale: "Verified." }],
+    [
+      {
+        severity: "minor",
+        title: "Edge case",
+        explanation: "The rereview found a separate edge case.",
+      },
+    ],
+    "CODEX_TASK",
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(workflow.phase, "ADDRESS_LOCAL_FINDINGS");
+  const continuationHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 7;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    continuationHead,
+  );
+  assert.equal(workflow.phase, "PREPARE_LOCAL_REVIEW");
+  const followup = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+    forceFullReview: true,
+    continuedFromReviewId: review.id,
+  });
+  await assert.rejects(
+    bindWorkflowReview(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      followup.id,
+    ),
+    /WORKFLOW_CHANGE_SIZE_WARNING_UNACKNOWLEDGED.*acknowledge_change_size_warning/,
+  );
+  workflow = await acknowledgeChangeSizeWarning(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    {
+      decision: "split",
+      rationale: "Cut the checkers into a follow-up change after this round.",
+      operatorLabel: "Test Operator",
+    },
+  );
+  assert.equal(workflow.change_size_warning.acknowledgment.decision, "split");
+  assert.equal(workflow.change_size_warning.acknowledgment.total_lines, 7);
+  // A recorded split that still targets the head it was decided on keeps the
+  // gate closed: binding the unchanged snapshot would proceed without the cut.
+  await assert.rejects(
+    bindWorkflowReview(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      followup.id,
+    ),
+    /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
+  );
+  // Re-acknowledging the decision as continue releases it auditedly.
+  workflow = await acknowledgeChangeSizeWarning(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    {
+      decision: "continue",
+      rationale: "The cut is not worth a re-review; continue as one unit.",
+      operatorLabel: "Test Operator",
+    },
+  );
+  // The follow-up snapshot measures the same 7 total lines: an equal-size
+  // later snapshot is not a new crossing and must not re-arm the demand.
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    followup.id,
+  );
+  assert.equal(workflow.status, "ACTIVE");
+  assert.equal(workflow.phase, "DISPATCH_CODEX_REVIEWER");
+  assert.equal(workflow.change_size_warning.total_lines, 7);
+  const auditPath = path.join(
+    state.store,
+    "workflows",
+    started.workflow_id,
+    "action-audit.jsonl",
+  );
+  const audit = (await fsp.readFile(auditPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+  const acknowledgments = audit.filter(
+    (event) => event.event === "CHANGE_SIZE_WARNING_ACKNOWLEDGED",
+  );
+  assert.equal(acknowledgments.length, 3);
+  assert.deepEqual(acknowledgments[0].metadata, {
+    decision: "continue",
+    rationale: "The checkers belong with the change they verify.",
+    crossed_total_lines: 6,
+    change_size_budget: 8,
+    operator_label: "Test Operator",
+  });
+  assert.deepEqual(acknowledgments[1].metadata, {
+    decision: "split",
+    rationale: "Cut the checkers into a follow-up change after this round.",
+    crossed_total_lines: 7,
+    change_size_budget: 8,
+    operator_label: "Test Operator",
+  });
+  assert.deepEqual(acknowledgments[2].metadata, {
+    decision: "continue",
+    rationale: "The cut is not worth a re-review; continue as one unit.",
+    crossed_total_lines: 7,
+    change_size_budget: 8,
+    operator_label: "Test Operator",
+  });
+});
+
+test("a split acknowledgment at the continuation bind can commit the intended cut", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const started = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, { changeSizeBudget: 8 }),
+  );
+  const headSha = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\n",
+  );
+  let workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    started.revision,
+    headSha,
+  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  ({ completed: workflow } = await dispatchReviewer(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  ));
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [{ severity: "major", title: "Defect", explanation: "Fix it." }],
+    "CODEX_TASK",
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  const fixedHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 6;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    fixedHead,
+  );
+  await submitResolutions(state.store, review.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Fixed." },
+  ]);
+  workflow = await acknowledgeChangeSizeWarning(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    {
+      decision: "continue",
+      rationale: "Finish the round before deciding the cut.",
+      operatorLabel: "Test Operator",
+    },
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  await prepareRereview(state.store, review.id);
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  await submitRereview(
+    state.store,
+    review.id,
+    [{ finding_id: "F-001", decision: "resolved", rationale: "Verified." }],
+    [
+      {
+        severity: "minor",
+        title: "Edge case",
+        explanation: "The rereview found a separate edge case.",
+      },
+    ],
+    "CODEX_TASK",
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  const addressedHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 7;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    addressedHead,
+  );
+  assert.equal(workflow.phase, "PREPARE_LOCAL_REVIEW");
+  const staleFollowup = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+    forceFullReview: true,
+    continuedFromReviewId: review.id,
+  });
+  await assert.rejects(
+    bindWorkflowReview(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      staleFollowup.id,
+    ),
+    /acknowledge_change_size_warning/,
+  );
+  workflow = await acknowledgeChangeSizeWarning(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    {
+      decision: "split",
+      rationale: "Cut the constants back to the reviewed core.",
+      operatorLabel: "Test Operator",
+    },
+  );
+  // The approved cut survives a restart: a controller reading only the
+  // ledger can recover what the split is supposed to remove.
+  const reloaded = await getAutonomousWorkflow(state.store, started.workflow_id);
+  assert.equal(
+    reloaded.change_size_warning.acknowledgment.rationale,
+    "Cut the constants back to the reviewed core.",
+  );
+  // The recorded split has not shrunk the change, so the unchanged snapshot
+  // cannot be bound before the cut lands.
+  await assert.rejects(
+    bindWorkflowReview(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      staleFollowup.id,
+    ),
+    /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
+  );
+  // An empty descendant records no cut and leaves the measurement unchanged:
+  // the gate stays closed.
+  git(state.repository, "commit", "--allow-empty", "-m", "empty descendant");
+  const emptyHead = git(state.repository, "rev-parse", "HEAD");
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    emptyHead,
+  );
+  await assert.rejects(
+    bindWorkflowReview(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      staleFollowup.id,
+    ),
+    /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
+  );
+  // A change-then-revert sequence restores the same measurement and must not
+  // release the gate either.
+  await commitImplementation(state.repository, "export const detour = 1;\n");
+  const revertedHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 7;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    revertedHead,
+  );
+  await assert.rejects(
+    bindWorkflowReview(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      staleFollowup.id,
+    ),
+    /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
+  );
+  // Attribute rules that zero a fresh diff cannot release the split at the
+  // bind: the candidate snapshot's immutable measurement is the authority.
+  const attributesPath = path.join(
+    state.repository,
+    ".git",
+    "info",
+    "attributes",
+  );
+  await fsp.writeFile(attributesPath, "* -diff\n");
+  await assert.rejects(
+    bindWorkflowReview(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      staleFollowup.id,
+    ),
+    /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
+  );
+  await fsp.unlink(attributesPath);
+  // The intended cut is a descendant head committed from PREPARE_LOCAL_REVIEW;
+  // the latest cycle's addressed head must follow it so the follow-up review
+  // still carries the open findings.
+  const cutHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    cutHead,
+  );
+  assert.equal(workflow.phase, "PREPARE_LOCAL_REVIEW");
+  assert.equal(workflow.current_head_sha, cutHead);
+  assert.equal(
+    workflow.local_review_cycles.at(-1).addressed_head_sha,
+    cutHead,
+  );
+  assert.equal(workflow.local_review_cycles.at(-1).followup_review_id, null);
+  const followup = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+    forceFullReview: true,
+    continuedFromReviewId: review.id,
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    followup.id,
+  );
+  assert.equal(workflow.status, "ACTIVE");
+  assert.equal(workflow.phase, "DISPATCH_CODEX_REVIEWER");
+  assert.equal(
+    workflow.local_review_cycles.at(-1).followup_review_id,
+    followup.id,
+  );
+  assert.equal(workflow.current_review.change_size.total_lines, 4);
+  assert.equal(workflow.change_size_warning.total_lines, 7);
+  assert.equal(workflow.change_size_warning.acknowledgment.decision, "split");
+  // Admitting the smaller round marks the split executed, so later growth of
+  // the successor work cannot re-trigger it.
+  assert.match(
+    workflow.change_size_warning.acknowledgment.executed_at,
+    /^\d{4}-\d{2}-\d{2}T/,
+  );
+});
+
+test("a premature split stays pending until the change shrinks below its crossing", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const started = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, { changeSizeBudget: 8 }),
+  );
+  const headSha = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\n",
+  );
+  let workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    started.revision,
+    headSha,
+  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  ({ completed: workflow } = await dispatchReviewer(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  ));
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [{ severity: "major", title: "Defect", explanation: "Fix it." }],
+    "CODEX_TASK",
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  // The split is decided before the response's fix commit even exists. Its
+  // execution is judged by measured size, so the owed fix cannot discharge
+  // it on paper.
+  await submitResolutions(state.store, review.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Fixed." },
+  ]);
+  workflow = await acknowledgeChangeSizeWarning(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    {
+      decision: "split",
+      rationale: "Split before the fix head lands.",
+      operatorLabel: "Test Operator",
+    },
+  );
+  assert.equal(workflow.change_size_warning.acknowledgment.total_lines, 6);
+  // The finding fix grows the change to 7 total lines: still at or above the
+  // acknowledged crossing, so the split stays pending.
+  const fixedHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\nexport const d = 4;\nexport const e = 5;\nexport const f = 6;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    fixedHead,
+  );
+  await assert.rejects(
+    advanceLocalWorkflow(state.store, started.workflow_id, workflow.revision),
+    /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
+  );
+  // Only a head that shrinks the measured change below the acknowledged
+  // crossing executes the split.
+  const cutHead = await commitImplementation(
+    state.repository,
+    "export const a = 1;\nexport const b = 2;\nexport const c = 3;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    cutHead,
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(workflow.phase, "PREPARE_REREVIEW");
+  // The stamp waits for an immutable measurement: the gate's own diff never
+  // marks the split executed.
+  assert.equal(
+    workflow.change_size_warning.acknowledgment.executed_at ?? null,
+    null,
+  );
+  await prepareRereview(state.store, review.id);
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(workflow.phase, "WAIT_LOCAL_REREVIEW");
+  assert.match(
+    workflow.change_size_warning.acknowledgment.executed_at,
+    /^\d{4}-\d{2}-\d{2}T/,
+  );
+});
+
+test("extending the exceeded budget does not satisfy the pending warning acknowledgment", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const started = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, { changeSizeBudget: 1 }),
+  );
+  const headSha = await commitImplementation(state.repository);
+  let workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    started.revision,
+    headSha,
+  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  assert.equal(workflow.pause.reason_code, "CHANGE_SIZE_BUDGET_EXCEEDED");
+  assert.equal(workflow.change_size_warning.total_lines, 2);
+  // The pending crossing cannot be acknowledged from the ceiling pause: no
+  // permitted action could commit a split's cut there, so the pause is
+  // answered first and the decision is demanded again at the gate.
+  await assert.rejects(
+    acknowledgeChangeSizeWarning(
+      state.store,
+      started.workflow_id,
+      workflow.revision,
+      {
+        decision: "split",
+        rationale: "Cut it while paused.",
+        operatorLabel: "Test Operator",
+      },
+    ),
+    /acknowledged where the next round is prepared/,
+  );
+  workflow = await extendChangeSizeBudget(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    {
+      newBudget: 2,
+      operatorLabel: "Test Operator",
+      rationale: "The change is cohesive.",
+    },
+  );
+  workflow = await resumeAutonomousWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    { operatorLabel: "Test Operator", rationale: "Continue." },
+  );
+  ({ completed: workflow } = await dispatchReviewer(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  ));
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [{ severity: "major", title: "Defect", explanation: "Fix it." }],
+    "CODEX_TASK",
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  const fixedHead = await commitImplementation(
+    state.repository,
+    "export const value = 3;\n",
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    fixedHead,
+  );
+  await submitResolutions(state.store, review.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Fixed." },
+  ]);
+  await assert.rejects(
+    advanceLocalWorkflow(state.store, started.workflow_id, workflow.revision),
+    /acknowledge_change_size_warning/,
+  );
+  workflow = await acknowledgeChangeSizeWarning(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    {
+      decision: "continue",
+      rationale: "The extended budget already admits this cohesive change.",
+      operatorLabel: "Test Operator",
+    },
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(workflow.phase, "PREPARE_REREVIEW");
+});
+
+test("acknowledging without an unacknowledged crossing is refused", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const started = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  await assert.rejects(
+    acknowledgeChangeSizeWarning(
+      state.store,
+      started.workflow_id,
+      started.revision,
+      {
+        decision: "continue",
+        rationale: "Nothing crossed.",
+        operatorLabel: "Test Operator",
+      },
+    ),
+    /no unacknowledged change-size warning crossing/,
+  );
+  await assert.rejects(
+    acknowledgeChangeSizeWarning(
+      state.store,
+      started.workflow_id,
+      started.revision,
+      {
+        decision: "defer",
+        rationale: "Invalid decision.",
+        operatorLabel: "Test Operator",
+      },
+    ),
+    /decision must be "continue" or "split"/,
+  );
+  await assert.rejects(
+    acknowledgeChangeSizeWarning(
+      state.store,
+      started.workflow_id,
+      started.revision,
+      {
+        decision: "continue",
+        rationale: "x".repeat(32 * 1024),
+        operatorLabel: "Test Operator",
+      },
+    ),
+    /rationale exceeds its canonical byte limit/,
+  );
+});
+
+test("a ledger written before the change-size warning field loads and operates", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  assert.equal(stored.change_size_warning, null);
+  delete stored.change_size_warning;
+  await fsp.writeFile(workflowPath, `${canonicalJson(stored)}\n`, {
+    mode: 0o600,
+  });
+  const summary = await getAutonomousWorkflowSummary(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(summary.change_size_warning, null);
+  const { completed } = await dispatchReviewer(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  assert.equal(completed.phase, "WAIT_LOCAL_REVIEW");
+});
+
+test("a legacy ledger with a crossed measurement gates before the next round", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  // The default budget keeps the fabricated pre-upgrade audit event, which
+  // predates every compatibility field, consistent with the stored ledger.
+  const started = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const crossingLines = Array.from(
+    { length: 1600 },
+    (_, index) => `export const value${index} = ${index};`,
+  );
+  const headSha = await commitImplementation(
+    state.repository,
+    `${crossingLines.join("\n")}\n`,
+  );
+  let workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    started.revision,
+    headSha,
+  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: started.requirement,
+    implementationScope: started.implementation_scope,
+    reviewerProvider: "CODEX_TASK",
+  });
+  workflow = await bindWorkflowReview(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  ({ completed: workflow } = await dispatchReviewer(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    review.id,
+  ));
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [{ severity: "major", title: "Defect", explanation: "Fix it." }],
+    "CODEX_TASK",
+  );
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  crossingLines[0] = "export const firstValue = 0;";
+  const fixedHead = await commitImplementation(
+    state.repository,
+    `${crossingLines.join("\n")}\n`,
+  );
+  workflow = await recordWorkflowHead(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+    fixedHead,
+  );
+  await submitResolutions(state.store, review.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Fixed." },
+  ]);
+  // Rewrite the ledger as a pre-upgrade one: no warning field anywhere, while
+  // the bound measurement already crosses the warning threshold.
+  const workflowRoot = path.join(
+    state.store,
+    "workflows",
+    started.workflow_id,
+  );
+  const workflowPath = path.join(workflowRoot, "workflow.json");
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  delete stored.change_size_warning;
+  const legacyEvent = workflowAuditEvent(stored, {
+    sequence: 1,
+    previousEventSha256: null,
+    eventId: "c".repeat(32),
+    at: stored.updated_at,
+  });
+  await fsp.writeFile(
+    path.join(workflowRoot, "action-audit.jsonl"),
+    legacyEvent.bytes,
+    { mode: 0o600 },
+  );
+  await fsp.writeFile(
+    path.join(workflowRoot, "action-audit-head.json"),
+    `${canonicalJson({
+      version: 1,
+      workflow_id: started.workflow_id,
+      committed_bytes: legacyEvent.bytes.length,
+      next_sequence: 2,
+      last_event_sha256: legacyEvent.event.event_sha256,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  stored.action_audit = {
+    next_sequence: 2,
+    last_event_sha256: legacyEvent.event.event_sha256,
+  };
+  await fsp.writeFile(workflowPath, `${canonicalJson(stored)}\n`, {
+    mode: 0o600,
+  });
+  // The crossing is derived from the recorded measurement, so the very first
+  // post-upgrade gate check refuses instead of admitting one more round.
+  await assert.rejects(
+    advanceLocalWorkflow(state.store, started.workflow_id, stored.revision),
+    /WORKFLOW_CHANGE_SIZE_WARNING_UNACKNOWLEDGED/,
+  );
+  workflow = await acknowledgeChangeSizeWarning(
+    state.store,
+    started.workflow_id,
+    stored.revision,
+    {
+      decision: "continue",
+      rationale: "The pre-upgrade crossing is acknowledged as one unit.",
+      operatorLabel: "Test Operator",
+    },
+  );
+  assert.equal(workflow.change_size_warning.total_lines, 1601);
+  assert.equal(workflow.change_size_warning.acknowledgment.total_lines, 1601);
+  workflow = await advanceLocalWorkflow(
+    state.store,
+    started.workflow_id,
+    workflow.revision,
+  );
+  assert.equal(workflow.phase, "PREPARE_REREVIEW");
 });
 
 test("active workflow phases stay bound to the audit chain from initial state onward", async (t) => {

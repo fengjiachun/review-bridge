@@ -5,9 +5,11 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import {
   changeSizeReport,
+  changeSizeWarningThreshold,
   continuationFindingFingerprint,
   DEFAULT_CHANGE_SIZE_BUDGET,
   getReviewSnapshot,
+  patchChangeSize,
 } from "./core.mjs";
 import {
   getAutonomousPreReady,
@@ -77,6 +79,11 @@ const REMOTE_REPAIR_PHASES = Object.freeze([
 const HEAD_RECORDING_PHASES = Object.freeze([
   "IMPLEMENTING",
   "ADDRESS_LOCAL_FINDINGS",
+  // Nothing is bound or dispatched yet in PREPARE_LOCAL_REVIEW, so a head
+  // recorded here only moves what the next review will cover. This is the
+  // window a split acknowledgment needs to commit its intended cut before
+  // the next round is prepared.
+  "PREPARE_LOCAL_REVIEW",
   ...REMOTE_REPAIR_PHASES,
 ]);
 const MAX_LISTED_BLOCKERS = 50;
@@ -87,6 +94,13 @@ const MAX_ORDINARY_AUDIT_BYTES =
   MAX_AUDIT_BYTES -
   MAX_TERMINAL_AUDIT_EVENTS * (MAX_AUDIT_EVENT_BYTES + 1);
 const MAX_CANCELLATION_RATIONALE_BYTES = 32 * 1024;
+// The acknowledgment rationale is the only durable description of the
+// operator-approved decision -- for a split, of the intended cut -- so a
+// controller restarted before the cut lands must be able to read it from the
+// workflow ledger. It therefore lives in persistent state, and the cap is
+// small because auditedWorkflowState copies that state into every later
+// audit event.
+const MAX_ACKNOWLEDGMENT_RATIONALE_BYTES = 2 * 1024;
 const MAX_RECONCILIATION_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_CLOCK_SKEW_MS = 30 * 1000;
 
@@ -151,6 +165,160 @@ function localCycleCount(workflow) {
   return workflow.local_review_cycles.filter(
     (cycle) => cycle.addressed_head_sha != null,
   ).length;
+}
+
+// A snapshot crosses the change-size warning when its immutable total reaches
+// the warning threshold of the budget in force. A crossing is NEW only when
+// its total exceeds every crossing recorded before it, so re-measuring the
+// same snapshot, or shrinking, never re-arms the demand; after an
+// acknowledgment, only a strictly larger crossing demands a fresh decision
+// (issue #79, superseding the #50 rule that the warning never blocks).
+function recordChangeSizeWarningCrossing(next, totalLines) {
+  if (totalLines < changeSizeWarningThreshold(next.change_size_budget)) {
+    return;
+  }
+  if (
+    next.change_size_warning != null &&
+    totalLines <= next.change_size_warning.total_lines
+  ) {
+    return;
+  }
+  next.change_size_warning = {
+    total_lines: totalLines,
+    crossed_at: now(),
+    acknowledgment: next.change_size_warning?.acknowledgment ?? null,
+  };
+}
+
+// A ledger written before the warning field can already hold a bound,
+// threshold-crossing measurement, and compatibility loading alone would let
+// that crossing admit one more round before anything records it. The pending
+// predicates therefore derive the crossing from the recorded measurement
+// whenever no warning has been recorded yet. The threshold is deliberately
+// the budget now in force: the budget at measurement time survives only in
+// the audit stream, and where a pre-upgrade extension raised it past the
+// measurement, that extension was the audited decision the old contract
+// demanded for this size -- it is honored, not re-demanded. The same
+// grandfathering covers a round the old contract already admitted: a ledger
+// upgraded while in PREPARE_REREVIEW completes that round as a round in
+// flight, and the derived crossing gates the next preparation point.
+function changeSizeWarningCrossingTotal(workflow) {
+  const recorded = workflow.change_size_warning?.total_lines;
+  if (recorded != null) {
+    return recorded;
+  }
+  const measured = workflow.current_review?.change_size?.total_lines;
+  return Number.isSafeInteger(measured) &&
+    measured >= changeSizeWarningThreshold(workflow.change_size_budget)
+    ? measured
+    : null;
+}
+
+function changeSizeWarningPending(workflow) {
+  const crossingTotal = changeSizeWarningCrossingTotal(workflow);
+  const acknowledgment = workflow.change_size_warning?.acknowledgment;
+  return (
+    crossingTotal != null &&
+    (acknowledgment == null || crossingTotal > acknowledgment.total_lines)
+  );
+}
+
+// A split promises a smaller change, so its execution is judged by the same
+// quantity the warning crossed on: the measured size of the base..head
+// patch. Nothing that fails to shrink the measurement releases the gate --
+// an empty descendant and a change-then-revert sequence never can, and
+// unrelated growth or a typical finding fix does not. A round measuring
+// below the acknowledged crossing is admitted whatever produced the
+// reduction: a change that has genuinely shrunk is the split's substance
+// delivered. Recording "split" and then proceeding unchanged would be the
+// #79 failure one level up: a record without teeth. An audited continue
+// re-acknowledgment releases it without the cut, so sovereignty stays with
+// the operator.
+function changeSizeSplitPending(workflow, candidateTotalLines = null) {
+  const acknowledgment = workflow.change_size_warning?.acknowledgment;
+  if (
+    acknowledgment?.decision !== "split" ||
+    acknowledgment.executed_at != null ||
+    workflow.current_head_sha == null
+  ) {
+    return false;
+  }
+  if (candidateTotalLines != null) {
+    return candidateTotalLines >= acknowledgment.total_lines;
+  }
+  // The same diff invocation the immutable snapshot measures, over the
+  // committed range so uncommitted content cannot influence the gate.
+  const patch = runGit(workflow.repository.path, [
+    "-c",
+    "core.quotePath=true",
+    "diff",
+    "--binary",
+    "--full-index",
+    "--no-ext-diff",
+    workflow.base_sha,
+    workflow.current_head_sha,
+    "--",
+  ]).stdout;
+  return patchChangeSize(patch).total_lines >= acknowledgment.total_lines;
+}
+
+// An admitted round whose immutable measurement is below the acknowledged
+// crossing is what proves the split executed -- the stamp is tied to that
+// measurement, never to a fresh diff, so it happens at the bind (candidate
+// change_size) or when the rereview snapshot's change_size is observed.
+// Later growth of the successor work can no longer re-trigger an
+// already-fulfilled split.
+function markChangeSizeSplitExecuted(next, admittedTotalLines) {
+  const acknowledgment = next.change_size_warning?.acknowledgment;
+  if (
+    acknowledgment?.decision === "split" &&
+    acknowledgment.executed_at == null &&
+    admittedTotalLines < acknowledgment.total_lines
+  ) {
+    acknowledgment.executed_at = now();
+  }
+}
+
+// The review round in flight when a snapshot crosses the warning completes
+// normally; only the NEXT round's preparation stops here, while acting on a
+// split is still cheap. The ceiling pause CHANGE_SIZE_BUDGET_EXCEEDED is a
+// separate, unchanged mechanism.
+function requireAcknowledgedChangeSizeWarning(workflow) {
+  if (changeSizeWarningPending(workflow)) {
+    fail(
+      "WORKFLOW_CHANGE_SIZE_WARNING_UNACKNOWLEDGED",
+      "the crossed change-size warning requires a recorded split decision: call acknowledge_change_size_warning with continue or split before preparing the next review round",
+      {
+        required_action: "acknowledge_change_size_warning",
+        crossed_total_lines: changeSizeWarningCrossingTotal(workflow),
+        acknowledged_total_lines:
+          workflow.change_size_warning?.acknowledgment?.total_lines ?? null,
+        change_size_budget: workflow.change_size_budget,
+      },
+    );
+  }
+}
+
+// At the bind gate the candidate snapshot's immutable change_size is the
+// authoritative quantity and must be passed in: a fresh committed-range diff
+// honors the worktree's current attribute rules, so attribute games could
+// make it diverge from what the admitted snapshot actually measures. Without
+// a candidate -- the AUTHOR_RESPONDED gate, or a legacy review with no
+// stored measurement -- the committed-range diff is the best available
+// proxy, and a snapshot that later measures larger records a fresh crossing
+// and re-arms the demand.
+function requireExecutedChangeSizeSplit(workflow, candidateTotalLines = null) {
+  if (changeSizeSplitPending(workflow, candidateTotalLines)) {
+    fail(
+      "WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED",
+      "the recorded split has not shrunk the change below its acknowledged crossing: record the cut, or re-acknowledge with continue, before preparing the next review round",
+      {
+        acknowledged_total_lines:
+          workflow.change_size_warning.acknowledgment.total_lines,
+        change_size_budget: workflow.change_size_budget,
+      },
+    );
+  }
 }
 
 function assertSha(value, name) {
@@ -935,6 +1103,66 @@ function validateCurrentPublication(workflow) {
       "the bound publication head is not the current workflow head",
     );
   }
+}
+
+function validateChangeSizeWarning(workflow) {
+  if (workflow.change_size_warning == null) {
+    return;
+  }
+  const warning = assertObject(
+    workflow.change_size_warning,
+    "workflow.change_size_warning",
+  );
+  assertPositiveInteger(
+    warning.total_lines,
+    "workflow.change_size_warning.total_lines",
+  );
+  assertString(warning.crossed_at, "workflow.change_size_warning.crossed_at", {
+    max: 1024,
+  });
+  if (warning.acknowledgment == null) {
+    return;
+  }
+  const acknowledgment = assertObject(
+    warning.acknowledgment,
+    "workflow.change_size_warning.acknowledgment",
+  );
+  if (!["continue", "split"].includes(acknowledgment.decision)) {
+    fail(
+      "WORKFLOW_STATE_INVALID",
+      "change-size warning acknowledgment decision is invalid",
+    );
+  }
+  assertString(
+    acknowledgment.rationale,
+    "workflow.change_size_warning.acknowledgment.rationale",
+  );
+  assertCanonicalStringCapacity(
+    acknowledgment.rationale,
+    "workflow.change_size_warning.acknowledgment.rationale",
+    MAX_ACKNOWLEDGMENT_RATIONALE_BYTES,
+  );
+  assertPositiveInteger(
+    acknowledgment.total_lines,
+    "workflow.change_size_warning.acknowledgment.total_lines",
+  );
+  if (acknowledgment.executed_at != null) {
+    assertString(
+      acknowledgment.executed_at,
+      "workflow.change_size_warning.acknowledgment.executed_at",
+      { max: 1024 },
+    );
+  }
+  assertString(
+    acknowledgment.operator_label,
+    "workflow.change_size_warning.acknowledgment.operator_label",
+    { max: 1024 },
+  );
+  assertString(
+    acknowledgment.acknowledged_at,
+    "workflow.change_size_warning.acknowledgment.acknowledged_at",
+    { max: 1024 },
+  );
 }
 
 function validateCurrentReview(workflow) {
@@ -1927,6 +2155,7 @@ function validateWorkflow(workflow) {
       );
     }
   }
+  validateChangeSizeWarning(workflow);
   validateCurrentReview(workflow);
   validateActiveAction(workflow);
   assertObject(workflow.action_audit, "workflow.action_audit");
@@ -1954,6 +2183,7 @@ const COMPAT_FIELD_DEFAULTS = Object.freeze({
   local_review_cycles: [],
   local_cycle_budget: DEFAULT_LOCAL_CYCLE_BUDGET,
   change_size_budget: DEFAULT_CHANGE_SIZE_BUDGET,
+  change_size_warning: null,
   remote_attempts: [],
   remote_cycle_budget: DEFAULT_REMOTE_CYCLE_BUDGET,
   current_publication: null,
@@ -2365,6 +2595,7 @@ function auditedWorkflowState(workflow, previousWorkflow = null) {
       workflow.local_cycle_budget ?? DEFAULT_LOCAL_CYCLE_BUDGET,
     change_size_budget:
       workflow.change_size_budget ?? DEFAULT_CHANGE_SIZE_BUDGET,
+    change_size_warning: workflow.change_size_warning ?? null,
     remote_attempts: workflow.remote_attempts ?? [],
     remote_cycle_budget:
       workflow.remote_cycle_budget ?? DEFAULT_REMOTE_CYCLE_BUDGET,
@@ -2585,6 +2816,7 @@ function requireWorkflowAuditBinding(workflow, audit) {
     }),
     local_cycle_budget: workflow.local_cycle_budget,
     change_size_budget: workflow.change_size_budget,
+    change_size_warning: null,
     remote_attempts: [],
     remote_cycle_budget: workflow.remote_cycle_budget,
     addressed_findings: [],
@@ -2620,6 +2852,8 @@ function requireWorkflowAuditBinding(workflow, audit) {
       (lastState.local_cycle_budget ?? DEFAULT_LOCAL_CYCLE_BUDGET) ||
     workflow.change_size_budget !==
       (lastState.change_size_budget ?? DEFAULT_CHANGE_SIZE_BUDGET) ||
+    canonicalJson(workflow.change_size_warning ?? null) !==
+      canonicalJson(lastState.change_size_warning ?? null) ||
     canonicalJson(workflow.remote_attempts ?? []) !==
       canonicalJson(lastState.remote_attempts ?? []) ||
     workflow.remote_cycle_budget !==
@@ -2691,6 +2925,7 @@ async function reconcileWorkflowAudit(paths, workflow) {
     "attempts",
     "local_cycle_budget",
     "change_size_budget",
+    "change_size_warning",
     "remote_attempts",
     "remote_cycle_budget",
     "addressed_findings",
@@ -3117,6 +3352,7 @@ function workflowSummary(workflow) {
     local_cycle_budget: workflow.local_cycle_budget,
     local_cycle_count: localCycleCount(workflow),
     change_size_budget: workflow.change_size_budget,
+    change_size_warning: structuredClone(workflow.change_size_warning ?? null),
     remote_attempts: workflow.remote_attempts,
     remote_cycle_budget: workflow.remote_cycle_budget,
     remote_cycle_count: remoteCycleCount(workflow),
@@ -3259,6 +3495,7 @@ export async function startAutonomousWorkflow(
     local_review_cycles: [],
     local_cycle_budget: localCycleBudget,
     change_size_budget: changeSizeBudget,
+    change_size_warning: null,
     remote_attempts: [],
     remote_cycle_budget: remoteCycleBudget,
     addressed_findings: [],
@@ -3470,6 +3707,14 @@ export async function recordWorkflowHead(
       workflow.local_review_cycles.at(-1)?.continued_from_review_id ===
         workflow.current_review?.review_id &&
       workflow.local_review_cycles.at(-1)?.addressed_head_sha == null;
+    // A head recorded from PREPARE_LOCAL_REVIEW refines an addressed head
+    // whose follow-up review is not yet bound. The latest cycle's addressed
+    // head must move with it, or the follow-up bind would no longer see a
+    // pending continuation and the carried open findings would be dropped.
+    const pendingFollowupRefinement =
+      workflow.phase === "PREPARE_LOCAL_REVIEW" &&
+      workflow.local_review_cycles.at(-1)?.addressed_head_sha != null &&
+      workflow.local_review_cycles.at(-1)?.followup_review_id == null;
     const saveRecordedHead = async (addressedFindings) =>
       publicWorkflow(
         await saveMutation(paths, workflow, async (next) => {
@@ -3495,7 +3740,7 @@ export async function recordWorkflowHead(
           // The publication ledger stays on disk as history but can no longer
           // authorize this workflow; the repaired head starts a fresh cycle.
           next.current_publication = null;
-          if (pendingLocalContinuation) {
+          if (pendingLocalContinuation || pendingFollowupRefinement) {
             next.local_review_cycles.at(-1).addressed_head_sha = headSha;
             next.phase = "PREPARE_LOCAL_REVIEW";
           } else if (next.phase !== "ADDRESS_LOCAL_FINDINGS") {
@@ -3611,11 +3856,16 @@ export async function bindWorkflowReview(
         `cannot bind a review in phase ${workflow.phase}`,
       );
     }
+    requireAcknowledgedChangeSizeWarning(workflow);
     // Validate and bind under the review mutation lock so a review verdict
     // submitted after this snapshot cannot be hidden behind a stale
     // WAITING_FOR_REVIEW binding that then dispatches a reviewer task.
     return getReviewSnapshot(storeRoot, reviewId, async ({ review, summary }) => {
       requireCleanReviewRound(review);
+      requireExecutedChangeSizeSplit(
+        workflow,
+        summary.current_snapshot?.change_size?.total_lines ?? null,
+      );
       const reviewRepository = await fsp.realpath(review.repository_path);
       if (
         reviewRepository !== workflow.repository.path ||
@@ -3719,6 +3969,8 @@ export async function bindWorkflowReview(
           if (isContinuationFollowup) {
             next.local_review_cycles.at(-1).followup_review_id = reviewId;
           }
+          recordChangeSizeWarningCrossing(next, measuredChangeSize.total_lines);
+          markChangeSizeSplitExecuted(next, measuredChangeSize.total_lines);
           // A repaired head binds a different review, and every review ID gets
           // its own fresh reviewer task. Releasing the previous binding is what
           // lets the next dispatch be planned at all.
@@ -3848,6 +4100,10 @@ export async function planCodexTaskDispatch(
             "WORKFLOW_PAUSED",
             async (next) => {
               next.current_review.change_size = measuredChangeSize;
+              recordChangeSizeWarningCrossing(
+                next,
+                measuredChangeSize.total_lines,
+              );
               next.status = "PAUSED";
               next.phase = "PAUSED_HUMAN";
               next.pause = {
@@ -3872,6 +4128,7 @@ export async function planCodexTaskDispatch(
         }
         const backfilled = await saveMutation(paths, workflow, async (next) => {
           next.current_review.change_size = measuredChangeSize;
+          recordChangeSizeWarningCrossing(next, measuredChangeSize.total_lines);
         });
         return { paused: null, revision: backfilled.revision };
       }
@@ -4477,6 +4734,10 @@ export async function markWorkflowActionExecuting(
           "WORKFLOW_PAUSED",
           async (next) => {
             next.current_review.change_size = measuredChangeSize;
+            recordChangeSizeWarningCrossing(
+              next,
+              measuredChangeSize.total_lines,
+            );
             next.active_action = null;
             next.status = "PAUSED";
             next.phase = "PAUSED_HUMAN";
@@ -4604,6 +4865,10 @@ export async function markWorkflowActionExecuting(
         async (next) => {
           if (measuredChangeSize != null) {
             next.current_review.change_size = measuredChangeSize;
+            recordChangeSizeWarningCrossing(
+              next,
+              measuredChangeSize.total_lines,
+            );
           }
           next.active_action.status = "EXECUTING";
           next.active_action.executing_at = now();
@@ -5560,6 +5825,12 @@ export async function advanceLocalWorkflow(
         `review status ${summary.status} cannot advance workflow phase ${workflow.phase}`,
       );
     }
+    // Entering PREPARE_REREVIEW is what spends the next review round; the
+    // round whose snapshot crossed the warning has already completed by here.
+    if (summary.status === "AUTHOR_RESPONDED") {
+      requireAcknowledgedChangeSizeWarning(workflow);
+      requireExecutedChangeSizeSplit(workflow);
+    }
     const snapshotHead = summary.current_snapshot?.head_sha ?? null;
     if (
       [
@@ -5629,6 +5900,13 @@ export async function advanceLocalWorkflow(
                   total_lines: snapshotChangeSize.total_lines,
                 },
         };
+        if (snapshotChangeSize != null) {
+          recordChangeSizeWarningCrossing(
+            next,
+            snapshotChangeSize.total_lines,
+          );
+          markChangeSizeSplitExecuted(next, snapshotChangeSize.total_lines);
+        }
         next.progress_fingerprint = findingFingerprint(summary);
         const phases = {
           WAITING_FOR_REVIEW: "WAIT_LOCAL_REVIEW",
@@ -6602,6 +6880,81 @@ export async function extendChangeSizeBudget(
           measured_change_size: measuredSize,
           operator_label: operatorLabel,
           rationale,
+        },
+      ),
+    );
+  });
+}
+
+export async function acknowledgeChangeSizeWarning(
+  storeRoot,
+  workflowId,
+  expectedRevision,
+  { decision, rationale, operatorLabel },
+) {
+  if (!["continue", "split"].includes(decision)) {
+    throw new TypeError('decision must be "continue" or "split"');
+  }
+  assertString(rationale, "rationale");
+  assertCanonicalStringCapacity(
+    rationale,
+    "rationale",
+    MAX_ACKNOWLEDGMENT_RATIONALE_BYTES,
+  );
+  assertString(operatorLabel, "operator_label", { max: 1024 });
+  return withWorkflowLock(storeRoot, workflowId, async (workflow, paths) => {
+    requireRevision(workflow, expectedRevision);
+    if (
+      !changeSizeWarningPending(workflow) &&
+      !changeSizeSplitPending(workflow)
+    ) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "workflow has no unacknowledged change-size warning crossing",
+      );
+    }
+    // The decision is answered only where the gate refuses and where
+    // record_workflow_head can still commit a split's intended cut. Accepting
+    // it from any other state would record a cut that no permitted action
+    // could deliver -- a paused workflow answers its pause first.
+    if (
+      workflow.status !== "ACTIVE" ||
+      !["ADDRESS_LOCAL_FINDINGS", "PREPARE_LOCAL_REVIEW"].includes(
+        workflow.phase,
+      )
+    ) {
+      fail(
+        "WORKFLOW_STATE_INVALID",
+        "a change-size warning is acknowledged where the next round is prepared: from ADDRESS_LOCAL_FINDINGS or PREPARE_LOCAL_REVIEW on an active workflow",
+      );
+    }
+    const crossedTotal = changeSizeWarningCrossingTotal(workflow);
+    return publicWorkflow(
+      await saveActionMutation(
+        paths,
+        workflow,
+        "CHANGE_SIZE_WARNING_ACKNOWLEDGED",
+        async (next) => {
+          // A pre-upgrade ledger reaches this acknowledgment with a derived
+          // crossing and no recorded warning; the record is created here.
+          next.change_size_warning = {
+            total_lines: crossedTotal,
+            crossed_at: next.change_size_warning?.crossed_at ?? now(),
+            acknowledgment: {
+              decision,
+              rationale,
+              total_lines: crossedTotal,
+              operator_label: operatorLabel,
+              acknowledged_at: now(),
+            },
+          };
+        },
+        {
+          decision,
+          rationale,
+          crossed_total_lines: crossedTotal,
+          change_size_budget: workflow.change_size_budget,
+          operator_label: operatorLabel,
         },
       ),
     );
