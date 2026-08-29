@@ -14,7 +14,7 @@ import {
   WORKFLOW_STOP_INPUTS,
   workflowRequiredInputs,
 } from "../src/tool-inputs.mjs";
-import { ACTION_KIND_SPECS } from "../src/workflow.mjs";
+import { ACTION_KIND_SPECS, continuesLocalCycle } from "../src/workflow.mjs";
 
 const serverPath = path.resolve("src/server.mjs");
 
@@ -326,6 +326,38 @@ test("every local-review phase declares the advance that follows it", () => {
       `${action} must declare advance_local_workflow`,
     );
   }
+});
+
+// Recording a head against an open continuation cycle moves the phase itself,
+// into one the advance refuses, so the declaration has to select on the same
+// condition the head recording decides with.
+test("a continuation cycle declares the head alone", () => {
+  const cycle = {
+    continued_from_review_id: "rb-first",
+    addressed_head_sha: null,
+  };
+  const workflow = {
+    phase: "ADDRESS_LOCAL_FINDINGS",
+    local_review_cycles: [cycle],
+    current_review: { review_id: "rb-first" },
+  };
+  const declared = () =>
+    workflowRequiredInputs(
+      "ADDRESS_LOCAL_FINDINGS",
+      workflow,
+      continuesLocalCycle(workflow),
+    );
+  assert.equal(continuesLocalCycle(workflow), true);
+  assert.deepEqual(Object.keys(declared()), ["record_workflow_head"]);
+
+  // The ordinary cycle answers findings against its own review and owes the
+  // advance, because the head recording leaves it in this phase.
+  cycle.continued_from_review_id = null;
+  assert.equal(continuesLocalCycle(workflow), false);
+  assert.deepEqual(Object.keys(declared()), [
+    "record_workflow_head",
+    "advance_local_workflow",
+  ]);
 });
 
 // A declared sequence whose earlier call writes the ledger a later call

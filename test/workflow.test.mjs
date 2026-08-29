@@ -4449,6 +4449,16 @@ test("uncontested rereview findings continue through a FULL review and obey the 
     started.workflow_id,
     workflow.revision,
   );
+  // The ordinary cycle answers findings against its own review, and recording
+  // the head leaves the workflow in this phase for the advance.
+  assert.equal(workflow.phase, "ADDRESS_LOCAL_FINDINGS");
+  assert.deepEqual(
+    Object.keys(
+      (await getAutonomousWorkflowSummary(state.store, started.workflow_id))
+        .required_inputs,
+    ),
+    ["record_workflow_head", "advance_local_workflow"],
+  );
   const fixedHead = await commitImplementation(
     state.repository,
     "export const value = 3;\n",
@@ -4508,6 +4518,16 @@ test("uncontested rereview findings continue through a FULL review and obey the 
   );
   assert.equal(workflow.local_review_cycles[0].findings.length, 100);
   assert.equal(workflow.local_review_cycles[0].findings[0].finding_id, "F-002");
+  // The head about to be recorded closes this continuation cycle and moves the
+  // phase itself, so the summary must not also name the advance that the phase
+  // it lands in refuses.
+  assert.deepEqual(
+    Object.keys(
+      (await getAutonomousWorkflowSummary(state.store, started.workflow_id))
+        .required_inputs,
+    ),
+    ["record_workflow_head"],
+  );
 
   const continuationHead = await commitImplementation(
     state.repository,

@@ -322,6 +322,21 @@ function requireExecutedChangeSizeSplit(workflow, candidateTotalLines = null) {
   }
 }
 
+/**
+ * Whether the next head recorded in this phase closes an open continuation
+ * cycle. Such a head answers a `CONTINUABLE_FINDINGS` round, so recording it
+ * moves the phase itself instead of leaving the workflow for the advance that
+ * an ordinary author-resolution cycle owes.
+ */
+export function continuesLocalCycle(workflow) {
+  return (
+    workflow.phase === "ADDRESS_LOCAL_FINDINGS" &&
+    workflow.local_review_cycles.at(-1)?.continued_from_review_id ===
+      workflow.current_review?.review_id &&
+    workflow.local_review_cycles.at(-1)?.addressed_head_sha == null
+  );
+}
+
 function assertSha(value, name) {
   if (typeof value !== "string" || !SHA_RE.test(value)) {
     throw new TypeError(`${name} must be a full lowercase Git SHA`);
@@ -3345,7 +3360,11 @@ function workflowSummary(workflow) {
     status: workflow.status,
     phase: workflow.phase,
     next_action: action,
-    required_inputs: workflowRequiredInputs(action, workflow),
+    required_inputs: workflowRequiredInputs(
+      action,
+      workflow,
+      continuesLocalCycle(workflow),
+    ),
     base_sha: workflow.base_sha,
     topic_branch: workflow.topic_branch,
     current_head_sha: workflow.current_head_sha,
@@ -3705,11 +3724,7 @@ export async function recordWorkflowHead(
         );
       }
     }
-    const pendingLocalContinuation =
-      workflow.phase === "ADDRESS_LOCAL_FINDINGS" &&
-      workflow.local_review_cycles.at(-1)?.continued_from_review_id ===
-        workflow.current_review?.review_id &&
-      workflow.local_review_cycles.at(-1)?.addressed_head_sha == null;
+    const pendingLocalContinuation = continuesLocalCycle(workflow);
     // A head recorded from PREPARE_LOCAL_REVIEW refines an addressed head
     // whose follow-up review is not yet bound. The latest cycle's addressed
     // head must move with it, or the follow-up bind would no longer see a

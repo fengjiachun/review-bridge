@@ -593,10 +593,20 @@ export function publicationRequiredInputs(nextAction) {
   return PUBLICATION_ACTION_INPUTS[nextAction] ?? {};
 }
 
-export function workflowRequiredInputs(nextAction, workflow) {
+export function workflowRequiredInputs(
+  nextAction,
+  workflow,
+  continuesLocalCycle = false,
+) {
   const ownsClaims = (workflow.claims ?? []).some(
     (entry) => entry.disposition === "ACTIVE",
   );
+  // A head recorded against an open continuation cycle closes that cycle and
+  // moves the phase itself, into one the advance refuses. Only the ordinary
+  // author-resolution cycle owes an advance after the head.
+  if (nextAction === "ADDRESS_LOCAL_FINDINGS" && continuesLocalCycle) {
+    return RECORD_HEAD;
+  }
   if (nextAction === "AWAIT_OPERATOR") {
     // A terminal run and a post-ready stop also wait on the operator without
     // being paused, and resume refuses every workflow that is not PAUSED.
