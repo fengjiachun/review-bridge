@@ -2226,12 +2226,6 @@ gate in a repository the App reviews. An expected-actor object is evaluated as
 a response instead, and an unrecognized response shape remains fail-closed as
 `UNKNOWN` rather than being ignored, unless it carries a known App marker.
 
-Trigger scanning ignores `>`-quoted lines and fenced code blocks. A comment
-that quotes the trigger phrase while discussing it is not a request; every
-other mention, including a mid-sentence one, still is, and still fails closed.
-Author surfaces that need to write the phrase without asking for a review put
-it in quoted or fenced form.
-
 An expected-actor object that is not verdict-shaped and carries a marker the
 Codex App uses to identify its own notices — today the review-summary marker
 and the environment notice — is reported under `app_notices` with that marker

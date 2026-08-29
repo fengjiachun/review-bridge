@@ -9,11 +9,6 @@ import {
 
 const EXACT_REQUEST = "@codex review";
 const TRIGGER_SHAPE = /@codex\s+review\b/i;
-const QUOTED_LINE = /^ {0,3}>/;
-const CODE_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-const FENCE_CLOSER_TAIL = /^[ \t]*$/;
-const STRIPPED_LINE = "\u0000";
-const LINE_BREAK = /\r\n|\r|\n/;
 const APP_NOTICE_MARKERS = [
   {
     marker: "codex-pull-request-review-summary",
@@ -37,38 +32,6 @@ const REQUEST_MARKER_COUNT = Symbol("requestMarkerCount");
 
 function requestIdFromBody(body) {
   return codexRequestIdFromBody(body);
-}
-
-function triggerScannableBody(body) {
-  const scanned = [];
-  let fence = null;
-  for (const line of body.split(LINE_BREAK)) {
-    const [, marker, info] = CODE_FENCE.exec(line) ?? [];
-    let stripped = false;
-    if (marker != null) {
-      if (fence == null) {
-        if (marker[0] !== "`" || !info.includes("`")) {
-          fence = marker;
-          stripped = true;
-        }
-      } else {
-        if (
-          marker[0] === fence[0] &&
-          marker.length >= fence.length &&
-          FENCE_CLOSER_TAIL.test(info)
-        ) {
-          fence = null;
-        }
-        stripped = true;
-      }
-    }
-    scanned.push(
-      stripped || fence != null || QUOTED_LINE.test(line)
-        ? STRIPPED_LINE
-        : line,
-    );
-  }
-  return scanned.join("\n");
 }
 
 export function codexAppNoticeMarker(body) {
@@ -668,8 +631,7 @@ export function adaptCodexEvidence({
         const looksLikeRequest =
           !looksLikeResult &&
           !isExpectedActor &&
-          (body === EXACT_REQUEST ||
-            TRIGGER_SHAPE.test(triggerScannableBody(body)));
+          (body === EXACT_REQUEST || TRIGGER_SHAPE.test(body));
         if (
           kind === "PULL_REQUEST_REVIEW" &&
           isExpectedActor &&
@@ -865,8 +827,7 @@ export function adaptCodexEvidence({
       const looksLikeRequest =
         !looksLikeResult &&
         !isExpectedActor &&
-        (body === EXACT_REQUEST ||
-          TRIGGER_SHAPE.test(triggerScannableBody(body)));
+        (body === EXACT_REQUEST || TRIGGER_SHAPE.test(body));
       const noticeMarker =
         isExpectedActor && !looksLikeResult ? codexAppNoticeMarker(body) : null;
       if (

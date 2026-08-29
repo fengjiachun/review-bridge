@@ -94,11 +94,6 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   still runs first, so a marker-carrying comment that does match a verdict
   format stays that verdict, and an unrecognized shape without a known marker
   keeps failing closed. (#87)
-- Strip `>`-quoted lines and fenced code blocks before scanning a body for the
-  review trigger. A pull-request comment that quotes `@codex review` while
-  discussing it is no longer classified as an unsupported request. Every other
-  mention, including a mid-sentence one, stays request-classified and fails
-  closed. (#87)
 
 ## 0.9.0 - 2026-08-14
 
