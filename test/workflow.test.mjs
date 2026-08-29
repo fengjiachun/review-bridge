@@ -3105,6 +3105,90 @@ test("round-two advancement rejects an overlay-bearing snapshot", async (t) => {
   );
 });
 
+test("a rereview prepared before the advance names the ran-ahead wedge", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const { completed } = await dispatchReviewer(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [
+      {
+        severity: "major",
+        title: "Fix the committed value",
+        explanation: "The committed value needs a second revision.",
+      },
+    ],
+    "CODEX_TASK",
+  );
+  const findings = await advanceLocalWorkflow(
+    state.store,
+    workflow.workflow_id,
+    completed.revision,
+  );
+  const fixedHead = await commitImplementation(
+    state.repository,
+    "export const value = 3;\n",
+  );
+  const fixed = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    findings.revision,
+    fixedHead,
+  );
+  await submitResolutions(state.store, review.id, [
+    {
+      finding_id: "F-001",
+      disposition: "fixed",
+      rationale: "Committed the requested value.",
+      evidence: "The new head contains the fix.",
+    },
+  ]);
+  // The driver skips the AUTHOR_RESPONDED advance and prepares round two
+  // directly: the review runs ahead of the workflow.
+  await prepareRereview(state.store, review.id);
+
+  await assert.rejects(
+    advanceLocalWorkflow(state.store, workflow.workflow_id, fixed.revision),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_REVIEW_RAN_AHEAD");
+      assert.match(error.message, /cancel the workflow/);
+      return true;
+    },
+  );
+  const stuck = await getAutonomousWorkflow(state.store, workflow.workflow_id);
+  assert.equal(stuck.phase, "ADDRESS_LOCAL_FINDINGS");
+
+  // The downstream statuses keep the same name: a completed rereview does
+  // not turn the wedge back into the generic transition error.
+  await submitRereview(
+    state.store,
+    review.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "resolved",
+        rationale: "The committed descendant fixes the finding.",
+      },
+    ],
+    [],
+    "CODEX_TASK",
+  );
+  await assert.rejects(
+    advanceLocalWorkflow(state.store, workflow.workflow_id, fixed.revision),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_REVIEW_RAN_AHEAD");
+      return true;
+    },
+  );
+});
+
 test("an author human-required resolution pauses without preparing round two", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
