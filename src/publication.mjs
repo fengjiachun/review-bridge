@@ -8,6 +8,10 @@ import {
   isCodexRequestId,
 } from "./codex-request.mjs";
 import { loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
+// One derivation of the App's notice markers, shared with the adapter that
+// records them. A notice is only non-blocking because its body carries a
+// marker, so the claim has to be checked here against that body.
+import { codexAppNoticeMarker } from "./github-adapter.mjs";
 // One derivation of thread completeness, shared with the normalizer that
 // records it. Two copies of this rule would be two things to keep in step.
 import { threadProvenanceComplete } from "./github-observation.mjs";
@@ -1621,6 +1625,14 @@ function validateCodexPartitions(codexReview, ledger) {
       ["codex-pull-request-review-summary", "codex-environment-notice"],
       "app_notice.marker",
     );
+    assertDigest(notice.body_sha256, "app_notice.body_sha256");
+    assertString(notice.body, "app_notice.body");
+    if (sha256(Buffer.from(notice.body, "utf8")) !== notice.body_sha256) {
+      fail("INVALID_INPUT", "app notice body does not match its digest");
+    }
+    if (codexAppNoticeMarker(notice.body) !== notice.marker) {
+      fail("INVALID_INPUT", "app notice body does not carry its marker");
+    }
     assertObject(notice.actor, "app_notice.actor");
     if (
       notice.actor.id !== ledger.target.codex_actor.id ||
@@ -1631,7 +1643,6 @@ function validateCodexPartitions(codexReview, ledger) {
         "app notice must carry the pinned Codex actor",
       );
     }
-    assertDigest(notice.body_sha256, "app_notice.body_sha256");
   }
   return baselineConflict
     ? "immutable Codex baseline object disappeared or changed"

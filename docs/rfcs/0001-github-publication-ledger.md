@@ -2236,9 +2236,13 @@ An expected-actor object that is not verdict-shaped and carries a marker the
 Codex App uses to identify its own notices — today the review-summary marker
 and the environment notice — is reported under `app_notices` with that marker
 rather than as an unrecognized result. Each entry carries `resource_id`,
-`resource_kind`, URL, `event_at`, `timestamp_field`, `body_sha256`, the pinned
-actor, and the matched marker; it is audit-only and never blocks a gate. This
-carve-out is bounded by two rules. Verdict recognition runs first, so a
+`resource_kind`, URL, `event_at`, `timestamp_field`, the body, `body_sha256`,
+the pinned actor, and the matched marker; it is audit-only and never blocks a
+gate. The body is carried because the claim is what makes the entry
+non-blocking: the ledger recomputes the digest and rederives the marker from
+that body, so an observation cannot move an unrecognized response out of the
+fail-closed result path by asserting a marker its body never carried. This
+carve-out is bounded by two further rules. Verdict recognition runs first, so a
 marker-carrying object that matches a verdict format is that verdict. And an
 unrecognized shape without a known marker keeps failing closed, which is what
 keeps a real verdict in a new format from being silently dropped. The App

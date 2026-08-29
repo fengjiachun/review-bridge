@@ -11,6 +11,7 @@ const EXACT_REQUEST = "@codex review";
 const TRIGGER_SHAPE = /@codex\s+review\b/i;
 const QUOTED_LINE = /^ {0,3}>/;
 const CODE_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const FENCE_CLOSER_TAIL = /^[ \t]*$/;
 const APP_NOTICE_MARKERS = [
   {
     marker: "codex-pull-request-review-summary",
@@ -50,7 +51,7 @@ function triggerScannableBody(body) {
       } else if (
         marker[0] === fence[0] &&
         marker.length >= fence.length &&
-        info.trim() === ""
+        FENCE_CLOSER_TAIL.test(info)
       ) {
         fence = null;
         continue;
@@ -66,8 +67,8 @@ function triggerScannableBody(body) {
   return kept.join("\n");
 }
 
-function appNoticeMarker(body) {
-  const trimmed = body.trim();
+export function codexAppNoticeMarker(body) {
+  const trimmed = String(body ?? "").trim();
   for (const { marker, shape } of APP_NOTICE_MARKERS) {
     if (shape.test(trimmed)) {
       return marker;
@@ -863,7 +864,7 @@ export function adaptCodexEvidence({
         (body === EXACT_REQUEST ||
           TRIGGER_SHAPE.test(triggerScannableBody(body)));
       const noticeMarker =
-        isExpectedActor && !looksLikeResult ? appNoticeMarker(body) : null;
+        isExpectedActor && !looksLikeResult ? codexAppNoticeMarker(body) : null;
       if (
         kind === "PULL_REQUEST_REVIEW" &&
         isExpectedActor &&
@@ -872,7 +873,11 @@ export function adaptCodexEvidence({
         continue;
       }
       if (noticeMarker) {
-        appNotices.push({ ...baseFacts(kind, object), marker: noticeMarker });
+        appNotices.push({
+          ...baseFacts(kind, object),
+          body,
+          marker: noticeMarker,
+        });
         continue;
       }
       if (looksLikeRequest) {
