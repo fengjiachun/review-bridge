@@ -743,21 +743,27 @@ test("a quoted or fenced trigger phrase is not a review request", async () => {
   const nested = structuredClone(input.issue_comments[0]);
   nested.id += 4;
   nested.body = "The help text reads\n\n````\n```\n@codex review\n```\n````\n";
+  const infoClosed = structuredClone(input.issue_comments[0]);
+  infoClosed.id += 5;
+  infoClosed.body = "Example\n\n```\n```not a close\n@codex review\n```\n";
   const mentioned = structuredClone(input.issue_comments[0]);
   mentioned.id += 3;
   mentioned.body = "I already asked for @codex review on this head.";
-  input.issue_comments.push(quoted, fenced, nested, mentioned);
+  const backtickInfo = structuredClone(input.issue_comments[0]);
+  backtickInfo.id += 6;
+  backtickInfo.body = "``` a ` b\n@codex review\n";
+  input.issue_comments.push(quoted, fenced, nested, infoClosed, mentioned, backtickInfo);
 
   const snapshot = adaptCodexEvidence(input);
   assert.deepEqual(
     snapshot.unsupported_requests.map((item) => item.resource_id),
-    [mentioned.id],
+    [mentioned.id, backtickInfo.id],
   );
 
   input.mode = "BASELINE";
   const baseline = adaptCodexEvidence(input);
   assert.deepEqual(
     baseline.requests.map((item) => item.resource_id),
-    [input.issue_comments[0].id, mentioned.id],
+    [input.issue_comments[0].id, mentioned.id, backtickInfo.id],
   );
 });
