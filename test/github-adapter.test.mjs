@@ -749,6 +749,12 @@ test("a quoted or fenced trigger phrase is not a review request", async () => {
   const nbspClosed = structuredClone(input.issue_comments[0]);
   nbspClosed.id += 10;
   nbspClosed.body = "Example\n\n```\n```\u00a0\n@codex review\n```\n";
+  const splitByFence = structuredClone(input.issue_comments[0]);
+  splitByFence.id += 11;
+  splitByFence.body = "@codex\n\n```\nnote\n```\n\nreview\n";
+  const splitByQuote = structuredClone(input.issue_comments[0]);
+  splitByQuote.id += 12;
+  splitByQuote.body = "@codex\n\n> note\n\nreview\n";
   const mentioned = structuredClone(input.issue_comments[0]);
   mentioned.id += 3;
   mentioned.body = "I already asked for @codex review on this head.";
@@ -771,6 +777,8 @@ test("a quoted or fenced trigger phrase is not a review request", async () => {
     infoClosed,
     indentedFence,
     nbspClosed,
+    splitByFence,
+    splitByQuote,
     mentioned,
     backtickInfo,
     tabFence,

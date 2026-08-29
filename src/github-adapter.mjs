@@ -12,6 +12,7 @@ const TRIGGER_SHAPE = /@codex\s+review\b/i;
 const QUOTED_LINE = /^ {0,3}>/;
 const CODE_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const FENCE_CLOSER_TAIL = /^[ \t]*$/;
+const STRIPPED_LINE = "\u0000";
 const APP_NOTICE_MARKERS = [
   {
     marker: "codex-pull-request-review-summary",
@@ -38,33 +39,35 @@ function requestIdFromBody(body) {
 }
 
 function triggerScannableBody(body) {
-  const kept = [];
+  const scanned = [];
   let fence = null;
   for (const line of body.split("\n")) {
     const [, marker, info] = CODE_FENCE.exec(line) ?? [];
+    let stripped = false;
     if (marker != null) {
       if (fence == null) {
         if (marker[0] !== "`" || !info.includes("`")) {
           fence = marker;
-          continue;
+          stripped = true;
         }
-      } else if (
-        marker[0] === fence[0] &&
-        marker.length >= fence.length &&
-        FENCE_CLOSER_TAIL.test(info)
-      ) {
-        fence = null;
-        continue;
       } else {
-        continue;
+        if (
+          marker[0] === fence[0] &&
+          marker.length >= fence.length &&
+          FENCE_CLOSER_TAIL.test(info)
+        ) {
+          fence = null;
+        }
+        stripped = true;
       }
     }
-    if (fence != null || QUOTED_LINE.test(line)) {
-      continue;
-    }
-    kept.push(line);
+    scanned.push(
+      stripped || fence != null || QUOTED_LINE.test(line)
+        ? STRIPPED_LINE
+        : line,
+    );
   }
-  return kept.join("\n");
+  return scanned.join("\n");
 }
 
 export function codexAppNoticeMarker(body) {
