@@ -10,7 +10,7 @@ import {
 const EXACT_REQUEST = "@codex review";
 const TRIGGER_SHAPE = /@codex\s+review\b/i;
 const QUOTED_LINE = /^\s{0,3}>/;
-const CODE_FENCE = /^\s{0,3}(?:```|~~~)/;
+const CODE_FENCE = /^\s{0,3}(`{3,}|~{3,})/;
 const APP_NOTICE_MARKERS = [
   {
     marker: "codex-pull-request-review-summary",
@@ -38,13 +38,20 @@ function requestIdFromBody(body) {
 
 function triggerScannableBody(body) {
   const kept = [];
-  let fenced = false;
+  let fence = null;
   for (const line of body.split("\n")) {
-    if (CODE_FENCE.test(line)) {
-      fenced = !fenced;
-      continue;
+    const opener = CODE_FENCE.exec(line)?.[1];
+    if (opener != null) {
+      if (fence == null) {
+        fence = opener;
+        continue;
+      }
+      if (opener[0] === fence[0] && opener.length >= fence.length) {
+        fence = null;
+        continue;
+      }
     }
-    if (fenced || QUOTED_LINE.test(line)) {
+    if (fence != null || QUOTED_LINE.test(line)) {
       continue;
     }
     kept.push(line);
