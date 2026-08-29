@@ -19,6 +19,8 @@ import {
   ACTION_KIND_SPECS,
   changeSizeWarningPending,
   continuesLocalCycle,
+  resolutionOwesRecord,
+  workflowSummary,
 } from "../src/workflow.mjs";
 
 const serverPath = path.resolve("src/server.mjs");
@@ -378,6 +380,9 @@ test("a pending change-size warning declares the acknowledgment", () => {
       changeSizeWarningPending: changeSizeWarningPending(crossed),
     });
     assert.deepEqual(declared, WARNING_GATED_INPUTS[action]);
+    // Either decision must be executable from the declaration, and a split is
+    // executed by committing the cut the next round measures.
+    assert.ok(declared.record_workflow_head);
     const gated =
       declared.bind_workflow_review ?? declared.advance_local_workflow;
     assert.match(
@@ -391,6 +396,82 @@ test("a pending change-size warning declares the acknowledgment", () => {
       false,
     );
   }
+});
+
+// A pre-resolved observation issued no mutation, so the publication exposes no
+// resolution to record and the recording call refuses it. Only a RESOLVED
+// outcome owes that record before the action may close.
+test("a pre-resolved thread declares only its completion", () => {
+  const observed = (outcome) => ({
+    active_action: {
+      kind: "RESOLVE_REVIEW_THREAD",
+      status: "OBSERVED",
+      provider_response: { outcome },
+    },
+  });
+  for (const [outcome, tools] of [
+    ["RESOLVED", ["record_automatic_resolution", "complete_workflow_action"]],
+    ["OBSERVED_PRE_RESOLVED", ["complete_workflow_action"]],
+  ]) {
+    const workflow = observed(outcome);
+    assert.deepEqual(
+      Object.keys(
+        workflowRequiredInputs("COMPLETE_THREAD_RESOLUTION", workflow, {
+          resolutionOwesRecord: resolutionOwesRecord(workflow.active_action),
+        }),
+      ),
+      tools,
+      `${outcome} must declare exactly the calls it owes`,
+    );
+  }
+});
+
+// Selecting the right declaration is only half of it: the summary has to hand
+// every condition to the selection. A dropped one reads as "nothing special
+// here" and silently restores the declaration the condition exists to replace.
+test("the summary passes every condition its declarations select on", () => {
+  const base = {
+    status: "ACTIVE",
+    local_review_cycles: [],
+    remote_attempts: [],
+    change_size_budget: 100,
+    change_size_warning: null,
+    ready_marks: [],
+    active_action: null,
+  };
+  const declared = (workflow) =>
+    Object.keys(workflowSummary({ ...base, ...workflow }).required_inputs);
+  assert.deepEqual(
+    declared({
+      phase: "ADDRESS_LOCAL_FINDINGS",
+      current_review: { review_id: "rb-first" },
+      local_review_cycles: [
+        { continued_from_review_id: "rb-first", addressed_head_sha: null },
+      ],
+    }),
+    ["record_workflow_head"],
+    "a continuation cycle must not be told to advance",
+  );
+  assert.deepEqual(
+    declared({
+      phase: "PREPARE_LOCAL_REVIEW",
+      change_size_warning: { total_lines: 90, acknowledgment: null },
+    }),
+    Object.keys(WARNING_GATED_INPUTS.PREPARE_LOCAL_REVIEW),
+    "a crossed warning must be told what clears it",
+  );
+  assert.deepEqual(
+    declared({
+      phase: "RESOLVE_CODEX_THREADS",
+      active_action: {
+        kind: "RESOLVE_REVIEW_THREAD",
+        status: "OBSERVED",
+        provider_response: { outcome: "OBSERVED_PRE_RESOLVED" },
+      },
+    }),
+    ["complete_workflow_action"],
+    "a pre-resolved thread must not be told to record",
+  );
 });
 
 // A declared sequence whose earlier call writes the ledger a later call

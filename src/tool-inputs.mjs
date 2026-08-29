@@ -379,6 +379,8 @@ export const WORKFLOW_ACTION_INPUTS = {
       ["resolved_by_type", "the post-read, required for RESOLVED"],
     ],
   },
+  // Only a RESOLVED outcome owes the record; the pre-resolved variant of this
+  // action is declared by COMPLETE_ACTION alone, below.
   COMPLETE_THREAD_RESOLUTION: {
     record_automatic_resolution: [
       PUBLICATION_ID,
@@ -506,10 +508,18 @@ const acknowledgeWarning = (revision) => [
 export const WARNING_GATED_INPUTS = {
   PREPARE_LOCAL_REVIEW: {
     acknowledge_change_size_warning: acknowledgeWarning(WORKFLOW_REVISION),
+    // A split decision promises a smaller change and the bind measures it, so
+    // the cut has to be committed before the round is prepared. This phase
+    // admits a head recording for exactly that.
+    record_workflow_head: [
+      WORKFLOW_ID,
+      afterWrite(WORKFLOW_REVISION, "the acknowledgment"),
+      ["head_sha", "the cut you committed, required for a split decision"],
+    ],
     prepare_review: WORKFLOW_ACTION_INPUTS.PREPARE_LOCAL_REVIEW.prepare_review,
     bind_workflow_review: [
       WORKFLOW_ID,
-      afterWrite(WORKFLOW_REVISION, "the acknowledgment"),
+      afterWrite(WORKFLOW_REVISION, "the acknowledgment and any recorded cut"),
       ["review_id", "the prepare_review result id"],
     ],
   },
@@ -632,7 +642,11 @@ export function publicationRequiredInputs(nextAction) {
 export function workflowRequiredInputs(
   nextAction,
   workflow,
-  { continuesLocalCycle = false, changeSizeWarningPending = false } = {},
+  {
+    continuesLocalCycle = false,
+    changeSizeWarningPending = false,
+    resolutionOwesRecord = false,
+  } = {},
 ) {
   const ownsClaims = (workflow.claims ?? []).some(
     (entry) => entry.disposition === "ACTIVE",
@@ -645,6 +659,11 @@ export function workflowRequiredInputs(
   }
   if (changeSizeWarningPending && WARNING_GATED_INPUTS[nextAction] != null) {
     return WARNING_GATED_INPUTS[nextAction];
+  }
+  // A pre-resolved observation claims no transition, so it has no record to
+  // make and the publication exposes none to name. It completes on its own.
+  if (nextAction === "COMPLETE_THREAD_RESOLUTION" && !resolutionOwesRecord) {
+    return COMPLETE_ACTION;
   }
   if (nextAction === "AWAIT_OPERATOR") {
     // A terminal run and a post-ready stop also wait on the operator without

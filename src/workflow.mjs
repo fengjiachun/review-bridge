@@ -329,6 +329,19 @@ function requireExecutedChangeSizeSplit(workflow, candidateTotalLines = null) {
 }
 
 /**
+ * Whether a completed thread resolution still owes the publication its
+ * server-owned record. Only a RESOLVED outcome mutated the thread; a
+ * pre-resolved observation issued no mutation, so it has nothing to record and
+ * nothing to hold the action open for.
+ */
+export function resolutionOwesRecord(action) {
+  return (
+    action?.kind === "RESOLVE_REVIEW_THREAD" &&
+    action.provider_response?.outcome === "RESOLVED"
+  );
+}
+
+/**
  * Whether the next head recorded in this phase closes an open continuation
  * cycle. Such a head answers a `CONTINUABLE_FINDINGS` round, so recording it
  * moves the phase itself instead of leaving the workflow for the advance that
@@ -3349,7 +3362,12 @@ function nextAction(workflow) {
   return actions[workflow.phase] ?? "INSPECT_WORKFLOW";
 }
 
-function workflowSummary(workflow) {
+/**
+ * The compact projection every workflow read surface returns, including the
+ * calls its current state implies. Exported so the declarations can be held to
+ * the conditions this projection selects them with.
+ */
+export function workflowSummary(workflow) {
   const action = nextAction(workflow);
   const currentReview = structuredClone(workflow.current_review);
   if (currentReview?.change_size != null) {
@@ -3369,6 +3387,7 @@ function workflowSummary(workflow) {
     required_inputs: workflowRequiredInputs(action, workflow, {
       continuesLocalCycle: continuesLocalCycle(workflow),
       changeSizeWarningPending: changeSizeWarningPending(workflow),
+      resolutionOwesRecord: resolutionOwesRecord(workflow.active_action),
     }),
     base_sha: workflow.base_sha,
     topic_branch: workflow.topic_branch,
@@ -5502,7 +5521,7 @@ export async function completeWorkflowAction(
       return completeDraftPullRequest(storeRoot, workflow, paths, action);
     }
     if (action.kind === "RESOLVE_REVIEW_THREAD") {
-      if (action.provider_response.outcome === "RESOLVED") {
+      if (resolutionOwesRecord(action)) {
         // The server-owned record must exist before the action may close.
         // Completing without it would let the next snapshot -- which shows
         // the thread resolved -- make the record permanently uncreatable,
