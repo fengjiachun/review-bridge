@@ -66,6 +66,14 @@ const PUBLICATION_TARGET_INPUTS = [
   ["codex_actor_login", "the pinned Codex bot actor"],
   ["codex_trigger_mode", "the operator's trigger policy"],
   ["codex_review_baseline", "the collector's preexisting Codex baseline"],
+  [
+    "operator_label",
+    "the acknowledging human; required for AUTOMATIC_QUIESCENCE_ACKNOWLEDGED, refused for EXPLICIT_ONLY",
+  ],
+  [
+    "rationale",
+    "the acknowledging human; required for AUTOMATIC_QUIESCENCE_ACKNOWLEDGED, refused for EXPLICIT_ONLY",
+  ],
 ];
 
 export const REVIEW_ACTION_INPUTS = {
@@ -504,6 +512,13 @@ export function publicationRequiredInputs(nextAction) {
 
 export function workflowRequiredInputs(nextAction, workflow) {
   if (nextAction === "AWAIT_OPERATOR") {
+    // A post-ready stop and a terminal MERGE_READY run also wait on the
+    // operator without being paused, and resume refuses every workflow that is
+    // not PAUSED. Declaring it there would send a driver at a call that can
+    // only fail, so those states declare nothing to call.
+    if (workflow.status !== "PAUSED") {
+      return {};
+    }
     return (
       WORKFLOW_STOP_INPUTS[workflow.pause?.reason_code] ??
       WORKFLOW_STOP_INPUTS.PAUSED

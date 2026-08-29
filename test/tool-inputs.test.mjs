@@ -5,9 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { startPublication } from "../src/publication.mjs";
 import { executingProof } from "../src/server-input.mjs";
 import {
   DECLARATION_TABLES,
+  REVIEW_ACTION_INPUTS,
   WORKFLOW_ACTION_INPUTS,
   WORKFLOW_STOP_INPUTS,
   workflowRequiredInputs,
@@ -249,5 +251,87 @@ test("a stopped workflow declares the call its own reason needs", () => {
       claims: [{ disposition: "RELEASED" }],
     }),
     {},
+  );
+});
+
+// A post-ready stop and a terminal run both wait on the operator while ACTIVE
+// or MERGE_READY. Resume refuses either, so neither may be told to call it.
+test("an unpaused operator stop declares no resume", () => {
+  for (const status of ["ACTIVE", "MERGE_READY"]) {
+    assert.deepEqual(
+      workflowRequiredInputs("AWAIT_OPERATOR", { status, pause: null }),
+      {},
+      `${status} must not advertise a call resume rejects`,
+    );
+  }
+});
+
+// start_publication requires the acknowledgement pair in automatic mode and
+// refuses it in explicit-only mode. Neither rule is visible to a JSON schema,
+// so the declaration is checked against the transition itself.
+test("declared start_publication inputs carry the acknowledgement pair", async (t) => {
+  const store = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-decl-"));
+  t.after(() => fsp.rm(store, { recursive: true, force: true }));
+  const declared = new Set(
+    REVIEW_ACTION_INPUTS.PUBLISH.start_publication.map(([field]) => field),
+  );
+  assert.ok(declared.has("operator_label"));
+  assert.ok(declared.has("rationale"));
+
+  // The publication lock is taken on the review directory before any argument
+  // is validated, so the directory has to exist for these refusals to be the
+  // ones under test.
+  const reviewId = "rb-2026-07-26T000000-000Z-deadbeef";
+  const reviewRoot = path.join(store, "reviews", reviewId);
+  await fsp.mkdir(reviewRoot, { recursive: true, mode: 0o700 });
+  await fsp.writeFile(
+    path.join(reviewRoot, "review.json"),
+    `${JSON.stringify({ id: reviewId, status: "LOCAL_GATE_PASSED", current_round: 1 })}\n`,
+    { mode: 0o600 },
+  );
+
+  const start = (overrides) =>
+    startPublication(store, {
+      reviewId,
+      repositoryId: 11,
+      owner: "owner",
+      repo: "repo",
+      prNumber: 7,
+      baseBranch: "main",
+      headBranch: "topic",
+      codexActorId: 99,
+      codexActorType: "Bot",
+      codexActorLogin: "codex[bot]",
+      codexTriggerMode: "AUTOMATIC_QUIESCENCE_ACKNOWLEDGED",
+      baseline: {},
+      ...overrides,
+    });
+
+  await assert.rejects(
+    () => start({ rationale: "why" }),
+    /operator_label/,
+    "automatic mode must still demand the declared operator_label",
+  );
+  await assert.rejects(
+    () => start({ operatorLabel: "jeremyhi" }),
+    /rationale/,
+    "automatic mode must still demand the declared rationale",
+  );
+  // Supplying both gets past the acknowledgement gate; the call still fails on
+  // the absent review, which is what proves the gate was cleared.
+  await assert.rejects(
+    () => start({ operatorLabel: "jeremyhi", rationale: "why" }),
+    (error) => !/operator_label|rationale/.test(error.message),
+  );
+  // The same pair is refused in explicit-only mode, which is why the
+  // declaration states the condition instead of listing them unconditionally.
+  await assert.rejects(
+    () =>
+      start({
+        codexTriggerMode: "EXPLICIT_ONLY",
+        operatorLabel: "jeremyhi",
+        rationale: "why",
+      }),
+    /explicit-only mode cannot include an acknowledgement/,
   );
 });
