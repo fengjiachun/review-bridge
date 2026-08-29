@@ -604,6 +604,71 @@ test("noise comments and decorative tests are contracted on both ends", async ()
   }
 });
 
+test("publish-bound work states its gate provider and its review strategy", async () => {
+  const flatten = (text) => text.replace(/\s+/g, " ");
+  const workflowSkill = flatten(
+    await readRequired(
+      path.join(
+        "templates",
+        "codex-plugin",
+        "skills",
+        "review-bridge-workflow",
+        "SKILL.md",
+      ),
+    ),
+  );
+  for (const [sentence, why] of [
+    [
+      "the local gate's provider is `CODEX_TASK` by default rather than a per-review choice",
+      "publish-bound work must state CODEX_TASK as the default local gate provider",
+    ],
+    [
+      "`DEEPSEEK_HARNESS` is the verification-shape second opinion beside that gate",
+      "DeepSeek Harness must be documented as the second opinion, not the gate",
+    ],
+    [
+      "never as the sole gate on a publication path",
+      "the second opinion must never read as a substitute for the gate",
+    ],
+    [
+      "A verified `SUCCESSOR` is the default and stands",
+      "successor must be stated as the default review strategy",
+    ],
+    [
+      "`force_full_review: true` is the deliberate exception, and two scenarios name it.",
+      "a full-patch review must read as the exception, with its scenarios named",
+    ],
+    [
+      "That review is a successor by default: leave `parent_review_id` unset and `force_full_review` off",
+      "the review after a remote finding must read as successor-by-default",
+    ],
+    [
+      "In `LOCAL_GATE` mode that task is a successor by default",
+      "the manual publication path must read as successor-by-default too",
+    ],
+    [
+      "also pass its `continued_from_review_id` and `force_full_review: true`",
+      "the carried-findings continuation keeps its deliberate full review",
+    ],
+    [
+      "The summary's `gate_expires_in_seconds` says how much of that gate's window is left.",
+      "the finalized gate's remaining window must be readable before a merge",
+    ],
+  ]) {
+    assert.ok(workflowSkill.includes(sentence), why);
+  }
+
+  const deepseekReadme = flatten(
+    await readRequired(path.join("templates", "deepseek-harness", "README.md")),
+  );
+  assert.ok(
+    deepseekReadme.includes(
+      "gate is a `CODEX_TASK` review by default, and a `DEEPSEEK_HARNESS` review is the verification-shape second opinion beside it",
+    ),
+    "the DeepSeek Harness README must carry the same role as the driver contract",
+  );
+});
+
 test("Codex workflow skill documents manual Hermes provider selection and handoff", async () => {
   const skill = await readRequired(
     path.join(

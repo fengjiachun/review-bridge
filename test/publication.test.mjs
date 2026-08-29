@@ -210,6 +210,7 @@ test("publication summary reports compact next actions and gate state", async (t
     required_request_refs: [],
     required_ambiguous_results: [],
     gate_state: "ABSENT",
+    gate_expires_in_seconds: null,
   });
 
   const requestAt = startedAt + 1_000;
@@ -1008,6 +1009,42 @@ test("publication summary refreshes expired evidence instead of prescribing gate
   assert.equal(summary.blocking_reason, "EVIDENCE_STALE");
   assert.equal(summary.next_action, "REFRESH_GITHUB_SNAPSHOT");
   assert.equal(summary.gate_state, "EXPIRED");
+});
+
+test("publication summary reports the finalized gate's remaining window", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, observedAt } = await reachReady(state);
+  const gate = await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  // The window runs from the oldest source collection in the observation, so
+  // this gate is already 920ms into its five minutes when it is issued.
+  const expiresAt = Date.parse(gate.expires_at);
+  assert.equal(expiresAt, observedAt - 900 + 5 * 60 * 1_000);
+
+  const live = await getPublicationSummary(state.store, state.reviewId, {
+    clock: () => expiresAt - 120_500,
+  });
+  assert.equal(live.gate_state, "PRESENT");
+  assert.equal(live.gate_expires_in_seconds, 120);
+
+  // The gate is alive at its expiry instant and dead one millisecond later:
+  // the reported window has to agree with that comparison from both sides.
+  const boundary = await getPublicationSummary(state.store, state.reviewId, {
+    clock: () => expiresAt,
+  });
+  assert.equal(boundary.gate_state, "PRESENT");
+  assert.equal(boundary.gate_expires_in_seconds, 0);
+
+  const expired = await getPublicationSummary(state.store, state.reviewId, {
+    clock: () => expiresAt + 1,
+  });
+  assert.equal(expired.gate_state, "EXPIRED");
+  assert.equal(expired.gate_expires_in_seconds, null);
 });
 
 test("publication summary refinalizes an uncommitted crash candidate", async (t) => {

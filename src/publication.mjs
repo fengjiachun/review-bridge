@@ -6438,6 +6438,12 @@ export async function getPublicationSummary(
             required_request_refs: clone(closure.requests),
             required_ambiguous_results: clone(closure.results),
             gate_state: gate.state,
+            // Rounded down, so the reported window is never wider than the
+            // one the expiry comparison enforces.
+            gate_expires_in_seconds:
+              gate.state === "PRESENT"
+                ? Math.floor((Date.parse(gate.expiresAt) - currentMs) / 1000)
+                : null,
           };
         },
       );
