@@ -1508,8 +1508,17 @@ function validateCodexPartitions(codexReview, ledger) {
     codexReview.app_notices ?? [],
     "codex_review.app_notices",
   );
-  for (const [index, notice] of appNotices.entries()) {
-    assertObject(notice, `codex_review.app_notices[${index}]`);
+  const foreignActorObjects = assertArray(
+    codexReview.foreign_actor_objects ?? [],
+    "codex_review.foreign_actor_objects",
+  );
+  for (const [name, items] of [
+    ["codex_review.app_notices", appNotices],
+    ["codex_review.foreign_actor_objects", foreignActorObjects],
+  ]) {
+    for (const [index, item] of items.entries()) {
+      assertObject(item, `${name}[${index}]`);
+    }
   }
   validateRequestFacts(unbound, "codex_review.unbound_requests");
   validateRequestFacts(unsupported, "codex_review.unsupported_requests");
@@ -1567,7 +1576,7 @@ function validateCodexPartitions(codexReview, ledger) {
     ...unbound,
     ...unsupported,
     ...results.map((result) => ({ ...result, resource_id: result.result_id })),
-    ...(codexReview.foreign_actor_objects ?? []),
+    ...foreignActorObjects,
     ...appNotices,
   ]) {
     allIdentities.push(resourceIdentity(item));
@@ -1595,7 +1604,7 @@ function validateCodexPartitions(codexReview, ledger) {
     }
     assertSha(request.requested_head_sha, "request.requested_head_sha");
   }
-  for (const foreign of codexReview.foreign_actor_objects ?? []) {
+  for (const foreign of foreignActorObjects) {
     assertUrl(foreign.url, "foreign_actor_object.url");
     timestampMs(foreign.event_at, "foreign_actor_object.event_at");
     assertObject(foreign.actor, "foreign_actor_object.actor");

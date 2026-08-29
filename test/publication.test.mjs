@@ -3909,6 +3909,12 @@ test("observation validation rejects incomplete provenance and unsafe check bind
         value.codex_review.app_notices = [null];
       },
     },
+    {
+      pattern: /codex_review\.foreign_actor_objects\[0\] must be an object/,
+      mutate(value) {
+        value.codex_review.foreign_actor_objects = [null];
+      },
+    },
     ...[
       {
         pattern: /app notice has wrong timestamp_field/,
