@@ -912,6 +912,7 @@ function validateObservation(input, ledger, currentMs) {
     codexReview.unbound_requests ?? [],
     codexReview.unsupported_requests ?? [],
     codexReview.foreign_actor_objects ?? [],
+    codexReview.app_notices ?? [],
     codexReview.results ?? [],
   ];
   for (const [index, value] of arrays.entries()) {
@@ -1499,6 +1500,10 @@ function validateCodexPartitions(codexReview, ledger) {
     "codex_review.unsupported_requests",
   );
   const results = assertArray(codexReview.results ?? [], "codex_review.results");
+  const appNotices = assertArray(
+    codexReview.app_notices ?? [],
+    "codex_review.app_notices",
+  );
   validateRequestFacts(unbound, "codex_review.unbound_requests");
   validateRequestFacts(unsupported, "codex_review.unsupported_requests");
   for (const item of unbound) {
@@ -1556,6 +1561,7 @@ function validateCodexPartitions(codexReview, ledger) {
     ...unsupported,
     ...results.map((result) => ({ ...result, resource_id: result.result_id })),
     ...(codexReview.foreign_actor_objects ?? []),
+    ...appNotices,
   ]) {
     allIdentities.push(resourceIdentity(item));
   }
@@ -1598,6 +1604,26 @@ function validateCodexPartitions(codexReview, ledger) {
       );
     }
     assertDigest(foreign.body_sha256, "foreign_actor_object.body_sha256");
+  }
+  for (const notice of appNotices) {
+    assertUrl(notice.url, "app_notice.url");
+    timestampMs(notice.event_at, "app_notice.event_at");
+    assertEnum(
+      notice.marker,
+      ["codex-pull-request-review-summary", "codex-environment-notice"],
+      "app_notice.marker",
+    );
+    assertObject(notice.actor, "app_notice.actor");
+    if (
+      notice.actor.id !== ledger.target.codex_actor.id ||
+      notice.actor.type !== ledger.target.codex_actor.type
+    ) {
+      fail(
+        "INVALID_INPUT",
+        "app notice must carry the pinned Codex actor",
+      );
+    }
+    assertDigest(notice.body_sha256, "app_notice.body_sha256");
   }
   return baselineConflict
     ? "immutable Codex baseline object disappeared or changed"

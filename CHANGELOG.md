@@ -78,6 +78,28 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `CONTINUABLE_FINDINGS`, which the server requires it for, and an advisory
   panel over an external pull request. (#80)
 
+### Fixed
+
+- Exclude the expected Codex actor from review-request classification in both
+  adapter modes. The GitHub Codex App posts and updates a review-summary
+  comment whose "About Codex" section quotes `@codex review`, and the trigger
+  shape matched that quoted line, so the App's own comment was classified as an
+  unsupported request and no gate could mint. A review request only ever comes
+  from the author side. (#PRNUM)
+- Record a known Codex App notice as a non-blocking `app_notices` observation
+  entry instead of an unrecognized result. An expected-actor comment that
+  carries a marker the App uses to identify its own notices and matches no
+  verdict format is the App describing itself, not a verdict, and leaving it
+  in the result partition blocked the gate on every round. Verdict recognition
+  still runs first, so a marker-carrying comment that does match a verdict
+  format stays that verdict, and an unrecognized shape without a known marker
+  keeps failing closed. (#PRNUM)
+- Strip `>`-quoted lines and fenced code blocks before scanning a body for the
+  review trigger. A pull-request comment that quotes `@codex review` while
+  discussing it is no longer classified as an unsupported request. Every other
+  mention, including a mid-sentence one, stays request-classified and fails
+  closed. (#PRNUM)
+
 ## 0.9.0 - 2026-08-14
 
 ### Added

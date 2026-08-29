@@ -661,3 +661,100 @@ test("a head-incompatible result remains ambiguous while a request is open", asy
   assert.equal(result.results[0].association, "AMBIGUOUS");
   assert.equal(result.results[0].request_ref, null);
 });
+
+test("the expected actor's own trigger-quoting comment is not a request", async () => {
+  const input = await fixture("codex-clean");
+  const summary = await fixture("codex-review-summary-comment");
+  assert.match(summary.body, /@codex review/i);
+  const unmarked = {
+    ...structuredClone(summary),
+    id: summary.id + 1,
+    body: "Reviews can be triggered by commenting @codex review.",
+  };
+  input.issue_comments.splice(1, 0, summary, unmarked);
+
+  const snapshot = adaptCodexEvidence(input);
+  assert.deepEqual(snapshot.unsupported_requests, []);
+  assert.equal(snapshot.requests.length, 1);
+  assert.equal(snapshot.requests[0].comment_id, 5080965488);
+  assert.deepEqual(
+    snapshot.app_notices.map((notice) => notice.resource_id),
+    [summary.id],
+  );
+
+  input.mode = "BASELINE";
+  const baseline = adaptCodexEvidence(input);
+  assert.equal(baseline.requests.length, 1);
+  assert.equal(baseline.requests[0].resource_id, 5080965488);
+});
+
+test("known App notices are recorded outside the result partition", async () => {
+  const input = await fixture("codex-clean");
+  const summary = await fixture("codex-review-summary-comment");
+  const environment = {
+    id: 5460014156,
+    html_url:
+      "https://github.com/fengjiachun/review-bridge/pull/80#issuecomment-5460014156",
+    created_at: "2026-07-25T23:09:00Z",
+    body: "To use Codex here, [create an environment for this repo](https://chatgpt.com/codex/cloud/settings/environments).",
+    user: structuredClone(summary.user),
+  };
+  input.issue_comments.splice(1, 0, summary, environment);
+
+  const result = adaptCodexEvidence(input);
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].verdict, "CLEAN");
+  assert.deepEqual(
+    result.app_notices.map((notice) => [notice.resource_id, notice.marker]),
+    [
+      [summary.id, "codex-pull-request-review-summary"],
+      [environment.id, "codex-environment-notice"],
+    ],
+  );
+  assert.deepEqual(result.app_notices[0].actor, {
+    id: 199175422,
+    type: "Bot",
+    login: "chatgpt-codex-connector[bot]",
+  });
+});
+
+test("a marker comment matching a verdict format stays that verdict", async () => {
+  const input = await fixture("codex-clean");
+  const summary = await fixture("codex-review-summary-comment");
+  const marker = summary.body.split("\n")[0];
+  input.issue_comments[1].body = `${input.issue_comments[1].body}\n\n${marker}`;
+
+  const result = adaptCodexEvidence(input);
+  assert.deepEqual(result.app_notices, []);
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].format, "CODEX_CLEAN_COMMENT_V1");
+  assert.equal(result.results[0].verdict, "CLEAN");
+});
+
+test("a quoted or fenced trigger phrase is not a review request", async () => {
+  const input = await fixture("codex-clean");
+  input.request_history = [];
+  const quoted = structuredClone(input.issue_comments[0]);
+  quoted.id += 1;
+  quoted.body = "The App's help text says\n\n> Comment \"@codex review\".\n";
+  const fenced = structuredClone(input.issue_comments[0]);
+  fenced.id += 2;
+  fenced.body = "The trigger is\n\n```\n@codex review\n```\n";
+  const mentioned = structuredClone(input.issue_comments[0]);
+  mentioned.id += 3;
+  mentioned.body = "I already asked for @codex review on this head.";
+  input.issue_comments.push(quoted, fenced, mentioned);
+
+  const snapshot = adaptCodexEvidence(input);
+  assert.deepEqual(
+    snapshot.unsupported_requests.map((item) => item.resource_id),
+    [mentioned.id],
+  );
+
+  input.mode = "BASELINE";
+  const baseline = adaptCodexEvidence(input);
+  assert.deepEqual(
+    baseline.requests.map((item) => item.resource_id),
+    [input.issue_comments[0].id, mentioned.id],
+  );
+});
