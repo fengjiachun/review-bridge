@@ -2847,6 +2847,24 @@ test("a baseline result missing a projected field or a nested one is refused at 
     start(state, startedAt, bindingField),
     /commit_binding contains unexpected field prefix/,
   );
+  // Present but not an array, and present but not an object: the walk must
+  // refuse these as input rather than crash on them.
+  for (const [field, value, pattern] of [
+    [
+      "attached_review_comments",
+      null,
+      /baseline\.candidate_results\[0\]\.attached_review_comments must be an array/,
+    ],
+    [
+      "attached_review_comments",
+      [null],
+      /baseline\.candidate_results\[0\] attachment must be an object/,
+    ],
+  ]) {
+    const malformed = structuredClone(adapted);
+    malformed.candidate_results[0][field] = value;
+    await assert.rejects(start(state, startedAt, malformed), pattern);
+  }
   // A kind the projection never binds reproduces null and nothing else, an
   // empty object included.
   const emptyBinding = structuredClone(adapted);

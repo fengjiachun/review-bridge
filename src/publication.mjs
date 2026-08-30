@@ -492,7 +492,10 @@ function assertBaselineShape(
         `${resultsName}[${index}].commit_binding`,
       );
     }
-    const attachments = item.attached_review_comments;
+    const attachments = assertArray(
+      item.attached_review_comments,
+      `${resultsName}[${index}].attached_review_comments`,
+    );
     for (const [position, attachment] of attachments.entries()) {
       const attachmentName =
         `${resultsName}[${index}].attached_review_comments[${position}]`;
@@ -873,6 +876,7 @@ function validateResultFacts(
       fail("INVALID_INPUT", `${name}[${index}] cannot have a native review state`);
     }
     for (const attachment of item.attached_review_comments ?? []) {
+      assertObject(attachment, `${name}[${index}] attachment`);
       assertId(attachment.comment_id, `${name}[${index}] attachment comment_id`);
       assertId(attachment.actor?.id, `${name}[${index}] attachment actor.id`);
       assertString(
