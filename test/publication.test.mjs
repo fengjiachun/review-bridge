@@ -2683,6 +2683,86 @@ test("adapter baseline round-trips through the server without actor-login drift"
   });
 });
 
+test("an App notice edited after the baseline leaves the ledger alive", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const collectedAt = iso(startedAt - 100);
+  const sources = [
+    "ISSUE_COMMENTS",
+    "PULL_REQUEST_REVIEWS",
+    "PULL_REQUEST_REVIEW_COMMENTS",
+  ].map((kind) =>
+    completeSource(kind, collectedAt, {
+      pagination_complete: true,
+      page_count: 1,
+    }),
+  );
+  const raw = {
+    mode: "BASELINE",
+    collection: { status: "COMPLETE", collected_at: collectedAt, sources },
+    expected_actor: { id: 99, type: "Bot" },
+    local_gate_head_sha: state.headSha,
+    issue_comments: [
+      {
+        id: 79,
+        html_url: "https://github.com/owner/repo/issues/7#issuecomment-79",
+        created_at: iso(startedAt - 900),
+        body: APP_SUMMARY_BODY,
+        user: { id: 99, type: "Bot", login: "chatgpt-codex-connector[bot]" },
+      },
+    ],
+    pull_request_reviews: [],
+    pull_request_review_comments: [],
+  };
+  const adaptedBaseline = adaptCodexEvidence(raw);
+  await start(state, startedAt, adaptedBaseline);
+
+  // The App rewrites its summary comment in place on its next review round.
+  const observedAt = startedAt + 1_000;
+  const snapshotCollectedAt = iso(observedAt - 100);
+  const edited = structuredClone(raw);
+  edited.issue_comments[0].body = `${APP_SUMMARY_BODY}\n\n| Code Review | Completed |`;
+  const snapshotCodex = adaptCodexEvidence({
+    ...edited,
+    mode: "SNAPSHOT",
+    collection: {
+      ...raw.collection,
+      collected_at: snapshotCollectedAt,
+      sources: sources.map((source) => ({
+        ...source,
+        collected_at: snapshotCollectedAt,
+      })),
+    },
+    baseline: adaptedBaseline,
+    request_history: [],
+    ambiguity_acknowledgements: [],
+  });
+  const current = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: observedAt,
+    withResult: false,
+  });
+  current.codex_review = snapshotCodex;
+  const ledger = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 1, observation: current },
+    { clock: () => observedAt + 10 },
+  );
+  assert.equal(ledger.terminal, null);
+  assert.equal(ledger.status, "GITHUB_REVIEW_NOT_REQUESTED");
+  assert.deepEqual(
+    ledger.latest_observation.codex_review.app_notices.map(
+      (notice) => notice.resource_id,
+    ),
+    [79],
+  );
+});
+
 test("server replay rejects a caller-forged pre-request result association", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
