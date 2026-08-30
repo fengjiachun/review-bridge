@@ -639,6 +639,9 @@ export function adaptCodexEvidence({
         ) {
           continue;
         }
+        if (isExpectedActor && !looksLikeResult && codexAppNoticeMarker(body)) {
+          continue;
+        }
         if (
           looksLikeRequest &&
           !hasCompleteUntrustedMetadata(kind, object)

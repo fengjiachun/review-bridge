@@ -2243,6 +2243,16 @@ keeps a real verdict in a new format from being silently dropped. The App
 posts and updates such a notice on every review, so without the carve-out
 every round of every publication needs an operator ambiguity acknowledgement.
 
+The same marker rule applies at baseline capture. The App edits a notice in
+place on every later review round, and a baseline object's stored facts —
+`body_sha256` among them — must be reproduced exactly by every later snapshot,
+so a baselined notice is a ledger the App's next round terminally invalidates.
+A known App notice therefore never enters the baseline: the baseline-mode
+adapter skips exactly the objects the snapshot mode reports under
+`app_notices`, and every snapshot keeps reporting the live object there.
+The exclusion cannot widen admission, because `app_notices` entries take part
+in no association: nothing is credited to them and they credit nothing.
+
 The exact request body is byte-for-byte UTF-8 string equality with
 `@codex review`; leading or trailing whitespace, additional instructions, a
 different case, or another line is not the workflow request. To avoid silently

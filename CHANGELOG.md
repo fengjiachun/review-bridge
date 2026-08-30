@@ -88,6 +88,15 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Fixed
 
+- Exclude known Codex App notices from the publication baseline. The App edits
+  its review-summary comment in place on every review round, and a baseline
+  object's stored `body_sha256` must be reproduced exactly by every later
+  snapshot, so starting a publication on a pull request the App had already
+  reviewed produced a ledger the App's next round terminally invalidated — a
+  comment nobody in the loop wrote or read. The baseline-mode adapter now
+  skips exactly the objects the snapshot mode reports under `app_notices`,
+  where every snapshot keeps reporting the live object without blocking a
+  gate. (#86) (#93)
 - Exclude the expected Codex actor from review-request classification in both
   adapter modes. The GitHub Codex App posts and updates a review-summary
   comment whose "About Codex" section quotes `@codex review`, and the trigger

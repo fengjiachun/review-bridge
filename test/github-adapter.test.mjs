@@ -718,6 +718,39 @@ test("known App notices are recorded outside the result partition", async () => 
   });
 });
 
+test("a known App notice never enters the baseline", async () => {
+  const input = await fixture("codex-clean");
+  const summary = await fixture("codex-review-summary-comment");
+  input.issue_comments.splice(1, 0, summary);
+
+  const baseline = adaptCodexEvidence({
+    ...structuredClone(input),
+    mode: "BASELINE",
+  });
+  assert.deepEqual(
+    baseline.candidate_results.filter((item) => item.result_id === summary.id),
+    [],
+  );
+  assert.deepEqual(
+    baseline.requests.filter((item) => item.resource_id === summary.id),
+    [],
+  );
+
+  // The App edits the summary in place on every later review round.
+  const edited = structuredClone(input);
+  edited.issue_comments.find((comment) => comment.id === summary.id).body =
+    `${summary.body}\n\n| Code Review | Completed |`;
+  const snapshot = adaptCodexEvidence({ ...edited, mode: "SNAPSHOT", baseline });
+  assert.deepEqual(
+    snapshot.preexisting_candidate_results,
+    baseline.candidate_results,
+  );
+  assert.deepEqual(
+    snapshot.app_notices.map((notice) => notice.resource_id),
+    [summary.id],
+  );
+});
+
 test("a marker comment matching a verdict format stays that verdict", async () => {
   const input = await fixture("codex-clean");
   const summary = await fixture("codex-review-summary-comment");
