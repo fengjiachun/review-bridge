@@ -11,6 +11,18 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Added
 
+- Add a mechanical reachability walk over `required_inputs` (#92). A
+  declaration-driven test drives workflows into the states real transitions
+  produce, reads `required_inputs` from the real read surfaces, and executes
+  the declared calls the way a driver that trusts the declaration would:
+  argument values resolved from the sources the declaration names, commits
+  containing only what the declared head describes, and the state-rejection
+  code family enumerated from the transitions themselves. A declaration that
+  names a refused call fails on the refusal, one that omits a state's exit
+  fails before anything runs, and a walked coverage listing holds the product
+  the walk claims. The expensive states — a genuine pre-resolved thread
+  observation, a terminal publication under an open action — are reached
+  through the existing fixtures and walked from there. (#96)
 - Add a release evidence chain (RFC 0004). A read-only collector records the
   merged pull requests, tag object, and published assets of a release
   content-addressed in the store, and a two-phase verifier reconciles the
@@ -88,6 +100,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Fixed
 
+- Keep declaring the cut a split acknowledged among the findings still owes
+  (#92). Acknowledging a change-size warning with `split` at
+  `ADDRESS_LOCAL_FINDINGS` cleared the crossing, so the summary fell back to
+  the plain declaration and sent a driver at an advance the unexecuted split
+  refuses — the mirror, one arm over, of the `PREPARE_LOCAL_REVIEW` case
+  fixed in the #82 review. The split-gated table gains the phase, and the
+  warning-gated arm declares the head recording after the acknowledgment,
+  because the decision is what says which commits the head carries. (#96)
 - Exclude known Codex App notices from the publication baseline. The App edits
   its review-summary comment in place on every review round, and a baseline
   object's stored `body_sha256` must be reproduced exactly by every later
