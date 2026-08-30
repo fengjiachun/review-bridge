@@ -2683,6 +2683,70 @@ test("adapter baseline round-trips through the server without actor-login drift"
   });
 });
 
+test("a baseline actor the snapshot projection cannot reproduce is refused at start", async (t) => {
+  // The snapshot side pins baseline actors to exactly {id, type}, so a stored
+  // actor carrying a login can never satisfy the identity comparison: the
+  // ledger is doomed at start and dies at the first snapshot, terminally. The
+  // key sets are shared with the snapshot side, so the refusal names the field.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const collectedAt = iso(startedAt - 100);
+  const adapted = adaptCodexEvidence({
+    mode: "BASELINE",
+    collection: {
+      status: "COMPLETE",
+      collected_at: collectedAt,
+      sources: [
+        "ISSUE_COMMENTS",
+        "PULL_REQUEST_REVIEWS",
+        "PULL_REQUEST_REVIEW_COMMENTS",
+      ].map((kind) =>
+        completeSource(kind, collectedAt, {
+          pagination_complete: true,
+          page_count: 1,
+        }),
+      ),
+    },
+    expected_actor: { id: 99, type: "Bot" },
+    local_gate_head_sha: state.headSha,
+    issue_comments: [
+      {
+        id: 77,
+        html_url: "https://github.com/owner/repo/issues/7#issuecomment-77",
+        created_at: iso(startedAt - 1_000),
+        body: "@codex review",
+        user: { id: 42, type: "User", login: "maintainer" },
+      },
+      {
+        id: 78,
+        html_url: "https://github.com/owner/repo/issues/7#issuecomment-78",
+        created_at: iso(startedAt - 900),
+        body: `Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** \`${state.headSha.slice(0, 10)}\``,
+        user: { id: 99, type: "Bot", login: "codex[bot]" },
+      },
+    ],
+    pull_request_reviews: [],
+    pull_request_review_comments: [],
+  });
+  const requestLogin = structuredClone(adapted);
+  requestLogin.requests[0].actor.login = "maintainer";
+  await assert.rejects(
+    start(state, startedAt, requestLogin),
+    /baseline\.requests\[0\]\.actor contains unexpected field login/,
+  );
+  const resultLogin = structuredClone(adapted);
+  resultLogin.candidate_results[0].actor.login = "codex[bot]";
+  await assert.rejects(
+    start(state, startedAt, resultLogin),
+    /baseline\.candidate_results\[0\]\.actor contains unexpected field login/,
+  );
+  // The adapter's own output still starts: the accepted key sets are the
+  // projection's, not a narrower list of them.
+  const ledger = await start(state, startedAt, adapted);
+  assert.equal(ledger.revision, 1);
+});
+
 test("an App notice edited after the baseline leaves the ledger alive", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

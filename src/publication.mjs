@@ -384,6 +384,80 @@ function assertExactKeys(value, allowedKeys, name) {
   }
 }
 
+// The shapes the snapshot projection can reproduce. Applied both to a stored
+// baseline at start and to the projected partitions at snapshot time: a key
+// either side accepts alone is a baseline the comparison can never satisfy.
+function baselineRequestKeys(item, adapterVersion) {
+  return [
+    "resource_id",
+    "resource_kind",
+    "url",
+    "event_at",
+    "timestamp_field",
+    "body_sha256",
+    ...(adapterVersion === 2 ? ["request_id"] : []),
+    ...("issuance" in item ? ["issuance"] : []),
+    "actor",
+  ];
+}
+
+function baselineResultKeys(adapterVersion) {
+  return [
+    "result_id",
+    "resource_kind",
+    "native_review_state",
+    "url",
+    "event_at",
+    "timestamp_field",
+    "actor",
+    "reviewed_head_sha",
+    "commit_binding",
+    "attached_review_comments",
+    "body_sha256",
+    ...(adapterVersion === 2 ? ["request_id"] : []),
+  ];
+}
+
+function assertBaselineShape(
+  requests,
+  results,
+  adapterVersion,
+  requestsName,
+  resultsName,
+) {
+  for (const [index, item] of requests.entries()) {
+    assertExactKeys(
+      item,
+      baselineRequestKeys(item, adapterVersion),
+      `${requestsName}[${index}]`,
+    );
+    assertExactKeys(
+      item.actor,
+      ["id", "type"],
+      `${requestsName}[${index}].actor`,
+    );
+    if ("issuance" in item) {
+      assertExactKeys(
+        item.issuance,
+        ["review_id", "recorded_revision", "requested_head_sha"],
+        `${requestsName}[${index}].issuance`,
+      );
+    }
+  }
+  for (const [index, item] of results.entries()) {
+    assertExactKeys(
+      item,
+      baselineResultKeys(adapterVersion),
+      `${resultsName}[${index}]`,
+    );
+    assertExactKeys(
+      item.actor,
+      ["id", "type"],
+      `${resultsName}[${index}].actor`,
+    );
+  }
+}
+
 function sameIdentitySet(left, right, idField = "resource_id") {
   if (left.length !== right.length) {
     return false;
@@ -605,6 +679,13 @@ function validateBaseline(input, currentMs, createdAt = null, expectedActor = nu
     baseline: true,
     expectedActor,
   });
+  assertBaselineShape(
+    requests,
+    results,
+    collection.adapter_version,
+    "baseline.requests",
+    "baseline.candidate_results",
+  );
   if (
     collection.adapter_version === 2 &&
     (requests.some((request) => !("request_id" in request)) ||
@@ -1431,60 +1512,13 @@ function validateCodexPartitions(codexReview, ledger) {
       expectedActor: ledger.target.codex_actor,
     },
   );
-  for (const [index, item] of baselineRequests.entries()) {
-    assertExactKeys(
-      item,
-      [
-        "resource_id",
-        "resource_kind",
-        "url",
-        "event_at",
-        "timestamp_field",
-        "body_sha256",
-        ...(adapterVersion === 2 ? ["request_id"] : []),
-        ...("issuance" in item ? ["issuance"] : []),
-        "actor",
-      ],
-      `codex_review.preexisting_requests[${index}]`,
-    );
-    assertExactKeys(
-      item.actor,
-      ["id", "type"],
-      `codex_review.preexisting_requests[${index}].actor`,
-    );
-    if ("issuance" in item) {
-      assertExactKeys(
-        item.issuance,
-        ["review_id", "recorded_revision", "requested_head_sha"],
-        `codex_review.preexisting_requests[${index}].issuance`,
-      );
-    }
-  }
-  for (const [index, item] of baselineResults.entries()) {
-    assertExactKeys(
-      item,
-      [
-        "result_id",
-        "resource_kind",
-        "native_review_state",
-        "url",
-        "event_at",
-        "timestamp_field",
-        "actor",
-        "reviewed_head_sha",
-        "commit_binding",
-        "attached_review_comments",
-        "body_sha256",
-        ...(adapterVersion === 2 ? ["request_id"] : []),
-      ],
-      `codex_review.preexisting_candidate_results[${index}]`,
-    );
-    assertExactKeys(
-      item.actor,
-      ["id", "type"],
-      `codex_review.preexisting_candidate_results[${index}].actor`,
-    );
-  }
+  assertBaselineShape(
+    baselineRequests,
+    baselineResults,
+    adapterVersion,
+    "codex_review.preexisting_requests",
+    "codex_review.preexisting_candidate_results",
+  );
   const baselineConflict =
     !sameIdentitySet(
       baselineRequests,
