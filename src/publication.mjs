@@ -384,6 +384,18 @@ function assertExactKeys(value, allowedKeys, name) {
   }
 }
 
+// Exact set equality, both directions: the projection always writes every key
+// it defines, so a key the stored side omits diverges from the projected
+// `null`, `null` and `[]` exactly as an extra key does.
+function assertProjectedKeys(value, keys, name) {
+  assertExactKeys(value, keys, name);
+  const present = new Set(Object.keys(value));
+  const missing = keys.filter((key) => !present.has(key));
+  if (missing.length > 0) {
+    fail("INVALID_INPUT", `${name} is missing field ${missing[0]}`);
+  }
+}
+
 // The shapes the snapshot projection can reproduce. Applied both to a stored
 // baseline at start and to the projected partitions at snapshot time: a key
 // either side accepts alone is a baseline the comparison can never satisfy.
@@ -418,6 +430,16 @@ function baselineResultKeys(adapterVersion) {
   ];
 }
 
+// The projection writes a commit binding only for the two resource kinds that
+// carry one, and one shape per kind. Any other kind projects to null, so no
+// key of one is reproducible there.
+function commitBindingKeys(resourceKind) {
+  if (resourceKind === "ISSUE_COMMENT") {
+    return ["source", "field", "prefix"];
+  }
+  return resourceKind === "PULL_REQUEST_REVIEW" ? ["source", "field"] : [];
+}
+
 function assertBaselineShape(
   requests,
   results,
@@ -426,18 +448,18 @@ function assertBaselineShape(
   resultsName,
 ) {
   for (const [index, item] of requests.entries()) {
-    assertExactKeys(
+    assertProjectedKeys(
       item,
       baselineRequestKeys(item, adapterVersion),
       `${requestsName}[${index}]`,
     );
-    assertExactKeys(
+    assertProjectedKeys(
       item.actor,
       ["id", "type"],
       `${requestsName}[${index}].actor`,
     );
     if ("issuance" in item) {
-      assertExactKeys(
+      assertProjectedKeys(
         item.issuance,
         ["review_id", "recorded_revision", "requested_head_sha"],
         `${requestsName}[${index}].issuance`,
@@ -445,16 +467,38 @@ function assertBaselineShape(
     }
   }
   for (const [index, item] of results.entries()) {
-    assertExactKeys(
+    assertProjectedKeys(
       item,
       baselineResultKeys(adapterVersion),
       `${resultsName}[${index}]`,
     );
-    assertExactKeys(
+    assertProjectedKeys(
       item.actor,
       ["id", "type"],
       `${resultsName}[${index}].actor`,
     );
+    if (item.commit_binding != null) {
+      assertProjectedKeys(
+        item.commit_binding,
+        commitBindingKeys(item.resource_kind),
+        `${resultsName}[${index}].commit_binding`,
+      );
+    }
+    const attachments = item.attached_review_comments;
+    for (const [position, attachment] of attachments.entries()) {
+      const attachmentName =
+        `${resultsName}[${index}].attached_review_comments[${position}]`;
+      assertProjectedKeys(
+        attachment,
+        ["comment_id", "actor", "commit_id", "body_sha256"],
+        attachmentName,
+      );
+      assertProjectedKeys(
+        attachment.actor,
+        ["id", "type"],
+        `${attachmentName}.actor`,
+      );
+    }
   }
 }
 

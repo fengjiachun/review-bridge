@@ -2747,6 +2747,96 @@ test("a baseline actor the snapshot projection cannot reproduce is refused at st
   assert.equal(ledger.revision, 1);
 });
 
+test("a baseline result missing a projected field or a nested one is refused at start", async (t) => {
+  // The same defect one level down and in the other direction: the projection
+  // always writes `reviewed_head_sha`, `commit_binding` and
+  // `attached_review_comments`, and pins attachment actors to {id, type}, so a
+  // stored result that omits one or carries a raw GitHub field inside an
+  // attachment diverges canonically at the first snapshot exactly as an extra
+  // top-level key does.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const collectedAt = iso(startedAt - 100);
+  const adapted = adaptCodexEvidence({
+    mode: "BASELINE",
+    collection: {
+      status: "COMPLETE",
+      collected_at: collectedAt,
+      sources: [
+        "ISSUE_COMMENTS",
+        "PULL_REQUEST_REVIEWS",
+        "PULL_REQUEST_REVIEW_COMMENTS",
+      ].map((kind) =>
+        completeSource(kind, collectedAt, {
+          pagination_complete: true,
+          page_count: 1,
+        }),
+      ),
+    },
+    expected_actor: { id: 99, type: "Bot" },
+    local_gate_head_sha: state.headSha,
+    issue_comments: [],
+    pull_request_reviews: [
+      {
+        id: 900,
+        html_url:
+          "https://github.com/owner/repo/pull/7#pullrequestreview-900",
+        submitted_at: iso(startedAt - 900),
+        commit_id: state.headSha,
+        state: "COMMENTED",
+        body: "### 💡 Codex Review\n\nHere are some automated review suggestions.",
+        user: { id: 99, type: "Bot", login: "codex[bot]" },
+      },
+    ],
+    pull_request_review_comments: [
+      {
+        id: 901,
+        pull_request_review_id: 900,
+        html_url: "https://github.com/owner/repo/pull/7#discussion_r901",
+        created_at: iso(startedAt - 890),
+        commit_id: state.headSha,
+        body: "One finding.",
+        user: { id: 99, type: "Bot", login: "codex[bot]" },
+      },
+    ],
+  });
+  // Without these the mutations below would exercise absent fields.
+  assert.notEqual(adapted.candidate_results[0].commit_binding, null);
+  assert.equal(adapted.candidate_results[0].attached_review_comments.length, 1);
+
+  for (const field of [
+    "reviewed_head_sha",
+    "commit_binding",
+    "attached_review_comments",
+  ]) {
+    const omitted = structuredClone(adapted);
+    delete omitted.candidate_results[0][field];
+    await assert.rejects(
+      start(state, startedAt, omitted),
+      new RegExp(`baseline\\.candidate_results\\[0\\] is missing field ${field}`),
+    );
+  }
+  const attachmentLogin = structuredClone(adapted);
+  attachmentLogin.candidate_results[0].attached_review_comments[0].actor.login =
+    "codex[bot]";
+  await assert.rejects(
+    start(state, startedAt, attachmentLogin),
+    /attached_review_comments\[0\]\.actor contains unexpected field login/,
+  );
+  const bindingField = structuredClone(adapted);
+  bindingField.candidate_results[0].commit_binding.prefix = state.headSha.slice(
+    0,
+    10,
+  );
+  await assert.rejects(
+    start(state, startedAt, bindingField),
+    /commit_binding contains unexpected field prefix/,
+  );
+  const ledger = await start(state, startedAt, adapted);
+  assert.equal(ledger.revision, 1);
+});
+
 test("an App notice edited after the baseline leaves the ledger alive", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

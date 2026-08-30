@@ -106,9 +106,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   the shape raw GitHub JSON hands a driver — and the mismatch surfaced only at
   the first snapshot, as a terminal `immutable Codex baseline object
   disappeared or changed` on a pull request that may already have a Codex
-  request recorded against it. Both sides now assert one shared set of exact
-  keys, so a baseline the comparison could never satisfy is refused where the
-  cost is a restart, and the refusal names the offending field. (#97)
+  request recorded against it. Both sides now assert one shared set of keys as
+  exact set equality: a stored object that omits `reviewed_head_sha`,
+  `commit_binding` or `attached_review_comments` diverges from the projection's
+  `null`, `null` and `[]` exactly as an extra key does, and the walk reaches
+  the nested projected objects — attachments, their actors, and the commit
+  binding — where the same raw GitHub fields leak in. A baseline the comparison
+  could never satisfy is now refused where the cost is a restart, and the
+  refusal names the offending field. (#97)
 - Keep declaring the cut a split acknowledged among the findings still owes
   (#92). Acknowledging a change-size warning with `split` at
   `ADDRESS_LOCAL_FINDINGS` cleared the crossing, so the summary fell back to
