@@ -2871,6 +2871,28 @@ test("a baseline result outside its resource kind's projected shape is refused a
     },
     /commit_binding contains unexpected field prefix/,
   );
+  // A binding's provenance is written from constants and its prefix is the
+  // substring a fixed pattern matched, so neither is the caller's to choose.
+  await refuses(
+    (c) => {
+      c.commit_binding.source = "PULL_REQUEST_REVIEW_COMMIT_ID";
+    },
+    /commit_binding\.source must be CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD/,
+  );
+  await refuses(
+    (_c, r) => {
+      r.commit_binding.field = "body.reviewed_commit";
+    },
+    /commit_binding\.field must be commit_id/,
+  );
+  for (const prefix of ["not-hexadecimal", state.headSha.slice(0, 4), 1]) {
+    await refuses(
+      (c) => {
+        c.commit_binding.prefix = prefix;
+      },
+      /commit_binding\.prefix is not a commit prefix/,
+    );
+  }
   // Present but not an array, and present but not an object: the walk must
   // refuse these as input rather than crash on them.
   await refuses(

@@ -11,7 +11,11 @@ import { loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
 // One derivation of the App's notice markers, shared with the adapter that
 // records them. A notice is only non-blocking because its body carries a
 // marker, so the claim has to be checked here against that body.
-import { codexAppNoticeMarker } from "./github-adapter.mjs";
+import {
+  codexAppNoticeMarker,
+  COMMIT_BINDINGS,
+  COMMIT_PREFIX_PATTERN,
+} from "./github-adapter.mjs";
 // One derivation of thread completeness, shared with the normalizer that
 // records it. Two copies of this rule would be two things to keep in step.
 import { threadProvenanceComplete } from "./github-observation.mjs";
@@ -436,23 +440,41 @@ function baselineResultKeys(adapterVersion) {
 // the three. A field a kind does not carry projects to null or [], which no
 // other value reproduces — an empty object included — so the stored side is
 // held to the same table rather than left to diverge at the first snapshot.
+// A binding is stated as the values the projection writes, a pattern where it
+// writes a matched substring rather than a constant.
 const PROJECTED_RESULT_SHAPES = {
   ISSUE_COMMENT: {
     reviewedHead: false,
-    commitBindingKeys: ["source", "field", "prefix"],
+    commitBinding: {
+      ...COMMIT_BINDINGS.ISSUE_COMMENT,
+      prefix: COMMIT_PREFIX_PATTERN,
+    },
     attachments: false,
   },
   PULL_REQUEST_REVIEW: {
     reviewedHead: true,
-    commitBindingKeys: ["source", "field"],
+    commitBinding: COMMIT_BINDINGS.PULL_REQUEST_REVIEW,
     attachments: true,
   },
   PULL_REQUEST_REVIEW_COMMENT: {
     reviewedHead: false,
-    commitBindingKeys: null,
+    commitBinding: null,
     attachments: false,
   },
 };
+
+function assertProjectedBinding(binding, spec, name) {
+  assertProjectedKeys(binding, Object.keys(spec), name);
+  for (const [key, expected] of Object.entries(spec)) {
+    if (expected instanceof RegExp) {
+      if (typeof binding[key] !== "string" || !expected.test(binding[key])) {
+        fail("INVALID_INPUT", `${name}.${key} is not a commit prefix`);
+      }
+    } else if (binding[key] !== expected) {
+      fail("INVALID_INPUT", `${name}.${key} must be ${expected}`);
+    }
+  }
+}
 
 function assertBaselineShape(
   requests,
@@ -498,7 +520,7 @@ function assertBaselineShape(
         `${resultsName}[${index}].reviewed_head_sha must be null for ${item.resource_kind}`,
       );
     }
-    if (shape.commitBindingKeys == null) {
+    if (shape.commitBinding == null) {
       if (item.commit_binding !== null) {
         fail(
           "INVALID_INPUT",
@@ -506,9 +528,9 @@ function assertBaselineShape(
         );
       }
     } else if (item.commit_binding != null) {
-      assertProjectedKeys(
+      assertProjectedBinding(
         item.commit_binding,
-        shape.commitBindingKeys,
+        shape.commitBinding,
         `${resultsName}[${index}].commit_binding`,
       );
     }
