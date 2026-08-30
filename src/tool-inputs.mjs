@@ -565,15 +565,24 @@ export const WARNING_GATED_INPUTS = {
       ["review_id", "the prepare_review result id"],
     ],
   },
+  // The head is declared after the acknowledgment because the decision is
+  // what says which commits it carries: a split owes the cut alongside any
+  // fix, and the advance measures the recorded head against the acknowledged
+  // crossing before it moves the phase.
   ADDRESS_LOCAL_FINDINGS: {
-    ...fixHead(WORKFLOW_REVISION),
-    ...SUBMIT_RESOLUTIONS,
-    acknowledge_change_size_warning: acknowledgeWarning(
-      afterWrite(WORKFLOW_REVISION, "any recorded fix head"),
-    ),
-    advance_local_workflow: [
+    acknowledge_change_size_warning: acknowledgeWarning(WORKFLOW_REVISION),
+    record_workflow_head: [
       WORKFLOW_ID,
       afterWrite(WORKFLOW_REVISION, "the acknowledgment"),
+      [
+        "head_sha",
+        "the committed fix, required when any resolution is fixed; a split decision commits its cut here too",
+      ],
+    ],
+    ...SUBMIT_RESOLUTIONS,
+    advance_local_workflow: [
+      WORKFLOW_ID,
+      afterWrite(WORKFLOW_REVISION, "the acknowledgment and any recorded head"),
     ],
   },
 };
@@ -594,6 +603,59 @@ export const SPLIT_GATED_INPUTS = {
       WORKFLOW_ID,
       afterWrite(WORKFLOW_REVISION, "the recorded cut"),
       ["review_id", "the prepare_review result id"],
+    ],
+  },
+  // The advance that consumes AUTHOR_RESPONDED measures the same promise, so
+  // this arm keeps naming the recording the fix head alone does not satisfy.
+  ADDRESS_LOCAL_FINDINGS: {
+    record_workflow_head: [
+      WORKFLOW_ID,
+      WORKFLOW_REVISION,
+      [
+        "head_sha",
+        "the cut you committed, carrying any fix, required until a gate admits it",
+      ],
+    ],
+    ...SUBMIT_RESOLUTIONS,
+    advance_local_workflow: [
+      WORKFLOW_ID,
+      afterWrite(WORKFLOW_REVISION, "the recorded cut"),
+    ],
+  },
+};
+
+// The cut is recorded and only its gate can judge it: whether the recorded
+// head measures below the crossing is not ledger-visible, so the recording is
+// no longer demanded -- recording the same head again refuses with
+// WORKFLOW_NO_PROGRESS -- and a further cut is stated as conditional on the
+// gate refusing the one already in.
+export const SPLIT_CUT_RECORDED_INPUTS = {
+  PREPARE_LOCAL_REVIEW: {
+    record_workflow_head: [
+      WORKFLOW_ID,
+      WORKFLOW_REVISION,
+      ["head_sha", "a further cut, required only if the bind refuses the recorded one"],
+    ],
+    prepare_review: WORKFLOW_ACTION_INPUTS.PREPARE_LOCAL_REVIEW.prepare_review,
+    bind_workflow_review: [
+      WORKFLOW_ID,
+      afterWrite(WORKFLOW_REVISION, "any further cut"),
+      ["review_id", "the prepare_review result id"],
+    ],
+  },
+  ADDRESS_LOCAL_FINDINGS: {
+    record_workflow_head: [
+      WORKFLOW_ID,
+      WORKFLOW_REVISION,
+      [
+        "head_sha",
+        "a further cut, required only if the advance refuses the recorded one",
+      ],
+    ],
+    ...SUBMIT_RESOLUTIONS,
+    advance_local_workflow: [
+      WORKFLOW_ID,
+      afterWrite(WORKFLOW_REVISION, "any further cut"),
     ],
   },
 };
@@ -692,6 +754,7 @@ export const DECLARATION_TABLES = [
   WORKFLOW_ACTION_INPUTS,
   WARNING_GATED_INPUTS,
   SPLIT_GATED_INPUTS,
+  SPLIT_CUT_RECORDED_INPUTS,
   WORKFLOW_STOP_INPUTS,
 ];
 
@@ -710,6 +773,7 @@ export function workflowRequiredInputs(
     continuesLocalCycle = false,
     changeSizeWarningPending = false,
     changeSizeSplitUnadmitted = false,
+    changeSizeSplitCutRecorded = false,
     resolutionOwesRecord = false,
     publicationTerminal = false,
   } = {},
@@ -729,8 +793,13 @@ export function workflowRequiredInputs(
   // Acknowledging a split clears the crossing but not the promise: the gate
   // stays shut until the cut is recorded and measured, so the declaration has
   // to keep naming the recording rather than fall back to the plain mapping.
+  // Once a head is recorded after the acknowledgment the demand flips: only
+  // the gate can judge the recorded cut, and re-demanding the recording
+  // strands a resumed driver on WORKFLOW_NO_PROGRESS.
   if (changeSizeSplitUnadmitted && SPLIT_GATED_INPUTS[nextAction] != null) {
-    return SPLIT_GATED_INPUTS[nextAction];
+    return (changeSizeSplitCutRecorded
+      ? SPLIT_CUT_RECORDED_INPUTS
+      : SPLIT_GATED_INPUTS)[nextAction];
   }
   // A pre-resolved observation claims no transition, so it has no record to
   // make and the publication exposes none to name. A terminal publication
