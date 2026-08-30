@@ -565,15 +565,24 @@ export const WARNING_GATED_INPUTS = {
       ["review_id", "the prepare_review result id"],
     ],
   },
+  // The head is declared after the acknowledgment because the decision is
+  // what says which commits it carries: a split owes the cut alongside any
+  // fix, and the advance measures the recorded head against the acknowledged
+  // crossing before it moves the phase.
   ADDRESS_LOCAL_FINDINGS: {
-    ...fixHead(WORKFLOW_REVISION),
-    ...SUBMIT_RESOLUTIONS,
-    acknowledge_change_size_warning: acknowledgeWarning(
-      afterWrite(WORKFLOW_REVISION, "any recorded fix head"),
-    ),
-    advance_local_workflow: [
+    acknowledge_change_size_warning: acknowledgeWarning(WORKFLOW_REVISION),
+    record_workflow_head: [
       WORKFLOW_ID,
       afterWrite(WORKFLOW_REVISION, "the acknowledgment"),
+      [
+        "head_sha",
+        "the committed fix, required when any resolution is fixed; a split decision commits its cut here too",
+      ],
+    ],
+    ...SUBMIT_RESOLUTIONS,
+    advance_local_workflow: [
+      WORKFLOW_ID,
+      afterWrite(WORKFLOW_REVISION, "the acknowledgment and any recorded head"),
     ],
   },
 };
@@ -594,6 +603,23 @@ export const SPLIT_GATED_INPUTS = {
       WORKFLOW_ID,
       afterWrite(WORKFLOW_REVISION, "the recorded cut"),
       ["review_id", "the prepare_review result id"],
+    ],
+  },
+  // The advance that consumes AUTHOR_RESPONDED measures the same promise, so
+  // this arm keeps naming the recording the fix head alone does not satisfy.
+  ADDRESS_LOCAL_FINDINGS: {
+    record_workflow_head: [
+      WORKFLOW_ID,
+      WORKFLOW_REVISION,
+      [
+        "head_sha",
+        "the cut you committed, carrying any fix, required until a gate admits it",
+      ],
+    ],
+    ...SUBMIT_RESOLUTIONS,
+    advance_local_workflow: [
+      WORKFLOW_ID,
+      afterWrite(WORKFLOW_REVISION, "the recorded cut"),
     ],
   },
 };

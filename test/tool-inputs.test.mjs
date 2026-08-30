@@ -550,6 +550,22 @@ test("the summary passes every condition its declarations select on", () => {
     Object.keys(SPLIT_GATED_INPUTS.PREPARE_LOCAL_REVIEW),
     "an outstanding split must still be told to record its cut",
   );
+  assert.deepEqual(
+    declared({
+      phase: "ADDRESS_LOCAL_FINDINGS",
+      current_review: { review_id: "rb-first" },
+      change_size_warning: {
+        total_lines: 90,
+        acknowledgment: {
+          decision: "split",
+          total_lines: 90,
+          executed_at: null,
+        },
+      },
+    }),
+    Object.keys(SPLIT_GATED_INPUTS.ADDRESS_LOCAL_FINDINGS),
+    "a split acknowledged among the findings still owes its cut",
+  );
 });
 
 // The thread loop is planned from an observation and left by an advance.
@@ -566,12 +582,13 @@ test("the thread loop declares its refresh and its exit", () => {
   ]);
 });
 
-// Acknowledging a split clears the crossing and leaves the promise: the bind
-// measures the change and refuses until the cut is in. Falling back to the
-// plain mapping here would name that bind and nothing that unblocks it.
+// Acknowledging a split clears the crossing and leaves the promise: the gate
+// that prepares the next round measures the change and refuses until the cut
+// is in. Falling back to the plain mapping on either arm would name that
+// gated call and nothing that unblocks it.
 test("an acknowledged split keeps declaring the cut it owes", () => {
-  const acknowledged = (executedAt) => ({
-    phase: "PREPARE_LOCAL_REVIEW",
+  const acknowledged = (phase, executedAt) => ({
+    phase,
     change_size_budget: 100,
     change_size_warning: {
       total_lines: 90,
@@ -582,25 +599,27 @@ test("an acknowledged split keeps declaring the cut it owes", () => {
       },
     },
   });
-  const outstanding = acknowledged(null);
-  assert.equal(changeSizeWarningPending(outstanding), false);
-  assert.equal(changeSizeSplitUnadmitted(outstanding), true);
-  assert.deepEqual(
-    workflowRequiredInputs("PREPARE_LOCAL_REVIEW", outstanding, {
-      changeSizeSplitUnadmitted: changeSizeSplitUnadmitted(outstanding),
-    }),
-    SPLIT_GATED_INPUTS.PREPARE_LOCAL_REVIEW,
-  );
-  // Once a gate has admitted the cut the promise is kept, and the phase goes
-  // back to declaring what it declares for every other run.
-  const admitted = acknowledged("2026-08-30T00:00:00.000Z");
-  assert.equal(changeSizeSplitUnadmitted(admitted), false);
-  assert.deepEqual(
-    workflowRequiredInputs("PREPARE_LOCAL_REVIEW", admitted, {
-      changeSizeSplitUnadmitted: changeSizeSplitUnadmitted(admitted),
-    }),
-    WORKFLOW_ACTION_INPUTS.PREPARE_LOCAL_REVIEW,
-  );
+  for (const action of ["PREPARE_LOCAL_REVIEW", "ADDRESS_LOCAL_FINDINGS"]) {
+    const outstanding = acknowledged(action, null);
+    assert.equal(changeSizeWarningPending(outstanding), false);
+    assert.equal(changeSizeSplitUnadmitted(outstanding), true);
+    assert.deepEqual(
+      workflowRequiredInputs(action, outstanding, {
+        changeSizeSplitUnadmitted: changeSizeSplitUnadmitted(outstanding),
+      }),
+      SPLIT_GATED_INPUTS[action],
+    );
+    // Once a gate has admitted the cut the promise is kept, and the phase goes
+    // back to declaring what it declares for every other run.
+    const admitted = acknowledged(action, "2026-08-30T00:00:00.000Z");
+    assert.equal(changeSizeSplitUnadmitted(admitted), false);
+    assert.deepEqual(
+      workflowRequiredInputs(action, admitted, {
+        changeSizeSplitUnadmitted: changeSizeSplitUnadmitted(admitted),
+      }),
+      WORKFLOW_ACTION_INPUTS[action],
+    );
+  }
 });
 
 // A declared sequence whose earlier call writes the ledger a later call
