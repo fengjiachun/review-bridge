@@ -106,14 +106,19 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   the shape raw GitHub JSON hands a driver — and the mismatch surfaced only at
   the first snapshot, as a terminal `immutable Codex baseline object
   disappeared or changed` on a pull request that may already have a Codex
-  request recorded against it. Both sides now assert one shared set of keys as
-  exact set equality: a stored object that omits `reviewed_head_sha`,
-  `commit_binding` or `attached_review_comments` diverges from the projection's
-  `null`, `null` and `[]` exactly as an extra key does, and the walk reaches
-  the nested projected objects — attachments, their actors, and the commit
-  binding — where the same raw GitHub fields leak in. A baseline the comparison
-  could never satisfy is now refused where the cost is a restart, and the
-  refusal names the offending field. (#97)
+  request recorded against it. Both sides now walk one shared description of
+  what the projection writes, and refuse anything it could not have produced:
+  key sets as exact set equality, nested objects included, so an omitted
+  `commit_binding` diverges from the projected `null` exactly as an extra key
+  does; the fields each resource kind carries, since only a formal review
+  carries a reviewed head and attachments; the commit binding's constants and
+  prefix pattern, taken from the adapter that writes them rather than copied;
+  the attachment order the projection sorts into; the reviewed head and commit
+  binding a review writes together; and the Codex actor every attachment is
+  rebuilt from. A baseline the comparison could never satisfy is refused where
+  the cost is a restart, and the refusal names the offending field. What
+  remains unchecked at start is what the projection copies out of the live
+  GitHub object, which the first snapshot is there to compare. (#97)
 - Keep declaring the cut a split acknowledged among the findings still owes
   (#92). Acknowledging a change-size warning with `split` at
   `ADDRESS_LOCAL_FINDINGS` cleared the crossing, so the summary fell back to
