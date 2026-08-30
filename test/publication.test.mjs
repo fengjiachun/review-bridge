@@ -2808,11 +2808,20 @@ test("a baseline result missing a projected field or a nested one is refused at 
         body: "A standalone comment.",
         user: { id: 99, type: "Bot", login: "codex[bot]" },
       },
+      {
+        id: 903,
+        pull_request_review_id: 900,
+        html_url: "https://github.com/owner/repo/pull/7#discussion_r903",
+        created_at: iso(startedAt - 870),
+        commit_id: state.headSha,
+        body: "A second finding.",
+        user: { id: 99, type: "Bot", login: "codex[bot]" },
+      },
     ],
   });
   // Without these the mutations below would exercise absent fields.
   assert.notEqual(adapted.candidate_results[0].commit_binding, null);
-  assert.equal(adapted.candidate_results[0].attached_review_comments.length, 1);
+  assert.equal(adapted.candidate_results[0].attached_review_comments.length, 2);
   assert.equal(
     adapted.candidate_results[1].resource_kind,
     "PULL_REQUEST_REVIEW_COMMENT",
@@ -2865,6 +2874,14 @@ test("a baseline result missing a projected field or a nested one is refused at 
     malformed.candidate_results[0][field] = value;
     await assert.rejects(start(state, startedAt, malformed), pattern);
   }
+  // The canonical comparison reads an array in order, so the projection's own
+  // sort is part of the shape.
+  const reordered = structuredClone(adapted);
+  reordered.candidate_results[0].attached_review_comments.reverse();
+  await assert.rejects(
+    start(state, startedAt, reordered),
+    /attached_review_comments\[1\] is out of comment_id order/,
+  );
   // A kind the projection never binds reproduces null and nothing else, an
   // empty object included.
   const emptyBinding = structuredClone(adapted);

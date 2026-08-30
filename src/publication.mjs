@@ -509,6 +509,14 @@ function assertBaselineShape(
         ["id", "type"],
         `${attachmentName}.actor`,
       );
+      // The canonical comparison reads an array in order, and the projection
+      // sorts attachments by comment_id, so any other order is unreproducible.
+      if (
+        position > 0 &&
+        attachment.comment_id <= attachments[position - 1].comment_id
+      ) {
+        fail("INVALID_INPUT", `${attachmentName} is out of comment_id order`);
+      }
     }
   }
 }
