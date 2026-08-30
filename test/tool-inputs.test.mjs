@@ -535,6 +535,20 @@ test("the summary passes every condition its declarations select on", () => {
   );
 });
 
+// The thread loop is planned from an observation and left by an advance.
+// Planners alone strand a controller twice over: the workflow's own reply is
+// not in the snapshot the plan reads, and once nothing is left to plan, every
+// planner refuses while the advance is the only way out of the phase.
+test("the thread loop declares its refresh and its exit", () => {
+  assert.deepEqual(Object.keys(WORKFLOW_ACTION_INPUTS.PLAN_THREAD_ACTION), [
+    "record_github_snapshot",
+    "plan_thread_reply",
+    "plan_thread_resolution",
+    "plan_thread_unresolve",
+    "advance_remote_workflow",
+  ]);
+});
+
 // A declared sequence whose earlier call writes the ledger a later call
 // addresses cannot hand both the same revision: the write increments it, and a
 // driver resolving the declaration once would send the consumed one.

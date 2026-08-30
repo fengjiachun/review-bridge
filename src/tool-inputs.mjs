@@ -357,6 +357,10 @@ export const WORKFLOW_ACTION_INPUTS = {
     advance_remote_workflow: [WORKFLOW_ID, WORKFLOW_REVISION],
   },
   PLAN_THREAD_ACTION: {
+    // A plan is only as good as the observation under it. The workflow's own
+    // reply is an external post the ledger cannot infer, and planning that
+    // thread's resolution refuses until a snapshot contains the reply.
+    record_github_snapshot: REFRESH_SNAPSHOT,
     plan_thread_reply: [
       WORKFLOW_ID,
       WORKFLOW_REVISION,
@@ -374,6 +378,10 @@ export const WORKFLOW_ACTION_INPUTS = {
       WORKFLOW_REVISION,
       ["thread_id", "get_invalidated_resolution_plan thread_id"],
     ],
+    // Every planner refuses once the fresh snapshot leaves no thread eligible
+    // or invalidated, and this phase is advanceable for exactly that: the
+    // advance is the loop's only exit.
+    advance_remote_workflow: [WORKFLOW_ID, WORKFLOW_REVISION],
   },
   REPLY_TO_CODEX_THREAD: MARK_EXECUTING,
   RECONCILE_THREAD_REPLY: {
