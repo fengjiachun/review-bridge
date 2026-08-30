@@ -37,6 +37,7 @@ import {
   workflowPaths,
   WORKFLOW_ID_RE,
 } from "./workflow-binding.mjs";
+import { workflowRequiredInputs } from "./tool-inputs.mjs";
 
 export const AUTONOMOUS_CAPABILITIES = Object.freeze([
   "EDIT_AND_TEST",
@@ -214,7 +215,13 @@ function changeSizeWarningCrossingTotal(workflow) {
     : null;
 }
 
-function changeSizeWarningPending(workflow) {
+/**
+ * Whether a crossed change-size warning still awaits its decision. The bind
+ * and the advance that prepare the next review round both refuse while it
+ * does, so a summary has to name the acknowledgment among the calls its state
+ * implies.
+ */
+export function changeSizeWarningPending(workflow) {
   const crossingTotal = changeSizeWarningCrossingTotal(workflow);
   const acknowledgment = workflow.change_size_warning?.acknowledgment;
   return (
@@ -321,6 +328,50 @@ function requireExecutedChangeSizeSplit(workflow, candidateTotalLines = null) {
   }
 }
 
+/**
+ * Whether a recorded split decision has yet to be admitted. The stamp that
+ * clears it is written where a gate measures an admitted round below the
+ * acknowledged crossing, so a decision carrying no stamp is one no gate has
+ * let through, and recording the cut is still what the driver owes. It stays
+ * true for a cut already committed but not yet measured, which is why the
+ * declaration states the recording as required until a gate admits it rather
+ * than as outstanding work.
+ */
+export function changeSizeSplitUnadmitted(workflow) {
+  const acknowledgment = workflow.change_size_warning?.acknowledgment;
+  return (
+    acknowledgment?.decision === "split" && acknowledgment.executed_at == null
+  );
+}
+
+/**
+ * Whether a completed thread resolution still owes the publication its
+ * server-owned record. Only a RESOLVED outcome mutated the thread; a
+ * pre-resolved observation issued no mutation, so it has nothing to record and
+ * nothing to hold the action open for.
+ */
+export function resolutionOwesRecord(action) {
+  return (
+    action?.kind === "RESOLVE_REVIEW_THREAD" &&
+    action.provider_response?.outcome === "RESOLVED"
+  );
+}
+
+/**
+ * Whether the next head recorded in this phase closes an open continuation
+ * cycle. Such a head answers a `CONTINUABLE_FINDINGS` round, so recording it
+ * moves the phase itself instead of leaving the workflow for the advance that
+ * an ordinary author-resolution cycle owes.
+ */
+export function continuesLocalCycle(workflow) {
+  return (
+    workflow.phase === "ADDRESS_LOCAL_FINDINGS" &&
+    workflow.local_review_cycles.at(-1)?.continued_from_review_id ===
+      workflow.current_review?.review_id &&
+    workflow.local_review_cycles.at(-1)?.addressed_head_sha == null
+  );
+}
+
 function assertSha(value, name) {
   if (typeof value !== "string" || !SHA_RE.test(value)) {
     throw new TypeError(`${name} must be a full lowercase Git SHA`);
@@ -383,7 +434,7 @@ function workflowCorrelationMarker(markerPrefix, workflow, actionId) {
 // capability, the phase the action lives in, the ownership claim it rides
 // on, its target and provider-response contracts, and its completion effect
 // (implemented in completeWorkflowAction).
-const ACTION_KIND_SPECS = {
+export const ACTION_KIND_SPECS = {
   CREATE_CODEX_REVIEWER_TASK: {
     capability: "CREATE_CODEX_REVIEWER_TASKS",
     phase: "DISPATCH_CODEX_REVIEWER",
@@ -3327,7 +3378,36 @@ function nextAction(workflow) {
   return actions[workflow.phase] ?? "INSPECT_WORKFLOW";
 }
 
-function workflowSummary(workflow) {
+/**
+ * The compact projection every workflow read surface returns, including the
+ * calls its current state implies. Exported so the declarations can be held to
+ * the conditions this projection selects them with.
+ */
+/**
+ * Whether the publication an observed thread action is bound to has gone
+ * terminal. A terminal ledger refuses the writes such an action would
+ * otherwise owe, and completion is permitted exactly there, so the calls the
+ * state implies differ. Only the publication ledger holds it, which the
+ * synchronous projection cannot reach; the async read surfaces resolve it and
+ * hand it in.
+ */
+async function boundPublicationTerminal(storeRoot, workflow) {
+  const action = workflow.active_action;
+  if (
+    action?.status !== "OBSERVED" ||
+    !["RESOLVE_REVIEW_THREAD", "UNRESOLVE_REVIEW_THREAD"].includes(action.kind)
+  ) {
+    return false;
+  }
+  const ledger = await getPublication(storeRoot, action.target.review_id);
+  return ledger.terminal != null;
+}
+
+export function workflowSummary(
+  workflow,
+  { publicationTerminal = false } = {},
+) {
+  const action = nextAction(workflow);
   const currentReview = structuredClone(workflow.current_review);
   if (currentReview?.change_size != null) {
     currentReview.change_size = changeSizeReport(
@@ -3342,7 +3422,14 @@ function workflowSummary(workflow) {
     updated_at: workflow.updated_at,
     status: workflow.status,
     phase: workflow.phase,
-    next_action: nextAction(workflow),
+    next_action: action,
+    required_inputs: workflowRequiredInputs(action, workflow, {
+      continuesLocalCycle: continuesLocalCycle(workflow),
+      changeSizeWarningPending: changeSizeWarningPending(workflow),
+      changeSizeSplitUnadmitted: changeSizeSplitUnadmitted(workflow),
+      resolutionOwesRecord: resolutionOwesRecord(workflow.active_action),
+      publicationTerminal,
+    }),
     base_sha: workflow.base_sha,
     topic_branch: workflow.topic_branch,
     current_head_sha: workflow.current_head_sha,
@@ -3566,7 +3653,9 @@ export async function getAutonomousWorkflow(storeRoot, workflowId) {
 
 export async function getAutonomousWorkflowSummary(storeRoot, workflowId) {
   return withWorkflowLock(storeRoot, workflowId, async (workflow) =>
-    workflowSummary(workflow),
+    workflowSummary(workflow, {
+      publicationTerminal: await boundPublicationTerminal(storeRoot, workflow),
+    }),
   );
 }
 
@@ -3593,7 +3682,14 @@ export async function listAutonomousWorkflows(storeRoot, statuses = null) {
     try {
       const workflow = await getAutonomousWorkflow(storeRoot, entry.name);
       if (statusSet == null || statusSet.has(workflow.status)) {
-        result.push(workflowSummary(workflow));
+        result.push(
+          workflowSummary(workflow, {
+            publicationTerminal: await boundPublicationTerminal(
+              storeRoot,
+              workflow,
+            ),
+          }),
+        );
       }
     } catch (error) {
       if (
@@ -3702,11 +3798,7 @@ export async function recordWorkflowHead(
         );
       }
     }
-    const pendingLocalContinuation =
-      workflow.phase === "ADDRESS_LOCAL_FINDINGS" &&
-      workflow.local_review_cycles.at(-1)?.continued_from_review_id ===
-        workflow.current_review?.review_id &&
-      workflow.local_review_cycles.at(-1)?.addressed_head_sha == null;
+    const pendingLocalContinuation = continuesLocalCycle(workflow);
     // A head recorded from PREPARE_LOCAL_REVIEW refines an addressed head
     // whose follow-up review is not yet bound. The latest cycle's addressed
     // head must move with it, or the follow-up bind would no longer see a
@@ -5479,7 +5571,7 @@ export async function completeWorkflowAction(
       return completeDraftPullRequest(storeRoot, workflow, paths, action);
     }
     if (action.kind === "RESOLVE_REVIEW_THREAD") {
-      if (action.provider_response.outcome === "RESOLVED") {
+      if (resolutionOwesRecord(action)) {
         // The server-owned record must exist before the action may close.
         // Completing without it would let the next snapshot -- which shows
         // the thread resolved -- make the record permanently uncreatable,

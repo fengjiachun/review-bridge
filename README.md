@@ -674,7 +674,11 @@ not access GitHub or return the full ledger. A finalized gate also reports
 `gate_expires_in_seconds`: the gate expires five minutes after the oldest source
 collection in the observation it was minted over, not five minutes after
 issuance, so part of that window is already spent when the gate first exists.
-When `next_action` is
+Its `required_inputs` — like the one on `get_review_summary`,
+`get_autonomous_workflow_summary`, and `list_autonomous_workflows` — names the
+calls the current action implies as `{tool: [[field, source], ...]}`, so a
+driver never has to discover a schema by sending empty arguments. When
+`next_action` is
 `POST_AND_RECORD_CODEX_REVIEW_REQUEST`, post the returned
 `codex_review_request.body` unchanged and bind the post with its
 `codex_review_request.request_id` when present. Adapter-version-1 ledgers

@@ -9,6 +9,7 @@ import {
   removeAndSync,
   withStateLock,
 } from "./storage.mjs";
+import { reviewRequiredInputs } from "./tool-inputs.mjs";
 
 export const MAX_ROUNDS = 2;
 export const DEFAULT_CHANGE_SIZE_BUDGET = 2000;
@@ -1100,6 +1101,7 @@ function reviewSummary(review) {
   const activeFindings = review.findings.filter(
     (finding) => !RESOLVED_FINDING_STATUSES.has(finding.status),
   );
+  const action = actionRequired(review.status, isAdvisory(review));
   return {
     id: review.id,
     status: review.status,
@@ -1108,7 +1110,8 @@ function reviewSummary(review) {
     state_version: review.state_version ?? 0,
     current_round: review.current_round,
     max_rounds: review.max_rounds,
-    action_required: actionRequired(review.status, isAdvisory(review)),
+    action_required: action,
+    required_inputs: reviewRequiredInputs(action),
     reviewer_provider: reviewerProviderFor(review),
     advisory: isAdvisory(review),
     review_strategy: review.review_strategy ?? {

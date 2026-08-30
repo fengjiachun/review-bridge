@@ -27,6 +27,7 @@ import {
   verifyPublicationGate,
 } from "../src/publication.mjs";
 import { adaptCodexEvidence } from "../src/github-adapter.mjs";
+import { PUBLICATION_ACTION_INPUTS } from "../src/tool-inputs.mjs";
 import {
   acquireStateLock,
   atomicWriteCanonicalJson,
@@ -213,6 +214,8 @@ test("publication summary reports compact next actions and gate state", async (t
     },
     required_request_refs: [],
     required_ambiguous_results: [],
+    required_inputs:
+      PUBLICATION_ACTION_INPUTS.POST_AND_RECORD_CODEX_REVIEW_REQUEST,
     gate_state: "ABSENT",
     gate_expires_in_seconds: null,
   });

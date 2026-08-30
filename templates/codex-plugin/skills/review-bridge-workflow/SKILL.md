@@ -34,7 +34,9 @@ gap returns the ready pull request to draft before any repair.
 2. Require a clean worktree with the authorized topic branch checked out at
    the immutable base. Call `start_autonomous_workflow`, record its
    `workflow_id` and revision, and follow only the server-derived
-   `next_action`.
+   `next_action`. Every summary carries `required_inputs`, which names the
+   calls that action implies as `{tool: [[field, source], ...]}`. Take each
+   call's arguments from it rather than discovering them by sending empty ones.
 3. For `COMMIT_HEAD`, estimate added plus deleted lines before editing. Real
    diffs commonly exceed estimates, so if the change is likely to approach the
    workflow's `change_size_budget`, discuss splitting it before implementation.
