@@ -2683,6 +2683,304 @@ test("adapter baseline round-trips through the server without actor-login drift"
   });
 });
 
+test("a baseline actor the snapshot projection cannot reproduce is refused at start", async (t) => {
+  // The snapshot side pins baseline actors to exactly {id, type}, so a stored
+  // actor carrying a login can never satisfy the identity comparison: the
+  // ledger is doomed at start and dies at the first snapshot, terminally. The
+  // key sets are shared with the snapshot side, so the refusal names the field.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const collectedAt = iso(startedAt - 100);
+  const adapted = adaptCodexEvidence({
+    mode: "BASELINE",
+    collection: {
+      status: "COMPLETE",
+      collected_at: collectedAt,
+      sources: [
+        "ISSUE_COMMENTS",
+        "PULL_REQUEST_REVIEWS",
+        "PULL_REQUEST_REVIEW_COMMENTS",
+      ].map((kind) =>
+        completeSource(kind, collectedAt, {
+          pagination_complete: true,
+          page_count: 1,
+        }),
+      ),
+    },
+    expected_actor: { id: 99, type: "Bot" },
+    local_gate_head_sha: state.headSha,
+    issue_comments: [
+      {
+        id: 77,
+        html_url: "https://github.com/owner/repo/issues/7#issuecomment-77",
+        created_at: iso(startedAt - 1_000),
+        body: "@codex review",
+        user: { id: 42, type: "User", login: "maintainer" },
+      },
+      {
+        id: 78,
+        html_url: "https://github.com/owner/repo/issues/7#issuecomment-78",
+        created_at: iso(startedAt - 900),
+        body: `Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** \`${state.headSha.slice(0, 10)}\``,
+        user: { id: 99, type: "Bot", login: "codex[bot]" },
+      },
+    ],
+    pull_request_reviews: [],
+    pull_request_review_comments: [],
+  });
+  const requestLogin = structuredClone(adapted);
+  requestLogin.requests[0].actor.login = "maintainer";
+  await assert.rejects(
+    start(state, startedAt, requestLogin),
+    /baseline\.requests\[0\]\.actor contains unexpected field login/,
+  );
+  const resultLogin = structuredClone(adapted);
+  resultLogin.candidate_results[0].actor.login = "codex[bot]";
+  await assert.rejects(
+    start(state, startedAt, resultLogin),
+    /baseline\.candidate_results\[0\]\.actor contains unexpected field login/,
+  );
+  // The adapter's own output still starts: the accepted key sets are the
+  // projection's, not a narrower list of them.
+  const ledger = await start(state, startedAt, adapted);
+  assert.equal(ledger.revision, 1);
+});
+
+test("a baseline result outside its resource kind's projected shape is refused at start", async (t) => {
+  // The same defect one level down and in the other direction: the projection
+  // always writes `reviewed_head_sha`, `commit_binding` and
+  // `attached_review_comments`, and pins attachment actors to {id, type}, so a
+  // stored result that omits one or carries a raw GitHub field inside an
+  // attachment diverges canonically at the first snapshot exactly as an extra
+  // top-level key does.
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const collectedAt = iso(startedAt - 100);
+  const adapted = adaptCodexEvidence({
+    mode: "BASELINE",
+    collection: {
+      status: "COMPLETE",
+      collected_at: collectedAt,
+      sources: [
+        "ISSUE_COMMENTS",
+        "PULL_REQUEST_REVIEWS",
+        "PULL_REQUEST_REVIEW_COMMENTS",
+      ].map((kind) =>
+        completeSource(kind, collectedAt, {
+          pagination_complete: true,
+          page_count: 1,
+        }),
+      ),
+    },
+    expected_actor: { id: 99, type: "Bot" },
+    local_gate_head_sha: state.headSha,
+    issue_comments: [
+      {
+        id: 800,
+        html_url: "https://github.com/owner/repo/issues/7#issuecomment-800",
+        created_at: iso(startedAt - 910),
+        body: `Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** \`${state.headSha.slice(0, 10)}\``,
+        user: { id: 99, type: "Bot", login: "codex[bot]" },
+      },
+    ],
+    pull_request_reviews: [
+      {
+        id: 900,
+        html_url:
+          "https://github.com/owner/repo/pull/7#pullrequestreview-900",
+        submitted_at: iso(startedAt - 900),
+        commit_id: state.headSha,
+        state: "COMMENTED",
+        body: "### 💡 Codex Review\n\nHere are some automated review suggestions.",
+        user: { id: 99, type: "Bot", login: "codex[bot]" },
+      },
+    ],
+    pull_request_review_comments: [
+      {
+        id: 901,
+        pull_request_review_id: 900,
+        html_url: "https://github.com/owner/repo/pull/7#discussion_r901",
+        created_at: iso(startedAt - 890),
+        commit_id: state.headSha,
+        body: "One finding.",
+        user: { id: 99, type: "Bot", login: "codex[bot]" },
+      },
+      {
+        id: 902,
+        pull_request_review_id: 800,
+        html_url: "https://github.com/owner/repo/pull/7#discussion_r902",
+        created_at: iso(startedAt - 880),
+        commit_id: state.headSha,
+        body: "A standalone comment.",
+        user: { id: 99, type: "Bot", login: "codex[bot]" },
+      },
+      {
+        id: 903,
+        pull_request_review_id: 900,
+        html_url: "https://github.com/owner/repo/pull/7#discussion_r903",
+        created_at: iso(startedAt - 870),
+        commit_id: state.headSha,
+        body: "A second finding.",
+        user: { id: 99, type: "Bot", login: "codex[bot]" },
+      },
+    ],
+  });
+  // One candidate result per resource kind, so every row of the projected
+  // shape table is exercised — and asserted here, because a mutation below
+  // proves nothing about a field the adapter left empty on its own.
+  const [comment, review, replyComment] = adapted.candidate_results;
+  assert.deepEqual(
+    adapted.candidate_results.map((result) => result.resource_kind),
+    ["ISSUE_COMMENT", "PULL_REQUEST_REVIEW", "PULL_REQUEST_REVIEW_COMMENT"],
+  );
+  assert.equal(comment.reviewed_head_sha, null);
+  assert.notEqual(comment.commit_binding, null);
+  assert.deepEqual(comment.attached_review_comments, []);
+  assert.equal(review.reviewed_head_sha, state.headSha);
+  assert.equal(review.attached_review_comments.length, 2);
+  assert.equal(replyComment.commit_binding, null);
+  assert.deepEqual(replyComment.attached_review_comments, []);
+
+  async function refuses(mutate, pattern) {
+    const mutated = structuredClone(adapted);
+    mutate(...mutated.candidate_results);
+    await assert.rejects(start(state, startedAt, mutated), pattern);
+  }
+
+  for (const field of [
+    "reviewed_head_sha",
+    "commit_binding",
+    "attached_review_comments",
+  ]) {
+    await refuses(
+      (_c, r) => delete r[field],
+      new RegExp(`baseline\\.candidate_results\\[1\\] is missing field ${field}`),
+    );
+  }
+  await refuses(
+    (_c, r) => {
+      r.attached_review_comments[0].actor.login = "codex[bot]";
+    },
+    /attached_review_comments\[0\]\.actor contains unexpected field login/,
+  );
+  await refuses(
+    (_c, r) => {
+      r.commit_binding.prefix = state.headSha.slice(0, 10);
+    },
+    /commit_binding contains unexpected field prefix/,
+  );
+  // A binding's provenance is written from constants and its prefix is the
+  // substring a fixed pattern matched, so neither is the caller's to choose.
+  await refuses(
+    (c) => {
+      c.commit_binding.source = "PULL_REQUEST_REVIEW_COMMIT_ID";
+    },
+    /commit_binding\.source must be CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD/,
+  );
+  await refuses(
+    (_c, r) => {
+      r.commit_binding.field = "body.reviewed_commit";
+    },
+    /commit_binding\.field must be commit_id/,
+  );
+  // One guard writes a review's reviewed head and its binding together, and
+  // the projection filters attachments to the expected actor before rebuilding
+  // each one's identity from it.
+  await refuses(
+    (_c, r) => {
+      r.reviewed_head_sha = null;
+    },
+    /baseline\.candidate_results\[1\] must carry a reviewed head and a commit binding together/,
+  );
+  await refuses(
+    (_c, r) => {
+      r.commit_binding = null;
+    },
+    /baseline\.candidate_results\[1\] must carry a reviewed head and a commit binding together/,
+  );
+  await refuses(
+    (_c, r) => {
+      r.attached_review_comments[0].actor = { id: 42, type: "User" };
+    },
+    /attached_review_comments\[0\]\.actor does not match the pinned Codex actor/,
+  );
+  for (const prefix of ["not-hexadecimal", state.headSha.slice(0, 4), 1]) {
+    await refuses(
+      (c) => {
+        c.commit_binding.prefix = prefix;
+      },
+      /commit_binding\.prefix is not a commit prefix/,
+    );
+  }
+  // Present but not an array, and present but not an object: the walk must
+  // refuse these as input rather than crash on them.
+  await refuses(
+    (_c, r) => {
+      r.attached_review_comments = null;
+    },
+    /baseline\.candidate_results\[1\]\.attached_review_comments must be an array/,
+  );
+  await refuses(
+    (_c, r) => {
+      r.attached_review_comments = [null];
+    },
+    /baseline\.candidate_results\[1\] attachment must be an object/,
+  );
+  // The canonical comparison reads an array in order, so the projection's own
+  // sort is part of the shape.
+  await refuses(
+    (_c, r) => r.attached_review_comments.reverse(),
+    /attached_review_comments\[1\] is out of comment_id order/,
+  );
+  // A field a kind does not carry reproduces null or [] and nothing else — an
+  // empty object, or a well-formed value borrowed from the kind that does
+  // carry it, included.
+  await refuses(
+    (_c, _r, reply) => {
+      reply.commit_binding = {};
+    },
+    /baseline\.candidate_results\[2\]\.commit_binding must be null for PULL_REQUEST_REVIEW_COMMENT/,
+  );
+  await refuses(
+    (_c, review_, reply) => {
+      reply.attached_review_comments = structuredClone(
+        review_.attached_review_comments,
+      );
+    },
+    /baseline\.candidate_results\[2\]\.attached_review_comments must be empty for PULL_REQUEST_REVIEW_COMMENT/,
+  );
+  await refuses(
+    (c) => {
+      c.attached_review_comments = [
+        {
+          comment_id: 901,
+          actor: { id: 99, type: "Bot" },
+          commit_id: state.headSha,
+          body_sha256: digest("One finding."),
+        },
+      ];
+    },
+    /baseline\.candidate_results\[0\]\.attached_review_comments must be empty for ISSUE_COMMENT/,
+  );
+  for (const [position, kind] of [
+    [0, "ISSUE_COMMENT"],
+    [2, "PULL_REQUEST_REVIEW_COMMENT"],
+  ]) {
+    await refuses(
+      (...results) => {
+        results[position].reviewed_head_sha = state.headSha;
+      },
+      new RegExp(
+        `baseline\\.candidate_results\\[${position}\\].reviewed_head_sha must be null for ${kind}`,
+      ),
+    );
+  }
+  const ledger = await start(state, startedAt, adapted);
+  assert.equal(ledger.revision, 1);
+});
+
 test("an App notice edited after the baseline leaves the ledger alive", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

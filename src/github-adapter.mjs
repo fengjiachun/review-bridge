@@ -21,7 +21,26 @@ const APP_NOTICE_MARKERS = [
   },
 ];
 const CLEAN_PREFIX = "Codex Review: Didn't find any major issues.";
-const CLEAN_MARKER = /\*\*Reviewed commit:\*\*\s*`([0-9a-f]{10,40})`/g;
+const COMMIT_PREFIX = "[0-9a-f]{10,40}";
+const CLEAN_MARKER = new RegExp(
+  `\\*\\*Reviewed commit:\\*\\*\\s*\`(${COMMIT_PREFIX})\``,
+  "g",
+);
+// The provenance a projected commit binding carries, by the resource kind that
+// carries it. Exported because the publication ledger holds a stored baseline
+// to the same values: a binding it cannot reproduce is one no snapshot can
+// match, and a second copy of these constants is how the two would drift.
+export const COMMIT_BINDINGS = {
+  ISSUE_COMMENT: {
+    source: "CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD",
+    field: "body.reviewed_commit",
+  },
+  PULL_REQUEST_REVIEW: {
+    source: "PULL_REQUEST_REVIEW_COMMIT_ID",
+    field: "commit_id",
+  },
+};
+export const COMMIT_PREFIX_PATTERN = new RegExp(`^${COMMIT_PREFIX}$`);
 const FINDINGS_PREFIX = /###\s+💡\s+Codex Review/;
 const RESOURCE_KINDS = {
   issue_comments: "ISSUE_COMMENT",
@@ -250,18 +269,14 @@ function makeResult(kind, object, comments, expectedActor, adapterVersion) {
     const markers = [...body.matchAll(CLEAN_MARKER)];
     if (body.startsWith(CLEAN_PREFIX) && markers.length === 1) {
       result.commit_binding = {
-        source: "CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD",
-        field: "body.reviewed_commit",
+        ...COMMIT_BINDINGS.ISSUE_COMMENT,
         prefix: markers[0][1],
       };
     }
   } else if (kind === "PULL_REQUEST_REVIEW") {
     if (/^[0-9a-f]{40}$/.test(String(object.commit_id ?? ""))) {
       result.reviewed_head_sha = object.commit_id;
-      result.commit_binding = {
-        source: "PULL_REQUEST_REVIEW_COMMIT_ID",
-        field: "commit_id",
-      };
+      result.commit_binding = { ...COMMIT_BINDINGS.PULL_REQUEST_REVIEW };
     }
     result.attached_review_comments = normalizedAttachments(
       object,

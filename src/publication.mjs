@@ -11,7 +11,11 @@ import { loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
 // One derivation of the App's notice markers, shared with the adapter that
 // records them. A notice is only non-blocking because its body carries a
 // marker, so the claim has to be checked here against that body.
-import { codexAppNoticeMarker } from "./github-adapter.mjs";
+import {
+  codexAppNoticeMarker,
+  COMMIT_BINDINGS,
+  COMMIT_PREFIX_PATTERN,
+} from "./github-adapter.mjs";
 // One derivation of thread completeness, shared with the normalizer that
 // records it. Two copies of this rule would be two things to keep in step.
 import { threadProvenanceComplete } from "./github-observation.mjs";
@@ -384,6 +388,209 @@ function assertExactKeys(value, allowedKeys, name) {
   }
 }
 
+// Exact set equality, both directions: the projection always writes every key
+// it defines, so a key the stored side omits diverges from the projected
+// `null`, `null` and `[]` exactly as an extra key does.
+function assertProjectedKeys(value, keys, name) {
+  assertExactKeys(value, keys, name);
+  const present = new Set(Object.keys(value));
+  const missing = keys.filter((key) => !present.has(key));
+  if (missing.length > 0) {
+    fail("INVALID_INPUT", `${name} is missing field ${missing[0]}`);
+  }
+}
+
+// The shapes the snapshot projection can reproduce. Applied both to a stored
+// baseline at start and to the projected partitions at snapshot time: a key
+// either side accepts alone is a baseline the comparison can never satisfy.
+function baselineRequestKeys(item, adapterVersion) {
+  return [
+    "resource_id",
+    "resource_kind",
+    "url",
+    "event_at",
+    "timestamp_field",
+    "body_sha256",
+    ...(adapterVersion === 2 ? ["request_id"] : []),
+    ...("issuance" in item ? ["issuance"] : []),
+    "actor",
+  ];
+}
+
+function baselineResultKeys(adapterVersion) {
+  return [
+    "result_id",
+    "resource_kind",
+    "native_review_state",
+    "url",
+    "event_at",
+    "timestamp_field",
+    "actor",
+    "reviewed_head_sha",
+    "commit_binding",
+    "attached_review_comments",
+    "body_sha256",
+    ...(adapterVersion === 2 ? ["request_id"] : []),
+  ];
+}
+
+// What the projection can write into a baseline result of each resource kind.
+// Only a formal review carries a reviewed head and attachments; an issue
+// comment carries the prefix binding alone; a review comment carries none of
+// the three. A field a kind does not carry projects to null or [], which no
+// other value reproduces — an empty object included — so the stored side is
+// held to the same table rather than left to diverge at the first snapshot.
+// A binding is stated as the values the projection writes, a pattern where it
+// writes a matched substring rather than a constant.
+const PROJECTED_RESULT_SHAPES = {
+  ISSUE_COMMENT: {
+    reviewedHead: false,
+    commitBinding: {
+      ...COMMIT_BINDINGS.ISSUE_COMMENT,
+      prefix: COMMIT_PREFIX_PATTERN,
+    },
+    attachments: false,
+  },
+  PULL_REQUEST_REVIEW: {
+    reviewedHead: true,
+    commitBinding: COMMIT_BINDINGS.PULL_REQUEST_REVIEW,
+    attachments: true,
+  },
+  PULL_REQUEST_REVIEW_COMMENT: {
+    reviewedHead: false,
+    commitBinding: null,
+    attachments: false,
+  },
+};
+
+function assertProjectedBinding(binding, spec, name) {
+  assertProjectedKeys(binding, Object.keys(spec), name);
+  for (const [key, expected] of Object.entries(spec)) {
+    if (expected instanceof RegExp) {
+      if (typeof binding[key] !== "string" || !expected.test(binding[key])) {
+        fail("INVALID_INPUT", `${name}.${key} is not a commit prefix`);
+      }
+    } else if (binding[key] !== expected) {
+      fail("INVALID_INPUT", `${name}.${key} must be ${expected}`);
+    }
+  }
+}
+
+function assertBaselineShape(
+  requests,
+  results,
+  { adapterVersion, expectedActor, requestsName, resultsName },
+) {
+  for (const [index, item] of requests.entries()) {
+    assertProjectedKeys(
+      item,
+      baselineRequestKeys(item, adapterVersion),
+      `${requestsName}[${index}]`,
+    );
+    assertProjectedKeys(
+      item.actor,
+      ["id", "type"],
+      `${requestsName}[${index}].actor`,
+    );
+    if ("issuance" in item) {
+      assertProjectedKeys(
+        item.issuance,
+        ["review_id", "recorded_revision", "requested_head_sha"],
+        `${requestsName}[${index}].issuance`,
+      );
+    }
+  }
+  for (const [index, item] of results.entries()) {
+    assertProjectedKeys(
+      item,
+      baselineResultKeys(adapterVersion),
+      `${resultsName}[${index}]`,
+    );
+    assertProjectedKeys(
+      item.actor,
+      ["id", "type"],
+      `${resultsName}[${index}].actor`,
+    );
+    const shape = PROJECTED_RESULT_SHAPES[item.resource_kind];
+    if (!shape.reviewedHead && item.reviewed_head_sha !== null) {
+      fail(
+        "INVALID_INPUT",
+        `${resultsName}[${index}].reviewed_head_sha must be null for ${item.resource_kind}`,
+      );
+    }
+    if (shape.commitBinding == null) {
+      if (item.commit_binding !== null) {
+        fail(
+          "INVALID_INPUT",
+          `${resultsName}[${index}].commit_binding must be null for ${item.resource_kind}`,
+        );
+      }
+    } else if (item.commit_binding != null) {
+      assertProjectedBinding(
+        item.commit_binding,
+        shape.commitBinding,
+        `${resultsName}[${index}].commit_binding`,
+      );
+    }
+    // One guard on the review's commit id writes the reviewed head and the
+    // binding together, so the projection reconstructs both or neither.
+    if (
+      shape.reviewedHead &&
+      (item.reviewed_head_sha == null) !== (item.commit_binding == null)
+    ) {
+      fail(
+        "INVALID_INPUT",
+        `${resultsName}[${index}] must carry a reviewed head and a commit binding together`,
+      );
+    }
+    const attachments = assertArray(
+      item.attached_review_comments,
+      `${resultsName}[${index}].attached_review_comments`,
+    );
+    if (!shape.attachments && attachments.length > 0) {
+      fail(
+        "INVALID_INPUT",
+        `${resultsName}[${index}].attached_review_comments must be empty for ${item.resource_kind}`,
+      );
+    }
+    for (const [position, attachment] of attachments.entries()) {
+      const attachmentName =
+        `${resultsName}[${index}].attached_review_comments[${position}]`;
+      assertProjectedKeys(
+        attachment,
+        ["comment_id", "actor", "commit_id", "body_sha256"],
+        attachmentName,
+      );
+      assertProjectedKeys(
+        attachment.actor,
+        ["id", "type"],
+        `${attachmentName}.actor`,
+      );
+      // The projection filters a review's comments to the expected actor and
+      // rebuilds each attachment actor from that identity, so no other one is
+      // reproducible.
+      if (
+        expectedActor &&
+        (attachment.actor.id !== expectedActor.id ||
+          attachment.actor.type !== expectedActor.type)
+      ) {
+        fail(
+          "INVALID_INPUT",
+          `${attachmentName}.actor does not match the pinned Codex actor`,
+        );
+      }
+      // The canonical comparison reads an array in order, and the projection
+      // sorts attachments by comment_id, so any other order is unreproducible.
+      if (
+        position > 0 &&
+        attachment.comment_id <= attachments[position - 1].comment_id
+      ) {
+        fail("INVALID_INPUT", `${attachmentName} is out of comment_id order`);
+      }
+    }
+  }
+}
+
 function sameIdentitySet(left, right, idField = "resource_id") {
   if (left.length !== right.length) {
     return false;
@@ -605,6 +812,12 @@ function validateBaseline(input, currentMs, createdAt = null, expectedActor = nu
     baseline: true,
     expectedActor,
   });
+  assertBaselineShape(requests, results, {
+    adapterVersion: collection.adapter_version,
+    expectedActor,
+    requestsName: "baseline.requests",
+    resultsName: "baseline.candidate_results",
+  });
   if (
     collection.adapter_version === 2 &&
     (requests.some((request) => !("request_id" in request)) ||
@@ -740,6 +953,7 @@ function validateResultFacts(
       fail("INVALID_INPUT", `${name}[${index}] cannot have a native review state`);
     }
     for (const attachment of item.attached_review_comments ?? []) {
+      assertObject(attachment, `${name}[${index}] attachment`);
       assertId(attachment.comment_id, `${name}[${index}] attachment comment_id`);
       assertId(attachment.actor?.id, `${name}[${index}] attachment actor.id`);
       assertString(
@@ -1431,60 +1645,12 @@ function validateCodexPartitions(codexReview, ledger) {
       expectedActor: ledger.target.codex_actor,
     },
   );
-  for (const [index, item] of baselineRequests.entries()) {
-    assertExactKeys(
-      item,
-      [
-        "resource_id",
-        "resource_kind",
-        "url",
-        "event_at",
-        "timestamp_field",
-        "body_sha256",
-        ...(adapterVersion === 2 ? ["request_id"] : []),
-        ...("issuance" in item ? ["issuance"] : []),
-        "actor",
-      ],
-      `codex_review.preexisting_requests[${index}]`,
-    );
-    assertExactKeys(
-      item.actor,
-      ["id", "type"],
-      `codex_review.preexisting_requests[${index}].actor`,
-    );
-    if ("issuance" in item) {
-      assertExactKeys(
-        item.issuance,
-        ["review_id", "recorded_revision", "requested_head_sha"],
-        `codex_review.preexisting_requests[${index}].issuance`,
-      );
-    }
-  }
-  for (const [index, item] of baselineResults.entries()) {
-    assertExactKeys(
-      item,
-      [
-        "result_id",
-        "resource_kind",
-        "native_review_state",
-        "url",
-        "event_at",
-        "timestamp_field",
-        "actor",
-        "reviewed_head_sha",
-        "commit_binding",
-        "attached_review_comments",
-        "body_sha256",
-        ...(adapterVersion === 2 ? ["request_id"] : []),
-      ],
-      `codex_review.preexisting_candidate_results[${index}]`,
-    );
-    assertExactKeys(
-      item.actor,
-      ["id", "type"],
-      `codex_review.preexisting_candidate_results[${index}].actor`,
-    );
-  }
+  assertBaselineShape(baselineRequests, baselineResults, {
+    adapterVersion,
+    expectedActor: ledger.target.codex_actor,
+    requestsName: "codex_review.preexisting_requests",
+    resultsName: "codex_review.preexisting_candidate_results",
+  });
   const baselineConflict =
     !sameIdentitySet(
       baselineRequests,
