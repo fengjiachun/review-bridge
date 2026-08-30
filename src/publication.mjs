@@ -430,15 +430,29 @@ function baselineResultKeys(adapterVersion) {
   ];
 }
 
-// The projection writes a commit binding only for the two resource kinds that
-// carry one, and one shape per kind. Any other kind projects to null, which no
-// object reproduces — an empty one included — so those kinds get no key list.
-function commitBindingKeys(resourceKind) {
-  if (resourceKind === "ISSUE_COMMENT") {
-    return ["source", "field", "prefix"];
-  }
-  return resourceKind === "PULL_REQUEST_REVIEW" ? ["source", "field"] : null;
-}
+// What the projection can write into a baseline result of each resource kind.
+// Only a formal review carries a reviewed head and attachments; an issue
+// comment carries the prefix binding alone; a review comment carries none of
+// the three. A field a kind does not carry projects to null or [], which no
+// other value reproduces — an empty object included — so the stored side is
+// held to the same table rather than left to diverge at the first snapshot.
+const PROJECTED_RESULT_SHAPES = {
+  ISSUE_COMMENT: {
+    reviewedHead: false,
+    commitBindingKeys: ["source", "field", "prefix"],
+    attachments: false,
+  },
+  PULL_REQUEST_REVIEW: {
+    reviewedHead: true,
+    commitBindingKeys: ["source", "field"],
+    attachments: true,
+  },
+  PULL_REQUEST_REVIEW_COMMENT: {
+    reviewedHead: false,
+    commitBindingKeys: null,
+    attachments: false,
+  },
+};
 
 function assertBaselineShape(
   requests,
@@ -477,8 +491,14 @@ function assertBaselineShape(
       ["id", "type"],
       `${resultsName}[${index}].actor`,
     );
-    const bindingKeys = commitBindingKeys(item.resource_kind);
-    if (bindingKeys == null) {
+    const shape = PROJECTED_RESULT_SHAPES[item.resource_kind];
+    if (!shape.reviewedHead && item.reviewed_head_sha !== null) {
+      fail(
+        "INVALID_INPUT",
+        `${resultsName}[${index}].reviewed_head_sha must be null for ${item.resource_kind}`,
+      );
+    }
+    if (shape.commitBindingKeys == null) {
       if (item.commit_binding !== null) {
         fail(
           "INVALID_INPUT",
@@ -488,7 +508,7 @@ function assertBaselineShape(
     } else if (item.commit_binding != null) {
       assertProjectedKeys(
         item.commit_binding,
-        bindingKeys,
+        shape.commitBindingKeys,
         `${resultsName}[${index}].commit_binding`,
       );
     }
@@ -496,6 +516,12 @@ function assertBaselineShape(
       item.attached_review_comments,
       `${resultsName}[${index}].attached_review_comments`,
     );
+    if (!shape.attachments && attachments.length > 0) {
+      fail(
+        "INVALID_INPUT",
+        `${resultsName}[${index}].attached_review_comments must be empty for ${item.resource_kind}`,
+      );
+    }
     for (const [position, attachment] of attachments.entries()) {
       const attachmentName =
         `${resultsName}[${index}].attached_review_comments[${position}]`;
