@@ -479,9 +479,7 @@ function assertProjectedBinding(binding, spec, name) {
 function assertBaselineShape(
   requests,
   results,
-  adapterVersion,
-  requestsName,
-  resultsName,
+  { adapterVersion, expectedActor, requestsName, resultsName },
 ) {
   for (const [index, item] of requests.entries()) {
     assertProjectedKeys(
@@ -534,6 +532,17 @@ function assertBaselineShape(
         `${resultsName}[${index}].commit_binding`,
       );
     }
+    // One guard on the review's commit id writes the reviewed head and the
+    // binding together, so the projection reconstructs both or neither.
+    if (
+      shape.reviewedHead &&
+      (item.reviewed_head_sha == null) !== (item.commit_binding == null)
+    ) {
+      fail(
+        "INVALID_INPUT",
+        `${resultsName}[${index}] must carry a reviewed head and a commit binding together`,
+      );
+    }
     const attachments = assertArray(
       item.attached_review_comments,
       `${resultsName}[${index}].attached_review_comments`,
@@ -557,6 +566,19 @@ function assertBaselineShape(
         ["id", "type"],
         `${attachmentName}.actor`,
       );
+      // The projection filters a review's comments to the expected actor and
+      // rebuilds each attachment actor from that identity, so no other one is
+      // reproducible.
+      if (
+        expectedActor &&
+        (attachment.actor.id !== expectedActor.id ||
+          attachment.actor.type !== expectedActor.type)
+      ) {
+        fail(
+          "INVALID_INPUT",
+          `${attachmentName}.actor does not match the pinned Codex actor`,
+        );
+      }
       // The canonical comparison reads an array in order, and the projection
       // sorts attachments by comment_id, so any other order is unreproducible.
       if (
@@ -790,13 +812,12 @@ function validateBaseline(input, currentMs, createdAt = null, expectedActor = nu
     baseline: true,
     expectedActor,
   });
-  assertBaselineShape(
-    requests,
-    results,
-    collection.adapter_version,
-    "baseline.requests",
-    "baseline.candidate_results",
-  );
+  assertBaselineShape(requests, results, {
+    adapterVersion: collection.adapter_version,
+    expectedActor,
+    requestsName: "baseline.requests",
+    resultsName: "baseline.candidate_results",
+  });
   if (
     collection.adapter_version === 2 &&
     (requests.some((request) => !("request_id" in request)) ||
@@ -1624,13 +1645,12 @@ function validateCodexPartitions(codexReview, ledger) {
       expectedActor: ledger.target.codex_actor,
     },
   );
-  assertBaselineShape(
-    baselineRequests,
-    baselineResults,
+  assertBaselineShape(baselineRequests, baselineResults, {
     adapterVersion,
-    "codex_review.preexisting_requests",
-    "codex_review.preexisting_candidate_results",
-  );
+    expectedActor: ledger.target.codex_actor,
+    requestsName: "codex_review.preexisting_requests",
+    resultsName: "codex_review.preexisting_candidate_results",
+  });
   const baselineConflict =
     !sameIdentitySet(
       baselineRequests,

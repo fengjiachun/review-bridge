@@ -2885,6 +2885,27 @@ test("a baseline result outside its resource kind's projected shape is refused a
     },
     /commit_binding\.field must be commit_id/,
   );
+  // One guard writes a review's reviewed head and its binding together, and
+  // the projection filters attachments to the expected actor before rebuilding
+  // each one's identity from it.
+  await refuses(
+    (_c, r) => {
+      r.reviewed_head_sha = null;
+    },
+    /baseline\.candidate_results\[1\] must carry a reviewed head and a commit binding together/,
+  );
+  await refuses(
+    (_c, r) => {
+      r.commit_binding = null;
+    },
+    /baseline\.candidate_results\[1\] must carry a reviewed head and a commit binding together/,
+  );
+  await refuses(
+    (_c, r) => {
+      r.attached_review_comments[0].actor = { id: 42, type: "User" };
+    },
+    /attached_review_comments\[0\]\.actor does not match the pinned Codex actor/,
+  );
   for (const prefix of ["not-hexadecimal", state.headSha.slice(0, 4), 1]) {
     await refuses(
       (c) => {
