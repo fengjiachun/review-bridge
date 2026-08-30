@@ -329,6 +329,22 @@ function requireExecutedChangeSizeSplit(workflow, candidateTotalLines = null) {
 }
 
 /**
+ * Whether a recorded split decision has yet to be admitted. The stamp that
+ * clears it is written where a gate measures an admitted round below the
+ * acknowledged crossing, so a decision carrying no stamp is one no gate has
+ * let through, and recording the cut is still what the driver owes. It stays
+ * true for a cut already committed but not yet measured, which is why the
+ * declaration states the recording as required until a gate admits it rather
+ * than as outstanding work.
+ */
+export function changeSizeSplitUnadmitted(workflow) {
+  const acknowledgment = workflow.change_size_warning?.acknowledgment;
+  return (
+    acknowledgment?.decision === "split" && acknowledgment.executed_at == null
+  );
+}
+
+/**
  * Whether a completed thread resolution still owes the publication its
  * server-owned record. Only a RESOLVED outcome mutated the thread; a
  * pre-resolved observation issued no mutation, so it has nothing to record and
@@ -3410,6 +3426,7 @@ export function workflowSummary(
     required_inputs: workflowRequiredInputs(action, workflow, {
       continuesLocalCycle: continuesLocalCycle(workflow),
       changeSizeWarningPending: changeSizeWarningPending(workflow),
+      changeSizeSplitUnadmitted: changeSizeSplitUnadmitted(workflow),
       resolutionOwesRecord: resolutionOwesRecord(workflow.active_action),
       publicationTerminal,
     }),

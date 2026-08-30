@@ -578,6 +578,26 @@ export const WARNING_GATED_INPUTS = {
   },
 };
 
+// The acknowledgment is made, and a split still owes the cut the bind measures.
+// The calls are the gated ones without the acknowledgment that has already
+// happened, and the recording is stated as required until a gate admits the
+// cut, because a ledger cannot see a cut it has not yet measured.
+export const SPLIT_GATED_INPUTS = {
+  PREPARE_LOCAL_REVIEW: {
+    record_workflow_head: [
+      WORKFLOW_ID,
+      WORKFLOW_REVISION,
+      ["head_sha", "the cut you committed, required until a gate admits it"],
+    ],
+    prepare_review: WORKFLOW_ACTION_INPUTS.PREPARE_LOCAL_REVIEW.prepare_review,
+    bind_workflow_review: [
+      WORKFLOW_ID,
+      afterWrite(WORKFLOW_REVISION, "the recorded cut"),
+      ["review_id", "the prepare_review result id"],
+    ],
+  },
+};
+
 // A stopped workflow advertises one next action for every reason it can hold,
 // so the reason is what says which call clears it. Keyed by pause reason code,
 // with PAUSED for every other reason, CANCELLED for the claims a cancelled
@@ -671,6 +691,7 @@ export const DECLARATION_TABLES = [
   PUBLICATION_ACTION_INPUTS,
   WORKFLOW_ACTION_INPUTS,
   WARNING_GATED_INPUTS,
+  SPLIT_GATED_INPUTS,
   WORKFLOW_STOP_INPUTS,
 ];
 
@@ -688,6 +709,7 @@ export function workflowRequiredInputs(
   {
     continuesLocalCycle = false,
     changeSizeWarningPending = false,
+    changeSizeSplitUnadmitted = false,
     resolutionOwesRecord = false,
     publicationTerminal = false,
   } = {},
@@ -703,6 +725,12 @@ export function workflowRequiredInputs(
   }
   if (changeSizeWarningPending && WARNING_GATED_INPUTS[nextAction] != null) {
     return WARNING_GATED_INPUTS[nextAction];
+  }
+  // Acknowledging a split clears the crossing but not the promise: the gate
+  // stays shut until the cut is recorded and measured, so the declaration has
+  // to keep naming the recording rather than fall back to the plain mapping.
+  if (changeSizeSplitUnadmitted && SPLIT_GATED_INPUTS[nextAction] != null) {
+    return SPLIT_GATED_INPUTS[nextAction];
   }
   // A pre-resolved observation claims no transition, so it has no record to
   // make and the publication exposes none to name. A terminal publication
