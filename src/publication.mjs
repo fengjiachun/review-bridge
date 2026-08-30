@@ -431,13 +431,13 @@ function baselineResultKeys(adapterVersion) {
 }
 
 // The projection writes a commit binding only for the two resource kinds that
-// carry one, and one shape per kind. Any other kind projects to null, so no
-// key of one is reproducible there.
+// carry one, and one shape per kind. Any other kind projects to null, which no
+// object reproduces — an empty one included — so those kinds get no key list.
 function commitBindingKeys(resourceKind) {
   if (resourceKind === "ISSUE_COMMENT") {
     return ["source", "field", "prefix"];
   }
-  return resourceKind === "PULL_REQUEST_REVIEW" ? ["source", "field"] : [];
+  return resourceKind === "PULL_REQUEST_REVIEW" ? ["source", "field"] : null;
 }
 
 function assertBaselineShape(
@@ -477,10 +477,18 @@ function assertBaselineShape(
       ["id", "type"],
       `${resultsName}[${index}].actor`,
     );
-    if (item.commit_binding != null) {
+    const bindingKeys = commitBindingKeys(item.resource_kind);
+    if (bindingKeys == null) {
+      if (item.commit_binding !== null) {
+        fail(
+          "INVALID_INPUT",
+          `${resultsName}[${index}].commit_binding must be null for ${item.resource_kind}`,
+        );
+      }
+    } else if (item.commit_binding != null) {
       assertProjectedKeys(
         item.commit_binding,
-        commitBindingKeys(item.resource_kind),
+        bindingKeys,
         `${resultsName}[${index}].commit_binding`,
       );
     }

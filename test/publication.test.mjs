@@ -2799,11 +2799,25 @@ test("a baseline result missing a projected field or a nested one is refused at 
         body: "One finding.",
         user: { id: 99, type: "Bot", login: "codex[bot]" },
       },
+      {
+        id: 902,
+        pull_request_review_id: 800,
+        html_url: "https://github.com/owner/repo/pull/7#discussion_r902",
+        created_at: iso(startedAt - 880),
+        commit_id: state.headSha,
+        body: "A standalone comment.",
+        user: { id: 99, type: "Bot", login: "codex[bot]" },
+      },
     ],
   });
   // Without these the mutations below would exercise absent fields.
   assert.notEqual(adapted.candidate_results[0].commit_binding, null);
   assert.equal(adapted.candidate_results[0].attached_review_comments.length, 1);
+  assert.equal(
+    adapted.candidate_results[1].resource_kind,
+    "PULL_REQUEST_REVIEW_COMMENT",
+  );
+  assert.equal(adapted.candidate_results[1].commit_binding, null);
 
   for (const field of [
     "reviewed_head_sha",
@@ -2832,6 +2846,14 @@ test("a baseline result missing a projected field or a nested one is refused at 
   await assert.rejects(
     start(state, startedAt, bindingField),
     /commit_binding contains unexpected field prefix/,
+  );
+  // A kind the projection never binds reproduces null and nothing else, an
+  // empty object included.
+  const emptyBinding = structuredClone(adapted);
+  emptyBinding.candidate_results[1].commit_binding = {};
+  await assert.rejects(
+    start(state, startedAt, emptyBinding),
+    /baseline\.candidate_results\[1\]\.commit_binding must be null for PULL_REQUEST_REVIEW_COMMENT/,
   );
   const ledger = await start(state, startedAt, adapted);
   assert.equal(ledger.revision, 1);
