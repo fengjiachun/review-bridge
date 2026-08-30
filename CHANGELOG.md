@@ -107,7 +107,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   refuses — the mirror, one arm over, of the `PREPARE_LOCAL_REVIEW` case
   fixed in the #82 review. The split-gated table gains the phase, and the
   warning-gated arm declares the head recording after the acknowledgment,
-  because the decision is what says which commits the head carries. (#96)
+  because the decision is what says which commits the head carries. Once a
+  head is recorded after the acknowledgment, both split arms flip to a
+  recorded-cut declaration: re-demanding the recording would strand a
+  resumed driver on `WORKFLOW_NO_PROGRESS`, so a further cut is stated as
+  conditional on the gate refusing the one already in. (#96)
 - Exclude known Codex App notices from the publication baseline. The App edits
   its review-summary comment in place on every review round, and a baseline
   object's stored `body_sha256` must be reproduced exactly by every later

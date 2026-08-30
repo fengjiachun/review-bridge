@@ -345,6 +345,28 @@ export function changeSizeSplitUnadmitted(workflow) {
 }
 
 /**
+ * Whether an unadmitted split already has a head recorded since its
+ * acknowledgment. Recording the same head twice refuses with
+ * WORKFLOW_NO_PROGRESS, so a declaration that keeps demanding the recording
+ * here strands a driver that stopped between the recording and the gate.
+ * Whether that head actually measures below the crossing is not
+ * ledger-visible (#91) -- only the gate can judge it, which is why the
+ * declaration this condition selects states a further cut as conditional on
+ * the gate's refusal rather than dropping the recording entirely.
+ */
+export function changeSizeSplitCutRecorded(workflow) {
+  if (!changeSizeSplitUnadmitted(workflow)) {
+    return false;
+  }
+  const recordedAt = workflow.attempts?.at(-1)?.recorded_at;
+  return (
+    recordedAt != null &&
+    Date.parse(recordedAt) >=
+      Date.parse(workflow.change_size_warning.acknowledgment.acknowledged_at)
+  );
+}
+
+/**
  * Whether a completed thread resolution still owes the publication its
  * server-owned record. Only a RESOLVED outcome mutated the thread; a
  * pre-resolved observation issued no mutation, so it has nothing to record and
@@ -3427,6 +3449,7 @@ export function workflowSummary(
       continuesLocalCycle: continuesLocalCycle(workflow),
       changeSizeWarningPending: changeSizeWarningPending(workflow),
       changeSizeSplitUnadmitted: changeSizeSplitUnadmitted(workflow),
+      changeSizeSplitCutRecorded: changeSizeSplitCutRecorded(workflow),
       resolutionOwesRecord: resolutionOwesRecord(workflow.active_action),
       publicationTerminal,
     }),

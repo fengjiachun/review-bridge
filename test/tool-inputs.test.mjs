@@ -11,6 +11,7 @@ import {
   DECLARATION_TABLES,
   PUBLICATION_ACTION_INPUTS,
   REVIEW_ACTION_INPUTS,
+  SPLIT_CUT_RECORDED_INPUTS,
   SPLIT_GATED_INPUTS,
   WARNING_GATED_INPUTS,
   WORKFLOW_ACTION_INPUTS,
@@ -19,6 +20,7 @@ import {
 } from "../src/tool-inputs.mjs";
 import {
   ACTION_KIND_SPECS,
+  changeSizeSplitCutRecorded,
   changeSizeSplitUnadmitted,
   changeSizeWarningPending,
   continuesLocalCycle,
@@ -566,6 +568,59 @@ test("the summary passes every condition its declarations select on", () => {
     Object.keys(SPLIT_GATED_INPUTS.ADDRESS_LOCAL_FINDINGS),
     "a split acknowledged among the findings still owes its cut",
   );
+  assert.deepEqual(
+    declared({
+      phase: "ADDRESS_LOCAL_FINDINGS",
+      current_review: { review_id: "rb-first" },
+      change_size_warning: {
+        total_lines: 90,
+        acknowledgment: {
+          decision: "split",
+          total_lines: 90,
+          acknowledged_at: "2026-08-30T00:00:00.000Z",
+          executed_at: null,
+        },
+      },
+      attempts: [{ recorded_at: "2026-08-30T00:00:01.000Z" }],
+    }),
+    Object.keys(SPLIT_CUT_RECORDED_INPUTS.ADDRESS_LOCAL_FINDINGS),
+    "a recorded cut must not be demanded again while its gate decides",
+  );
+});
+
+// The predicate the recorded-cut arm selects on: nothing recorded, or a head
+// that predates the acknowledgment, still owes the recording; only a head
+// recorded at or after it flips the demand.
+test("a recorded cut is one whose head postdates the acknowledgment", () => {
+  const split = (attempts) => ({
+    change_size_warning: {
+      total_lines: 90,
+      acknowledgment: {
+        decision: "split",
+        total_lines: 90,
+        acknowledged_at: "2026-08-30T00:00:01.000Z",
+        executed_at: null,
+      },
+    },
+    attempts,
+  });
+  assert.equal(changeSizeSplitCutRecorded(split([])), false);
+  assert.equal(
+    changeSizeSplitCutRecorded(
+      split([{ recorded_at: "2026-08-30T00:00:00.000Z" }]),
+    ),
+    false,
+  );
+  assert.equal(
+    changeSizeSplitCutRecorded(
+      split([{ recorded_at: "2026-08-30T00:00:01.000Z" }]),
+    ),
+    true,
+  );
+  const admitted = split([{ recorded_at: "2026-08-30T00:00:02.000Z" }]);
+  admitted.change_size_warning.acknowledgment.executed_at =
+    "2026-08-30T00:00:03.000Z";
+  assert.equal(changeSizeSplitCutRecorded(admitted), false);
 });
 
 // The thread loop is planned from an observation and left by an advance.
@@ -608,6 +663,16 @@ test("an acknowledged split keeps declaring the cut it owes", () => {
         changeSizeSplitUnadmitted: changeSizeSplitUnadmitted(outstanding),
       }),
       SPLIT_GATED_INPUTS[action],
+    );
+    // Once a head is recorded after the acknowledgment, re-demanding the
+    // recording strands a resumed driver on WORKFLOW_NO_PROGRESS: the
+    // declaration flips to the arm that leaves the judgment to the gate.
+    assert.deepEqual(
+      workflowRequiredInputs(action, outstanding, {
+        changeSizeSplitUnadmitted: true,
+        changeSizeSplitCutRecorded: true,
+      }),
+      SPLIT_CUT_RECORDED_INPUTS[action],
     );
     // Once a gate has admitted the cut the promise is kept, and the phase goes
     // back to declaring what it declares for every other run.

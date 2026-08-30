@@ -168,6 +168,15 @@ async function publicationRevision(ctx, reviewId) {
 const PROBES = {
   record_workflow_head: async (ctx, summary, fields, m) => {
     const content = declaresCut(fields, m) ? m.cutContent : m.content;
+    // A head stated as owed only on a gate's refusal is not owed on the walked
+    // happy path; a turn that supplies no content is the driver reading that
+    // condition as false.
+    const conditional = /required only if/.test(
+      fields.find(([field]) => field === "head_sha")?.[1] ?? "",
+    );
+    if (conditional && content == null) {
+      return;
+    }
     assert.ok(content, "the turn supplies no commit content");
     const headSha = await commit(ctx.state.repository, content);
     const result = await recordWorkflowHead(
@@ -858,10 +867,12 @@ test("a split decided among the findings walks through in one pass", async (t) =
   assert.equal(after.next_action, "PREPARE_REREVIEW");
 });
 
-// The same arm with a driver that stops after the acknowledgment: the next
-// summary read stands on an acknowledged, unadmitted split, and the
-// declaration it selects has to keep naming the cut. This is the state the
-// plain mapping strands, which is why SPLIT_GATED_INPUTS carries this phase.
+// The same arm with a driver that stops twice: after the acknowledgment, the
+// summary stands on an acknowledged, unadmitted split and has to keep naming
+// the cut -- the state the plain mapping strands. After the recording, the
+// summary stands on a recorded, unjudged cut and must stop demanding the
+// recording -- re-recording the same head refuses with WORKFLOW_NO_PROGRESS,
+// so the resumed walk goes straight at the resolutions and the advance.
 test("a split acknowledged among the findings still walks out", async (t) => {
   const ctx = await reachCrossedFindings(t, "walk-split-two");
   await runTurn(ctx, {
@@ -869,10 +880,12 @@ test("a split acknowledged among the findings still walks out", async (t) => {
     use: ["acknowledge_change_size_warning"],
     materials: { decision: "split" },
   });
-  const after = await runTurn(ctx, {
+  await runTurn(ctx, {
     expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["record_workflow_head"],
     materials: { cutContent: ONE_LINE_CUT },
   });
+  const after = await runTurn(ctx, { expect: "ADDRESS_LOCAL_FINDINGS" });
   assert.equal(after.next_action, "PREPARE_REREVIEW");
 });
 
@@ -934,10 +947,14 @@ test("a split acknowledged where the round is prepared still walks out", async (
     use: ["acknowledge_change_size_warning"],
     materials: { decision: "split" },
   });
-  const bound = await runTurn(ctx, {
+  // The same two stops as the findings arm: the cut recorded on its own turn,
+  // then the resumed walk carried by the bind alone.
+  await runTurn(ctx, {
     expect: "PREPARE_LOCAL_REVIEW",
+    use: ["record_workflow_head"],
     materials: { cutContent: ONE_LINE_CUT },
   });
+  const bound = await runTurn(ctx, { expect: "PREPARE_LOCAL_REVIEW" });
   assert.equal(bound.next_action, "PLAN_CODEX_TASK_DISPATCH");
 });
 

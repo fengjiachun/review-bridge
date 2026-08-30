@@ -624,6 +624,42 @@ export const SPLIT_GATED_INPUTS = {
   },
 };
 
+// The cut is recorded and only its gate can judge it: whether the recorded
+// head measures below the crossing is not ledger-visible, so the recording is
+// no longer demanded -- recording the same head again refuses with
+// WORKFLOW_NO_PROGRESS -- and a further cut is stated as conditional on the
+// gate refusing the one already in.
+export const SPLIT_CUT_RECORDED_INPUTS = {
+  PREPARE_LOCAL_REVIEW: {
+    record_workflow_head: [
+      WORKFLOW_ID,
+      WORKFLOW_REVISION,
+      ["head_sha", "a further cut, required only if the bind refuses the recorded one"],
+    ],
+    prepare_review: WORKFLOW_ACTION_INPUTS.PREPARE_LOCAL_REVIEW.prepare_review,
+    bind_workflow_review: [
+      WORKFLOW_ID,
+      afterWrite(WORKFLOW_REVISION, "any further cut"),
+      ["review_id", "the prepare_review result id"],
+    ],
+  },
+  ADDRESS_LOCAL_FINDINGS: {
+    record_workflow_head: [
+      WORKFLOW_ID,
+      WORKFLOW_REVISION,
+      [
+        "head_sha",
+        "a further cut, required only if the advance refuses the recorded one",
+      ],
+    ],
+    ...SUBMIT_RESOLUTIONS,
+    advance_local_workflow: [
+      WORKFLOW_ID,
+      afterWrite(WORKFLOW_REVISION, "any further cut"),
+    ],
+  },
+};
+
 // A stopped workflow advertises one next action for every reason it can hold,
 // so the reason is what says which call clears it. Keyed by pause reason code,
 // with PAUSED for every other reason, CANCELLED for the claims a cancelled
@@ -718,6 +754,7 @@ export const DECLARATION_TABLES = [
   WORKFLOW_ACTION_INPUTS,
   WARNING_GATED_INPUTS,
   SPLIT_GATED_INPUTS,
+  SPLIT_CUT_RECORDED_INPUTS,
   WORKFLOW_STOP_INPUTS,
 ];
 
@@ -736,6 +773,7 @@ export function workflowRequiredInputs(
     continuesLocalCycle = false,
     changeSizeWarningPending = false,
     changeSizeSplitUnadmitted = false,
+    changeSizeSplitCutRecorded = false,
     resolutionOwesRecord = false,
     publicationTerminal = false,
   } = {},
@@ -755,8 +793,13 @@ export function workflowRequiredInputs(
   // Acknowledging a split clears the crossing but not the promise: the gate
   // stays shut until the cut is recorded and measured, so the declaration has
   // to keep naming the recording rather than fall back to the plain mapping.
+  // Once a head is recorded after the acknowledgment the demand flips: only
+  // the gate can judge the recorded cut, and re-demanding the recording
+  // strands a resumed driver on WORKFLOW_NO_PROGRESS.
   if (changeSizeSplitUnadmitted && SPLIT_GATED_INPUTS[nextAction] != null) {
-    return SPLIT_GATED_INPUTS[nextAction];
+    return (changeSizeSplitCutRecorded
+      ? SPLIT_CUT_RECORDED_INPUTS
+      : SPLIT_GATED_INPUTS)[nextAction];
   }
   // A pre-resolved observation claims no transition, so it has no record to
   // make and the publication exposes none to name. A terminal publication
