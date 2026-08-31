@@ -1219,6 +1219,10 @@ function reviewSummary(review) {
       ...(finding.path == null ? {} : { path: finding.path }),
       ...(finding.line == null ? {} : { line: finding.line }),
     })),
+    // Server-derived errata evidence, so a driver comparing bound state can
+    // tell erratum-only drift from a real review transition.
+    errata_watermark: errataWatermark(review),
+    last_opened_errata_watermark: review.last_opened_errata_watermark ?? 0,
     latest_event: review.history.at(-1) ?? null,
     clean_snapshot_hash: review.clean_snapshot_hash ?? null,
   };
