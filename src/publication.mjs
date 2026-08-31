@@ -39,6 +39,11 @@ const TERMINAL_RESERVE_BYTES = 64 * 1024;
 const MAX_OBSERVATION_BYTES = 6 * 1024 * 1024;
 const MAX_BASELINE_BYTES = 2 * 1024 * 1024;
 const MAX_AUDIT_EVENT_BYTES = 16 * 1024;
+// References one acknowledgement record may close. The stored validator, the
+// capacity check, the operator input boundary, and the server-authored
+// supersession chunking all express this one cap; a second copy of the number
+// is how they would drift apart.
+const MAX_ACKNOWLEDGEMENT_REFERENCES = 1_000;
 const MAX_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_MS = 30 * 1000;
 const MAX_ATOMIC_WINDOW_MS = 2 * 60 * 1000;
@@ -2551,8 +2556,16 @@ function validateStoredLedger(ledger) {
   for (const item of acknowledgements) {
     assertString(item.acknowledgement_id, "acknowledgement_id", 255);
     assertSha(item.head_sha, "acknowledgement head_sha");
-    assertArray(item.closed_requests, "acknowledgement closed_requests", 1_000);
-    assertArray(item.closed_results, "acknowledgement closed_results", 1_000);
+    assertArray(
+      item.closed_requests,
+      "acknowledgement closed_requests",
+      MAX_ACKNOWLEDGEMENT_REFERENCES,
+    );
+    assertArray(
+      item.closed_results,
+      "acknowledgement closed_results",
+      MAX_ACKNOWLEDGEMENT_REFERENCES,
+    );
     if (
       ![
         "NO_FURTHER_RESULTS_EXPECTED",
@@ -5288,7 +5301,7 @@ function assertLedgerSize(ledger) {
     if (
       acknowledgement.closed_requests.length +
         acknowledgement.closed_results.length >
-      1_000
+      MAX_ACKNOWLEDGEMENT_REFERENCES
     ) {
       fail(
         "PUBLICATION_LIMIT_EXCEEDED",
@@ -7442,11 +7455,25 @@ export async function recordCodexReviewRequest(
         : { request_id: expectedRequest.request_id }),
       requested_head_sha: requestedHeadSha,
     });
-    if (superseded.length > 0) {
+    // A baseline holds up to 5,000 requests and a history up to 10,000, so a
+    // long enough chain can prove more open requests than one acknowledgement
+    // may close. Writing them as one record would exceed the reference cap and
+    // throw -- after the driver has already posted the request comment to
+    // GitHub, and identically on every retry, wedging the publication line. The
+    // closure is therefore split across as many bounded records as it needs,
+    // sharing the timestamp and revision that mark them one transaction.
+    for (
+      let index = 0;
+      index < superseded.length;
+      index += MAX_ACKNOWLEDGEMENT_REFERENCES
+    ) {
       ledger.codex_review_ambiguity_acknowledgements.push({
         acknowledgement_id: `ack-${crypto.randomBytes(16).toString("hex")}`,
         head_sha: sourceAuthorization.head_sha,
-        closed_requests: superseded,
+        closed_requests: superseded.slice(
+          index,
+          index + MAX_ACKNOWLEDGEMENT_REFERENCES,
+        ),
         closed_results: [],
         acknowledgement: "SUPERSEDED_BY_LATER_OWN_REQUEST",
         backing_observation_sha256: null,
@@ -8204,9 +8231,16 @@ export async function acknowledgeCodexReviewAmbiguity(
     const currentMs = clock();
     assertRevision(expectedRevision);
     assertSha(headSha, "head_sha");
-    assertArray(requestRefs, "request_refs", 1_000);
-    assertArray(ambiguousResults, "ambiguous_results", 1_000);
-    if (requestRefs.length + ambiguousResults.length > 1_000) {
+    assertArray(requestRefs, "request_refs", MAX_ACKNOWLEDGEMENT_REFERENCES);
+    assertArray(
+      ambiguousResults,
+      "ambiguous_results",
+      MAX_ACKNOWLEDGEMENT_REFERENCES,
+    );
+    if (
+      requestRefs.length + ambiguousResults.length >
+      MAX_ACKNOWLEDGEMENT_REFERENCES
+    ) {
       fail("PUBLICATION_LIMIT_EXCEEDED", "acknowledgement exceeds 1,000 references");
     }
     uniqueBy(requestRefs, (item) => resourceIdentity(item), "request_refs");
@@ -8574,5 +8608,6 @@ export const publicationConstants = Object.freeze({
   max_publication_bytes: MAX_PUBLICATION_BYTES,
   max_observation_bytes: MAX_OBSERVATION_BYTES,
   max_baseline_bytes: MAX_BASELINE_BYTES,
+  max_acknowledgement_references: MAX_ACKNOWLEDGEMENT_REFERENCES,
   terminal_reserve_bytes: TERMINAL_RESERVE_BYTES,
 });

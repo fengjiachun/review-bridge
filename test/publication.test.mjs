@@ -1105,6 +1105,91 @@ test("a markerless clean reply keeps the request it answered out of the closure"
   assert.deepEqual(requested.codex_review_ambiguity_acknowledgements, []);
 });
 
+test("a closure wider than one acknowledgement is written as bounded records", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const started = await start(state, startedAt, baselineV2(startedAt - 100));
+
+  // A baseline holds up to 5,000 requests, so a long enough chain proves more
+  // open requests than one acknowledgement may close. Reaching that by running
+  // the rounds is not the point; the ledger shape is, so it is written
+  // directly. Every request is authenticated the way findBaselineIssuances
+  // authenticates one: request_id recomputed from the issuing ledger's ID,
+  // revision, and head.
+  const provable = 1_200;
+  started.codex_review_baseline.requests = Array.from(
+    { length: provable },
+    (_, index) => {
+      const issuance = {
+        review_id: `rb-2026-08-30T000000-000Z-${index
+          .toString(16)
+          .padStart(8, "0")}`,
+        recorded_revision: 2,
+        requested_head_sha: state.headSha,
+      };
+      const requestId = correlatedRequestId(
+        issuance.review_id,
+        issuance.recorded_revision - 1,
+        issuance.requested_head_sha,
+      );
+      return {
+        resource_id: 10_000 + index,
+        resource_kind: "ISSUE_COMMENT",
+        url: `https://github.com/owner/repo/issues/7#issuecomment-${10_000 + index}`,
+        event_at: iso(startedAt - 1_000),
+        timestamp_field: "created_at",
+        body_sha256: digest(correlatedRequestBody(requestId)),
+        request_id: requestId,
+        actor: { id: 7, type: "User" },
+        issuance,
+        classification: "BASELINE_CORRELATED",
+        reason: null,
+      };
+    },
+  );
+  await atomicWriteCanonicalJson(
+    path.join(state.store, "reviews", state.reviewId, "publication.json"),
+    started,
+  );
+
+  const requestAt = startedAt + 1_000;
+  const requested = await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(requestAt),
+      requestedHeadSha: state.headSha,
+      requestId: correlatedRequestId(state.reviewId, 1, state.headSha),
+    },
+    { clock: () => requestAt + 10 },
+  );
+
+  const records = requested.codex_review_ambiguity_acknowledgements;
+  assert.equal(records.length, 2);
+  for (const record of records) {
+    assert.equal(record.acknowledgement, "SUPERSEDED_BY_LATER_OWN_REQUEST");
+    assert.ok(
+      record.closed_requests.length + record.closed_results.length <=
+        publicationConstants.max_acknowledgement_references,
+    );
+    // One transaction, however many records it takes.
+    assert.equal(record.acknowledged_at, records[0].acknowledged_at);
+    assert.equal(record.publication_revision, 2);
+  }
+  const closed = records.flatMap((record) =>
+    record.closed_requests.map((item) => item.resource_id),
+  );
+  assert.equal(new Set(closed).size, provable);
+  assert.deepEqual(
+    closed.slice().sort((left, right) => left - right),
+    started.codex_review_baseline.requests.map((item) => item.resource_id),
+  );
+});
+
 test("version 1 has no correlation evidence to supersede with", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

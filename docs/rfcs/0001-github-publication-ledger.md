@@ -1832,7 +1832,15 @@ pinned `reviewed_head_sha`, and the next snapshot refuses the ledger as
 terminally changed. Baseline requests are outside this rule, because the
 adapter binds a markerless reply only to a recognized request.
 
-The record closes no results, carries no
+A baseline holds up to 5,000 requests and a request history up to 10,000, so a
+long enough chain can prove more open requests than the 1,000 references one
+acknowledgement may close. The closure is therefore split across as many bounded
+records as it needs, sharing one `acknowledged_at` and `publication_revision` to
+mark them one transaction. Writing it as a single record would exceed the cap
+and refuse the mutation after the driver has already posted the request comment
+to GitHub, identically on every retry.
+
+Each record closes no results, carries no
 `operator_label`, `rationale`, or `backing_observed_at`, and its
 `backing_observation_sha256` is `null`: the derivation reads the ledger, not an
 observation, and the request it accompanies clears the observation anyway. A

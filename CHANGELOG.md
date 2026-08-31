@@ -118,11 +118,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   has no inline comment for the marker to travel in — spares every own request
   at the head its pinned `reviewed_head_sha` names, since closing one would
   re-derive the reply as `UNSOLICITED`, drop that head, and terminally
-  invalidate the ledger at the next snapshot. The closure is a
-  server-authored `SUPERSEDED_BY_LATER_OWN_REQUEST` record in the existing
+  invalidate the ledger at the next snapshot. The closure is written as
+  server-authored `SUPERSEDED_BY_LATER_OWN_REQUEST` records in the existing
   acknowledgement channel, carrying no operator label or rationale and no
   backing observation, which keeps the audit able to tell a derivation from a
-  human decision. (#98)
+  human decision; a closure wider than one acknowledgement's 1,000 references
+  is split across as many bounded records as it needs, sharing one timestamp
+  and revision, rather than refusing the mutation after the request comment is
+  already posted. (#98)
 - Refuse at start a publication baseline whose object shape no snapshot can
   reproduce (#94). The snapshot side pins baseline actors to exactly
   `{id, type}`, but `startPublication` accepted an actor carrying a `login` —
