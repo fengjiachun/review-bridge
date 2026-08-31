@@ -2553,13 +2553,40 @@ function validateStoredLedger(ledger) {
     assertSha(item.head_sha, "acknowledgement head_sha");
     assertArray(item.closed_requests, "acknowledgement closed_requests", 1_000);
     assertArray(item.closed_results, "acknowledgement closed_results", 1_000);
-    if (item.acknowledgement !== "NO_FURTHER_RESULTS_EXPECTED") {
+    if (
+      ![
+        "NO_FURTHER_RESULTS_EXPECTED",
+        "SUPERSEDED_BY_LATER_OWN_REQUEST",
+      ].includes(item.acknowledgement)
+    ) {
       fail("PUBLICATION_STORE_INVALID", "stored acknowledgement enum changed");
     }
-    assertDigest(
-      item.backing_observation_sha256,
-      "acknowledgement backing_observation_sha256",
-    );
+    // The two closures are kept apart by more than a label. A supersession is
+    // the server's own derivation over ledger-held evidence, recorded with the
+    // request that clears the observation, so it carries no operator judgement
+    // and no backing snapshot; an operator acknowledgement carries both, and
+    // may close results a supersession never speaks for.
+    if (item.acknowledgement === "SUPERSEDED_BY_LATER_OWN_REQUEST") {
+      if (
+        "operator_label" in item ||
+        "rationale" in item ||
+        "backing_observed_at" in item ||
+        item.backing_observation_sha256 !== null ||
+        item.closed_results.length > 0
+      ) {
+        fail(
+          "PUBLICATION_STORE_INVALID",
+          "stored supersession carries operator or observation evidence",
+        );
+      }
+    } else {
+      assertString(item.operator_label, "acknowledgement operator_label", 500);
+      assertString(item.rationale, "acknowledgement rationale", 20_000);
+      assertDigest(
+        item.backing_observation_sha256,
+        "acknowledgement backing_observation_sha256",
+      );
+    }
     timestampMs(item.acknowledged_at, "acknowledgement acknowledged_at");
   }
   const history = assertArray(ledger.history, "publication history");
@@ -7232,6 +7259,60 @@ export async function withAutonomousTerminalLock(
   });
 }
 
+// The prior requests a newly posted request supersedes: the ones this ledger
+// can prove, from its own durable evidence, that it issued itself.
+//
+// Two shapes qualify, and nothing else. A RECOGNIZED history entry bound
+// RECORDED_AT_POST is the server's own record of posting that comment -- only
+// recordCodexReviewRequest writes that pair, so no observation can forge it. A
+// BASELINE_CORRELATED baseline request carrying an issuance is one
+// findBaselineIssuances re-derived at start against a prior ledger of this
+// chain in this store, matching rbreq = sha256(review_id\0revision\0head).
+//
+// UNBOUND deliberately stays out. Its only claim to ownership is an rbreq
+// marker in comment text, which anyone can type; the ambiguity pause exists to
+// protect exactly the reply that could bind to a request this chain cannot
+// prove it owns. Observations are not read here at all: the closure follows
+// from what the ledger already holds, never from what a caller reports.
+//
+// A request whose reply this ledger already recorded also stays out. Closing
+// it would strip the correlation from a result the ledger had already accepted
+// -- reinterpretation of a recorded result, not a change to how future replies
+// bind. Telling answered from unanswered needs the rbreq correlation, so a
+// version 1 ledger, which has no request IDs at all, supersedes nothing and
+// keeps the operator pause.
+function supersededOwnRequests(ledger) {
+  if (ledger.codex_review_baseline.collection.adapter_version !== 2) {
+    return [];
+  }
+  const closed = closedRequestIdentities(ledger);
+  const answered = new Set(
+    ledger.codex_result_history
+      .map((entry) => entry.request_id)
+      .filter((requestId) => isCodexRequestId(requestId)),
+  );
+  return [
+    ...ledger.codex_request_history.filter(
+      (entry) =>
+        entry.classification === "RECOGNIZED" &&
+        entry.binding_source === "RECORDED_AT_POST",
+    ),
+    ...ledger.codex_review_baseline.requests.filter(
+      (request) =>
+        request.classification === "BASELINE_CORRELATED" &&
+        request.issuance != null,
+    ),
+  ]
+    .filter(
+      (item) =>
+        !closed.has(resourceIdentity(item)) && !answered.has(item.request_id),
+    )
+    .map((item) => ({
+      resource_kind: item.resource_kind,
+      resource_id: item.resource_id,
+    }));
+}
+
 export async function recordCodexReviewRequest(
   storeRoot,
   reviewId,
@@ -7313,6 +7394,12 @@ export async function recordCodexReviewRequest(
       ledger.latest_observation == null
         ? null
         : canonicalDigest(ledger.latest_observation);
+    // Derived before the new entry joins the history, so the request doing the
+    // superseding can never supersede itself. Prospective by construction: it
+    // is recorded with the request, not at start, because until this ledger has
+    // posted its own request a prior round's late reply still binds to the
+    // baseline request that earned it.
+    const superseded = supersededOwnRequests(ledger);
     ledger.codex_request_history.push({
       resource_id: commentId,
       resource_kind: "ISSUE_COMMENT",
@@ -7330,6 +7417,18 @@ export async function recordCodexReviewRequest(
         : { request_id: expectedRequest.request_id }),
       requested_head_sha: requestedHeadSha,
     });
+    if (superseded.length > 0) {
+      ledger.codex_review_ambiguity_acknowledgements.push({
+        acknowledgement_id: `ack-${crypto.randomBytes(16).toString("hex")}`,
+        head_sha: sourceAuthorization.head_sha,
+        closed_requests: superseded,
+        closed_results: [],
+        acknowledgement: "SUPERSEDED_BY_LATER_OWN_REQUEST",
+        backing_observation_sha256: null,
+        acknowledged_at: recordedAt,
+        publication_revision: nextRevision,
+      });
+    }
     ledger.latest_observation = null;
     ledger.revision = nextRevision;
     ledger.updated_at = recordedAt;

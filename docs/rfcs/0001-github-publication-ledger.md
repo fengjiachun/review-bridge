@@ -1808,6 +1808,25 @@ approved request set and named indeterminate results. It never changes a result
 to `CLEAN`, and any later unacknowledged ambiguity requires a new human
 decision.
 
+The same array also holds a second, server-authored record kind:
+`acknowledgement: "SUPERSEDED_BY_LATER_OWN_REQUEST"`. `record_codex_review_request`
+appends one, in the same locked transaction as the request it records, naming
+the prior requests this ledger can prove from its own durable evidence that it
+issued: its `RECOGNIZED` history entries bound `RECORDED_AT_POST`, and
+`BASELINE_CORRELATED` baseline requests whose issuance the server re-derived at
+start against a prior ledger of the same chain. It never names an `UNBOUND`
+request, whose only claim to ownership is a forgeable comment marker, and never
+names a request whose reply the ledger has already recorded, whose correlation a
+closure would retroactively strip. It closes no results, carries no
+`operator_label`, `rationale`, or `backing_observed_at`, and its
+`backing_observation_sha256` is `null`: the derivation reads the ledger, not an
+observation, and the request it accompanies clears the observation anyway. A
+version 1 ledger, which has no request IDs to tell an answered request from an
+open one, records no supersession. The distinct enum is what lets an audit
+separate this derivation from a human risk decision; both kinds close requests
+through the same `closed_requests` array, so replay, adapter closure, and the
+epoch fence need no second mechanism.
+
 Like every later ledger mutation, the tool first revokes and directory-syncs
 an existing publication gate, then appends the acknowledgement and history
 event named `CODEX_REVIEW_AMBIGUITY_ACKNOWLEDGED` and advances the revision.

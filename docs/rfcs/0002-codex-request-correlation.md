@@ -82,7 +82,11 @@ recomputes the ID from the source review ID, source revision, and authorized
 head. Only that server-derived issuance provenance may scope a baseline
 request. For markerless results, a proven request from another head is not a
 candidate; an unproven or same-head request remains a candidate until an exact
-correlated result or explicit closure removes the ambiguity.
+correlated result or explicit closure removes the ambiguity. Recording a new
+request is itself such a closure for the requests this ledger can prove it
+issued, proven baseline requests included: see the
+`SUPERSEDED_BY_LATER_OWN_REQUEST` record in RFC 0001. An unproven request is
+never closed that way and keeps the acknowledgement path.
 
 Legacy exact requests and unsupported trigger shapes remain fail-closed and
 retain the RFC 0001 acknowledgement path. Upgrading an existing pull request

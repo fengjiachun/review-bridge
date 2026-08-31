@@ -100,6 +100,24 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Fixed
 
+- Supersede the ledger's own prior Codex requests when it records a new one
+  (#77). A repair round republished at an unchanged head left the previous
+  publication's request open at that same head, so a clean Codex reply — which
+  carries no `rbreq` marker and binds by its `Reviewed commit:` prefix — matched
+  both requests and evaluated as `GITHUB_REVIEW_UNKNOWN`, costing an
+  `acknowledge_codex_review_ambiguity` and a full post-review-collect lap.
+  Recording a request now closes, in the same locked transaction, exactly the
+  prior requests the ledger can prove it issued: its own `RECOGNIZED` entries
+  bound `RECORDED_AT_POST`, and baseline requests whose issuance was
+  re-derived against a prior ledger of the chain at start. An `UNBOUND`
+  request is never closed — an `rbreq` marker in comment text is forgeable, and
+  the pause exists for exactly the reply that could bind to a request the chain
+  cannot prove it owns. A request whose reply the ledger already recorded also
+  stays open, so no recorded result loses its correlation. The closure is a
+  server-authored `SUPERSEDED_BY_LATER_OWN_REQUEST` record in the existing
+  acknowledgement channel, carrying no operator label or rationale and no
+  backing observation, which keeps the audit able to tell a derivation from a
+  human decision. (#98)
 - Refuse at start a publication baseline whose object shape no snapshot can
   reproduce (#94). The snapshot side pins baseline actors to exactly
   `{id, type}`, but `startPublication` accepted an actor carrying a `login` —

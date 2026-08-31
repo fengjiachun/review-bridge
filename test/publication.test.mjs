@@ -39,6 +39,7 @@ import {
   baselineV2,
   completeSource,
   correlatedRequestBody,
+  correlatedRequestId,
   digest,
   iso,
   observation,
@@ -148,6 +149,20 @@ async function successorFixture(state) {
   await submitInitialReview(state.store, review.id, []);
   await finalizeLocalGate(state.store, review.id);
   return { ...state, reviewId: review.id, headSha };
+}
+
+// A second publication over the same commit, the way a repair round that
+// changed nothing in the tree republishes.
+async function sameHeadSuccessorFixture(state) {
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: "Re-publish the same change.",
+    implementationScope: "Update value.js.",
+  });
+  await submitInitialReview(state.store, review.id, []);
+  await finalizeLocalGate(state.store, review.id);
+  return { ...state, reviewId: review.id };
 }
 
 async function reachReady(state, startedAt = Date.now()) {
@@ -470,6 +485,505 @@ test("version 2 accepts one markerless result bound to the authorized head", asy
     { clock: () => startedAt + 4_010 },
   );
   assert.equal(ready.status, "MERGE_READY");
+});
+
+test("a later own request supersedes the chain's provable prior requests", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt, baselineV2(startedAt - 100));
+  const first = await getPublicationSummary(state.store, state.reviewId);
+  const oldRequestId = first.codex_review_request.request_id;
+  const oldRequestAt = startedAt + 1_000;
+  const oldRequest = {
+    resource_id: 90,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-90",
+    event_at: iso(oldRequestAt),
+    timestamp_field: "created_at",
+    body_sha256: digest(correlatedRequestBody(oldRequestId)),
+    request_id: oldRequestId,
+    actor: { id: 7, type: "User" },
+  };
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 90,
+      url: oldRequest.url,
+      createdAt: oldRequest.event_at,
+      requestedHeadSha: state.headSha,
+      requestId: oldRequestId,
+    },
+    { clock: () => oldRequestAt + 10 },
+  );
+
+  // The repair round republishes at the same head, which is the shape the
+  // 2026-08-28 field report hit: head compatibility cannot tell the two
+  // requests apart, so a markerless clean reply matches both. Only ownership
+  // separates them.
+  const successor = await sameHeadSuccessorFixture(state);
+  await start(
+    successor,
+    startedAt + 2_000,
+    baselineV2(startedAt + 1_900, [oldRequest]),
+  );
+  const stored = await getPublication(successor.store, successor.reviewId);
+  const issuance = stored.codex_review_baseline.requests[0].issuance;
+  assert.deepEqual(issuance, {
+    review_id: state.reviewId,
+    recorded_revision: 2,
+    requested_head_sha: state.headSha,
+  });
+
+  const created = await getPublicationSummary(
+    successor.store,
+    successor.reviewId,
+  );
+  const requestAt = startedAt + 3_000;
+  const requested = await recordCodexReviewRequest(
+    successor.store,
+    successor.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(requestAt),
+      requestedHeadSha: successor.headSha,
+      requestId: created.codex_review_request.request_id,
+    },
+    { clock: () => requestAt + 10 },
+  );
+  assert.deepEqual(requested.codex_review_ambiguity_acknowledgements, [
+    {
+      acknowledgement_id:
+        requested.codex_review_ambiguity_acknowledgements[0]
+          ?.acknowledgement_id,
+      head_sha: successor.headSha,
+      closed_requests: [{ resource_kind: "ISSUE_COMMENT", resource_id: 90 }],
+      closed_results: [],
+      acknowledgement: "SUPERSEDED_BY_LATER_OWN_REQUEST",
+      backing_observation_sha256: null,
+      acknowledged_at: iso(requestAt + 10),
+      publication_revision: 2,
+    },
+  ]);
+
+  const current = observationV2(
+    {
+      at: startedAt + 4_000,
+      baseSha: successor.baseSha,
+      headSha: successor.headSha,
+      requestId: 100,
+      requestAt,
+      baselineRequests: [{ ...oldRequest, issuance }],
+    },
+    created.codex_review_request.request_id,
+  );
+  current.codex_review.results[0].request_id = null;
+  current.codex_review.results[0].association = "SINGLE_OPEN_REQUEST";
+  current.codex_review.results[0].format = "CODEX_CLEAN_COMMENT_V1";
+  const accepted = await recordGithubSnapshot(
+    successor.store,
+    successor.reviewId,
+    { expectedRevision: 2, observation: current },
+    { clock: () => startedAt + 4_010 },
+  );
+  assert.equal(accepted.status, "MERGE_READY");
+  assert.equal(
+    accepted.latest_observation.codex_review.results[0].verdict,
+    "CLEAN",
+  );
+});
+
+test("supersession never closes a request the ledger cannot prove it issued", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt, baselineV2(startedAt - 100));
+  const first = await getPublicationSummary(state.store, state.reviewId);
+  const firstRequestId = first.codex_review_request.request_id;
+  const firstRequestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(firstRequestAt),
+      requestedHeadSha: state.headSha,
+      requestId: firstRequestId,
+    },
+    { clock: () => firstRequestAt + 10 },
+  );
+
+  // Anyone can type an rbreq marker into a comment. This one is canonical
+  // enough to be recorded, and still carries no post-time binding.
+  const forgedRequestId = `rbreq-${"e".repeat(32)}`;
+  const forgedRequest = {
+    resource_id: 150,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-150",
+    event_at: iso(firstRequestAt + 50),
+    timestamp_field: "created_at",
+    body_sha256: digest(correlatedRequestBody(forgedRequestId)),
+    request_id: forgedRequestId,
+    reason: "MISSING_POST_BINDING",
+  };
+  const seen = observationV2(
+    {
+      at: startedAt + 2_000,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: 100,
+      requestAt: firstRequestAt,
+      withResult: false,
+    },
+    firstRequestId,
+  );
+  seen.codex_review.unbound_requests.push(forgedRequest);
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 2, observation: seen },
+    { clock: () => startedAt + 2_010 },
+  );
+
+  const secondRequestId = correlatedRequestId(
+    state.reviewId,
+    3,
+    state.headSha,
+  );
+  const secondRequestAt = startedAt + 3_000;
+  const requested = await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 3,
+      commentId: 200,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-200",
+      createdAt: iso(secondRequestAt),
+      requestedHeadSha: state.headSha,
+      requestId: secondRequestId,
+    },
+    { clock: () => secondRequestAt + 10 },
+  );
+  assert.deepEqual(
+    requested.codex_review_ambiguity_acknowledgements[0].closed_requests,
+    [{ resource_kind: "ISSUE_COMMENT", resource_id: 100 }],
+  );
+
+  const current = observationV2(
+    {
+      at: startedAt + 4_000,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: 200,
+      requestAt: secondRequestAt,
+    },
+    secondRequestId,
+  );
+  current.codex_review.requests.unshift(seen.codex_review.requests[0]);
+  current.codex_review.unbound_requests.push(forgedRequest);
+  current.codex_review.results[0].request_id = null;
+  current.codex_review.results[0].association = "AMBIGUOUS";
+  current.codex_review.results[0].request_ref = null;
+  current.codex_review.results[0].format = "UNKNOWN";
+  current.codex_review.results[0].verdict = "UNKNOWN";
+  const blocked = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 4, observation: current },
+    { clock: () => startedAt + 4_010 },
+  );
+  assert.equal(blocked.status, "GITHUB_REVIEW_UNKNOWN");
+
+  // The pause survives for exactly the request ownership could not settle.
+  const summary = await getPublicationSummary(state.store, state.reviewId, {
+    clock: () => startedAt + 4_020,
+  });
+  assert.deepEqual(summary.required_request_refs, [
+    { resource_kind: "ISSUE_COMMENT", resource_id: 150 },
+    { resource_kind: "ISSUE_COMMENT", resource_id: 200 },
+  ]);
+});
+
+test("a prior round's late result still binds until this ledger posts its own request", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt, baselineV2(startedAt - 100));
+  const first = await getPublicationSummary(state.store, state.reviewId);
+  const oldRequestId = first.codex_review_request.request_id;
+  const oldRequestAt = startedAt + 1_000;
+  const oldRequest = {
+    resource_id: 90,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-90",
+    event_at: iso(oldRequestAt),
+    timestamp_field: "created_at",
+    body_sha256: digest(correlatedRequestBody(oldRequestId)),
+    request_id: oldRequestId,
+    actor: { id: 7, type: "User" },
+  };
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 90,
+      url: oldRequest.url,
+      createdAt: oldRequest.event_at,
+      requestedHeadSha: state.headSha,
+      requestId: oldRequestId,
+    },
+    { clock: () => oldRequestAt + 10 },
+  );
+
+  const successor = await successorFixture(state);
+  await start(
+    successor,
+    startedAt + 2_000,
+    baselineV2(startedAt + 1_900, [oldRequest]),
+  );
+  const stored = await getPublication(successor.store, successor.reviewId);
+  const issuance = stored.codex_review_baseline.requests[0].issuance;
+  assert.equal(issuance.review_id, state.reviewId);
+
+  // Nothing has been posted from this ledger yet, so the reply the previous
+  // round earned is still the previous round's to claim.
+  const late = observationV2(
+    {
+      at: startedAt + 3_000,
+      baseSha: successor.baseSha,
+      headSha: successor.headSha,
+      requestId: null,
+      requestAt: oldRequestAt,
+      baselineRequests: [{ ...oldRequest, issuance }],
+    },
+    oldRequestId,
+  );
+  late.codex_review.results.push({
+    result_id: 91,
+    resource_kind: "ISSUE_COMMENT",
+    native_review_state: null,
+    url: "https://github.com/owner/repo/issues/7#issuecomment-91",
+    event_at: iso(startedAt + 2_500),
+    timestamp_field: "created_at",
+    actor: {
+      id: 99,
+      type: "Bot",
+      login: "chatgpt-codex-connector[bot]",
+    },
+    request_ref: { resource_kind: "ISSUE_COMMENT", resource_id: 90 },
+    association: "BASELINE_LATE_RESULT",
+    reviewed_head_sha: null,
+    commit_binding: {
+      source: "CODEX_REVIEWED_COMMIT_PREFIX_AND_REQUEST_HEAD",
+      field: "body.reviewed_commit",
+      prefix: state.headSha.slice(0, 10),
+    },
+    attached_review_comments: [],
+    format: "UNKNOWN",
+    verdict: "UNKNOWN",
+    body_sha256: digest("delayed predecessor result"),
+    request_id: oldRequestId,
+  });
+  await recordGithubSnapshot(
+    successor.store,
+    successor.reviewId,
+    { expectedRevision: 1, observation: late },
+    { clock: () => startedAt + 3_010 },
+  );
+  const summary = await getPublicationSummary(
+    successor.store,
+    successor.reviewId,
+    { clock: () => startedAt + 3_020 },
+  );
+  assert.deepEqual(summary.required_ambiguous_results, []);
+  assert.deepEqual(summary.required_request_refs, []);
+});
+
+test("a supersession is audited apart from an operator acknowledgement", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt, baselineV2(startedAt - 100));
+  const first = await getPublicationSummary(state.store, state.reviewId);
+  const firstRequestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(firstRequestAt),
+      requestedHeadSha: state.headSha,
+      requestId: first.codex_review_request.request_id,
+    },
+    { clock: () => firstRequestAt + 10 },
+  );
+  const secondRequestAt = startedAt + 2_000;
+  const requested = await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 2,
+      commentId: 200,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-200",
+      createdAt: iso(secondRequestAt),
+      requestedHeadSha: state.headSha,
+      requestId: correlatedRequestId(state.reviewId, 2, state.headSha),
+    },
+    { clock: () => secondRequestAt + 10 },
+  );
+  const supersession = requested.codex_review_ambiguity_acknowledgements[0];
+  assert.equal(supersession.acknowledgement, "SUPERSEDED_BY_LATER_OWN_REQUEST");
+  assert.equal("operator_label" in supersession, false);
+  assert.equal("rationale" in supersession, false);
+  assert.equal("backing_observed_at" in supersession, false);
+
+  const ledgerPath = path.join(
+    state.store,
+    "reviews",
+    state.reviewId,
+    "publication.json",
+  );
+  const relabelled = structuredClone(requested);
+  relabelled.codex_review_ambiguity_acknowledgements[0].acknowledgement =
+    "NO_FURTHER_RESULTS_EXPECTED";
+  await atomicWriteCanonicalJson(ledgerPath, relabelled);
+  await assert.rejects(
+    getPublication(state.store, state.reviewId),
+    /acknowledgement operator_label must be a non-empty string/,
+  );
+
+  const dressed = structuredClone(requested);
+  dressed.codex_review_ambiguity_acknowledgements[0].operator_label =
+    "maintainer";
+  dressed.codex_review_ambiguity_acknowledgements[0].rationale =
+    "Close the prior epoch.";
+  await atomicWriteCanonicalJson(ledgerPath, dressed);
+  await assert.rejects(
+    getPublication(state.store, state.reviewId),
+    /stored supersession carries operator or observation evidence/,
+  );
+});
+
+test("a supersession leaves an already-recorded result's association alone", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt, baselineV2(startedAt - 100));
+  const first = await getPublicationSummary(state.store, state.reviewId);
+  const firstRequestId = first.codex_review_request.request_id;
+  const firstRequestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(firstRequestAt),
+      requestedHeadSha: state.headSha,
+      requestId: firstRequestId,
+    },
+    { clock: () => firstRequestAt + 10 },
+  );
+  const answered = observationV2(
+    {
+      at: startedAt + 2_000,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: 100,
+      requestAt: firstRequestAt,
+    },
+    firstRequestId,
+  );
+  const before = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 2, observation: answered },
+    { clock: () => startedAt + 2_010 },
+  );
+  assert.equal(
+    before.latest_observation.codex_review.results[0].association,
+    "CORRELATED_REQUEST_ID",
+  );
+
+  const secondRequestId = correlatedRequestId(
+    state.reviewId,
+    3,
+    state.headSha,
+  );
+  const secondRequestAt = startedAt + 3_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 3,
+      commentId: 200,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-200",
+      createdAt: iso(secondRequestAt),
+      requestedHeadSha: state.headSha,
+      requestId: secondRequestId,
+    },
+    { clock: () => secondRequestAt + 10 },
+  );
+
+  const after = observationV2(
+    {
+      at: startedAt + 4_000,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: 200,
+      requestAt: secondRequestAt,
+      withResult: false,
+    },
+    secondRequestId,
+  );
+  after.codex_review.requests.unshift(answered.codex_review.requests[0]);
+  after.codex_review.results.push(answered.codex_review.results[0]);
+  const replayed = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 4, observation: after },
+    { clock: () => startedAt + 4_010 },
+  );
+  // The stored association is the caller's own claim, so the derivation is
+  // what has to be checked: a result the ledger re-reads as unexplained lands
+  // in the acknowledgement closure, and this one must not.
+  assert.equal(replayed.status, "GITHUB_REVIEW_PENDING");
+  const summary = await getPublicationSummary(state.store, state.reviewId, {
+    clock: () => startedAt + 4_020,
+  });
+  assert.deepEqual(summary.required_ambiguous_results, []);
+  assert.deepEqual(summary.required_request_refs, []);
+});
+
+test("version 1 has no correlation evidence to supersede with", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const { observedAt } = await reachReady(state, startedAt);
+  const secondRequestAt = observedAt + 1_000;
+  const requested = await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 3,
+      commentId: 200,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-200",
+      createdAt: iso(secondRequestAt),
+      requestedHeadSha: state.headSha,
+    },
+    { clock: () => secondRequestAt + 10 },
+  );
+  assert.deepEqual(requested.codex_review_ambiguity_acknowledgements, []);
 });
 
 test("version 2 rejects a markerless result with an unverified baseline request", async (t) => {
