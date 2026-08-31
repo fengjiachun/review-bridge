@@ -3872,15 +3872,235 @@ test("an absorbed erratum drift still times out honestly", async (t) => {
   // to re-arm on it can.
   assert.equal(result.summary.state_version, appended.state_version);
   assert.equal(result.summary.status, "WAITING_FOR_REVIEW");
+});
 
-  // Without a witnessed baseline the wait keeps its original semantics: a
-  // version that moved before the first read returns changed immediately.
-  const preDrifted = await waitForReviewState(
+test("re-arming with the original version cannot false-wake on errata", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  assert.equal(prepared.last_transition_state_version, 1);
+  const first = waitForReviewState(
     store,
     prepared.id,
     prepared.state_version,
-    5_000,
+    1_500,
   );
-  assert.equal(preDrifted.changed, true);
-  assert.equal(preDrifted.summary.status, "WAITING_FOR_REVIEW");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  await appendReviewErratum(store, prepared.id, "Stale claim, mid-wait.");
+  const firstResult = await first;
+  assert.equal(firstResult.changed, false);
+  assert.equal(firstResult.timed_out, true);
+
+  // The driver re-arms with the version it recorded originally, as the
+  // packaged wait steps instruct. The drift predates this wait's first
+  // read, and the transition stamp still says the state machine never
+  // moved past it.
+  let settled = false;
+  const rearmed = waitForReviewState(
+    store,
+    prepared.id,
+    prepared.state_version,
+    10_000,
+  ).finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(settled, false);
+
+  await submitInitialReview(store, prepared.id, []);
+  const woken = await rearmed;
+  assert.equal(woken.changed, true);
+  assert.equal(woken.summary.status, "CLEAN");
+});
+
+// Every state-machine transition, driven from a table so a new transition
+// that forgets its stamp turns this red rather than silently never waking a
+// wait. Each scenario arms the wait at the pre-transition version, performs
+// exactly one transition, and expects the wake.
+const WAIT_TRANSITION_FINDING = {
+  severity: "major",
+  title: "Missing behavior test",
+  explanation: "No test asserts the zero-divisor branch.",
+};
+
+async function driveToWaitingRereview(store, repository, reviewId) {
+  await submitInitialReview(store, reviewId, [WAIT_TRANSITION_FINDING]);
+  await submitResolutions(store, reviewId, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await fsp.writeFile(
+    path.join(repository, "app.test.js"),
+    "import assert from 'node:assert/strict';\nimport { divide } from './app.js';\nassert.equal(divide(1, 0), null);\n",
+  );
+  await prepareRereview(store, reviewId);
+}
+
+const WAIT_TRANSITIONS = [
+  [
+    "initial findings submitted",
+    null,
+    (store, repository, id) =>
+      submitInitialReview(store, id, [WAIT_TRANSITION_FINDING]),
+    "REVIEW_SUBMITTED",
+  ],
+  [
+    "initial review clean",
+    null,
+    (store, repository, id) => submitInitialReview(store, id, []),
+    "CLEAN",
+  ],
+  [
+    "author responded",
+    (store, repository, id) =>
+      submitInitialReview(store, id, [WAIT_TRANSITION_FINDING]),
+    (store, repository, id) =>
+      submitResolutions(store, id, [
+        { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+      ]),
+    "AUTHOR_RESPONDED",
+  ],
+  [
+    "author escalated",
+    (store, repository, id) =>
+      submitInitialReview(store, id, [WAIT_TRANSITION_FINDING]),
+    (store, repository, id) =>
+      submitResolutions(store, id, [
+        {
+          finding_id: "F-001",
+          disposition: "human_required",
+          rationale: "The requirement itself is contested.",
+        },
+      ]),
+    "HUMAN_REQUIRED",
+  ],
+  [
+    "rereview prepared",
+    async (store, repository, id) => {
+      await submitInitialReview(store, id, [WAIT_TRANSITION_FINDING]);
+      await submitResolutions(store, id, [
+        { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+      ]);
+    },
+    (store, repository, id) => prepareRereview(store, id),
+    "WAITING_FOR_REREVIEW",
+  ],
+  [
+    "rereview clean",
+    driveToWaitingRereview,
+    (store, repository, id) =>
+      submitRereview(
+        store,
+        id,
+        [
+          {
+            finding_id: "F-001",
+            decision: "resolved",
+            rationale: "The assertion covers the branch.",
+          },
+        ],
+        [],
+      ),
+    "CLEAN",
+  ],
+  [
+    "rereview continuable",
+    driveToWaitingRereview,
+    (store, repository, id) =>
+      submitRereview(
+        store,
+        id,
+        [
+          {
+            finding_id: "F-001",
+            decision: "resolved",
+            rationale: "The assertion covers the branch.",
+          },
+        ],
+        [
+          {
+            severity: "minor",
+            title: "New edge case",
+            explanation: "A separate edge case still needs a decision.",
+          },
+        ],
+      ),
+    "CONTINUABLE_FINDINGS",
+  ],
+  [
+    "rereview contested",
+    driveToWaitingRereview,
+    (store, repository, id) =>
+      submitRereview(
+        store,
+        id,
+        [
+          {
+            finding_id: "F-001",
+            decision: "still_open",
+            rationale: "The concern remains.",
+          },
+        ],
+        [],
+      ),
+    "HUMAN_REQUIRED",
+  ],
+  [
+    "local gate passed",
+    (store, repository, id) => submitInitialReview(store, id, []),
+    (store, repository, id) => finalizeLocalGate(store, id),
+    "LOCAL_GATE_PASSED",
+  ],
+];
+
+test("every state-machine transition wakes the wait", async (t) => {
+  for (const [name, prepare, transition, expected] of WAIT_TRANSITIONS) {
+    await t.test(name, async (t2) => {
+      const { repository, store, prepared } = await erratumFixture(t2);
+      if (prepare) {
+        await prepare(store, repository, prepared.id);
+      }
+      const before = await getReview(store, prepared.id);
+      const wait = waitForReviewState(
+        store,
+        prepared.id,
+        before.state_version,
+        10_000,
+      );
+      await transition(store, repository, prepared.id);
+      const result = await wait;
+      assert.equal(result.changed, true);
+      assert.equal(result.summary.status, expected);
+      assert.equal(
+        result.summary.last_transition_state_version,
+        result.summary.state_version,
+      );
+    });
+  }
+});
+
+test("a ledger without the transition stamp wakes on any change until its next transition", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  const ledgerPath = path.join(store, "reviews", prepared.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  delete ledger.last_transition_state_version;
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`, {
+    mode: 0o600,
+  });
+
+  // Pre-stamp semantics: any change wakes -- a conservative false wake
+  // rather than a missed one.
+  const wait = waitForReviewState(
+    store,
+    prepared.id,
+    prepared.state_version,
+    10_000,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  await appendReviewErratum(store, prepared.id, "Erratum on a legacy ledger.");
+  const woken = await wait;
+  assert.equal(woken.changed, true);
+  assert.equal(woken.summary.status, "WAITING_FOR_REVIEW");
+  assert.equal(woken.summary.last_transition_state_version, null);
+
+  // The next transition writes the stamp and the new semantics take over.
+  const clean = await submitInitialReview(store, prepared.id, []);
+  assert.equal(clean.last_transition_state_version, clean.state_version);
 });

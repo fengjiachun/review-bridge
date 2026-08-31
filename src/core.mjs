@@ -215,6 +215,16 @@ async function saveReview(storeRoot, review) {
   await atomicWriteJson(reviewFile(storeRoot, review.id), review);
 }
 
+// A state-machine transition -- any save that changes review.status or
+// advances current_round -- stamps the version it lands at, so the wait can
+// tell movement from errata evidence without reconstructing history. Erratum
+// appends, served-watermark recordings, and the continuation freeze save
+// without the stamp.
+async function saveReviewTransition(storeRoot, review) {
+  review.last_transition_state_version = (review.state_version ?? 0) + 1;
+  await saveReview(storeRoot, review);
+}
+
 function createReviewId() {
   const stamp = new Date().toISOString().replaceAll(":", "").replaceAll(".", "-");
   return `rb-${stamp}-${crypto.randomBytes(4).toString("hex")}`;
@@ -1037,6 +1047,7 @@ function publicReview(review) {
     rereview_decisions: review.rereview_decisions,
     errata: review.errata ?? [],
     last_opened_errata_watermark: review.last_opened_errata_watermark ?? 0,
+    last_transition_state_version: review.last_transition_state_version ?? null,
     continued_by_review_id: review.continued_by_review_id ?? null,
     carried_findings: review.carried_findings ?? [],
     clean_snapshot_hash: review.clean_snapshot_hash ?? null,
@@ -1223,6 +1234,7 @@ function reviewSummary(review) {
     // tell erratum-only drift from a real review transition.
     errata_watermark: errataWatermark(review),
     last_opened_errata_watermark: review.last_opened_errata_watermark ?? 0,
+    last_transition_state_version: review.last_transition_state_version ?? null,
     latest_event: review.history.at(-1) ?? null,
     clean_snapshot_hash: review.clean_snapshot_hash ?? null,
   };
@@ -1544,6 +1556,7 @@ export async function prepareReview(
       created_at: timestamp,
       updated_at: timestamp,
       state_version: 1,
+      last_transition_state_version: 1,
       repository_path: manifest.repository_path,
       base_ref: baseRef,
       requirement,
@@ -1812,27 +1825,6 @@ export async function exportHumanArbitration(
   };
 }
 
-// Ledger movement between two witnessed reads of one waiting review that is
-// fully explained by errata evidence: the state machine did not move — same
-// waiting status, same round, same snapshot — and an erratum append or the
-// served-watermark recording is what advanced the version. A waiting status
-// admits no other ledger mutation, so anything outside this shape is a real
-// transition.
-function erratumOnlyLedgerDrift(previous, current) {
-  const previousRound = previous.rounds?.at(-1);
-  const currentRound = current.rounds?.at(-1);
-  return (
-    ["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"].includes(previous.status) &&
-    current.status === previous.status &&
-    current.current_round === previous.current_round &&
-    currentRound?.snapshot_hash === previousRound?.snapshot_hash &&
-    currentRound?.head_sha === previousRound?.head_sha &&
-    (errataWatermark(current) > errataWatermark(previous) ||
-      (current.last_opened_errata_watermark ?? 0) >
-        (previous.last_opened_errata_watermark ?? 0))
-  );
-}
-
 export async function waitForReviewState(
   storeRoot,
   reviewId,
@@ -1850,26 +1842,18 @@ export async function waitForReviewState(
   }
   const deadline = Date.now() + timeoutMs;
   let review = await loadReview(storeRoot, reviewId);
-  // The wait observes state-machine movement, not ledger bytes: erratum-only
-  // drift witnessed mid-wait is absorbed by re-arming on the drifted version
-  // instead of returning changed. Absorption needs a witnessed baseline to
-  // explain the drift against, so a version that already moved before the
-  // first read returns changed exactly as before.
-  let witnessed =
-    (review.state_version ?? 0) === knownStateVersion ? review : null;
-  let awaitedVersion = knownStateVersion;
-  for (;;) {
-    if ((review.state_version ?? 0) !== awaitedVersion) {
-      if (witnessed == null || !erratumOnlyLedgerDrift(witnessed, review)) {
-        return {
-          changed: true,
-          timed_out: false,
-          summary: reviewSummary(review),
-        };
-      }
-      witnessed = review;
-      awaitedVersion = review.state_version ?? 0;
-    }
+  // The wait observes state-machine movement, not ledger bytes: every
+  // transition stamps last_transition_state_version, so erratum appends and
+  // served-watermark recordings advance state_version without waking the
+  // wait, whatever version a re-armed caller passes. A ledger from before
+  // the stamp reports any change -- the pre-stamp semantics, a conservative
+  // false wake rather than a missed one -- until its next transition writes
+  // the stamp.
+  const moved = (current) =>
+    current.last_transition_state_version == null
+      ? (current.state_version ?? 0) !== knownStateVersion
+      : current.last_transition_state_version > knownStateVersion;
+  while (!moved(review)) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       return {
@@ -1881,6 +1865,11 @@ export async function waitForReviewState(
     await new Promise((resolve) => setTimeout(resolve, Math.min(100, remaining)));
     review = await loadReview(storeRoot, reviewId);
   }
+  return {
+    changed: true,
+    timed_out: false,
+    summary: reviewSummary(review),
+  };
 }
 
 function normalizeFinding(input, id, round) {
@@ -1983,7 +1972,7 @@ async function submitInitialReviewWhileLocked(
       errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
   }
-  await saveReview(storeRoot, review);
+  await saveReviewTransition(storeRoot, review);
   return publicReview(review);
 }
 
@@ -2062,7 +2051,7 @@ async function submitResolutionsWhileLocked(storeRoot, reviewId, inputs) {
     event: humanRequired ? "AUTHOR_ESCALATED" : "AUTHOR_RESPONDED",
     round: review.current_round,
   });
-  await saveReview(storeRoot, review);
+  await saveReviewTransition(storeRoot, review);
   return publicReview(review);
 }
 
@@ -2145,7 +2134,7 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
   if (review.current_round >= review.max_rounds) {
     review.status = "HUMAN_REQUIRED";
     review.history.push({ at: now(), event: "ROUND_LIMIT_REACHED" });
-    await saveReview(storeRoot, review);
+    await saveReviewTransition(storeRoot, review);
     return publicReview(review);
   }
   const round = review.current_round + 1;
@@ -2208,7 +2197,7 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
     round,
     mode: successorResult.strategy.mode,
   });
-  await saveReview(storeRoot, review);
+  await saveReviewTransition(storeRoot, review);
   return publicReview(review);
 }
 
@@ -2343,7 +2332,7 @@ async function submitRereviewWhileLocked(
       errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
   }
-  await saveReview(storeRoot, review);
+  await saveReviewTransition(storeRoot, review);
   return publicReview(review);
 }
 
@@ -2409,7 +2398,7 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
   await atomicWriteJson(path.join(reviewDirectory(storeRoot, review.id), "gate.json"), gate);
   review.status = "LOCAL_GATE_PASSED";
   review.history.push({ at: now(), event: "LOCAL_GATE_PASSED" });
-  await saveReview(storeRoot, review);
+  await saveReviewTransition(storeRoot, review);
   return { review: publicReview(review), gate };
 }
 
