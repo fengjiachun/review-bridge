@@ -1215,7 +1215,7 @@ if (role === "author") {
     {
       title: "Prepare local review",
       description:
-        "Capture an immutable Git snapshot, requirement, implementation scope, patch, added-plus-deleted line measurement, warning-threshold headroom, test context, and explicit reviewer provider. Manual preparation reports the measurement against the default budget without blocking. Without parent_review_id the server selects a verifiable successor parent itself and records how it was selected; pass force_full_review to demand a full-patch review. For a continuable local cycle, pass continued_from_review_id with force_full_review to carry only the source findings as scope hints. Pass advisory to persist a review whose terminal is a report: it accepts submit_review and nothing else, and finalize_local_gate, submit_resolutions, prepare_rereview, and append_review_erratum all refuse it, so an advisory panel over someone else's pull request can never mint a gate.",
+        "Capture an immutable Git snapshot, requirement, implementation scope, patch, added-plus-deleted line measurement, warning-threshold headroom, test context, and explicit reviewer provider. Manual preparation reports the measurement against the default budget without blocking. Without parent_review_id the server selects a verifiable successor parent itself and records how it was selected; pass force_full_review to demand a full-patch review. For a continuable local cycle, pass continued_from_review_id with force_full_review to carry the source's open findings as bare scope hints and its errata forward; preparing the continuation freezes the source against further errata. Pass advisory to persist a review whose terminal is a report: it accepts submit_review and nothing else, and finalize_local_gate, submit_resolutions, prepare_rereview, and append_review_erratum all refuse it, so an advisory panel over someone else's pull request can never mint a gate.",
       inputSchema: {
         repository_path: z.string(),
         base_ref: z.string(),
@@ -1258,7 +1258,7 @@ if (role === "author") {
     "get_review",
     {
       title: "Get local review",
-      description: "Read findings, author resolutions, decisions, and state.",
+      description: "Read findings, author resolutions, decisions, errata, and state.",
       inputSchema: { review_id: z.string() },
     },
     (input) => getReview(storeRoot, input.review_id),
@@ -1303,7 +1303,7 @@ if (role === "author") {
     {
       title: "Wait for local review state change",
       description:
-        "Wait 25 seconds by default, configurable up to 30 seconds, for review.json to advance beyond a known state_version. A timeout is expected while a human-paced review is in progress and returns the unchanged compact summary; call this tool again with the same known_state_version until changed is true, or resume when the user confirms the review is complete.",
+        "Wait 25 seconds by default, configurable up to 30 seconds, for the review's state machine to move past a known state_version. Only a transition -- a status change or a new round -- completes the wait: erratum appends and served-watermark recordings advance state_version without waking it. A timeout is expected while a human-paced review is in progress and returns the current compact summary, whose state_version and errata metadata may have advanced without a transition; call this tool again with the same known_state_version until changed is true, or resume when the user confirms the review is complete.",
       inputSchema: {
         review_id: z.string(),
         known_state_version: z

@@ -313,6 +313,22 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       /without an open in its round records zero/,
     );
 
+    const waitTool = authorTools.tools.find(
+      (tool) => tool.name === "wait_for_review_state",
+    );
+    assert.match(
+      waitTool.description,
+      /Only a transition -- a status change or a new round -- completes the wait/,
+    );
+    assert.match(
+      waitTool.description,
+      /advance state_version without waking it/,
+    );
+    assert.match(
+      waitTool.description,
+      /may have advanced without a transition/,
+    );
+
     const reviewerTools = await reviewer.listTools();
     assert.match(
       reviewer.getInstructions(),
