@@ -3445,6 +3445,9 @@ test("a continuation review carries the source errata with resequenced watermark
     forceFullReview: true,
     continuedFromReviewId: source.id,
   });
+  // A continuation ledger starts unserved: it carries the corrections, not
+  // the source's open.
+  assert.equal(continuation.last_opened_errata_watermark, 0);
   assert.deepEqual(
     continuation.errata.map((entry) => ({
       sequence: entry.sequence,
@@ -3729,4 +3732,45 @@ test("the continuation errata copy waits behind the source review lock", async (
     /Appended while the continuation was waiting/,
   );
   assert.equal(continuation.errata[1].sequence, 2);
+});
+
+test("a rereview verdict cannot inherit round one's open", async (t) => {
+  const { repository, store, prepared } = await erratumFixture(t);
+  await appendReviewErratum(store, prepared.id, "Stale claim one.");
+  const opened = await openReview(store, prepared.id);
+  assert.equal(opened.last_opened_errata_watermark, 1);
+  await submitInitialReview(store, prepared.id, [
+    {
+      severity: "major",
+      title: "Missing behavior test",
+      explanation: "No test asserts the zero-divisor branch.",
+    },
+  ]);
+  await submitResolutions(store, prepared.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await fsp.writeFile(
+    path.join(repository, "app.test.js"),
+    "import assert from 'node:assert/strict';\nimport { divide } from './app.js';\nassert.equal(divide(1, 0), null);\n",
+  );
+  const rereview = await prepareRereview(store, prepared.id);
+  // The new round starts unserved.
+  assert.equal(rereview.last_opened_errata_watermark, 0);
+
+  // A fresh round-two context that submits without opening records zero,
+  // not round one's open.
+  const clean = await submitRereview(
+    store,
+    prepared.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "resolved",
+        rationale: "The assertion covers the branch.",
+      },
+    ],
+    [],
+  );
+  assert.equal(clean.history.at(-1).event, "REREVIEW_CLEAN");
+  assert.equal(clean.history.at(-1).errata_watermark, 0);
 });

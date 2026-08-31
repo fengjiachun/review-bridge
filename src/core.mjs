@@ -2155,6 +2155,11 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
           successor: null,
         };
   review.current_round = round;
+  // A new round starts unserved: the field means "the highest watermark the
+  // server served the reviewer this round", and a round-two reviewer may be
+  // a fresh context that submits without opening — its verdict then records
+  // zero rather than inheriting round one's open.
+  review.last_opened_errata_watermark = 0;
   review.rounds.push({
     round,
     ...manifest,
