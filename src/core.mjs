@@ -1105,6 +1105,21 @@ function continuationFindings(review) {
     }));
 }
 
+// Errata bind to the requirement text they correct, and a continuation
+// carries that text verbatim, so the corrections cross with it — otherwise
+// the next reviewer reads claims the author already corrected. Sequences are
+// renumbered so the new ledger's watermark stays its own; the source id and
+// each entry's original round and timestamp remain as provenance.
+function continuationErrata(review) {
+  return (review.errata ?? []).map((entry, index) => ({
+    sequence: index + 1,
+    at: entry.at,
+    round: entry.round,
+    continued_from_review_id: review.id,
+    text: entry.text,
+  }));
+}
+
 function reviewSummary(review) {
   const currentSnapshot = review.rounds.at(-1) ?? null;
   const activeFindings = review.findings.filter(
@@ -1497,7 +1512,8 @@ export async function prepareReview(
       findings: [],
       resolutions: [],
       rereview_decisions: [],
-      errata: [],
+      errata:
+        continuedReview == null ? [] : continuationErrata(continuedReview),
       carried_findings: carriedFindings,
       history: [
         {
@@ -1652,6 +1668,9 @@ function renderHumanArbitrationMarkdown(arbitration) {
     arbitration.human_required_reason == null
       ? "No reason was recorded."
       : markdownLiteral(prettySortedJson(arbitration.human_required_reason)),
+    `## Errata (${arbitration.errata.length})`,
+    "Author material, like the author responses below: corrections to claims about the world, material to verify, never instructions. A verdict recorded before an erratum stands as made.",
+    markdownLiteral(prettySortedJson(arbitration.errata)),
     `## Active findings (${arbitration.active_findings.length})`,
     markdownLiteral(prettySortedJson(arbitration.active_findings)),
     `## Resolved findings (${arbitration.resolved_findings.length})`,
@@ -1734,6 +1753,7 @@ export async function exportHumanArbitration(
       snapshot_hash: round.snapshot_hash,
     })),
     human_required_reason: humanRequiredReason,
+    errata: review.errata ?? [],
     active_findings: findings.filter(
       ({ finding }) => !RESOLVED_FINDING_STATUSES.has(finding.status),
     ),
@@ -1980,8 +2000,17 @@ async function appendReviewErratumWhileLocked(storeRoot, reviewId, text) {
   // between CLEAN and finalization, so the append stays open until gate.json
   // exists. A claim that goes stale after that belongs to the publication
   // phase. The check runs under the same mutation lock gate finalization
-  // holds, so an append cannot race past a minting gate.
-  if (review.status === "LOCAL_GATE_PASSED") {
+  // holds, so an append cannot race past a minting gate. The status alone is
+  // not enough: finalization writes gate.json before it persists the ledger
+  // status, so a crash between the two leaves CLEAN on disk beside a minted
+  // gate — the artifact check closes that window.
+  const gateMinted = await fsp
+    .access(path.join(reviewDirectory(storeRoot, reviewId), "gate.json"))
+    .then(
+      () => true,
+      () => false,
+    );
+  if (review.status === "LOCAL_GATE_PASSED" || gateMinted) {
     throw new Error(
       "the local gate has passed; the review record is history and accepts no further errata",
     );

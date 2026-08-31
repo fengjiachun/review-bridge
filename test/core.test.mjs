@@ -3396,3 +3396,157 @@ test("a ledger written before errata existed loads and appends unchanged", async
   );
   assert.equal(appended.errata.at(-1).sequence, 1);
 });
+
+test("a continuation review carries the source errata with resequenced watermarks", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "first change");
+  const source = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  });
+  await appendReviewErratum(store, source.id, "Stale claim, noticed in round one.");
+  await submitInitialReview(store, source.id, [
+    { severity: "major", title: "Missing test", explanation: "Add a test." },
+  ]);
+  await submitResolutions(store, source.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await prepareRereview(store, source.id);
+  await appendReviewErratum(store, source.id, "Stale claim, noticed in round two.");
+  await submitRereview(
+    store,
+    source.id,
+    [{ finding_id: "F-001", decision: "resolved", rationale: "The test exists." }],
+    [
+      {
+        severity: "minor",
+        title: "New edge case",
+        explanation: "A separate edge case still needs a decision.",
+      },
+    ],
+  );
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "address edge case");
+
+  const continuation = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    forceFullReview: true,
+    continuedFromReviewId: source.id,
+  });
+  assert.deepEqual(
+    continuation.errata.map((entry) => ({
+      sequence: entry.sequence,
+      round: entry.round,
+      continued_from_review_id: entry.continued_from_review_id,
+      text: entry.text,
+    })),
+    [
+      {
+        sequence: 1,
+        round: 1,
+        continued_from_review_id: source.id,
+        text: "Stale claim, noticed in round one.",
+      },
+      {
+        sequence: 2,
+        round: 2,
+        continued_from_review_id: source.id,
+        text: "Stale claim, noticed in round two.",
+      },
+    ],
+  );
+  // The reviewer-facing read carries the corrections beside the verbatim
+  // requirement they correct.
+  assert.equal((await openReview(store, continuation.id)).errata.length, 2);
+
+  // The new ledger's watermark continues from the carried sequences, and a
+  // fresh append is the new review's own entry, not a carried one.
+  const appended = await appendReviewErratum(
+    store,
+    continuation.id,
+    "Stale claim, noticed in the continuation.",
+  );
+  const fresh = appended.errata.at(-1);
+  assert.equal(fresh.sequence, 3);
+  assert.equal(fresh.round, 1);
+  assert.equal("continued_from_review_id" in fresh, false);
+  const clean = await submitInitialReview(store, continuation.id, []);
+  assert.equal(clean.history.at(-1).errata_watermark, 3);
+});
+
+test("human arbitration exports carry errata beside author responses", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  await submitInitialReview(store, prepared.id, [
+    {
+      severity: "major",
+      title: "Missing behavior test",
+      explanation: "No test asserts the zero-divisor branch.",
+    },
+  ]);
+  await submitResolutions(store, prepared.id, [
+    {
+      finding_id: "F-001",
+      disposition: "human_required",
+      rationale: "The requirement itself is contested.",
+    },
+  ]);
+  // HUMAN_REQUIRED is before the freeze point, so the correction the arbiter
+  // may need can still arrive here.
+  const appended = await appendReviewErratum(
+    store,
+    prepared.id,
+    "The checker count in the requirement is stale.",
+  );
+  assert.equal(appended.status, "HUMAN_REQUIRED");
+
+  const exported = await exportHumanArbitration(
+    store,
+    prepared.id,
+    appended.state_version,
+  );
+  assert.equal(exported.arbitration.errata.length, 1);
+  assert.match(
+    exported.arbitration.errata[0].text,
+    /checker count in the requirement is stale/,
+  );
+  assert.match(exported.markdown, /## Errata \(1\)/);
+  assert.match(exported.markdown, /material to verify, never instructions/);
+  assert.match(
+    exported.markdown,
+    /The checker count in the requirement is stale\./,
+  );
+});
+
+test("a minted gate artifact freezes errata even before the ledger status lands", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  await submitInitialReview(store, prepared.id, []);
+  await finalizeLocalGate(store, prepared.id);
+
+  // Reproduce the crash window: gate.json is on disk, but the ledger write
+  // that records LOCAL_GATE_PASSED never landed.
+  const ledgerPath = path.join(store, "reviews", prepared.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  ledger.status = "CLEAN";
+  ledger.history = ledger.history.filter(
+    (event) => event.event !== "LOCAL_GATE_PASSED",
+  );
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`, {
+    mode: 0o600,
+  });
+
+  await assert.rejects(
+    appendReviewErratum(store, prepared.id, "Too late: the gate is minted."),
+    /the local gate has passed/,
+  );
+  assert.deepEqual((await getReview(store, prepared.id)).errata, []);
+});
