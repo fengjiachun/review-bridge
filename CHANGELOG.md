@@ -113,7 +113,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   request is never closed — an `rbreq` marker in comment text is forgeable, and
   the pause exists for exactly the reply that could bind to a request the chain
   cannot prove it owns. A request whose reply the ledger already recorded also
-  stays open, so no recorded result loses its correlation. The closure is a
+  stays open, so no recorded result loses its correlation: a reply carrying the
+  request's `rbreq` ID spares that request, and a markerless clean reply — which
+  has no inline comment for the marker to travel in — spares every own request
+  at the head its pinned `reviewed_head_sha` names, since closing one would
+  re-derive the reply as `UNSOLICITED`, drop that head, and terminally
+  invalidate the ledger at the next snapshot. The closure is a
   server-authored `SUPERSEDED_BY_LATER_OWN_REQUEST` record in the existing
   acknowledgement channel, carrying no operator label or rationale and no
   backing observation, which keeps the audit able to tell a derivation from a

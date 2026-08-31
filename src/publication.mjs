@@ -7281,6 +7281,20 @@ export async function withAutonomousTerminalLock(
 // bind. Telling answered from unanswered needs the rbreq correlation, so a
 // version 1 ledger, which has no request IDs at all, supersedes nothing and
 // keeps the operator pause.
+//
+// An answer arrives in one of two shapes and both have to be seen. A result
+// carrying the request's rbreq ID names the request it answered exactly, so
+// only that request is spared. A clean review leaves no inline comment for the
+// marker to travel in, so its reply carries no ID: the only durable trace is
+// the reviewed_head_sha the adapter writes when the reply binds, and
+// resultHistoryFacts pins that value. It says some own request at that head was
+// answered without saying which, so every RECOGNIZED entry at that head is
+// spared -- closing one would re-derive the reply as UNSOLICITED, drop the
+// pinned head, and invalidate the ledger at the next snapshot. Sparing too
+// much only leaves the operator pause standing; sparing too little invalidates
+// the ledger, so this errs wide. Baseline requests are outside the rule: the
+// adapter binds a markerless reply only to a recognized request, so no baseline
+// request can be the one it answered.
 function supersededOwnRequests(ledger) {
   if (ledger.codex_review_baseline.collection.adapter_version !== 2) {
     return [];
@@ -7290,6 +7304,15 @@ function supersededOwnRequests(ledger) {
     ledger.codex_result_history
       .map((entry) => entry.request_id)
       .filter((requestId) => isCodexRequestId(requestId)),
+  );
+  const answeredHeads = new Set(
+    ledger.codex_result_history
+      .filter(
+        (entry) =>
+          !isCodexRequestId(entry.request_id) &&
+          entry.reviewed_head_sha != null,
+      )
+      .map((entry) => entry.reviewed_head_sha),
   );
   return [
     ...ledger.codex_request_history.filter(
@@ -7305,7 +7328,9 @@ function supersededOwnRequests(ledger) {
   ]
     .filter(
       (item) =>
-        !closed.has(resourceIdentity(item)) && !answered.has(item.request_id),
+        !closed.has(resourceIdentity(item)) &&
+        !answered.has(item.request_id) &&
+        !answeredHeads.has(item.requested_head_sha),
     )
     .map((item) => ({
       resource_kind: item.resource_kind,

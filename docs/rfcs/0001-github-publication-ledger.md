@@ -1817,7 +1817,22 @@ issued: its `RECOGNIZED` history entries bound `RECORDED_AT_POST`, and
 start against a prior ledger of the same chain. It never names an `UNBOUND`
 request, whose only claim to ownership is a forgeable comment marker, and never
 names a request whose reply the ledger has already recorded, whose correlation a
-closure would retroactively strip. It closes no results, carries no
+closure would retroactively strip.
+
+An already-recorded reply is recognized in both of the shapes it arrives in. A
+result carrying the request's `rbreq` ID names its request exactly, and only
+that request is spared. A clean review leaves no inline comment for the marker
+to travel in, so its reply carries no ID at all; the durable trace is the
+`reviewed_head_sha` the adapter writes when the reply binds, which
+`resultHistoryFacts` pins. That says some own request at that head was answered
+without saying which, so every `RECOGNIZED` entry at that head is spared.
+Sparing too much only leaves the acknowledgement path standing for those
+requests; sparing too little re-derives the reply as `UNSOLICITED`, drops the
+pinned `reviewed_head_sha`, and the next snapshot refuses the ledger as
+terminally changed. Baseline requests are outside this rule, because the
+adapter binds a markerless reply only to a recognized request.
+
+The record closes no results, carries no
 `operator_label`, `rationale`, or `backing_observed_at`, and its
 `backing_observation_sha256` is `null`: the derivation reads the ledger, not an
 observation, and the request it accompanies clears the observation anyway. A

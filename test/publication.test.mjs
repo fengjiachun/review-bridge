@@ -965,6 +965,146 @@ test("a supersession leaves an already-recorded result's association alone", asy
   assert.deepEqual(summary.required_request_refs, []);
 });
 
+test("a markerless clean reply keeps the request it answered out of the closure", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt, baselineV2(startedAt - 100));
+  const first = await getPublicationSummary(state.store, state.reviewId);
+  const firstRequestId = first.codex_review_request.request_id;
+  const firstRequestAt = startedAt + 1_000;
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
+      createdAt: iso(firstRequestAt),
+      requestedHeadSha: state.headSha,
+      requestId: firstRequestId,
+    },
+    { clock: () => firstRequestAt + 10 },
+  );
+
+  // A clean review leaves no inline comment, so the marker has nowhere to
+  // travel: the reply carries no request ID and the only durable trace of what
+  // it answered is the reviewed head the adapter writes when it binds. Both
+  // snapshots below are adapted from feeds the way a driver builds them, so the
+  // second one genuinely re-derives rather than echoing the first.
+  const requestComment = (id, requestId, at) => ({
+    id,
+    user: { id: 42, type: "User", login: "maintainer" },
+    created_at: iso(at),
+    html_url: `https://github.com/owner/repo/issues/7#issuecomment-${id}`,
+    body: correlatedRequestBody(requestId),
+  });
+  const cleanReply = {
+    id: 101,
+    user: { id: 99, type: "Bot", login: "chatgpt-codex-connector[bot]" },
+    created_at: iso(firstRequestAt + 100),
+    html_url: "https://github.com/owner/repo/issues/7#issuecomment-101",
+    body: [
+      "Codex Review: Didn't find any major issues.",
+      "",
+      `**Reviewed commit:** \`${state.headSha.slice(0, 12)}\``,
+    ].join("\n"),
+  };
+  const adapt = async (at, issueComments) => {
+    const collectedAt = iso(at - 500);
+    const ledger = await getPublication(state.store, state.reviewId);
+    const value = observation({
+      at,
+      baseSha: state.baseSha,
+      headSha: state.headSha,
+      requestId: null,
+      requestAt: at,
+      withResult: false,
+    });
+    value.codex_review = adaptCodexEvidence({
+      mode: "SNAPSHOT",
+      collection: {
+        status: "COMPLETE",
+        collected_at: collectedAt,
+        adapter_version: 2,
+        sources: [
+          "ISSUE_COMMENTS",
+          "PULL_REQUEST_REVIEWS",
+          "PULL_REQUEST_REVIEW_COMMENTS",
+        ].map((kind) =>
+          completeSource(kind, collectedAt, {
+            pagination_complete: true,
+            page_count: 1,
+          }),
+        ),
+      },
+      expected_actor: { id: 99, type: "Bot" },
+      authorization_head_sha: state.headSha,
+      baseline: ledger.codex_review_baseline,
+      request_history: ledger.codex_request_history,
+      ambiguity_acknowledgements:
+        ledger.codex_review_ambiguity_acknowledgements,
+      issue_comments: issueComments,
+      pull_request_reviews: [],
+      pull_request_review_comments: [],
+    });
+    return value;
+  };
+
+  const answered = await adapt(startedAt + 2_000, [
+    requestComment(100, firstRequestId, firstRequestAt),
+    cleanReply,
+  ]);
+  assert.equal(
+    answered.codex_review.results[0].association,
+    "SINGLE_OPEN_REQUEST",
+  );
+  const before = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 2, observation: answered },
+    { clock: () => startedAt + 2_010 },
+  );
+  assert.equal(before.codex_result_history[0].reviewed_head_sha, state.headSha);
+
+  const secondRequestId = correlatedRequestId(state.reviewId, 3, state.headSha);
+  const secondRequestAt = startedAt + 3_000;
+  const requested = await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 3,
+      commentId: 200,
+      url: "https://github.com/owner/repo/issues/7#issuecomment-200",
+      createdAt: iso(secondRequestAt),
+      requestedHeadSha: state.headSha,
+      requestId: secondRequestId,
+    },
+    { clock: () => secondRequestAt + 10 },
+  );
+
+  // Closing request 100 re-derives result 101 as UNSOLICITED, dropping the
+  // reviewed_head_sha that resultHistoryFacts pins, and this snapshot then
+  // refuses the ledger as terminally changed.
+  const after = await adapt(startedAt + 4_000, [
+    requestComment(100, firstRequestId, firstRequestAt),
+    cleanReply,
+    requestComment(200, secondRequestId, secondRequestAt),
+  ]);
+  const replayed = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: 4, observation: after },
+    { clock: () => startedAt + 4_010 },
+  );
+  assert.equal(replayed.terminal, null);
+  assert.equal(
+    replayed.latest_observation.codex_review.results[0].reviewed_head_sha,
+    state.headSha,
+  );
+  assert.deepEqual(requested.codex_review_ambiguity_acknowledgements, []);
+});
+
 test("version 1 has no correlation evidence to supersede with", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
