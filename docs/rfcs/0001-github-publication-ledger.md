@@ -1808,6 +1808,56 @@ approved request set and named indeterminate results. It never changes a result
 to `CLEAN`, and any later unacknowledged ambiguity requires a new human
 decision.
 
+The same array also holds a second, server-authored record kind:
+`acknowledgement: "SUPERSEDED_BY_LATER_OWN_REQUEST"`. `record_codex_review_request`
+appends one, in the same locked transaction as the request it records, naming
+the prior requests this ledger can prove from its own durable evidence that it
+issued: its `RECOGNIZED` history entries bound `RECORDED_AT_POST`, and
+`BASELINE_CORRELATED` baseline requests whose issuance the server re-derived at
+start against a prior ledger of the same chain. It never names an `UNBOUND`
+request, whose only claim to ownership is a forgeable comment marker, and never
+names a request whose reply the ledger has already recorded, whose correlation a
+closure would retroactively strip.
+
+An already-recorded reply is recognized in both of the shapes it arrives in. A
+result carrying the request's `rbreq` ID names its request exactly, and only
+that request is spared. A clean review leaves no inline comment for the marker
+to travel in, so its reply carries no ID at all; the durable trace is the
+`reviewed_head_sha` the adapter writes when the reply binds, which
+`resultHistoryFacts` pins. Such a reply cannot say which request it answered, but the
+binding rules bound the candidates exactly: a markerless clean comment binds
+only to a request whose head is the one written to `reviewed_head_sha`, and
+only to one ordering strictly before it under the same comparator the replay
+binds with. A `RECOGNIZED` entry meeting both tests is spared; one failing
+either could not have produced the recorded reply. Both tests earn their place.
+Sparing a request that could not have answered leaves it open for good and
+ambiguates every later markerless reply — the tax this closure exists to end —
+and a review carries its own `commit_id` into `reviewed_head_sha` whatever it
+binds to, so without the head test a review of an earlier commit would spare
+every request at the authorized head. Sparing too little re-derives the reply as
+`UNSOLICITED`, drops the pinned `reviewed_head_sha`, and the next snapshot
+refuses the ledger as terminally changed. Baseline requests are outside this
+rule, because the adapter binds a markerless reply only to a recognized
+request.
+
+A baseline holds up to 5,000 requests and a request history up to 10,000, so a
+long enough chain can prove more open requests than the 1,000 references one
+acknowledgement may close. The closure is therefore split across as many bounded
+records as it needs, sharing one `acknowledged_at` and `publication_revision` to
+mark them one transaction. Writing it as a single record would exceed the cap
+and refuse the mutation after the driver has already posted the request comment
+to GitHub, identically on every retry.
+
+Each record closes no results, carries no
+`operator_label`, `rationale`, or `backing_observed_at`, and its
+`backing_observation_sha256` is `null`: the derivation reads the ledger, not an
+observation, and the request it accompanies clears the observation anyway. A
+version 1 ledger, which has no request IDs to tell an answered request from an
+open one, records no supersession. The distinct enum is what lets an audit
+separate this derivation from a human risk decision; both kinds close requests
+through the same `closed_requests` array, so replay, adapter closure, and the
+epoch fence need no second mechanism.
+
 Like every later ledger mutation, the tool first revokes and directory-syncs
 an existing publication gate, then appends the acknowledgement and history
 event named `CODEX_REVIEW_AMBIGUITY_ACKNOWLEDGED` and advances the revision.

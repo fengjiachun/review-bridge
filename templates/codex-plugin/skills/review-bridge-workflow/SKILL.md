@@ -853,7 +853,10 @@ For either mode:
    an acknowledgement. A version-2 `BASELINE_CORRELATED` request with
    server-verified issuance provenance from another head is not a candidate for
    a later markerless result; an unverified, same-head, or legacy unscoped
-   baseline request remains a candidate.
+   baseline request remains a candidate. A same-head one stops being a
+   candidate the moment step 5 records the next request: the server supersedes
+   the prior requests it proved this chain issued. An unverified or legacy one
+   is never superseded and keeps the acknowledgement path.
 5. Refresh the PR head and require it to equal the publication authorization
    head. Call `get_publication_summary` and require
    `next_action: POST_AND_RECORD_CODEX_REVIEW_REQUEST`. Post exactly one issue

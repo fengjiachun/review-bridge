@@ -100,6 +100,35 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Fixed
 
+- Supersede the ledger's own prior Codex requests when it records a new one
+  (#77). A repair round republished at an unchanged head left the previous
+  publication's request open at that same head, so a clean Codex reply — which
+  carries no `rbreq` marker and binds by its `Reviewed commit:` prefix — matched
+  both requests and evaluated as `GITHUB_REVIEW_UNKNOWN`, costing an
+  `acknowledge_codex_review_ambiguity` and a full post-review-collect lap.
+  Recording a request now closes, in the same locked transaction, exactly the
+  prior requests the ledger can prove it issued: its own `RECOGNIZED` entries
+  bound `RECORDED_AT_POST`, and baseline requests whose issuance was
+  re-derived against a prior ledger of the chain at start. An `UNBOUND`
+  request is never closed — an `rbreq` marker in comment text is forgeable, and
+  the pause exists for exactly the reply that could bind to a request the chain
+  cannot prove it owns. A request whose reply the ledger already recorded also
+  stays open, so no recorded result loses its correlation: a reply carrying the
+  request's `rbreq` ID spares that request, and a markerless clean reply — which
+  has no inline comment for the marker to travel in — spares the requests that
+  could have produced it under the binding rules: those at the head its pinned
+  `reviewed_head_sha` names, ordering before it under the comparator the replay
+  binds with. Closing one of those would re-derive the reply as `UNSOLICITED`,
+  drop that head, and terminally invalidate the ledger at the next snapshot;
+  sparing a request that could not have answered would instead leave it open for
+  good and ambiguate every later markerless reply. The closure is written as
+  server-authored `SUPERSEDED_BY_LATER_OWN_REQUEST` records in the existing
+  acknowledgement channel, carrying no operator label or rationale and no
+  backing observation, which keeps the audit able to tell a derivation from a
+  human decision; a closure wider than one acknowledgement's 1,000 references
+  is split across as many bounded records as it needs, sharing one timestamp
+  and revision, rather than refusing the mutation after the request comment is
+  already posted. (#98)
 - Refuse at start a publication baseline whose object shape no snapshot can
   reproduce (#94). The snapshot side pins baseline actors to exactly
   `{id, type}`, but `startPublication` accepted an actor carrying a `login` —

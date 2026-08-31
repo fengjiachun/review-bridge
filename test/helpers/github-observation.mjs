@@ -82,6 +82,10 @@ export function baselineV2(at, requests = []) {
   return value;
 }
 
+export function correlatedRequestId(reviewId, revision, headSha) {
+  return `rbreq-${digest(`${reviewId}\0${revision}\0${headSha}`).slice(0, 32)}`;
+}
+
 export function correlatedRequestBody(requestId) {
   return [
     "@codex review",

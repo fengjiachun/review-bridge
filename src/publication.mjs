@@ -39,6 +39,11 @@ const TERMINAL_RESERVE_BYTES = 64 * 1024;
 const MAX_OBSERVATION_BYTES = 6 * 1024 * 1024;
 const MAX_BASELINE_BYTES = 2 * 1024 * 1024;
 const MAX_AUDIT_EVENT_BYTES = 16 * 1024;
+// References one acknowledgement record may close. The stored validator, the
+// capacity check, the operator input boundary, and the server-authored
+// supersession chunking all express this one cap; a second copy of the number
+// is how they would drift apart.
+const MAX_ACKNOWLEDGEMENT_REFERENCES = 1_000;
 const MAX_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_MS = 30 * 1000;
 const MAX_ATOMIC_WINDOW_MS = 2 * 60 * 1000;
@@ -2551,15 +2556,50 @@ function validateStoredLedger(ledger) {
   for (const item of acknowledgements) {
     assertString(item.acknowledgement_id, "acknowledgement_id", 255);
     assertSha(item.head_sha, "acknowledgement head_sha");
-    assertArray(item.closed_requests, "acknowledgement closed_requests", 1_000);
-    assertArray(item.closed_results, "acknowledgement closed_results", 1_000);
-    if (item.acknowledgement !== "NO_FURTHER_RESULTS_EXPECTED") {
+    assertArray(
+      item.closed_requests,
+      "acknowledgement closed_requests",
+      MAX_ACKNOWLEDGEMENT_REFERENCES,
+    );
+    assertArray(
+      item.closed_results,
+      "acknowledgement closed_results",
+      MAX_ACKNOWLEDGEMENT_REFERENCES,
+    );
+    if (
+      ![
+        "NO_FURTHER_RESULTS_EXPECTED",
+        "SUPERSEDED_BY_LATER_OWN_REQUEST",
+      ].includes(item.acknowledgement)
+    ) {
       fail("PUBLICATION_STORE_INVALID", "stored acknowledgement enum changed");
     }
-    assertDigest(
-      item.backing_observation_sha256,
-      "acknowledgement backing_observation_sha256",
-    );
+    // The two closures are kept apart by more than a label. A supersession is
+    // the server's own derivation over ledger-held evidence, recorded with the
+    // request that clears the observation, so it carries no operator judgement
+    // and no backing snapshot; an operator acknowledgement carries both, and
+    // may close results a supersession never speaks for.
+    if (item.acknowledgement === "SUPERSEDED_BY_LATER_OWN_REQUEST") {
+      if (
+        "operator_label" in item ||
+        "rationale" in item ||
+        "backing_observed_at" in item ||
+        item.backing_observation_sha256 !== null ||
+        item.closed_results.length > 0
+      ) {
+        fail(
+          "PUBLICATION_STORE_INVALID",
+          "stored supersession carries operator or observation evidence",
+        );
+      }
+    } else {
+      assertString(item.operator_label, "acknowledgement operator_label", 500);
+      assertString(item.rationale, "acknowledgement rationale", 20_000);
+      assertDigest(
+        item.backing_observation_sha256,
+        "acknowledgement backing_observation_sha256",
+      );
+    }
     timestampMs(item.acknowledged_at, "acknowledgement acknowledged_at");
   }
   const history = assertArray(ledger.history, "publication history");
@@ -5261,7 +5301,7 @@ function assertLedgerSize(ledger) {
     if (
       acknowledgement.closed_requests.length +
         acknowledgement.closed_results.length >
-      1_000
+      MAX_ACKNOWLEDGEMENT_REFERENCES
     ) {
       fail(
         "PUBLICATION_LIMIT_EXCEEDED",
@@ -7232,6 +7272,93 @@ export async function withAutonomousTerminalLock(
   });
 }
 
+// The prior requests a newly posted request supersedes: the ones this ledger
+// can prove, from its own durable evidence, that it issued itself.
+//
+// Two shapes qualify, and nothing else. A RECOGNIZED history entry bound
+// RECORDED_AT_POST is the server's own record of posting that comment -- only
+// recordCodexReviewRequest writes that pair, so no observation can forge it. A
+// BASELINE_CORRELATED baseline request carrying an issuance is one
+// findBaselineIssuances re-derived at start against a prior ledger of this
+// chain in this store, matching rbreq = sha256(review_id\0revision\0head).
+//
+// UNBOUND deliberately stays out. Its only claim to ownership is an rbreq
+// marker in comment text, which anyone can type; the ambiguity pause exists to
+// protect exactly the reply that could bind to a request this chain cannot
+// prove it owns. Observations are not read here at all: the closure follows
+// from what the ledger already holds, never from what a caller reports.
+//
+// A request whose reply this ledger already recorded also stays out. Closing
+// it would strip the correlation from a result the ledger had already accepted
+// -- reinterpretation of a recorded result, not a change to how future replies
+// bind. Telling answered from unanswered needs the rbreq correlation, so a
+// version 1 ledger, which has no request IDs at all, supersedes nothing and
+// keeps the operator pause.
+//
+// An answer arrives in one of two shapes and both have to be seen. A result
+// carrying the request's rbreq ID names the request it answered exactly, so
+// only that request is spared. A clean review leaves no inline comment for the
+// marker to travel in, so its reply carries no ID: the only durable trace is
+// the reviewed_head_sha the adapter writes when the reply binds, and
+// resultHistoryFacts pins that value. Closing the request it bound to would
+// re-derive the reply as UNSOLICITED, drop the pinned head, and invalidate the
+// ledger at the next snapshot.
+//
+// Such a reply cannot say which request it answered, but the binding rules
+// bound the candidates exactly: the adapter binds only a request that is
+// compatible with the reply -- which for a markerless clean comment means the
+// request's head is the one written to reviewed_head_sha -- and that orders
+// strictly before it. A request failing either test could not have produced
+// the recorded reply, so closing it is safe, and sparing it would leave it open
+// for good and ambiguate every later markerless reply -- the very tax this
+// closure exists to end. The same comparator the replay binds with decides it
+// here, so the two cannot disagree about a tie. Baseline requests are outside
+// the rule: the adapter binds a markerless reply only to a recognized request,
+// so no baseline request can be the one it answered.
+function supersededOwnRequests(ledger) {
+  if (ledger.codex_review_baseline.collection.adapter_version !== 2) {
+    return [];
+  }
+  const closed = closedRequestIdentities(ledger);
+  const answered = new Set(
+    ledger.codex_result_history
+      .map((entry) => entry.request_id)
+      .filter((requestId) => isCodexRequestId(requestId)),
+  );
+  const markerlessAnswers = ledger.codex_result_history.filter(
+    (entry) =>
+      !isCodexRequestId(entry.request_id) && entry.reviewed_head_sha != null,
+  );
+  const couldHaveAnswered = (item) =>
+    markerlessAnswers.some(
+      (answer) =>
+        answer.reviewed_head_sha === item.requested_head_sha &&
+        correlationRequestBeforeResult(item, answer),
+    );
+  return [
+    ...ledger.codex_request_history.filter(
+      (entry) =>
+        entry.classification === "RECOGNIZED" &&
+        entry.binding_source === "RECORDED_AT_POST",
+    ),
+    ...ledger.codex_review_baseline.requests.filter(
+      (request) =>
+        request.classification === "BASELINE_CORRELATED" &&
+        request.issuance != null,
+    ),
+  ]
+    .filter(
+      (item) =>
+        !closed.has(resourceIdentity(item)) &&
+        !answered.has(item.request_id) &&
+        !couldHaveAnswered(item),
+    )
+    .map((item) => ({
+      resource_kind: item.resource_kind,
+      resource_id: item.resource_id,
+    }));
+}
+
 export async function recordCodexReviewRequest(
   storeRoot,
   reviewId,
@@ -7313,6 +7440,12 @@ export async function recordCodexReviewRequest(
       ledger.latest_observation == null
         ? null
         : canonicalDigest(ledger.latest_observation);
+    // Derived before the new entry joins the history, so the request doing the
+    // superseding can never supersede itself. Prospective by construction: it
+    // is recorded with the request, not at start, because until this ledger has
+    // posted its own request a prior round's late reply still binds to the
+    // baseline request that earned it.
+    const superseded = supersededOwnRequests(ledger);
     ledger.codex_request_history.push({
       resource_id: commentId,
       resource_kind: "ISSUE_COMMENT",
@@ -7330,6 +7463,32 @@ export async function recordCodexReviewRequest(
         : { request_id: expectedRequest.request_id }),
       requested_head_sha: requestedHeadSha,
     });
+    // A baseline holds up to 5,000 requests and a history up to 10,000, so a
+    // long enough chain can prove more open requests than one acknowledgement
+    // may close. Writing them as one record would exceed the reference cap and
+    // throw -- after the driver has already posted the request comment to
+    // GitHub, and identically on every retry, wedging the publication line. The
+    // closure is therefore split across as many bounded records as it needs,
+    // sharing the timestamp and revision that mark them one transaction.
+    for (
+      let index = 0;
+      index < superseded.length;
+      index += MAX_ACKNOWLEDGEMENT_REFERENCES
+    ) {
+      ledger.codex_review_ambiguity_acknowledgements.push({
+        acknowledgement_id: `ack-${crypto.randomBytes(16).toString("hex")}`,
+        head_sha: sourceAuthorization.head_sha,
+        closed_requests: superseded.slice(
+          index,
+          index + MAX_ACKNOWLEDGEMENT_REFERENCES,
+        ),
+        closed_results: [],
+        acknowledgement: "SUPERSEDED_BY_LATER_OWN_REQUEST",
+        backing_observation_sha256: null,
+        acknowledged_at: recordedAt,
+        publication_revision: nextRevision,
+      });
+    }
     ledger.latest_observation = null;
     ledger.revision = nextRevision;
     ledger.updated_at = recordedAt;
@@ -8080,9 +8239,16 @@ export async function acknowledgeCodexReviewAmbiguity(
     const currentMs = clock();
     assertRevision(expectedRevision);
     assertSha(headSha, "head_sha");
-    assertArray(requestRefs, "request_refs", 1_000);
-    assertArray(ambiguousResults, "ambiguous_results", 1_000);
-    if (requestRefs.length + ambiguousResults.length > 1_000) {
+    assertArray(requestRefs, "request_refs", MAX_ACKNOWLEDGEMENT_REFERENCES);
+    assertArray(
+      ambiguousResults,
+      "ambiguous_results",
+      MAX_ACKNOWLEDGEMENT_REFERENCES,
+    );
+    if (
+      requestRefs.length + ambiguousResults.length >
+      MAX_ACKNOWLEDGEMENT_REFERENCES
+    ) {
       fail("PUBLICATION_LIMIT_EXCEEDED", "acknowledgement exceeds 1,000 references");
     }
     uniqueBy(requestRefs, (item) => resourceIdentity(item), "request_refs");
@@ -8450,5 +8616,6 @@ export const publicationConstants = Object.freeze({
   max_publication_bytes: MAX_PUBLICATION_BYTES,
   max_observation_bytes: MAX_OBSERVATION_BYTES,
   max_baseline_bytes: MAX_BASELINE_BYTES,
+  max_acknowledgement_references: MAX_ACKNOWLEDGEMENT_REFERENCES,
   terminal_reserve_bytes: TERMINAL_RESERVE_BYTES,
 });
