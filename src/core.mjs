@@ -23,6 +23,8 @@ const MAX_GIT_OUTPUT = 64 * 1024 * 1024;
 const MAX_OVERLAY_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT_FIELD = 200_000;
 const MAX_FINDINGS = 100;
+const MAX_ERRATA = 100;
+const MAX_ERRATUM_TEXT = 20_000;
 const MAX_READ_BYTES = 200_000;
 const MAX_PATCH_INDEX_ENTRIES = 400;
 const MAX_AUTOMATIC_PARENT_CANDIDATES = 3;
@@ -1001,6 +1003,12 @@ async function buildSuccessorArtifacts({
   }
 }
 
+// The highest erratum sequence a caller can currently see. A ledger written
+// before errata existed carries no field and reads as watermark zero.
+function errataWatermark(review) {
+  return review.errata?.at(-1)?.sequence ?? 0;
+}
+
 function publicReview(review) {
   return {
     id: review.id,
@@ -1027,6 +1035,7 @@ function publicReview(review) {
     findings: review.findings,
     resolutions: review.resolutions,
     rereview_decisions: review.rereview_decisions,
+    errata: review.errata ?? [],
     carried_findings: review.carried_findings ?? [],
     clean_snapshot_hash: review.clean_snapshot_hash ?? null,
     history: review.history,
@@ -1488,6 +1497,7 @@ export async function prepareReview(
       findings: [],
       resolutions: [],
       rereview_decisions: [],
+      errata: [],
       carried_findings: carriedFindings,
       history: [
         {
@@ -1848,11 +1858,19 @@ async function submitInitialReviewWhileLocked(
     normalizeFinding(finding, `F-${String(index + 1).padStart(3, "0")}`, 1),
   );
   review.findings = findings;
+  // Each verdict records the highest erratum sequence visible when it was
+  // submitted, so which decision weighed which corrections stays replayable;
+  // an erratum appended later never retroactively enters this record.
   if (findings.length === 0) {
     await verifySuccessorArtifacts(storeRoot, reviewId, review.rounds[0]);
     review.status = "CLEAN";
     review.clean_snapshot_hash = review.rounds[0].snapshot_hash;
-    review.history.push({ at: now(), event: "INITIAL_REVIEW_CLEAN", round: 1 });
+    review.history.push({
+      at: now(),
+      event: "INITIAL_REVIEW_CLEAN",
+      round: 1,
+      errata_watermark: errataWatermark(review),
+    });
   } else {
     review.status = "REVIEW_SUBMITTED";
     review.history.push({
@@ -1860,6 +1878,7 @@ async function submitInitialReviewWhileLocked(
       event: "FINDINGS_SUBMITTED",
       round: 1,
       count: findings.length,
+      errata_watermark: errataWatermark(review),
     });
   }
   await saveReview(storeRoot, review);
@@ -1940,6 +1959,50 @@ async function submitResolutionsWhileLocked(storeRoot, reviewId, inputs) {
     at: now(),
     event: humanRequired ? "AUTHOR_ESCALATED" : "AUTHOR_RESPONDED",
     round: review.current_round,
+  });
+  await saveReview(storeRoot, review);
+  return publicReview(review);
+}
+
+export async function appendReviewErratum(storeRoot, reviewId, text) {
+  return withReviewMutationLock(storeRoot, reviewId, () =>
+    appendReviewErratumWhileLocked(storeRoot, reviewId, text),
+  );
+}
+
+async function appendReviewErratumWhileLocked(storeRoot, reviewId, text) {
+  const review = await loadReview(storeRoot, reviewId);
+  assertNotAdvisory(
+    review,
+    "an advisory review has no author loop: its requirement quotes a third party's unverified claims, and no correction recorded here could speak for their intent",
+  );
+  // The freeze point is the gate mint, not any verdict: a claim can go stale
+  // between CLEAN and finalization, so the append stays open until gate.json
+  // exists. A claim that goes stale after that belongs to the publication
+  // phase. The check runs under the same mutation lock gate finalization
+  // holds, so an append cannot race past a minting gate.
+  if (review.status === "LOCAL_GATE_PASSED") {
+    throw new Error(
+      "the local gate has passed; the review record is history and accepts no further errata",
+    );
+  }
+  assertString(text, "erratum.text", { max: MAX_ERRATUM_TEXT });
+  const errata = review.errata ?? [];
+  if (errata.length >= MAX_ERRATA) {
+    throw new Error(`errata must contain at most ${MAX_ERRATA} entries`);
+  }
+  const entry = {
+    sequence: errataWatermark(review) + 1,
+    at: now(),
+    round: review.current_round,
+    text,
+  };
+  review.errata = [...errata, entry];
+  review.history.push({
+    at: entry.at,
+    event: "ERRATUM_APPENDED",
+    round: entry.round,
+    sequence: entry.sequence,
   });
   await saveReview(storeRoot, review);
   return publicReview(review);
@@ -2120,6 +2183,8 @@ async function submitRereviewWhileLocked(
     ),
   );
   review.findings.push(...newFindings);
+  // The rereview verdict records its errata watermark the same way the
+  // initial one does: what this decision could see, fixed at submission.
   if (contested) {
     review.status = "HUMAN_REQUIRED";
     review.history.push({
@@ -2127,6 +2192,7 @@ async function submitRereviewWhileLocked(
       event: "REREVIEW_UNRESOLVED",
       round: review.current_round,
       new_findings: newFindings.length,
+      errata_watermark: errataWatermark(review),
     });
   } else if (newFindings.length > 0) {
     review.status = "CONTINUABLE_FINDINGS";
@@ -2135,6 +2201,7 @@ async function submitRereviewWhileLocked(
       event: "REREVIEW_CONTINUABLE_FINDINGS",
       round: review.current_round,
       new_findings: newFindings.length,
+      errata_watermark: errataWatermark(review),
     });
   } else {
     await verifySuccessorArtifacts(
@@ -2149,6 +2216,7 @@ async function submitRereviewWhileLocked(
       at: now(),
       event: "REREVIEW_CLEAN",
       round: review.current_round,
+      errata_watermark: errataWatermark(review),
     });
   }
   await saveReview(storeRoot, review);

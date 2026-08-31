@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  appendReviewErratum,
   buildPatchIndex,
   exportHumanArbitration,
   finalizeLocalGate,
@@ -3168,4 +3169,230 @@ test("the review summary exposes worktree cleanliness beside the snapshot hash",
     (await getReviewSummary(store, clean.id)).current_snapshot.worktree_clean,
     false,
   );
+});
+
+// The #78 errata contract. An erratum corrects a claim about the world that
+// went stale mid-review; the snapshot and requirement stay immutable, no
+// verdict is reinterpreted, and the record freezes when the gate mints.
+async function erratumFixture(t) {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "export function divide(a, b) {\n  if (b === 0) return null;\n  return a / b;\n}\n",
+  );
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Return null when division by zero is requested.",
+    implementationScope: "Change app.js.",
+  });
+  return { repository, store, prepared };
+}
+
+test("an erratum appends author text without touching the snapshot", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  assert.deepEqual(prepared.errata, []);
+
+  const appended = await appendReviewErratum(
+    store,
+    prepared.id,
+    "The checker count in the requirement is stale: an unrelated tripwire cleared.",
+  );
+  assert.equal(appended.errata.length, 1);
+  const [entry] = appended.errata;
+  assert.equal(entry.sequence, 1);
+  assert.equal(entry.round, 1);
+  assert.match(entry.at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(entry.text, /tripwire cleared/);
+  assert.equal(appended.requirement, prepared.requirement);
+  assert.equal(
+    appended.rounds[0].snapshot_hash,
+    prepared.rounds[0].snapshot_hash,
+  );
+  assert.deepEqual(appended.history.at(-1), {
+    at: entry.at,
+    event: "ERRATUM_APPENDED",
+    round: 1,
+    sequence: 1,
+  });
+
+  const second = await appendReviewErratum(
+    store,
+    prepared.id,
+    "The described protection is reached by a different mechanism.",
+  );
+  assert.equal(second.errata.at(-1).sequence, 2);
+  // The reviewer-facing read carries the same append-only errata.
+  const opened = await openReview(store, prepared.id);
+  assert.equal(opened.errata.length, 2);
+});
+
+test("verdicts record the errata watermark visible at submission", async (t) => {
+  const { repository, store, prepared } = await erratumFixture(t);
+  await appendReviewErratum(store, prepared.id, "Stale claim one.");
+
+  const submitted = await submitInitialReview(store, prepared.id, [
+    {
+      severity: "major",
+      title: "Missing behavior test",
+      explanation: "No test asserts the zero-divisor branch.",
+      path: "app.js",
+      line: 2,
+    },
+  ]);
+  const verdictOne = submitted.history.at(-1);
+  assert.equal(verdictOne.event, "FINDINGS_SUBMITTED");
+  assert.equal(verdictOne.errata_watermark, 1);
+
+  // An erratum appended after the verdict never enters that verdict's record.
+  await appendReviewErratum(store, prepared.id, "Stale claim two.");
+  const afterAppend = await getReview(store, prepared.id);
+  const recordedVerdictOne = afterAppend.history.find(
+    (event) => event.event === "FINDINGS_SUBMITTED",
+  );
+  assert.equal(recordedVerdictOne.errata_watermark, 1);
+
+  await submitResolutions(store, prepared.id, [
+    {
+      finding_id: "F-001",
+      disposition: "fixed",
+      rationale: "Added the assertion.",
+    },
+  ]);
+  await fsp.writeFile(
+    path.join(repository, "app.test.js"),
+    "import assert from 'node:assert/strict';\nimport { divide } from './app.js';\nassert.equal(divide(1, 0), null);\n",
+  );
+  await prepareRereview(store, prepared.id);
+  const erratumInRoundTwo = await appendReviewErratum(
+    store,
+    prepared.id,
+    "Stale claim three, noticed during round two.",
+  );
+  assert.equal(erratumInRoundTwo.errata.at(-1).round, 2);
+
+  const clean = await submitRereview(
+    store,
+    prepared.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "resolved",
+        rationale: "The assertion covers the branch.",
+      },
+    ],
+    [],
+  );
+  const verdictTwo = clean.history.at(-1);
+  assert.equal(verdictTwo.event, "REREVIEW_CLEAN");
+  assert.equal(verdictTwo.errata_watermark, 3);
+});
+
+test("the local gate freezes errata", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  const clean = await submitInitialReview(store, prepared.id, []);
+  assert.equal(clean.status, "CLEAN");
+  assert.equal(clean.history.at(-1).errata_watermark, 0);
+
+  // CLEAN is before the freeze point: the claim can still go stale between
+  // the verdict and the gate.
+  const appended = await appendReviewErratum(
+    store,
+    prepared.id,
+    "A claim went stale after the clean verdict, before the gate.",
+  );
+  assert.equal(appended.errata.length, 1);
+
+  const finalized = await finalizeLocalGate(store, prepared.id);
+  // Errata never enter the gate digest: gate.json stays exactly v1.
+  assert.deepEqual(Object.keys(finalized.gate).sort(), [
+    "base_sha",
+    "head_sha",
+    "passed_at",
+    "review_id",
+    "reviewer_provider",
+    "snapshot_hash",
+    "status",
+    "version",
+  ]);
+
+  await assert.rejects(
+    appendReviewErratum(store, prepared.id, "Too late."),
+    /the local gate has passed/,
+  );
+  const after = await getReview(store, prepared.id);
+  assert.equal(after.errata.length, 1);
+  assert.equal(after.status, "LOCAL_GATE_PASSED");
+});
+
+test("append_review_erratum refuses an advisory review", async (t) => {
+  const { repository, store, baseSha } = await advisoryFixture(t);
+  const advisory = await prepareAdvisory(
+    store,
+    repository,
+    baseSha,
+    "CODEX_TASK",
+  );
+  await assert.rejects(
+    appendReviewErratum(store, advisory.id, "Correcting a third party's claim."),
+    /an advisory review has no author loop/,
+  );
+  assert.deepEqual((await getReview(store, advisory.id)).errata, []);
+});
+
+test("errata are bounded like author responses", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  await assert.rejects(
+    appendReviewErratum(store, prepared.id, ""),
+    /erratum\.text must be a non-empty string/,
+  );
+  await assert.rejects(
+    appendReviewErratum(store, prepared.id, "x".repeat(20_001)),
+    /erratum\.text exceeds 20000 characters/,
+  );
+  const atLimit = await appendReviewErratum(
+    store,
+    prepared.id,
+    "x".repeat(20_000),
+  );
+  assert.equal(atLimit.errata.length, 1);
+
+  const ledgerPath = path.join(store, "reviews", prepared.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  ledger.errata = Array.from({ length: 100 }, (_, index) => ({
+    sequence: index + 1,
+    at: ledger.errata[0].at,
+    round: 1,
+    text: "filled",
+  }));
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`, {
+    mode: 0o600,
+  });
+  await assert.rejects(
+    appendReviewErratum(store, prepared.id, "one past the cap"),
+    /errata must contain at most 100 entries/,
+  );
+  assert.equal((await getReview(store, prepared.id)).errata.length, 100);
+});
+
+test("a ledger written before errata existed loads and appends unchanged", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  const ledgerPath = path.join(store, "reviews", prepared.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  delete ledger.errata;
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`, {
+    mode: 0o600,
+  });
+
+  assert.deepEqual((await getReview(store, prepared.id)).errata, []);
+  const clean = await submitInitialReview(store, prepared.id, []);
+  assert.equal(clean.status, "CLEAN");
+  assert.equal(clean.history.at(-1).errata_watermark, 0);
+  const appended = await appendReviewErratum(
+    store,
+    prepared.id,
+    "First erratum on a pre-errata ledger.",
+  );
+  assert.equal(appended.errata.at(-1).sequence, 1);
 });

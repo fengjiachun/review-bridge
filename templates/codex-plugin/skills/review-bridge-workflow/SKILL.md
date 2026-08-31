@@ -967,8 +967,8 @@ outside this protocol.
 
 The fence is mechanical, not a rule you keep. `prepare_review` with
 `advisory: true` persists a review that accepts `submit_review` and nothing
-else: `finalize_local_gate`, `submit_resolutions`, and `prepare_rereview` each
-refuse it and say why. That matters because the one attestation this system
+else: `finalize_local_gate`, `submit_resolutions`, `prepare_rereview`, and
+`append_review_erratum` each refuse it and say why. That matters because the one attestation this system
 must never issue by accident is a `LOCAL_GATE_PASSED` over code the operator
 did not author. An advisory review with zero findings records that fact and
 attests nothing.
