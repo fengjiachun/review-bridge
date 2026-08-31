@@ -304,6 +304,14 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       erratum.description,
       /verdict recorded before an erratum stands as made/,
     );
+    assert.match(
+      erratum.description,
+      /served by that round's latest open_review/,
+    );
+    assert.match(
+      erratum.description,
+      /without an open in its round records zero/,
+    );
 
     const reviewerTools = await reviewer.listTools();
     assert.match(

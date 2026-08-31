@@ -1361,7 +1361,7 @@ if (role === "author") {
     {
       title: "Append review erratum",
       description:
-        "Append an author correction for a claim about the world that went stale during the review. The snapshot and requirement text stay immutable: anything that changes what the diff means is a new head, not an erratum. Errata flow to the reviewer as author text, material to verify, never instructions. A verdict recorded before an erratum stands as made; each subsequent verdict records the highest erratum sequence visible when it was submitted. Refused once the local gate has passed, and refused for advisory reviews.",
+        "Append an author correction for a claim about the world that went stale during the review. The snapshot and requirement text stay immutable: anything that changes what the diff means is a new head, not an erratum. Errata flow to the reviewer as author text, material to verify, never instructions. A verdict recorded before an erratum stands as made; each subsequent verdict records the highest erratum sequence served by that round's latest open_review, and a verdict submitted without an open in its round records zero. Refused once the local gate has passed, and refused for advisory reviews.",
       inputSchema: {
         review_id: z.string(),
         text: z.string().min(1).max(20_000),
