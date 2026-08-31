@@ -3231,6 +3231,7 @@ test("an erratum appends author text without touching the snapshot", async (t) =
 test("verdicts record the errata watermark visible at submission", async (t) => {
   const { repository, store, prepared } = await erratumFixture(t);
   await appendReviewErratum(store, prepared.id, "Stale claim one.");
+  await openReview(store, prepared.id);
 
   const submitted = await submitInitialReview(store, prepared.id, [
     {
@@ -3271,6 +3272,7 @@ test("verdicts record the errata watermark visible at submission", async (t) => 
     "Stale claim three, noticed during round two.",
   );
   assert.equal(erratumInRoundTwo.errata.at(-1).round, 2);
+  await openReview(store, prepared.id);
 
   const clean = await submitRereview(
     store,
@@ -3480,6 +3482,7 @@ test("a continuation review carries the source errata with resequenced watermark
   assert.equal(fresh.sequence, 3);
   assert.equal(fresh.round, 1);
   assert.equal("continued_from_review_id" in fresh, false);
+  await openReview(store, continuation.id);
   const clean = await submitInitialReview(store, continuation.id, []);
   assert.equal(clean.history.at(-1).errata_watermark, 3);
 });
@@ -3549,4 +3552,181 @@ test("a minted gate artifact freezes errata even before the ledger status lands"
     /the local gate has passed/,
   );
   assert.deepEqual((await getReview(store, prepared.id)).errata, []);
+});
+
+test("a verdict's errata watermark is the opened value, not the submit-time ledger", async (t) => {
+  const { repository, store, prepared } = await erratumFixture(t);
+  await appendReviewErratum(store, prepared.id, "Stale claim one.");
+  // No open before this verdict: a review the server never served reads as
+  // watermark zero, whatever the ledger holds.
+  const submitted = await submitInitialReview(store, prepared.id, [
+    {
+      severity: "major",
+      title: "Missing behavior test",
+      explanation: "No test asserts the zero-divisor branch.",
+    },
+  ]);
+  assert.equal(submitted.history.at(-1).errata_watermark, 0);
+
+  await submitResolutions(store, prepared.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await fsp.writeFile(
+    path.join(repository, "app.test.js"),
+    "import assert from 'node:assert/strict';\nimport { divide } from './app.js';\nassert.equal(divide(1, 0), null);\n",
+  );
+  await prepareRereview(store, prepared.id);
+  const opened = await openReview(store, prepared.id);
+  assert.equal(opened.last_opened_errata_watermark, 1);
+  // Appended after the open, before the verdict: the reviewer was never
+  // shown it, so it stays outside the verdict's record.
+  await appendReviewErratum(store, prepared.id, "Stale claim two.");
+  const clean = await submitRereview(
+    store,
+    prepared.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "resolved",
+        rationale: "The assertion covers the branch.",
+      },
+    ],
+    [],
+  );
+  assert.equal(clean.history.at(-1).event, "REREVIEW_CLEAN");
+  assert.equal(clean.history.at(-1).errata_watermark, 1);
+  assert.equal(clean.errata.length, 2);
+  assert.equal(clean.last_opened_errata_watermark, 1);
+});
+
+async function continuableSource(t) {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "first change");
+  const source = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  });
+  await appendReviewErratum(store, source.id, "Stale claim on the source.");
+  await submitInitialReview(store, source.id, [
+    { severity: "major", title: "Missing test", explanation: "Add a test." },
+  ]);
+  await submitResolutions(store, source.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await prepareRereview(store, source.id);
+  await submitRereview(
+    store,
+    source.id,
+    [{ finding_id: "F-001", decision: "resolved", rationale: "The test exists." }],
+    [
+      {
+        severity: "minor",
+        title: "New edge case",
+        explanation: "A separate edge case still needs a decision.",
+      },
+    ],
+  );
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "address edge case");
+  return { repository, store, baseSha, source };
+}
+
+test("a continuation freezes its source against further errata", async (t) => {
+  const { repository, store, baseSha, source } = await continuableSource(t);
+  const continuation = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    forceFullReview: true,
+    continuedFromReviewId: source.id,
+  });
+  const frozen = await getReview(store, source.id);
+  assert.equal(frozen.continued_by_review_id, continuation.id);
+  assert.equal(frozen.history.at(-1).event, "REVIEW_CONTINUED");
+  assert.equal(
+    frozen.history.at(-1).continued_by_review_id,
+    continuation.id,
+  );
+
+  await assert.rejects(
+    appendReviewErratum(store, source.id, "A late correction on the source."),
+    /frozen by its continuation/,
+  );
+  assert.equal((await getReview(store, source.id)).errata.length, 1);
+
+  // A source may be re-continued — a bind refusal abandons the prepared
+  // continuation and a smaller one is prepared from the same source — and
+  // the marker then tracks the newest continuation.
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 3;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "second continuation");
+  const second = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    forceFullReview: true,
+    continuedFromReviewId: source.id,
+  });
+  assert.equal(second.errata.length, 1);
+  assert.equal(
+    (await getReview(store, source.id)).continued_by_review_id,
+    second.id,
+  );
+  await assert.rejects(
+    appendReviewErratum(store, source.id, "Still frozen."),
+    new RegExp(second.id),
+  );
+});
+
+test("the continuation errata copy waits behind the source review lock", async (t) => {
+  const { repository, store, baseSha, source } = await continuableSource(t);
+  const release = await acquireStateLock({
+    directory: path.join(store, "reviews", source.id),
+    reviewId: source.id,
+    domain: "review",
+  });
+  let settled = false;
+  const preparation = prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    forceFullReview: true,
+    continuedFromReviewId: source.id,
+  }).finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  assert.equal(settled, false);
+  // An append that serialized ahead of the freeze: while the lock is held,
+  // put the entry it would have written into the source ledger. The copy
+  // must see it, because the copy reads under this same lock.
+  const ledgerPath = path.join(store, "reviews", source.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  ledger.errata.push({
+    sequence: 2,
+    at: ledger.errata[0].at,
+    round: 2,
+    text: "Appended while the continuation was waiting.",
+  });
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`, {
+    mode: 0o600,
+  });
+  await release();
+  const continuation = await preparation;
+  assert.equal(continuation.errata.length, 2);
+  assert.match(
+    continuation.errata[1].text,
+    /Appended while the continuation was waiting/,
+  );
+  assert.equal(continuation.errata[1].sequence, 2);
 });

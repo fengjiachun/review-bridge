@@ -1036,6 +1036,8 @@ function publicReview(review) {
     resolutions: review.resolutions,
     rereview_decisions: review.rereview_decisions,
     errata: review.errata ?? [],
+    last_opened_errata_watermark: review.last_opened_errata_watermark ?? 0,
+    continued_by_review_id: review.continued_by_review_id ?? null,
     carried_findings: review.carried_findings ?? [],
     clean_snapshot_hash: review.clean_snapshot_hash ?? null,
     history: review.history,
@@ -1118,6 +1120,39 @@ function continuationErrata(review) {
     continued_from_review_id: review.id,
     text: entry.text,
   }));
+}
+
+// A continuation freezes its source. The errata copy, the carried findings,
+// the freeze marker, and its history event land in one write under the
+// source's own mutation lock, so the copy cannot race a concurrent append.
+// The marker is written before the continuation ledger exists, so a crash
+// between the two writes fails closed: the source freezes rather than staying
+// appendable beside a continuation. A source may be re-continued — a bind
+// refusal, such as an unexecuted split, abandons the prepared continuation
+// and a smaller one is prepared from the same source — so the marker tracks
+// the newest continuation and every freeze copies under this lock again.
+async function freezeContinuationSource(storeRoot, sourceReviewId, continuationId) {
+  return withReviewMutationLock(storeRoot, sourceReviewId, async () => {
+    const source = await loadReview(storeRoot, sourceReviewId);
+    if (source.status !== "CONTINUABLE_FINDINGS") {
+      throw new Error(
+        "continued review does not match the repository, requirement, provider, base, scope, and continuable state",
+      );
+    }
+    const carriedFindings = continuationFindings(source);
+    if (carriedFindings.length === 0) {
+      throw new Error("continued review has no open findings");
+    }
+    const carriedErrata = continuationErrata(source);
+    source.continued_by_review_id = continuationId;
+    source.history.push({
+      at: now(),
+      event: "REVIEW_CONTINUED",
+      continued_by_review_id: continuationId,
+    });
+    await saveReview(storeRoot, source);
+    return { carriedFindings, carriedErrata };
+  });
 }
 
 function reviewSummary(review) {
@@ -1437,9 +1472,12 @@ export async function prepareReview(
       "continued review does not match the repository, requirement, provider, base, scope, and continuable state",
     );
   }
-  const carriedFindings =
-    continuedReview == null ? [] : continuationFindings(continuedReview);
-  if (continuedReview != null && carriedFindings.length === 0) {
+  // A cheap pre-check before any directory exists; the authoritative copy is
+  // taken again under the source's own mutation lock below.
+  if (
+    continuedReview != null &&
+    continuationFindings(continuedReview).length === 0
+  ) {
     throw new Error("continued review has no open findings");
   }
   const id = createReviewId();
@@ -1491,6 +1529,10 @@ export async function prepareReview(
       manifest,
       roundRoot,
     });
+    const carried =
+      continuedReview == null
+        ? { carriedFindings: [], carriedErrata: [] }
+        : await freezeContinuationSource(storeRoot, continuedFromReviewId, id);
     const timestamp = now();
     const review = {
       version: 1,
@@ -1512,9 +1554,8 @@ export async function prepareReview(
       findings: [],
       resolutions: [],
       rereview_decisions: [],
-      errata:
-        continuedReview == null ? [] : continuationErrata(continuedReview),
-      carried_findings: carriedFindings,
+      errata: carried.carriedErrata,
+      carried_findings: carried.carriedFindings,
       history: [
         {
           at: timestamp,
@@ -1878,9 +1919,11 @@ async function submitInitialReviewWhileLocked(
     normalizeFinding(finding, `F-${String(index + 1).padStart(3, "0")}`, 1),
   );
   review.findings = findings;
-  // Each verdict records the highest erratum sequence visible when it was
-  // submitted, so which decision weighed which corrections stays replayable;
-  // an erratum appended later never retroactively enters this record.
+  // Each verdict records the errata watermark the server last witnessed
+  // being served to the reviewer through open_review, so which decision
+  // weighed which corrections stays replayable; an erratum appended after
+  // that open — even one landing before submission — never enters this
+  // record, because the reviewer was never shown it.
   if (findings.length === 0) {
     await verifySuccessorArtifacts(storeRoot, reviewId, review.rounds[0]);
     review.status = "CLEAN";
@@ -1889,7 +1932,7 @@ async function submitInitialReviewWhileLocked(
       at: now(),
       event: "INITIAL_REVIEW_CLEAN",
       round: 1,
-      errata_watermark: errataWatermark(review),
+      errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
   } else {
     review.status = "REVIEW_SUBMITTED";
@@ -1898,7 +1941,7 @@ async function submitInitialReviewWhileLocked(
       event: "FINDINGS_SUBMITTED",
       round: 1,
       count: findings.length,
-      errata_watermark: errataWatermark(review),
+      errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
   }
   await saveReview(storeRoot, review);
@@ -1996,6 +2039,14 @@ async function appendReviewErratumWhileLocked(storeRoot, reviewId, text) {
     review,
     "an advisory review has no author loop: its requirement quotes a third party's unverified claims, and no correction recorded here could speak for their intent",
   );
+  // A continued source is frozen: its errata were copied forward when the
+  // continuation was prepared, and a correction recorded here now would
+  // never reach the continuation's reviewer.
+  if (review.continued_by_review_id != null) {
+    throw new Error(
+      `this review is frozen by its continuation ${review.continued_by_review_id}: append the erratum there, on the live review`,
+    );
+  }
   // The freeze point is the gate mint, not any verdict: a claim can go stale
   // between CLEAN and finalization, so the append stays open until gate.json
   // exists. A claim that goes stale after that belongs to the publication
@@ -2213,7 +2264,7 @@ async function submitRereviewWhileLocked(
   );
   review.findings.push(...newFindings);
   // The rereview verdict records its errata watermark the same way the
-  // initial one does: what this decision could see, fixed at submission.
+  // initial one does: what the server last served through open_review.
   if (contested) {
     review.status = "HUMAN_REQUIRED";
     review.history.push({
@@ -2221,7 +2272,7 @@ async function submitRereviewWhileLocked(
       event: "REREVIEW_UNRESOLVED",
       round: review.current_round,
       new_findings: newFindings.length,
-      errata_watermark: errataWatermark(review),
+      errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
   } else if (newFindings.length > 0) {
     review.status = "CONTINUABLE_FINDINGS";
@@ -2230,7 +2281,7 @@ async function submitRereviewWhileLocked(
       event: "REREVIEW_CONTINUABLE_FINDINGS",
       round: review.current_round,
       new_findings: newFindings.length,
-      errata_watermark: errataWatermark(review),
+      errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
   } else {
     await verifySuccessorArtifacts(
@@ -2245,7 +2296,7 @@ async function submitRereviewWhileLocked(
       at: now(),
       event: "REREVIEW_CLEAN",
       round: review.current_round,
-      errata_watermark: errataWatermark(review),
+      errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
   }
   await saveReview(storeRoot, review);
@@ -2632,41 +2683,56 @@ export async function openReview(
   reviewId,
   reviewerProvider = "CLAUDE_DESKTOP",
 ) {
-  const review = await loadReview(storeRoot, reviewId);
-  requireReviewerProvider(review, reviewerProvider);
-  const current = findRound(review, review.current_round);
-  const patchIndex = await patchIndexForRound(
-    storeRoot,
-    review.id,
-    review,
-    current,
-  );
-  const { rounds, ...rest } = publicReview(review);
-  return {
-    ...rest,
-    rounds: rounds.map(roundDescriptor),
-    current_snapshot: {
-      ...current,
-      patch_index: patchIndex.entries,
-      patch_index_truncated: patchIndex.truncated,
-    },
-    artifacts: [
-      ...(current.successor == null
-        ? []
-        : [
-            {
-              name: "successor.diff",
-              round: review.current_round,
-              bytes: current.successor.delta_bytes,
-            },
-            { name: "successor.json", round: review.current_round },
-          ]),
-      {
-        name: "patch.diff",
-        round: review.current_round,
-        bytes: current.patch_bytes,
+  return withReviewMutationLock(storeRoot, reviewId, async () => {
+    const review = await loadReview(storeRoot, reviewId);
+    requireReviewerProvider(review, reviewerProvider);
+    // A verdict's errata watermark is what the server witnessed serving to
+    // the reviewer, not what the ledger holds at submission: each open
+    // records the watermark it serves, and verdicts copy that value. An
+    // erratum appended after the open is outside the verdict's record — the
+    // decision was made before it, and it stands as made. Written only when
+    // the value changes, so a re-open without new errata does not spin the
+    // state version; a review that was never opened reads as zero.
+    if (
+      (review.last_opened_errata_watermark ?? 0) !== errataWatermark(review)
+    ) {
+      review.last_opened_errata_watermark = errataWatermark(review);
+      await saveReview(storeRoot, review);
+    }
+    const current = findRound(review, review.current_round);
+    const patchIndex = await patchIndexForRound(
+      storeRoot,
+      review.id,
+      review,
+      current,
+    );
+    const { rounds, ...rest } = publicReview(review);
+    return {
+      ...rest,
+      rounds: rounds.map(roundDescriptor),
+      current_snapshot: {
+        ...current,
+        patch_index: patchIndex.entries,
+        patch_index_truncated: patchIndex.truncated,
       },
-      { name: "manifest.json", round: review.current_round },
-    ],
-  };
+      artifacts: [
+        ...(current.successor == null
+          ? []
+          : [
+              {
+                name: "successor.diff",
+                round: review.current_round,
+                bytes: current.successor.delta_bytes,
+              },
+              { name: "successor.json", round: review.current_round },
+            ]),
+        {
+          name: "patch.diff",
+          round: review.current_round,
+          bytes: current.patch_bytes,
+        },
+        { name: "manifest.json", round: review.current_round },
+      ],
+    };
+  });
 }
