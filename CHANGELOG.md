@@ -115,10 +115,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   cannot prove it owns. A request whose reply the ledger already recorded also
   stays open, so no recorded result loses its correlation: a reply carrying the
   request's `rbreq` ID spares that request, and a markerless clean reply — which
-  has no inline comment for the marker to travel in — spares every own request
-  at the head its pinned `reviewed_head_sha` names, since closing one would
-  re-derive the reply as `UNSOLICITED`, drop that head, and terminally
-  invalidate the ledger at the next snapshot. The closure is written as
+  has no inline comment for the marker to travel in — spares the requests that
+  could have produced it under the binding rules: those at the head its pinned
+  `reviewed_head_sha` names, ordering before it under the comparator the replay
+  binds with. Closing one of those would re-derive the reply as `UNSOLICITED`,
+  drop that head, and terminally invalidate the ledger at the next snapshot;
+  sparing a request that could not have answered would instead leave it open for
+  good and ambiguate every later markerless reply. The closure is written as
   server-authored `SUPERSEDED_BY_LATER_OWN_REQUEST` records in the existing
   acknowledgement channel, carrying no operator label or rationale and no
   backing observation, which keeps the audit able to tell a derivation from a

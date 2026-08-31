@@ -7300,14 +7300,21 @@ export async function withAutonomousTerminalLock(
 // only that request is spared. A clean review leaves no inline comment for the
 // marker to travel in, so its reply carries no ID: the only durable trace is
 // the reviewed_head_sha the adapter writes when the reply binds, and
-// resultHistoryFacts pins that value. It says some own request at that head was
-// answered without saying which, so every RECOGNIZED entry at that head is
-// spared -- closing one would re-derive the reply as UNSOLICITED, drop the
-// pinned head, and invalidate the ledger at the next snapshot. Sparing too
-// much only leaves the operator pause standing; sparing too little invalidates
-// the ledger, so this errs wide. Baseline requests are outside the rule: the
-// adapter binds a markerless reply only to a recognized request, so no baseline
-// request can be the one it answered.
+// resultHistoryFacts pins that value. Closing the request it bound to would
+// re-derive the reply as UNSOLICITED, drop the pinned head, and invalidate the
+// ledger at the next snapshot.
+//
+// Such a reply cannot say which request it answered, but the binding rules
+// bound the candidates exactly: the adapter binds only a request that is
+// compatible with the reply -- which for a markerless clean comment means the
+// request's head is the one written to reviewed_head_sha -- and that orders
+// strictly before it. A request failing either test could not have produced
+// the recorded reply, so closing it is safe, and sparing it would leave it open
+// for good and ambiguate every later markerless reply -- the very tax this
+// closure exists to end. The same comparator the replay binds with decides it
+// here, so the two cannot disagree about a tie. Baseline requests are outside
+// the rule: the adapter binds a markerless reply only to a recognized request,
+// so no baseline request can be the one it answered.
 function supersededOwnRequests(ledger) {
   if (ledger.codex_review_baseline.collection.adapter_version !== 2) {
     return [];
@@ -7318,15 +7325,16 @@ function supersededOwnRequests(ledger) {
       .map((entry) => entry.request_id)
       .filter((requestId) => isCodexRequestId(requestId)),
   );
-  const answeredHeads = new Set(
-    ledger.codex_result_history
-      .filter(
-        (entry) =>
-          !isCodexRequestId(entry.request_id) &&
-          entry.reviewed_head_sha != null,
-      )
-      .map((entry) => entry.reviewed_head_sha),
+  const markerlessAnswers = ledger.codex_result_history.filter(
+    (entry) =>
+      !isCodexRequestId(entry.request_id) && entry.reviewed_head_sha != null,
   );
+  const couldHaveAnswered = (item) =>
+    markerlessAnswers.some(
+      (answer) =>
+        answer.reviewed_head_sha === item.requested_head_sha &&
+        correlationRequestBeforeResult(item, answer),
+    );
   return [
     ...ledger.codex_request_history.filter(
       (entry) =>
@@ -7343,7 +7351,7 @@ function supersededOwnRequests(ledger) {
       (item) =>
         !closed.has(resourceIdentity(item)) &&
         !answered.has(item.request_id) &&
-        !answeredHeads.has(item.requested_head_sha),
+        !couldHaveAnswered(item),
     )
     .map((item) => ({
       resource_kind: item.resource_kind,

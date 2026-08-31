@@ -1824,13 +1824,21 @@ result carrying the request's `rbreq` ID names its request exactly, and only
 that request is spared. A clean review leaves no inline comment for the marker
 to travel in, so its reply carries no ID at all; the durable trace is the
 `reviewed_head_sha` the adapter writes when the reply binds, which
-`resultHistoryFacts` pins. That says some own request at that head was answered
-without saying which, so every `RECOGNIZED` entry at that head is spared.
-Sparing too much only leaves the acknowledgement path standing for those
-requests; sparing too little re-derives the reply as `UNSOLICITED`, drops the
-pinned `reviewed_head_sha`, and the next snapshot refuses the ledger as
-terminally changed. Baseline requests are outside this rule, because the
-adapter binds a markerless reply only to a recognized request.
+`resultHistoryFacts` pins. Such a reply cannot say which request it answered, but the
+binding rules bound the candidates exactly: a markerless clean comment binds
+only to a request whose head is the one written to `reviewed_head_sha`, and
+only to one ordering strictly before it under the same comparator the replay
+binds with. A `RECOGNIZED` entry meeting both tests is spared; one failing
+either could not have produced the recorded reply. Both tests earn their place.
+Sparing a request that could not have answered leaves it open for good and
+ambiguates every later markerless reply — the tax this closure exists to end —
+and a review carries its own `commit_id` into `reviewed_head_sha` whatever it
+binds to, so without the head test a review of an earlier commit would spare
+every request at the authorized head. Sparing too little re-derives the reply as
+`UNSOLICITED`, drops the pinned `reviewed_head_sha`, and the next snapshot
+refuses the ledger as terminally changed. Baseline requests are outside this
+rule, because the adapter binds a markerless reply only to a recognized
+request.
 
 A baseline holds up to 5,000 requests and a request history up to 10,000, so a
 long enough chain can prove more open requests than the 1,000 references one
