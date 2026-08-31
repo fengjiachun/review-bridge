@@ -1812,6 +1812,27 @@ export async function exportHumanArbitration(
   };
 }
 
+// Ledger movement between two witnessed reads of one waiting review that is
+// fully explained by errata evidence: the state machine did not move — same
+// waiting status, same round, same snapshot — and an erratum append or the
+// served-watermark recording is what advanced the version. A waiting status
+// admits no other ledger mutation, so anything outside this shape is a real
+// transition.
+function erratumOnlyLedgerDrift(previous, current) {
+  const previousRound = previous.rounds?.at(-1);
+  const currentRound = current.rounds?.at(-1);
+  return (
+    ["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"].includes(previous.status) &&
+    current.status === previous.status &&
+    current.current_round === previous.current_round &&
+    currentRound?.snapshot_hash === previousRound?.snapshot_hash &&
+    currentRound?.head_sha === previousRound?.head_sha &&
+    (errataWatermark(current) > errataWatermark(previous) ||
+      (current.last_opened_errata_watermark ?? 0) >
+        (previous.last_opened_errata_watermark ?? 0))
+  );
+}
+
 export async function waitForReviewState(
   storeRoot,
   reviewId,
@@ -1829,7 +1850,26 @@ export async function waitForReviewState(
   }
   const deadline = Date.now() + timeoutMs;
   let review = await loadReview(storeRoot, reviewId);
-  while ((review.state_version ?? 0) === knownStateVersion) {
+  // The wait observes state-machine movement, not ledger bytes: erratum-only
+  // drift witnessed mid-wait is absorbed by re-arming on the drifted version
+  // instead of returning changed. Absorption needs a witnessed baseline to
+  // explain the drift against, so a version that already moved before the
+  // first read returns changed exactly as before.
+  let witnessed =
+    (review.state_version ?? 0) === knownStateVersion ? review : null;
+  let awaitedVersion = knownStateVersion;
+  for (;;) {
+    if ((review.state_version ?? 0) !== awaitedVersion) {
+      if (witnessed == null || !erratumOnlyLedgerDrift(witnessed, review)) {
+        return {
+          changed: true,
+          timed_out: false,
+          summary: reviewSummary(review),
+        };
+      }
+      witnessed = review;
+      awaitedVersion = review.state_version ?? 0;
+    }
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       return {
@@ -1841,11 +1881,6 @@ export async function waitForReviewState(
     await new Promise((resolve) => setTimeout(resolve, Math.min(100, remaining)));
     review = await loadReview(storeRoot, reviewId);
   }
-  return {
-    changed: true,
-    timed_out: false,
-    summary: reviewSummary(review),
-  };
 }
 
 function normalizeFinding(input, id, round) {

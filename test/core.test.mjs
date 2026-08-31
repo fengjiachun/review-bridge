@@ -3774,3 +3774,113 @@ test("a rereview verdict cannot inherit round one's open", async (t) => {
   assert.equal(clean.history.at(-1).event, "REREVIEW_CLEAN");
   assert.equal(clean.history.at(-1).errata_watermark, 0);
 });
+
+test("an erratum does not wake the review wait", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  let settled = false;
+  const wait = waitForReviewState(
+    store,
+    prepared.id,
+    prepared.state_version,
+    10_000,
+  ).finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  // Both erratum-evidence sources drift the version mid-wait: the append,
+  // and the open recording the watermark it served.
+  await appendReviewErratum(store, prepared.id, "Stale claim, mid-wait.");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await openReview(store, prepared.id);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(settled, false);
+
+  await submitInitialReview(store, prepared.id, []);
+  const result = await wait;
+  assert.equal(result.changed, true);
+  assert.equal(result.timed_out, false);
+  assert.equal(result.summary.status, "CLEAN");
+});
+
+test("the rereview wait absorbs erratum drift the same way", async (t) => {
+  const { repository, store, prepared } = await erratumFixture(t);
+  await submitInitialReview(store, prepared.id, [
+    {
+      severity: "major",
+      title: "Missing behavior test",
+      explanation: "No test asserts the zero-divisor branch.",
+    },
+  ]);
+  await submitResolutions(store, prepared.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await fsp.writeFile(
+    path.join(repository, "app.test.js"),
+    "import assert from 'node:assert/strict';\nimport { divide } from './app.js';\nassert.equal(divide(1, 0), null);\n",
+  );
+  const rereview = await prepareRereview(store, prepared.id);
+  assert.equal(rereview.status, "WAITING_FOR_REREVIEW");
+  let settled = false;
+  const wait = waitForReviewState(
+    store,
+    prepared.id,
+    rereview.state_version,
+    10_000,
+  ).finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  await appendReviewErratum(store, prepared.id, "Stale claim, round two.");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(settled, false);
+
+  await submitRereview(
+    store,
+    prepared.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "resolved",
+        rationale: "The assertion covers the branch.",
+      },
+    ],
+    [],
+  );
+  const result = await wait;
+  assert.equal(result.changed, true);
+  assert.equal(result.summary.status, "CLEAN");
+});
+
+test("an absorbed erratum drift still times out honestly", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  const wait = waitForReviewState(
+    store,
+    prepared.id,
+    prepared.state_version,
+    1_500,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const appended = await appendReviewErratum(
+    store,
+    prepared.id,
+    "Stale claim before the timeout.",
+  );
+  const result = await wait;
+  assert.equal(result.changed, false);
+  assert.equal(result.timed_out, true);
+  // The returned summary carries the drifted version so a caller that wants
+  // to re-arm on it can.
+  assert.equal(result.summary.state_version, appended.state_version);
+  assert.equal(result.summary.status, "WAITING_FOR_REVIEW");
+
+  // Without a witnessed baseline the wait keeps its original semantics: a
+  // version that moved before the first read returns changed immediately.
+  const preDrifted = await waitForReviewState(
+    store,
+    prepared.id,
+    prepared.state_version,
+    5_000,
+  );
+  assert.equal(preDrifted.changed, true);
+  assert.equal(preDrifted.summary.status, "WAITING_FOR_REVIEW");
+});
