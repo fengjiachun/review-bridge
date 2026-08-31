@@ -11,6 +11,26 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Added
 
+- Add append-only errata against the immutable review scope (#78). A new
+  author action `append_review_erratum` appends `{sequence, at, round, text}`
+  to the review ledger when a factual claim in the requirement goes stale
+  mid-review; the snapshot and requirement text stay untouched, because
+  anything that changes what the diff means is a new head, not an erratum.
+  Errata reach the reviewer beside author responses as material to verify,
+  never instructions, on every packaged reviewer surface and in human
+  arbitration exports. Every verdict records the errata watermark the server
+  last served that reviewer through `open_review` — zero when never opened,
+  reset at each new round — so which decision weighed which corrections is
+  replayable and no verdict is reinterpreted. Erratum appends never read as
+  review progress: waits observe a state-machine transition stamp, and an
+  in-flight reviewer dispatch accepts erratum-explained drift instead of
+  stranding. Preparing a continuation freezes its source under the source's
+  own lock and carries its errata forward. Appending stays open through
+  CLEAN and freezes when `finalize_local_gate` mints the gate — a server
+  status guard plus the gate artifact itself, with `gate.json` staying
+  exactly v1. Advisory reviews refuse the action: there is no author loop.
+  Entries are bounded like author responses, at 20k characters each and at
+  most 100 per review. (#100)
 - Add a mechanical reachability walk over `required_inputs` (#92). A
   declaration-driven test drives workflows into the states real transitions
   produce, reads `required_inputs` from the real read surfaces, and executes

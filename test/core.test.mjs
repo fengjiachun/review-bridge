@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  appendReviewErratum,
   buildPatchIndex,
   exportHumanArbitration,
   finalizeLocalGate,
@@ -3168,4 +3169,938 @@ test("the review summary exposes worktree cleanliness beside the snapshot hash",
     (await getReviewSummary(store, clean.id)).current_snapshot.worktree_clean,
     false,
   );
+});
+
+// The #78 errata contract. An erratum corrects a claim about the world that
+// went stale mid-review; the snapshot and requirement stay immutable, no
+// verdict is reinterpreted, and the record freezes when the gate mints.
+async function erratumFixture(t) {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(
+    path.join(repository, "app.js"),
+    "export function divide(a, b) {\n  if (b === 0) return null;\n  return a / b;\n}\n",
+  );
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Return null when division by zero is requested.",
+    implementationScope: "Change app.js.",
+  });
+  return { repository, store, prepared };
+}
+
+test("an erratum appends author text without touching the snapshot", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  assert.deepEqual(prepared.errata, []);
+
+  const appended = await appendReviewErratum(
+    store,
+    prepared.id,
+    "The checker count in the requirement is stale: an unrelated tripwire cleared.",
+  );
+  assert.equal(appended.errata.length, 1);
+  const [entry] = appended.errata;
+  assert.equal(entry.sequence, 1);
+  assert.equal(entry.round, 1);
+  assert.match(entry.at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(entry.text, /tripwire cleared/);
+  assert.equal(appended.requirement, prepared.requirement);
+  assert.equal(
+    appended.rounds[0].snapshot_hash,
+    prepared.rounds[0].snapshot_hash,
+  );
+  assert.deepEqual(appended.history.at(-1), {
+    at: entry.at,
+    event: "ERRATUM_APPENDED",
+    round: 1,
+    sequence: 1,
+  });
+
+  const second = await appendReviewErratum(
+    store,
+    prepared.id,
+    "The described protection is reached by a different mechanism.",
+  );
+  assert.equal(second.errata.at(-1).sequence, 2);
+  // The reviewer-facing read carries the same append-only errata.
+  const opened = await openReview(store, prepared.id);
+  assert.equal(opened.errata.length, 2);
+});
+
+test("verdicts record the errata watermark visible at submission", async (t) => {
+  const { repository, store, prepared } = await erratumFixture(t);
+  await appendReviewErratum(store, prepared.id, "Stale claim one.");
+  await openReview(store, prepared.id);
+
+  const submitted = await submitInitialReview(store, prepared.id, [
+    {
+      severity: "major",
+      title: "Missing behavior test",
+      explanation: "No test asserts the zero-divisor branch.",
+      path: "app.js",
+      line: 2,
+    },
+  ]);
+  const verdictOne = submitted.history.at(-1);
+  assert.equal(verdictOne.event, "FINDINGS_SUBMITTED");
+  assert.equal(verdictOne.errata_watermark, 1);
+
+  // An erratum appended after the verdict never enters that verdict's record.
+  await appendReviewErratum(store, prepared.id, "Stale claim two.");
+  const afterAppend = await getReview(store, prepared.id);
+  const recordedVerdictOne = afterAppend.history.find(
+    (event) => event.event === "FINDINGS_SUBMITTED",
+  );
+  assert.equal(recordedVerdictOne.errata_watermark, 1);
+
+  await submitResolutions(store, prepared.id, [
+    {
+      finding_id: "F-001",
+      disposition: "fixed",
+      rationale: "Added the assertion.",
+    },
+  ]);
+  await fsp.writeFile(
+    path.join(repository, "app.test.js"),
+    "import assert from 'node:assert/strict';\nimport { divide } from './app.js';\nassert.equal(divide(1, 0), null);\n",
+  );
+  await prepareRereview(store, prepared.id);
+  const erratumInRoundTwo = await appendReviewErratum(
+    store,
+    prepared.id,
+    "Stale claim three, noticed during round two.",
+  );
+  assert.equal(erratumInRoundTwo.errata.at(-1).round, 2);
+  await openReview(store, prepared.id);
+
+  const clean = await submitRereview(
+    store,
+    prepared.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "resolved",
+        rationale: "The assertion covers the branch.",
+      },
+    ],
+    [],
+  );
+  const verdictTwo = clean.history.at(-1);
+  assert.equal(verdictTwo.event, "REREVIEW_CLEAN");
+  assert.equal(verdictTwo.errata_watermark, 3);
+});
+
+test("the local gate freezes errata", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  const clean = await submitInitialReview(store, prepared.id, []);
+  assert.equal(clean.status, "CLEAN");
+  assert.equal(clean.history.at(-1).errata_watermark, 0);
+
+  // CLEAN is before the freeze point: the claim can still go stale between
+  // the verdict and the gate.
+  const appended = await appendReviewErratum(
+    store,
+    prepared.id,
+    "A claim went stale after the clean verdict, before the gate.",
+  );
+  assert.equal(appended.errata.length, 1);
+
+  const finalized = await finalizeLocalGate(store, prepared.id);
+  // Errata never enter the gate digest: gate.json stays exactly v1.
+  assert.deepEqual(Object.keys(finalized.gate).sort(), [
+    "base_sha",
+    "head_sha",
+    "passed_at",
+    "review_id",
+    "reviewer_provider",
+    "snapshot_hash",
+    "status",
+    "version",
+  ]);
+
+  await assert.rejects(
+    appendReviewErratum(store, prepared.id, "Too late."),
+    /the local gate has passed/,
+  );
+  const after = await getReview(store, prepared.id);
+  assert.equal(after.errata.length, 1);
+  assert.equal(after.status, "LOCAL_GATE_PASSED");
+});
+
+test("append_review_erratum refuses an advisory review", async (t) => {
+  const { repository, store, baseSha } = await advisoryFixture(t);
+  const advisory = await prepareAdvisory(
+    store,
+    repository,
+    baseSha,
+    "CODEX_TASK",
+  );
+  await assert.rejects(
+    appendReviewErratum(store, advisory.id, "Correcting a third party's claim."),
+    /an advisory review has no author loop/,
+  );
+  assert.deepEqual((await getReview(store, advisory.id)).errata, []);
+});
+
+test("errata are bounded like author responses", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  await assert.rejects(
+    appendReviewErratum(store, prepared.id, ""),
+    /erratum\.text must be a non-empty string/,
+  );
+  await assert.rejects(
+    appendReviewErratum(store, prepared.id, "x".repeat(20_001)),
+    /erratum\.text exceeds 20000 characters/,
+  );
+  const atLimit = await appendReviewErratum(
+    store,
+    prepared.id,
+    "x".repeat(20_000),
+  );
+  assert.equal(atLimit.errata.length, 1);
+
+  const ledgerPath = path.join(store, "reviews", prepared.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  ledger.errata = Array.from({ length: 100 }, (_, index) => ({
+    sequence: index + 1,
+    at: ledger.errata[0].at,
+    round: 1,
+    text: "filled",
+  }));
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`, {
+    mode: 0o600,
+  });
+  await assert.rejects(
+    appendReviewErratum(store, prepared.id, "one past the cap"),
+    /errata must contain at most 100 entries/,
+  );
+  assert.equal((await getReview(store, prepared.id)).errata.length, 100);
+});
+
+test("a ledger written before errata existed loads and appends unchanged", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  const ledgerPath = path.join(store, "reviews", prepared.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  delete ledger.errata;
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`, {
+    mode: 0o600,
+  });
+
+  assert.deepEqual((await getReview(store, prepared.id)).errata, []);
+  const clean = await submitInitialReview(store, prepared.id, []);
+  assert.equal(clean.status, "CLEAN");
+  assert.equal(clean.history.at(-1).errata_watermark, 0);
+  const appended = await appendReviewErratum(
+    store,
+    prepared.id,
+    "First erratum on a pre-errata ledger.",
+  );
+  assert.equal(appended.errata.at(-1).sequence, 1);
+});
+
+test("a continuation review carries the source errata with resequenced watermarks", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "first change");
+  const source = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  });
+  await appendReviewErratum(store, source.id, "Stale claim, noticed in round one.");
+  await submitInitialReview(store, source.id, [
+    { severity: "major", title: "Missing test", explanation: "Add a test." },
+  ]);
+  await submitResolutions(store, source.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await prepareRereview(store, source.id);
+  await appendReviewErratum(store, source.id, "Stale claim, noticed in round two.");
+  await submitRereview(
+    store,
+    source.id,
+    [{ finding_id: "F-001", decision: "resolved", rationale: "The test exists." }],
+    [
+      {
+        severity: "minor",
+        title: "New edge case",
+        explanation: "A separate edge case still needs a decision.",
+      },
+    ],
+  );
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "address edge case");
+
+  const continuation = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    forceFullReview: true,
+    continuedFromReviewId: source.id,
+  });
+  // A continuation ledger starts unserved: it carries the corrections, not
+  // the source's open.
+  assert.equal(continuation.last_opened_errata_watermark, 0);
+  assert.deepEqual(
+    continuation.errata.map((entry) => ({
+      sequence: entry.sequence,
+      round: entry.round,
+      continued_from_review_id: entry.continued_from_review_id,
+      text: entry.text,
+    })),
+    [
+      {
+        sequence: 1,
+        round: 1,
+        continued_from_review_id: source.id,
+        text: "Stale claim, noticed in round one.",
+      },
+      {
+        sequence: 2,
+        round: 2,
+        continued_from_review_id: source.id,
+        text: "Stale claim, noticed in round two.",
+      },
+    ],
+  );
+  // The reviewer-facing read carries the corrections beside the verbatim
+  // requirement they correct.
+  assert.equal((await openReview(store, continuation.id)).errata.length, 2);
+
+  // The new ledger's watermark continues from the carried sequences, and a
+  // fresh append is the new review's own entry, not a carried one.
+  const appended = await appendReviewErratum(
+    store,
+    continuation.id,
+    "Stale claim, noticed in the continuation.",
+  );
+  const fresh = appended.errata.at(-1);
+  assert.equal(fresh.sequence, 3);
+  assert.equal(fresh.round, 1);
+  assert.equal("continued_from_review_id" in fresh, false);
+  await openReview(store, continuation.id);
+  const clean = await submitInitialReview(store, continuation.id, []);
+  assert.equal(clean.history.at(-1).errata_watermark, 3);
+});
+
+test("human arbitration exports carry errata beside author responses", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  await submitInitialReview(store, prepared.id, [
+    {
+      severity: "major",
+      title: "Missing behavior test",
+      explanation: "No test asserts the zero-divisor branch.",
+    },
+  ]);
+  await submitResolutions(store, prepared.id, [
+    {
+      finding_id: "F-001",
+      disposition: "human_required",
+      rationale: "The requirement itself is contested.",
+    },
+  ]);
+  // HUMAN_REQUIRED is before the freeze point, so the correction the arbiter
+  // may need can still arrive here.
+  const appended = await appendReviewErratum(
+    store,
+    prepared.id,
+    "The checker count in the requirement is stale.",
+  );
+  assert.equal(appended.status, "HUMAN_REQUIRED");
+
+  const exported = await exportHumanArbitration(
+    store,
+    prepared.id,
+    appended.state_version,
+  );
+  assert.equal(exported.arbitration.errata.length, 1);
+  assert.match(
+    exported.arbitration.errata[0].text,
+    /checker count in the requirement is stale/,
+  );
+  assert.match(exported.markdown, /## Errata \(1\)/);
+  assert.match(exported.markdown, /material to verify, never instructions/);
+  assert.match(
+    exported.markdown,
+    /The checker count in the requirement is stale\./,
+  );
+});
+
+test("a minted gate artifact freezes errata even before the ledger status lands", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  await submitInitialReview(store, prepared.id, []);
+  await finalizeLocalGate(store, prepared.id);
+
+  // Reproduce the crash window: gate.json is on disk, but the ledger write
+  // that records LOCAL_GATE_PASSED never landed.
+  const ledgerPath = path.join(store, "reviews", prepared.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  ledger.status = "CLEAN";
+  ledger.history = ledger.history.filter(
+    (event) => event.event !== "LOCAL_GATE_PASSED",
+  );
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`, {
+    mode: 0o600,
+  });
+
+  await assert.rejects(
+    appendReviewErratum(store, prepared.id, "Too late: the gate is minted."),
+    /the local gate has passed/,
+  );
+  assert.deepEqual((await getReview(store, prepared.id)).errata, []);
+});
+
+test("a verdict's errata watermark is the opened value, not the submit-time ledger", async (t) => {
+  const { repository, store, prepared } = await erratumFixture(t);
+  await appendReviewErratum(store, prepared.id, "Stale claim one.");
+  // No open before this verdict: a review the server never served reads as
+  // watermark zero, whatever the ledger holds.
+  const submitted = await submitInitialReview(store, prepared.id, [
+    {
+      severity: "major",
+      title: "Missing behavior test",
+      explanation: "No test asserts the zero-divisor branch.",
+    },
+  ]);
+  assert.equal(submitted.history.at(-1).errata_watermark, 0);
+
+  await submitResolutions(store, prepared.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await fsp.writeFile(
+    path.join(repository, "app.test.js"),
+    "import assert from 'node:assert/strict';\nimport { divide } from './app.js';\nassert.equal(divide(1, 0), null);\n",
+  );
+  await prepareRereview(store, prepared.id);
+  const opened = await openReview(store, prepared.id);
+  assert.equal(opened.last_opened_errata_watermark, 1);
+  // Appended after the open, before the verdict: the reviewer was never
+  // shown it, so it stays outside the verdict's record.
+  await appendReviewErratum(store, prepared.id, "Stale claim two.");
+  const clean = await submitRereview(
+    store,
+    prepared.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "resolved",
+        rationale: "The assertion covers the branch.",
+      },
+    ],
+    [],
+  );
+  assert.equal(clean.history.at(-1).event, "REREVIEW_CLEAN");
+  assert.equal(clean.history.at(-1).errata_watermark, 1);
+  assert.equal(clean.errata.length, 2);
+  assert.equal(clean.last_opened_errata_watermark, 1);
+});
+
+async function continuableSource(t) {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "first change");
+  const source = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  });
+  await appendReviewErratum(store, source.id, "Stale claim on the source.");
+  await submitInitialReview(store, source.id, [
+    { severity: "major", title: "Missing test", explanation: "Add a test." },
+  ]);
+  await submitResolutions(store, source.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await prepareRereview(store, source.id);
+  await submitRereview(
+    store,
+    source.id,
+    [{ finding_id: "F-001", decision: "resolved", rationale: "The test exists." }],
+    [
+      {
+        severity: "minor",
+        title: "New edge case",
+        explanation: "A separate edge case still needs a decision.",
+      },
+    ],
+  );
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "address edge case");
+  return { repository, store, baseSha, source };
+}
+
+test("a continuation freezes its source against further errata", async (t) => {
+  const { repository, store, baseSha, source } = await continuableSource(t);
+  const continuation = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    forceFullReview: true,
+    continuedFromReviewId: source.id,
+  });
+  const frozen = await getReview(store, source.id);
+  assert.equal(frozen.continued_by_review_id, continuation.id);
+  assert.equal(frozen.history.at(-1).event, "REVIEW_CONTINUED");
+  assert.equal(
+    frozen.history.at(-1).continued_by_review_id,
+    continuation.id,
+  );
+
+  await assert.rejects(
+    appendReviewErratum(store, source.id, "A late correction on the source."),
+    /frozen by its continuation/,
+  );
+  assert.equal((await getReview(store, source.id)).errata.length, 1);
+
+  // A source may be re-continued — a bind refusal abandons the prepared
+  // continuation and a smaller one is prepared from the same source — and
+  // the marker then tracks the newest continuation.
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 3;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "second continuation");
+  const second = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    forceFullReview: true,
+    continuedFromReviewId: source.id,
+  });
+  assert.equal(second.errata.length, 1);
+  assert.equal(
+    (await getReview(store, source.id)).continued_by_review_id,
+    second.id,
+  );
+  await assert.rejects(
+    appendReviewErratum(store, source.id, "Still frozen."),
+    new RegExp(second.id),
+  );
+});
+
+test("the continuation errata copy waits behind the source review lock", async (t) => {
+  const { repository, store, baseSha, source } = await continuableSource(t);
+  const release = await acquireStateLock({
+    directory: path.join(store, "reviews", source.id),
+    reviewId: source.id,
+    domain: "review",
+  });
+  let settled = false;
+  const preparation = prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    forceFullReview: true,
+    continuedFromReviewId: source.id,
+  }).finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  assert.equal(settled, false);
+  // An append that serialized ahead of the freeze: while the lock is held,
+  // put the entry it would have written into the source ledger. The copy
+  // must see it, because the copy reads under this same lock.
+  const ledgerPath = path.join(store, "reviews", source.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  ledger.errata.push({
+    sequence: 2,
+    at: ledger.errata[0].at,
+    round: 2,
+    text: "Appended while the continuation was waiting.",
+  });
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`, {
+    mode: 0o600,
+  });
+  await release();
+  const continuation = await preparation;
+  assert.equal(continuation.errata.length, 2);
+  assert.match(
+    continuation.errata[1].text,
+    /Appended while the continuation was waiting/,
+  );
+  assert.equal(continuation.errata[1].sequence, 2);
+});
+
+test("a rereview verdict cannot inherit round one's open", async (t) => {
+  const { repository, store, prepared } = await erratumFixture(t);
+  await appendReviewErratum(store, prepared.id, "Stale claim one.");
+  const opened = await openReview(store, prepared.id);
+  assert.equal(opened.last_opened_errata_watermark, 1);
+  await submitInitialReview(store, prepared.id, [
+    {
+      severity: "major",
+      title: "Missing behavior test",
+      explanation: "No test asserts the zero-divisor branch.",
+    },
+  ]);
+  await submitResolutions(store, prepared.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await fsp.writeFile(
+    path.join(repository, "app.test.js"),
+    "import assert from 'node:assert/strict';\nimport { divide } from './app.js';\nassert.equal(divide(1, 0), null);\n",
+  );
+  const rereview = await prepareRereview(store, prepared.id);
+  // The new round starts unserved.
+  assert.equal(rereview.last_opened_errata_watermark, 0);
+
+  // A fresh round-two context that submits without opening records zero,
+  // not round one's open.
+  const clean = await submitRereview(
+    store,
+    prepared.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "resolved",
+        rationale: "The assertion covers the branch.",
+      },
+    ],
+    [],
+  );
+  assert.equal(clean.history.at(-1).event, "REREVIEW_CLEAN");
+  assert.equal(clean.history.at(-1).errata_watermark, 0);
+});
+
+test("an erratum does not wake the review wait", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  let settled = false;
+  const wait = waitForReviewState(
+    store,
+    prepared.id,
+    prepared.state_version,
+    10_000,
+  ).finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  // Both erratum-evidence sources drift the version mid-wait: the append,
+  // and the open recording the watermark it served.
+  await appendReviewErratum(store, prepared.id, "Stale claim, mid-wait.");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await openReview(store, prepared.id);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(settled, false);
+
+  await submitInitialReview(store, prepared.id, []);
+  const result = await wait;
+  assert.equal(result.changed, true);
+  assert.equal(result.timed_out, false);
+  assert.equal(result.summary.status, "CLEAN");
+});
+
+test("the rereview wait absorbs erratum drift the same way", async (t) => {
+  const { repository, store, prepared } = await erratumFixture(t);
+  await submitInitialReview(store, prepared.id, [
+    {
+      severity: "major",
+      title: "Missing behavior test",
+      explanation: "No test asserts the zero-divisor branch.",
+    },
+  ]);
+  await submitResolutions(store, prepared.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await fsp.writeFile(
+    path.join(repository, "app.test.js"),
+    "import assert from 'node:assert/strict';\nimport { divide } from './app.js';\nassert.equal(divide(1, 0), null);\n",
+  );
+  const rereview = await prepareRereview(store, prepared.id);
+  assert.equal(rereview.status, "WAITING_FOR_REREVIEW");
+  let settled = false;
+  const wait = waitForReviewState(
+    store,
+    prepared.id,
+    rereview.state_version,
+    10_000,
+  ).finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  await appendReviewErratum(store, prepared.id, "Stale claim, round two.");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(settled, false);
+
+  await submitRereview(
+    store,
+    prepared.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "resolved",
+        rationale: "The assertion covers the branch.",
+      },
+    ],
+    [],
+  );
+  const result = await wait;
+  assert.equal(result.changed, true);
+  assert.equal(result.summary.status, "CLEAN");
+});
+
+test("an absorbed erratum drift still times out honestly", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  const wait = waitForReviewState(
+    store,
+    prepared.id,
+    prepared.state_version,
+    1_500,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const appended = await appendReviewErratum(
+    store,
+    prepared.id,
+    "Stale claim before the timeout.",
+  );
+  const result = await wait;
+  assert.equal(result.changed, false);
+  assert.equal(result.timed_out, true);
+  // The returned summary carries the drifted version so a caller that wants
+  // to re-arm on it can.
+  assert.equal(result.summary.state_version, appended.state_version);
+  assert.equal(result.summary.status, "WAITING_FOR_REVIEW");
+});
+
+test("re-arming with the original version cannot false-wake on errata", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  assert.equal(prepared.last_transition_state_version, 1);
+  const first = waitForReviewState(
+    store,
+    prepared.id,
+    prepared.state_version,
+    1_500,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  await appendReviewErratum(store, prepared.id, "Stale claim, mid-wait.");
+  const firstResult = await first;
+  assert.equal(firstResult.changed, false);
+  assert.equal(firstResult.timed_out, true);
+
+  // The driver re-arms with the version it recorded originally, as the
+  // packaged wait steps instruct. The drift predates this wait's first
+  // read, and the transition stamp still says the state machine never
+  // moved past it.
+  let settled = false;
+  const rearmed = waitForReviewState(
+    store,
+    prepared.id,
+    prepared.state_version,
+    10_000,
+  ).finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(settled, false);
+
+  await submitInitialReview(store, prepared.id, []);
+  const woken = await rearmed;
+  assert.equal(woken.changed, true);
+  assert.equal(woken.summary.status, "CLEAN");
+});
+
+// Every state-machine transition, driven from a table so a new transition
+// that forgets its stamp turns this red rather than silently never waking a
+// wait. Each scenario arms the wait at the pre-transition version, performs
+// exactly one transition, and expects the wake.
+const WAIT_TRANSITION_FINDING = {
+  severity: "major",
+  title: "Missing behavior test",
+  explanation: "No test asserts the zero-divisor branch.",
+};
+
+async function driveToWaitingRereview(store, repository, reviewId) {
+  await submitInitialReview(store, reviewId, [WAIT_TRANSITION_FINDING]);
+  await submitResolutions(store, reviewId, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+  ]);
+  await fsp.writeFile(
+    path.join(repository, "app.test.js"),
+    "import assert from 'node:assert/strict';\nimport { divide } from './app.js';\nassert.equal(divide(1, 0), null);\n",
+  );
+  await prepareRereview(store, reviewId);
+}
+
+const WAIT_TRANSITIONS = [
+  [
+    "initial findings submitted",
+    null,
+    (store, repository, id) =>
+      submitInitialReview(store, id, [WAIT_TRANSITION_FINDING]),
+    "REVIEW_SUBMITTED",
+  ],
+  [
+    "initial review clean",
+    null,
+    (store, repository, id) => submitInitialReview(store, id, []),
+    "CLEAN",
+  ],
+  [
+    "author responded",
+    (store, repository, id) =>
+      submitInitialReview(store, id, [WAIT_TRANSITION_FINDING]),
+    (store, repository, id) =>
+      submitResolutions(store, id, [
+        { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+      ]),
+    "AUTHOR_RESPONDED",
+  ],
+  [
+    "author escalated",
+    (store, repository, id) =>
+      submitInitialReview(store, id, [WAIT_TRANSITION_FINDING]),
+    (store, repository, id) =>
+      submitResolutions(store, id, [
+        {
+          finding_id: "F-001",
+          disposition: "human_required",
+          rationale: "The requirement itself is contested.",
+        },
+      ]),
+    "HUMAN_REQUIRED",
+  ],
+  [
+    "rereview prepared",
+    async (store, repository, id) => {
+      await submitInitialReview(store, id, [WAIT_TRANSITION_FINDING]);
+      await submitResolutions(store, id, [
+        { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+      ]);
+    },
+    (store, repository, id) => prepareRereview(store, id),
+    "WAITING_FOR_REREVIEW",
+  ],
+  [
+    "rereview clean",
+    driveToWaitingRereview,
+    (store, repository, id) =>
+      submitRereview(
+        store,
+        id,
+        [
+          {
+            finding_id: "F-001",
+            decision: "resolved",
+            rationale: "The assertion covers the branch.",
+          },
+        ],
+        [],
+      ),
+    "CLEAN",
+  ],
+  [
+    "rereview continuable",
+    driveToWaitingRereview,
+    (store, repository, id) =>
+      submitRereview(
+        store,
+        id,
+        [
+          {
+            finding_id: "F-001",
+            decision: "resolved",
+            rationale: "The assertion covers the branch.",
+          },
+        ],
+        [
+          {
+            severity: "minor",
+            title: "New edge case",
+            explanation: "A separate edge case still needs a decision.",
+          },
+        ],
+      ),
+    "CONTINUABLE_FINDINGS",
+  ],
+  [
+    "rereview contested",
+    driveToWaitingRereview,
+    (store, repository, id) =>
+      submitRereview(
+        store,
+        id,
+        [
+          {
+            finding_id: "F-001",
+            decision: "still_open",
+            rationale: "The concern remains.",
+          },
+        ],
+        [],
+      ),
+    "HUMAN_REQUIRED",
+  ],
+  [
+    "local gate passed",
+    (store, repository, id) => submitInitialReview(store, id, []),
+    (store, repository, id) => finalizeLocalGate(store, id),
+    "LOCAL_GATE_PASSED",
+  ],
+];
+
+test("every state-machine transition wakes the wait", async (t) => {
+  for (const [name, prepare, transition, expected] of WAIT_TRANSITIONS) {
+    await t.test(name, async (t2) => {
+      const { repository, store, prepared } = await erratumFixture(t2);
+      if (prepare) {
+        await prepare(store, repository, prepared.id);
+      }
+      const before = await getReview(store, prepared.id);
+      const wait = waitForReviewState(
+        store,
+        prepared.id,
+        before.state_version,
+        10_000,
+      );
+      await transition(store, repository, prepared.id);
+      const result = await wait;
+      assert.equal(result.changed, true);
+      assert.equal(result.summary.status, expected);
+      assert.equal(
+        result.summary.last_transition_state_version,
+        result.summary.state_version,
+      );
+    });
+  }
+});
+
+test("a ledger without the transition stamp wakes on any change until its next transition", async (t) => {
+  const { store, prepared } = await erratumFixture(t);
+  const ledgerPath = path.join(store, "reviews", prepared.id, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
+  delete ledger.last_transition_state_version;
+  await fsp.writeFile(ledgerPath, `${JSON.stringify(ledger)}\n`, {
+    mode: 0o600,
+  });
+
+  // Pre-stamp semantics: any change wakes -- a conservative false wake
+  // rather than a missed one.
+  const wait = waitForReviewState(
+    store,
+    prepared.id,
+    prepared.state_version,
+    10_000,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  await appendReviewErratum(store, prepared.id, "Erratum on a legacy ledger.");
+  const woken = await wait;
+  assert.equal(woken.changed, true);
+  assert.equal(woken.summary.status, "WAITING_FOR_REVIEW");
+  assert.equal(woken.summary.last_transition_state_version, null);
+
+  // The next transition writes the stamp and the new semantics take over.
+  const clean = await submitInitialReview(store, prepared.id, []);
+  assert.equal(clean.last_transition_state_version, clean.state_version);
 });

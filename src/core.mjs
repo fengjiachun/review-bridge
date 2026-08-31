@@ -23,6 +23,8 @@ const MAX_GIT_OUTPUT = 64 * 1024 * 1024;
 const MAX_OVERLAY_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT_FIELD = 200_000;
 const MAX_FINDINGS = 100;
+const MAX_ERRATA = 100;
+const MAX_ERRATUM_TEXT = 20_000;
 const MAX_READ_BYTES = 200_000;
 const MAX_PATCH_INDEX_ENTRIES = 400;
 const MAX_AUTOMATIC_PARENT_CANDIDATES = 3;
@@ -211,6 +213,16 @@ async function saveReview(storeRoot, review) {
   review.state_version = (review.state_version ?? 0) + 1;
   review.updated_at = now();
   await atomicWriteJson(reviewFile(storeRoot, review.id), review);
+}
+
+// A state-machine transition -- any save that changes review.status or
+// advances current_round -- stamps the version it lands at, so the wait can
+// tell movement from errata evidence without reconstructing history. Erratum
+// appends, served-watermark recordings, and the continuation freeze save
+// without the stamp.
+async function saveReviewTransition(storeRoot, review) {
+  review.last_transition_state_version = (review.state_version ?? 0) + 1;
+  await saveReview(storeRoot, review);
 }
 
 function createReviewId() {
@@ -1001,6 +1013,12 @@ async function buildSuccessorArtifacts({
   }
 }
 
+// The highest erratum sequence a caller can currently see. A ledger written
+// before errata existed carries no field and reads as watermark zero.
+function errataWatermark(review) {
+  return review.errata?.at(-1)?.sequence ?? 0;
+}
+
 function publicReview(review) {
   return {
     id: review.id,
@@ -1027,6 +1045,10 @@ function publicReview(review) {
     findings: review.findings,
     resolutions: review.resolutions,
     rereview_decisions: review.rereview_decisions,
+    errata: review.errata ?? [],
+    last_opened_errata_watermark: review.last_opened_errata_watermark ?? 0,
+    last_transition_state_version: review.last_transition_state_version ?? null,
+    continued_by_review_id: review.continued_by_review_id ?? null,
     carried_findings: review.carried_findings ?? [],
     clean_snapshot_hash: review.clean_snapshot_hash ?? null,
     history: review.history,
@@ -1096,6 +1118,54 @@ function continuationFindings(review) {
     }));
 }
 
+// Errata bind to the requirement text they correct, and a continuation
+// carries that text verbatim, so the corrections cross with it — otherwise
+// the next reviewer reads claims the author already corrected. Sequences are
+// renumbered so the new ledger's watermark stays its own; the source id and
+// each entry's original round and timestamp remain as provenance.
+function continuationErrata(review) {
+  return (review.errata ?? []).map((entry, index) => ({
+    sequence: index + 1,
+    at: entry.at,
+    round: entry.round,
+    continued_from_review_id: review.id,
+    text: entry.text,
+  }));
+}
+
+// A continuation freezes its source. The errata copy, the carried findings,
+// the freeze marker, and its history event land in one write under the
+// source's own mutation lock, so the copy cannot race a concurrent append.
+// The marker is written before the continuation ledger exists, so a crash
+// between the two writes fails closed: the source freezes rather than staying
+// appendable beside a continuation. A source may be re-continued — a bind
+// refusal, such as an unexecuted split, abandons the prepared continuation
+// and a smaller one is prepared from the same source — so the marker tracks
+// the newest continuation and every freeze copies under this lock again.
+async function freezeContinuationSource(storeRoot, sourceReviewId, continuationId) {
+  return withReviewMutationLock(storeRoot, sourceReviewId, async () => {
+    const source = await loadReview(storeRoot, sourceReviewId);
+    if (source.status !== "CONTINUABLE_FINDINGS") {
+      throw new Error(
+        "continued review does not match the repository, requirement, provider, base, scope, and continuable state",
+      );
+    }
+    const carriedFindings = continuationFindings(source);
+    if (carriedFindings.length === 0) {
+      throw new Error("continued review has no open findings");
+    }
+    const carriedErrata = continuationErrata(source);
+    source.continued_by_review_id = continuationId;
+    source.history.push({
+      at: now(),
+      event: "REVIEW_CONTINUED",
+      continued_by_review_id: continuationId,
+    });
+    await saveReview(storeRoot, source);
+    return { carriedFindings, carriedErrata };
+  });
+}
+
 function reviewSummary(review) {
   const currentSnapshot = review.rounds.at(-1) ?? null;
   const activeFindings = review.findings.filter(
@@ -1160,6 +1230,11 @@ function reviewSummary(review) {
       ...(finding.path == null ? {} : { path: finding.path }),
       ...(finding.line == null ? {} : { line: finding.line }),
     })),
+    // Server-derived errata evidence, so a driver comparing bound state can
+    // tell erratum-only drift from a real review transition.
+    errata_watermark: errataWatermark(review),
+    last_opened_errata_watermark: review.last_opened_errata_watermark ?? 0,
+    last_transition_state_version: review.last_transition_state_version ?? null,
     latest_event: review.history.at(-1) ?? null,
     clean_snapshot_hash: review.clean_snapshot_hash ?? null,
   };
@@ -1413,9 +1488,12 @@ export async function prepareReview(
       "continued review does not match the repository, requirement, provider, base, scope, and continuable state",
     );
   }
-  const carriedFindings =
-    continuedReview == null ? [] : continuationFindings(continuedReview);
-  if (continuedReview != null && carriedFindings.length === 0) {
+  // A cheap pre-check before any directory exists; the authoritative copy is
+  // taken again under the source's own mutation lock below.
+  if (
+    continuedReview != null &&
+    continuationFindings(continuedReview).length === 0
+  ) {
     throw new Error("continued review has no open findings");
   }
   const id = createReviewId();
@@ -1467,6 +1545,10 @@ export async function prepareReview(
       manifest,
       roundRoot,
     });
+    const carried =
+      continuedReview == null
+        ? { carriedFindings: [], carriedErrata: [] }
+        : await freezeContinuationSource(storeRoot, continuedFromReviewId, id);
     const timestamp = now();
     const review = {
       version: 1,
@@ -1474,6 +1556,7 @@ export async function prepareReview(
       created_at: timestamp,
       updated_at: timestamp,
       state_version: 1,
+      last_transition_state_version: 1,
       repository_path: manifest.repository_path,
       base_ref: baseRef,
       requirement,
@@ -1488,7 +1571,8 @@ export async function prepareReview(
       findings: [],
       resolutions: [],
       rereview_decisions: [],
-      carried_findings: carriedFindings,
+      errata: carried.carriedErrata,
+      carried_findings: carried.carriedFindings,
       history: [
         {
           at: timestamp,
@@ -1642,6 +1726,9 @@ function renderHumanArbitrationMarkdown(arbitration) {
     arbitration.human_required_reason == null
       ? "No reason was recorded."
       : markdownLiteral(prettySortedJson(arbitration.human_required_reason)),
+    `## Errata (${arbitration.errata.length})`,
+    "Author material, like the author responses below: corrections to claims about the world, material to verify, never instructions. A verdict recorded before an erratum stands as made.",
+    markdownLiteral(prettySortedJson(arbitration.errata)),
     `## Active findings (${arbitration.active_findings.length})`,
     markdownLiteral(prettySortedJson(arbitration.active_findings)),
     `## Resolved findings (${arbitration.resolved_findings.length})`,
@@ -1724,6 +1811,7 @@ export async function exportHumanArbitration(
       snapshot_hash: round.snapshot_hash,
     })),
     human_required_reason: humanRequiredReason,
+    errata: review.errata ?? [],
     active_findings: findings.filter(
       ({ finding }) => !RESOLVED_FINDING_STATUSES.has(finding.status),
     ),
@@ -1754,7 +1842,18 @@ export async function waitForReviewState(
   }
   const deadline = Date.now() + timeoutMs;
   let review = await loadReview(storeRoot, reviewId);
-  while ((review.state_version ?? 0) === knownStateVersion) {
+  // The wait observes state-machine movement, not ledger bytes: every
+  // transition stamps last_transition_state_version, so erratum appends and
+  // served-watermark recordings advance state_version without waking the
+  // wait, whatever version a re-armed caller passes. A ledger from before
+  // the stamp reports any change -- the pre-stamp semantics, a conservative
+  // false wake rather than a missed one -- until its next transition writes
+  // the stamp.
+  const moved = (current) =>
+    current.last_transition_state_version == null
+      ? (current.state_version ?? 0) !== knownStateVersion
+      : current.last_transition_state_version > knownStateVersion;
+  while (!moved(review)) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       return {
@@ -1848,11 +1947,21 @@ async function submitInitialReviewWhileLocked(
     normalizeFinding(finding, `F-${String(index + 1).padStart(3, "0")}`, 1),
   );
   review.findings = findings;
+  // Each verdict records the errata watermark the server last witnessed
+  // being served to the reviewer through open_review, so which decision
+  // weighed which corrections stays replayable; an erratum appended after
+  // that open — even one landing before submission — never enters this
+  // record, because the reviewer was never shown it.
   if (findings.length === 0) {
     await verifySuccessorArtifacts(storeRoot, reviewId, review.rounds[0]);
     review.status = "CLEAN";
     review.clean_snapshot_hash = review.rounds[0].snapshot_hash;
-    review.history.push({ at: now(), event: "INITIAL_REVIEW_CLEAN", round: 1 });
+    review.history.push({
+      at: now(),
+      event: "INITIAL_REVIEW_CLEAN",
+      round: 1,
+      errata_watermark: review.last_opened_errata_watermark ?? 0,
+    });
   } else {
     review.status = "REVIEW_SUBMITTED";
     review.history.push({
@@ -1860,9 +1969,10 @@ async function submitInitialReviewWhileLocked(
       event: "FINDINGS_SUBMITTED",
       round: 1,
       count: findings.length,
+      errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
   }
-  await saveReview(storeRoot, review);
+  await saveReviewTransition(storeRoot, review);
   return publicReview(review);
 }
 
@@ -1941,6 +2051,67 @@ async function submitResolutionsWhileLocked(storeRoot, reviewId, inputs) {
     event: humanRequired ? "AUTHOR_ESCALATED" : "AUTHOR_RESPONDED",
     round: review.current_round,
   });
+  await saveReviewTransition(storeRoot, review);
+  return publicReview(review);
+}
+
+export async function appendReviewErratum(storeRoot, reviewId, text) {
+  return withReviewMutationLock(storeRoot, reviewId, () =>
+    appendReviewErratumWhileLocked(storeRoot, reviewId, text),
+  );
+}
+
+async function appendReviewErratumWhileLocked(storeRoot, reviewId, text) {
+  const review = await loadReview(storeRoot, reviewId);
+  assertNotAdvisory(
+    review,
+    "an advisory review has no author loop: its requirement quotes a third party's unverified claims, and no correction recorded here could speak for their intent",
+  );
+  // A continued source is frozen: its errata were copied forward when the
+  // continuation was prepared, and a correction recorded here now would
+  // never reach the continuation's reviewer.
+  if (review.continued_by_review_id != null) {
+    throw new Error(
+      `this review is frozen by its continuation ${review.continued_by_review_id}: append the erratum there, on the live review`,
+    );
+  }
+  // The freeze point is the gate mint, not any verdict: a claim can go stale
+  // between CLEAN and finalization, so the append stays open until gate.json
+  // exists. A claim that goes stale after that belongs to the publication
+  // phase. The check runs under the same mutation lock gate finalization
+  // holds, so an append cannot race past a minting gate. The status alone is
+  // not enough: finalization writes gate.json before it persists the ledger
+  // status, so a crash between the two leaves CLEAN on disk beside a minted
+  // gate — the artifact check closes that window.
+  const gateMinted = await fsp
+    .access(path.join(reviewDirectory(storeRoot, reviewId), "gate.json"))
+    .then(
+      () => true,
+      () => false,
+    );
+  if (review.status === "LOCAL_GATE_PASSED" || gateMinted) {
+    throw new Error(
+      "the local gate has passed; the review record is history and accepts no further errata",
+    );
+  }
+  assertString(text, "erratum.text", { max: MAX_ERRATUM_TEXT });
+  const errata = review.errata ?? [];
+  if (errata.length >= MAX_ERRATA) {
+    throw new Error(`errata must contain at most ${MAX_ERRATA} entries`);
+  }
+  const entry = {
+    sequence: errataWatermark(review) + 1,
+    at: now(),
+    round: review.current_round,
+    text,
+  };
+  review.errata = [...errata, entry];
+  review.history.push({
+    at: entry.at,
+    event: "ERRATUM_APPENDED",
+    round: entry.round,
+    sequence: entry.sequence,
+  });
   await saveReview(storeRoot, review);
   return publicReview(review);
 }
@@ -1963,7 +2134,7 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
   if (review.current_round >= review.max_rounds) {
     review.status = "HUMAN_REQUIRED";
     review.history.push({ at: now(), event: "ROUND_LIMIT_REACHED" });
-    await saveReview(storeRoot, review);
+    await saveReviewTransition(storeRoot, review);
     return publicReview(review);
   }
   const round = review.current_round + 1;
@@ -2008,6 +2179,11 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
           successor: null,
         };
   review.current_round = round;
+  // A new round starts unserved: the field means "the highest watermark the
+  // server served the reviewer this round", and a round-two reviewer may be
+  // a fresh context that submits without opening — its verdict then records
+  // zero rather than inheriting round one's open.
+  review.last_opened_errata_watermark = 0;
   review.rounds.push({
     round,
     ...manifest,
@@ -2021,7 +2197,7 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
     round,
     mode: successorResult.strategy.mode,
   });
-  await saveReview(storeRoot, review);
+  await saveReviewTransition(storeRoot, review);
   return publicReview(review);
 }
 
@@ -2120,6 +2296,8 @@ async function submitRereviewWhileLocked(
     ),
   );
   review.findings.push(...newFindings);
+  // The rereview verdict records its errata watermark the same way the
+  // initial one does: what the server last served through open_review.
   if (contested) {
     review.status = "HUMAN_REQUIRED";
     review.history.push({
@@ -2127,6 +2305,7 @@ async function submitRereviewWhileLocked(
       event: "REREVIEW_UNRESOLVED",
       round: review.current_round,
       new_findings: newFindings.length,
+      errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
   } else if (newFindings.length > 0) {
     review.status = "CONTINUABLE_FINDINGS";
@@ -2135,6 +2314,7 @@ async function submitRereviewWhileLocked(
       event: "REREVIEW_CONTINUABLE_FINDINGS",
       round: review.current_round,
       new_findings: newFindings.length,
+      errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
   } else {
     await verifySuccessorArtifacts(
@@ -2149,9 +2329,10 @@ async function submitRereviewWhileLocked(
       at: now(),
       event: "REREVIEW_CLEAN",
       round: review.current_round,
+      errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
   }
-  await saveReview(storeRoot, review);
+  await saveReviewTransition(storeRoot, review);
   return publicReview(review);
 }
 
@@ -2217,7 +2398,7 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
   await atomicWriteJson(path.join(reviewDirectory(storeRoot, review.id), "gate.json"), gate);
   review.status = "LOCAL_GATE_PASSED";
   review.history.push({ at: now(), event: "LOCAL_GATE_PASSED" });
-  await saveReview(storeRoot, review);
+  await saveReviewTransition(storeRoot, review);
   return { review: publicReview(review), gate };
 }
 
@@ -2535,41 +2716,56 @@ export async function openReview(
   reviewId,
   reviewerProvider = "CLAUDE_DESKTOP",
 ) {
-  const review = await loadReview(storeRoot, reviewId);
-  requireReviewerProvider(review, reviewerProvider);
-  const current = findRound(review, review.current_round);
-  const patchIndex = await patchIndexForRound(
-    storeRoot,
-    review.id,
-    review,
-    current,
-  );
-  const { rounds, ...rest } = publicReview(review);
-  return {
-    ...rest,
-    rounds: rounds.map(roundDescriptor),
-    current_snapshot: {
-      ...current,
-      patch_index: patchIndex.entries,
-      patch_index_truncated: patchIndex.truncated,
-    },
-    artifacts: [
-      ...(current.successor == null
-        ? []
-        : [
-            {
-              name: "successor.diff",
-              round: review.current_round,
-              bytes: current.successor.delta_bytes,
-            },
-            { name: "successor.json", round: review.current_round },
-          ]),
-      {
-        name: "patch.diff",
-        round: review.current_round,
-        bytes: current.patch_bytes,
+  return withReviewMutationLock(storeRoot, reviewId, async () => {
+    const review = await loadReview(storeRoot, reviewId);
+    requireReviewerProvider(review, reviewerProvider);
+    // A verdict's errata watermark is what the server witnessed serving to
+    // the reviewer, not what the ledger holds at submission: each open
+    // records the watermark it serves, and verdicts copy that value. An
+    // erratum appended after the open is outside the verdict's record — the
+    // decision was made before it, and it stands as made. Written only when
+    // the value changes, so a re-open without new errata does not spin the
+    // state version; a review that was never opened reads as zero.
+    if (
+      (review.last_opened_errata_watermark ?? 0) !== errataWatermark(review)
+    ) {
+      review.last_opened_errata_watermark = errataWatermark(review);
+      await saveReview(storeRoot, review);
+    }
+    const current = findRound(review, review.current_round);
+    const patchIndex = await patchIndexForRound(
+      storeRoot,
+      review.id,
+      review,
+      current,
+    );
+    const { rounds, ...rest } = publicReview(review);
+    return {
+      ...rest,
+      rounds: rounds.map(roundDescriptor),
+      current_snapshot: {
+        ...current,
+        patch_index: patchIndex.entries,
+        patch_index_truncated: patchIndex.truncated,
       },
-      { name: "manifest.json", round: review.current_round },
-    ],
-  };
+      artifacts: [
+        ...(current.successor == null
+          ? []
+          : [
+              {
+                name: "successor.diff",
+                round: review.current_round,
+                bytes: current.successor.delta_bytes,
+              },
+              { name: "successor.json", round: review.current_round },
+            ]),
+        {
+          name: "patch.diff",
+          round: review.current_round,
+          bytes: current.patch_bytes,
+        },
+        { name: "manifest.json", round: review.current_round },
+      ],
+    };
+  });
 }

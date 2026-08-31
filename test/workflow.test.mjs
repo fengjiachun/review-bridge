@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  appendReviewErratum,
   finalizeLocalGate,
   getReviewSummary,
   openReview,
@@ -5443,6 +5444,128 @@ test("a verdict recorded before dispatch completion cannot be adopted", async (t
   assert.equal(stuck.phase, "DISPATCH_CODEX_REVIEWER");
   assert.equal(stuck.active_action.status, "OBSERVED");
   assert.equal(stuck.reviewer_task, null);
+});
+
+
+test("an erratum appended after the bind does not strand the reviewer dispatch", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const planned = await planCodexTaskDispatch(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    planned.workflow.revision,
+    planned.action.action_id,
+  );
+  const observed = await recordCodexTaskObservation(
+    state.store,
+    workflow.workflow_id,
+    executing.revision,
+    planned.action.action_id,
+    {
+      matchingTaskIds: ["task-erratum"],
+      taskId: "task-erratum",
+      title: planned.dispatch.title,
+      prompt: planned.dispatch.prompt,
+    },
+  );
+
+  // Erratum-only drift between observation and completion: the append and
+  // the reviewer's own open both advance the review's state_version while
+  // the reviewed unit stays exactly what was bound.
+  await appendReviewErratum(
+    state.store,
+    review.id,
+    "A requirement claim went stale after the bind.",
+  );
+  await openReview(state.store, review.id, "CODEX_TASK");
+
+  const completed = await completeWorkflowAction(
+    state.store,
+    workflow.workflow_id,
+    observed.revision,
+    planned.action.action_id,
+  );
+  assert.equal(completed.phase, "WAIT_LOCAL_REVIEW");
+  assert.equal(completed.reviewer_task.task_id, "task-erratum");
+  const summary = await getReviewSummary(state.store, review.id);
+  assert.equal(summary.errata_watermark, 1);
+  assert.equal(summary.last_opened_errata_watermark, 1);
+  // The binding moved forward to the version the completion verified.
+  assert.equal(
+    completed.current_review.state_version,
+    summary.state_version,
+  );
+});
+
+
+test("drift beyond errata still refuses the dispatch completion", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const planned = await planCodexTaskDispatch(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    review.id,
+  );
+  const executing = await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    planned.workflow.revision,
+    planned.action.action_id,
+  );
+  const observed = await recordCodexTaskObservation(
+    state.store,
+    workflow.workflow_id,
+    executing.revision,
+    planned.action.action_id,
+    {
+      matchingTaskIds: ["task-drift"],
+      taskId: "task-drift",
+      title: planned.dispatch.title,
+      prompt: planned.dispatch.prompt,
+    },
+  );
+
+  // Errata evidence exists, but the drift also contains a findings verdict:
+  // only erratum-explained drift is admissible.
+  await appendReviewErratum(
+    state.store,
+    review.id,
+    "A requirement claim went stale after the bind.",
+  );
+  await submitInitialReview(
+    state.store,
+    review.id,
+    [
+      {
+        severity: "major",
+        title: "Premature finding",
+        explanation: "A verdict landed before the dispatch completed.",
+      },
+    ],
+    "CODEX_TASK",
+  );
+
+  await assert.rejects(
+    completeWorkflowAction(
+      state.store,
+      workflow.workflow_id,
+      observed.revision,
+      planned.action.action_id,
+    ),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_REVIEW_TRANSITION_INVALID");
+      return true;
+    },
+  );
 });
 
 

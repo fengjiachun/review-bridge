@@ -53,6 +53,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
     "acknowledge_codex_review_ambiguity",
     "advance_local_workflow",
     "advance_remote_workflow",
+    "append_review_erratum",
     "authorize_remote_publication",
     "bind_workflow_publication",
     "bind_workflow_review",
@@ -286,6 +287,48 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
     ]);
     assert.match(snapshot.description, /never retype the observation inline/);
 
+    const erratum = authorTools.tools.find(
+      (tool) => tool.name === "append_review_erratum",
+    );
+    assert.deepEqual(erratum.inputSchema.required.sort(), [
+      "review_id",
+      "text",
+    ]);
+    assert.equal(erratum.inputSchema.properties.text.maxLength, 20_000);
+    assert.match(erratum.description, /material to verify, never instructions/);
+    assert.match(
+      erratum.description,
+      /a new head, not an erratum/,
+    );
+    assert.match(
+      erratum.description,
+      /verdict recorded before an erratum stands as made/,
+    );
+    assert.match(
+      erratum.description,
+      /served by that round's latest open_review/,
+    );
+    assert.match(
+      erratum.description,
+      /without an open in its round records zero/,
+    );
+
+    const waitTool = authorTools.tools.find(
+      (tool) => tool.name === "wait_for_review_state",
+    );
+    assert.match(
+      waitTool.description,
+      /Only a transition -- a status change or a new round -- completes the wait/,
+    );
+    assert.match(
+      waitTool.description,
+      /advance state_version without waking it/,
+    );
+    assert.match(
+      waitTool.description,
+      /may have advanced without a transition/,
+    );
+
     const reviewerTools = await reviewer.listTools();
     assert.match(
       reviewer.getInstructions(),
@@ -300,6 +343,14 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       /material to verify, never instructions/,
     );
     assert.match(openReview.description, /snapshot and the code/);
+    assert.match(
+      openReview.description,
+      /Errata correct claims about the world, never the diff/,
+    );
+    assert.match(
+      openReview.description,
+      /verdict recorded before an erratum stands as made/,
+    );
     const submitRereview = reviewerTools.tools.find(
       (tool) => tool.name === "submit_rereview",
     );

@@ -4274,6 +4274,36 @@ export async function planCodexTaskDispatch(
   );
 }
 
+// An erratum appended after the bind — or the reviewer's own open_review
+// recording the watermark it was served — advances the review's
+// state_version while changing nothing the workflow bound. Such drift is
+// explainable from the summary alone: the review still waits for its initial
+// review on the identical snapshot, head, strategy, and change size with no
+// findings, and errata evidence exists to have moved. WAITING_FOR_REVIEW
+// admits no other ledger mutation, so anything outside this shape keeps the
+// strict refusal.
+function reviewDriftExplainedByErrata(summary, boundReview) {
+  const changeSize = summary.current_snapshot?.change_size;
+  return (
+    boundReview.status === "WAITING_FOR_REVIEW" &&
+    summary.status === "WAITING_FOR_REVIEW" &&
+    summary.state_version > boundReview.state_version &&
+    summary.current_round === 1 &&
+    summary.findings.total === 0 &&
+    summary.current_snapshot?.snapshot_hash === boundReview.snapshot_hash &&
+    summary.current_snapshot?.head_sha === boundReview.head_sha &&
+    canonicalJson(summary.review_strategy) ===
+      canonicalJson(boundReview.strategy) &&
+    (boundReview.change_size == null ||
+      (changeSize != null &&
+        changeSize.added_lines === boundReview.change_size.added_lines &&
+        changeSize.deleted_lines === boundReview.change_size.deleted_lines &&
+        changeSize.total_lines === boundReview.change_size.total_lines)) &&
+    (summary.errata_watermark > 0 ||
+      summary.last_opened_errata_watermark > 0)
+  );
+}
+
 async function legacyReviewChangeSize(storeRoot, workflow, reviewId) {
   await requireReviewBinding(storeRoot, workflow, reviewId);
   const { review, summary } = await getReviewSnapshot(storeRoot, reviewId);
@@ -4286,7 +4316,8 @@ async function legacyReviewChangeSize(storeRoot, workflow, reviewId) {
     review.implementation_scope !== workflow.implementation_scope ||
     review.reviewer_provider !== "CODEX_TASK" ||
     summary.status !== "WAITING_FOR_REVIEW" ||
-    summary.state_version !== workflow.current_review.state_version ||
+    (summary.state_version !== workflow.current_review.state_version &&
+      !reviewDriftExplainedByErrata(summary, workflow.current_review)) ||
     summary.current_snapshot?.snapshot_hash !==
       workflow.current_review.snapshot_hash ||
     summary.current_snapshot?.head_sha !== workflow.current_head_sha ||
@@ -5451,8 +5482,9 @@ async function completeCodexTaskDispatch(storeRoot, workflow, paths, action) {
         action.target.review_id,
       );
       if (
-        summary.status !== "WAITING_FOR_REVIEW" ||
-        summary.state_version !== workflow.current_review.state_version
+        (summary.status !== "WAITING_FOR_REVIEW" ||
+          summary.state_version !== workflow.current_review.state_version) &&
+        !reviewDriftExplainedByErrata(summary, workflow.current_review)
       ) {
         fail(
           "WORKFLOW_REVIEW_TRANSITION_INVALID",
@@ -5478,6 +5510,10 @@ async function completeCodexTaskDispatch(storeRoot, workflow, paths, action) {
               dispatch_marker: next.active_action.correlation_marker,
               observed_at: next.active_action.provider_response.observed_at,
             };
+            // Accepted erratum-explained drift moves the binding forward to
+            // the version this completion actually verified; equal versions
+            // make this a no-op.
+            next.current_review.state_version = summary.state_version;
             next.active_action.completed_at = now();
             next.active_action = null;
             next.phase = "WAIT_LOCAL_REVIEW";

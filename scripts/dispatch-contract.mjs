@@ -194,8 +194,8 @@ export const ADVISORY_PANEL_CONTRACT = {
     // and which three refuse, or a reader is left keeping the rule by hand.
     ["the advisory flag arms the fence", /`prepare_review` with `advisory: true`/],
     [
-      "the three refusals are named",
-      /`finalize_local_gate`, `submit_resolutions`, and `prepare_rereview` each refuse it/,
+      "the four refusals are named",
+      /`finalize_local_gate`, `submit_resolutions`, `prepare_rereview`, and `append_review_erratum` each refuse it/,
     ],
     [
       "the attestation the fence exists for is named",
