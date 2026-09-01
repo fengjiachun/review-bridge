@@ -138,7 +138,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   hold, and one approval is stored across as many bounded records as the
   sets need, split the way the supersession closure already is and sharing
   the operator inputs, backing observation, timestamp, and revision that
-  mark them one decision. (#102)
+  mark them one decision. A closure the ledger cannot hold is refused before
+  anything is written — by the same predicate that settles a mandatory
+  overflow as a capacity terminal — instead of the acknowledgement executing
+  the ledger as INVALIDATED; the honest consequence is that a pull request
+  whose Codex evidence exceeds the aggregate budget keeps no closure path
+  and stays `GITHUB_REVIEW_UNKNOWN`, mutable and readable. (#102)
 - Supersede the ledger's own prior Codex requests when it records a new one
   (#77). A repair round republished at an unchanged head left the previous
   publication's request open at that same head, so a clean Codex reply — which
