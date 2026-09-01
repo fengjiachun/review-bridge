@@ -3472,12 +3472,18 @@ function reconcileHistories(ledger, observation, nextRevision, currentMs) {
     }
     const storedFacts = resultHistoryFacts(stored);
     const currentFacts = observationResultFacts(current);
-    if (closedResults.has(identity)) {
+    if (
+      closedResults.has(identity) &&
+      stored.resource_kind === "ISSUE_COMMENT"
+    ) {
       // Association skips a closed result, so the adapter can no longer
-      // re-derive the reviewed head its binding once pinned -- by
-      // construction, not because the comment changed. The remaining facts
-      // still pin the immutable comment itself, so an edit or deletion is
-      // detected exactly as before.
+      // re-derive the reviewed head a clean comment's binding once pinned --
+      // by construction, not because the comment changed. Only ISSUE_COMMENT
+      // heads are binding-derived; a formal review's head comes from its own
+      // commit_id, an intrinsic fact, so every other kind keeps the full
+      // comparison and a review re-pointed at another commit is still
+      // detected. The remaining facts still pin the immutable comment
+      // itself, so an edit or deletion is detected exactly as before.
       storedFacts.reviewed_head_sha = null;
       currentFacts.reviewed_head_sha = null;
     }

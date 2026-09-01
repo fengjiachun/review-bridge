@@ -1447,6 +1447,83 @@ test("an acknowledged request takes the reply attributed to it along", async (t)
   assert.equal(ready.status, "MERGE_READY");
 });
 
+test("a closed review re-pointed at another commit is still a changed result", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+
+  // A formal review's reviewed head comes from its own commit_id -- an
+  // intrinsic fact, not a binding derivation -- so closing the result must
+  // not neutralize the tamper check that catches the same review id pointed
+  // at another commit.
+  const strayRequestId = `rbreq-${"1".repeat(32)}`;
+  const stray = {
+    resource_id: 90,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-90",
+    event_at: iso(startedAt - 1_000),
+    timestamp_field: "created_at",
+    body_sha256: digest(correlatedRequestBody(strayRequestId)),
+    request_id: strayRequestId,
+    actor: { id: 42, type: "User" },
+  };
+  await start(state, startedAt, baselineV2(startedAt - 100, [stray]));
+  const { requestComment, findingsReview, adapt, record } = codexFeeds(state);
+  const strayComment = requestComment(90, strayRequestId, startedAt - 1_000);
+  const a = await record(1, 100, startedAt + 1_000);
+  const review = findingsReview(500, startedAt + 1_100, state.baseSha);
+  const observedAt = startedAt + 2_000;
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 2,
+      observation: await adapt(observedAt, [strayComment, a.comment], [review]),
+    },
+    { clock: () => observedAt + 10 },
+  );
+  const summary = await getPublicationSummary(state.store, state.reviewId, {
+    clock: () => observedAt + 20,
+  });
+  assert.deepEqual(summary.required_ambiguous_results, [
+    { resource_kind: "PULL_REQUEST_REVIEW", result_id: 500 },
+  ]);
+  await acknowledgeCodexReviewAmbiguity(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 3,
+      headSha: state.headSha,
+      requestRefs: summary.required_request_refs,
+      ambiguousResults: summary.required_ambiguous_results,
+      acknowledgement: "NO_FURTHER_RESULTS_EXPECTED",
+      operatorLabel: "maintainer",
+      rationale: "Close the wildcard round.",
+    },
+    { clock: () => observedAt + 30 },
+  );
+
+  const nextAt = startedAt + 4_000;
+  const next = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 4,
+      observation: await adapt(
+        nextAt,
+        [strayComment, a.comment],
+        [{ ...review, commit_id: state.headSha }],
+      ),
+    },
+    { clock: () => nextAt + 10 },
+  );
+  assert.equal(next.terminal.status, "INVALIDATED");
+  assert.match(
+    next.terminal.reason,
+    /Codex result PULL_REQUEST_REVIEW:500 changed/,
+  );
+});
+
 test("an authenticated correlated baseline request is not an ambiguity blocker", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
