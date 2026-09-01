@@ -120,6 +120,39 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Fixed
 
+- Let an acknowledgement close an unauthenticated `BASELINE_CORRELATED`
+  request (#99). Such a request — a well-formed `rbreq` body no prior ledger of
+  the chain could vouch for — carries no head, so every markerless clean reply
+  matched it forever, while `activeCorrelation` excluded the whole
+  `BASELINE_CORRELATED` class from `openBaseline`, keeping the wildcard out of
+  `required_request_refs`: the operator could only acknowledge the symptom each
+  round, never the cause. The exclusion now covers only proven requests
+  (issuance present), which stay head-scoped, compatibility-filtered, and
+  supersession-managed exactly as before; an unproven one blocks like any
+  other baseline request, appears in `required_request_refs`, and one
+  `acknowledge_codex_review_ambiguity` closes it through the existing
+  channels, after which markerless replies bind again. The acknowledgement
+  itself no longer caps its input at the 1,000 references one stored record
+  holds — a bound the demanded closure can exceed, wedging the publication
+  line for good: the input caps now mirror what the closure's sources can
+  hold, and one approval is stored across as many bounded records as the
+  sets need, split the way the supersession closure already is and sharing
+  the operator inputs, backing observation, timestamp, and revision that
+  mark them one decision. A closure the ledger cannot hold is refused before
+  anything is written — by the same predicate that settles a mandatory
+  overflow as a capacity terminal — instead of the acknowledgement executing
+  the ledger as INVALIDATED; the honest consequence is that a pull request
+  whose Codex evidence exceeds the aggregate budget keeps no closure path
+  and stays `GITHUB_REVIEW_UNKNOWN`, mutable and readable. The demanded
+  closure also closes each request together with the reply the replay
+  attributes to it, whatever its verdict, and the snapshot reconciliation
+  masks the one binding-derived fact — a clean comment's
+  `reviewed_head_sha`, the only kind whose head exists solely through its
+  binding — when comparing a closed result, so acknowledging a round whose
+  reply had already bound no longer orphans that reply and invalidates the
+  ledger at the next snapshot; a closed formal review keeps the full
+  comparison, so one re-pointed at another commit is still detected
+  (#103). (#102)
 - Supersede the ledger's own prior Codex requests when it records a new one
   (#77). A repair round republished at an unchanged head left the previous
   publication's request open at that same head, so a clean Codex reply — which

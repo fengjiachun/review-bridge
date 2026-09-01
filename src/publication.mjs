@@ -44,6 +44,16 @@ const MAX_AUDIT_EVENT_BYTES = 16 * 1024;
 // supersession chunking all express this one cap; a second copy of the number
 // is how they would drift apart.
 const MAX_ACKNOWLEDGEMENT_REFERENCES = 1_000;
+// The operator approves the complete demanded closure, whose size is bounded
+// by its sources, not by one record: request references come from the
+// immutable baseline (5,000 evidence entries) plus the request history (a
+// 10,000-entry monotonic array), and ambiguous-result references from the
+// observation's result set (10,000 entries). The input caps mirror those
+// bounds; storage splits the approved sets into records bounded above. They
+// are input-shape bounds, not an acceptance promise: whether a closure fits
+// is decided by the aggregate-capacity precheck at write time.
+const MAX_CLOSURE_REQUEST_REFERENCES = 15_000;
+const MAX_CLOSURE_RESULT_REFERENCES = 10_000;
 const MAX_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_MS = 30 * 1000;
 const MAX_ATOMIC_WINDOW_MS = 2 * 60 * 1000;
@@ -3453,13 +3463,31 @@ function reconcileHistories(ledger, observation, nextRevision, currentMs) {
       item,
     ]),
   );
+  const closedResults = closedResultIdentities(ledger);
   for (const stored of ledger.codex_result_history) {
     const identity = `${stored.resource_kind}:${stored.result_id}`;
     const current = currentResults.get(identity);
     if (!current) {
       return { conflict: `Codex result ${identity} disappeared`, visibilityGrace: false };
     }
-    if (!sameCanonical(resultHistoryFacts(stored), observationResultFacts(current))) {
+    const storedFacts = resultHistoryFacts(stored);
+    const currentFacts = observationResultFacts(current);
+    if (
+      closedResults.has(identity) &&
+      stored.resource_kind === "ISSUE_COMMENT"
+    ) {
+      // Association skips a closed result, so the adapter can no longer
+      // re-derive the reviewed head a clean comment's binding once pinned --
+      // by construction, not because the comment changed. Only ISSUE_COMMENT
+      // heads are binding-derived; a formal review's head comes from its own
+      // commit_id, an intrinsic fact, so every other kind keeps the full
+      // comparison and a review re-pointed at another commit is still
+      // detected. The remaining facts still pin the immutable comment
+      // itself, so an edit or deletion is detected exactly as before.
+      storedFacts.reviewed_head_sha = null;
+      currentFacts.reviewed_head_sha = null;
+    }
+    if (!sameCanonical(storedFacts, currentFacts)) {
       return { conflict: `Codex result ${identity} changed`, visibilityGrace: false };
     }
   }
@@ -3869,10 +3897,16 @@ function checkRequiredRuns(requiredChecks) {
 function activeCorrelation(ledger) {
   const closedRequests = closedRequestIdentities(ledger);
   const closedResults = closedResultIdentities(ledger);
+  // A BASELINE_CORRELATED request carrying an issuance is proven and
+  // head-scoped: compatibility filters it and supersession retires it, so it
+  // never blocks here. An unproven one has no head at all -- it matches every
+  // markerless reply forever -- and RFC 0002 keeps the acknowledgement path
+  // for it, so it blocks like any other baseline request until closed.
   const openBaseline = ledger.codex_review_baseline.requests
     .filter(
       (item) =>
-        item.classification !== "BASELINE_CORRELATED" &&
+        (item.classification !== "BASELINE_CORRELATED" ||
+          item.issuance == null) &&
         !closedRequests.has(`${item.resource_kind}:${item.resource_id}`),
     )
     .map((item) => ({
@@ -8217,7 +8251,43 @@ function ambiguityClosure(ledger) {
     })),
   ];
   uniqueBy(requests, (item) => resourceIdentity(item), "ambiguity closure requests");
-  return { requests, results: correlation.ambiguousResults };
+  // A request and its answer are one piece of evidence and close together.
+  // Closing a request while the reply the replay attributes to it stays open
+  // orphans that reply: the next replay re-derives it against a candidate set
+  // that no longer holds the request it bound to, and a reply whose pinned
+  // facts depended on that binding invalidates the ledger (#103). Every
+  // result whose replayed request_ref names a demanded request therefore
+  // joins the demanded results, ambiguous or not, whatever its verdict.
+  const requestIdentities = new Set(
+    requests.map((item) => resourceIdentity(item)),
+  );
+  const resultIdentities = new Set();
+  const results = [];
+  const addResult = (item) => {
+    const identity = resourceIdentity(item, "result_id");
+    if (!resultIdentities.has(identity)) {
+      resultIdentities.add(identity);
+      results.push({
+        resource_kind: item.resource_kind,
+        result_id: item.result_id,
+      });
+    }
+  };
+  for (const item of correlation.ambiguousResults) {
+    addResult(item);
+  }
+  for (const item of ledger.latest_observation.codex_review.results) {
+    const replay = correlation.replayed.get(
+      `${item.resource_kind}:${item.result_id}`,
+    );
+    if (
+      replay?.request_ref != null &&
+      requestIdentities.has(resourceIdentity(replay.request_ref))
+    ) {
+      addResult(item);
+    }
+  }
+  return { requests, results };
 }
 
 export async function acknowledgeCodexReviewAmbiguity(
@@ -8239,18 +8309,12 @@ export async function acknowledgeCodexReviewAmbiguity(
     const currentMs = clock();
     assertRevision(expectedRevision);
     assertSha(headSha, "head_sha");
-    assertArray(requestRefs, "request_refs", MAX_ACKNOWLEDGEMENT_REFERENCES);
+    assertArray(requestRefs, "request_refs", MAX_CLOSURE_REQUEST_REFERENCES);
     assertArray(
       ambiguousResults,
       "ambiguous_results",
-      MAX_ACKNOWLEDGEMENT_REFERENCES,
+      MAX_CLOSURE_RESULT_REFERENCES,
     );
-    if (
-      requestRefs.length + ambiguousResults.length >
-      MAX_ACKNOWLEDGEMENT_REFERENCES
-    ) {
-      fail("PUBLICATION_LIMIT_EXCEEDED", "acknowledgement exceeds 1,000 references");
-    }
     uniqueBy(requestRefs, (item) => resourceIdentity(item), "request_refs");
     uniqueBy(
       ambiguousResults,
@@ -8296,19 +8360,46 @@ export async function acknowledgeCodexReviewAmbiguity(
     }
     const timestamp = new Date(currentMs).toISOString();
     const nextRevision = ledger.revision + 1;
-    ledger.codex_review_ambiguity_acknowledgements.push({
-      acknowledgement_id: `ack-${crypto.randomBytes(16).toString("hex")}`,
-      head_sha: headSha,
-      closed_requests: clone(requestRefs),
-      closed_results: clone(ambiguousResults),
-      acknowledgement,
-      operator_label: operatorLabel,
-      rationale,
-      backing_observed_at: ledger.latest_observation.observed_at,
-      backing_observation_sha256: canonicalDigest(ledger.latest_observation),
-      acknowledged_at: timestamp,
-      publication_revision: nextRevision,
-    });
+    const backingObservedAt = ledger.latest_observation.observed_at;
+    const backingObservationSha256 = canonicalDigest(
+      ledger.latest_observation,
+    );
+    // One human approval covers the complete closure, but a stored record
+    // holds at most 1,000 references, and the demanded sets can be larger --
+    // the same overflow the supersession closure splits for. The approved
+    // sets are therefore written across as many bounded records as they
+    // need, requests first, sharing the operator inputs, backing
+    // observation, timestamp, and revision that mark them one decision.
+    let requestIndex = 0;
+    let resultIndex = 0;
+    while (
+      requestIndex < requestRefs.length ||
+      resultIndex < ambiguousResults.length
+    ) {
+      const closedRequests = requestRefs.slice(
+        requestIndex,
+        requestIndex + MAX_ACKNOWLEDGEMENT_REFERENCES,
+      );
+      requestIndex += closedRequests.length;
+      const closedResults = ambiguousResults.slice(
+        resultIndex,
+        resultIndex + MAX_ACKNOWLEDGEMENT_REFERENCES - closedRequests.length,
+      );
+      resultIndex += closedResults.length;
+      ledger.codex_review_ambiguity_acknowledgements.push({
+        acknowledgement_id: `ack-${crypto.randomBytes(16).toString("hex")}`,
+        head_sha: headSha,
+        closed_requests: clone(closedRequests),
+        closed_results: clone(closedResults),
+        acknowledgement,
+        operator_label: operatorLabel,
+        rationale,
+        backing_observed_at: backingObservedAt,
+        backing_observation_sha256: backingObservationSha256,
+        acknowledged_at: timestamp,
+        publication_revision: nextRevision,
+      });
+    }
     const derived = derivePublication(ledger);
     ledger.revision = nextRevision;
     ledger.updated_at = timestamp;
@@ -8320,6 +8411,20 @@ export async function acknowledgeCodexReviewAmbiguity(
       status: derived.status,
       head_sha: sourceAuthorization.head_sha,
     });
+    // Recording an approval must never execute the ledger. A wide enough
+    // closure would push the monotonic aggregate past the non-terminal
+    // capacity that capacityTerminal settles as INVALIDATED -- an operator
+    // acknowledgement is a replaceable caller action, so it is refused here
+    // instead, by the same predicate, before anything is written: the ledger
+    // stays mutable and readable. The honest consequence is that a pull
+    // request whose Codex evidence exceeds the aggregate budget has no
+    // acknowledgement closure path and stays GITHUB_REVIEW_UNKNOWN.
+    if (mandatoryStateExceedsNonterminalCapacity(ledger)) {
+      fail(
+        "PUBLICATION_LIMIT_EXCEEDED",
+        "this pull request's Codex evidence exceeds the ledger's aggregate capacity; the acknowledgement is refused and the ledger is unchanged",
+      );
+    }
     const storedLedger = capacityTerminal(originalLedger, ledger);
     assertLedgerSize(storedLedger);
     await revokeGate(paths);

@@ -1704,8 +1704,13 @@ Inputs:
   indeterminate, unbound, unsupported, still-open recovery, and open
   source-only baseline request
 - the exact `ambiguous_results`; each result names both `resource_kind` and
-  `result_id`. `ambiguous_results` may be empty when a baseline, unbound, or
-  unsupported request alone is blocking
+  `result_id`. Beyond the indeterminate results, the set includes every result
+  the replay attributes to a request in `request_refs`, whatever its verdict:
+  a request and its reply are one piece of evidence and close together, since
+  closing the request alone would orphan a reply whose binding-derived facts
+  existed only while the request stayed open. `ambiguous_results` may be empty
+  when an unanswered baseline, unbound, or unsupported request alone is
+  blocking
 - `acknowledgement: "NO_FURTHER_RESULTS_EXPECTED"`
 - a non-empty `operator_label` and `rationale`
 
@@ -1749,8 +1754,9 @@ request. After `MERGE_READY`, finalize the gate and call
 Under the publication lock, the server reloads the current observation,
 requires `head_sha` to match the local gate and pull request, independently
 replays association, and requires set equality between the supplied references
-and the entire request set the boundary would close and the current
-indeterminate result set, comparing requests by
+and the entire request set the boundary would close and the demanded result
+set — the current indeterminate results plus every result the replay
+attributes to a demanded request — comparing requests by
 `(resource_kind, resource_id)` and results by `(resource_kind, result_id)`. The
 request set includes every indeterminate recognized, unbound, unsupported,
 recovery, and open source-only baseline request in the current epoch.
@@ -1762,13 +1768,27 @@ record a fresh snapshot first.
 The acknowledgement closes the entire observed correlation epoch. Every
 indeterminate recognized, unbound, unsupported, recovery, and source-only
 baseline request in that epoch must be present in the directly approved
-`request_refs`. The server stores that exact set once as `closed_requests`; the
-input alias `request_refs` is not persisted, and the boundary cannot close an
-unapproved request. It likewise stores the exact supplied `ambiguous_results`
-set once as `closed_results`; the input alias is not persisted, and the
-boundary cannot close an unapproved result. These two stored arrays are the
+`request_refs`, and the demanded closure can exceed the 1,000 references one
+record holds: request references are bounded by the 5,000-entry baseline plus
+the 10,000-entry request history, and result references by the observation's
+10,000-entry result set. One approval is therefore persisted across as many
+bounded records as the sets need, split the way the supersession closure is
+and sharing one `operator_label`, `rationale`, backing observation,
+`acknowledged_at`, and `publication_revision` that mark them one human
+decision. The approved sets are stored exactly once in aggregate across those
+records' `closed_requests` and `closed_results`; the input aliases
+`request_refs` and `ambiguous_results` are not persisted, and the boundary
+cannot close an unapproved request or result. These stored arrays are the
 only nested acknowledgement references counted by the per-acknowledgement and
-monotonic aggregate limits.
+monotonic aggregate limits. A closure whose records would push the ledger past
+its non-terminal monotonic capacity is refused before anything is written —
+decided by the same predicate that settles a mandatory overflow as a capacity
+terminal, so the two cannot disagree — and the ledger stays mutable and
+readable. An acknowledgement is a replaceable caller action, never a mandatory
+write, so refusal is the correct side of the overflow taxonomy; the honest
+consequence is that a pull request whose Codex evidence exceeds the aggregate
+budget has no acknowledgement closure path and remains
+`GITHUB_REVIEW_UNKNOWN`.
 In a separate ambiguity-recovery scenario, the server-generated record is:
 
 ```json
@@ -1804,9 +1824,10 @@ In a separate ambiguity-recovery scenario, the server-generated record is:
 `operator_label` is a self-declared audit label, not authenticated identity.
 The acknowledgement asserts that the named requests will produce no later
 results; the server cannot prove that claim. It closes only the exact directly
-approved request set and named indeterminate results. It never changes a result
-to `CLEAN`, and any later unacknowledged ambiguity requires a new human
-decision.
+approved request set and named results — the indeterminate ones plus each
+demanded request's attributed reply, which closes with its request. It never
+changes a result to `CLEAN`, and any later unacknowledged ambiguity requires a
+new human decision.
 
 The same array also holds a second, server-authored record kind:
 `acknowledgement: "SUPERSEDED_BY_LATER_OWN_REQUEST"`. `record_codex_review_request`
