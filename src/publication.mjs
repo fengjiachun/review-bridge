@@ -3463,13 +3463,25 @@ function reconcileHistories(ledger, observation, nextRevision, currentMs) {
       item,
     ]),
   );
+  const closedResults = closedResultIdentities(ledger);
   for (const stored of ledger.codex_result_history) {
     const identity = `${stored.resource_kind}:${stored.result_id}`;
     const current = currentResults.get(identity);
     if (!current) {
       return { conflict: `Codex result ${identity} disappeared`, visibilityGrace: false };
     }
-    if (!sameCanonical(resultHistoryFacts(stored), observationResultFacts(current))) {
+    const storedFacts = resultHistoryFacts(stored);
+    const currentFacts = observationResultFacts(current);
+    if (closedResults.has(identity)) {
+      // Association skips a closed result, so the adapter can no longer
+      // re-derive the reviewed head its binding once pinned -- by
+      // construction, not because the comment changed. The remaining facts
+      // still pin the immutable comment itself, so an edit or deletion is
+      // detected exactly as before.
+      storedFacts.reviewed_head_sha = null;
+      currentFacts.reviewed_head_sha = null;
+    }
+    if (!sameCanonical(storedFacts, currentFacts)) {
       return { conflict: `Codex result ${identity} changed`, visibilityGrace: false };
     }
   }
@@ -8233,7 +8245,43 @@ function ambiguityClosure(ledger) {
     })),
   ];
   uniqueBy(requests, (item) => resourceIdentity(item), "ambiguity closure requests");
-  return { requests, results: correlation.ambiguousResults };
+  // A request and its answer are one piece of evidence and close together.
+  // Closing a request while the reply the replay attributes to it stays open
+  // orphans that reply: the next replay re-derives it against a candidate set
+  // that no longer holds the request it bound to, and a reply whose pinned
+  // facts depended on that binding invalidates the ledger (#103). Every
+  // result whose replayed request_ref names a demanded request therefore
+  // joins the demanded results, ambiguous or not, whatever its verdict.
+  const requestIdentities = new Set(
+    requests.map((item) => resourceIdentity(item)),
+  );
+  const resultIdentities = new Set();
+  const results = [];
+  const addResult = (item) => {
+    const identity = resourceIdentity(item, "result_id");
+    if (!resultIdentities.has(identity)) {
+      resultIdentities.add(identity);
+      results.push({
+        resource_kind: item.resource_kind,
+        result_id: item.result_id,
+      });
+    }
+  };
+  for (const item of correlation.ambiguousResults) {
+    addResult(item);
+  }
+  for (const item of ledger.latest_observation.codex_review.results) {
+    const replay = correlation.replayed.get(
+      `${item.resource_kind}:${item.result_id}`,
+    );
+    if (
+      replay?.request_ref != null &&
+      requestIdentities.has(resourceIdentity(replay.request_ref))
+    ) {
+      addResult(item);
+    }
+  }
+  return { requests, results };
 }
 
 export async function acknowledgeCodexReviewAmbiguity(

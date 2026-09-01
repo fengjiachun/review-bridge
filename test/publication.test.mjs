@@ -1318,6 +1318,135 @@ test("an acknowledgement closes an unauthenticated correlated baseline wildcard"
   assert.equal(ready.status, "MERGE_READY");
 });
 
+test("an acknowledged request takes the reply attributed to it along", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+
+  // The #103 shape: an unauthenticated wildcard forces an acknowledgement
+  // while the recognized request is already answered by a clean reply that
+  // echoes the request marker -- a reply whose pinned reviewed head exists
+  // only while its request stays open. Closing the request without the reply
+  // would orphan it and invalidate the ledger at the next snapshot.
+  const strayRequestId = `rbreq-${"1".repeat(32)}`;
+  const stray = {
+    resource_id: 90,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-90",
+    event_at: iso(startedAt - 1_000),
+    timestamp_field: "created_at",
+    body_sha256: digest(correlatedRequestBody(strayRequestId)),
+    request_id: strayRequestId,
+    actor: { id: 42, type: "User" },
+  };
+  await start(state, startedAt, baselineV2(startedAt - 100, [stray]));
+  const { requestComment, adapt, record } = codexFeeds(state);
+  const strayComment = requestComment(90, strayRequestId, startedAt - 1_000);
+  const a = await record(1, 100, startedAt + 1_000);
+  const markerClean = {
+    id: 110,
+    user: { id: 99, type: "Bot", login: "chatgpt-codex-connector[bot]" },
+    created_at: iso(startedAt + 1_100),
+    html_url: "https://github.com/owner/repo/issues/7#issuecomment-110",
+    body: [
+      "Codex Review: Didn't find any major issues.",
+      "",
+      `**Reviewed commit:** \`${state.headSha.slice(0, 12)}\``,
+      `<!-- review-bridge-request-id: ${a.requestId} -->`,
+    ].join("\n"),
+  };
+  const observedAt = startedAt + 2_000;
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 2,
+      observation: await adapt(observedAt, [strayComment, a.comment, markerClean]),
+    },
+    { clock: () => observedAt + 10 },
+  );
+  const summary = await getPublicationSummary(state.store, state.reviewId, {
+    clock: () => observedAt + 20,
+  });
+  assert.deepEqual(summary.required_request_refs, [
+    { resource_kind: "ISSUE_COMMENT", resource_id: 90 },
+    { resource_kind: "ISSUE_COMMENT", resource_id: 100 },
+  ]);
+  // The correlated clean reply is not ambiguous, but its request is demanded:
+  // the pair closes together.
+  assert.deepEqual(summary.required_ambiguous_results, [
+    { resource_kind: "ISSUE_COMMENT", result_id: 110 },
+  ]);
+
+  const acknowledged = await acknowledgeCodexReviewAmbiguity(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 3,
+      headSha: state.headSha,
+      requestRefs: summary.required_request_refs,
+      ambiguousResults: summary.required_ambiguous_results,
+      acknowledgement: "NO_FURTHER_RESULTS_EXPECTED",
+      operatorLabel: "maintainer",
+      rationale: "The wildcard forces the round closed; the pair goes together.",
+    },
+    { clock: () => observedAt + 30 },
+  );
+  assert.deepEqual(
+    acknowledged.codex_review_ambiguity_acknowledgements[0].closed_results,
+    [{ resource_kind: "ISSUE_COMMENT", result_id: 110 }],
+  );
+  assert.equal(acknowledged.status, "GITHUB_REVIEW_NOT_REQUESTED");
+
+  // The next snapshot re-derives the closed reply without its binding and
+  // must not read that as the comment having changed.
+  const nextAt = startedAt + 4_000;
+  const next = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 4,
+      observation: await adapt(nextAt, [strayComment, a.comment, markerClean]),
+    },
+    { clock: () => nextAt + 10 },
+  );
+  assert.equal(next.terminal, null);
+  assert.equal(next.status, "GITHUB_REVIEW_NOT_REQUESTED");
+
+  // And the ledger genuinely advances: a fresh request round reaches CLEAN.
+  const b = await record(5, 200, startedAt + 5_000);
+  const secondClean = {
+    id: 210,
+    user: { id: 99, type: "Bot", login: "chatgpt-codex-connector[bot]" },
+    created_at: iso(startedAt + 5_100),
+    html_url: "https://github.com/owner/repo/issues/7#issuecomment-210",
+    body: [
+      "Codex Review: Didn't find any major issues.",
+      "",
+      `**Reviewed commit:** \`${state.headSha.slice(0, 12)}\``,
+      `<!-- review-bridge-request-id: ${b.requestId} -->`,
+    ].join("\n"),
+  };
+  const finalAt = startedAt + 6_000;
+  const ready = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 6,
+      observation: await adapt(finalAt, [
+        strayComment,
+        a.comment,
+        markerClean,
+        b.comment,
+        secondClean,
+      ]),
+    },
+    { clock: () => finalAt + 10 },
+  );
+  assert.equal(ready.terminal, null);
+  assert.equal(ready.status, "MERGE_READY");
+});
+
 test("an authenticated correlated baseline request is not an ambiguity blocker", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
