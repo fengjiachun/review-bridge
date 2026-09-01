@@ -849,8 +849,8 @@ For either mode:
    `required_request_refs` and `required_ambiguous_results` sets to the human,
    and call `acknowledge_codex_review_ambiguity` only after direct approval of
    both exact sets and the `NO_FURTHER_RESULTS_EXPECTED` risk statement. If the
-   baseline contains no open legacy or unsupported request, continue without
-   an acknowledgement. A version-2 `BASELINE_CORRELATED` request with
+   baseline contains no open legacy, unsupported, or unverified correlated
+   request, continue without an acknowledgement. A version-2 `BASELINE_CORRELATED` request with
    server-verified issuance provenance from another head is not a candidate for
    a later markerless result; an unverified, same-head, or legacy unscoped
    baseline request remains a candidate. A same-head one stops being a
