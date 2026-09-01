@@ -89,7 +89,7 @@ Because the integrations come from different places, **pin every participant
 to the same release tag**: install the extension from a release, then build the
 Codex plugin and Hermes integration from a checkout of that same tag. Building
 from an arbitrary `main` checkout can pair a newer author process with an older
-reviewer against one store. The version examples below use `v0.9.0`; substitute
+reviewer against one store. The version examples below use `v0.10.0`; substitute
 the exact release you installed.
 
 ### Claude Desktop extension
@@ -124,10 +124,10 @@ installed, then build the local marketplace and register it:
 ```bash
 git clone https://github.com/fengjiachun/review-bridge.git
 cd review-bridge
-git checkout v0.9.0
+git checkout v0.10.0
 npm ci
 npm run build
-codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.9.0/codex-marketplace"
+codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.10.0/codex-marketplace"
 ```
 
 Build from a Git clone, not from the release's source archive: `scripts/build.mjs`
@@ -165,7 +165,7 @@ author/publication server to the reviewer profile, and never add a reviewer
 provider binding to the author profile.
 
 Run `npm run verify:build`, then render `__REVIEW_BRIDGE_RELEASE_PATH__` to the
-absolute, versioned `review-bridge-v0.9.0/hermes-integration` directory and
+absolute, versioned `review-bridge-v0.10.0/hermes-integration` directory and
 `__REVIEW_BRIDGE_HOME__` to one explicit absolute shared store. Merge each
 snippet's server entry into only its matching profile's top-level `mcp_servers`
 mapping.
@@ -199,7 +199,7 @@ neither the machine's other skills nor the author's guidance.
 Pin `@deepseek-ai/dsh@0.1.0-rc.6`, the release these snippets were verified
 against; its plugin configuration is a developer preview and will move. Run
 `npm run verify:build`, then render `__REVIEW_BRIDGE_RELEASE_PATH__` to the
-absolute, versioned `review-bridge-v0.9.0/deepseek-harness` directory and
+absolute, versioned `review-bridge-v0.10.0/deepseek-harness` directory and
 `__REVIEW_BRIDGE_HOME__` to one explicit absolute shared store. Append each
 snippet's entries to only its matching profile's `cordis.patch.yml`. The
 packaged `deepseek-harness/README.md` gives the complete install, profile tool
@@ -213,12 +213,12 @@ decides from the ledger `open_review` serves and re-runs its own verification.
 
 ### Build output
 
-`npm run build` writes everything under `dist/review-bridge-v0.9.0/`:
+`npm run build` writes everything under `dist/review-bridge-v0.10.0/`:
 
 - `codex-marketplace/` — local Codex marketplace containing the Review Bridge
   plugin, author MCP server, and `CODEX_TASK` reviewer MCP server.
-- `review-bridge-reviewer-v0.9.0.mcpb` — MCP Bundle for Claude Desktop.
-- `review-bridge-reviewer-v0.9.0.dxt` — compatibility copy of the same bundle.
+- `review-bridge-reviewer-v0.10.0.mcpb` — MCP Bundle for Claude Desktop.
+- `review-bridge-reviewer-v0.10.0.dxt` — compatibility copy of the same bundle.
 - `claude-extension-source/` — inspectable source of the Claude extension.
 - `hermes-integration/` — Hermes profile MCP config snippets (separate author
   and reviewer), the Review Bridge-owned Hermes reviewer skill, and
@@ -228,7 +228,7 @@ decides from the ledger `open_review` serves and re-runs its own verification.
   and reviewer), the Review Bridge-owned DeepSeek Harness reviewer skill, and
   install/upgrade/isolation documentation, with the same packaged server
   runtime.
-- `review-bridge-source-v0.9.0.zip` — source archive of the built commit, for
+- `review-bridge-source-v0.10.0.zip` — source archive of the built commit, for
   inspection and provenance. It carries no Git metadata, so it cannot be used to
   run the build itself.
 - `SHA256SUMS.txt` — checksums for the bundle, compatibility copy, and source
@@ -686,7 +686,7 @@ return the legacy exact body without an ID. For a fresh snapshot, run the
 packaged read-only collector against the review ID:
 
 ```bash
-node dist/review-bridge-v0.9.0/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id>
+node dist/review-bridge-v0.10.0/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id>
 ```
 
 Run that command from the repository root after `npm run build`. Inside an
