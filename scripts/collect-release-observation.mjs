@@ -302,36 +302,36 @@ async function main() {
         release == null
           ? { exists: false }
           : (() => {
-              const fetched = release.assets.map((asset) => ({
-                name: asset.name,
-                size: asset.size,
-                bytes: ghBytes(
-                  `/repos/${nameWithOwner}/releases/assets/${asset.id}`,
-                  repositoryPath,
-                ),
-              }));
-              // The manifest's text is a published fact the verifier judges
-              // payload assets against, so it travels in the observation
+              // Each asset is hashed as it arrives, so only one download is
+              // ever held at a time; the manifest alone keeps its bytes,
+              // because its text is a published fact the verifier judges
+              // payload assets against and it travels in the observation
               // rather than being re-fetched at verification time.
-              const manifest = fetched.find(
-                (asset) => asset.name === CHECKSUM_MANIFEST_NAME,
-              );
+              let manifestText = null;
+              const assets = release.assets
+                .map((asset) => {
+                  const bytes = ghBytes(
+                    `/repos/${nameWithOwner}/releases/assets/${asset.id}`,
+                    repositoryPath,
+                  );
+                  if (asset.name === CHECKSUM_MANIFEST_NAME) {
+                    manifestText = bytes.toString("utf8");
+                  }
+                  return {
+                    name: asset.name,
+                    size: asset.size,
+                    sha256: sha256(bytes),
+                  };
+                })
+                .sort((left, right) => left.name.localeCompare(right.name));
               return {
                 exists: true,
                 id: release.id,
                 published_at: release.published_at,
-                ...(manifest == null
+                ...(manifestText == null
                   ? {}
-                  : {
-                      checksum_manifest_text: manifest.bytes.toString("utf8"),
-                    }),
-                assets: fetched
-                  .map((asset) => ({
-                    name: asset.name,
-                    size: asset.size,
-                    sha256: sha256(asset.bytes),
-                  }))
-                  .sort((left, right) => left.name.localeCompare(right.name)),
+                  : { checksum_manifest_text: manifestText }),
+                assets,
               };
             })(),
     };
