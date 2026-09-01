@@ -49,7 +49,9 @@ const MAX_ACKNOWLEDGEMENT_REFERENCES = 1_000;
 // immutable baseline (5,000 evidence entries) plus the request history (a
 // 10,000-entry monotonic array), and ambiguous-result references from the
 // observation's result set (10,000 entries). The input caps mirror those
-// bounds; storage splits the approved sets into records bounded above.
+// bounds; storage splits the approved sets into records bounded above. They
+// are input-shape bounds, not an acceptance promise: whether a closure fits
+// is decided by the aggregate-capacity precheck at write time.
 const MAX_CLOSURE_REQUEST_REFERENCES = 15_000;
 const MAX_CLOSURE_RESULT_REFERENCES = 10_000;
 const MAX_AGE_MS = 5 * 60 * 1000;
@@ -8355,6 +8357,20 @@ export async function acknowledgeCodexReviewAmbiguity(
       status: derived.status,
       head_sha: sourceAuthorization.head_sha,
     });
+    // Recording an approval must never execute the ledger. A wide enough
+    // closure would push the monotonic aggregate past the non-terminal
+    // capacity that capacityTerminal settles as INVALIDATED -- an operator
+    // acknowledgement is a replaceable caller action, so it is refused here
+    // instead, by the same predicate, before anything is written: the ledger
+    // stays mutable and readable. The honest consequence is that a pull
+    // request whose Codex evidence exceeds the aggregate budget has no
+    // acknowledgement closure path and stays GITHUB_REVIEW_UNKNOWN.
+    if (mandatoryStateExceedsNonterminalCapacity(ledger)) {
+      fail(
+        "PUBLICATION_LIMIT_EXCEEDED",
+        "this pull request's Codex evidence exceeds the ledger's aggregate capacity; the acknowledgement is refused and the ledger is unchanged",
+      );
+    }
     const storedLedger = capacityTerminal(originalLedger, ledger);
     assertLedgerSize(storedLedger);
     await revokeGate(paths);

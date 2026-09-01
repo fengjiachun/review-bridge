@@ -1601,6 +1601,104 @@ test("an operator approval wider than one acknowledgement is stored as bounded r
   assert.equal(acknowledged.status, "GITHUB_REVIEW_NOT_REQUESTED");
 });
 
+test("an acknowledgement the ledger cannot hold is refused, not settled terminal", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const requests = Array.from({ length: 1_200 }, (_, index) => {
+    const requestId = `rbreq-${index.toString(16).padStart(32, "0")}`;
+    return {
+      resource_id: 10_000 + index,
+      resource_kind: "ISSUE_COMMENT",
+      url: `https://github.com/owner/repo/issues/7#issuecomment-${10_000 + index}`,
+      event_at: iso(startedAt - 1_000),
+      timestamp_field: "created_at",
+      body_sha256: digest(correlatedRequestBody(requestId)),
+      request_id: requestId,
+      actor: { id: 7, type: "User" },
+    };
+  });
+  const started = await start(state, startedAt, baselineV2(startedAt - 100, requests));
+
+  // 999 prior acknowledgement rounds already stand, so the two records this
+  // closure needs would exceed the 1,000-record capacity that
+  // capacityTerminal would otherwise settle as a terminal INVALIDATED.
+  // Reaching that by running the rounds is not the point; the ledger shape
+  // is, so it is written directly.
+  started.codex_review_ambiguity_acknowledgements = Array.from(
+    { length: 999 },
+    (_, index) => ({
+      acknowledgement_id: `ack-${index.toString(16).padStart(32, "0")}`,
+      head_sha: state.headSha,
+      closed_requests: [
+        { resource_kind: "ISSUE_COMMENT", resource_id: 900_000 + index },
+      ],
+      closed_results: [],
+      acknowledgement: "NO_FURTHER_RESULTS_EXPECTED",
+      operator_label: "padding",
+      rationale: "padding",
+      backing_observed_at: iso(startedAt - 50),
+      backing_observation_sha256: digest("padding"),
+      acknowledged_at: iso(startedAt - 50),
+      publication_revision: 1,
+    }),
+  );
+  await atomicWriteCanonicalJson(
+    path.join(state.store, "reviews", state.reviewId, "publication.json"),
+    started,
+  );
+
+  const observedAt = startedAt + 1_000;
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      observation: observationV2(
+        {
+          at: observedAt,
+          baseSha: state.baseSha,
+          headSha: state.headSha,
+          requestId: null,
+          requestAt: startedAt,
+          withResult: false,
+          baselineRequests: requests,
+        },
+        null,
+      ),
+    },
+    { clock: () => observedAt + 10 },
+  );
+  const summary = await getPublicationSummary(state.store, state.reviewId, {
+    clock: () => observedAt + 20,
+  });
+  assert.equal(summary.required_request_refs.length, 1_200);
+  await assert.rejects(
+    acknowledgeCodexReviewAmbiguity(
+      state.store,
+      state.reviewId,
+      {
+        expectedRevision: 2,
+        headSha: state.headSha,
+        requestRefs: summary.required_request_refs,
+        ambiguousResults: summary.required_ambiguous_results,
+        acknowledgement: "NO_FURTHER_RESULTS_EXPECTED",
+        operatorLabel: "maintainer",
+        rationale: "None of the preexisting requests will answer.",
+      },
+      { clock: () => observedAt + 30 },
+    ),
+    /exceeds the ledger's aggregate capacity/,
+  );
+
+  // Refused, not executed: the ledger is unchanged, mutable, and readable.
+  const after = await getPublication(state.store, state.reviewId);
+  assert.equal(after.revision, 2);
+  assert.equal(after.terminal, null);
+  assert.equal(after.codex_review_ambiguity_acknowledgements.length, 999);
+  assert.equal(after.status, "GITHUB_REVIEW_UNKNOWN");
+});
+
 test("acknowledgement inputs are bounded by what a closure can demand", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

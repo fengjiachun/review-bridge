@@ -1774,7 +1774,15 @@ records' `closed_requests` and `closed_results`; the input aliases
 `request_refs` and `ambiguous_results` are not persisted, and the boundary
 cannot close an unapproved request or result. These stored arrays are the
 only nested acknowledgement references counted by the per-acknowledgement and
-monotonic aggregate limits.
+monotonic aggregate limits. A closure whose records would push the ledger past
+its non-terminal monotonic capacity is refused before anything is written —
+decided by the same predicate that settles a mandatory overflow as a capacity
+terminal, so the two cannot disagree — and the ledger stays mutable and
+readable. An acknowledgement is a replaceable caller action, never a mandatory
+write, so refusal is the correct side of the overflow taxonomy; the honest
+consequence is that a pull request whose Codex evidence exceeds the aggregate
+budget has no acknowledgement closure path and remains
+`GITHUB_REVIEW_UNKNOWN`.
 In a separate ambiguity-recovery scenario, the server-generated record is:
 
 ```json
