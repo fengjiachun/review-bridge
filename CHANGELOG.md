@@ -120,6 +120,18 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Fixed
 
+- Let an acknowledgement close an unauthenticated `BASELINE_CORRELATED`
+  request (#99). Such a request — a well-formed `rbreq` body no prior ledger of
+  the chain could vouch for — carries no head, so every markerless clean reply
+  matched it forever, while `activeCorrelation` excluded the whole
+  `BASELINE_CORRELATED` class from `openBaseline`, keeping the wildcard out of
+  `required_request_refs`: the operator could only acknowledge the symptom each
+  round, never the cause. The exclusion now covers only proven requests
+  (issuance present), which stay head-scoped, compatibility-filtered, and
+  supersession-managed exactly as before; an unproven one blocks like any
+  other baseline request, appears in `required_request_refs`, and one
+  `acknowledge_codex_review_ambiguity` closes it through the existing
+  channels, after which markerless replies bind again. (#102)
 - Supersede the ledger's own prior Codex requests when it records a new one
   (#77). A repair round republished at an unchanged head left the previous
   publication's request open at that same head, so a clean Codex reply — which
