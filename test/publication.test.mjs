@@ -1726,7 +1726,7 @@ test("version 2 ignores a delayed result correlated to a baseline request", asyn
     request_id: oldRequestId,
   });
 
-  const ready = await recordGithubSnapshot(
+  const recorded = await recordGithubSnapshot(
     state.store,
     state.reviewId,
     {
@@ -1735,7 +1735,25 @@ test("version 2 ignores a delayed result correlated to a baseline request", asyn
     },
     { clock: () => observedAt + 10 },
   );
-  assert.equal(ready.status, "MERGE_READY");
+  // The delayed result is retained as audit evidence and satisfies nothing.
+  // The unproven baseline request it answered still has no head -- it keeps
+  // ambiguating every later markerless reply -- so since #99 it blocks like
+  // any other baseline request until the operator closes it, instead of the
+  // ledger publishing over the open wildcard.
+  const delayed = recorded.latest_observation.codex_review.results.find(
+    (item) => item.result_id === 91,
+  );
+  assert.equal(delayed.association, "BASELINE_LATE_RESULT");
+  assert.equal(delayed.verdict, "UNKNOWN");
+  assert.equal(recorded.status, "GITHUB_REVIEW_UNKNOWN");
+  const summary = await getPublicationSummary(state.store, state.reviewId, {
+    clock: () => observedAt + 20,
+  });
+  assert.equal(summary.next_action, "ACKNOWLEDGE_CODEX_REVIEW_AMBIGUITY");
+  assert.deepEqual(summary.required_request_refs, [
+    { resource_kind: "ISSUE_COMMENT", resource_id: 90 },
+    { resource_kind: "ISSUE_COMMENT", resource_id: 100 },
+  ]);
 });
 
 test("version 2 rejects a forged correlated baseline classification", async (t) => {
