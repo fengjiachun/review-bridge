@@ -131,7 +131,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   supersession-managed exactly as before; an unproven one blocks like any
   other baseline request, appears in `required_request_refs`, and one
   `acknowledge_codex_review_ambiguity` closes it through the existing
-  channels, after which markerless replies bind again. (#102)
+  channels, after which markerless replies bind again. The acknowledgement
+  itself no longer caps its input at the 1,000 references one stored record
+  holds — a bound the demanded closure can exceed, wedging the publication
+  line for good: the input caps now mirror what the closure's sources can
+  hold, and one approval is stored across as many bounded records as the
+  sets need, split the way the supersession closure already is and sharing
+  the operator inputs, backing observation, timestamp, and revision that
+  mark them one decision. (#102)
 - Supersede the ledger's own prior Codex requests when it records a new one
   (#77). A repair round republished at an unchanged head left the previous
   publication's request open at that same head, so a clean Codex reply — which
