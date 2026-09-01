@@ -25,7 +25,7 @@ const projectRoot = path.resolve(
 );
 const hermesTemplates = path.join(projectRoot, "templates", "hermes");
 const serverPath = path.join(projectRoot, "src", "server.mjs");
-const RELEASE_VERSION = "0.9.0";
+const RELEASE_VERSION = "0.10.0";
 const RELEASE_PATH_PLACEHOLDER = "__REVIEW_BRIDGE_RELEASE_PATH__";
 const STORE_PLACEHOLDER = "__REVIEW_BRIDGE_HOME__";
 
@@ -785,7 +785,7 @@ test("Hermes README documents profile separation, exact release pinning, absolut
   assert.match(readme, /one exact Review Bridge (release|build|version)/i);
   assert.match(readme, /absolute path/i);
   assert.match(readme, /__REVIEW_BRIDGE_RELEASE_PATH__/);
-  assert.match(readme, /v0\.9\.0/);
+  assert.match(readme, /v0\.10\.0/);
   assert.match(readme, /install/i);
   assert.match(readme, /upgrade/i);
   assert.match(readme, /verify/i);
@@ -796,7 +796,7 @@ test("Hermes README documents profile separation, exact release pinning, absolut
   assert.match(readme, /author\/publication side/i);
 });
 
-test("Hermes install and release artifacts use the 0.9.0 release identity", async () => {
+test("Hermes install and release artifacts use the 0.10.0 release identity", async () => {
   const [
     packageJson,
     packageLock,
@@ -839,7 +839,7 @@ test("Hermes install and release artifacts use the 0.9.0 release identity", asyn
 
   // v0.5.0 was released before Hermes support existed, so it cannot be the
   // tag or output path used by the current Hermes installation instructions.
-  assert.match(hermesReadme, /exact `v0\.9\.0` tag/);
+  assert.match(hermesReadme, /exact `v0\.10\.0` tag/);
 
   const rootPackage = JSON.parse(packageJson);
   const lock = JSON.parse(packageLock);
@@ -848,7 +848,7 @@ test("Hermes install and release artifacts use the 0.9.0 release identity", asyn
   assert.equal(lock.packages[""].version, RELEASE_VERSION);
   assert.equal(JSON.parse(claudeManifest).version, RELEASE_VERSION);
   assert.equal(JSON.parse(codexManifest).version, RELEASE_VERSION);
-  assert.match(server, /version: "0\.9\.0"/);
+  assert.match(server, /version: "0\.10\.0"/);
 
   for (const currentReleaseText of [
     build,
@@ -866,25 +866,25 @@ test("Hermes install and release artifacts use the 0.9.0 release identity", asyn
 
   assert.match(build, /releaseVersion/);
   assert.match(verifyBuild, /releaseVersion/);
-  assert.match(rootReadme, /v0\.9\.0/);
-  assert.match(hermesReadme, /v0\.9\.0/);
-  assert.match(hermesAuthorConfig, /v0\.9\.0/);
-  assert.match(hermesReviewerConfig, /v0\.9\.0/);
-  assert.match(deepseekReadme, /exact `v0\.9\.0` tag/);
-  assert.match(deepseekAuthorPatch, /v0\.9\.0/);
-  assert.match(deepseekReviewerPatch, /v0\.9\.0/);
+  assert.match(rootReadme, /v0\.10\.0/);
+  assert.match(hermesReadme, /v0\.10\.0/);
+  assert.match(hermesAuthorConfig, /v0\.10\.0/);
+  assert.match(hermesReviewerConfig, /v0\.10\.0/);
+  assert.match(deepseekReadme, /exact `v0\.10\.0` tag/);
+  assert.match(deepseekAuthorPatch, /v0\.10\.0/);
+  assert.match(deepseekReviewerPatch, /v0\.10\.0/);
   // The DeepSeek Harness plugin API is a developer preview, so the pinned
   // runtime release belongs to this identity too.
   assert.match(deepseekReadme, /@deepseek-ai\/dsh@0\.1\.0-rc\.6/);
 
   const currentChangelog = changelog.match(
-    /^## 0\.9\.0[^\n]*\n(?<body>[\s\S]*?)(?=^## )/m,
+    /^## 0\.10\.0[^\n]*\n(?<body>[\s\S]*?)(?=^## )/m,
   );
   const previousChangelog = changelog.match(
     /^## 0\.5\.0[^\n]*\n(?<body>[\s\S]*?)(?=^## )/m,
   );
-  assert.ok(currentChangelog, "the 0.9.0 changelog entry is missing");
-  assert.match(currentChangelog.groups.body, /DEEPSEEK_HARNESS/);
+  assert.ok(currentChangelog, "the 0.10.0 changelog entry is missing");
+  assert.match(currentChangelog.groups.body, /erratum/);
   assert.ok(previousChangelog, "the historical 0.5.0 changelog entry is missing");
   assert.doesNotMatch(previousChangelog.groups.body, /HERMES|hermes-integration/);
 });
