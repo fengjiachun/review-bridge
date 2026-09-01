@@ -146,10 +146,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   and stays `GITHUB_REVIEW_UNKNOWN`, mutable and readable. The demanded
   closure also closes each request together with the reply the replay
   attributes to it, whatever its verdict, and the snapshot reconciliation
-  masks the one binding-derived fact — `reviewed_head_sha` — when comparing
-  a closed result, so acknowledging a round whose reply had already bound
-  no longer orphans that reply and invalidates the ledger at the next
-  snapshot (#103). (#102)
+  masks the one binding-derived fact — a clean comment's
+  `reviewed_head_sha`, the only kind whose head exists solely through its
+  binding — when comparing a closed result, so acknowledging a round whose
+  reply had already bound no longer orphans that reply and invalidates the
+  ledger at the next snapshot; a closed formal review keeps the full
+  comparison, so one re-pointed at another commit is still detected
+  (#103). (#102)
 - Supersede the ledger's own prior Codex requests when it records a new one
   (#77). A repair round republished at an unchanged head left the previous
   publication's request open at that same head, so a clean Codex reply — which
