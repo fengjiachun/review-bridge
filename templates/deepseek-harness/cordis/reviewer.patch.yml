@@ -2,10 +2,10 @@
 #
 # Merge these entries into the reviewer profile's `cordis.patch.yml`, which is
 # a top-level YAML array of loader patch entries. Render the placeholder path
-# within one exact Review Bridge release/build (v0.9.0) before use:
+# within one exact Review Bridge release/build (v0.10.0) before use:
 #   - __REVIEW_BRIDGE_RELEASE_PATH__ -> absolute path of the versioned
 #     deepseek-harness directory, for example
-#     /opt/review-bridge-v0.9.0/deepseek-harness
+#     /opt/review-bridge-v0.10.0/deepseek-harness
 #   - __REVIEW_BRIDGE_HOME__        -> absolute path of the shared store used
 #     by every Review Bridge participant (same value as the author profile)
 #

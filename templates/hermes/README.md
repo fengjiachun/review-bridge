@@ -1,7 +1,7 @@
 # Review Bridge for Hermes
 
 This directory is the self-contained Hermes integration for Review Bridge
-v0.9.0. It contains the packaged server runtime, separate author and reviewer
+v0.10.0. It contains the packaged server runtime, separate author and reviewer
 MCP snippets, and a Review Bridge-owned reviewer skill. The reviewer snippet
 runs `node <absolute-versioned-path>/server/server.mjs --role reviewer
 --reviewer-provider HERMES`; the author snippet runs the same exact server with
@@ -26,16 +26,16 @@ tools as that surface evolves.
 
 ## Install
 
-1. Check out the exact `v0.9.0` tag, run `npm ci`, `npm test`, `npm run build`,
+1. Check out the exact `v0.10.0` tag, run `npm ci`, `npm test`, `npm run build`,
    and `npm run verify:build`. Keep the resulting
-   `dist/review-bridge-v0.9.0/hermes-integration` directory in place.
+   `dist/review-bridge-v0.10.0/hermes-integration` directory in place.
 2. Create dedicated author and reviewer profiles. Do not clone a profile after
    installing either Review Bridge MCP entry, because that would copy the
    opposite role's server into the new profile.
 3. Render both snippets before installing them:
    - `__REVIEW_BRIDGE_RELEASE_PATH__` → the absolute path of the versioned
      `hermes-integration` directory, ending in
-     `review-bridge-v0.9.0/hermes-integration`.
+     `review-bridge-v0.10.0/hermes-integration`.
    - `__REVIEW_BRIDGE_HOME__` → the absolute path of the shared store used by
      every Review Bridge participant.
 4. Merge the server entry from `mcp/reviewer.config.yaml` into the reviewer
@@ -69,7 +69,7 @@ search_snapshot submit_review submit_rereview
 The reviewer profile must have no Review Bridge author/publication server or
 tools. The author profile must have no Review Bridge reviewer server and must
 retain the full author tool surface. Both rendered snippets must contain the
-same absolute `REVIEW_BRIDGE_HOME` and the same absolute v0.9.0 integration
+same absolute `REVIEW_BRIDGE_HOME` and the same absolute v0.10.0 integration
 path.
 
 ## Review

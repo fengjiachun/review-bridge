@@ -7,11 +7,11 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.10.0 - 2026-09-01
 
 ### Added
 
-- Add append-only errata against the immutable review scope (#78). A new
+- Add append-only errata against the immutable review scope issue #78. A new
   author action `append_review_erratum` appends `{sequence, at, round, text}`
   to the review ledger when a factual claim in the requirement goes stale
   mid-review; the snapshot and requirement text stay untouched, because
@@ -31,7 +31,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   exactly v1. Advisory reviews refuse the action: there is no author loop.
   Entries are bounded like author responses, at 20k characters each and at
   most 100 per review. (#100)
-- Add a mechanical reachability walk over `required_inputs` (#92). A
+- Add a mechanical reachability walk over `required_inputs` issue #92. A
   declaration-driven test drives workflows into the states real transitions
   produce, reads `required_inputs` from the real read surfaces, and executes
   the declared calls the way a driver that trusts the declaration would:
@@ -121,7 +121,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 ### Fixed
 
 - Let an acknowledgement close an unauthenticated `BASELINE_CORRELATED`
-  request (#99). Such a request — a well-formed `rbreq` body no prior ledger of
+  request issue #99. Such a request — a well-formed `rbreq` body no prior ledger of
   the chain could vouch for — carries no head, so every markerless clean reply
   matched it forever, while `activeCorrelation` excluded the whole
   `BASELINE_CORRELATED` class from `openBaseline`, keeping the wildcard out of
@@ -152,9 +152,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   reply had already bound no longer orphans that reply and invalidates the
   ledger at the next snapshot; a closed formal review keeps the full
   comparison, so one re-pointed at another commit is still detected
-  (#103). (#102)
+  issue #103. (#102)
 - Supersede the ledger's own prior Codex requests when it records a new one
-  (#77). A repair round republished at an unchanged head left the previous
+  issue #77. A repair round republished at an unchanged head left the previous
   publication's request open at that same head, so a clean Codex reply — which
   carries no `rbreq` marker and binds by its `Reviewed commit:` prefix — matched
   both requests and evaluated as `GITHUB_REVIEW_UNKNOWN`, costing an
@@ -183,7 +183,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   and revision, rather than refusing the mutation after the request comment is
   already posted. (#98)
 - Refuse at start a publication baseline whose object shape no snapshot can
-  reproduce (#94). The snapshot side pins baseline actors to exactly
+  reproduce issue #94. The snapshot side pins baseline actors to exactly
   `{id, type}`, but `startPublication` accepted an actor carrying a `login` —
   the shape raw GitHub JSON hands a driver — and the mismatch surfaced only at
   the first snapshot, as a terminal `immutable Codex baseline object
@@ -202,7 +202,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   remains unchecked at start is what the projection copies out of the live
   GitHub object, which the first snapshot is there to compare. (#97)
 - Keep declaring the cut a split acknowledged among the findings still owes
-  (#92). Acknowledging a change-size warning with `split` at
+  issue #92. Acknowledging a change-size warning with `split` at
   `ADDRESS_LOCAL_FINDINGS` cleared the crossing, so the summary fell back to
   the plain declaration and sent a driver at an advance the unexecuted split
   refuses — the mirror, one arm over, of the `PREPARE_LOCAL_REVIEW` case
@@ -221,7 +221,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   comment nobody in the loop wrote or read. The baseline-mode adapter now
   skips exactly the objects the snapshot mode reports under `app_notices`,
   where every snapshot keeps reporting the live object without blocking a
-  gate. (#86) (#93)
+  gate. issue #86 (#93)
 - Exclude the expected Codex actor from review-request classification in both
   adapter modes. The GitHub Codex App posts and updates a review-summary
   comment whose "About Codex" section quotes `@codex review`, and the trigger
@@ -236,6 +236,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   still runs first, so a marker-carrying comment that does match a verdict
   format stays that verdict, and an unrecognized shape without a known marker
   keeps failing closed. (#87)
+
+### Internal
+
+- (#69) RFC 0004 document merged ahead of its implementation.
+- (#85) Pause reason code enum correction.
+- (#89) The review-ran-ahead wedge fix for issue #84.
 
 ## 0.9.0 - 2026-08-14
 
