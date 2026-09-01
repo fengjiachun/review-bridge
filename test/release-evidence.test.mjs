@@ -258,38 +258,84 @@ test("ASSET_MANIFEST_ABSENT when the release publishes no checksum manifest", ()
   assert.deepEqual(codes(result), ["ASSET_MANIFEST_ABSENT"]);
 });
 
-test("ASSET_MANIFEST_MISMATCH when the published manifest is not the local one", () => {
+test("an unreproducible asset differing from the local build still passes", () => {
+  // The packaged bundle cannot be rebuilt byte-for-byte, so only the
+  // published manifest vouches for it; the local build's differing bytes are
+  // not a failure (#74's ruling of 2026-09-01).
+  const bundle = "review-bridge-reviewer-v1.1.0.mcpb";
+  const publishedManifest = `${MANIFEST}${"4".repeat(64)}  ${bundle}\n`;
+  const collected = observation();
+  collected.release.checksum_manifest_text = publishedManifest;
+  collected.release.assets[0].sha256 = sha256(publishedManifest);
+  collected.release.assets.push({
+    name: bundle,
+    size: 11,
+    sha256: "4".repeat(64),
+  });
+  const result = verifyRelease(
+    input({
+      observation: collected,
+      localManifest: `${MANIFEST}${"5".repeat(64)}  ${bundle}\n`,
+    }),
+  );
+  assert.deepEqual(codes(result), []);
+  assert.equal(result.status, "PASSED");
+});
+
+test("ASSET_REPRODUCIBLE_MISMATCH when the source archive is not the built one", () => {
   const result = verifyRelease(
     input({
       localManifest: `${"2".repeat(64)}  review-bridge-source-v1.1.0.zip\n`,
     }),
   );
-  assert.deepEqual(codes(result).sort(), [
-    "ASSET_DIGEST_MISMATCH",
-    "ASSET_MANIFEST_MISMATCH",
-  ]);
+  assert.deepEqual(codes(result), ["ASSET_REPRODUCIBLE_MISMATCH"]);
+});
+
+test("ASSET_REPRODUCIBLE_UNBUILT when the local build produced no source archive", () => {
+  const result = verifyRelease(
+    input({
+      localManifest: `${"2".repeat(64)}  something-else.zip\n`,
+    }),
+  );
+  assert.deepEqual(codes(result), ["ASSET_REPRODUCIBLE_UNBUILT"]);
+});
+
+test("ASSET_MANIFEST_UNOBSERVED when the observation lacks the manifest text", () => {
+  const collected = observation();
+  delete collected.release.checksum_manifest_text;
+  const result = verifyRelease(input({ observation: collected }));
+  assert.deepEqual(codes(result), ["ASSET_MANIFEST_UNOBSERVED"]);
+  assert.match(result.failures[0].message, /re-collect/);
+});
+
+test("ASSET_MANIFEST_UNOBSERVED when the captured text is not the published manifest", () => {
+  const collected = observation();
+  collected.release.checksum_manifest_text = `${"6".repeat(64)}  review-bridge-source-v1.1.0.zip\n`;
+  const result = verifyRelease(input({ observation: collected }));
+  assert.deepEqual(codes(result), ["ASSET_MANIFEST_UNOBSERVED"]);
+});
+
+test("ASSET_MANIFEST_MALFORMED when the published manifest cannot be read", () => {
+  const collected = observation();
+  collected.release.checksum_manifest_text = "not-a-checksum-line\n";
+  collected.release.assets[0].sha256 = sha256("not-a-checksum-line\n");
+  const result = verifyRelease(input({ observation: collected }));
+  assert.deepEqual(codes(result), ["ASSET_MANIFEST_MALFORMED"]);
+  assert.match(result.failures[0].message, /published/);
 });
 
 test("ASSET_MANIFEST_MALFORMED when the local manifest cannot be read", () => {
   const result = verifyRelease(input({ localManifest: "not-a-checksum-line\n" }));
-  assert.deepEqual(codes(result).sort(), [
-    "ASSET_MANIFEST_MALFORMED",
-    "ASSET_MANIFEST_MISMATCH",
-  ]);
-  assert.match(
-    result.failures.find((entry) => entry.code === "ASSET_MANIFEST_MALFORMED")
-      .message,
-    /not-a-checksum-line/,
-  );
+  assert.deepEqual(codes(result), ["ASSET_MANIFEST_MALFORMED"]);
+  assert.match(result.failures[0].message, /local build.*not-a-checksum-line/);
 });
 
-test("ASSET_MISSING when the manifest lists an unpublished asset", () => {
+test("ASSET_MISSING when the published manifest lists an unpublished asset", () => {
   const manifest = `${MANIFEST}${"3".repeat(64)}  review-bridge-reviewer-v1.1.0.mcpb\n`;
   const collected = observation();
+  collected.release.checksum_manifest_text = manifest;
   collected.release.assets[0].sha256 = sha256(manifest);
-  const result = verifyRelease(
-    input({ observation: collected, localManifest: manifest }),
-  );
+  const result = verifyRelease(input({ observation: collected }));
   assert.deepEqual(codes(result), ["ASSET_MISSING"]);
 });
 
@@ -304,11 +350,16 @@ test("ASSET_UNEXPECTED when the release publishes an asset the manifest omits", 
   assert.deepEqual(codes(result), ["ASSET_UNEXPECTED"]);
 });
 
-test("ASSET_DIGEST_MISMATCH when a published asset is not the built one", () => {
+test("ASSET_DIGEST_MISMATCH when a published asset is not the manifest's", () => {
   const collected = observation();
   collected.release.assets[1].sha256 = "5".repeat(64);
   const result = verifyRelease(input({ observation: collected }));
-  assert.deepEqual(codes(result), ["ASSET_DIGEST_MISMATCH"]);
+  // The corrupted asset is also the reproducible source archive, so the
+  // local-build comparison names it a second time.
+  assert.deepEqual(codes(result).sort(), [
+    "ASSET_DIGEST_MISMATCH",
+    "ASSET_REPRODUCIBLE_MISMATCH",
+  ]);
 });
 
 test("MERGE_INTEGRITY_MISMATCH when the merged head is not the attested head", () => {

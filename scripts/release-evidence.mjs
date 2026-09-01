@@ -303,11 +303,23 @@ export function parseChecksumManifest(text) {
 }
 
 /**
- * The published assets against a local `verify:build` output for the same tag.
- * The manifest is validated by content first and then excluded from the
- * payload set, because a manifest cannot list a stable checksum of itself.
+ * The published assets against the published checksum manifest, plus byte
+ * equality with a local `verify:build` output for the reproducible assets.
+ *
+ * The manifest asset is validated against the observation's captured text and
+ * then excluded from the payload set, because a manifest cannot list a stable
+ * checksum of itself. Every payload asset must agree with the published
+ * manifest in both directions and by digest, so a swapped, corrupted,
+ * missing, or unexplained asset still fails by name. Byte equality with the
+ * local rebuild is demanded only where a rebuild can produce the same bytes
+ * (#74's ruling of 2026-09-01).
  */
-export function verifyAssets(published, localManifestText) {
+export function verifyAssets(
+  published,
+  publishedManifestText,
+  localManifestText,
+  version,
+) {
   const failures = [];
   const manifest = published.find(
     (asset) => asset.name === CHECKSUM_MANIFEST_NAME,
@@ -323,26 +335,38 @@ export function verifyAssets(published, localManifestText) {
       assets: assetDigests(published),
     };
   }
-  if (manifest.sha256 !== sha256(localManifestText)) {
-    failures.push(
-      failure(
-        "ASSET_MANIFEST_MISMATCH",
-        `published ${CHECKSUM_MANIFEST_NAME} differs from the local build's`,
-      ),
-    );
+  if (publishedManifestText == null) {
+    // An observation from before the manifest text was captured cannot answer
+    // what the publisher claimed, and re-collection is cheap and read-only.
+    return {
+      failures: [
+        failure(
+          "ASSET_MANIFEST_UNOBSERVED",
+          `the observation carries no ${CHECKSUM_MANIFEST_NAME} content; re-collect the release observation`,
+        ),
+      ],
+      assets: assetDigests(published),
+    };
+  }
+  if (sha256(publishedManifestText) !== manifest.sha256) {
+    return {
+      failures: [
+        failure(
+          "ASSET_MANIFEST_UNOBSERVED",
+          `the observation's ${CHECKSUM_MANIFEST_NAME} content does not match the published manifest digest; re-collect the release observation`,
+        ),
+      ],
+      assets: assetDigests(published),
+    };
   }
   let expected;
   try {
-    expected = parseChecksumManifest(localManifestText);
+    expected = parseChecksumManifest(publishedManifestText);
   } catch (error) {
-    // A manifest whose format cannot be read leaves the payload comparison
-    // with nothing to compare against, and the report is the only place the
-    // operator learns why. Naming it keeps it in the structured failure list
-    // instead of leaving the caller a stack trace.
     failures.push(
       failure(
         "ASSET_MANIFEST_MALFORMED",
-        `the local build's ${CHECKSUM_MANIFEST_NAME} is unreadable: ${error.message}`,
+        `the published ${CHECKSUM_MANIFEST_NAME} is unreadable: ${error.message}`,
       ),
     );
     return { failures, assets: assetDigests(published) };
@@ -379,7 +403,64 @@ export function verifyAssets(published, localManifestText) {
       );
     }
   }
+  let local;
+  try {
+    local = parseChecksumManifest(localManifestText);
+  } catch (error) {
+    failures.push(
+      failure(
+        "ASSET_MANIFEST_MALFORMED",
+        `the local build's ${CHECKSUM_MANIFEST_NAME} is unreadable: ${error.message}`,
+      ),
+    );
+    return { failures, assets: assetDigests(published) };
+  }
+  for (const name of reproducibleAssetNames(version)) {
+    const built = local.find((entry) => entry.name === name);
+    if (built == null) {
+      failures.push(
+        failure(
+          "ASSET_REPRODUCIBLE_UNBUILT",
+          `the local build produced no ${name}`,
+          { asset: name },
+        ),
+      );
+      continue;
+    }
+    const publishedAsset = payload.find((asset) => asset.name === name);
+    if (publishedAsset == null) {
+      if (!expected.some((entry) => entry.name === name)) {
+        failures.push(
+          failure("ASSET_MISSING", `the release publishes no ${name}`, {
+            asset: name,
+          }),
+        );
+      }
+      continue;
+    }
+    if (publishedAsset.sha256 !== built.sha256) {
+      failures.push(
+        failure(
+          "ASSET_REPRODUCIBLE_MISMATCH",
+          `published ${name} does not match the local build's bytes`,
+          { asset: name },
+        ),
+      );
+    }
+  }
   return { failures, assets: assetDigests(published) };
+}
+
+/**
+ * The assets a local rebuild must reproduce byte for byte. The packaged
+ * `.mcpb`/`.dxt` bundles are outside by construction, not by choice: their
+ * runtime install resolves transitive dependencies without a lockfile and the
+ * pack stamps build time into every zip entry, so identical sources cannot
+ * produce identical bytes. A deterministic build would put its assets back on
+ * this list and restore their byte-equality claim.
+ */
+export function reproducibleAssetNames(version) {
+  return [`review-bridge-source-v${version}.zip`];
 }
 
 function assetDigests(published) {
@@ -542,6 +623,12 @@ export function normalizeReleaseObservation(input) {
         throw new Error(`release.assets[${index}] is malformed`);
       }
     }
+    if (
+      "checksum_manifest_text" in release &&
+      typeof release.checksum_manifest_text !== "string"
+    ) {
+      throw new Error("release.checksum_manifest_text must be a string");
+    }
   }
   return {
     ...raw,
@@ -631,7 +718,9 @@ export function verifyRelease(input) {
   } else {
     const assetResult = verifyAssets(
       input.observation.release.assets,
+      input.observation.release.checksum_manifest_text ?? null,
       input.localManifest,
+      input.observation.version,
     );
     failures.push(...assetResult.failures);
     assets = assetResult.assets;

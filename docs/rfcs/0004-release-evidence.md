@@ -127,12 +127,19 @@ verifier runs in two modes sharing one requirement list:
     and rebase-merged pull requests that local history cannot reveal — so
     the pre-flight result is exact for merge-commit-only history and an
     approximation otherwise;
-  - the published release's assets match a local `verify-build` output for
-    the same tag. The checksum manifest is validated by content — the
-    published `SHA256SUMS.txt` must equal the locally generated one — and is
-    then excluded from the payload set, because a manifest cannot list a
-    stable checksum of itself. The remaining assets must agree with that
-    manifest in both directions: no missing asset, no unexplained extra;
+  - the published release's assets match the published checksum manifest,
+    whose text the observation captures. The manifest is validated against
+    its own published digest and then excluded from the payload set, because
+    a manifest cannot list a stable checksum of itself. The remaining assets
+    must agree with the published manifest in both directions and by digest:
+    no missing asset, no unexplained extra, no swapped or corrupted bytes.
+    Byte equality with a local `verify-build` output for the same tag is
+    demanded only for the reproducible assets — today the source archive,
+    which `git archive` produces deterministically. The packaged
+    `.mcpb`/`.dxt` bundles are outside that set by construction (their
+    runtime install resolves dependencies without a lockfile and the pack
+    stamps build time into every zip entry), per the #74 ruling of
+    2026-09-01; a deterministic build would return them to it;
   - the merge-integrity check below.
 
 ### Merge-integrity check

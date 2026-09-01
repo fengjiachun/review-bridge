@@ -77,6 +77,7 @@ export function observation(overrides = {}) {
       exists: true,
       id: 1,
       published_at: "2026-01-02T00:00:00.000Z",
+      checksum_manifest_text: MANIFEST,
       assets: [
         {
           name: "SHA256SUMS.txt",

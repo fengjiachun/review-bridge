@@ -12,6 +12,7 @@ import { defaultStoreRoot } from "../src/core.mjs";
 import { canonicalJsonBytes, sha256 } from "../src/storage.mjs";
 import { writeContentAddressed } from "./release-store.mjs";
 import {
+  CHECKSUM_MANIFEST_NAME,
   compareVersions,
   normalizeReleaseObservation,
   parseVersion,
@@ -300,23 +301,39 @@ async function main() {
       release:
         release == null
           ? { exists: false }
-          : {
-              exists: true,
-              id: release.id,
-              published_at: release.published_at,
-              assets: release.assets
-                .map((asset) => ({
-                  name: asset.name,
-                  size: asset.size,
-                  sha256: sha256(
-                    ghBytes(
-                      `/repos/${nameWithOwner}/releases/assets/${asset.id}`,
-                      repositoryPath,
-                    ),
-                  ),
-                }))
-                .sort((left, right) => left.name.localeCompare(right.name)),
-            },
+          : (() => {
+              const fetched = release.assets.map((asset) => ({
+                name: asset.name,
+                size: asset.size,
+                bytes: ghBytes(
+                  `/repos/${nameWithOwner}/releases/assets/${asset.id}`,
+                  repositoryPath,
+                ),
+              }));
+              // The manifest's text is a published fact the verifier judges
+              // payload assets against, so it travels in the observation
+              // rather than being re-fetched at verification time.
+              const manifest = fetched.find(
+                (asset) => asset.name === CHECKSUM_MANIFEST_NAME,
+              );
+              return {
+                exists: true,
+                id: release.id,
+                published_at: release.published_at,
+                ...(manifest == null
+                  ? {}
+                  : {
+                      checksum_manifest_text: manifest.bytes.toString("utf8"),
+                    }),
+                assets: fetched
+                  .map((asset) => ({
+                    name: asset.name,
+                    size: asset.size,
+                    sha256: sha256(asset.bytes),
+                  }))
+                  .sort((left, right) => left.name.localeCompare(right.name)),
+              };
+            })(),
     };
   }
 

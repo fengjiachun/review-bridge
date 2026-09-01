@@ -7,6 +7,21 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Fixed
+
+- Verify a release's published assets against the published checksum
+  manifest — both directions plus digests, so a swapped, corrupted, missing,
+  or unexplained asset still fails by name — and demand byte equality with
+  the local rebuild only for the reproducible assets (the source archive).
+  The packaged `.mcpb`/`.dxt` bundles are unreproducible by construction, so
+  the old requirement that the published `SHA256SUMS.txt` equal the locally
+  generated one could never pass and kept every release's evidence record
+  unreachable. The collector now captures the published manifest's text in
+  the observation, and an observation from before that capture fails with a
+  named code asking for re-collection. Ruled on PR #74, 2026-09-01.
+
 ## 0.10.0 - 2026-09-01
 
 ### Added
