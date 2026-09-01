@@ -12,6 +12,7 @@ import { defaultStoreRoot } from "../src/core.mjs";
 import { canonicalJsonBytes, sha256 } from "../src/storage.mjs";
 import { writeContentAddressed } from "./release-store.mjs";
 import {
+  CHECKSUM_MANIFEST_NAME,
   compareVersions,
   normalizeReleaseObservation,
   parseVersion,
@@ -300,23 +301,39 @@ async function main() {
       release:
         release == null
           ? { exists: false }
-          : {
-              exists: true,
-              id: release.id,
-              published_at: release.published_at,
-              assets: release.assets
-                .map((asset) => ({
-                  name: asset.name,
-                  size: asset.size,
-                  sha256: sha256(
-                    ghBytes(
-                      `/repos/${nameWithOwner}/releases/assets/${asset.id}`,
-                      repositoryPath,
-                    ),
-                  ),
-                }))
-                .sort((left, right) => left.name.localeCompare(right.name)),
-            },
+          : (() => {
+              // Each asset is hashed as it arrives, so only one download is
+              // ever held at a time; the manifest alone keeps its bytes,
+              // because its text is a published fact the verifier judges
+              // payload assets against and it travels in the observation
+              // rather than being re-fetched at verification time.
+              let manifestText = null;
+              const assets = release.assets
+                .map((asset) => {
+                  const bytes = ghBytes(
+                    `/repos/${nameWithOwner}/releases/assets/${asset.id}`,
+                    repositoryPath,
+                  );
+                  if (asset.name === CHECKSUM_MANIFEST_NAME) {
+                    manifestText = bytes.toString("utf8");
+                  }
+                  return {
+                    name: asset.name,
+                    size: asset.size,
+                    sha256: sha256(bytes),
+                  };
+                })
+                .sort((left, right) => left.name.localeCompare(right.name));
+              return {
+                exists: true,
+                id: release.id,
+                published_at: release.published_at,
+                ...(manifestText == null
+                  ? {}
+                  : { checksum_manifest_text: manifestText }),
+                assets,
+              };
+            })(),
     };
   }
 
