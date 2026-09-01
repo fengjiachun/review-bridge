@@ -143,7 +143,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   overflow as a capacity terminal — instead of the acknowledgement executing
   the ledger as INVALIDATED; the honest consequence is that a pull request
   whose Codex evidence exceeds the aggregate budget keeps no closure path
-  and stays `GITHUB_REVIEW_UNKNOWN`, mutable and readable. (#102)
+  and stays `GITHUB_REVIEW_UNKNOWN`, mutable and readable. The demanded
+  closure also closes each request together with the reply the replay
+  attributes to it, whatever its verdict, and the snapshot reconciliation
+  masks the one binding-derived fact — `reviewed_head_sha` — when comparing
+  a closed result, so acknowledging a round whose reply had already bound
+  no longer orphans that reply and invalidates the ledger at the next
+  snapshot (#103). (#102)
 - Supersede the ledger's own prior Codex requests when it records a new one
   (#77). A repair round republished at an unchanged head left the previous
   publication's request open at that same head, so a clean Codex reply — which
