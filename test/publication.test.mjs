@@ -1507,6 +1507,139 @@ test("a closure wider than one acknowledgement is written as bounded records", a
   );
 });
 
+test("an operator approval wider than one acknowledgement is stored as bounded records", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  // 1,200 unauthenticated correlated requests: each is a wildcard blocker,
+  // so the demanded closure is wider than the 1,000 references one stored
+  // record may hold. The baseline is synthesized directly; running 1,200
+  // rounds is not the point, the closure width is.
+  const requests = Array.from({ length: 1_200 }, (_, index) => {
+    const requestId = `rbreq-${index.toString(16).padStart(32, "0")}`;
+    return {
+      resource_id: 10_000 + index,
+      resource_kind: "ISSUE_COMMENT",
+      url: `https://github.com/owner/repo/issues/7#issuecomment-${10_000 + index}`,
+      event_at: iso(startedAt - 1_000),
+      timestamp_field: "created_at",
+      body_sha256: digest(correlatedRequestBody(requestId)),
+      request_id: requestId,
+      actor: { id: 7, type: "User" },
+    };
+  });
+  await start(state, startedAt, baselineV2(startedAt - 100, requests));
+
+  const observedAt = startedAt + 1_000;
+  const recorded = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      observation: observationV2(
+        {
+          at: observedAt,
+          baseSha: state.baseSha,
+          headSha: state.headSha,
+          requestId: null,
+          requestAt: startedAt,
+          withResult: false,
+          baselineRequests: requests,
+        },
+        null,
+      ),
+    },
+    { clock: () => observedAt + 10 },
+  );
+  assert.equal(recorded.status, "GITHUB_REVIEW_UNKNOWN");
+
+  const summary = await getPublicationSummary(state.store, state.reviewId, {
+    clock: () => observedAt + 20,
+  });
+  assert.equal(summary.required_request_refs.length, 1_200);
+  const acknowledged = await acknowledgeCodexReviewAmbiguity(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 2,
+      headSha: state.headSha,
+      requestRefs: summary.required_request_refs,
+      ambiguousResults: summary.required_ambiguous_results,
+      acknowledgement: "NO_FURTHER_RESULTS_EXPECTED",
+      operatorLabel: "maintainer",
+      rationale: "None of the preexisting requests will answer.",
+    },
+    { clock: () => observedAt + 30 },
+  );
+
+  // One approval, bounded records sharing the marks of one decision.
+  const records = acknowledged.codex_review_ambiguity_acknowledgements;
+  assert.equal(records.length, 2);
+  for (const record of records) {
+    assert.equal(record.acknowledgement, "NO_FURTHER_RESULTS_EXPECTED");
+    assert.ok(
+      record.closed_requests.length + record.closed_results.length <=
+        publicationConstants.max_acknowledgement_references,
+    );
+    assert.equal(record.acknowledged_at, records[0].acknowledged_at);
+    assert.equal(record.publication_revision, 3);
+    assert.equal(record.operator_label, "maintainer");
+    assert.equal(record.rationale, records[0].rationale);
+    assert.equal(
+      record.backing_observation_sha256,
+      records[0].backing_observation_sha256,
+    );
+  }
+  const closed = records.flatMap((record) =>
+    record.closed_requests.map((item) => item.resource_id),
+  );
+  assert.equal(new Set(closed).size, 1_200);
+  assert.deepEqual(
+    closed.slice().sort((left, right) => left - right),
+    requests.map((item) => item.resource_id),
+  );
+  assert.equal(acknowledged.status, "GITHUB_REVIEW_NOT_REQUESTED");
+});
+
+test("acknowledgement inputs are bounded by what a closure can demand", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt, baselineV2(startedAt - 100));
+  const refs = (length) =>
+    Array.from({ length }, (_, index) => ({
+      resource_kind: "ISSUE_COMMENT",
+      resource_id: index + 1,
+    }));
+  await assert.rejects(
+    acknowledgeCodexReviewAmbiguity(state.store, state.reviewId, {
+      expectedRevision: 1,
+      headSha: state.headSha,
+      requestRefs: refs(15_001),
+      ambiguousResults: [],
+      acknowledgement: "NO_FURTHER_RESULTS_EXPECTED",
+      operatorLabel: "maintainer",
+      rationale: "over",
+    }),
+    /request_refs must be an array with at most 15000 entries/,
+  );
+  await assert.rejects(
+    acknowledgeCodexReviewAmbiguity(state.store, state.reviewId, {
+      expectedRevision: 1,
+      headSha: state.headSha,
+      requestRefs: refs(1),
+      ambiguousResults: refs(10_001).map((item) => ({
+        resource_kind: item.resource_kind,
+        result_id: item.resource_id,
+      })),
+      acknowledgement: "NO_FURTHER_RESULTS_EXPECTED",
+      operatorLabel: "maintainer",
+      rationale: "over",
+    }),
+    /ambiguous_results must be an array with at most 10000 entries/,
+  );
+});
+
 test("version 1 has no correlation evidence to supersede with", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

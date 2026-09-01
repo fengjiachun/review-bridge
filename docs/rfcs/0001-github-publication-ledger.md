@@ -1762,11 +1762,17 @@ record a fresh snapshot first.
 The acknowledgement closes the entire observed correlation epoch. Every
 indeterminate recognized, unbound, unsupported, recovery, and source-only
 baseline request in that epoch must be present in the directly approved
-`request_refs`. The server stores that exact set once as `closed_requests`; the
-input alias `request_refs` is not persisted, and the boundary cannot close an
-unapproved request. It likewise stores the exact supplied `ambiguous_results`
-set once as `closed_results`; the input alias is not persisted, and the
-boundary cannot close an unapproved result. These two stored arrays are the
+`request_refs`, and the demanded closure can exceed the 1,000 references one
+record holds: request references are bounded by the 5,000-entry baseline plus
+the 10,000-entry request history, and result references by the observation's
+10,000-entry result set. One approval is therefore persisted across as many
+bounded records as the sets need, split the way the supersession closure is
+and sharing one `operator_label`, `rationale`, backing observation,
+`acknowledged_at`, and `publication_revision` that mark them one human
+decision. The approved sets are stored exactly once in aggregate across those
+records' `closed_requests` and `closed_results`; the input aliases
+`request_refs` and `ambiguous_results` are not persisted, and the boundary
+cannot close an unapproved request or result. These stored arrays are the
 only nested acknowledgement references counted by the per-acknowledgement and
 monotonic aggregate limits.
 In a separate ambiguity-recovery scenario, the server-generated record is:

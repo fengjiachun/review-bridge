@@ -44,6 +44,14 @@ const MAX_AUDIT_EVENT_BYTES = 16 * 1024;
 // supersession chunking all express this one cap; a second copy of the number
 // is how they would drift apart.
 const MAX_ACKNOWLEDGEMENT_REFERENCES = 1_000;
+// The operator approves the complete demanded closure, whose size is bounded
+// by its sources, not by one record: request references come from the
+// immutable baseline (5,000 evidence entries) plus the request history (a
+// 10,000-entry monotonic array), and ambiguous-result references from the
+// observation's result set (10,000 entries). The input caps mirror those
+// bounds; storage splits the approved sets into records bounded above.
+const MAX_CLOSURE_REQUEST_REFERENCES = 15_000;
+const MAX_CLOSURE_RESULT_REFERENCES = 10_000;
 const MAX_AGE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_MS = 30 * 1000;
 const MAX_ATOMIC_WINDOW_MS = 2 * 60 * 1000;
@@ -8245,18 +8253,12 @@ export async function acknowledgeCodexReviewAmbiguity(
     const currentMs = clock();
     assertRevision(expectedRevision);
     assertSha(headSha, "head_sha");
-    assertArray(requestRefs, "request_refs", MAX_ACKNOWLEDGEMENT_REFERENCES);
+    assertArray(requestRefs, "request_refs", MAX_CLOSURE_REQUEST_REFERENCES);
     assertArray(
       ambiguousResults,
       "ambiguous_results",
-      MAX_ACKNOWLEDGEMENT_REFERENCES,
+      MAX_CLOSURE_RESULT_REFERENCES,
     );
-    if (
-      requestRefs.length + ambiguousResults.length >
-      MAX_ACKNOWLEDGEMENT_REFERENCES
-    ) {
-      fail("PUBLICATION_LIMIT_EXCEEDED", "acknowledgement exceeds 1,000 references");
-    }
     uniqueBy(requestRefs, (item) => resourceIdentity(item), "request_refs");
     uniqueBy(
       ambiguousResults,
@@ -8302,19 +8304,46 @@ export async function acknowledgeCodexReviewAmbiguity(
     }
     const timestamp = new Date(currentMs).toISOString();
     const nextRevision = ledger.revision + 1;
-    ledger.codex_review_ambiguity_acknowledgements.push({
-      acknowledgement_id: `ack-${crypto.randomBytes(16).toString("hex")}`,
-      head_sha: headSha,
-      closed_requests: clone(requestRefs),
-      closed_results: clone(ambiguousResults),
-      acknowledgement,
-      operator_label: operatorLabel,
-      rationale,
-      backing_observed_at: ledger.latest_observation.observed_at,
-      backing_observation_sha256: canonicalDigest(ledger.latest_observation),
-      acknowledged_at: timestamp,
-      publication_revision: nextRevision,
-    });
+    const backingObservedAt = ledger.latest_observation.observed_at;
+    const backingObservationSha256 = canonicalDigest(
+      ledger.latest_observation,
+    );
+    // One human approval covers the complete closure, but a stored record
+    // holds at most 1,000 references, and the demanded sets can be larger --
+    // the same overflow the supersession closure splits for. The approved
+    // sets are therefore written across as many bounded records as they
+    // need, requests first, sharing the operator inputs, backing
+    // observation, timestamp, and revision that mark them one decision.
+    let requestIndex = 0;
+    let resultIndex = 0;
+    while (
+      requestIndex < requestRefs.length ||
+      resultIndex < ambiguousResults.length
+    ) {
+      const closedRequests = requestRefs.slice(
+        requestIndex,
+        requestIndex + MAX_ACKNOWLEDGEMENT_REFERENCES,
+      );
+      requestIndex += closedRequests.length;
+      const closedResults = ambiguousResults.slice(
+        resultIndex,
+        resultIndex + MAX_ACKNOWLEDGEMENT_REFERENCES - closedRequests.length,
+      );
+      resultIndex += closedResults.length;
+      ledger.codex_review_ambiguity_acknowledgements.push({
+        acknowledgement_id: `ack-${crypto.randomBytes(16).toString("hex")}`,
+        head_sha: headSha,
+        closed_requests: clone(closedRequests),
+        closed_results: clone(closedResults),
+        acknowledgement,
+        operator_label: operatorLabel,
+        rationale,
+        backing_observed_at: backingObservedAt,
+        backing_observation_sha256: backingObservationSha256,
+        acknowledged_at: timestamp,
+        publication_revision: nextRevision,
+      });
+    }
     const derived = derivePublication(ledger);
     ledger.revision = nextRevision;
     ledger.updated_at = timestamp;
