@@ -1212,6 +1212,178 @@ test("a request posted after a markerless answer is still superseded", async (t)
   });
 });
 
+test("an acknowledgement closes an unauthenticated correlated baseline wildcard", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+
+  // The #99 evidence shape: a well-formed rbreq body no prior ledger in this
+  // store can vouch for. It classifies BASELINE_CORRELATED, stays
+  // unauthenticated, and carries no head, so every markerless reply matches
+  // it forever unless the operator can close it.
+  const strayRequestId = `rbreq-${"e".repeat(32)}`;
+  const strayAt = startedAt - 1_000;
+  const stray = {
+    resource_id: 90,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-90",
+    event_at: iso(strayAt),
+    timestamp_field: "created_at",
+    body_sha256: digest(correlatedRequestBody(strayRequestId)),
+    request_id: strayRequestId,
+    actor: { id: 42, type: "User" },
+  };
+  await start(state, startedAt, baselineV2(startedAt - 100, [stray]));
+  const stored = await getPublication(state.store, state.reviewId);
+  assert.equal(
+    stored.codex_review_baseline.requests[0].classification,
+    "BASELINE_CORRELATED",
+  );
+  assert.equal("issuance" in stored.codex_review_baseline.requests[0], false);
+
+  const { requestComment, cleanReply, adapt, record } = codexFeeds(state);
+  const strayComment = requestComment(90, strayRequestId, strayAt);
+  const a = await record(1, 100, startedAt + 1_000);
+  // Not provably this chain's own request, so supersession spares it.
+  assert.deepEqual(a.ledger.codex_review_ambiguity_acknowledgements, []);
+
+  const answer = cleanReply(110, startedAt + 1_100);
+  const observedAt = startedAt + 2_000;
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 2,
+      observation: await adapt(observedAt, [strayComment, a.comment, answer]),
+    },
+    { clock: () => observedAt + 10 },
+  );
+
+  const summary = await getPublicationSummary(state.store, state.reviewId, {
+    clock: () => observedAt + 20,
+  });
+  assert.equal(summary.status, "GITHUB_REVIEW_UNKNOWN");
+  assert.equal(summary.next_action, "ACKNOWLEDGE_CODEX_REVIEW_AMBIGUITY");
+  // The wildcard itself is in the closure set, so one acknowledgement
+  // retires the cause rather than the round's symptom.
+  assert.deepEqual(summary.required_request_refs, [
+    { resource_kind: "ISSUE_COMMENT", resource_id: 90 },
+    { resource_kind: "ISSUE_COMMENT", resource_id: 100 },
+  ]);
+  assert.deepEqual(summary.required_ambiguous_results, [
+    { resource_kind: "ISSUE_COMMENT", result_id: 110 },
+  ]);
+
+  await acknowledgeCodexReviewAmbiguity(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 3,
+      headSha: state.headSha,
+      requestRefs: summary.required_request_refs,
+      ambiguousResults: summary.required_ambiguous_results,
+      acknowledgement: "NO_FURTHER_RESULTS_EXPECTED",
+      operatorLabel: "maintainer",
+      rationale: "The unauthenticated baseline request will never answer.",
+    },
+    { clock: () => observedAt + 30 },
+  );
+
+  const b = await record(4, 200, startedAt + 3_000);
+  const secondAnswer = cleanReply(210, startedAt + 3_100);
+  const nextAt = startedAt + 4_000;
+  const ready = await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 5,
+      observation: await adapt(nextAt, [
+        strayComment,
+        a.comment,
+        answer,
+        b.comment,
+        secondAnswer,
+      ]),
+    },
+    { clock: () => nextAt + 10 },
+  );
+  const byId = new Map(
+    ready.latest_observation.codex_review.results.map((item) => [
+      item.result_id,
+      item,
+    ]),
+  );
+  assert.equal(byId.get(210).association, "SINGLE_OPEN_REQUEST");
+  assert.equal(byId.get(210).verdict, "CLEAN");
+  assert.equal(ready.status, "MERGE_READY");
+});
+
+test("an authenticated correlated baseline request is not an ambiguity blocker", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt, baselineV2(startedAt - 100));
+  const first = await getPublicationSummary(state.store, state.reviewId);
+  const oldRequestId = first.codex_review_request.request_id;
+  const oldRequestAt = startedAt + 1_000;
+  const oldRequest = {
+    resource_id: 90,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-90",
+    event_at: iso(oldRequestAt),
+    timestamp_field: "created_at",
+    body_sha256: digest(correlatedRequestBody(oldRequestId)),
+    request_id: oldRequestId,
+    actor: { id: 42, type: "User" },
+  };
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 90,
+      url: oldRequest.url,
+      createdAt: oldRequest.event_at,
+      requestedHeadSha: state.headSha,
+      requestId: oldRequestId,
+    },
+    { clock: () => oldRequestAt + 10 },
+  );
+
+  const successor = await sameHeadSuccessorFixture(state);
+  await start(
+    successor,
+    startedAt + 2_000,
+    baselineV2(startedAt + 1_900, [oldRequest]),
+  );
+  const stored = await getPublication(successor.store, successor.reviewId);
+  assert.notEqual(stored.codex_review_baseline.requests[0].issuance, null);
+
+  // A proven baseline request is head-scoped and supersession-managed, so it
+  // never enters the ambiguity closure and nothing demands an acknowledgement.
+  const feeds = codexFeeds(successor);
+  const observedAt = startedAt + 3_000;
+  await recordGithubSnapshot(
+    successor.store,
+    successor.reviewId,
+    {
+      expectedRevision: 1,
+      observation: await feeds.adapt(observedAt, [
+        feeds.requestComment(90, oldRequestId, oldRequestAt),
+      ]),
+    },
+    { clock: () => observedAt + 10 },
+  );
+  const summary = await getPublicationSummary(
+    successor.store,
+    successor.reviewId,
+    { clock: () => observedAt + 20 },
+  );
+  assert.equal(summary.status, "GITHUB_REVIEW_NOT_REQUESTED");
+  assert.deepEqual(summary.required_request_refs, []);
+  assert.deepEqual(summary.required_ambiguous_results, []);
+});
+
 test("a review of another commit spares no request at the authorized head", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

@@ -3869,10 +3869,16 @@ function checkRequiredRuns(requiredChecks) {
 function activeCorrelation(ledger) {
   const closedRequests = closedRequestIdentities(ledger);
   const closedResults = closedResultIdentities(ledger);
+  // A BASELINE_CORRELATED request carrying an issuance is proven and
+  // head-scoped: compatibility filters it and supersession retires it, so it
+  // never blocks here. An unproven one has no head at all -- it matches every
+  // markerless reply forever -- and RFC 0002 keeps the acknowledgement path
+  // for it, so it blocks like any other baseline request until closed.
   const openBaseline = ledger.codex_review_baseline.requests
     .filter(
       (item) =>
-        item.classification !== "BASELINE_CORRELATED" &&
+        (item.classification !== "BASELINE_CORRELATED" ||
+          item.issuance == null) &&
         !closedRequests.has(`${item.resource_kind}:${item.resource_id}`),
     )
     .map((item) => ({
