@@ -58,6 +58,99 @@ const SHARED_REQUIREMENTS = [
   ["autonomous dispatch stays CODEX_TASK-only", /`CODEX_TASK` dispatch only/],
 ];
 
+// CODEX_TASK does not reuse SHARED_REQUIREMENTS. Those claims are worded for a
+// reviewer "instance" or "session" that the operator is present to launch, and
+// they close each provider's section by handing autonomous dispatch back to
+// CODEX_TASK. CODEX_TASK is that provider: it launches a "task", it may run
+// unattended, and its `--dangerously-bypass-approvals-and-sandbox` launch has
+// its own boundary the other two do not — an unsandboxed shell fenced only by
+// the reviewer server's seven-tool surface and the skill. So its contract
+// states the genuinely shared claims itself and adds the ones only the bypass
+// launch makes true.
+export const CODEX_TASK_DISPATCH_CONTRACT = {
+  requirements: [
+    [
+      "step 1 records the state version the wait needs",
+      /[Rr]ecord the returned `review_id` and `state_version`/,
+    ],
+    [
+      "the wait is bound to the recorded state version",
+      /`wait_for_review_state` on the recorded `state_version`/,
+    ],
+    ["findings are narrated from the ledger", /narrating every finding from the ledger/],
+    ["the request is single-quoted", /[Ss]ingle-quote that request[\s\S]*?backticks/],
+    ["the launch does not block the wait", /background it or use a separate terminal/],
+    ["one launch per review", /[Oo]ne new task per `review_id`/],
+    ["no forking the author task", /never fork the author task to review/],
+    ["no authoring history", /[Nn]ever pass any authoring history/],
+    ["step 1 binds the review to CODEX_TASK", /choosing `CODEX_TASK` at its provider step/],
+    [
+      "the reviewer request is the whole handoff, binding included",
+      /Independently review Review Bridge task `<review_id>` using the packaged Review Bridge reviewer skill\. Require `reviewer_provider: CODEX_TASK`, follow the review strategy, and submit every actionable finding\./,
+    ],
+    // Why bypass is mandatory and not a convenience: a non-interactive
+    // `codex exec` cannot answer the approval prompt every MCP call raises, so
+    // without the flag the reviewer stalls with the exact cancel string the
+    // 2026-08-28 probe recorded before it lists a single review.
+    [
+      "the bypass flag is mandatory, with the non-bypass stall as its reason",
+      /`--dangerously-bypass-approvals-and-sandbox` flag is required, not a convenience[\s\S]*?`user cancelled MCP tool call`/,
+    ],
+    [
+      "the launch happens outside the repository under review",
+      /Launch it from a neutral working directory outside the repository under review/,
+    ],
+    // The reason the working directory is a hard requirement here, not advice:
+    // bypass strips the sandbox, so the reviewer surface is all that is left.
+    [
+      "bypass leaves the reviewer tool surface as the only boundary",
+      /unsandboxed shell with no approval gate, so the only boundary left around it is the Review Bridge reviewer server's seven-tool `--role reviewer` surface plus the packaged reviewer skill/,
+    ],
+    [
+      "the neutral directory is a hard requirement under bypass",
+      /hard requirement rather than the advice it is for the other providers/,
+    ],
+    [
+      "the task body must name the review id",
+      /task body must name the `review_id`/,
+    ],
+    [
+      "Codex reads the packaged reviewer skill on its own",
+      /Codex reads the packaged Review Bridge reviewer skill from the plugin and follows it/,
+    ],
+    ["the dispatch may run unattended", /may run unattended/],
+    ["nothing verifies the dispatch", /observes nothing about how the task was started/],
+    // The one boundary bypass must never be read as loosening: an unattended
+    // Codex launch is cleared, a programmatic Claude launch never is.
+    [
+      "the Claude boundary is unchanged",
+      /[Nn]ever launch, script, or otherwise programmatically invoke a Claude reviewer/,
+    ],
+    ["the Claude boundary is a compliance line", /account-compliance boundary/],
+  ],
+  structural: [
+    // The launch must carry the bypass flag before the request, or every MCP
+    // call stalls on an approval prompt the run cannot answer.
+    [
+      "match",
+      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox '<the reviewer request below>'/,
+      "launch is not the bypass one-shot form",
+    ],
+    [
+      "doesNotMatch",
+      /codex exec '<the reviewer request below>'/,
+      "launch dropped the --dangerously-bypass-approvals-and-sandbox flag",
+    ],
+    // Round two is another launch, not a resume, and needs its own runnable
+    // form carrying the same flag.
+    [
+      "match",
+      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox '<the rereview request>'/,
+      "round-two launch form",
+    ],
+  ],
+};
+
 export const HERMES_DISPATCH_CONTRACT = {
   requirements: [
     ...SHARED_REQUIREMENTS,

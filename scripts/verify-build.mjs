@@ -11,6 +11,7 @@ import {
   ADVISORY_PANEL_CONTRACT,
   assertDispatchContract,
   assertThirdPartyMaterialBoundary,
+  CODEX_TASK_DISPATCH_CONTRACT,
   DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
   HERMES_DISPATCH_CONTRACT,
 } from "./dispatch-contract.mjs";
@@ -456,6 +457,12 @@ assert.match(
 assert.match(workflowSkill, /get_review_summary/);
 assert.match(workflowSkill, /wait_for_review_state/);
 assert.match(workflowSkill, /export_human_arbitration/);
+assertDispatchContract(
+  workflowSkill,
+  "## Dispatching a CODEX_TASK review",
+  "packaged Codex workflow skill",
+  CODEX_TASK_DISPATCH_CONTRACT,
+);
 assertDispatchContract(
   workflowSkill,
   "## Dispatching a HERMES review",

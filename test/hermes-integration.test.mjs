@@ -12,6 +12,7 @@ import {
   ADVISORY_PANEL_CONTRACT,
   assertDispatchContract,
   assertThirdPartyMaterialBoundary,
+  CODEX_TASK_DISPATCH_CONTRACT,
   DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
   extractMarkdownSection,
   HERMES_DISPATCH_CONTRACT,
@@ -712,6 +713,12 @@ const WORKFLOW_SKILL = path.join(
   "SKILL.md",
 );
 const DISPATCH_SECTIONS = [
+  {
+    name: "Codex workflow skill (CODEX_TASK)",
+    file: WORKFLOW_SKILL,
+    heading: "## Dispatching a CODEX_TASK review",
+    contract: CODEX_TASK_DISPATCH_CONTRACT,
+  },
   {
     name: "Codex workflow skill (HERMES)",
     file: WORKFLOW_SKILL,
