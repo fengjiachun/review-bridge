@@ -80,15 +80,41 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     ["findings are narrated from the ledger", /narrating every finding from the ledger/],
     ["the request is single-quoted", /[Ss]ingle-quote that request[\s\S]*?backticks/],
     ["the launch does not block the wait", /background it or use a separate terminal/],
-    // Scoped to the round, not the review: a per-`review_id` reading
-    // contradicts the round-two launch below, and a driver following it
-    // literally would refuse round two and strand the review.
-    ["one launch per review round", /[Oo]ne new task per review round/],
+    // Stated as prohibitions rather than a count. The counting form was
+    // narrowed three times in this PR's review — per-`review_id`, then
+    // per-round, then "except after a failed launch" — because each count
+    // leaves a legitimate launch it forbids. What the rule actually protects
+    // is these two conditions, so it names them and lets launches be
+    // unrationed within them.
+    [
+      "the discipline states prohibitions rather than a count",
+      /states what must never happen rather than counting launches/,
+    ],
+    [
+      "no two reviewers on one round at once",
+      /Never run two reviewers on the same round at once/,
+    ],
+    ["no reviewing from the author task", /never review from the author task/],
     [
       "a round-two launch is required by the rule rather than excepted from it",
-      /a round-two rereview is that review's next round, so its launch is required rather than an exception/,
+      /[Aa] round-two rereview is that review's next round, so its launch is required rather than an exception/,
     ],
-    ["no forking the author task", /never fork the author task to review/],
+    // Without a replacement the round strands: the reviewer is gone, the state
+    // never moves, and the wait can only keep timing out.
+    [
+      "a launch that exited without a verdict is replaced",
+      /exited without submitting a verdict[\s\S]*?start a replacement launch in the same shape as the original/,
+    ],
+    // The distinction the replacement rule stands on. A timeout is not death,
+    // and replacing a slow reviewer manufactures the pair the first bar bans.
+    [
+      "the replacement is judged by the process exit, not by the wait",
+      /Judge that by the process having exited, never by `wait_for_review_state` timing out/,
+    ],
+    [
+      "replacing a merely slow reviewer would create the forbidden pair",
+      /replacing a reviewer that is merely slow creates exactly the concurrent pair the first bar forbids/,
+    ],
     ["no authoring history", /[Nn]ever pass any authoring history/],
     ["step 1 binds the review to CODEX_TASK", /choosing `CODEX_TASK` at its provider step/],
     [

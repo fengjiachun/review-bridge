@@ -606,14 +606,24 @@ launch between them.
    stdout and exits nonzero on failure, so read its output before assuming a
    review that never arrives is merely slow.
 
-The launch discipline is fixed. One new task per review round: never fork the
-author task to review, and never pass any authoring history — not the diff you
-wrote, the requirement discussion, your reasoning, or this session's
-transcript. The rule bars a second reviewer racing the same round and bars
-reusing the author's task; a round-two rereview is that review's next round, so
-its launch is required rather than an exception. That request is the whole
-handoff, and Codex reads the packaged Review Bridge reviewer skill from the
-plugin and follows it without being told where it is.
+The launch discipline is fixed, and it states what must never happen rather
+than counting launches. Never run two reviewers on the same round at once, and
+never review from the author task: never fork that task, and never pass any
+authoring history — not the diff you wrote, the requirement discussion, your
+reasoning, or this session's transcript. Within those two bars launches are not
+rationed. A round-two rereview is that review's next round, so its launch is
+required rather than an exception. A launch that has exited without submitting
+a verdict — a nonzero exit, or a zero exit with nothing recorded in the
+ledger — leaves that round with no reviewer working it, so start a replacement
+launch in the same shape as the original; that replacement is the same round,
+and both bars still hold, because the reviewer it replaces is gone. Judge that
+by the process having exited, never by `wait_for_review_state` timing out: a
+timeout says the round is unfinished, not that the reviewer is gone, and
+replacing a reviewer that is merely slow creates exactly the concurrent pair
+the first bar forbids. The driver started the process, so it has the exit
+status to judge by. That request is the whole handoff, and Codex reads the
+packaged Review Bridge reviewer skill from the plugin and follows it without
+being told where it is.
 
 The bypass flag is what makes the working directory a hard requirement rather
 than the advice it is for the other providers. `--dangerously-bypass-approvals-and-sandbox`

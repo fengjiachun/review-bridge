@@ -39,7 +39,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   opened by the operator by hand or inside a real external sandbox instead. The
   reviewer server's seven-tool surface bounds what Review Bridge exposes, not
   the shell Codex brings of its own, and the neutral directory is hygiene rather
-  than an isolation boundary. A shared `CODEX_TASK_DISPATCH_CONTRACT` holds the
+  than an isolation boundary. The launch discipline names what must never
+  happen — two reviewers on one round at once, and reviewing from the author
+  task — rather than counting launches, so a launch that exited without
+  submitting a verdict is replaced instead of leaving the round stranded with
+  no reviewer and a wait that can only time out; the replacement is justified
+  by the process having exited, never by the wait timing out, since replacing a
+  merely slow reviewer would create the concurrent pair the rule forbids. A
+  shared `CODEX_TASK_DISPATCH_CONTRACT` holds the
   section's key claims, asserted against the source template in CI and the
   packaged copy at release. PR #108.
 
