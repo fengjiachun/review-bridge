@@ -137,6 +137,24 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "an advisory CODEX_TASK member is manual or externally sandboxed",
       /opened by the operator by hand, or launched inside a real external sandbox/,
     ],
+    // Corrected by the #108 Codex P2. The section used to justify the
+    // from-ledger round two by claiming the CLI could not resume, which is
+    // false: `codex exec resume` takes a session id and `codex exec` prints
+    // one. Stating the capability accurately is what keeps the justification
+    // honest — the design stands on the evidence bar, not on a missing feature.
+    [
+      "the CLI's resume capability is stated accurately",
+      /`codex exec resume <session-id>` exists/,
+    ],
+    ["round two deliberately does not resume", /This flow deliberately does not resume/],
+    [
+      "round two is rebuilt from the ledger",
+      /reconstructed from the ledger, which `open_review` serves whole/,
+    ],
+    [
+      "the from-ledger round is a design choice, not a CLI limitation",
+      /evidence bar rather than a missing capability/,
+    ],
     [
       "the task body must name the review id",
       /task body must name the `review_id`/,
@@ -186,6 +204,13 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "match",
       /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox '<the rereview request>'/,
       "round-two launch form",
+    ],
+    // The prose names `codex exec resume` to say the flow declines it, so the
+    // guard is against a runnable resume form, not the mention.
+    [
+      "doesNotMatch",
+      /```bash\n *codex exec resume/,
+      "round two regressed to a resume launch form",
     ],
   ],
 };

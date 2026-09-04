@@ -644,12 +644,16 @@ resolutions with the packaged reviewer skill:
 codex exec --dangerously-bypass-approvals-and-sandbox '<the rereview request>'
 ```
 
-`codex exec` mints a fresh session per invocation and exposes none to name or
-resume, so round two runs in a session that did not perform round one and is
-reconstructed from the ledger, which `open_review` serves whole. The reviewer
-skill already requires each `rebuttal_accepted` decision to carry verification
-the reviewer performed itself rather than recalled, so the evidence bar is the
-one a resumed context would have faced.
+`codex exec resume <session-id>` exists, and `codex exec` prints the session id
+it minted in its own header, so round two could inherit round one's context.
+This flow deliberately does not resume. Round two is a fresh launch that did not
+perform round one, reconstructed from the ledger, which `open_review` serves
+whole — every round-one finding with its explanation, recommendation, and
+status, and every author resolution with its rationale and evidence. The reason
+is the evidence bar rather than a missing capability: the reviewer skill
+requires each `rebuttal_accepted` decision to carry verification the reviewer
+performed itself rather than recalled, and a resumed context reintroduces
+exactly the recall this design makes the reviewer re-derive.
 
 This launch may run unattended, exactly as the HERMES and DeepSeek Harness
 launches may: unattended shell dispatch is cleared for all three of
