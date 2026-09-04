@@ -20,7 +20,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   and why the bypass makes a neutral working directory outside the reviewed
   repository a hard requirement rather than advice. A shared
   `CODEX_TASK_DISPATCH_CONTRACT` holds the section's key claims, asserted
-  against the source template in CI and the packaged copy at release. PR #106.
+  against the source template in CI and the packaged copy at release. PR #108.
 
 ### Fixed
 
