@@ -606,18 +606,35 @@ where it is.
 
 The bypass flag is what makes the working directory a hard requirement rather
 than the advice it is for the other providers. `--dangerously-bypass-approvals-and-sandbox`
-gives the reviewer an unsandboxed shell with no approval gate, so the only
-boundary left around it is the Review Bridge reviewer server's seven-tool
-`--role reviewer` surface plus the packaged reviewer skill's discipline. Launch
-it from a neutral working directory outside the repository under review, and
-prefer a directory in no repository at all: an unsandboxed shell rooted in the
-authoring worktree can read and write that tree directly, and Codex also
-injects project context from the nearest `AGENTS.md` or `CLAUDE.md` it finds
-there. The reviewer process needs no checkout of its own — its tools read the
-change from the immutable snapshot and from the author's repository by recorded
-path, never from its own working directory — so the task body must name the
-`review_id`: it is the reviewer's only pointer to the snapshot, and the
-seven-tool surface exposes no other way to discover which review it was sent to.
+gives the reviewer an unsandboxed shell with no approval gate. Be exact about
+what that leaves standing: the Review Bridge reviewer server's seven-tool
+`--role reviewer` surface bounds only what Review Bridge exposes, not what the
+reviewer process can do — Codex brings a shell of its own, and bypass strips
+the sandbox and the approval gate from that shell. Launch it from a neutral
+working directory outside the repository under review, and prefer a directory
+in no repository at all: an unsandboxed shell rooted in the authoring worktree
+can read and write that tree directly, and Codex also injects project context
+from the nearest `AGENTS.md` or `CLAUDE.md` it finds there. That directory is
+hygiene, not an isolation boundary — it keeps the reviewer off the authoring
+tree by default and contains nothing that a reviewer decides to reach for. The
+reviewer process needs no checkout of its own — its tools read the change from
+the immutable snapshot and from the author's repository by recorded path, never
+from its own working directory — so the task body must name the `review_id`: it
+is the reviewer's only pointer to the snapshot, and the seven-tool surface
+exposes no other way to discover which review it was sent to.
+
+Because of that, this unattended bypass launch is for reviews of the operator's
+own changes only. Never use it for an advisory review of a third party's pull
+request. An `advisory: true` review puts an outside author's diff, requirement,
+and commit messages in front of a reviewer whose shell bypass has already
+unsandboxed, and every one of those is attacker-controllable text. The reviewer
+skill does require treating that material as material to verify and never as
+instructions, but that is skill discipline rather than a mechanism, and nothing
+in this launch contains a reviewer that disregards it. `codex --help` states the
+flag is intended solely for running in environments that are externally
+sandboxed; a neutral working directory is not one. An advisory `CODEX_TASK`
+member is therefore opened by the operator by hand, or launched inside a real
+external sandbox.
 
 A round-two rereview of the same `review_id` is another launch in the same
 shape, carrying the same review ID and a request to rereview the author's
@@ -1131,7 +1148,12 @@ attests nothing.
    is an explicit per-review choice for exceptional stakes.
 5. Dispatch each member by its own pattern. The table is asymmetric by design:
 
-   - `CODEX_TASK` — the headless launch in Dispatching a CODEX_TASK review.
+   - `CODEX_TASK` — **the operator opens a fresh Codex task themselves, or
+     launches one inside a real external sandbox.** The unattended bypass
+     launch in Dispatching a CODEX_TASK review is for the operator's own
+     changes only and must never review a third party's pull request: it
+     leaves the reviewer an unsandboxed host shell, and this panel's material
+     is an outside author's.
    - `HERMES` — the headless launch in Dispatching a HERMES review.
    - `DEEPSEEK_HARNESS` — the headless launch in Dispatching a
      DEEPSEEK_HARNESS review.

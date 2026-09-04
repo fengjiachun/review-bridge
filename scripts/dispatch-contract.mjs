@@ -100,15 +100,42 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the launch happens outside the repository under review",
       /Launch it from a neutral working directory outside the repository under review/,
     ],
-    // The reason the working directory is a hard requirement here, not advice:
-    // bypass strips the sandbox, so the reviewer surface is all that is left.
+    // Corrected by the #108 Codex P1: the seven-tool surface is not a fence
+    // around the reviewer. It bounds what Review Bridge exposes; Codex brings
+    // its own shell, which bypass unsandboxes. Claiming otherwise reads as a
+    // containment guarantee that does not exist.
     [
-      "bypass leaves the reviewer tool surface as the only boundary",
-      /unsandboxed shell with no approval gate, so the only boundary left around it is the Review Bridge reviewer server's seven-tool `--role reviewer` surface plus the packaged reviewer skill/,
+      "the seven-tool surface does not bound the reviewer's own shell",
+      /seven-tool `--role reviewer` surface bounds only what Review Bridge exposes, not what the reviewer process can do/,
     ],
     [
       "the neutral directory is a hard requirement under bypass",
       /hard requirement rather than the advice it is for the other providers/,
+    ],
+    // ...and a hard requirement is still not a fence. Losing this sentence
+    // lets a reader mistake the directory for the containment the launch lacks.
+    [
+      "the neutral directory is not an isolation boundary",
+      /That directory is hygiene, not an isolation boundary/,
+    ],
+    // The #108 ruling. An unattended bypass reviewer reading a stranger's diff
+    // is a full host shell pointed at attacker-controllable text, so the
+    // advisory case is barred outright rather than fenced.
+    [
+      "the unattended bypass launch covers the operator's own changes only",
+      /this unattended bypass launch is for reviews of the operator's own changes only/,
+    ],
+    [
+      "an advisory review never takes this launch",
+      /Never use it for an advisory review of a third party's pull request/,
+    ],
+    [
+      "the flag's own help text scopes it to external sandboxes",
+      /intended solely for running in environments that are externally sandboxed/,
+    ],
+    [
+      "an advisory CODEX_TASK member is manual or externally sandboxed",
+      /opened by the operator by hand, or launched inside a real external sandbox/,
     ],
     [
       "the task body must name the review id",
@@ -376,6 +403,17 @@ export const ADVISORY_PANEL_CONTRACT = {
     [
       "the Claude member is opened by the operator",
       /the operator opens a fresh Claude conversation themselves/,
+    ],
+    // The #108 ruling reaches the panel too: the unattended bypass launch is
+    // barred here, so the CODEX_TASK member is manual or externally sandboxed
+    // like the Claude one, not the headless launch the dispatch section gives.
+    [
+      "the Codex member is opened by the operator or externally sandboxed",
+      /the operator opens a fresh Codex task themselves, or launches one inside a real external sandbox/,
+    ],
+    [
+      "the panel never takes the unattended bypass launch",
+      /must never review a third party's pull request/,
     ],
     [
       "no programmatic Claude dispatch",

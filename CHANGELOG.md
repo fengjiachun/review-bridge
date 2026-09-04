@@ -18,9 +18,17 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   why the bypass flag is mandatory (a non-interactive run cannot answer the
   per-call approval prompt and stalls with `user cancelled MCP tool call`),
   and why the bypass makes a neutral working directory outside the reviewed
-  repository a hard requirement rather than advice. A shared
-  `CODEX_TASK_DISPATCH_CONTRACT` holds the section's key claims, asserted
-  against the source template in CI and the packaged copy at release. PR #108.
+  repository a hard requirement rather than advice. That launch is bounded to
+  reviews of the operator's own changes: an advisory review of a third party's
+  pull request must never take it, because bypass leaves the reviewer an
+  unsandboxed host shell while the reviewed diff, requirement, and commit
+  messages are all attacker-controllable — the advisory `CODEX_TASK` member is
+  opened by the operator by hand or inside a real external sandbox instead. The
+  reviewer server's seven-tool surface bounds what Review Bridge exposes, not
+  the shell Codex brings of its own, and the neutral directory is hygiene rather
+  than an isolation boundary. A shared `CODEX_TASK_DISPATCH_CONTRACT` holds the
+  section's key claims, asserted against the source template in CI and the
+  packaged copy at release. PR #108.
 
 ### Fixed
 
