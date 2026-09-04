@@ -573,7 +573,7 @@ launch between them.
    repository, handing it the reviewer request below as its single task:
 
    ```bash
-   codex exec --dangerously-bypass-approvals-and-sandbox '<the reviewer request below>'
+   codex exec --dangerously-bypass-approvals-and-sandbox '<the reviewer request below>' < /dev/null
    ```
 
    > Independently review Review Bridge task `<review_id>` using the packaged
@@ -587,8 +587,16 @@ launch between them.
    convenience: without it `codex exec` routes each Review Bridge MCP call
    through an approval prompt that a non-interactive run cannot answer, and the
    reviewer stalls with `user cancelled MCP tool call` before it lists a single
-   pending review (observed 2026-08-28). Run the launch so it does not block
-   step 3 — background it or use a separate terminal.
+   pending review (observed 2026-08-28). Redirect stdin from `/dev/null`, as
+   both launch lines here do: `codex exec` treats piped stdin as more input,
+   appending it to the prompt as a `<stdin>` block when a prompt is also given,
+   and an unattended launch runs from a shell with no terminal on stdin. Left
+   open, that channel either feeds the reviewer whatever the driver's stdin
+   carries — silently breaking the single-task handoff and the rule below that
+   no authoring history reaches the reviewer, since the request is then no
+   longer the whole handoff — or blocks the launch waiting for an EOF that
+   never comes. Run the launch so it does not block step 3 — background it or
+   use a separate terminal.
 3. Wait with `wait_for_review_state` on the recorded `state_version`, treating
    `timed_out` as the expected in-progress result described in Prepare. When
    the state changes, hand the review to Handle findings, which owns narrating
@@ -643,7 +651,7 @@ shape, carrying the same review ID and a request to rereview the author's
 resolutions with the packaged reviewer skill:
 
 ```bash
-codex exec --dangerously-bypass-approvals-and-sandbox '<the rereview request>'
+codex exec --dangerously-bypass-approvals-and-sandbox '<the rereview request>' < /dev/null
 ```
 
 `codex exec resume <session-id>` exists, and `codex exec` prints the session id

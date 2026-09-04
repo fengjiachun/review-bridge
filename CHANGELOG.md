@@ -14,7 +14,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - Document unattended `CODEX_TASK` dispatch from the driver session's shell,
   parallel to the HERMES and DeepSeek Harness launches. The Codex workflow
   skill gains a `Dispatching a CODEX_TASK review` section pinning the launch
-  command `codex exec --dangerously-bypass-approvals-and-sandbox '<request>'`,
+  command
+  `codex exec --dangerously-bypass-approvals-and-sandbox '<request>' < /dev/null`
+  — stdin is closed because an unattended launch has no terminal on it, and
+  `codex exec` would otherwise append piped stdin to the prompt as a `<stdin>`
+  block, breaking the single-task handoff, or block waiting for EOF —
   why the bypass flag is mandatory (a non-interactive run cannot answer the
   per-call approval prompt and stalls with `user cancelled MCP tool call`),
   and why the bypass makes a neutral working directory outside the reviewed

@@ -103,6 +103,20 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the bypass flag is mandatory, with the non-bypass stall as its reason",
       /`--dangerously-bypass-approvals-and-sandbox` flag is required, not a convenience[\s\S]*?`user cancelled MCP tool call`/,
     ],
+    // The redirect has to carry its reason, or it reads as boilerplate someone
+    // drops when reformatting the command.
+    [
+      "stdin is closed on the launch",
+      /Redirect stdin from `\/dev\/null`, as both launch lines here do/,
+    ],
+    [
+      "piped stdin would be appended to the prompt",
+      /appending it to the prompt as a `<stdin>` block when a prompt is also given/,
+    ],
+    [
+      "an open stdin breaks the handoff or blocks the launch",
+      /silently breaking the single-task handoff and the rule below that no authoring history reaches the reviewer[\s\S]*?blocks the launch waiting for an EOF that never comes/,
+    ],
     [
       "the launch happens outside the repository under review",
       /Launch it from a neutral working directory outside the repository under review/,
@@ -195,10 +209,13 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
   structural: [
     // The launch must carry the bypass flag before the request, or every MCP
     // call stalls on an approval prompt the run cannot answer.
+    // The stdin redirect is part of the launch, not decoration: without it a
+    // non-TTY driver's stdin is appended to the prompt as a `<stdin>` block,
+    // which breaks the single-task handoff, or the launch blocks on EOF.
     [
       "match",
-      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox '<the reviewer request below>'/,
-      "launch is not the bypass one-shot form",
+      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox '<the reviewer request below>' < \/dev\/null/,
+      "launch is not the bypass one-shot form with stdin closed",
     ],
     [
       "doesNotMatch",
@@ -209,8 +226,8 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // form carrying the same flag.
     [
       "match",
-      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox '<the rereview request>'/,
-      "round-two launch form",
+      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox '<the rereview request>' < \/dev\/null/,
+      "round-two launch form with stdin closed",
     ],
     // The prose names `codex exec resume` to say the flow declines it, so the
     // guard is against a runnable resume form, not the mention.
