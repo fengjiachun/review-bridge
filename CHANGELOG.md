@@ -18,7 +18,15 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `codex exec --dangerously-bypass-approvals-and-sandbox '<request>' < /dev/null`
   — stdin is closed because an unattended launch has no terminal on it, and
   `codex exec` would otherwise append piped stdin to the prompt as a `<stdin>`
-  block, breaking the single-task handoff, or block waiting for EOF —
+  block, breaking the single-task handoff, or block waiting for EOF, and the
+  launch disables the plugin's author server, whose `submit_resolutions`,
+  `prepare_rereview`, and `finalize_local_gate` bypass leaves reachable with no
+  approval between a drifting reviewer and the author surface (the `command`
+  override beside `enabled=false` is required for the configuration to load at
+  all, not redundant). A release and CI check derives the author server's key
+  from the packaged manifest's own `--role author` marker and requires both
+  launch fences to disable that exact key, so a renamed key cannot leave an
+  inert override behind while the author server still starts —
   why the bypass flag is mandatory (a non-interactive run cannot answer the
   per-call approval prompt and stalls with `user cancelled MCP tool call`),
   and why the bypass makes a neutral working directory outside the reviewed

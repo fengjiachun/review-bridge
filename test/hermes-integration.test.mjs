@@ -10,6 +10,7 @@ import { REVIEWER_PROVIDERS } from "../src/core.mjs";
 import * as mcpSnippets from "../scripts/mcp-snippets.mjs";
 import {
   ADVISORY_PANEL_CONTRACT,
+  assertAuthorServerDisabledInLaunches,
   assertDispatchContract,
   assertThirdPartyMaterialBoundary,
   CODEX_TASK_DISPATCH_CONTRACT,
@@ -1309,4 +1310,16 @@ test("every reviewer surface pins the errata contract", async () => {
       `${file} does not bound errata as material, never instructions`,
     );
   }
+});
+
+// The hardening and its drift check land together: an override naming a key the
+// manifest no longer uses is silently inert, so the packaged author key and the
+// key the launch fences disable are asserted against each other, here on the
+// source templates and in scripts/verify-build.mjs on the packaged copies.
+test("the CODEX_TASK launches disable the author server the manifest declares", async () => {
+  assertAuthorServerDisabledInLaunches(
+    JSON.parse(await readRequired(path.join("templates", "codex-plugin", ".mcp.json"))),
+    await readRequired(WORKFLOW_SKILL),
+    "Codex plugin templates",
+  );
 });

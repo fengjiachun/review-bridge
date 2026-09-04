@@ -139,6 +139,23 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the neutral directory is not an isolation boundary",
       /That directory is hygiene, not an isolation boundary/,
     ],
+    // The #108 Codex P1. Bypass makes every reachable surface executable, so
+    // the launch has to shrink the surface rather than describe it: the
+    // plugin's second server carries the author mutation tools.
+    [
+      "the author server's mutation tools are named",
+      /`submit_resolutions`, `prepare_rereview`, and `finalize_local_gate`/,
+    ],
+    [
+      "both launches disable the author server",
+      /Both launch lines therefore disable that server for the run/,
+    ],
+    // Without this the placeholder reads like a stray line, and removing it
+    // breaks the whole configuration rather than just the hardening.
+    [
+      "the command placeholder is required for the config to load",
+      /a lone `enabled` key makes Codex read the entry as a new server definition, find no transport, and refuse the whole configuration/,
+    ],
     // The #108 ruling. An unattended bypass reviewer reading a stranger's diff
     // is a full host shell pointed at attacker-controllable text, so the
     // advisory case is barred outright rather than fenced.
@@ -214,8 +231,8 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // which breaks the single-task handoff, or the launch blocks on EOF.
     [
       "match",
-      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox '<the reviewer request below>' < \/dev\/null/,
-      "launch is not the bypass one-shot form with stdin closed",
+      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
+      "launch is not the bypass one-shot form with the author server disabled and stdin closed",
     ],
     [
       "doesNotMatch",
@@ -226,8 +243,8 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // form carrying the same flag.
     [
       "match",
-      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox '<the rereview request>' < \/dev\/null/,
-      "round-two launch form with stdin closed",
+      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
+      "round-two launch form with the author server disabled and stdin closed",
     ],
     // The prose names `codex exec resume` to say the flow declines it, so the
     // guard is against a runnable resume form, not the mention.
@@ -357,6 +374,47 @@ export const DEEPSEEK_HARNESS_DISPATCH_CONTRACT = {
     ],
   ],
 };
+
+// The unattended CODEX_TASK launch hardens itself by disabling this plugin's
+// author server, and it can only name that server by key. The key is derived
+// from the manifest's own `--role author` marker rather than written as a
+// literal on both sides, so drift fails in either direction: rename the
+// packaged key without updating the fences and the override becomes an inert
+// disabled entry while the real author server still starts — hardening that
+// fails open, with no error anywhere — while editing the fences alone fails
+// here too.
+export function assertAuthorServerDisabledInLaunches(
+  mcpConfig,
+  workflowSkill,
+  label,
+) {
+  const authorKeys = Object.entries(mcpConfig.mcpServers ?? {}).filter(
+    ([, server]) => {
+      const args = server?.args ?? [];
+      return args[args.indexOf("--role") + 1] === "author";
+    },
+  );
+  assert.equal(
+    authorKeys.length,
+    1,
+    `${label}: expected exactly one --role author server in .mcp.json, found ${authorKeys.length}`,
+  );
+  const key = authorKeys[0][0];
+  // Both overrides, in both fences. Dropping `enabled=false` leaves the author
+  // surface reachable; dropping the `command` placeholder makes the whole
+  // configuration fail to load, which is the more deceptive loss because the
+  // line reads like redundancy.
+  for (const override of [
+    `mcp_servers.${key}.command="node"`,
+    `mcp_servers.${key}.enabled=false`,
+  ]) {
+    assert.equal(
+      workflowSkill.split(override).length - 1,
+      2,
+      `${label}: both CODEX_TASK launch fences must carry -c '${override}' — the author key the contract disables must match the packaged manifest`,
+    );
+  }
+}
 
 export function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

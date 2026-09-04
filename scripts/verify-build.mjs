@@ -9,6 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
   ADVISORY_PANEL_CONTRACT,
+  assertAuthorServerDisabledInLaunches,
   assertDispatchContract,
   assertThirdPartyMaterialBoundary,
   CODEX_TASK_DISPATCH_CONTRACT,
@@ -709,6 +710,11 @@ assert.ok(
 );
 
 const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
+assertAuthorServerDisabledInLaunches(
+  mcpConfig,
+  workflowSkill,
+  "packaged Codex plugin",
+);
 assert.equal(mcpConfig.mcpServers["review-bridge-author"].cwd, ".");
 assert.equal(
   mcpConfig.mcpServers["review-bridge-author"].args[0],

@@ -573,7 +573,10 @@ launch between them.
    repository, handing it the reviewer request below as its single task:
 
    ```bash
-   codex exec --dangerously-bypass-approvals-and-sandbox '<the reviewer request below>' < /dev/null
+   codex exec --dangerously-bypass-approvals-and-sandbox \
+     -c 'mcp_servers.review-bridge-author.command="node"' \
+     -c 'mcp_servers.review-bridge-author.enabled=false' \
+     '<the reviewer request below>' < /dev/null
    ```
 
    > Independently review Review Bridge task `<review_id>` using the packaged
@@ -633,6 +636,21 @@ from its own working directory — so the task body must name the `review_id`: i
 is the reviewer's only pointer to the snapshot, and the seven-tool surface
 exposes no other way to discover which review it was sent to.
 
+The same reasoning forces the launch to shrink its reachable surface rather
+than describe it. This plugin's `.mcp.json` starts two servers, and the author
+one carries `submit_resolutions`, `prepare_rereview`, and
+`finalize_local_gate`. Under bypass there is no approval step between a
+reviewer that drifts from its skill and those tools, so author/reviewer
+separation would rest on the reviewer choosing not to call them. Both launch
+lines therefore disable that server for the run. The `command` override beside
+`enabled=false` is not redundant: a lone `enabled` key makes Codex read the
+entry as a new server definition, find no transport, and refuse the whole
+configuration with `failed to load configuration` — the server is disabled, so
+the command it names never runs. Verify the pair the way its effect is
+observable: `codex mcp list` with both overrides reports the author server
+`disabled` and the reviewer server `enabled`, and an author tool invoked from
+such a run returns no tool rather than a result.
+
 Because of that, this unattended bypass launch is for reviews of the operator's
 own changes only. Never use it for an advisory review of a third party's pull
 request. An `advisory: true` review puts an outside author's diff, requirement,
@@ -651,7 +669,10 @@ shape, carrying the same review ID and a request to rereview the author's
 resolutions with the packaged reviewer skill:
 
 ```bash
-codex exec --dangerously-bypass-approvals-and-sandbox '<the rereview request>' < /dev/null
+codex exec --dangerously-bypass-approvals-and-sandbox \
+  -c 'mcp_servers.review-bridge-author.command="node"' \
+  -c 'mcp_servers.review-bridge-author.enabled=false' \
+  '<the rereview request>' < /dev/null
 ```
 
 `codex exec resume <session-id>` exists, and `codex exec` prints the session id
