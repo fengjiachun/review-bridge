@@ -560,10 +560,11 @@ waiting for its reviewer.
 ## Dispatching a CODEX_TASK review
 
 This driver session can dispatch the `CODEX_TASK` reviewer itself rather than
-asking the operator to start it by hand, and unlike the HERMES and DeepSeek
-Harness launches this one may run unattended. Nothing else moves: Prepare,
-Handle findings, and Finish still own the review, and this section adds only
-the shell launch between them.
+asking the operator to start it by hand — the same kind of unattended shell
+launch the HERMES and DeepSeek Harness sections describe, for the provider the
+autonomous workflow itself dispatches. Nothing else moves: Prepare, Handle
+findings, and Finish still own the review, and this section adds only the shell
+launch between them.
 
 1. Follow Prepare through `get_review_summary`, choosing `CODEX_TASK` at its
    provider step. Record the returned `review_id` and `state_version` and
@@ -633,13 +634,17 @@ skill already requires each `rebuttal_accepted` decision to carry verification
 the reviewer performed itself rather than recalled, so the evidence bar is the
 one a resumed context would have faced.
 
-This launch may run unattended — `CODEX_TASK` is the one reviewer provider
-cleared for autonomous dispatch. Review Bridge records the review's
-`CODEX_TASK` binding; it observes nothing about how the task was started, and
-this section adds no mechanism that would. The `CLAUDE_DESKTOP` boundary is
-unchanged: never launch, script, or otherwise programmatically invoke a Claude
-reviewer from this session — the operator opens that conversation themselves,
-an account-compliance boundary rather than a convenience.
+This launch may run unattended, exactly as the HERMES and DeepSeek Harness
+launches may: unattended shell dispatch is cleared for all three of
+`CODEX_TASK`, `HERMES`, and `DEEPSEEK_HARNESS`, and only `CLAUDE_DESKTOP` is
+barred from it. What is `CODEX_TASK`-only is one level down — the autonomous
+workflow's own state machine dispatches `CODEX_TASK` and no other provider; this
+shell launch is a separate path. Review Bridge records the review's `CODEX_TASK`
+binding; it observes nothing about how the task was started, and this section
+adds no mechanism that would. The `CLAUDE_DESKTOP` boundary is unchanged: never
+launch, script, or otherwise programmatically invoke a Claude reviewer from this
+session — the operator opens that conversation themselves, an account-compliance
+boundary rather than a convenience.
 
 ## Dispatching a HERMES review
 

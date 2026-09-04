@@ -119,6 +119,18 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       /Codex reads the packaged Review Bridge reviewer skill from the plugin and follows it/,
     ],
     ["the dispatch may run unattended", /may run unattended/],
+    // The correction from the #108 review: unattended shell dispatch is not
+    // CODEX_TASK-exclusive. It is cleared for all three shell-launchable
+    // providers and barred only for CLAUDE_DESKTOP; what CODEX_TASK alone owns
+    // is the autonomous workflow's state-machine dispatch, a different path.
+    [
+      "unattended shell dispatch is cleared for all three providers, Claude excepted",
+      /unattended shell dispatch is cleared for all three of `CODEX_TASK`, `HERMES`, and `DEEPSEEK_HARNESS`, and only `CLAUDE_DESKTOP` is barred/,
+    ],
+    [
+      "only the autonomous state machine is CODEX_TASK-only",
+      /autonomous workflow's own state machine dispatches `CODEX_TASK` and no other provider/,
+    ],
     ["nothing verifies the dispatch", /observes nothing about how the task was started/],
     // The one boundary bypass must never be read as loosening: an unattended
     // Codex launch is cleared, a programmatic Claude launch never is.
