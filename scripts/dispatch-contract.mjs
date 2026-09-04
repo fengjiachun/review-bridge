@@ -80,7 +80,14 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     ["findings are narrated from the ledger", /narrating every finding from the ledger/],
     ["the request is single-quoted", /[Ss]ingle-quote that request[\s\S]*?backticks/],
     ["the launch does not block the wait", /background it or use a separate terminal/],
-    ["one launch per review", /[Oo]ne new task per `review_id`/],
+    // Scoped to the round, not the review: a per-`review_id` reading
+    // contradicts the round-two launch below, and a driver following it
+    // literally would refuse round two and strand the review.
+    ["one launch per review round", /[Oo]ne new task per review round/],
+    [
+      "a round-two launch is required by the rule rather than excepted from it",
+      /a round-two rereview is that review's next round, so its launch is required rather than an exception/,
+    ],
     ["no forking the author task", /never fork the author task to review/],
     ["no authoring history", /[Nn]ever pass any authoring history/],
     ["step 1 binds the review to CODEX_TASK", /choosing `CODEX_TASK` at its provider step/],

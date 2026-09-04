@@ -597,12 +597,14 @@ launch between them.
    stdout and exits nonzero on failure, so read its output before assuming a
    review that never arrives is merely slow.
 
-The launch discipline is fixed. One new task per `review_id`: never fork the
+The launch discipline is fixed. One new task per review round: never fork the
 author task to review, and never pass any authoring history — not the diff you
 wrote, the requirement discussion, your reasoning, or this session's
-transcript. That request is the whole handoff, and Codex reads the packaged
-Review Bridge reviewer skill from the plugin and follows it without being told
-where it is.
+transcript. The rule bars a second reviewer racing the same round and bars
+reusing the author's task; a round-two rereview is that review's next round, so
+its launch is required rather than an exception. That request is the whole
+handoff, and Codex reads the packaged Review Bridge reviewer skill from the
+plugin and follows it without being told where it is.
 
 The bypass flag is what makes the working directory a hard requirement rather
 than the advice it is for the other providers. `--dangerously-bypass-approvals-and-sandbox`
