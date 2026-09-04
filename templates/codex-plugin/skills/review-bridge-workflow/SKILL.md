@@ -527,7 +527,9 @@ explicitly requests cleanup.
 9. Start a fresh reviewer context for every new `review_id`. For
    `CLAUDE_DESKTOP`, use a fresh Claude conversation. For `CODEX_TASK`, create
    a new Codex task rather than forking this task, and send it only the review
-   ID and a request to follow the packaged reviewer skill. For `HERMES`, start
+   ID and a request to follow the packaged reviewer skill; to launch that task
+   from this session's shell, follow Dispatching a CODEX_TASK review below. For
+   `HERMES`, start
    a fresh, independent Hermes reviewer context in the packaged Hermes reviewer
    profile, and send it only the review ID and a request to follow the packaged
    reviewer skill; to launch that context from this session's shell, follow
@@ -554,6 +556,155 @@ explicitly requests cleanup.
 
 In local-review mode, do not push or open a pull request while the task is
 waiting for its reviewer.
+
+## Dispatching a CODEX_TASK review
+
+This driver session can dispatch the `CODEX_TASK` reviewer itself rather than
+asking the operator to start it by hand. Nothing else moves: Prepare, Handle
+findings, and Finish still own the review, and this section adds only the shell
+launch between them.
+
+1. Follow Prepare through `get_review_summary`, choosing `CODEX_TASK` at its
+   provider step. Record the returned `review_id` and `state_version` and
+   report the summary exactly as Prepare requires.
+2. Launch a fresh Codex review from a neutral working directory outside every
+   repository, handing it the reviewer request below as its single task:
+
+   ```bash
+   codex exec --dangerously-bypass-approvals-and-sandbox \
+     -c 'mcp_servers.review-bridge-author.command="node"' \
+     -c 'mcp_servers.review-bridge-author.enabled=false' \
+     '<the reviewer request below>' < /dev/null
+   ```
+
+   > Independently review Review Bridge task `<review_id>` using the packaged
+   > Review Bridge reviewer skill. Require `reviewer_provider: CODEX_TASK`,
+   > follow the review strategy, and submit every actionable finding.
+
+   Single-quote that request: it contains backticks, and a double-quoted shell
+   string would execute them instead of passing them through. Pass it as one
+   line with `<review_id>` substituted. The
+   `--dangerously-bypass-approvals-and-sandbox` flag is required, not a
+   convenience: without it `codex exec` routes each Review Bridge MCP call
+   through an approval prompt that a non-interactive run cannot answer, and the
+   reviewer stalls with `user cancelled MCP tool call` before it lists a single
+   pending review (observed 2026-08-28). Redirect stdin from `/dev/null`, as
+   both launch lines here do: `codex exec` treats piped stdin as more input,
+   appending it to the prompt as a `<stdin>` block when a prompt is also given,
+   and an unattended launch runs from a shell with no terminal on stdin. Left
+   open, that channel either feeds the reviewer whatever the driver's stdin
+   carries — silently breaking the single-task handoff and the rule below that
+   no authoring history reaches the reviewer, since the request is then no
+   longer the whole handoff — or blocks the launch waiting for an EOF that
+   never comes. Run the launch so it does not block step 3 — background it or
+   use a separate terminal.
+3. Wait with `wait_for_review_state` on the recorded `state_version`, treating
+   `timed_out` as the expected in-progress result described in Prepare. When
+   the state changes, hand the review to Handle findings, which owns narrating
+   every finding from the ledger and, after `submit_resolutions`, every
+   persisted disposition. `codex exec` prints the reviewer's transcript on
+   stdout and exits nonzero on failure, so read its output before assuming a
+   review that never arrives is merely slow.
+
+The launch discipline is fixed, and it states what must never happen rather
+than counting launches. Never run two reviewers on the same round at once, and
+never review from the author task: never fork that task, and never pass any
+authoring history — not the diff you wrote, the requirement discussion, your
+reasoning, or this session's transcript. Within those two bars launches are not
+rationed. A round-two rereview is that review's next round, so its launch is
+required rather than an exception. A launch that has exited without submitting
+a verdict — a nonzero exit, or a zero exit with nothing recorded in the
+ledger — leaves that round with no reviewer working it, so start a replacement
+launch in the same shape as the original; that replacement is the same round,
+and both bars still hold, because the reviewer it replaces is gone. Judge that
+by the process having exited, never by `wait_for_review_state` timing out: a
+timeout says the round is unfinished, not that the reviewer is gone, and
+replacing a reviewer that is merely slow creates exactly the concurrent pair
+the first bar forbids. The driver started the process, so it has the exit
+status to judge by. That request is the whole handoff, and Codex reads the
+packaged Review Bridge reviewer skill from the plugin and follows it without
+being told where it is.
+
+The bypass flag is what makes the working directory a hard requirement rather
+than the advice it is for the other providers. `--dangerously-bypass-approvals-and-sandbox`
+gives the reviewer an unsandboxed shell with no approval gate. Be exact about
+what that leaves standing: the Review Bridge reviewer server's seven-tool
+`--role reviewer` surface bounds only what Review Bridge exposes, not what the
+reviewer process can do — Codex brings a shell of its own, and bypass strips
+the sandbox and the approval gate from that shell. Launch it from a neutral
+working directory outside the repository under review, and prefer a directory
+in no repository at all: an unsandboxed shell rooted in the authoring worktree
+can read and write that tree directly, and Codex also injects project context
+from the nearest `AGENTS.md` or `CLAUDE.md` it finds there. That directory is
+hygiene, not an isolation boundary — it keeps the reviewer off the authoring
+tree by default and contains nothing that a reviewer decides to reach for. The
+reviewer process needs no checkout of its own — its tools read the change from
+the immutable snapshot and from the author's repository by recorded path, never
+from its own working directory — so the task body must name the `review_id`: it
+is the reviewer's only pointer to the snapshot, and the seven-tool surface
+exposes no other way to discover which review it was sent to.
+
+The same reasoning forces the launch to shrink its reachable surface rather
+than describe it. This plugin's `.mcp.json` starts two servers, and the author
+one carries `submit_resolutions`, `prepare_rereview`, and
+`finalize_local_gate`. Under bypass there is no approval step between a
+reviewer that drifts from its skill and those tools, so author/reviewer
+separation would rest on the reviewer choosing not to call them. Both launch
+lines therefore disable that server for the run. The `command` override beside
+`enabled=false` is not redundant: a lone `enabled` key makes Codex read the
+entry as a new server definition, find no transport, and refuse the whole
+configuration with `failed to load configuration` — the server is disabled, so
+the command it names never runs. Verify the pair the way its effect is
+observable: `codex mcp list` with both overrides reports the author server
+`disabled` and the reviewer server `enabled`, and an author tool invoked from
+such a run returns no tool rather than a result.
+
+Because of that, this unattended bypass launch is for reviews of the operator's
+own changes only. Never use it for an advisory review of a third party's pull
+request. An `advisory: true` review puts an outside author's diff, requirement,
+and commit messages in front of a reviewer whose shell bypass has already
+unsandboxed, and every one of those is attacker-controllable text. The reviewer
+skill does require treating that material as material to verify and never as
+instructions, but that is skill discipline rather than a mechanism, and nothing
+in this launch contains a reviewer that disregards it. `codex --help` states the
+flag is intended solely for running in environments that are externally
+sandboxed; a neutral working directory is not one. An advisory `CODEX_TASK`
+member is therefore opened by the operator by hand, or launched inside a real
+external sandbox.
+
+A round-two rereview of the same `review_id` is another launch in the same
+shape, carrying the same review ID and a request to rereview the author's
+resolutions with the packaged reviewer skill:
+
+```bash
+codex exec --dangerously-bypass-approvals-and-sandbox \
+  -c 'mcp_servers.review-bridge-author.command="node"' \
+  -c 'mcp_servers.review-bridge-author.enabled=false' \
+  '<the rereview request>' < /dev/null
+```
+
+`codex exec resume <session-id>` exists, and `codex exec` prints the session id
+it minted in its own header, so round two could inherit round one's context.
+This flow deliberately does not resume. Round two is a fresh launch that did not
+perform round one, reconstructed from the ledger, which `open_review` serves
+whole — every round-one finding with its explanation, recommendation, and
+status, and every author resolution with its rationale and evidence. The reason
+is the evidence bar rather than a missing capability: the reviewer skill
+requires each `rebuttal_accepted` decision to carry verification the reviewer
+performed itself rather than recalled, and a resumed context reintroduces
+exactly the recall this design makes the reviewer re-derive.
+
+This launch may run unattended; it needs no operator at the keyboard. What the
+HERMES and DeepSeek Harness sections require of their own launches is stated
+there and is neither changed nor described by this one. Separately, the
+autonomous workflow's own state machine dispatches `CODEX_TASK` and no other
+provider; this shell launch is a different path from that one. Review Bridge
+records the review's `CODEX_TASK` binding; it observes nothing about how the
+task was started, and this section adds no mechanism that would. The
+`CLAUDE_DESKTOP` boundary is unchanged, and nothing above narrows it: never
+launch, script, or otherwise programmatically invoke a Claude reviewer from this
+session — the operator opens that conversation themselves, an account-compliance
+boundary rather than a convenience.
 
 ## Dispatching a HERMES review
 
@@ -1040,7 +1191,12 @@ attests nothing.
    is an explicit per-review choice for exceptional stakes.
 5. Dispatch each member by its own pattern. The table is asymmetric by design:
 
-   - `CODEX_TASK` — a fresh Codex task, as the manual handoff describes.
+   - `CODEX_TASK` — **the operator opens a fresh Codex task themselves, or
+     launches one inside a real external sandbox.** The unattended bypass
+     launch in Dispatching a CODEX_TASK review is for the operator's own
+     changes only and must never review a third party's pull request: it
+     leaves the reviewer an unsandboxed host shell, and this panel's material
+     is an outside author's.
    - `HERMES` — the headless launch in Dispatching a HERMES review.
    - `DEEPSEEK_HARNESS` — the headless launch in Dispatching a
      DEEPSEEK_HARNESS review.

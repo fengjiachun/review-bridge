@@ -9,6 +9,47 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Added
+
+- Document unattended `CODEX_TASK` dispatch from the driver session's shell,
+  in its own section beside the existing HERMES and DeepSeek Harness dispatch
+  sections, whose own launch modes it neither changes nor describes. The Codex
+  workflow skill gains a `Dispatching a CODEX_TASK review` section pinning the
+  launch command
+  `codex exec --dangerously-bypass-approvals-and-sandbox '<request>' < /dev/null`
+  — stdin is closed because an unattended launch has no terminal on it, and
+  `codex exec` would otherwise append piped stdin to the prompt as a `<stdin>`
+  block, breaking the single-task handoff, or block waiting for EOF, and the
+  launch disables the plugin's author server, whose `submit_resolutions`,
+  `prepare_rereview`, and `finalize_local_gate` bypass leaves reachable with no
+  approval between a drifting reviewer and the author surface (the `command`
+  override beside `enabled=false` is required for the configuration to load at
+  all, not redundant). A release and CI check derives the author server's key
+  from the packaged manifest's own `--role author` marker and requires both
+  launch fences to disable that exact key, so a renamed key cannot leave an
+  inert override behind while the author server still starts —
+  why the bypass flag is mandatory (a non-interactive run cannot answer the
+  per-call approval prompt and stalls with `user cancelled MCP tool call`),
+  and why the bypass makes a neutral working directory outside the reviewed
+  repository a hard requirement rather than advice. That launch is bounded to
+  reviews of the operator's own changes: an advisory review of a third party's
+  pull request must never take it, because bypass leaves the reviewer an
+  unsandboxed host shell while the reviewed diff, requirement, and commit
+  messages are all attacker-controllable — the advisory `CODEX_TASK` member is
+  opened by the operator by hand or inside a real external sandbox instead. The
+  reviewer server's seven-tool surface bounds what Review Bridge exposes, not
+  the shell Codex brings of its own, and the neutral directory is hygiene rather
+  than an isolation boundary. The launch discipline names what must never
+  happen — two reviewers on one round at once, and reviewing from the author
+  task — rather than counting launches, so a launch that exited without
+  submitting a verdict is replaced instead of leaving the round stranded with
+  no reviewer and a wait that can only time out; the replacement is justified
+  by the process having exited, never by the wait timing out, since replacing a
+  merely slow reviewer would create the concurrent pair the rule forbids. A
+  shared `CODEX_TASK_DISPATCH_CONTRACT` holds the
+  section's key claims, asserted against the source template in CI and the
+  packaged copy at release. PR #108.
+
 ### Fixed
 
 - Verify a release's published assets against the published checksum

@@ -58,6 +58,231 @@ const SHARED_REQUIREMENTS = [
   ["autonomous dispatch stays CODEX_TASK-only", /`CODEX_TASK` dispatch only/],
 ];
 
+// CODEX_TASK does not reuse SHARED_REQUIREMENTS. Those claims are worded for a
+// reviewer "instance" or "session" that the operator is present to launch, and
+// they close each provider's section by handing autonomous dispatch back to
+// CODEX_TASK. CODEX_TASK is that provider: it launches a "task", it may run
+// unattended, and its `--dangerously-bypass-approvals-and-sandbox` launch has
+// its own boundary the other two do not — an unsandboxed shell fenced only by
+// the reviewer server's seven-tool surface and the skill. So its contract
+// states the genuinely shared claims itself and adds the ones only the bypass
+// launch makes true.
+export const CODEX_TASK_DISPATCH_CONTRACT = {
+  requirements: [
+    [
+      "step 1 records the state version the wait needs",
+      /[Rr]ecord the returned `review_id` and `state_version`/,
+    ],
+    [
+      "the wait is bound to the recorded state version",
+      /`wait_for_review_state` on the recorded `state_version`/,
+    ],
+    ["findings are narrated from the ledger", /narrating every finding from the ledger/],
+    ["the request is single-quoted", /[Ss]ingle-quote that request[\s\S]*?backticks/],
+    ["the launch does not block the wait", /background it or use a separate terminal/],
+    // Stated as prohibitions rather than a count. The counting form was
+    // narrowed three times in this PR's review — per-`review_id`, then
+    // per-round, then "except after a failed launch" — because each count
+    // leaves a legitimate launch it forbids. What the rule actually protects
+    // is these two conditions, so it names them and lets launches be
+    // unrationed within them.
+    [
+      "the discipline states prohibitions rather than a count",
+      /states what must never happen rather than counting launches/,
+    ],
+    [
+      "no two reviewers on one round at once",
+      /Never run two reviewers on the same round at once/,
+    ],
+    ["no reviewing from the author task", /never review from the author task/],
+    [
+      "a round-two launch is required by the rule rather than excepted from it",
+      /[Aa] round-two rereview is that review's next round, so its launch is required rather than an exception/,
+    ],
+    // Without a replacement the round strands: the reviewer is gone, the state
+    // never moves, and the wait can only keep timing out.
+    [
+      "a launch that exited without a verdict is replaced",
+      /exited without submitting a verdict[\s\S]*?start a replacement launch in the same shape as the original/,
+    ],
+    // The distinction the replacement rule stands on. A timeout is not death,
+    // and replacing a slow reviewer manufactures the pair the first bar bans.
+    [
+      "the replacement is judged by the process exit, not by the wait",
+      /Judge that by the process having exited, never by `wait_for_review_state` timing out/,
+    ],
+    [
+      "replacing a merely slow reviewer would create the forbidden pair",
+      /replacing a reviewer that is merely slow creates exactly the concurrent pair the first bar forbids/,
+    ],
+    ["no authoring history", /[Nn]ever pass any authoring history/],
+    ["step 1 binds the review to CODEX_TASK", /choosing `CODEX_TASK` at its provider step/],
+    [
+      "the reviewer request is the whole handoff, binding included",
+      /Independently review Review Bridge task `<review_id>` using the packaged Review Bridge reviewer skill\. Require `reviewer_provider: CODEX_TASK`, follow the review strategy, and submit every actionable finding\./,
+    ],
+    // Why bypass is mandatory and not a convenience: a non-interactive
+    // `codex exec` cannot answer the approval prompt every MCP call raises, so
+    // without the flag the reviewer stalls with the exact cancel string the
+    // 2026-08-28 probe recorded before it lists a single review.
+    [
+      "the bypass flag is mandatory, with the non-bypass stall as its reason",
+      /`--dangerously-bypass-approvals-and-sandbox` flag is required, not a convenience[\s\S]*?`user cancelled MCP tool call`/,
+    ],
+    // The redirect has to carry its reason, or it reads as boilerplate someone
+    // drops when reformatting the command.
+    [
+      "stdin is closed on the launch",
+      /Redirect stdin from `\/dev\/null`, as both launch lines here do/,
+    ],
+    [
+      "piped stdin would be appended to the prompt",
+      /appending it to the prompt as a `<stdin>` block when a prompt is also given/,
+    ],
+    [
+      "an open stdin breaks the handoff or blocks the launch",
+      /silently breaking the single-task handoff and the rule below that no authoring history reaches the reviewer[\s\S]*?blocks the launch waiting for an EOF that never comes/,
+    ],
+    [
+      "the launch happens outside the repository under review",
+      /Launch it from a neutral working directory outside the repository under review/,
+    ],
+    // Corrected by the #108 Codex P1: the seven-tool surface is not a fence
+    // around the reviewer. It bounds what Review Bridge exposes; Codex brings
+    // its own shell, which bypass unsandboxes. Claiming otherwise reads as a
+    // containment guarantee that does not exist.
+    [
+      "the seven-tool surface does not bound the reviewer's own shell",
+      /seven-tool `--role reviewer` surface bounds only what Review Bridge exposes, not what the reviewer process can do/,
+    ],
+    [
+      "the neutral directory is a hard requirement under bypass",
+      /hard requirement rather than the advice it is for the other providers/,
+    ],
+    // ...and a hard requirement is still not a fence. Losing this sentence
+    // lets a reader mistake the directory for the containment the launch lacks.
+    [
+      "the neutral directory is not an isolation boundary",
+      /That directory is hygiene, not an isolation boundary/,
+    ],
+    // The #108 Codex P1. Bypass makes every reachable surface executable, so
+    // the launch has to shrink the surface rather than describe it: the
+    // plugin's second server carries the author mutation tools.
+    [
+      "the author server's mutation tools are named",
+      /`submit_resolutions`, `prepare_rereview`, and `finalize_local_gate`/,
+    ],
+    [
+      "both launches disable the author server",
+      /Both launch lines therefore disable that server for the run/,
+    ],
+    // Without this the placeholder reads like a stray line, and removing it
+    // breaks the whole configuration rather than just the hardening.
+    [
+      "the command placeholder is required for the config to load",
+      /a lone `enabled` key makes Codex read the entry as a new server definition, find no transport, and refuse the whole configuration/,
+    ],
+    // The #108 ruling. An unattended bypass reviewer reading a stranger's diff
+    // is a full host shell pointed at attacker-controllable text, so the
+    // advisory case is barred outright rather than fenced.
+    [
+      "the unattended bypass launch covers the operator's own changes only",
+      /this unattended bypass launch is for reviews of the operator's own changes only/,
+    ],
+    [
+      "an advisory review never takes this launch",
+      /Never use it for an advisory review of a third party's pull request/,
+    ],
+    [
+      "the flag's own help text scopes it to external sandboxes",
+      /intended solely for running in environments that are externally sandboxed/,
+    ],
+    [
+      "an advisory CODEX_TASK member is manual or externally sandboxed",
+      /opened by the operator by hand, or launched inside a real external sandbox/,
+    ],
+    // Corrected by the #108 Codex P2. The section used to justify the
+    // from-ledger round two by claiming the CLI could not resume, which is
+    // false: `codex exec resume` takes a session id and `codex exec` prints
+    // one. Stating the capability accurately is what keeps the justification
+    // honest — the design stands on the evidence bar, not on a missing feature.
+    [
+      "the CLI's resume capability is stated accurately",
+      /`codex exec resume <session-id>` exists/,
+    ],
+    ["round two deliberately does not resume", /This flow deliberately does not resume/],
+    [
+      "round two is rebuilt from the ledger",
+      /reconstructed from the ledger, which `open_review` serves whole/,
+    ],
+    [
+      "the from-ledger round is a design choice, not a CLI limitation",
+      /evidence bar rather than a missing capability/,
+    ],
+    [
+      "the task body must name the review id",
+      /task body must name the `review_id`/,
+    ],
+    [
+      "Codex reads the packaged reviewer skill on its own",
+      /Codex reads the packaged Review Bridge reviewer skill from the plugin and follows it/,
+    ],
+    ["the dispatch may run unattended", /may run unattended/],
+    // Narrowed by the #108 round-seven finding. An earlier revision of this
+    // section claimed unattended dispatch was cleared for all three
+    // shell-launchable providers, which contradicted the HERMES and DeepSeek
+    // Harness sections still calling themselves operator-present. This section
+    // speaks for its own launch only; aligning the other two is separate work.
+    [
+      "the section makes no claim about the other providers' launches",
+      /What the HERMES and DeepSeek Harness sections require of their own launches is stated there and is neither changed nor described by this one/,
+    ],
+    [
+      "only the autonomous state machine is CODEX_TASK-only",
+      /autonomous workflow's own state machine dispatches `CODEX_TASK` and no other provider/,
+    ],
+    ["nothing verifies the dispatch", /observes nothing about how the task was started/],
+    // The one boundary bypass must never be read as loosening: an unattended
+    // Codex launch is cleared, a programmatic Claude launch never is.
+    [
+      "the Claude boundary is unchanged",
+      /[Nn]ever launch, script, or otherwise programmatically invoke a Claude reviewer/,
+    ],
+    ["the Claude boundary is a compliance line", /account-compliance boundary/],
+  ],
+  structural: [
+    // The launch must carry the bypass flag before the request, or every MCP
+    // call stalls on an approval prompt the run cannot answer.
+    // The stdin redirect is part of the launch, not decoration: without it a
+    // non-TTY driver's stdin is appended to the prompt as a `<stdin>` block,
+    // which breaks the single-task handoff, or the launch blocks on EOF.
+    [
+      "match",
+      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
+      "launch is not the bypass one-shot form with the author server disabled and stdin closed",
+    ],
+    [
+      "doesNotMatch",
+      /codex exec '<the reviewer request below>'/,
+      "launch dropped the --dangerously-bypass-approvals-and-sandbox flag",
+    ],
+    // Round two is another launch, not a resume, and needs its own runnable
+    // form carrying the same flag.
+    [
+      "match",
+      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
+      "round-two launch form with the author server disabled and stdin closed",
+    ],
+    // The prose names `codex exec resume` to say the flow declines it, so the
+    // guard is against a runnable resume form, not the mention.
+    [
+      "doesNotMatch",
+      /```bash\n *codex exec resume/,
+      "round two regressed to a resume launch form",
+    ],
+  ],
+};
+
 export const HERMES_DISPATCH_CONTRACT = {
   requirements: [
     ...SHARED_REQUIREMENTS,
@@ -177,6 +402,47 @@ export const DEEPSEEK_HARNESS_DISPATCH_CONTRACT = {
   ],
 };
 
+// The unattended CODEX_TASK launch hardens itself by disabling this plugin's
+// author server, and it can only name that server by key. The key is derived
+// from the manifest's own `--role author` marker rather than written as a
+// literal on both sides, so drift fails in either direction: rename the
+// packaged key without updating the fences and the override becomes an inert
+// disabled entry while the real author server still starts — hardening that
+// fails open, with no error anywhere — while editing the fences alone fails
+// here too.
+export function assertAuthorServerDisabledInLaunches(
+  mcpConfig,
+  workflowSkill,
+  label,
+) {
+  const authorKeys = Object.entries(mcpConfig.mcpServers ?? {}).filter(
+    ([, server]) => {
+      const args = server?.args ?? [];
+      return args[args.indexOf("--role") + 1] === "author";
+    },
+  );
+  assert.equal(
+    authorKeys.length,
+    1,
+    `${label}: expected exactly one --role author server in .mcp.json, found ${authorKeys.length}`,
+  );
+  const key = authorKeys[0][0];
+  // Both overrides, in both fences. Dropping `enabled=false` leaves the author
+  // surface reachable; dropping the `command` placeholder makes the whole
+  // configuration fail to load, which is the more deceptive loss because the
+  // line reads like redundancy.
+  for (const override of [
+    `mcp_servers.${key}.command="node"`,
+    `mcp_servers.${key}.enabled=false`,
+  ]) {
+    assert.equal(
+      workflowSkill.split(override).length - 1,
+      2,
+      `${label}: both CODEX_TASK launch fences must carry -c '${override}' — the author key the contract disables must match the packaged manifest`,
+    );
+  }
+}
+
 export function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -271,6 +537,17 @@ export const ADVISORY_PANEL_CONTRACT = {
     [
       "the Claude member is opened by the operator",
       /the operator opens a fresh Claude conversation themselves/,
+    ],
+    // The #108 ruling reaches the panel too: the unattended bypass launch is
+    // barred here, so the CODEX_TASK member is manual or externally sandboxed
+    // like the Claude one, not the headless launch the dispatch section gives.
+    [
+      "the Codex member is opened by the operator or externally sandboxed",
+      /the operator opens a fresh Codex task themselves, or launches one inside a real external sandbox/,
+    ],
+    [
+      "the panel never takes the unattended bypass launch",
+      /must never review a third party's pull request/,
     ],
     [
       "no programmatic Claude dispatch",
