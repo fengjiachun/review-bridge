@@ -12,9 +12,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 ### Added
 
 - Document unattended `CODEX_TASK` dispatch from the driver session's shell,
-  parallel to the HERMES and DeepSeek Harness launches. The Codex workflow
-  skill gains a `Dispatching a CODEX_TASK review` section pinning the launch
-  command
+  in its own section beside the existing HERMES and DeepSeek Harness dispatch
+  sections, whose own launch modes it neither changes nor describes. The Codex
+  workflow skill gains a `Dispatching a CODEX_TASK review` section pinning the
+  launch command
   `codex exec --dangerously-bypass-approvals-and-sandbox '<request>' < /dev/null`
   — stdin is closed because an unattended launch has no terminal on it, and
   `codex exec` would otherwise append piped stdin to the prompt as a `<stdin>`

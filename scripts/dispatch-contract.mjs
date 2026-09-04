@@ -202,13 +202,14 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       /Codex reads the packaged Review Bridge reviewer skill from the plugin and follows it/,
     ],
     ["the dispatch may run unattended", /may run unattended/],
-    // The correction from the #108 review: unattended shell dispatch is not
-    // CODEX_TASK-exclusive. It is cleared for all three shell-launchable
-    // providers and barred only for CLAUDE_DESKTOP; what CODEX_TASK alone owns
-    // is the autonomous workflow's state-machine dispatch, a different path.
+    // Narrowed by the #108 round-seven finding. An earlier revision of this
+    // section claimed unattended dispatch was cleared for all three
+    // shell-launchable providers, which contradicted the HERMES and DeepSeek
+    // Harness sections still calling themselves operator-present. This section
+    // speaks for its own launch only; aligning the other two is separate work.
     [
-      "unattended shell dispatch is cleared for all three providers, Claude excepted",
-      /unattended shell dispatch is cleared for all three of `CODEX_TASK`, `HERMES`, and `DEEPSEEK_HARNESS`, and only `CLAUDE_DESKTOP` is barred/,
+      "the section makes no claim about the other providers' launches",
+      /What the HERMES and DeepSeek Harness sections require of their own launches is stated there and is neither changed nor described by this one/,
     ],
     [
       "only the autonomous state machine is CODEX_TASK-only",
