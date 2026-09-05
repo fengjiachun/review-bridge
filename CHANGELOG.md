@@ -72,6 +72,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - (#104) The 0.10.0 release pull request, whose merge fell outside the
   v0.10.0 tag.
+- (#113) The 0.11.0 release pull request, whose merge carries the v0.11.0
+  tag, so no later release inherits this line.
 
 ## 0.10.0 - 2026-09-01
 
