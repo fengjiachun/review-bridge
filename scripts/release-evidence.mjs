@@ -141,6 +141,7 @@ export function reconcileClaims({
   previousVersion,
   mergedPullRequests,
   phase,
+  releasePullRequest = null,
 }) {
   const failures = [];
   const deferred = [];
@@ -198,6 +199,17 @@ export function reconcileClaims({
     }
     for (const number of [...claimed].sort((left, right) => left - right)) {
       if (merged.has(number)) {
+        continue;
+      }
+      // The release pull request claims itself, so that tagging its own merge
+      // commit puts that merge inside the range its entry describes and no
+      // later release inherits the line. Pre-flight runs before that merge
+      // exists, so this one claim is unfindable by construction rather than
+      // wrong. The operator names the number and the report carries it back,
+      // so the exemption is one declared number rather than a silent class,
+      // and it is pre-flight only: by the final phase the merge exists, and a
+      // claim still unfound there is the tag sitting on the wrong commit.
+      if (phase === "PRE" && number === releasePullRequest) {
         continue;
       }
       const unfound = failure(
@@ -687,6 +699,7 @@ export function verifyRelease(input) {
     previousVersion: input.previousVersion,
     mergedPullRequests: input.mergedPullRequests,
     phase,
+    releasePullRequest: input.releasePullRequest ?? null,
   });
   failures.push(...reconciliation.failures);
   if (phase === "PRE") {
@@ -697,6 +710,7 @@ export function verifyRelease(input) {
       deferred: reconciliation.deferred,
       notes,
       reconciliation: reconciliation.status,
+      releasePullRequest: input.releasePullRequest ?? null,
     };
   }
   if (!input.observation.tag_reachable_from_default_branch) {
