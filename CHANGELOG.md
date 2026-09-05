@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.11.0 - 2026-09-05
 
 ### Added
 
@@ -48,7 +48,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   merely slow reviewer would create the concurrent pair the rule forbids. A
   shared `CODEX_TASK_DISPATCH_CONTRACT` holds the
   section's key claims, asserted against the source template in CI and the
-  packaged copy at release. PR #108.
+  packaged copy at release. (#108)
 
 ### Fixed
 
@@ -61,7 +61,21 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   generated one could never pass and kept every release's evidence record
   unreachable. The collector now captures the published manifest's text in
   the observation, and an observation from before that capture fails with a
-  named code asking for re-collection. Ruled on PR #74, 2026-09-01.
+  named code asking for re-collection. Ruled on PR #74, 2026-09-01. (#105)
+- Move the lockfile past the `fast-uri` and `qs` advisories `npm audit`
+  reports against the transitive dependencies of
+  `@modelcontextprotocol/sdk`, which failed the audit step on every pull
+  request. `fast-uri` goes to 3.1.7 and `qs` to 6.16.0, lockfile only, with
+  no change to `package.json`. (#111)
+
+### Internal
+
+- (#104) The 0.10.0 release pull request, whose merge fell outside the
+  v0.10.0 tag.
+- (#113) The 0.11.0 release pull request, whose merge carries the v0.11.0
+  tag, so no later release inherits this line. Pre-flight cannot see that
+  merge yet, so `verify-release.mjs --pre` takes the release pull request's
+  own number through `--release-pull-request` and exempts that one claim.
 
 ## 0.10.0 - 2026-09-01
 

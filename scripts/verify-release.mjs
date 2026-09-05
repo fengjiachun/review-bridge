@@ -39,6 +39,14 @@ passing final run appends releases/<repository-id>/<version>.json to the store.
                         unless the observation reports the tag as absent.
   --repo <path>         Git repository to read (default: cwd).
   --store <path>        Review Bridge store (default: REVIEW_BRIDGE_HOME).
+  --release-pull-request <n>
+                        Pre-flight only: the release pull request's own number.
+                        Its CHANGELOG entry claims itself so that tagging its
+                        merge commit puts that merge inside the range the entry
+                        describes. That merge does not exist yet at pre-flight,
+                        so this exempts that one number from UNFOUND_CLAIM and
+                        reports it back as release_pull_request. Every other
+                        number is still reported.
 `;
 
 const MAX_RECORD_BYTES = 1024 * 1024;
@@ -63,6 +71,7 @@ function parseArguments(argv) {
     store: null,
     observation: null,
     "build-dir": null,
+    "release-pull-request": null,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -75,7 +84,15 @@ function parseArguments(argv) {
       continue;
     }
     const value = argv[index + 1];
-    if (!["--repo", "--store", "--observation", "--build-dir"].includes(flag)) {
+    if (
+      ![
+        "--repo",
+        "--store",
+        "--observation",
+        "--build-dir",
+        "--release-pull-request",
+      ].includes(flag)
+    ) {
       usageError(`unknown argument ${flag}`);
     }
     if (value == null) {
@@ -92,6 +109,17 @@ function parseArguments(argv) {
   // missing-tag report impossible to produce.
   if (options.phase === "FINAL" && options.observation == null) {
     usageError("--final requires --observation");
+  }
+  if (options["release-pull-request"] != null) {
+    // The exemption exists only while the merge cannot exist. Accepting it in
+    // the final phase would let the one run that can prove the tag sits on the
+    // release merge be told to skip that proof.
+    if (options.phase !== "PRE") {
+      usageError("--release-pull-request applies to --pre only");
+    }
+    if (!/^[1-9][0-9]*$/.test(options["release-pull-request"])) {
+      usageError("--release-pull-request requires a positive pull request number");
+    }
   }
   return options;
 }
@@ -318,6 +346,10 @@ if (options.phase === "PRE") {
     previousVersion:
       range.kind === "ROOT" ? null : versionFromTagName(range.tag),
     mergedPullRequests: localMergedPullRequests(repositoryPath, range),
+    releasePullRequest:
+      options["release-pull-request"] == null
+        ? null
+        : Number(options["release-pull-request"]),
   });
 } else {
   let observation;
@@ -397,6 +429,7 @@ process.stdout.write(
       failures: result.failures,
       deferred: result.deferred,
       notes: result.notes,
+      release_pull_request: result.releasePullRequest ?? null,
       record: recordOutcome,
     },
     null,

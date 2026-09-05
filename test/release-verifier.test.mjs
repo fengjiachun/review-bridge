@@ -120,6 +120,56 @@ test("pre-flight verifies a release pull request from the repository alone", asy
   );
 });
 
+test("pre-flight exempts only the named release pull request from its own claim", async (t) => {
+  const fixture = await releaseRepository();
+  t.after(() => fsp.rm(fixture.root, { recursive: true, force: true }));
+  // #42 is the release pull request claiming itself, so that tagging its merge
+  // commit puts that merge inside the range this entry describes. #99 is an
+  // ordinary claim the range does not contain.
+  await fsp.writeFile(
+    path.join(fixture.repository, "CHANGELOG.md"),
+    `${changelog({ entry: "- A shipped thing (#7)\n- An unmerged claim (#99)\n\n### Internal\n\n- (#42) The release pull request." })}\n`,
+  );
+  git(fixture.repository, "commit", "-am", "claim the release pull request");
+
+  const unnamed = runVerifier(["--pre"], fixture.repository);
+  assert.equal(unnamed.status, 0, unnamed.stdout + unnamed.stderr);
+  assert.deepEqual(
+    unnamed.report.deferred.map((entry) => entry.pull_request),
+    [42, 99],
+  );
+  assert.equal(unnamed.report.release_pull_request, null);
+
+  const named = runVerifier(
+    ["--pre", "--release-pull-request", "42"],
+    fixture.repository,
+  );
+  assert.equal(named.status, 0, named.stdout + named.stderr);
+  // The exemption is one declared number, not a class: #99 is still reported.
+  assert.deepEqual(
+    named.report.deferred.map((entry) => entry.pull_request),
+    [99],
+  );
+  // The report carries the number back, so the exemption is never silent.
+  assert.equal(named.report.release_pull_request, 42);
+
+  // The exemption exists only while the merge cannot exist.
+  const final = runVerifier(
+    ["--final", "--observation", "unused.json", "--release-pull-request", "42"],
+    fixture.repository,
+  );
+  assert.equal(final.status, 2);
+  assert.match(final.stderr, /--release-pull-request applies to --pre only/);
+  for (const value of ["0", "-1", "twelve"]) {
+    const rejected = runVerifier(
+      ["--pre", "--release-pull-request", value],
+      fixture.repository,
+    );
+    assert.equal(rejected.status, 2);
+    assert.match(rejected.stderr, /positive pull request number/);
+  }
+});
+
 test("the final phase records once, agrees on re-run, and refuses to overwrite", async (t) => {
   const fixture = await releaseRepository();
   t.after(() => fsp.rm(fixture.root, { recursive: true, force: true }));

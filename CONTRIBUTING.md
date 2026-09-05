@@ -33,11 +33,19 @@ security issues privately as described in [SECURITY.md](SECURITY.md).
 
 ## Verifying a release
 
-Before tagging, from the release pull request:
+Before tagging, from the release pull request, naming its own number:
 
 ```bash
-node scripts/verify-release.mjs --pre
+node scripts/verify-release.mjs --pre --release-pull-request <n>
 ```
+
+The release entry claims the release pull request itself, so that tagging its
+merge commit puts that merge inside the range the entry describes and no later
+release inherits the line. That merge does not exist during pre-flight, so the
+flag exempts that one number from `UNFOUND_CLAIM` and reports it back as
+`release_pull_request`. Every other unfound claim is still reported, and the
+final phase accepts no exemption: by then the merge exists, and a claim still
+unfound is the tag sitting on the wrong commit.
 
 After the tag and release are published, from a clean checkout of the tag:
 
