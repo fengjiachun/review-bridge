@@ -173,7 +173,7 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // contract could flip: refused, not left waiting.
     [
       "an out-of-workspace write is refused without a hang",
-      /a write to `\$HOME` from that shell fails with `operation not permitted`[\s\S]*?an unattended run is refused, not left waiting/,
+      /a write to `\$HOME` or to `\/tmp` from that shell fails with `operation not permitted`[\s\S]*?an unattended run is refused, not left waiting/,
     ],
     // ...and the positive control, without which a denial is
     // indistinguishable from a reviewer that never tried.
@@ -374,14 +374,14 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // the launch blocks on EOF.
     [
       "match",
-      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
       "launch is not the sandboxed one-shot form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, the author server disabled, and stdin closed",
     ],
     // Round two is another launch, not a resume, and needs its own runnable
     // form in the same shape.
     [
       "match",
-      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
       "round-two launch form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, the author server disabled, and stdin closed",
     ],
     // The flag this launch dropped. It strips the sandbox that is now the
