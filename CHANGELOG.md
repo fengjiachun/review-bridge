@@ -15,8 +15,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `--dangerously-bypass-approvals-and-sandbox` and runs the reviewer inside
   Codex's own `workspace-write` sandbox, on codex-cli 0.153.4 or newer
   issue #109 (#114). The launch is now
-  `codex exec --skip-git-repo-check -c 'approvals_reviewer="guardian_subagent"' …`
-  with the author server still disabled and stdin still closed:
+  `codex exec --skip-git-repo-check --sandbox workspace-write -c 'sandbox_workspace_write.network_access=false' -c 'approvals_reviewer="guardian_subagent"' …`
+  with the author server still disabled and stdin still closed: the sandbox
+  mode and its network policy named in the launch rather than inherited from
+  the host profile,
   `--skip-git-repo-check` because the neutral working directory is in no
   repository and `codex exec` refuses such a directory otherwise, and the
   guardian named in the launch line because every Review Bridge MCP call still
@@ -29,11 +31,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   servers running outside the sandbox — which is why the reviewer server can
   write its store and why the author server is disabled rather than trusted to
   the sandbox or the guardian. The neutral directory stays required as the
-  sandbox's writable root and the source of injected project context. With
-  the reviewer's shell sandboxed, the #108 bar on advisory reviews falls:
-  the advisory `CODEX_TASK` panel member takes the unattended launch, while
-  the advisory fence itself — a terminal state that is a report and never a
-  `LOCAL_GATE_PASSED` — is unchanged by how the member is launched. The
+  sandbox's writable root and the source of injected project context. The
+  bar on advisory reviews stays, for a new reason: the sandbox bounds writes
+  and network, not reads, so an outside author's text can still steer the
+  reviewer into reading host credentials and carrying them out through its
+  own verdict, and the advisory `CODEX_TASK` panel member is still opened by
+  the operator by hand or inside a real external sandbox. The
   contract in `scripts/dispatch-contract.mjs` pins the new launch form in
   both fences, the version floor, the network and write denials, the
   `--skip-git-repo-check` reason, and the absence of the bypass flag from the

@@ -185,9 +185,12 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the sandbox blocks the network outright",
       /`curl https:\/\/example\.com` from that shell fails with `Could not resolve host`/,
     ],
+    // The sandbox and its network policy are named in the launch, not
+    // inherited: a host profile can set sandbox_mode to anything and can
+    // grant network, and the fence has to say why it carries both.
     [
-      "the launching profile must not grant network",
-      /`\[sandbox_workspace_write\] network_access = true`, which the profile launching reviewers must not do/,
+      "the launch names its sandbox and network policy rather than inheriting the host profile",
+      /`--sandbox workspace-write` and `-c 'sandbox_workspace_write\.network_access=false'` are in the launch line[\s\S]*?rather than inheriting whatever the host's `~\/\.codex\/config\.toml` says/,
     ],
     // The MCP approval gate survives the sandbox, and a non-interactive run
     // cannot answer it. The launch names its approver itself so the same
@@ -252,14 +255,35 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the command placeholder is required for the config to load",
       /a lone `enabled` key makes Codex read the entry as a new server definition, find no transport, and refuse the whole configuration/,
     ],
-    // The #109 ruling. The #108 P1 was an unsandboxed shell fed an outside
-    // author's text; under this launch that shell is sandboxed, so the
-    // advisory member rejoins unattended dispatch. What must survive is the
-    // part that never depended on the launch: an advisory review's terminal
-    // state is a report, never an attestation.
+    // The #114 Codex P1-3, upholding the #108 bar for a new reason. The
+    // sandbox bounds writes and network, not reads, so an outside author's
+    // text can still steer the reviewer into reading host credentials and
+    // carrying them out through its own verdict. The advisory member stays
+    // operator-opened or externally sandboxed, and the section has to give
+    // the read-side reason, or a reader concludes the sandbox settled it.
     [
-      "an advisory review may take this launch",
-      /An `advisory: true` review may take this launch unattended/,
+      "an advisory review never takes this launch",
+      /An `advisory: true` review does not take this launch/,
+    ],
+    [
+      "the sandbox does not bound reads",
+      /The sandbox bounds writes and network, not reads/,
+    ],
+    // The #114 Codex P1-2. The launch names the author server because it
+    // can name it; every other server the host config enables stays
+    // reachable, outside the sandbox, and the section has to say so rather
+    // than let the disabled author server read as a closed set.
+    [
+      "other host MCP servers stay reachable",
+      /Every other MCP server the host's `~\/\.codex\/config\.toml` enables is reachable from the same run as well/,
+    ],
+    [
+      "for attacker-controllable input the sandbox is not an isolation boundary",
+      /For attacker-controllable input the sandbox is therefore not an isolation boundary/,
+    ],
+    [
+      "an advisory CODEX_TASK member is manual or externally sandboxed",
+      /opened by the operator by hand, or launched inside a real external sandbox/,
     ],
     [
       "the advisory fence does not depend on the launch",
@@ -316,23 +340,24 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
   ],
   structural: [
     // The launch is the sandboxed one-shot form: the git-repo check skipped
-    // for a neutral directory in no repository, the guardian named as the
-    // approver of the MCP calls the sandbox leaves gated, the author server
-    // disabled, and stdin closed. The stdin redirect is part of the launch,
+    // for a neutral directory in no repository, the sandbox mode and its
+    // network policy named rather than inherited from the host profile, the
+    // guardian named as the approver of the MCP calls the sandbox leaves
+    // gated, the author server disabled, and stdin closed. The stdin redirect is part of the launch,
     // not decoration: without it a non-TTY driver's stdin is appended to the
     // prompt as a `<stdin>` block, which breaks the single-task handoff, or
     // the launch blocks on EOF.
     [
       "match",
-      /```bash\n *codex exec --skip-git-repo-check \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
-      "launch is not the sandboxed one-shot form with the git-repo check skipped, the guardian named, the author server disabled, and stdin closed",
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
+      "launch is not the sandboxed one-shot form with the git-repo check skipped, the sandbox and network policy named, the guardian named, the author server disabled, and stdin closed",
     ],
     // Round two is another launch, not a resume, and needs its own runnable
     // form in the same shape.
     [
       "match",
-      /```bash\n *codex exec --skip-git-repo-check \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
-      "round-two launch form with the git-repo check skipped, the guardian named, the author server disabled, and stdin closed",
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
+      "round-two launch form with the git-repo check skipped, the sandbox and network policy named, the guardian named, the author server disabled, and stdin closed",
     ],
     // The flag this launch dropped. It strips the sandbox that is now the
     // isolation boundary, so it must not come back in any fence — or in the
@@ -607,18 +632,21 @@ export const ADVISORY_PANEL_CONTRACT = {
       "the Claude member is opened by the operator",
       /the operator opens a fresh Claude conversation themselves/,
     ],
-    // The #109 ruling reaches the panel too: the CODEX_TASK member takes the
-    // unattended launch the dispatch section gives, because that launch now
-    // sandboxes the reviewer's shell, and the panel has to say that the
-    // sandbox is what bounds it — not the operator's presence, which the
-    // Claude member still needs for a different reason.
+    // The #108 bar, upheld by the #114 Codex P1-3 for a new reason: the
+    // unattended launch's sandbox bounds writes and network, not reads, so
+    // the CODEX_TASK member is manual or externally sandboxed like the Claude
+    // one, not the headless launch the dispatch section gives.
     [
-      "the Codex member takes the unattended launch",
-      /`CODEX_TASK` — the unattended launch in Dispatching a CODEX_TASK review/,
+      "the Codex member is opened by the operator or externally sandboxed",
+      /the operator opens a fresh Codex task themselves, or launches one inside a real external sandbox/,
     ],
     [
-      "the sandbox is what bounds the Codex member",
-      /runs the reviewer inside Codex's own sandbox, which is what bounds a reviewer reading an outside author's text/,
+      "the panel never takes the unattended launch",
+      /must never review a third party's pull request/,
+    ],
+    [
+      "the read side is why",
+      /its sandbox bounds writes and network, not reads/,
     ],
     [
       "no programmatic Claude dispatch",

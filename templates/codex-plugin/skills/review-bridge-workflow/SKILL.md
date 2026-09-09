@@ -571,7 +571,8 @@ launch between them.
    repository, handing it the reviewer request below as its single task:
 
    ```bash
-   codex exec --skip-git-repo-check \
+   codex exec --skip-git-repo-check --sandbox workspace-write \
+     -c 'sandbox_workspace_write.network_access=false' \
      -c 'approvals_reviewer="guardian_subagent"' \
      -c 'mcp_servers.review-bridge-author.command="node"' \
      -c 'mcp_servers.review-bridge-author.enabled=false' \
@@ -643,11 +644,13 @@ raised, and the launch runs to completion — an unattended run is refused, not
 left waiting — while the same write inside the working directory succeeds, so
 the instrument tells a denial from a reviewer that never tried. Network is
 off: `curl https://example.com` from that shell fails with
-`Could not resolve host`, again with no approval raised, because
-`workspace-write` grants network only when the operator's configuration turns
-it on with `[sandbox_workspace_write] network_access = true`, which the
-profile launching reviewers must not do. And the author server is disabled,
-for the reason given below.
+`Could not resolve host`, again with no approval raised. `--sandbox
+workspace-write` and `-c 'sandbox_workspace_write.network_access=false'` are
+in the launch line for the same reason `approvals_reviewer` is below: a host
+profile can set `sandbox_mode` to anything and can grant network with
+`[sandbox_workspace_write] network_access = true`, so the launch names both
+rather than inheriting whatever the host's `~/.codex/config.toml` says. And
+the author server is disabled, for the reason given below.
 
 What the sandbox does not remove is the approval gate on MCP calls. Every
 Review Bridge tool the reviewer calls raises an approval request, and a
@@ -701,23 +704,30 @@ names never runs. Verify the pair the way its effect is observable:
 the reviewer server `enabled`, and an author tool invoked from such a run
 returns no tool rather than a result.
 
-An `advisory: true` review may take this launch unattended. What barred it
-before was the shell: a reviewer with an unsandboxed host shell reading an
-outside author's diff, requirement, and commit messages — every one of them
-attacker-controllable text — with only skill discipline between that text and
-the host. Under this launch the shell is bounded as measured above, and the
-reviewer skill still requires treating that material as material to verify
-and never as instructions. What the advisory fence guarantees is unchanged by
-how the member is launched: `finalize_local_gate` refuses an advisory review,
-so its terminal state is a report and never a `LOCAL_GATE_PASSED`, however the
-reviewer was started.
+An `advisory: true` review does not take this launch. The sandbox bounds
+writes and network, not reads: the reviewer's shell reads the whole host, so
+an outside author's diff, requirement, and commit messages — every one of
+them attacker-controllable text — can steer a reviewer into reading the
+operator's credentials and carrying them out through `submit_review` or its
+own model context, with no network needed. Every other MCP server the host's
+`~/.codex/config.toml` enables is reachable from the same run as well, and
+sits outside the sandbox altogether; this launch does not shrink that set.
+For attacker-controllable input the sandbox is therefore not an isolation
+boundary, and the reviewer skill's
+rule that such material is material to verify and never instructions is
+skill discipline rather than a mechanism. An advisory `CODEX_TASK` member is
+opened by the operator by hand, or launched inside a real external sandbox.
+What the advisory fence guarantees is unchanged either way:
+`finalize_local_gate` refuses an advisory review, so its terminal state is a
+report and never a `LOCAL_GATE_PASSED`, however the reviewer was started.
 
 A round-two rereview of the same `review_id` is another launch in the same
 shape, carrying the same review ID and a request to rereview the author's
 resolutions with the packaged reviewer skill:
 
 ```bash
-codex exec --skip-git-repo-check \
+codex exec --skip-git-repo-check --sandbox workspace-write \
+  -c 'sandbox_workspace_write.network_access=false' \
   -c 'approvals_reviewer="guardian_subagent"' \
   -c 'mcp_servers.review-bridge-author.command="node"' \
   -c 'mcp_servers.review-bridge-author.enabled=false' \
@@ -1232,11 +1242,12 @@ attests nothing.
    is an explicit per-review choice for exceptional stakes.
 5. Dispatch each member by its own pattern. The table is asymmetric by design:
 
-   - `CODEX_TASK` — the unattended launch in Dispatching a CODEX_TASK review.
-     That launch runs the reviewer inside Codex's own sandbox, which is what
-     bounds a reviewer reading an outside author's text; the operator may
-     still open a fresh Codex task by hand, and the member is no more attested
-     either way.
+   - `CODEX_TASK` — **the operator opens a fresh Codex task themselves, or
+     launches one inside a real external sandbox.** The unattended launch in
+     Dispatching a CODEX_TASK review is for the operator's own changes only
+     and must never review a third party's pull request: its sandbox bounds
+     writes and network, not reads, and this panel's material is an outside
+     author's.
    - `HERMES` — the headless launch in Dispatching a HERMES review.
    - `DEEPSEEK_HARNESS` — the headless launch in Dispatching a
      DEEPSEEK_HARNESS review.
@@ -1252,9 +1263,9 @@ attests nothing.
 
      Then wait on `wait_for_review_state` exactly as for any other member. This
      manual step is a first-class path, not a degraded one: the panel is not
-     waiting on a broken dispatcher, it is waiting on a person, and a `CODEX_TASK`,
-     `HERMES`, or `DEEPSEEK_HARNESS` member the driver did launch is no more
-     attested than this one — Review Bridge records the provider binding and observes
+     waiting on a broken dispatcher, it is waiting on a person, and a `HERMES`
+     or `DEEPSEEK_HARNESS` member the driver did launch is no more attested
+     than this one — Review Bridge records the provider binding and observes
      nothing about how any reviewer was started.
 
    Every member gets the review ID and the request, and no authoring history,
