@@ -281,9 +281,22 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "for attacker-controllable input the sandbox is not an isolation boundary",
       /For attacker-controllable input the sandbox is therefore not an isolation boundary/,
     ],
+    // The #114 Codex round-three P1. Opening the task by hand was the #108
+    // alternative to an external sandbox, but it bounds no read: the read
+    // enters the model's context and leaves through the verdict before an
+    // operator could act. So the requirement is the read boundary alone,
+    // and the section has to say why the hand-opened path was withdrawn.
     [
-      "an advisory CODEX_TASK member is manual or externally sandboxed",
-      /opened by the operator by hand, or launched inside a real external sandbox/,
+      "an advisory CODEX_TASK member needs an external sandbox with a read boundary",
+      /launched only inside a real external sandbox with a filesystem read boundary/,
+    ],
+    [
+      "opening the task by hand is not a mitigation",
+      /Opening the task by hand is not a mitigation[\s\S]*?before an operator could intervene/,
+    ],
+    [
+      "the advisory member is unavailable until a read boundary exists",
+      /Until such a read boundary exists[\s\S]*?advisory `CODEX_TASK` member is not available/,
     ],
     [
       "the advisory fence does not depend on the launch",
@@ -366,6 +379,14 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "doesNotMatch",
       /--dangerously-bypass-approvals-and-sandbox/,
       "the section reintroduced --dangerously-bypass-approvals-and-sandbox",
+    ],
+    // The hand-opened alternative for an advisory member must not return as
+    // a launch option. The prose still says "by hand" to explain why it is
+    // no mitigation, so the guard is the #108 sentence shape, not the words.
+    [
+      "doesNotMatch",
+      /`CODEX_TASK` member is opened by the operator by hand/,
+      "the advisory CODEX_TASK member regressed to a hand-opened launch option",
     ],
     // The prose names `codex exec resume` to say the flow declines it, so the
     // guard is against a runnable resume form, not the mention.
@@ -637,8 +658,12 @@ export const ADVISORY_PANEL_CONTRACT = {
     // the CODEX_TASK member is manual or externally sandboxed like the Claude
     // one, not the headless launch the dispatch section gives.
     [
-      "the Codex member is opened by the operator or externally sandboxed",
-      /the operator opens a fresh Codex task themselves, or launches one inside a real external sandbox/,
+      "the Codex member is externally sandboxed with a read boundary",
+      /`CODEX_TASK` — \*\*launched only inside a real external sandbox with a filesystem read boundary\.\*\*/,
+    ],
+    [
+      "hand-opening the Codex member is no substitute",
+      /Opening the task by hand is not a substitute/,
     ],
     [
       "the panel never takes the unattended launch",
@@ -710,6 +735,13 @@ export const ADVISORY_PANEL_CONTRACT = {
       "doesNotMatch",
       /merge-base <remote>\/<target-branch>/,
       "the merge base regressed to a remote-tracking ref the fetch may not update",
+    ],
+    // The Claude member is still opened by the operator, for the compliance
+    // reason; the guard names the Codex task so it cannot catch that line.
+    [
+      "doesNotMatch",
+      /opens a fresh Codex task themselves/,
+      "the advisory CODEX_TASK member regressed to a hand-opened launch option",
     ],
   ],
 };

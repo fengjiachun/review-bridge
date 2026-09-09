@@ -716,8 +716,13 @@ For attacker-controllable input the sandbox is therefore not an isolation
 boundary, and the reviewer skill's
 rule that such material is material to verify and never instructions is
 skill discipline rather than a mechanism. An advisory `CODEX_TASK` member is
-opened by the operator by hand, or launched inside a real external sandbox.
-What the advisory fence guarantees is unchanged either way:
+launched only inside a real external sandbox with a filesystem read boundary.
+Opening the task by hand is not a mitigation: the read happens and enters the
+model's context before an operator could intervene, and it leaves through the
+verdict the same way, so a person at the keyboard changes nothing about that
+chain. Until such a read boundary exists — it is tracked separately — an
+advisory `CODEX_TASK` member is not available. What the advisory fence
+guarantees is unchanged either way:
 `finalize_local_gate` refuses an advisory review, so its terminal state is a
 report and never a `LOCAL_GATE_PASSED`, however the reviewer was started.
 
@@ -1242,12 +1247,14 @@ attests nothing.
    is an explicit per-review choice for exceptional stakes.
 5. Dispatch each member by its own pattern. The table is asymmetric by design:
 
-   - `CODEX_TASK` — **the operator opens a fresh Codex task themselves, or
-     launches one inside a real external sandbox.** The unattended launch in
-     Dispatching a CODEX_TASK review is for the operator's own changes only
-     and must never review a third party's pull request: its sandbox bounds
-     writes and network, not reads, and this panel's material is an outside
-     author's.
+   - `CODEX_TASK` — **launched only inside a real external sandbox with a
+     filesystem read boundary.** The unattended launch in Dispatching a
+     CODEX_TASK review is for the operator's own changes only and must never
+     review a third party's pull request: its sandbox bounds writes and
+     network, not reads, and this panel's material is an outside author's.
+     Opening the task by hand is not a substitute — the read enters the
+     model's context before an operator could intervene — so until a read
+     boundary exists this member is not available.
    - `HERMES` — the headless launch in Dispatching a HERMES review.
    - `DEEPSEEK_HARNESS` — the headless launch in Dispatching a
      DEEPSEEK_HARNESS review.

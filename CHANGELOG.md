@@ -35,8 +35,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   bar on advisory reviews stays, for a new reason: the sandbox bounds writes
   and network, not reads, so an outside author's text can still steer the
   reviewer into reading host credentials and carrying them out through its
-  own verdict, and the advisory `CODEX_TASK` panel member is still opened by
-  the operator by hand or inside a real external sandbox. The
+  own verdict. The by-hand alternative for the advisory `CODEX_TASK` member
+  is withdrawn: opening the task by hand bounds no read, since the read enters
+  the model's context before an operator could intervene, so that member is
+  launched only inside a real external sandbox with a filesystem read boundary
+  and is unavailable until one exists. The
   contract in `scripts/dispatch-contract.mjs` pins the new launch form in
   both fences, the version floor, the network and write denials, the
   `--skip-git-repo-check` reason, and the absence of the bypass flag from the
