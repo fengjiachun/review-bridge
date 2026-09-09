@@ -14,7 +14,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - The unattended `CODEX_TASK` launch drops
   `--dangerously-bypass-approvals-and-sandbox` and runs the reviewer inside
   Codex's own `workspace-write` sandbox, on codex-cli 0.153.4 or newer
-  (issue #109, #PRNUM). The launch is now
+  (issue #109, #114). The launch is now
   `codex exec --skip-git-repo-check -c 'approvals_reviewer="guardian_subagent"' …`
   with the author server still disabled and stdin still closed:
   `--skip-git-repo-check` because the neutral working directory is in no
