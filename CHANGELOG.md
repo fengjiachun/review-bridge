@@ -7,6 +7,47 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Changed
+
+- The unattended `CODEX_TASK` launch drops
+  `--dangerously-bypass-approvals-and-sandbox` and runs the reviewer inside
+  Codex's own `workspace-write` sandbox, on codex-cli 0.153.4 or newer
+  issue #109 (#114). The launch is now
+  `codex exec --skip-git-repo-check --sandbox workspace-write -c 'sandbox_workspace_write.network_access=false' -c 'approvals_reviewer="guardian_subagent"' …`
+  with the author server still disabled and stdin still closed: the sandbox
+  mode and its network policy named in the launch rather than inherited from
+  the host profile,
+  `--skip-git-repo-check` because the neutral working directory is in no
+  repository and `codex exec` refuses such a directory otherwise, and the
+  guardian named in the launch line because every Review Bridge MCP call still
+  raises an approval request that a non-interactive run cannot answer — left
+  to its default the run reports `approval: never` and the first call fails
+  with `MCP tool call requires approval, but approval policy is never`. The
+  workflow skill states the sandbox's edges as measured rather than quoted:
+  writes bounded to the working directory alone — the launch also names the
+  sandbox's writable roots, since `workspace-write` writes `/tmp` and `$TMPDIR`
+  by default and an authoring worktree may sit under either — with an
+  out-of-workspace write refused rather than left waiting, network blocked outright, and MCP
+  servers running outside the sandbox — which is why the reviewer server can
+  write its store and why the author server is disabled rather than trusted to
+  the sandbox or the guardian. The neutral directory stays required as the
+  sandbox's writable root and the source of injected project context. The
+  bar on advisory reviews stays, for a new reason: the sandbox bounds writes
+  and network, not reads, so an outside author's text can still steer the
+  reviewer into reading host credentials and carrying them out through its
+  own verdict. The by-hand alternative for the advisory `CODEX_TASK` member
+  is withdrawn: opening the task by hand bounds no read, since the read enters
+  the model's context before an operator could intervene, so that member is
+  launched only inside a real external sandbox with a filesystem read boundary
+  and is unavailable until one exists. The
+  contract in `scripts/dispatch-contract.mjs` pins the new launch form in
+  both fences, the version floor, the network and write denials, the
+  `--skip-git-repo-check` reason, and the absence of the bypass flag from the
+  whole section; the `CLAUDE_DESKTOP` boundary and the HERMES and DeepSeek
+  Harness sections are untouched.
+
 ## 0.11.0 - 2026-09-05
 
 ### Added

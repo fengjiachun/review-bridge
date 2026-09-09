@@ -62,11 +62,11 @@ const SHARED_REQUIREMENTS = [
 // reviewer "instance" or "session" that the operator is present to launch, and
 // they close each provider's section by handing autonomous dispatch back to
 // CODEX_TASK. CODEX_TASK is that provider: it launches a "task", it may run
-// unattended, and its `--dangerously-bypass-approvals-and-sandbox` launch has
-// its own boundary the other two do not — an unsandboxed shell fenced only by
-// the reviewer server's seven-tool surface and the skill. So its contract
-// states the genuinely shared claims itself and adds the ones only the bypass
-// launch makes true.
+// unattended, and its launch has a boundary the other two do not — Codex's
+// own `workspace-write` sandbox around the reviewer's shell, with the MCP
+// calls that sandbox leaves gated routed to Codex's guardian subagent. So its
+// contract states the genuinely shared claims itself and adds the ones only
+// that launch makes true.
 export const CODEX_TASK_DISPATCH_CONTRACT = {
   requirements: [
     [
@@ -121,13 +121,24 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the reviewer request is the whole handoff, binding included",
       /Independently review Review Bridge task `<review_id>` using the packaged Review Bridge reviewer skill\. Require `reviewer_provider: CODEX_TASK`, follow the review strategy, and submit every actionable finding\./,
     ],
-    // Why bypass is mandatory and not a convenience: a non-interactive
-    // `codex exec` cannot answer the approval prompt every MCP call raises, so
-    // without the flag the reviewer stalls with the exact cancel string the
-    // 2026-08-28 probe recorded before it lists a single review.
+    // The version floor, with the symptom an older codex shows. Before
+    // 0.153.4 every sandboxed form cancelled the reviewer's first MCP call, so
+    // a reader on an older binary must be able to recognise the stall as the
+    // version rather than as a broken launch.
     [
-      "the bypass flag is mandatory, with the non-bypass stall as its reason",
-      /`--dangerously-bypass-approvals-and-sandbox` flag is required, not a convenience[\s\S]*?`user cancelled MCP tool call`/,
+      "the launch names its codex version floor",
+      /needs codex-cli 0\.153\.4 or newer/,
+    ],
+    [
+      "an older codex cancels the first MCP call",
+      /on 0\.145\.0 and earlier every sandboxed form cancelled the reviewer's first Review Bridge MCP call with `user cancelled MCP tool call`/,
+    ],
+    // The neutral directory is in no repository, and `codex exec` refuses
+    // such a directory unless told to; the flag has to carry that reason or
+    // it reads as one more thing to drop.
+    [
+      "the git-repo check is skipped because the neutral directory is no repository",
+      /`--skip-git-repo-check` is there because the working directory is in no repository[\s\S]*?`Not inside a trusted directory and --skip-git-repo-check was not specified`/,
     ],
     // The redirect has to carry its reason, or it reads as boilerplate someone
     // drops when reformatting the command.
@@ -149,28 +160,101 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     ],
     // Corrected by the #108 Codex P1: the seven-tool surface is not a fence
     // around the reviewer. It bounds what Review Bridge exposes; Codex brings
-    // its own shell, which bypass unsandboxes. Claiming otherwise reads as a
-    // containment guarantee that does not exist.
+    // its own shell. What bounds that shell now is the sandbox, and the
+    // section has to say so in those words, or a reader is left with the
+    // seven-tool surface as the containment.
     [
       "the seven-tool surface does not bound the reviewer's own shell",
       /seven-tool `--role reviewer` surface bounds only what Review Bridge exposes, not what the reviewer process can do/,
     ],
+    ["the sandbox is the isolation boundary", /The sandbox is the isolation boundary/],
+    // The three sandbox edges, each measured rather than quoted. The write
+    // denial carries the property the #109 ruling required before the
+    // contract could flip: refused, not left waiting.
     [
-      "the neutral directory is a hard requirement under bypass",
-      /hard requirement rather than the advice it is for the other providers/,
+      "an out-of-workspace write is refused without a hang",
+      /a write to `\$HOME` or to `\/tmp` from that shell fails with `operation not permitted`[\s\S]*?an unattended run is refused, not left waiting/,
     ],
-    // ...and a hard requirement is still not a fence. Losing this sentence
-    // lets a reader mistake the directory for the containment the launch lacks.
+    // ...and the positive control, without which a denial is
+    // indistinguishable from a reviewer that never tried.
+    // The third axis of the sandbox the launch has to name, after mode and
+    // network: workspace-write writes /tmp and $TMPDIR by default and adds the
+    // host's writable_roots, and an authoring worktree can sit under either.
     [
-      "the neutral directory is not an isolation boundary",
-      /That directory is hygiene, not an isolation boundary/,
+      "the writable roots are named in the launch rather than inherited",
+      /`writable_roots=\[\]`, `exclude_slash_tmp=true`, and `exclude_tmpdir_env_var=true` shrink the roots to the working directory rather than inheriting them/,
     ],
-    // The #108 Codex P1. Bypass makes every reachable surface executable, so
-    // the launch has to shrink the surface rather than describe it: the
-    // plugin's second server carries the author mutation tools.
+    [
+      "writes are bounded to the working directory alone",
+      /Writes are bounded to the working directory alone/,
+    ],
+    [
+      "the denial was measured against a write that succeeds",
+      /the same write inside the working directory succeeds/,
+    ],
+    [
+      "the sandbox blocks the network outright",
+      /`curl https:\/\/example\.com` from that shell fails with `Could not resolve host`/,
+    ],
+    // The sandbox and its network policy are named in the launch, not
+    // inherited: a host profile can set sandbox_mode to anything and can
+    // grant network, and the fence has to say why it carries both.
+    [
+      "the launch names its sandbox and network policy rather than inheriting the host profile",
+      /`--sandbox workspace-write` and `-c 'sandbox_workspace_write\.network_access=false'` are in the launch line[\s\S]*?rather than inheriting whatever the host's `~\/\.codex\/config\.toml` says/,
+    ],
+    // The MCP approval gate survives the sandbox, and a non-interactive run
+    // cannot answer it. The launch names its approver itself so the same
+    // command works or fails identically on any machine, rather than
+    // depending on which operator's config.toml it ran under.
+    [
+      "MCP calls still need approval and exec has no one to ask",
+      /`MCP tool call requires approval, but approval policy is never`/,
+    ],
+    [
+      "the guardian is named as the approver, in the launch line",
+      /`approvals_reviewer="guardian_subagent"` routes each request to Codex's guardian subagent/,
+    ],
+    [
+      "the launch carries the approver rather than relying on operator config",
+      /sets that key itself rather than relying on the operator's `~\/\.codex\/config\.toml`/,
+    ],
+    // What the guardian is not. Losing this lets a reader credit it with the
+    // containment the sandbox provides, or with the separation the disabled
+    // author server provides.
+    [
+      "the guardian bounds neither the shell nor the author surface",
+      /It is not what bounds the shell[\s\S]*?not what keeps the author surface out of reach/,
+    ],
+    // The neutral directory survives the sandbox for reasons of its own, and
+    // they have to be stated or the directory reads as a leftover.
+    [
+      "the neutral directory is still required",
+      /neutral working directory is still required/,
+    ],
+    [
+      "the working directory is the sandbox's writable root",
+      /It is the sandbox's writable root/,
+    ],
+    // The sandbox stops at the shell. An MCP server is a child of Codex
+    // outside it — measured, not assumed — which is both why the reviewer
+    // server can write its store and why the author server has to be
+    // disabled rather than trusted to the sandbox or the guardian.
+    [
+      "MCP servers run outside the sandbox",
+      /The sandbox does not reach MCP servers/,
+    ],
+    [
+      "that was measured with a probe server",
+      /a probe server launched by this exact form wrote to `\$HOME` and reached the network/,
+    ],
     [
       "the author server's mutation tools are named",
       /`submit_resolutions`, `prepare_rereview`, and `finalize_local_gate`/,
+    ],
+    [
+      "separation rests on neither the sandbox nor the guardian",
+      /Author\/reviewer separation cannot rest on the sandbox, and it must not rest on the guardian either/,
     ],
     [
       "both launches disable the author server",
@@ -182,24 +266,52 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the command placeholder is required for the config to load",
       /a lone `enabled` key makes Codex read the entry as a new server definition, find no transport, and refuse the whole configuration/,
     ],
-    // The #108 ruling. An unattended bypass reviewer reading a stranger's diff
-    // is a full host shell pointed at attacker-controllable text, so the
-    // advisory case is barred outright rather than fenced.
-    [
-      "the unattended bypass launch covers the operator's own changes only",
-      /this unattended bypass launch is for reviews of the operator's own changes only/,
-    ],
+    // The #114 Codex P1-3, upholding the #108 bar for a new reason. The
+    // sandbox bounds writes and network, not reads, so an outside author's
+    // text can still steer the reviewer into reading host credentials and
+    // carrying them out through its own verdict. The advisory member stays
+    // operator-opened or externally sandboxed, and the section has to give
+    // the read-side reason, or a reader concludes the sandbox settled it.
     [
       "an advisory review never takes this launch",
-      /Never use it for an advisory review of a third party's pull request/,
+      /An `advisory: true` review does not take this launch/,
     ],
     [
-      "the flag's own help text scopes it to external sandboxes",
-      /intended solely for running in environments that are externally sandboxed/,
+      "the sandbox does not bound reads",
+      /The sandbox bounds writes and network, not reads/,
+    ],
+    // The #114 Codex P1-2. The launch names the author server because it
+    // can name it; every other server the host config enables stays
+    // reachable, outside the sandbox, and the section has to say so rather
+    // than let the disabled author server read as a closed set.
+    [
+      "other host MCP servers stay reachable",
+      /Every other MCP server the host's `~\/\.codex\/config\.toml` enables is reachable from the same run as well/,
     ],
     [
-      "an advisory CODEX_TASK member is manual or externally sandboxed",
-      /opened by the operator by hand, or launched inside a real external sandbox/,
+      "for attacker-controllable input the sandbox is not an isolation boundary",
+      /For attacker-controllable input the sandbox is therefore not an isolation boundary/,
+    ],
+    // The #114 Codex round-three P1. Opening the task by hand was the #108
+    // alternative to an external sandbox, but it bounds no read: the read
+    // enters the model's context and leaves through the verdict before an
+    // operator could act. So the requirement is the read boundary alone,
+    // and the section has to say why the hand-opened path was withdrawn.
+    [
+      "an advisory CODEX_TASK member needs an external sandbox with a read boundary",
+      /launched only inside a real external sandbox with a filesystem read boundary/,
+    ],
+    [
+      "opening the task by hand is not a mitigation",
+      /Opening the task by hand is not a mitigation[\s\S]*?before an operator could intervene/,
+    ],
+    [
+      "the advisory member is unavailable until a read boundary exists",
+      /Until such a read boundary exists[\s\S]*?advisory `CODEX_TASK` member is not available/,
+    ],
+    [
+      "the advisory fence does not depend on the launch",
+      /`finalize_local_gate` refuses an advisory review, so its terminal state is a report and never a `LOCAL_GATE_PASSED`, however the reviewer was started/,
     ],
     // Corrected by the #108 Codex P2. The section used to justify the
     // from-ledger round two by claiming the CLI could not resume, which is
@@ -242,8 +354,8 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       /autonomous workflow's own state machine dispatches `CODEX_TASK` and no other provider/,
     ],
     ["nothing verifies the dispatch", /observes nothing about how the task was started/],
-    // The one boundary bypass must never be read as loosening: an unattended
-    // Codex launch is cleared, a programmatic Claude launch never is.
+    // The one boundary this launch must never be read as loosening: an
+    // unattended Codex launch is cleared, a programmatic Claude launch never is.
     [
       "the Claude boundary is unchanged",
       /[Nn]ever launch, script, or otherwise programmatically invoke a Claude reviewer/,
@@ -251,27 +363,42 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     ["the Claude boundary is a compliance line", /account-compliance boundary/],
   ],
   structural: [
-    // The launch must carry the bypass flag before the request, or every MCP
-    // call stalls on an approval prompt the run cannot answer.
-    // The stdin redirect is part of the launch, not decoration: without it a
-    // non-TTY driver's stdin is appended to the prompt as a `<stdin>` block,
-    // which breaks the single-task handoff, or the launch blocks on EOF.
+    // The launch is the sandboxed one-shot form: the git-repo check skipped
+    // for a neutral directory in no repository, the sandbox mode, its network
+    // policy, and its writable roots named rather than inherited from the
+    // host profile, the
+    // guardian named as the approver of the MCP calls the sandbox leaves
+    // gated, the author server disabled, and stdin closed. The stdin redirect is part of the launch,
+    // not decoration: without it a non-TTY driver's stdin is appended to the
+    // prompt as a `<stdin>` block, which breaks the single-task handoff, or
+    // the launch blocks on EOF.
     [
       "match",
-      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
-      "launch is not the bypass one-shot form with the author server disabled and stdin closed",
-    ],
-    [
-      "doesNotMatch",
-      /codex exec '<the reviewer request below>'/,
-      "launch dropped the --dangerously-bypass-approvals-and-sandbox flag",
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
+      "launch is not the sandboxed one-shot form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, the author server disabled, and stdin closed",
     ],
     // Round two is another launch, not a resume, and needs its own runnable
-    // form carrying the same flag.
+    // form in the same shape.
     [
       "match",
-      /```bash\n *codex exec --dangerously-bypass-approvals-and-sandbox \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
-      "round-two launch form with the author server disabled and stdin closed",
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
+      "round-two launch form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, the author server disabled, and stdin closed",
+    ],
+    // The flag this launch dropped. It strips the sandbox that is now the
+    // isolation boundary, so it must not come back in any fence — or in the
+    // prose, where a mention reads as an alternative.
+    [
+      "doesNotMatch",
+      /--dangerously-bypass-approvals-and-sandbox/,
+      "the section reintroduced --dangerously-bypass-approvals-and-sandbox",
+    ],
+    // The hand-opened alternative for an advisory member must not return as
+    // a launch option. The prose still says "by hand" to explain why it is
+    // no mitigation, so the guard is the #108 sentence shape, not the words.
+    [
+      "doesNotMatch",
+      /`CODEX_TASK` member is opened by the operator by hand/,
+      "the advisory CODEX_TASK member regressed to a hand-opened launch option",
     ],
     // The prose names `codex exec resume` to say the flow declines it, so the
     // guard is against a runnable resume form, not the mention.
@@ -538,16 +665,25 @@ export const ADVISORY_PANEL_CONTRACT = {
       "the Claude member is opened by the operator",
       /the operator opens a fresh Claude conversation themselves/,
     ],
-    // The #108 ruling reaches the panel too: the unattended bypass launch is
-    // barred here, so the CODEX_TASK member is manual or externally sandboxed
-    // like the Claude one, not the headless launch the dispatch section gives.
+    // The #108 bar, upheld by the #114 Codex P1-3 for a new reason: the
+    // unattended launch's sandbox bounds writes and network, not reads, so
+    // the CODEX_TASK member is manual or externally sandboxed like the Claude
+    // one, not the headless launch the dispatch section gives.
     [
-      "the Codex member is opened by the operator or externally sandboxed",
-      /the operator opens a fresh Codex task themselves, or launches one inside a real external sandbox/,
+      "the Codex member is externally sandboxed with a read boundary",
+      /`CODEX_TASK` — \*\*launched only inside a real external sandbox with a filesystem read boundary\.\*\*/,
     ],
     [
-      "the panel never takes the unattended bypass launch",
+      "hand-opening the Codex member is no substitute",
+      /Opening the task by hand is not a substitute/,
+    ],
+    [
+      "the panel never takes the unattended launch",
       /must never review a third party's pull request/,
+    ],
+    [
+      "the read side is why",
+      /its sandbox bounds writes and network, not reads/,
     ],
     [
       "no programmatic Claude dispatch",
@@ -611,6 +747,13 @@ export const ADVISORY_PANEL_CONTRACT = {
       "doesNotMatch",
       /merge-base <remote>\/<target-branch>/,
       "the merge base regressed to a remote-tracking ref the fetch may not update",
+    ],
+    // The Claude member is still opened by the operator, for the compliance
+    // reason; the guard names the Codex task so it cannot catch that line.
+    [
+      "doesNotMatch",
+      /opens a fresh Codex task themselves/,
+      "the advisory CODEX_TASK member regressed to a hand-opened launch option",
     ],
   ],
 };

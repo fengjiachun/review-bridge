@@ -571,7 +571,12 @@ launch between them.
    repository, handing it the reviewer request below as its single task:
 
    ```bash
-   codex exec --dangerously-bypass-approvals-and-sandbox \
+   codex exec --skip-git-repo-check --sandbox workspace-write \
+     -c 'sandbox_workspace_write.network_access=false' \
+     -c 'sandbox_workspace_write.writable_roots=[]' \
+     -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
+     -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' \
+     -c 'approvals_reviewer="guardian_subagent"' \
      -c 'mcp_servers.review-bridge-author.command="node"' \
      -c 'mcp_servers.review-bridge-author.enabled=false' \
      '<the reviewer request below>' < /dev/null
@@ -583,21 +588,26 @@ launch between them.
 
    Single-quote that request: it contains backticks, and a double-quoted shell
    string would execute them instead of passing them through. Pass it as one
-   line with `<review_id>` substituted. The
-   `--dangerously-bypass-approvals-and-sandbox` flag is required, not a
-   convenience: without it `codex exec` routes each Review Bridge MCP call
-   through an approval prompt that a non-interactive run cannot answer, and the
-   reviewer stalls with `user cancelled MCP tool call` before it lists a single
-   pending review (observed 2026-08-28). Redirect stdin from `/dev/null`, as
-   both launch lines here do: `codex exec` treats piped stdin as more input,
-   appending it to the prompt as a `<stdin>` block when a prompt is also given,
-   and an unattended launch runs from a shell with no terminal on stdin. Left
-   open, that channel either feeds the reviewer whatever the driver's stdin
-   carries — silently breaking the single-task handoff and the rule below that
-   no authoring history reaches the reviewer, since the request is then no
-   longer the whole handoff — or blocks the launch waiting for an EOF that
-   never comes. Run the launch so it does not block step 3 — background it or
-   use a separate terminal.
+   line with `<review_id>` substituted. This launch needs codex-cli 0.153.4 or
+   newer. It runs the reviewer inside Codex's own `workspace-write` sandbox,
+   and on 0.145.0 and earlier every sandboxed form cancelled the reviewer's
+   first Review Bridge MCP call with `user cancelled MCP tool call` before it
+   listed a single pending review (observed 2026-08-28 and 2026-09-04); on
+   0.153.4 the same call completes under a header reporting
+   `approval: on-request` and
+   `sandbox: workspace-write [workdir]` (observed 2026-09-09).
+   `--skip-git-repo-check` is there because the working directory is in no
+   repository: without it `codex exec` refuses to start with `Not inside a
+   trusted directory and --skip-git-repo-check was not specified`. Redirect
+   stdin from `/dev/null`, as both launch lines here do: `codex exec` treats
+   piped stdin as more input, appending it to the prompt as a `<stdin>` block
+   when a prompt is also given, and an unattended launch runs from a shell
+   with no terminal on stdin. Left open, that channel either feeds the
+   reviewer whatever the driver's stdin carries — silently breaking the
+   single-task handoff and the rule below that no authoring history reaches
+   the reviewer, since the request is then no longer the whole handoff — or
+   blocks the launch waiting for an EOF that never comes. Run the launch so it
+   does not block step 3 — background it or use a separate terminal.
 3. Wait with `wait_for_review_state` on the recorded `state_version`, treating
    `timed_out` as the expected in-progress result described in Prepare. When
    the state changes, hand the review to Handle findings, which owns narrating
@@ -625,59 +635,117 @@ status to judge by. That request is the whole handoff, and Codex reads the
 packaged Review Bridge reviewer skill from the plugin and follows it without
 being told where it is.
 
-The bypass flag is what makes the working directory a hard requirement rather
-than the advice it is for the other providers. `--dangerously-bypass-approvals-and-sandbox`
-gives the reviewer an unsandboxed shell with no approval gate. Be exact about
-what that leaves standing: the Review Bridge reviewer server's seven-tool
-`--role reviewer` surface bounds only what Review Bridge exposes, not what the
-reviewer process can do — Codex brings a shell of its own, and bypass strips
-the sandbox and the approval gate from that shell. Launch it from a neutral
-working directory outside the repository under review, and prefer a directory
-in no repository at all: an unsandboxed shell rooted in the authoring worktree
-can read and write that tree directly, and Codex also injects project context
-from the nearest `AGENTS.md` or `CLAUDE.md` it finds there. That directory is
-hygiene, not an isolation boundary — it keeps the reviewer off the authoring
-tree by default and contains nothing that a reviewer decides to reach for. The
-reviewer process needs no checkout of its own — its tools read the change from
-the immutable snapshot and from the author's repository by recorded path, never
-from its own working directory — so the task body must name the `review_id`: it
-is the reviewer's only pointer to the snapshot, and the seven-tool surface
-exposes no other way to discover which review it was sent to.
+The sandbox is the isolation boundary, so be exact about what it bounds. The
+Review Bridge reviewer server's seven-tool `--role reviewer` surface bounds
+only what Review Bridge exposes, not what the reviewer process can do — Codex
+brings a shell of its own, and under this launch that shell runs inside the
+`workspace-write` sandbox. Three of its edges were measured on 2026-09-09
+rather than read from documentation. Writes are bounded to the working
+directory alone: a write to `$HOME` or to `/tmp` from that shell fails with
+`operation not permitted`, the command exits nonzero, no approval is raised,
+and the launch runs to completion — an unattended run is refused, not left
+waiting — while the same write inside the working directory succeeds, so the
+instrument tells a denial from a reviewer that never tried. The writable roots
+are in the launch line too: `workspace-write` writes `/tmp` and `$TMPDIR` by
+default and adds whatever `sandbox_workspace_write.writable_roots` the host's
+configuration lists, and an authoring worktree may well sit under a temporary
+directory, so `writable_roots=[]`, `exclude_slash_tmp=true`, and
+`exclude_tmpdir_env_var=true` shrink the roots to the working directory rather
+than inheriting them — the header then reads `[workdir]` and nothing else. Network is
+off: `curl https://example.com` from that shell fails with
+`Could not resolve host`, again with no approval raised. `--sandbox
+workspace-write` and `-c 'sandbox_workspace_write.network_access=false'` are
+in the launch line for the same reason `approvals_reviewer` is below: a host
+profile can set `sandbox_mode` to anything and can grant network with
+`[sandbox_workspace_write] network_access = true`, so the launch names both
+rather than inheriting whatever the host's `~/.codex/config.toml` says. And
+the author server is disabled, for the reason given below.
 
-The same reasoning forces the launch to shrink its reachable surface rather
-than describe it. This plugin's `.mcp.json` starts two servers, and the author
-one carries `submit_resolutions`, `prepare_rereview`, and
-`finalize_local_gate`. Under bypass there is no approval step between a
-reviewer that drifts from its skill and those tools, so author/reviewer
-separation would rest on the reviewer choosing not to call them. Both launch
-lines therefore disable that server for the run. The `command` override beside
-`enabled=false` is not redundant: a lone `enabled` key makes Codex read the
-entry as a new server definition, find no transport, and refuse the whole
-configuration with `failed to load configuration` — the server is disabled, so
-the command it names never runs. Verify the pair the way its effect is
-observable: `codex mcp list` with both overrides reports the author server
-`disabled` and the reviewer server `enabled`, and an author tool invoked from
-such a run returns no tool rather than a result.
+What the sandbox does not remove is the approval gate on MCP calls. Every
+Review Bridge tool the reviewer calls raises an approval request, and a
+non-interactive `codex exec` has no operator to answer it: with the reviewer
+of those requests left at its `user` default the run reports
+`approval: never`, and the first call fails with
+`MCP tool call requires approval, but approval policy is never`.
+`approvals_reviewer="guardian_subagent"` routes each request to Codex's
+guardian subagent instead, which judged the probe's `list_pending_reviews`
+call `{"risk_level":"low","user_authorization":"high","outcome":"allow"}`
+from the request alone. The launch line sets that key itself rather than
+relying on the operator's `~/.codex/config.toml` to carry it, so the launch
+either works or fails with that message, on any machine. Be exact about what
+the guardian is: an automatic reviewer of the MCP calls, and by Codex's own
+account of the setting of any sandbox escalation the reviewer explicitly asks
+for, judging against the request as the trusted instruction and the transcript
+as untrusted evidence. It is not what bounds the shell — the sandbox denials
+above raised nothing for it to judge — and it is not what keeps the author
+surface out of reach, below.
 
-Because of that, this unattended bypass launch is for reviews of the operator's
-own changes only. Never use it for an advisory review of a third party's pull
-request. An `advisory: true` review puts an outside author's diff, requirement,
-and commit messages in front of a reviewer whose shell bypass has already
-unsandboxed, and every one of those is attacker-controllable text. The reviewer
-skill does require treating that material as material to verify and never as
-instructions, but that is skill discipline rather than a mechanism, and nothing
-in this launch contains a reviewer that disregards it. `codex --help` states the
-flag is intended solely for running in environments that are externally
-sandboxed; a neutral working directory is not one. An advisory `CODEX_TASK`
-member is therefore opened by the operator by hand, or launched inside a real
-external sandbox.
+The neutral working directory is still required, for two reasons that survive
+the sandbox. It is the sandbox's writable root, so a reviewer launched inside
+the authoring worktree could write that tree, and Codex also injects project
+context from the nearest `AGENTS.md` or `CLAUDE.md` it finds there. Launch it
+from a neutral working directory outside the repository under review, and
+prefer a directory in no repository at all. The reviewer process needs no
+checkout of its own — its tools read the change from the immutable snapshot
+and from the author's repository by recorded path, never from its own working
+directory — so the task body must name the `review_id`: it is the reviewer's
+only pointer to the snapshot, and the seven-tool surface exposes no other way
+to discover which review it was sent to.
+
+The sandbox does not reach MCP servers, so the launch shrinks its reachable
+surface rather than describing it. An MCP server is a child process of Codex
+running outside the sandbox: a probe server launched by this exact form wrote
+to `$HOME` and reached the network while the shell beside it could do neither
+(2026-09-09). That is what lets the reviewer server deliver a verdict at all —
+the Review Bridge store lives under the operator's home, outside every
+writable root — and it is also why this plugin's second server matters.
+`.mcp.json` starts two servers, and the author one carries
+`submit_resolutions`, `prepare_rereview`, and `finalize_local_gate`.
+Author/reviewer separation cannot rest on the sandbox, and it must not rest on
+the guardian either — a call the reviewer frames as part of its task is exactly
+what the guardian allows. Both launch lines therefore disable that server for
+the run. The `command` override beside `enabled=false` is not redundant: a
+lone `enabled` key makes Codex read the entry as a new server definition, find
+no transport, and refuse the whole configuration with
+`failed to load configuration` — the server is disabled, so the command it
+names never runs. Verify the pair the way its effect is observable:
+`codex mcp list` with both overrides reports the author server `disabled` and
+the reviewer server `enabled`, and an author tool invoked from such a run
+returns no tool rather than a result.
+
+An `advisory: true` review does not take this launch. The sandbox bounds
+writes and network, not reads: the reviewer's shell reads the whole host, so
+an outside author's diff, requirement, and commit messages — every one of
+them attacker-controllable text — can steer a reviewer into reading the
+operator's credentials and carrying them out through `submit_review` or its
+own model context, with no network needed. Every other MCP server the host's
+`~/.codex/config.toml` enables is reachable from the same run as well, and
+sits outside the sandbox altogether; this launch does not shrink that set.
+For attacker-controllable input the sandbox is therefore not an isolation
+boundary, and the reviewer skill's
+rule that such material is material to verify and never instructions is
+skill discipline rather than a mechanism. An advisory `CODEX_TASK` member is
+launched only inside a real external sandbox with a filesystem read boundary.
+Opening the task by hand is not a mitigation: the read happens and enters the
+model's context before an operator could intervene, and it leaves through the
+verdict the same way, so a person at the keyboard changes nothing about that
+chain. Until such a read boundary exists — it is tracked separately — an
+advisory `CODEX_TASK` member is not available. What the advisory fence
+guarantees is unchanged either way:
+`finalize_local_gate` refuses an advisory review, so its terminal state is a
+report and never a `LOCAL_GATE_PASSED`, however the reviewer was started.
 
 A round-two rereview of the same `review_id` is another launch in the same
 shape, carrying the same review ID and a request to rereview the author's
 resolutions with the packaged reviewer skill:
 
 ```bash
-codex exec --dangerously-bypass-approvals-and-sandbox \
+codex exec --skip-git-repo-check --sandbox workspace-write \
+  -c 'sandbox_workspace_write.network_access=false' \
+  -c 'sandbox_workspace_write.writable_roots=[]' \
+  -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
+  -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' \
+  -c 'approvals_reviewer="guardian_subagent"' \
   -c 'mcp_servers.review-bridge-author.command="node"' \
   -c 'mcp_servers.review-bridge-author.enabled=false' \
   '<the rereview request>' < /dev/null
@@ -1191,12 +1259,14 @@ attests nothing.
    is an explicit per-review choice for exceptional stakes.
 5. Dispatch each member by its own pattern. The table is asymmetric by design:
 
-   - `CODEX_TASK` — **the operator opens a fresh Codex task themselves, or
-     launches one inside a real external sandbox.** The unattended bypass
-     launch in Dispatching a CODEX_TASK review is for the operator's own
-     changes only and must never review a third party's pull request: it
-     leaves the reviewer an unsandboxed host shell, and this panel's material
-     is an outside author's.
+   - `CODEX_TASK` — **launched only inside a real external sandbox with a
+     filesystem read boundary.** The unattended launch in Dispatching a
+     CODEX_TASK review is for the operator's own changes only and must never
+     review a third party's pull request: its sandbox bounds writes and
+     network, not reads, and this panel's material is an outside author's.
+     Opening the task by hand is not a substitute — the read enters the
+     model's context before an operator could intervene — so until a read
+     boundary exists this member is not available.
    - `HERMES` — the headless launch in Dispatching a HERMES review.
    - `DEEPSEEK_HARNESS` — the headless launch in Dispatching a
      DEEPSEEK_HARNESS review.
