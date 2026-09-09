@@ -177,6 +177,17 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     ],
     // ...and the positive control, without which a denial is
     // indistinguishable from a reviewer that never tried.
+    // The third axis of the sandbox the launch has to name, after mode and
+    // network: workspace-write writes /tmp and $TMPDIR by default and adds the
+    // host's writable_roots, and an authoring worktree can sit under either.
+    [
+      "the writable roots are named in the launch rather than inherited",
+      /`writable_roots=\[\]`, `exclude_slash_tmp=true`, and `exclude_tmpdir_env_var=true` shrink the roots to the working directory rather than inheriting them/,
+    ],
+    [
+      "writes are bounded to the working directory alone",
+      /Writes are bounded to the working directory alone/,
+    ],
     [
       "the denial was measured against a write that succeeds",
       /the same write inside the working directory succeeds/,
@@ -353,8 +364,9 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
   ],
   structural: [
     // The launch is the sandboxed one-shot form: the git-repo check skipped
-    // for a neutral directory in no repository, the sandbox mode and its
-    // network policy named rather than inherited from the host profile, the
+    // for a neutral directory in no repository, the sandbox mode, its network
+    // policy, and its writable roots named rather than inherited from the
+    // host profile, the
     // guardian named as the approver of the MCP calls the sandbox leaves
     // gated, the author server disabled, and stdin closed. The stdin redirect is part of the launch,
     // not decoration: without it a non-TTY driver's stdin is appended to the
@@ -363,14 +375,14 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     [
       "match",
       /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
-      "launch is not the sandboxed one-shot form with the git-repo check skipped, the sandbox and network policy named, the guardian named, the author server disabled, and stdin closed",
+      "launch is not the sandboxed one-shot form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, the author server disabled, and stdin closed",
     ],
     // Round two is another launch, not a resume, and needs its own runnable
     // form in the same shape.
     [
       "match",
       /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
-      "round-two launch form with the git-repo check skipped, the sandbox and network policy named, the guardian named, the author server disabled, and stdin closed",
+      "round-two launch form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, the author server disabled, and stdin closed",
     ],
     // The flag this launch dropped. It strips the sandbox that is now the
     // isolation boundary, so it must not come back in any fence — or in the

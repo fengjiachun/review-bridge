@@ -573,6 +573,9 @@ launch between them.
    ```bash
    codex exec --skip-git-repo-check --sandbox workspace-write \
      -c 'sandbox_workspace_write.network_access=false' \
+     -c 'sandbox_workspace_write.writable_roots=[]' \
+     -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
+     -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' \
      -c 'approvals_reviewer="guardian_subagent"' \
      -c 'mcp_servers.review-bridge-author.command="node"' \
      -c 'mcp_servers.review-bridge-author.enabled=false' \
@@ -592,7 +595,7 @@ launch between them.
    listed a single pending review (observed 2026-08-28 and 2026-09-04); on
    0.153.4 the same call completes under a header reporting
    `approval: on-request` and
-   `sandbox: workspace-write [workdir, /tmp, $TMPDIR]` (observed 2026-09-09).
+   `sandbox: workspace-write [workdir]` (observed 2026-09-09).
    `--skip-git-repo-check` is there because the working directory is in no
    repository: without it `codex exec` refuses to start with `Not inside a
    trusted directory and --skip-git-repo-check was not specified`. Redirect
@@ -638,11 +641,17 @@ only what Review Bridge exposes, not what the reviewer process can do — Codex
 brings a shell of its own, and under this launch that shell runs inside the
 `workspace-write` sandbox. Three of its edges were measured on 2026-09-09
 rather than read from documentation. Writes are bounded to the working
-directory, `/tmp`, and `$TMPDIR`: a write to `$HOME` from that shell fails
-with `operation not permitted`, the command exits nonzero, no approval is
-raised, and the launch runs to completion — an unattended run is refused, not
-left waiting — while the same write inside the working directory succeeds, so
-the instrument tells a denial from a reviewer that never tried. Network is
+directory alone: a write to `$HOME` or to `/tmp` from that shell fails with
+`operation not permitted`, the command exits nonzero, no approval is raised,
+and the launch runs to completion — an unattended run is refused, not left
+waiting — while the same write inside the working directory succeeds, so the
+instrument tells a denial from a reviewer that never tried. The writable roots
+are in the launch line too: `workspace-write` writes `/tmp` and `$TMPDIR` by
+default and adds whatever `sandbox_workspace_write.writable_roots` the host's
+configuration lists, and an authoring worktree may well sit under a temporary
+directory, so `writable_roots=[]`, `exclude_slash_tmp=true`, and
+`exclude_tmpdir_env_var=true` shrink the roots to the working directory rather
+than inheriting them — the header then reads `[workdir]` and nothing else. Network is
 off: `curl https://example.com` from that shell fails with
 `Could not resolve host`, again with no approval raised. `--sandbox
 workspace-write` and `-c 'sandbox_workspace_write.network_access=false'` are
@@ -733,6 +742,9 @@ resolutions with the packaged reviewer skill:
 ```bash
 codex exec --skip-git-repo-check --sandbox workspace-write \
   -c 'sandbox_workspace_write.network_access=false' \
+  -c 'sandbox_workspace_write.writable_roots=[]' \
+  -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
+  -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' \
   -c 'approvals_reviewer="guardian_subagent"' \
   -c 'mcp_servers.review-bridge-author.command="node"' \
   -c 'mcp_servers.review-bridge-author.enabled=false' \

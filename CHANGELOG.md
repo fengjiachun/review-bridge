@@ -26,8 +26,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   to its default the run reports `approval: never` and the first call fails
   with `MCP tool call requires approval, but approval policy is never`. The
   workflow skill states the sandbox's edges as measured rather than quoted:
-  writes bounded to the working directory and `/tmp` with an out-of-workspace
-  write refused rather than left waiting, network blocked outright, and MCP
+  writes bounded to the working directory alone — the launch also names the
+  sandbox's writable roots, since `workspace-write` writes `/tmp` and `$TMPDIR`
+  by default and an authoring worktree may sit under either — with an
+  out-of-workspace write refused rather than left waiting, network blocked outright, and MCP
   servers running outside the sandbox — which is why the reviewer server can
   write its store and why the author server is disabled rather than trusted to
   the sandbox or the guardian. The neutral directory stays required as the
