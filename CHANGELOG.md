@@ -7,6 +7,39 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Changed
+
+- The unattended `CODEX_TASK` launch drops
+  `--dangerously-bypass-approvals-and-sandbox` and runs the reviewer inside
+  Codex's own `workspace-write` sandbox, on codex-cli 0.153.4 or newer
+  (issue #109, #PRNUM). The launch is now
+  `codex exec --skip-git-repo-check -c 'approvals_reviewer="guardian_subagent"' …`
+  with the author server still disabled and stdin still closed:
+  `--skip-git-repo-check` because the neutral working directory is in no
+  repository and `codex exec` refuses such a directory otherwise, and the
+  guardian named in the launch line because every Review Bridge MCP call still
+  raises an approval request that a non-interactive run cannot answer — left
+  to its default the run reports `approval: never` and the first call fails
+  with `MCP tool call requires approval, but approval policy is never`. The
+  workflow skill states the sandbox's edges as measured rather than quoted:
+  writes bounded to the working directory and `/tmp` with an out-of-workspace
+  write refused rather than left waiting, network blocked outright, and MCP
+  servers running outside the sandbox — which is why the reviewer server can
+  write its store and why the author server is disabled rather than trusted to
+  the sandbox or the guardian. The neutral directory stays required as the
+  sandbox's writable root and the source of injected project context. With
+  the reviewer's shell sandboxed, the #108 bar on advisory reviews falls:
+  the advisory `CODEX_TASK` panel member takes the unattended launch, while
+  the advisory fence itself — a terminal state that is a report and never a
+  `LOCAL_GATE_PASSED` — is unchanged by how the member is launched. The
+  contract in `scripts/dispatch-contract.mjs` pins the new launch form in
+  both fences, the version floor, the network and write denials, the
+  `--skip-git-repo-check` reason, and the absence of the bypass flag from the
+  whole section; the `CLAUDE_DESKTOP` boundary and the HERMES and DeepSeek
+  Harness sections are untouched.
+
 ## 0.11.0 - 2026-09-05
 
 ### Added
