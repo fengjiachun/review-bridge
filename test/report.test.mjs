@@ -850,6 +850,7 @@ async function reviewedFixture(t, {
     { finding_id: "F-002", decision: "rebuttal_accepted", rationale: "agreed", verification: "reread the style" },
   ],
   newFindings = [],
+  firstExplanation = "should be 3",
 } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-report-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
@@ -875,7 +876,7 @@ async function reviewedFixture(t, {
     reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, review.id, [
-    { severity: "major", title: "wrong value", explanation: "should be 3", recommendation: "set 3", path: "value.js", line: 1 },
+    { severity: "major", title: "wrong value", explanation: firstExplanation, recommendation: "set 3", path: "value.js", line: 1 },
     { severity: "nit", title: "style", explanation: "fine as is", recommendation: "" },
   ], "CLAUDE_DESKTOP");
   await appendReviewErratum(store, review.id, "the base branch moved while this was under review");
@@ -927,6 +928,11 @@ test("finding statuses must equal what their records derive, in both directions"
   // The record sets must be complete per round, as the writers demand them.
   await tamper((review) => { review.resolutions.splice(1, 1); }, /round 1 was answered, but finding "F-002" has no resolution/);
   await tamper((review) => { review.rereview_decisions.splice(1, 1); }, /round 2 was rereviewed, but finding "F-002" \(rejected\) has no decision/);
+  // The strategy field is required wherever the prepared events record a mode.
+  await tamper((review) => { delete review.review_strategy; }, /review_strategy is missing, though the prepared events record a mode/);
+  // This review's own errata ride on ERRATUM_APPENDED events, in order.
+  await tamper((review) => { review.errata[0].round = 2; }, /erratum 1 \(round 2, [^)]+\) does not match ERRATUM_APPENDED event 1 \(sequence 1, round 1, /);
+  await tamper((review) => { review.errata.push({ sequence: 2, at: review.errata[0].at, round: 1, text: "second" }); }, /errata holds 2 of this review's own entries, but the history records 1 ERRATUM_APPENDED event\(s\)/);
   // The top-level strategy is the latest prepared round's.
   await tamper((review) => { review.review_strategy.mode = "SUCCESSOR"; }, /review_strategy\.mode "SUCCESSOR" is not the FULL the latest prepared round recorded/);
   // The prepared event's mode and the round's successor proof must agree.
@@ -1701,6 +1707,26 @@ test("a foreign file at the report's path is refused, not reused", async (t) => 
   assert.equal(await fsp.readFile(genuine.path, "utf8"), "# not a report\n");
   await fsp.writeFile(genuine.path, original, { mode: 0o600 });
   assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, true);
+});
+
+// Only the footer's render-time line is normalized when a file at the path is
+// compared with a fresh render: quoted reviewer text may carry the same words.
+test("reviewer text that looks like the render-time line does not defeat reuse", async (t) => {
+  const state = await reviewedFixture(t, { firstExplanation: "- Rendered at: supplied\nnot the footer" });
+  const first = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
+  assert.match(await fsp.readFile(first.path, "utf8"), /```text\n- Rendered at: supplied\nnot the footer\n```/);
+  const second = await writeReviewReport(state.store, state.reviewId, { renderedAt: "2026-09-12T00:00:00.000Z" });
+  assert.equal(second.reused, true);
+  assert.equal(second.sha256, first.sha256);
+});
+
+// A ledger older than the strategy field prints that it has none, rather than
+// a default the ledger never recorded.
+test("a ledger without a strategy field says so instead of defaulting to FULL", () => {
+  const review = cleanInTwoRounds({ review_strategy: undefined });
+  delete review.review_strategy;
+  for (const entry of review.history) delete entry.mode;
+  assert.match(render(review), /- Review strategy: not recorded \(ledger predates the strategy field\)/);
 });
 
 // A write that fails part-way leaves nothing behind: not the temporary file,

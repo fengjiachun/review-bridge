@@ -540,6 +540,15 @@ function reviewLedgerDefect(review, reviewId) {
   // own table.
   const top = recordDefect(review, REVIEW_LEDGER_FIELDS, {}, "review ledger");
   if (top != null) return top;
+  // The strategy field and the prepared events' mode arrived together, so a
+  // ledger whose prepared events record a mode always has the field; only a
+  // ledger with no mode anywhere may lack it.
+  const recordsMode = review.history.some(
+    (entry) => ["REVIEW_PREPARED", "REREVIEW_PREPARED"].includes(entry?.event) && entry.mode != null,
+  );
+  if (review.review_strategy == null && recordsMode) {
+    return "review_strategy is missing, though the prepared events record a mode";
+  }
   if (review.review_strategy != null) {
     const defect = recordDefect(review.review_strategy, STRATEGY_FIELDS, {}, "review_strategy");
     if (defect != null) return defect;
@@ -619,6 +628,21 @@ function reviewLedgerDefect(review, reviewId) {
   }
   if ((review.errata ?? []).length > MAX_ERRATA) {
     return `errata holds ${review.errata.length} entries, more than the writer's ${MAX_ERRATA}`;
+  }
+  // Every erratum this review appended rode on an ERRATUM_APPENDED event
+  // carrying the same sequence, round, and time, in order; an erratum carried
+  // in from a continued source was appended there, not here, and has no
+  // event in this history.
+  const ownErrata = (review.errata ?? []).filter((erratum) => erratum.continued_from_review_id == null);
+  const appended = review.history.filter((entry) => entry.event === "ERRATUM_APPENDED");
+  if (ownErrata.length !== appended.length) {
+    return `errata holds ${ownErrata.length} of this review's own entries, but the history records ${appended.length} ERRATUM_APPENDED event(s)`;
+  }
+  for (const [index, erratum] of ownErrata.entries()) {
+    const event = appended[index];
+    if (event.sequence !== erratum.sequence || event.round !== erratum.round || event.at !== erratum.at) {
+      return `erratum ${erratum.sequence} (round ${erratum.round}, ${erratum.at}) does not match ERRATUM_APPENDED event ${index + 1} (sequence ${event.sequence}, round ${event.round}, ${event.at})`;
+    }
   }
   // Every save increments state_version and every history entry rode on a
   // save, so the version can never fall below the history; a transition

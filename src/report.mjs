@@ -119,8 +119,12 @@ function list(values) {
   return values.length === 0 ? "none" : values.map(code).join(", ");
 }
 
+// A ledger older than the strategy field has none to print; the validator
+// requires the field on every ledger whose prepared events record a mode, so
+// "not recorded" is only ever an old ledger, never a stripped one.
 function strategyLine(review) {
-  const strategy = review.review_strategy ?? { mode: "FULL" };
+  const strategy = review.review_strategy;
+  if (strategy == null) return "not recorded (ledger predates the strategy field)";
   const parts = [code(strategy.mode)];
   if (strategy.parent_review_id != null) {
     parts.push(`parent ${code(strategy.parent_review_id)}`);
@@ -855,9 +859,16 @@ async function createExclusive(filePath, data) {
 }
 
 // The render time is the one line two renders of the same ledgers legitimately
-// differ in; everything else must agree byte for byte.
+// differ in; everything else must agree byte for byte. Only the footer's line
+// is normalized: the body quotes reviewer and author text, which may contain
+// the same words, inside fences.
 function withoutRenderTime(markdown) {
-  return markdown.replace(/^- Rendered at: .*$/m, "- Rendered at: <render time>");
+  const footer = markdown.lastIndexOf("\n## Footer\n");
+  if (footer < 0) return markdown;
+  return (
+    markdown.slice(0, footer) +
+    markdown.slice(footer).replace(/^- Rendered at: .*$/m, "- Rendered at: <render time>")
+  );
 }
 
 // Writes `report-r<revision>.md` beside the ledger and returns a receipt. The
