@@ -11,6 +11,7 @@ import {
   getPublicationSummary,
   invalidatedAutomaticResolution,
   readBoundPublicationAuthorization,
+  readLocalGateAuthorization,
   resolutionFrontier,
 } from "./publication.mjs";
 
@@ -155,20 +156,30 @@ function remoteOnlySection() {
   ];
 }
 
-function successorSection(review) {
-  const successor = (review.rounds ?? [])[0]?.successor;
-  if (successor == null) return [];
-  return [
-    "### Successor delta",
-    [
-      `- Parent review: ${code(successor.parent_review_id)} (${code(successor.parent_reviewer_provider)})`,
-      `- Requirement matches the parent: ${successor.requirement_match === true ? "yes" : "no"}`,
-      `- Parent head → current head: ${code(successor.parent_head_sha)} → ${code(successor.current_head_sha)}`,
-      `- Delta: ${successor.delta_bytes ?? "n/a"} bytes, sha256 ${code(successor.delta_sha256)}`,
-      `- Files in the delta: ${list(successor.changed_files ?? [])}`,
-      `- Files deleted in the delta: ${list(successor.deleted_files ?? [])}`,
-    ].join("\n"),
-  ];
+// Each round is reviewed under its own strategy: a rereview recomputes the
+// successor proof for the new head, and may fall back to FULL. So the
+// strategy and proof are rendered per round, from that round's prepared event
+// and its own successor record, never from another round's.
+function roundStrategySections(review) {
+  const history = review.history ?? [];
+  return (review.rounds ?? []).flatMap((round) => {
+    const prepared = eventFor(history, PREPARED_EVENTS, round.round);
+    const mode = prepared?.mode ?? (round.successor == null ? "FULL" : "SUCCESSOR");
+    const successor = round.successor;
+    return [
+      `#### Round ${round.round} strategy: ${code(mode)}`,
+      successor == null
+        ? `Reviewed as a full diff of ${code(round.base_sha)} → ${code(round.head_sha)}.`
+        : [
+            `- Parent review: ${code(successor.parent_review_id)} (${code(successor.parent_reviewer_provider)})`,
+            `- Requirement matches the parent: ${successor.requirement_match === true ? "yes" : "no"}`,
+            `- Parent head → current head: ${code(successor.parent_head_sha)} → ${code(successor.current_head_sha)}`,
+            `- Delta: ${successor.delta_bytes ?? "n/a"} bytes, sha256 ${code(successor.delta_sha256)}`,
+            `- Files in the delta: ${list(successor.changed_files ?? [])}`,
+            `- Files deleted in the delta: ${list(successor.deleted_files ?? [])}`,
+          ].join("\n"),
+    ];
+  });
 }
 
 function roundsSection(review) {
@@ -203,6 +214,7 @@ function roundsSection(review) {
       ],
       rows,
     ),
+    ...roundStrategySections(review),
   ];
 }
 
@@ -294,8 +306,15 @@ function changesSection(review) {
   const respondedLast = (review.history ?? []).some(
     (entry) => RESPONSE_EVENTS.includes(entry?.event) && entry.round === lastRound,
   );
+  // Only a fix to a finding the last round itself raised can lack a later
+  // round to bind it; an earlier round's fix was bound by the round after it.
+  const lastRoundFindings = new Set(
+    (review.findings ?? [])
+      .filter((finding) => finding.introduced_round === lastRound)
+      .map((finding) => finding.id),
+  );
   const fixedLast = (review.resolutions ?? []).some(
-    (entry) => entry.disposition === "fixed",
+    (entry) => entry.disposition === "fixed" && lastRoundFindings.has(entry.finding_id),
   );
   if (respondedLast && fixedLast) {
     lines.push(
@@ -628,7 +647,6 @@ export function renderReviewReport(
       ? remoteOnlySection()
       : [
           ...identitySection(review),
-          ...successorSection(review),
           ...roundsSection(review),
           ...findingsSection(review),
           ...changesSection(review),
@@ -707,10 +725,33 @@ export async function loadReportLedgers(
   // The gate file or remote sidecar, admitted by the publication reader's own
   // binding check; a file it rejects, or one that is missing, fails the
   // render rather than lending the report fields the ledger never bound.
-  const authorization =
-    publication == null
-      ? null
-      : await readBoundPublicationAuthorization(storeRoot, reviewId, publication);
+  // A LOCAL_GATE_PASSED review with no publication yet still minted a gate --
+  // core enters that status only by writing it -- so the gate is required,
+  // read by the same reader, and held to the review's clean snapshot.
+  let authorization = null;
+  if (publication != null) {
+    authorization = await readBoundPublicationAuthorization(storeRoot, reviewId, publication);
+  } else if (review.status === "LOCAL_GATE_PASSED") {
+    const gatePath = path.join(directory, "gate.json");
+    if (!fs.existsSync(gatePath)) {
+      throw reportError(
+        "LOCAL_GATE_MISSING",
+        `review ${reviewId} is LOCAL_GATE_PASSED but its gate.json is missing`,
+        { review_id: reviewId, path: gatePath },
+      );
+    }
+    authorization = await readLocalGateAuthorization(storeRoot, reviewId);
+    if (
+      authorization.snapshot_hash !== review.clean_snapshot_hash ||
+      authorization.head_sha !== review.rounds.at(-1).head_sha
+    ) {
+      throw reportError(
+        "LOCAL_GATE_INVALID",
+        `gate.json of ${reviewId} does not attest the review's clean snapshot`,
+        { review_id: reviewId, path: gatePath },
+      );
+    }
+  }
   // The server's own judgement over the same ledger, workflow binding and
   // terminal replay included; the report prints it and derives nothing.
   const publicationSummary =

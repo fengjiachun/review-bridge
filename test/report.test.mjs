@@ -314,6 +314,7 @@ test("a FULL review that reached CLEAN in round two renders every section and fi
   }
   assert.match(markdown, /- Review strategy: `FULL`, parent selection `NONE`/);
   assert.match(markdown, /- Reviewer provider: `CODEX_TASK`\n/);
+  assert.match(markdown, /#### Round 1 strategy: `FULL`\n\nReviewed as a full diff of `a{40}` → `b{40}`\.\n\n#### Round 2 strategy: `FULL`\n\nReviewed as a full diff of `a{40}` → `c{40}`\./);
   assert.match(markdown, /### Requirement\n\n```text\nImplement the thing\.\nSecond requirement line\.\n```\n/);
   // Wall time per round from the prepared and verdict events.
   assert.match(markdown, /\| 1 \| bbbbbbbbbbbb \| 2026-09-01T00:00:00\.000Z \| FINDINGS_SUBMITTED \| 2026-09-01T00:06:00\.000Z \| 6m 0s \| 2 \| \+10 −2 \|/);
@@ -386,11 +387,87 @@ test("a SUCCESSOR review renders its strategy and the delta it was reviewed as",
   });
   const markdown = render(review);
   assert.match(markdown, /- Review strategy: `SUCCESSOR`, parent `rb-2026-08-31T000000-000Z-00parent`/);
-  assert.match(markdown, /### Successor delta\n\n- Parent review: `rb-2026-08-31T000000-000Z-00parent` \(`CODEX_TASK`\)\n- Requirement matches the parent: yes\n- Parent head → current head: `b{40}` → `c{40}`\n- Delta: 321 bytes, sha256 `d{64}`\n- Files in the delta: `src\/b\.mjs`\n- Files deleted in the delta: `src\/old\.mjs`/);
+  assert.doesNotMatch(markdown, /### Successor delta/);
+  assert.match(markdown, /#### Round 1 strategy: `SUCCESSOR`\n\n- Parent review: `rb-2026-08-31T000000-000Z-00parent` \(`CODEX_TASK`\)\n- Requirement matches the parent: yes\n- Parent head → current head: `b{40}` → `c{40}`\n- Delta: 321 bytes, sha256 `d{64}`\n- Files in the delta: `src\/b\.mjs`\n- Files deleted in the delta: `src\/old\.mjs`/);
   assert.match(markdown, /### Findings\n\nNo findings were recorded\./);
   assert.match(markdown, /\| 1 \| cccccccccccc \| [^|]+\| INITIAL_REVIEW_CLEAN \| [^|]+\| 3m 0s \|/);
   assert.match(markdown, /### Changes between rounds\n\nNo round followed another\./);
   assert.match(markdown, /- Rounds to CLEAN: 1/);
+});
+
+// A rereview recomputes the proof for the new head and may fall back to
+// FULL, so each round shows its own strategy and its own proof.
+test("each round renders its own strategy and proof, so a successor first round and a FULL second round do not contradict", () => {
+  const review = cleanInTwoRounds({
+    review_strategy: { mode: "SUCCESSOR", parent_review_id: "rb-2026-08-31T000000-000Z-00parent", fallback_reason: null },
+    rounds: [
+      round(1, HEAD_ONE, "2026-09-01T00:00:00.000Z", {
+        successor: {
+          version: 1,
+          parent_review_id: "rb-2026-08-31T000000-000Z-00parent",
+          parent_reviewer_provider: "CODEX_TASK",
+          requirement_match: true,
+          parent_head_sha: BASE,
+          current_head_sha: HEAD_ONE,
+          changed_files: ["src/a.mjs"],
+          deleted_files: [],
+          delta_bytes: 10,
+          delta_sha256: "d".repeat(64),
+        },
+      }),
+      round(2, HEAD_TWO, "2026-09-01T00:20:00.000Z"),
+    ],
+    history: [
+      { at: "2026-09-01T00:00:00.000Z", event: "REVIEW_PREPARED", round: 1, mode: "SUCCESSOR" },
+      { at: "2026-09-01T00:06:00.000Z", event: "FINDINGS_SUBMITTED", round: 1, count: 2 },
+      { at: "2026-09-01T00:15:00.000Z", event: "AUTHOR_RESPONDED", round: 1 },
+      { at: "2026-09-01T00:20:00.000Z", event: "REREVIEW_PREPARED", round: 2, mode: "FULL" },
+      { at: "2026-09-01T00:24:30.000Z", event: "REREVIEW_CLEAN", round: 2 },
+    ],
+  });
+  const markdown = render(review);
+  const first = markdown.indexOf("#### Round 1 strategy: `SUCCESSOR`");
+  const second = markdown.indexOf("#### Round 2 strategy: `FULL`");
+  assert.ok(first > 0 && second > first);
+  const firstSection = markdown.slice(first, second);
+  assert.match(firstSection, /- Parent head → current head: `a{40}` → `b{40}`\n- Delta: 10 bytes/);
+  const secondSection = markdown.slice(second, markdown.indexOf("### Findings"));
+  assert.match(secondSection, /^#### Round 2 strategy: `FULL`\n\nReviewed as a full diff of `a{40}` → `c{40}`\.\n\n$/);
+  assert.doesNotMatch(secondSection, /Delta|Parent/);
+  assert.doesNotMatch(markdown, /### Successor delta/);
+});
+
+// The "unavailable" line is about a fix the last round itself raised and no
+// later round bound; an earlier round's fix was bound by the round after it.
+test("a fix in an earlier round does not make the last round's response read as an unbound fix", () => {
+  const review = cleanInTwoRounds({
+    status: "HUMAN_REQUIRED",
+    findings: [
+      finding("F-001", "major", "RESOLVED"),
+      finding("F-003", "minor", "HUMAN_REQUIRED", { introduced_round: 2 }),
+    ],
+    resolutions: [
+      { finding_id: "F-001", disposition: "fixed", rationale: "fixed in round one", evidence: "", submitted_at: "2026-09-01T00:15:00.000Z" },
+      { finding_id: "F-003", disposition: "human_required", rationale: "needs a human", evidence: "", submitted_at: "2026-09-01T00:30:00.000Z" },
+    ],
+    rereview_decisions: [
+      { finding_id: "F-001", decision: "resolved", rationale: "ok", verification: "", submitted_at: "2026-09-01T00:25:00.000Z" },
+    ],
+    history: [
+      { at: "2026-09-01T00:00:00.000Z", event: "REVIEW_PREPARED", round: 1, mode: "FULL" },
+      { at: "2026-09-01T00:06:00.000Z", event: "FINDINGS_SUBMITTED", round: 1, count: 1 },
+      { at: "2026-09-01T00:15:00.000Z", event: "AUTHOR_RESPONDED", round: 1 },
+      { at: "2026-09-01T00:20:00.000Z", event: "REREVIEW_PREPARED", round: 2, mode: "FULL" },
+      { at: "2026-09-01T00:30:00.000Z", event: "AUTHOR_ESCALATED", round: 2 },
+    ],
+    clean_snapshot_hash: null,
+  });
+  assert.doesNotMatch(render(review), /no later round binds its fix commit/);
+  // A fix to a finding the last round raised, with no round after it, is
+  // what the line is for.
+  review.resolutions[1] = { finding_id: "F-003", disposition: "fixed", rationale: "fixed", evidence: "", submitted_at: "2026-09-01T00:30:00.000Z" };
+  review.findings[1].status = "AUTHOR_FIXED";
+  assert.match(render(review), /- After round 2: a fixed resolution was submitted, but no later round binds its fix commit or affected files, so they are unavailable here\./);
 });
 
 test("a HUMAN_REQUIRED stop names its reason and does not infer a fix commit no round binds", () => {
@@ -884,7 +961,8 @@ test("a publication that moves between the ledger read and the summary read fail
 test("the store writer names the file by the ledger revision, returns a receipt, and is idempotent at that revision", async (t) => {
   const state = await gatedFixture(t);
   const directory = reviewDirectory(state);
-  const { review } = await loadReportLedgers(state.store, state.reviewId);
+  const { review, authorization } = await loadReportLedgers(state.store, state.reviewId);
+  assert.equal(authorization.mode, "LOCAL_GATE");
 
   const first = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
   assert.equal(first.path, path.join(directory, `report-r${review.state_version}.md`));
@@ -900,8 +978,11 @@ test("the store writer names the file by the ledger revision, returns a receipt,
   assert.equal(crypto.createHash("sha256").update(written).digest("hex"), first.sha256);
   assert.equal(
     written.toString("utf8"),
-    renderReviewReport(review, { renderedAt: RENDERED_AT, ledgerDirectory: directory }),
+    renderReviewReport(review, { authorization, renderedAt: RENDERED_AT, ledgerDirectory: directory }),
   );
+  // The gate the passed review minted is read and listed even before any
+  // publication exists.
+  assert.match(written.toString("utf8"), new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/gate\\.json\`\\n`));
   assert.equal((await fsp.stat(first.path)).mode & 0o777, 0o600);
 
   // A second render at the same revision keeps the same bytes, render time
@@ -1069,6 +1150,31 @@ test("a review ledger edited in place is refused as REVIEW_LEDGER_INVALID", asyn
   await fsp.writeFile(reviewPath, original, { mode: 0o600 });
   const written = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
   assert.equal(written.reused, false);
+});
+
+// A LOCAL_GATE_PASSED review minted its gate; a store without it, or with a
+// gate that does not attest the review's clean snapshot, is incomplete and is
+// not rendered as a passed gate.
+test("a LOCAL_GATE_PASSED review without a valid gate.json is refused even before any publication exists", async (t) => {
+  const state = await gatedFixture(t);
+  const gatePath = path.join(reviewDirectory(state), "gate.json");
+  const original = await fsp.readFile(gatePath, "utf8");
+  await fsp.rm(gatePath);
+  await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+    assert.equal(error.code, "LOCAL_GATE_MISSING");
+    assert.equal(error.details.path, gatePath);
+    return true;
+  });
+  const tampered = JSON.parse(original);
+  tampered.snapshot_hash = "f".repeat(64);
+  await fsp.writeFile(gatePath, `${JSON.stringify(tampered, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.reviewId), { code: "LOCAL_GATE_INVALID" });
+  const foreign = { ...JSON.parse(original), review_id: REVIEW_ID };
+  await fsp.writeFile(gatePath, `${JSON.stringify(foreign, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.reviewId), { code: "LOCAL_GATE_INVALID" });
+  assert.ok(!(await fsp.readdir(reviewDirectory(state))).some((name) => name.startsWith("report-")));
+  await fsp.writeFile(gatePath, original, { mode: 0o600 });
+  assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
 });
 
 // Two renderers racing on one revision must leave one file, and each receipt

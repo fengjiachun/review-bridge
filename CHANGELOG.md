@@ -17,8 +17,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `publication.json`, or over the publication and its authorization alone for
   a `REMOTE_ONLY` publication, which has no review ledger (a local-gate
   publication whose review ledger is missing is refused as an incomplete
-  store, not rendered as a skipped review): requirement and scope, base and
-  head, provider and strategy, each round's findings with the author's
+  store, not rendered as a skipped review): requirement and
+  scope, base and head, provider, each round's own strategy and successor
+  proof, each round's findings with the author's
   disposition and rationale, the rereview decision and the verification
   behind a sustained rebuttal, what changed between rounds from the immutable
   rounds or stated as unavailable, the terminal state, and the pull request,
@@ -46,7 +47,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   from the immutable manifest and patch beside it, as the gate reproduces the
   clean round's) and is used by the report alone, the publication by the canonical, schema-validated reader that
   requires the review ID inside to match, and the gate or authorization file
-  by the binding check that ties it to the ledger -- so a file copied in from
+  by the binding check that ties it to the ledger, a `LOCAL_GATE_PASSED`
+  review requiring its gate even before any publication exists -- so a file
+  copied in from
   another review or edited in place fails the render with that reader's
   error and nothing is written. Every reviewer- or author-supplied string is
   rendered as one escaped line or inside a fence longer than any backtick

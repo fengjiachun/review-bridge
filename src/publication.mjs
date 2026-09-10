@@ -3016,6 +3016,16 @@ export async function readBoundPublicationAuthorization(storeRoot, reviewId, led
   return readBoundAuthorization(pathsFor(storeRoot, reviewId), reviewId, ledger);
 }
 
+// The local gate a LOCAL_GATE_PASSED review minted, read and validated the
+// way a publication start reads it, for a reader that has the review but no
+// publication yet. core enters that status only by writing this file, so its
+// absence is an incomplete store, not a review that skipped its gate.
+export async function readLocalGateAuthorization(storeRoot, reviewId) {
+  return normalizedLocalGate(
+    await readLocalGate(pathsFor(storeRoot, reviewId), reviewId),
+  );
+}
+
 async function openAuthorizationFiles(
   paths,
   reviewId,
