@@ -242,15 +242,17 @@ async function marketplaceFromCodexConfig() {
   return source ? source.groups.path : null;
 }
 
-// Keys of the checkout's local and worktree Git configuration whose name ends
-// in `.extraheader` or whose value is a URL carrying a credential. Values are
-// never printed.
+// Keys of the checkout's local and worktree Git configuration (includes
+// followed) whose name ends in `.extraheader`, starts with `credential.`, or
+// whose value is a URL carrying a credential. Values are never printed.
 function gitConfigCredentialKeys(repository) {
   const keys = [];
   for (const scope of ["--local", "--worktree"]) {
-    const result = spawnSync("git", ["-C", repository, "config", scope, "--list", "--null"], {
-      encoding: "utf8",
-    });
+    const result = spawnSync(
+      "git",
+      ["-C", repository, "config", scope, "--includes", "--list", "--null"],
+      { encoding: "utf8" },
+    );
     // The local scope always reads in a repository; a failure there is git
     // itself failing, and the check must not pass by not running. The
     // worktree scope exists only with extensions.worktreeConfig.
@@ -267,9 +269,12 @@ function gitConfigCredentialKeys(repository) {
       const value = newline === -1 ? "" : entry.slice(newline + 1);
       // Userinfo is a credential when it carries a password in any scheme
       // (`user:pass@`) or appears at all in an http(s) URL, where a token can
-      // stand as the user; `ssh://git@…` is a username and no secret.
+      // stand as the user; `ssh://git@…` is a username and no secret. Any
+      // `credential.*` setting is refused without reading its value: a
+      // helper can point at a credentials file inside the checkout.
       if (
         /\.extraheader$/i.test(key) ||
+        /^credential\./i.test(key) ||
         /:\/\/[^/\s@]*:[^/\s@]*@/.test(value) ||
         /^https?:\/\/[^/\s@]+@/i.test(value)
       ) {
@@ -373,6 +378,23 @@ async function resolveInputs(options) {
   // two things it commonly carries are host secrets: an
   // `http.<url>.extraheader` such as actions/checkout writes (a bearer token),
   // and a remote URL with a user in it. Refused up front, key names only.
+  // Inside the container only the checkout itself exists. A linked worktree
+  // keeps its `.git` as a file pointing into the main repository, and a
+  // clone made with `--shared` reads objects through
+  // `.git/objects/info/alternates`; git can follow neither there, so only a
+  // self-contained clone is accepted.
+  const gitDir = path.join(repository, ".git");
+  const gitDirStat = await fsp.lstat(gitDir).catch(() => null);
+  if (!gitDirStat?.isDirectory()) {
+    fail(
+      `the author checkout ${repository} is not a self-contained clone: .git is ${gitDirStat ? "a file (a linked worktree or a separate git dir)" : "missing"}; use a self-contained clone (git clone <remote-url> <path>)`,
+    );
+  }
+  if (await exists(path.join(gitDir, "objects", "info", "alternates"))) {
+    fail(
+      `the author checkout ${repository} is not a self-contained clone: it reads objects through .git/objects/info/alternates; use a self-contained clone (git clone <remote-url> <path>)`,
+    );
+  }
   const credentialKeys = gitConfigCredentialKeys(repository);
   if (credentialKeys.length > 0) {
     fail(
@@ -787,9 +809,17 @@ function evaluateBoundary(baselineOutput, mountedOutput, inputs) {
       const removed = [...before].filter((name) => !after.has(name)).sort();
       const expected = wayDown(record.path);
       facts.children.push(`${record.path}: +${added.join(",") || "∅"}${removed.length ? ` −${removed.join(",")}` : ""} over ${before.size} in the image`);
-      if (!(ancestors.includes(record.path) && added.length === 1 && added[0] === expected && removed.length === 0)) {
+      // The mount may add the way-down name, or nothing when the image has
+      // that name already (/usr/src); it may add nothing else and remove
+      // nothing, and the way down must be there afterwards.
+      const clean =
+        ancestors.includes(record.path) &&
+        removed.length === 0 &&
+        added.every((name) => name === expected) &&
+        after.has(expected);
+      if (!clean) {
         failures.push(
-          `${record.path} changed by more than the way down to the checkout: added ${added.join(", ") || "nothing"}${removed.length ? `, removed ${removed.join(", ")}` : ""}, expected only ${expected}`,
+          `${record.path} changed by more than the way down to the checkout: added ${added.join(", ") || "nothing"}${removed.length ? `, removed ${removed.join(", ")}` : ""}, expected only ${expected}${after.has(expected) ? "" : " (which is missing)"}`,
         );
       }
     } else if (record.kind === "egress") {
@@ -908,38 +938,42 @@ async function guardianVerdicts(sessionsRoot) {
 }
 
 // Codex prints `(failed)` both when the server answered a call with an error
-// result and when the call failed to complete at all. The two differ for the
+// result and when the call did not complete at all. The two differ for the
 // criterion: an answered error (a path that is not in the snapshot, say) is
-// the server working. The main rollout carries every tool output, so the
-// server's error answers are counted there and set against the failed lines;
-// only failures no answer accounts for count against the container.
-async function serverErrorAnswers(sessionsRoot) {
-  const messages = [];
+// the server working. The main rollout records every MCP call as its own
+// `McpToolCall` item, with the server's result when there was one, so each
+// failed call is judged on its own record: answered when its record carries
+// a result, unexplained otherwise — including a call with no record at all.
+// Nothing else in the rollout (a script output that happens to contain an
+// error object) counts.
+async function reviewerCallRecords(sessionsRoot) {
+  const records = [];
   for await (const file of walkFiles(sessionsRoot)) {
     if (!file.endsWith(".jsonl")) continue;
     const text = await fsp.readFile(file, "utf8");
     if (text.includes('"thread_source":"guardian_review"')) continue;
     for (const line of text.split("\n")) {
-      if (!line || !line.includes("function_call_output") && !line.includes("custom_tool_call_output")) continue;
+      if (!line.includes('"McpToolCall"')) continue;
       let event;
       try {
         event = JSON.parse(line);
       } catch {
         continue;
       }
-      const payload = event.payload ?? {};
-      if (!["function_call_output", "custom_tool_call_output"].includes(payload.type)) continue;
-      const output = Array.isArray(payload.output)
-        ? payload.output.map((part) => part?.text ?? "").join(" ")
-        : String(payload.output ?? "");
-      // The server's `{"error":"…"}` may arrive raw or JSON-escaped one level
-      // deeper; the message ends at the first quote either way.
-      for (const match of output.matchAll(/\{\\?"error\\?":\\?"((?:[^"\\]|\\[^"]){0,200})/g)) {
-        messages.push(match[1]);
+      const item = event.payload?.item;
+      if (event.payload?.type !== "item_completed" || item?.type !== "McpToolCall") continue;
+      if (item.server !== REVIEWER_SERVER) continue;
+      const answered = item.status === "completed" || (item.result != null && item.error == null);
+      let message = null;
+      if (item.status !== "completed" && answered) {
+        const text = item.result?.content?.map((part) => part?.text ?? "").join(" ") ?? "";
+        const match = text.match(/"error":"((?:[^"\\]|\\.){0,200})/);
+        message = match ? match[1] : text.slice(0, 200);
       }
+      records.push({ id: item.id, tool: item.tool, status: item.status, answered, message });
     }
   }
-  return messages;
+  return records;
 }
 
 function summarizeProxyLog(log) {
@@ -1205,8 +1239,9 @@ async function main() {
   const started = reviewerCalls.reduce((sum, [, entry]) => sum + entry.started, 0);
   const completed = reviewerCalls.reduce((sum, [, entry]) => sum + entry.completed, 0);
   const failedCalls = started - completed;
-  const answeredErrors = failedCalls > 0 ? await serverErrorAnswers(path.join(scratch, "sessions")) : [];
-  const explained = Math.min(failedCalls, answeredErrors.length);
+  const callRecords = failedCalls > 0 ? await reviewerCallRecords(path.join(scratch, "sessions")) : [];
+  const answeredFailures = callRecords.filter((record) => record.status !== "completed" && record.answered);
+  const explained = answeredFailures.length;
   // The copy-back happens only after criteria 1 and 2 and the exit code have
   // passed: a host ledger advanced to REVIEW_SUBMITTED or CLEAN cannot be
   // launched again, so a run with an unexplained failure or a nonzero exit
@@ -1214,6 +1249,8 @@ async function main() {
   // staged store at the file level, replay the verdict through the host's own
   // submit_review under the host review's lock, and keep the replay only if
   // it equals the staged ledger; otherwise refuse with the reasons.
+  // Every started call must be either completed or a failed call whose own
+  // record carries the server's answer; a mismatch in either direction fails.
   const mcpOk = started > 0 && completed + explained === started;
   const preCopyFailures = [
     ...(codexExit === 0 ? [] : [`codex exited ${codexExit}`]),
@@ -1257,7 +1294,7 @@ async function main() {
             .map(([key, entry]) => `${key.split("/")[1]} ${entry.completed}/${entry.started}`)
             .join(", ") +
           (failedCalls > 0
-            ? `; ${explained} of ${failedCalls} failed call(s) answered by the server with an error (${answeredErrors.slice(0, 3).map((m) => `"${m}"`).join(", ")}${answeredErrors.length > 3 ? ", …" : ""})${failedCalls > explained ? `, ${failedCalls - explained} unexplained` : ""}`
+            ? `; ${explained} of ${failedCalls} failed call(s) answered by the server with an error (${answeredFailures.slice(0, 3).map((record) => `${record.tool}: "${record.message}"`).join(", ")}${answeredFailures.length > 3 ? ", …" : ""})${failedCalls > explained ? `, ${failedCalls - explained} unexplained` : explained > failedCalls ? `, ${explained - failedCalls} more answered failures than failed lines` : ""}`
             : ""),
     ],
     [

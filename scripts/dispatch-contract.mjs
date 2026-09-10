@@ -461,6 +461,18 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "a checkout carrying a Git credential is refused before launch",
       /refuses, before anything is started, a checkout whose Git configuration carries a credential/,
     ],
+    // Codex round six on #125: a credential helper is a credential, the
+    // check's scope has to be stated, and a linked worktree cannot be read
+    // inside the container at all.
+    ["any credential.* setting is refused", /any `credential\.\*` setting/],
+    [
+      "the credential check's scope is stated",
+      /reads Git configuration only, includes followed, and not the working tree/,
+    ],
+    [
+      "a checkout that is not a self-contained clone is refused",
+      /refuses a checkout that is not a self-contained clone/,
+    ],
     [
       "the credential is a read-only bind mount, never an image layer",
       /`auth\.json` as a read-only bind mount, never copied into an image layer/,
@@ -938,10 +950,20 @@ export const ADVISORY_PANEL_CONTRACT = {
       /zero findings records that fact and attests nothing/,
     ],
     // A reviewer must never read a tree someone is editing, and the panel must
-    // never dirty one.
+    // never dirty one. Codex round six on #125: the container launcher can
+    // only read a self-contained clone, so the panel checkout is a clone of
+    // its own, never a linked worktree of the authoring repository.
     [
       "the head goes to a worktree outside every authoring tree",
       /worktree outside every authoring tree/,
+    ],
+    [
+      "the panel checkout is a self-contained clone",
+      /container launcher below reads only a self-contained clone/,
+    ],
+    [
+      "the refs and the merge base live in the clone",
+      /merge base is computed from the refs the fetch just wrote, in the clone/,
     ],
     [
       "the base is the merge base, not the target branch tip",
@@ -1095,6 +1117,18 @@ export const ADVISORY_PANEL_CONTRACT = {
       "doesNotMatch",
       /merge-base <remote>\/<target-branch>/,
       "the merge base regressed to a remote-tracking ref the fetch may not update",
+    ],
+    // The panel checkout is a clone, in a runnable form, and never a linked
+    // worktree the container cannot read.
+    [
+      "match",
+      /```bash\n *git clone <remote-url> <path outside any authoring tree>\n/,
+      "the panel checkout is not a clone in a runnable form",
+    ],
+    [
+      "doesNotMatch",
+      /git worktree add/,
+      "the panel checkout regressed to a linked worktree",
     ],
     // The Claude member is still opened by the operator, for the compliance
     // reason; the guard names the Codex task so it cannot catch that line.

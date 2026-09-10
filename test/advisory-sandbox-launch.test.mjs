@@ -28,7 +28,7 @@ const launcherSource = path.join(
 );
 const REVIEW_ID = "rb-2026-09-10T000000-000Z-0badcafe";
 
-async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", realReview = false } = {}) {
+async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", checkoutPath = null, realReview = false } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-advisory-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const plugin = path.join(root, "plugin");
@@ -39,7 +39,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", r
   const home = path.join(root, "home");
   const marketplace = path.join(home, "Runtime", "codex-marketplace");
   const pluginSource = path.join(marketplace, "plugins", "review-bridge");
-  let checkout = path.join(home, checkoutName);
+  let checkout = checkoutPath ?? path.join(home, checkoutName);
   let store = path.join(root, "store");
   let reviewId = REVIEW_ID;
   if (realReview) {
@@ -80,7 +80,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", r
     await fsp.mkdir(checkout, { recursive: true });
     // The ledger's repository_path is always a repository; the credential
     // precheck reads its configuration.
-    spawnSync("git", ["-C", checkout, "init", "-q"]);
+    if (!checkoutPath) spawnSync("git", ["-C", checkout, "init", "-q"]);
     await fsp.mkdir(path.join(store, "reviews", REVIEW_ID), { recursive: true });
     await fsp.writeFile(
       path.join(store, "reviews", REVIEW_ID, "review.json"),
@@ -114,7 +114,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", r
 // records derived from the probe's own argument, and plays the reviewer by
 // moving the staged ledger with the server's own submit — or, when asked,
 // by also leaving the kind of trace the copy-back must refuse.
-async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", leak = "", exit = "" } = {}) {
+async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "" } = {}) {
   const bin = path.join(f.root, "bin");
   await fsp.mkdir(bin, { recursive: true });
   const runner = path.join(bin, "fake-run.mjs");
@@ -136,7 +136,10 @@ if (!args.includes("codex")) {
   // it, home directory or not.
   const wayDown = (p) => path.relative(p, spec.checkout).split(path.sep)[0];
   const imageChildren = (process.env.FAKE_BASELINE_CHILDREN || "").split(",").filter(Boolean);
-  spec.ancestors.forEach((p) => out.push({ kind: "ancestor", path: p, children: mounted ? [...imageChildren, wayDown(p), ...(process.env.FAKE_LEAK ? [process.env.FAKE_LEAK] : [])] : imageChildren }));
+  spec.ancestors.forEach((p) => {
+    const image = process.env.FAKE_BASELINE_HAS_EXPECTED ? [...imageChildren, wayDown(p)] : imageChildren;
+    out.push({ kind: "ancestor", path: p, children: mounted ? [...new Set([...image, wayDown(p), ...(process.env.FAKE_LEAK ? [process.env.FAKE_LEAK] : [])])] : image });
+  });
   if (!mounted) { process.stdout.write(out.map((r) => JSON.stringify(r)).join("\\n") + "\\n"); process.exit(0); }
   out.push({ kind: "checkout-head", value: spawnSync("git", ["-C", spec.checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim() });
   out.push({ kind: "store-writable", value: true });
@@ -154,16 +157,30 @@ if (!args.includes("codex")) {
   const tamper = process.env.FAKE_TAMPER || "";
   if (process.env.FAKE_SERVER_ERROR) {
     // A call the server answered with an error: printed as (failed) by codex
-    // and recorded as an error result in the main rollout.
+    // and recorded as a failed McpToolCall item carrying the server's result.
     process.stdout.write("mcp: review-bridge-reviewer/read_snapshot_file started\\nmcp: review-bridge-reviewer/read_snapshot_file (failed)\\n");
     const scratch = path.dirname(bind("/codex-home/config.toml"));
     fs.mkdirSync(path.join(scratch, "sessions"), { recursive: true });
-    const output = JSON.stringify({ content: [{ type: "text", text: JSON.stringify({ error: "git show failed (128): fatal: path 'nope.js' does not exist in 'abc'" }) }], isError: true });
-    fs.writeFileSync(path.join(scratch, "sessions", "rollout-main.jsonl"), [
+    const answered = { type: "McpToolCall", id: "exec-1", server: "review-bridge-reviewer", tool: "read_snapshot_file", arguments: {}, status: "failed", result: { content: [{ type: "text", text: JSON.stringify({ error: "git show failed (128): fatal: path 'nope.js' does not exist in 'abc'" }) }], isError: true } };
+    const lines = [
       JSON.stringify({ type: "session_meta", payload: { id: "main" } }),
-      JSON.stringify({ type: "response_item", payload: { type: "function_call_output", call_id: "c1", output: output } }),
-    ].join("\\n") + "\\n");
-    if (process.env.FAKE_SERVER_ERROR === "unexplained") process.stdout.write("mcp: review-bridge-reviewer/search_snapshot started\\nmcp: review-bridge-reviewer/search_snapshot (failed)\\n");
+      JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item: answered } }),
+      // Noise that must explain nothing: an error object in a script output
+      // and in a shell item's text.
+      JSON.stringify({ type: "response_item", payload: { type: "custom_tool_call_output", call_id: "c9", output: JSON.stringify({ error: "x" }) } }),
+      JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item: { type: "CommandExecution", id: "exec-9", status: "completed", aggregated_output: JSON.stringify({ error: "x" }) } } }),
+    ];
+    if (process.env.FAKE_SERVER_ERROR === "unexplained") {
+      // A call nobody answered: (failed) in the transcript, a failed item
+      // with a transport error and no result in the rollout.
+      process.stdout.write("mcp: review-bridge-reviewer/search_snapshot started\\nmcp: review-bridge-reviewer/search_snapshot (failed)\\n");
+      lines.push(JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item: { type: "McpToolCall", id: "exec-2", server: "review-bridge-reviewer", tool: "search_snapshot", arguments: {}, status: "failed", error: "MCP tool call failed: transport closed" } } }));
+    }
+    if (process.env.FAKE_SERVER_ERROR === "no-record") {
+      // A (failed) line with no McpToolCall record at all.
+      process.stdout.write("mcp: review-bridge-reviewer/search_snapshot started\\nmcp: review-bridge-reviewer/search_snapshot (failed)\\n");
+    }
+    fs.writeFileSync(path.join(scratch, "sessions", "rollout-main.jsonl"), lines.join("\\n") + "\\n");
   }
   if (tamper !== "no-verdict") {
     await submitInitialReview(staged, reviewId, [{ severity: "major", title: "one", explanation: "first", path: "app.js", line: 1 }], "CODEX_TASK");
@@ -213,6 +230,7 @@ esac
     FAKE_PRESENT: present,
     FAKE_IMAGE_PRESENT: imagePresent,
     FAKE_BASELINE_CHILDREN: baselineChildren,
+    FAKE_BASELINE_HAS_EXPECTED: baselineHasExpected ? "1" : "",
     FAKE_LEAK: leak,
     FAKE_EXIT: exit,
   };
@@ -501,7 +519,7 @@ test("a call the server answered with an error is not a failed call; one nobody 
   assert.equal(result.status, 0, result.stdout.slice(-2000));
   assert.match(
     result.stdout,
-    /criterion 1 MCP calls completed inside the container: PASS — .*read_snapshot_file 0\/1.*; 1 of 1 failed call\(s\) answered by the server with an error \("git show failed \(128\): fatal: path 'nope\.js' does not exist in 'abc'"\)/,
+    /criterion 1 MCP calls completed inside the container: PASS — .*read_snapshot_file 0\/1.*; 1 of 1 failed call\(s\) answered by the server with an error \(read_snapshot_file: "git show failed \(128\): fatal: path 'nope\.js' does not exist in 'abc'"\)/,
   );
   const g = await fixture(t, { realReview: true });
   const hostBefore = await fsp.readFile(path.join(g.store, "reviews", g.reviewId, "review.json"));
@@ -514,6 +532,13 @@ test("a call the server answered with an error is not a failed call; one nobody 
   assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: FAIL — refused — pre-copy criteria failed: 1 unexplained failed MCP call\(s\); host store unwritten/);
   assert.deepEqual(await fsp.readFile(path.join(g.store, "reviews", g.reviewId, "review.json")), hostBefore);
   assert.equal((await loadReview(g.store, g.reviewId)).status, "WAITING_FOR_REVIEW");
+  // A (failed) line with no record of its own is unexplained too, whatever
+  // error objects other outputs carry.
+  const h = await fixture(t, { realReview: true });
+  result = launch(h, ["--review-id", h.reviewId], await fakeDocker(h, { serverError: "no-record" }));
+  assert.equal(result.status, 1, result.stdout.slice(-2000));
+  assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: FAIL — .*, 1 unexplained/);
+  assert.equal((await loadReview(h.store, h.reviewId)).status, "WAITING_FOR_REVIEW");
 });
 
 test("a nonzero codex exit leaves the host ledger untouched even when the staged ledger holds a verdict", async (t) => {
@@ -537,6 +562,12 @@ test("the boundary is judged against the unmounted image: image directories pass
   assert.match(result.stdout, /criterion 2 host filesystem absent: PASS — .*present: \/root\/\.ssh \(in the image\); checkout ancestors against the unmounted baseline: .* over 3 in the image/);
   // Each ancestor gained exactly the checkout's next segment below it.
   assert.match(result.stdout, new RegExp(`${path.dirname(f.checkout)}: \\+${path.basename(f.checkout)} over 3 in the image`));
+  // An image that already holds the way-down name (/usr/src) adds nothing
+  // and still passes, because the name is there after the mount.
+  const h = await fixture(t, { realReview: true });
+  result = launch(h, ["--review-id", h.reviewId], await fakeDocker(h, { baselineChildren: "src,bin", baselineHasExpected: true }));
+  assert.equal(result.status, 0, result.stdout.slice(-2500));
+  assert.match(result.stdout, new RegExp(`${path.dirname(h.checkout)}: \\+∅ over 3 in the image`));
   // A name the mount added beside the way down is a leak.
   const g = await fixture(t, { realReview: true });
   result = launch(g, ["--review-id", g.reviewId], await fakeDocker(g, { leak: "stray" }));
@@ -579,6 +610,19 @@ test("a checkout whose Git configuration carries a credential is refused before 
   const i = await fixture(t, { realReview: true });
   result = launch(i, ["--review-id", i.reviewId, "--dry-run"]);
   assert.equal(result.status, 0, result.stderr);
+  // An included file is read too; a credential helper is a credential.
+  const k = await fixture(t, { realReview: true });
+  await fsp.writeFile(path.join(k.checkout, ".git", "cred.inc"), '[http "https://github.com/"]\n\textraheader = AUTHORIZATION: basic c2VjcmV0\n');
+  spawnSync("git", ["-C", k.checkout, "config", "include.path", "cred.inc"]);
+  result = launch(k, ["--review-id", k.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /carries a credential \(http\.https:\/\/github\.com\/\.extraheader\)/);
+  const l = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", l.checkout, "config", "credential.helper", "store --file=.git/credentials"]);
+  result = launch(l, ["--review-id", l.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /carries a credential \(credential\.helper\)/);
+  assert.doesNotMatch(result.stderr, /\.git\/credentials/);
   // git itself unavailable: the check fails closed rather than passing by
   // not running.
   const j = await fixture(t, { realReview: true });
@@ -608,6 +652,29 @@ test("a direct egress answer with any HTTP status fails the boundary before the 
   assert.doesNotMatch(result.stdout, /mcp: /);
   const ledger = await loadReview(f.store, f.reviewId);
   assert.equal(ledger.state_version, 1);
+});
+
+test("only a self-contained clone is accepted: a linked worktree and a shared clone are refused before Docker", async (t) => {
+  const PATH = await gitOnlyPath(t);
+  const repo = await repositoryFixture();
+  t.after(() => fsp.rm(repo.root, { recursive: true, force: true }));
+  const worktree = path.join(repo.root, "linked");
+  spawnSync("git", ["-C", repo.repository, "worktree", "add", "-q", worktree, "-b", "panel"]);
+  const f = await fixture(t, { checkoutPath: worktree });
+  let result = launch(f, ["--review-id", REVIEW_ID], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /is not a self-contained clone: \.git is a file \(a linked worktree or a separate git dir\); use a self-contained clone \(git clone <remote-url> <path>\)/);
+  const shared = path.join(repo.root, "shared");
+  spawnSync("git", ["clone", "-q", "-s", repo.repository, shared]);
+  const g = await fixture(t, { checkoutPath: shared });
+  result = launch(g, ["--review-id", REVIEW_ID], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /is not a self-contained clone: it reads objects through \.git\/objects\/info\/alternates/);
+  const plain = path.join(repo.root, "plain");
+  spawnSync("git", ["clone", "-q", repo.repository, plain]);
+  const h = await fixture(t, { checkoutPath: plain });
+  result = launch(h, ["--review-id", REVIEW_ID, "--dry-run"]);
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("the launcher fails closed when Docker is unavailable", async (t) => {

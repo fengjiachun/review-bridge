@@ -35,8 +35,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   ledger and lock; its round-two P1: a field comparison of the staged ledger
   is forgeable from inside the container). The boundary probe treats any
   HTTP status on the direct egress check as traffic that left the container
-  (round-two P1), and the codex transcript is flushed before the launcher
-  reads it (round-two P2). The
+  (round-two P1), the codex transcript is flushed before the launcher reads
+  it (round-two P2), and a failed reviewer call counts as answered only when
+  its own `McpToolCall` record in the rollout carries the server's result. The
   isolated `CODEX_HOME` is a Docker volume and the working directory a tmpfs
   rather than host directories — nothing Codex keeps there needs to be on the
   host during the run — and the sessions are copied out of the volume
@@ -53,8 +54,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   (the home directory itself is not probed: `/root` is a directory of the
   base image), judged against the same image run without the checkout mount
   so that what the image carries is never read as the host's; a checkout
-  whose Git configuration carries a credential (`.extraheader`, a remote URL
-  with a user) is refused before anything starts; on exit the launcher prints the three criteria it verified (MCP calls
+  whose Git configuration carries a credential (`.extraheader`, any
+  `credential.*` setting, a remote URL with a user; includes followed) or that
+  is not a self-contained clone (a linked worktree, a clone with alternates —
+  neither readable inside the container) is refused before anything starts,
+  and the packaged skill's advisory panel now clones the pull request's
+  repository instead of adding a linked worktree; on exit the launcher prints the three criteria it verified (MCP calls
   completed inside the container, host filesystem absent, validated verdict
   copied back to the host store), the guardian's verdict per call, and the
   proxy's egress log, and exits nonzero when a criterion fails; the copy-back

@@ -823,8 +823,15 @@ so a directory the image itself carries is not read as the host's, and each
 ancestor of the checkout may gain exactly the one name that leads down to it.
 The launcher also refuses, before anything is started, a checkout whose Git
 configuration carries a credential — an `http.<url>.extraheader` such as
-`actions/checkout` writes, or a remote URL with a user in it — because the
-checkout's `.git/config` rides into the container with the mount. The container is the only sandbox. Inside it the reviewer
+`actions/checkout` writes, any `credential.*` setting, or a remote URL with a
+user in it — because the checkout's `.git/config` rides into the container
+with the mount. That check reads Git configuration only, includes followed,
+and not the working tree: a `.env` or `.netrc` in the tree is kept out by the
+panel checkout being a fresh clone, not by the launcher. And it refuses a
+checkout that is not a self-contained clone — a linked worktree, whose
+`.git` is a file pointing into the main repository, or a clone with
+alternates — because inside the container only the checkout itself
+exists and git can follow neither. The container is the only sandbox. Inside it the reviewer
 runs with `--sandbox danger-full-access`, because Codex's nested bubblewrap
 does not start under Docker's default confinement, and relaxing that
 confinement to fit a second sandbox inside would weaken the one boundary that
@@ -1409,23 +1416,28 @@ must never issue by accident is a `LOCAL_GATE_PASSED` over code the operator
 did not author. An advisory review with zero findings records that fact and
 attests nothing.
 
-1. Fetch the pull request head and the target branch into refs of this flow's
-   own, and check the head out in a worktree outside every authoring tree — a
-   reviewer must never read a tree someone is editing, and the panel must never
-   dirty one:
+1. Clone the pull request's repository into a directory outside every
+   authoring tree, fetch its head and the target branch into refs of this
+   flow's own inside that clone, check the head out there, and compute the
+   merge base there. A reviewer must never read a tree someone is editing and
+   the panel must never dirty one, and the container launcher below reads
+   only a self-contained clone: a linked worktree keeps its `.git` as a file
+   pointing into the main repository, which the container does not hold. The clone is the panel's worktree outside every authoring
+   tree:
 
    ```bash
-   git -C <repository> fetch <remote> \
+   git clone <remote-url> <path outside any authoring tree>
+   git -C <path outside any authoring tree> fetch origin \
      '+<target-branch>:refs/review-bridge/<pr-number>/base' \
      '+pull/<pr-number>/head:refs/review-bridge/<pr-number>/head'
-   git -C <repository> worktree add <path outside any authoring tree> \
+   git -C <path outside any authoring tree> checkout --detach \
      refs/review-bridge/<pr-number>/head
-   git -C <repository> merge-base refs/review-bridge/<pr-number>/base \
+   git -C <path outside any authoring tree> merge-base refs/review-bridge/<pr-number>/base \
      refs/review-bridge/<pr-number>/head
    ```
 
    Both refspecs name their destination, and the merge base is computed from
-   the refs the fetch just wrote. A source-only refspec would not be enough: it
+   the refs the fetch just wrote, in the clone. A source-only refspec would not be enough: it
    fetches the commit but leaves updating any remote-tracking ref to
    `remote.<name>.fetch`, so under a narrow refmap — a `--single-branch` clone
    whose tracked branch is not this pull request's target —
