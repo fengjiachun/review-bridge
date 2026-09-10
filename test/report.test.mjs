@@ -1194,6 +1194,36 @@ test("a LOCAL_GATE_PASSED review without a valid gate.json is refused even befor
   assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
 });
 
+// With a publication, the gate is bound to the publication by the store
+// reader; it must still be held to the review, or a structurally valid review
+// ledger of another change, filed under this id with its own rounds, would be
+// rendered under this gate and publication.
+test("a local-gate publication's gate is held to the review ledger beside it", async (t) => {
+  const state = await gatedFixture(t);
+  await reachReady(state);
+  const directory = reviewDirectory(state);
+  const genuine = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
+  assert.equal(genuine.reused, false);
+  await fsp.rm(genuine.path);
+
+  // Another review's ledger and rounds, re-labelled with this review's id so
+  // the ledger validates on its own terms; only the gate can tell it apart.
+  const other = await gatedFixture(t);
+  const otherDirectory = reviewDirectory(other);
+  const foreign = JSON.parse(await fsp.readFile(path.join(otherDirectory, "review.json"), "utf8"));
+  foreign.id = state.reviewId;
+  const keep = { reviewPath: path.join(directory, "review.json"), original: await fsp.readFile(path.join(directory, "review.json")) };
+  await fsp.rm(path.join(directory, "rounds"), { recursive: true });
+  await fsp.cp(path.join(otherDirectory, "rounds"), path.join(directory, "rounds"), { recursive: true });
+  await fsp.writeFile(keep.reviewPath, `${JSON.stringify(foreign, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+    assert.equal(error.code, "LOCAL_GATE_INVALID");
+    assert.ok(["base_sha", "head_sha", "snapshot_hash"].includes(error.details.field), error.details.field);
+    return true;
+  });
+  assert.ok(!(await fsp.readdir(directory)).some((name) => name.startsWith("report-")));
+});
+
 // Two renderers racing on one revision must leave one file, and each receipt
 // must describe that file: the loser reuses the winner's bytes rather than
 // replacing them with a render that differs by its render time.

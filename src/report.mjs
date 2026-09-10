@@ -742,13 +742,18 @@ export async function loadReportLedgers(
       );
     }
     authorization = await readLocalGateAuthorization(storeRoot, reviewId);
-    // Every attested field the review also holds, compared in one place.
+  }
+  // Whichever path read a local gate -- bound to a publication or standing
+  // alone -- it attests this review, so every attested field the review also
+  // holds is compared here, once, after the two paths meet. A remote sidecar
+  // has no review to compare with.
+  if (authorization?.mode === "LOCAL_GATE" && review != null) {
     const mismatch = localGateReviewMismatch(authorization, review);
     if (mismatch != null) {
       throw reportError(
         "LOCAL_GATE_INVALID",
         `gate.json of ${reviewId} attests ${mismatch.field} ${JSON.stringify(mismatch.gate)}, but the review holds ${JSON.stringify(mismatch.review)}`,
-        { review_id: reviewId, path: gatePath, ...mismatch },
+        { review_id: reviewId, path: path.join(directory, "gate.json"), ...mismatch },
       );
     }
   }
