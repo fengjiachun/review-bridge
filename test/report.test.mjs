@@ -934,7 +934,9 @@ test("finding statuses must equal what their records derive, in both directions"
   // author responded; core refuses that on an advisory review too.
   await tamper((review) => { review.advisory = true; }, /history entry 3 \(ERRATUM_APPENDED\) violates the writer's precondition: advisory review/);
   await tamper((review) => { review.history.find((entry) => entry.event === "FINDINGS_SUBMITTED").count = 101; }, /history entry 2 \(FINDINGS_SUBMITTED\) violates the writer's precondition: more than 100 findings/);
-  await tamper((review) => { review.max_rounds = 2; review.history.splice(3, 0, { at: review.history[2].at, event: "ROUND_LIMIT_REACHED" }); }, /history entry 4 \(ROUND_LIMIT_REACHED\) violates the writer's precondition: round 1 is below max_rounds 2/);
+  // Spliced in right after the author responded, where the writer would
+  // record it, but in round 1 of 2, where the writer never would.
+  await tamper((review) => { review.max_rounds = 2; review.history.splice(4, 0, { at: review.history[3].at, event: "ROUND_LIMIT_REACHED" }); review.state_version += 1; }, /history entry 5 \(ROUND_LIMIT_REACHED\) violates the writer's precondition: round 1 is below max_rounds 2/);
   // Restored, it renders again.
   await fsp.writeFile(reviewPath, original, { mode: 0o600 });
   assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
