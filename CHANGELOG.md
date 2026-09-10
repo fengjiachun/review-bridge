@@ -9,6 +9,34 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Added
+
+- Render a human-readable Markdown report of a review from its ledger once a
+  gate passes, issue #123 (#124). `src/report.mjs` holds
+  `renderReviewReport`, a pure renderer over `review.json` and, when present,
+  `publication.json`: requirement and scope, base and head, provider and
+  strategy, each round's findings with the author's disposition and rationale,
+  the rereview decision and the verification behind a sustained rebuttal,
+  what changed between rounds from the immutable rounds or stated as
+  unavailable, the terminal state, and the pull request, Codex results and
+  their correlation, required checks, threads and their outcome,
+  supersessions and acknowledgements, and the observation a `MERGE_READY`
+  derivation rests on, by revision and canonical digest. The author tool
+  `render_review_report` writes `reviews/<review_id>/report-r<revision>.md`
+  beside the ledger and returns it, unchanged when that revision was already
+  rendered; it changes no ledger, consumes no round, and touches no gate, and
+  `required_inputs` declares it under the review `PUBLISH` action and the
+  publication `FINALIZE_PUBLICATION_GATE` action. The packaged
+  `scripts/review-report.mjs <review_id> [--json] [--store <path>]` prints
+  the same render and writes nothing. The workflow skill's Finish step renders
+  it once `LOCAL_GATE_PASSED` is recorded and the Publish step once the ledger
+  reads `MERGE_READY`, prints the path, and runs `plannotator annotate` when
+  `plannotator` is on PATH; annotations never flow back into the ledger, and
+  a failure there changes no gate and no workflow state.
+  `REVIEW_REPORT_CONTRACT` pins both steps in the source and packaged skill.
+  The footer states, in the terms the README uses for operator narration,
+  that the report is a projection of the ledger, not evidence.
+
 ### Changed
 
 - The `CODEX_TASK` launch refuses shell escalation by configuration,
