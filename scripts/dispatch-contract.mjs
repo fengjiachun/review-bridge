@@ -469,6 +469,10 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       /with any of those URL values that carries a credential refused as well/,
     ],
     [
+      "a key whose name carries a URL or a user is refused outright",
+      /any key whose name itself carries `:\/\/` or `@`/,
+    ],
+    [
       "core.* is not accepted wholesale",
       /the `core\.\*` keys a fresh clone writes/,
     ],

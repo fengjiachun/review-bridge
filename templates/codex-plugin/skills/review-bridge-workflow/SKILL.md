@@ -829,7 +829,8 @@ submodule's `url` and `active` — with any of those URL values that carries a
 credential refused as well; anything else (an `http.<url>.extraheader` such as
 `actions/checkout` writes, any `credential.*` setting, an `http.cookieFile` or
 `http.sslKey` pointing into the checkout, a `core.askPass`, `core.gitProxy`,
-or `core.sshCommand`, an `include.path`) is refused by key name, because the checkout's `.git/config`
+or `core.sshCommand`, an `include.path`, or any key whose name itself carries
+`://` or `@`) is refused by key name, because the checkout's `.git/config`
 rides into the container with the mount and a denylist of secret-bearing keys
 does not converge. That check reads Git configuration only, includes followed,
 and not the working tree: a `.env` or `.netrc` in the tree is kept out by the

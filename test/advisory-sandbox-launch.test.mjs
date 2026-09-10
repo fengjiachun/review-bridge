@@ -696,6 +696,19 @@ test("a checkout whose Git configuration carries a credential is refused before 
     assert.match(result.stderr, new RegExp(`holds more than a fresh clone writes \\(${key.toLowerCase().replace(".", "\\.")}\\)`));
     assert.doesNotMatch(result.stderr, /\.git\/(cookies|client\.key)/);
   }
+  // A subsection name that is itself a URL, or carries a user, is refused
+  // before the allowlist is consulted, however clean the value.
+  const u = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", u.checkout, "config", "remote.https://ghp_n4me@github.com/.url", "https://github.com/public/repo.git"]);
+  result = launch(u, ["--review-id", u.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /holds more than a fresh clone writes \(remote\.https:\/\/<redacted>@github\.com\/\.url\)/);
+  assert.doesNotMatch(result.stderr, /ghp_n4me/);
+  const v = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", v.checkout, "config", "branch.feat@x.remote", "origin"]);
+  result = launch(v, ["--review-id", v.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /holds more than a fresh clone writes \(branch\.<redacted>@x\.remote\)/);
   // Every URL-valued key on the allowlist gets the credential test, a
   // submodule's url as much as a remote's; a clean submodule url passes.
   const r = await fixture(t, { realReview: true });

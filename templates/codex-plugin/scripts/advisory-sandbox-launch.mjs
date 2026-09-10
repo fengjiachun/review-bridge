@@ -375,7 +375,8 @@ async function marketplaceFromCodexConfig() {
 // rounds) and the panel checkout is a fresh clone, so nothing else belongs
 // there. A URL-valued key — a remote's or a submodule's url — whose value
 // carries a credential is refused as well. Values are never printed; a key that is itself a URL is printed with its userinfo
-// redacted.
+// redacted, and a key whose name carries `://` or `@` at all is refused
+// before the allowlist is consulted.
 //
 // The core keys are what `git clone` writes as observed: on macOS (git
 // 2.54, Apple Git-157) repositoryformatversion, filemode, bare,
@@ -401,7 +402,7 @@ function gitConfigViolations(repository) {
   const violations = [];
   const urlCredential = (text) =>
     /:\/\/[^/\s@]*:[^/\s@]*@/.test(text) || /(?:^|\.)https?:\/\/[^/\s@]+@/i.test(text);
-  const redact = (key) => key.replace(/:\/\/[^/\s@]*@/g, "://<redacted>@");
+  const redact = (key) => key.replace(/[^./@\s]*@/g, "<redacted>@");
   for (const scope of ["--local", "--worktree"]) {
     const result = spawnSync(
       "git",
@@ -422,6 +423,15 @@ function gitConfigViolations(repository) {
       const newline = entry.indexOf("\n");
       const key = newline === -1 ? entry : entry.slice(0, newline);
       const value = newline === -1 ? "" : entry.slice(newline + 1);
+      // A subsection name can itself be a URL (`remote.<url>.url`) or carry
+      // a user (`branch.feat@x.remote`); a fresh clone names no remote,
+      // branch, or submodule with `://` or `@`, so such a key is refused
+      // before the allowlist is consulted, without relying on the URL test's
+      // shape.
+      if (key.includes("://") || key.includes("@")) {
+        violations.push(redact(key));
+        continue;
+      }
       const allowed = FRESH_CLONE_CONFIG_KEYS.find((entry) => entry.pattern.test(key));
       if (!allowed) {
         violations.push(redact(key));
