@@ -934,6 +934,9 @@ test("finding statuses must equal what their records derive, in both directions"
   // author responded; core refuses that on an advisory review too.
   await tamper((review) => { review.advisory = true; }, /history entry 3 \(ERRATUM_APPENDED\) violates the writer's precondition: advisory review/);
   await tamper((review) => { review.history.find((entry) => entry.event === "FINDINGS_SUBMITTED").count = 101; }, /history entry 2 \(FINDINGS_SUBMITTED\) violates the writer's precondition: more than 100 findings/);
+  await tamper((review) => { review.history.find((entry) => entry.event === "FINDINGS_SUBMITTED").count = 0; }, /history entry 2 \(FINDINGS_SUBMITTED\) violates the writer's precondition: fewer than 1 finding/);
+  // The continuation marker without the event that would have set it.
+  await tamper((review) => { review.continued_by_review_id = "rb-2026-09-02T000000-000Z-0000c0de"; }, /continued_by_review_id "rb-2026-09-02T000000-000Z-0000c0de" is recorded, but the history holds no REVIEW_CONTINUED event/);
   // Spliced in right after the author responded, where the writer would
   // record it, but in round 1 of 2, where the writer never would.
   await tamper((review) => { review.max_rounds = 2; review.history.splice(4, 0, { at: review.history[3].at, event: "ROUND_LIMIT_REACHED" }); review.state_version += 1; }, /history entry 5 \(ROUND_LIMIT_REACHED\) violates the writer's precondition: round 1 is below max_rounds 2/);
@@ -1085,6 +1088,84 @@ test("every rendered record kind is held to its writer's field table", async (t)
   await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
   assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
   await fsp.writeFile(reviewPath, original, { mode: 0o600 });
+});
+
+// A source review that was continued: its ledger carries the REVIEW_CONTINUED
+// event and the marker the writer set together, and the validator derives one
+// from the other.
+async function continuedFixture(t) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-report-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const repository = path.join(root, "repo");
+  const store = path.join(root, "store");
+  await fsp.mkdir(repository);
+  git(repository, "init", "-b", "main");
+  git(repository, "config", "user.name", "Review Bridge Test");
+  git(repository, "config", "user.email", "review-bridge@example.invalid");
+  await fsp.writeFile(path.join(repository, "value.js"), "export const value = 1;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "base");
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  git(repository, "switch", "-c", "agent/change");
+  await fsp.writeFile(path.join(repository, "value.js"), "export const value = 2;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "change");
+  const input = {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Change the exported value.",
+    implementationScope: "Update value.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
+  };
+  const source = await prepareReview(store, input);
+  await submitInitialReview(store, source.id, [
+    { severity: "major", title: "wrong value", explanation: "should be 3", recommendation: "set 3" },
+  ], "CLAUDE_DESKTOP");
+  await submitResolutions(store, source.id, [{ finding_id: "F-001", disposition: "fixed", rationale: "set to 3" }]);
+  await fsp.writeFile(path.join(repository, "value.js"), "export const value = 3;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "fix");
+  await prepareRereview(store, source.id);
+  await submitRereview(store, source.id, [
+    { finding_id: "F-001", decision: "resolved", rationale: "verified", verification: "read value.js" },
+  ], [
+    { severity: "minor", title: "new concern", explanation: "raised on rereview", recommendation: "" },
+  ], "CLAUDE_DESKTOP");
+  // A continuation reviews a new head that addresses the carried finding.
+  await fsp.writeFile(path.join(repository, "value.js"), "export const value = 4;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "address the new concern");
+  const continuation = await prepareReview(store, { ...input, continuedFromReviewId: source.id, forceFullReview: true });
+  return { root, store, sourceId: source.id, continuationId: continuation.id };
+}
+
+test("the continuation marker must be the one the history's REVIEW_CONTINUED event names", async (t) => {
+  const state = await continuedFixture(t);
+  const reviewPath = path.join(state.store, "reviews", state.sourceId, "review.json");
+  const original = await fsp.readFile(reviewPath, "utf8");
+  const genuine = JSON.parse(original);
+  assert.equal(genuine.status, "CONTINUABLE_FINDINGS");
+  assert.equal(genuine.continued_by_review_id, state.continuationId);
+  assert.equal(genuine.history.at(-1).event, "REVIEW_CONTINUED");
+  // The genuine source renders, naming its continuation.
+  const written = await writeReviewReport(state.store, state.sourceId, { renderedAt: RENDERED_AT });
+  assert.match(await fsp.readFile(written.path, "utf8"), new RegExp(`- Continued by: \`${state.continuationId}\``));
+  await fsp.rm(written.path);
+  const tamper = async (mutate, expected) => {
+    const review = JSON.parse(original);
+    mutate(review);
+    await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
+    await assert.rejects(writeReviewReport(state.store, state.sourceId), (error) => {
+      assert.equal(error.code, "REVIEW_LEDGER_INVALID");
+      assert.match(error.details.reason, expected);
+      return true;
+    });
+  };
+  await tamper((review) => { review.continued_by_review_id = "rb-2026-09-02T000000-000Z-0000c0de"; }, /continued_by_review_id "rb-2026-09-02T000000-000Z-0000c0de" is not the "rb-[^"]+" the history's REVIEW_CONTINUED event names/);
+  await tamper((review) => { delete review.continued_by_review_id; }, /continued_by_review_id null is not the "rb-[^"]+" the history's REVIEW_CONTINUED event names/);
+  // The continuation itself carries the source's open finding and renders too.
+  const continuation = await writeReviewReport(state.store, state.continuationId, { renderedAt: RENDERED_AT });
+  assert.match(await fsp.readFile(continuation.path, "utf8"), new RegExp(`carried finding\\(s\\): \`F-002\` from \`${state.sourceId}\``));
 });
 
 // ---------------------------------------------------------------------------

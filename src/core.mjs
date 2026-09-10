@@ -402,12 +402,19 @@ const notAdvisory = (review) => (review.advisory === true ? "advisory review" : 
 const LEDGER_TRANSITIONS = {
   REVIEW_PREPARED: { from: [null], to: "WAITING_FOR_REVIEW", opensRound: true, roundBound: true },
   INITIAL_REVIEW_CLEAN: { from: ["WAITING_FOR_REVIEW"], to: "CLEAN", roundBound: true },
+  // Zero findings is recorded as INITIAL_REVIEW_CLEAN, never as a submission.
   FINDINGS_SUBMITTED: {
     from: ["WAITING_FOR_REVIEW"],
     to: "REVIEW_SUBMITTED",
     roundBound: true,
     guard: (review, state, entry) =>
-      Number.isInteger(entry.count) && entry.count > MAX_FINDINGS ? `more than ${MAX_FINDINGS} findings` : null,
+      !Number.isInteger(entry.count)
+        ? null
+        : entry.count < 1
+          ? "fewer than 1 finding"
+          : entry.count > MAX_FINDINGS
+            ? `more than ${MAX_FINDINGS} findings`
+            : null,
   },
   AUTHOR_RESPONDED: { from: ["REVIEW_SUBMITTED"], to: "AUTHOR_RESPONDED", roundBound: true, guard: notAdvisory },
   AUTHOR_ESCALATED: { from: ["REVIEW_SUBMITTED"], to: "HUMAN_REQUIRED", roundBound: true, guard: notAdvisory },
@@ -432,12 +439,21 @@ const LEDGER_TRANSITIONS = {
     guard: (review, state, entry) =>
       notAdvisory(review) ?? (Number.isInteger(entry.new_findings) && entry.new_findings > MAX_FINDINGS ? `more than ${MAX_FINDINGS} new findings` : null),
   },
+  // The writer takes this branch only when the rereview raised at least one
+  // new finding; an unresolved verdict may raise none.
   REREVIEW_CONTINUABLE_FINDINGS: {
     from: ["WAITING_FOR_REREVIEW"],
     to: "CONTINUABLE_FINDINGS",
     roundBound: true,
     guard: (review, state, entry) =>
-      notAdvisory(review) ?? (Number.isInteger(entry.new_findings) && entry.new_findings > MAX_FINDINGS ? `more than ${MAX_FINDINGS} new findings` : null),
+      notAdvisory(review) ??
+      (!Number.isInteger(entry.new_findings)
+        ? null
+        : entry.new_findings < 1
+          ? "fewer than 1 new finding"
+          : entry.new_findings > MAX_FINDINGS
+            ? `more than ${MAX_FINDINGS} new findings`
+            : null),
   },
   REREVIEW_CLEAN: { from: ["WAITING_FOR_REREVIEW"], to: "CLEAN", roundBound: true, guard: notAdvisory },
   LOCAL_GATE_PASSED: { from: ["CLEAN"], to: "LOCAL_GATE_PASSED", guard: notAdvisory },
@@ -551,6 +567,17 @@ function reviewLedgerDefect(review, reviewId) {
   for (const [index, carried] of (review.carried_findings ?? []).entries()) {
     const defect = recordDefect(carried, CARRIED_FINDING_FIELDS, { index, review }, `carried finding ${index + 1}`);
     if (defect != null) return defect;
+  }
+  // The continuation marker is derived from the newest REVIEW_CONTINUED event
+  // -- a source may be re-continued, and the writer tracks the newest -- and
+  // compared with the stored field, so the two cannot name different reviews
+  // or exist without each other.
+  const continuedBy =
+    review.history.findLast((entry) => entry.event === "REVIEW_CONTINUED")?.continued_by_review_id ?? null;
+  if ((review.continued_by_review_id ?? null) !== continuedBy) {
+    return continuedBy == null
+      ? `continued_by_review_id ${JSON.stringify(review.continued_by_review_id)} is recorded, but the history holds no REVIEW_CONTINUED event`
+      : `continued_by_review_id ${JSON.stringify(review.continued_by_review_id ?? null)} is not the ${JSON.stringify(continuedBy)} the history's REVIEW_CONTINUED event names`;
   }
   if ((review.errata ?? []).length > MAX_ERRATA) {
     return `errata holds ${review.errata.length} entries, more than the writer's ${MAX_ERRATA}`;
