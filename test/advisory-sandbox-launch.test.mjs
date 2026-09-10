@@ -126,7 +126,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
 // records derived from the probe's own argument, and plays the reviewer by
 // moving the staged ledger with the server's own submit — or, when asked,
 // by also leaving the kind of trace the copy-back must refuse.
-async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "" } = {}) {
+async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "", volumeRmFail = false } = {}) {
   const bin = path.join(f.root, "bin");
   await fsp.mkdir(bin, { recursive: true });
   const runner = path.join(bin, "fake-run.mjs");
@@ -136,6 +136,7 @@ async function fakeDocker(f, { tamper = "", directCode = "", big = false, server
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
+if (args.includes("sh")) process.exit(0);
 const bind = (dst) => args.map((a) => a.match(new RegExp("^type=bind,src=(.*),dst=" + dst + "(,readonly)?$"))).find(Boolean)?.[1];
 if (!args.includes("codex")) {
   const spec = JSON.parse(args[args.length - 1]);
@@ -237,7 +238,8 @@ set -e
 case "$1 $2" in
   "version --format") echo "28.3.2 linux/arm64" ;;
   "image inspect") exit 0 ;;
-  "network create"|"network connect"|"network rm"|"volume rm"|"rm -f") exit 0 ;;
+  "volume rm") [ -n "\${FAKE_VOLUME_RM_FAIL}" ] && { echo "Error response from daemon: volume is in use" >&2; exit 1; }; exit 0 ;;
+  "network create"|"network connect"|"network rm"|"rm -f") exit 0 ;;
   "logs "*) # the readiness poll (--tail 20000) sees a short log; the final collection (--tail 200000) is where the variants bite
     case "$*" in *"--tail 200000"*) collecting=1 ;; *) collecting= ;; esac
     if [ -n "$collecting" ] && [ -n "\${FAKE_LOGS_FAIL}" ]; then echo "Error response from daemon: log driver failed" >&2; exit 1; fi
@@ -268,6 +270,7 @@ esac
     FAKE_LOGS_BIG: logs === "big" ? "1" : "",
     FAKE_LOGS_FAIL: logs === "fail" ? "1" : "",
     FAKE_CALLS: path.join(bin, "calls.log"),
+    FAKE_VOLUME_RM_FAIL: volumeRmFail ? "1" : "",
   };
 }
 
@@ -743,6 +746,34 @@ test("a checkout whose Git configuration carries a credential is refused before 
   spawnSync("git", ["-C", s2.checkout, "config", "submodule.public.active", "true"]);
   result = launch(s2, ["--review-id", s2.reviewId, "--dry-run"]);
   assert.equal(result.status, 0, result.stderr);
+  // extensions.* is not accepted wholesale either: the two keys git writes,
+  // with the values git writes; anything else refused by name or value. An
+  // unknown extension is one git itself (2.54 here) refuses to open the
+  // repository with, so that refusal arrives as the configuration read
+  // failing; the value stays out of the message either way.
+  const e1 = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", e1.checkout, "config", "core.repositoryformatversion", "1"]);
+  spawnSync("git", ["-C", e1.checkout, "config", "extensions.reviewToken", "ghp_ext3nsion"]);
+  result = launch(e1, ["--review-id", e1.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /holds more than a fresh clone writes \(extensions\.reviewtoken\)|cannot read the author checkout's Git configuration: .*unknown repository extension/s);
+  assert.doesNotMatch(result.stderr, /ghp_ext3nsion/);
+  const e2 = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", e2.checkout, "config", "core.repositoryformatversion", "1"]);
+  spawnSync("git", ["-C", e2.checkout, "config", "extensions.objectFormat", "sha1"]);
+  result = launch(e2, ["--review-id", e2.reviewId, "--dry-run"]);
+  assert.equal(result.status, 0, result.stderr);
+  // A value git itself does not accept is refused by git before the launcher
+  // sees it, and git's error quotes the value; the launcher drops the quoted
+  // text. The launcher's own value check is what remains for a git that
+  // accepts more than these two values.
+  const e3 = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", e3.checkout, "config", "core.repositoryformatversion", "1"]);
+  spawnSync("git", ["-C", e3.checkout, "config", "extensions.objectFormat", "ghp_v4lue"]);
+  result = launch(e3, ["--review-id", e3.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /holds more than a fresh clone writes \(extensions\.objectformat \(unexpected value\)\)|cannot read the author checkout's Git configuration: .*'<redacted>'/s);
+  assert.doesNotMatch(result.stderr, /ghp_v4lue/);
   // core.* is not accepted wholesale: the keys that carry a command or a
   // credential are refused by name.
   for (const [key, value] of [["core.askPass", "/tmp/askpass.sh"], ["core.gitProxy", "/tmp/proxy.sh"], ["core.sshCommand", "ssh -i .git/id"]]) {
@@ -790,8 +821,31 @@ test("a checkout whose Git configuration carries a credential is refused before 
   const z = await fixture(t, { realReview: true });
   await fsp.mkdir(path.join(z.checkout, ".git", "hooks"), { recursive: true });
   await fsp.mkdir(path.join(z.checkout, ".git", "info"), { recursive: true });
+  // Linux git 2.43's init --template= leaves an empty branches/ too.
+  await fsp.mkdir(path.join(z.checkout, ".git", "branches"), { recursive: true });
   result = launch(z, ["--review-id", z.reviewId, "--dry-run"]);
   assert.equal(result.status, 0, result.stderr);
+  // objects/, refs/, and logs/ are held to their structure: a file hidden
+  // among the objects, a stray ref root, or a stray log is refused by name,
+  // ten shown and the rest counted.
+  const d = await fixture(t, { realReview: true });
+  await fsp.writeFile(path.join(d.checkout, ".git", "objects", "helper"), "#!/bin/sh\n");
+  await fsp.mkdir(path.join(d.checkout, ".git", "objects", "pack"), { recursive: true });
+  await fsp.writeFile(path.join(d.checkout, ".git", "objects", "pack", "evil.sh"), "x");
+  await fsp.mkdir(path.join(d.checkout, ".git", "objects", "ab"), { recursive: true });
+  await fsp.writeFile(path.join(d.checkout, ".git", "objects", "ab", "notanobject"), "x");
+  await fsp.writeFile(path.join(d.checkout, ".git", "refs", "x"), "x");
+  await fsp.writeFile(path.join(d.checkout, ".git", "logs", "x"), "x");
+  await fsp.mkdir(path.join(d.checkout, ".git", "branches"), { recursive: true });
+  await fsp.writeFile(path.join(d.checkout, ".git", "branches", "b"), "x");
+  result = launch(d, ["--review-id", d.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /\.git holds more than a fresh clone writes \(\.git\/branches\/b, \.git\/logs\/x, \.git\/objects\/ab\/notanobject, \.git\/objects\/helper, \.git\/objects\/pack\/evil\.sh, \.git\/refs\/x\)/);
+  const many = await fixture(t, { realReview: true });
+  for (let i = 0; i < 13; i += 1) await fsp.writeFile(path.join(many.checkout, ".git", `stray-${String(i).padStart(2, "0")}`), "x");
+  result = launch(many, ["--review-id", many.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /\(\.git\/stray-00, .*\.git\/stray-09, and 3 more\)/);
   // A query or fragment in a remote URL is refused, whatever it carries.
   const q = await fixture(t, { realReview: true });
   spawnSync("git", ["-C", q.checkout, "remote", "set-url", "origin", "https://example.com/repo.git?access_token=t0k3n"]);
@@ -1019,4 +1073,11 @@ test("a huge or failing docker logs leaves the report, the criteria, and every c
     assert.match(calls, pattern);
   }
   assert.equal((await loadReview(g.store, g.reviewId)).status, "REVIEW_SUBMITTED");
+  // A cleanup step that exits nonzero is a failure too, named with its
+  // stderr, and the run's outcome is still the criteria's.
+  const h = await fixture(t, { realReview: true });
+  result = launch(h, ["--review-id", h.reviewId], await fakeDocker(h, { volumeRmFail: true }));
+  assert.equal(result.status, 0, result.stdout.slice(-2000));
+  assert.match(result.stdout, /cleanup steps that failed: remove volume: Error response from daemon: volume is in use/);
+  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: PASS/);
 });

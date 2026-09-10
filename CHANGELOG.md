@@ -45,12 +45,15 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `://` or a `user:pass@` (`url.<url>.insteadOf`, `remote.<url>.url`) is
   refused before the allowlist is consulted and printed with its userinfo
   redacted; the `.git` directory is held to what a fresh `--template=` clone writes
-  as well (no file under `hooks` or `info`, no other top-level entry), since
+  as well (no file under `hooks`, `info`, or `branches`; `objects`, `refs`,
+  and `logs` holding only objects, packs, refs, and their logs; no other
+  top-level entry), since
   `git clone` copies the operator's `init.templateDir` into it, and the
   packaged skill's panel clone now uses `--template=`; a remote or submodule
   URL carrying a query or a fragment is refused, since a token can ride in
   either; the sidecar's log is collected bounded and every cleanup step runs
-  on its own, a failure recorded in the report rather than skipping the rest;
+  on its own, a spawn error or a nonzero exit recorded in the report rather
+  than skipping the rest;
   and the codex `auth.json` path is
   held to the same host-prefix check as the other mounts. The
   isolated `CODEX_HOME` is a Docker volume and the working directory a tmpfs
@@ -79,7 +82,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   base image), judged against the same image run without the checkout mount
   so that what the image carries is never read as the host's; a checkout
   whose local Git configuration holds more than a fresh clone writes (only
-  the `core.*` keys a fresh clone writes, a remote's `url` and `fetch`, a branch's `remote`, `merge`, and
+  the `core.*` keys a fresh clone writes, `extensions.objectformat` and
+  `extensions.refstorage` with the values git writes, a remote's `url` and `fetch`, a branch's `remote`, `merge`, and
   `rebase`, `extensions.*`, and a submodule's `url` and `active` are accepted,
   includes followed, any remote or submodule URL carrying a credential refused too; a
   denylist of `.extraheader`, `credential.*`, `http.cookieFile`, and their

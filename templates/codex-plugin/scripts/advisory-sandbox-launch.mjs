@@ -393,7 +393,13 @@ const FRESH_CLONE_CONFIG_KEYS = [
   { pattern: /^remote\..+\.url$/, url: true },
   { pattern: /^remote\..+\.fetch$/ },
   { pattern: /^branch\..+\.(remote|merge|rebase)$/ },
-  { pattern: /^extensions\.[^.]+$/ },
+  // extensions.* is not accepted wholesale (a value can be anything, a
+  // token included). git writes extensions.objectformat only for
+  // --object-format=sha256 and extensions.refstorage only for
+  // --ref-format=reftable (git ≥ 2.45); both are enumerated with the values
+  // git itself writes.
+  { pattern: /^extensions\.objectformat$/, values: ["sha1", "sha256"] },
+  { pattern: /^extensions\.refstorage$/, values: ["files", "reftable"] },
   { pattern: /^submodule\..+\.url$/, url: true },
   { pattern: /^submodule\..+\.active$/ },
 ];
@@ -413,8 +419,10 @@ function gitConfigViolations(repository) {
     // itself failing, and the check must not pass by not running. The
     // worktree scope exists only with extensions.worktreeConfig.
     if (result.error || (result.status !== 0 && scope === "--local")) {
+      // git quotes the offending value in some of its errors (`invalid value
+      // for 'extensions.objectformat': '…'`); the quoted text is dropped.
       fail(
-        `cannot read the author checkout's Git configuration: ${result.error?.message ?? result.stderr.trim()}`,
+        `cannot read the author checkout's Git configuration: ${result.error?.message ?? result.stderr.trim().replace(/'[^']*'/g, "'<redacted>'")}`,
       );
     }
     if (result.status !== 0) continue;
@@ -443,31 +451,43 @@ function gitConfigViolations(repository) {
         // can ride in either (`?access_token=…`); refused without reading
         // further.
         violations.push(`${key} (query or fragment in the URL)`);
+      } else if (allowed.values && !allowed.values.includes(value)) {
+        violations.push(`${key} (unexpected value)`);
       }
     }
   }
   return [...new Set(violations)];
 }
 
-// The .git directory of a fresh clone, by entry. `git clone` copies the
-// operator's init.templateDir into a new .git — hooks, helpers, anything —
-// and the configuration check cannot see those, so the skill clones with
-// `--template=` and the launcher accepts only the layout such a clone plus
-// the skill's fetch and checkout write; the default template gets no
-// allowance, since a helper can hide behind a *.sample name. Observed on
-// macOS (git 2.54, Apple Git-157): a `--template=` clone + fetch + detached
-// checkout leaves FETCH_HEAD, HEAD, config, index, logs, objects,
-// packed-refs, refs and no hooks or info directory. ORIG_HEAD, shallow, and
+// The .git directory of a fresh clone, by entry and by structure. `git clone`
+// copies the operator's init.templateDir into a new .git — hooks, helpers,
+// anything — and the configuration check cannot see those, so the skill
+// clones with `--template=` and the launcher accepts only the layout such a
+// clone plus the skill's fetch and checkout write; the default template gets
+// no allowance, since a helper can hide behind a *.sample name, and a file
+// can equally hide under objects/, refs/, or logs/, so those are held to
+// their structure too. Observed on macOS (git 2.54, Apple Git-157) after a
+// `--template=` clone of a GitHub repository, the skill's fetch into
+// refs/review-bridge/<n>/…, and a detached checkout: top level FETCH_HEAD,
+// HEAD, config, index, logs, objects, packed-refs, refs; objects/ holding
+// pack/ (pack-<hex>.idx/.pack/.rev) and info/commit-graphs/
+// (commit-graph-chain, graph-<hex>.graph), loose objects in <2 hex>/<38 or 62
+// hex> once anything is written; refs/{heads,tags,remotes,review-bridge}/…;
+// logs/HEAD and logs/refs/{heads,remotes}/…. ORIG_HEAD, shallow, and
 // COMMIT_EDITMSG are what other ordinary git operations on such a clone
-// write; hooks and info may exist only as empty directories. Anything else
-// at the top level, and any file under hooks or info, is refused by name.
-// The working tree itself is the repository's own content and is not
+// write; objects/info/packs and objects/info/commit-graph are what
+// repacking writes; pack .keep/.promisor/.mtimes are pack sidecars git
+// itself makes. hooks, info, and branches may exist only as empty
+// directories (Linux git 2.43's `init --template=` creates an empty
+// branches/). Anything else, anywhere in .git, is refused by name. The
+// working tree itself is the repository's own content and is not
 // inspected.
 const FRESH_CLONE_GIT_ENTRIES = new Set([
   "HEAD",
   "config",
   "hooks",
   "info",
+  "branches",
   "objects",
   "refs",
   "logs",
@@ -478,26 +498,82 @@ const FRESH_CLONE_GIT_ENTRIES = new Set([
   "shallow",
   "COMMIT_EDITMSG",
 ]);
+const EMPTY_ONLY_GIT_DIRECTORIES = new Set(["hooks", "info", "branches"]);
+const REF_ROOTS = new Set(["heads", "tags", "remotes", "review-bridge"]);
 
 async function gitLayoutViolations(repository) {
   const gitDir = path.join(repository, ".git");
   const violations = [];
-  const list = async (directory) => {
+  const add = (relative) => violations.push(`.git/${relative}`);
+  const entries = async (directory) => {
     try {
-      return await fsp.readdir(directory);
+      return await fsp.readdir(directory, { withFileTypes: true });
     } catch {
       return [];
     }
   };
-  for (const entry of await list(gitDir)) {
-    if (!FRESH_CLONE_GIT_ENTRIES.has(entry)) violations.push(`.git/${entry}`);
-  }
-  for (const directory of ["hooks", "info"]) {
-    for (const entry of await list(path.join(gitDir, directory))) {
-      violations.push(`.git/${directory}/${entry}`);
+  // A ref subtree: directories and plain files named as refs; git itself
+  // never allows ':' in a ref name, so one there is not a ref.
+  const refTree = async (directory, relative) => {
+    for (const entry of await entries(directory)) {
+      const here = `${relative}/${entry.name}`;
+      if (entry.name.includes(":")) add(here);
+      else if (entry.isDirectory()) await refTree(path.join(directory, entry.name), here);
+      else if (!entry.isFile()) add(here);
+    }
+  };
+  for (const entry of await entries(gitDir)) {
+    const name = entry.name;
+    if (!FRESH_CLONE_GIT_ENTRIES.has(name)) {
+      add(name);
+    } else if (EMPTY_ONLY_GIT_DIRECTORIES.has(name)) {
+      for (const child of await entries(path.join(gitDir, name))) add(`${name}/${child.name}`);
     }
   }
-  return violations.sort();
+  const objects = path.join(gitDir, "objects");
+  for (const entry of await entries(objects)) {
+    const name = entry.name;
+    if (/^[0-9a-f]{2}$/.test(name) && entry.isDirectory()) {
+      for (const object of await entries(path.join(objects, name))) {
+        if (!(object.isFile() && /^(?:[0-9a-f]{38}|[0-9a-f]{62})$/.test(object.name))) add(`objects/${name}/${object.name}`);
+      }
+    } else if (name === "pack" && entry.isDirectory()) {
+      for (const file of await entries(path.join(objects, "pack"))) {
+        if (!(file.isFile() && /^pack-[0-9a-f]+\.(?:pack|idx|rev|keep|promisor|mtimes)$/.test(file.name))) add(`objects/pack/${file.name}`);
+      }
+    } else if (name === "info" && entry.isDirectory()) {
+      for (const file of await entries(path.join(objects, "info"))) {
+        if ((file.name === "packs" || file.name === "commit-graph") && file.isFile()) continue;
+        if (file.name === "commit-graphs" && file.isDirectory()) {
+          for (const graph of await entries(path.join(objects, "info", "commit-graphs"))) {
+            if (!(graph.isFile() && (graph.name === "commit-graph-chain" || /^graph-[0-9a-f]+\.graph$/.test(graph.name)))) {
+              add(`objects/info/commit-graphs/${graph.name}`);
+            }
+          }
+          continue;
+        }
+        add(`objects/info/${file.name}`);
+      }
+    } else {
+      add(`objects/${name}`);
+    }
+  }
+  for (const entry of await entries(path.join(gitDir, "refs"))) {
+    if (REF_ROOTS.has(entry.name) && entry.isDirectory()) await refTree(path.join(gitDir, "refs", entry.name), `refs/${entry.name}`);
+    else add(`refs/${entry.name}`);
+  }
+  for (const entry of await entries(path.join(gitDir, "logs"))) {
+    if (entry.name === "HEAD" && entry.isFile()) continue;
+    if (entry.name === "refs" && entry.isDirectory()) {
+      for (const sub of await entries(path.join(gitDir, "logs", "refs"))) {
+        if (REF_ROOTS.has(sub.name) && sub.isDirectory()) await refTree(path.join(gitDir, "logs", "refs", sub.name), `logs/refs/${sub.name}`);
+        else add(`logs/refs/${sub.name}`);
+      }
+      continue;
+    }
+    add(`logs/${entry.name}`);
+  }
+  return [...new Set(violations)].sort();
 }
 
 function run(command, args, options = {}) {
@@ -627,8 +703,10 @@ async function resolveInputs(options) {
   }
   const layoutViolations = await gitLayoutViolations(repository);
   if (layoutViolations.length > 0) {
+    const shown = layoutViolations.slice(0, 10).join(", ");
+    const more = layoutViolations.length > 10 ? `, and ${layoutViolations.length - 10} more` : "";
     fail(
-      `the author checkout's .git holds more than a fresh clone writes (${layoutViolations.join(", ")}); the checkout is mounted whole, so use a fresh clone made with --template= of the pull request's repository`,
+      `the author checkout's .git holds more than a fresh clone writes (${shown}${more}); the checkout is mounted whole, so use a fresh clone made with --template= of the pull request's repository`,
     );
   }
   // Again on the real paths, so a symlink such as /tmp → /private/tmp cannot
@@ -1425,17 +1503,24 @@ async function main() {
   let proxyLogNote = null;
   const cleanupFailures = [];
   let cleaned = false;
+  // A step fails on a spawn error or a nonzero exit alike; stderr's first
+  // 200 characters go into the report.
   const step = (label, fn) => {
     try {
-      fn();
+      const result = fn();
+      if (result?.error) throw result.error;
+      if (result && result.status !== 0) {
+        throw new Error((result.stderr || `exited ${result.status}`).toString().trim().slice(0, 200));
+      }
     } catch (error) {
       cleanupFailures.push(`${label}: ${error.message}`);
     }
   };
+  const quiet = { encoding: "utf8", stdio: ["ignore", "ignore", "pipe"] };
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
-    step("remove codex container", () => spawnSync("docker", ["rm", "-f", codexName], { stdio: "ignore" }));
+    step("remove codex container", () => spawnSync("docker", ["rm", "-f", codexName], quiet));
     step("collect proxy log", () => {
       const result = spawnSync("docker", ["logs", "--tail", String(PROXY_LOG_LINES), proxyName], {
         encoding: "utf8",
@@ -1448,12 +1533,12 @@ async function main() {
         proxyLogNote = `proxy log truncated to last ${PROXY_LOG_LINES} lines`;
       }
     });
-    step("remove proxy container", () => spawnSync("docker", ["rm", "-f", proxyName], { stdio: "ignore" }));
-    step("remove network", () => spawnSync("docker", ["network", "rm", network], { stdio: "ignore" }));
+    step("remove proxy container", () => spawnSync("docker", ["rm", "-f", proxyName], quiet));
+    step("remove network", () => spawnSync("docker", ["network", "rm", network], quiet));
     // The rollouts are the guardian evidence; copy them out before the
     // volume goes.
-    step("export sessions", () => spawnSync("docker", sessionsExport, { stdio: "ignore" }));
-    step("remove volume", () => spawnSync("docker", ["volume", "rm", homeVolume], { stdio: "ignore" }));
+    step("export sessions", () => spawnSync("docker", sessionsExport, quiet));
+    step("remove volume", () => spawnSync("docker", ["volume", "rm", homeVolume], quiet));
   };
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.on(signal, () => {
