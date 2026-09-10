@@ -223,6 +223,15 @@ const PROBES = {
     ctx.revision = result.revision;
   },
   acknowledge_change_size_warning: async (ctx, summary, fields, m) => {
+    // A release stated as owed only if the split is given up, or only on a
+    // gate's refusal, is not owed on the walked happy path; a turn that
+    // supplies no decision is the driver reading that condition as false.
+    const conditional = /required only if/.test(
+      fields.find(([field]) => field === "decision")?.[1] ?? "",
+    );
+    if (conditional && m.decision == null) {
+      return;
+    }
     assert.ok(m.decision, "the turn supplies no split decision");
     const result = await acknowledgeChangeSizeWarning(
       ctx.store,
@@ -889,12 +898,33 @@ test("a split acknowledged among the findings still walks out", async (t) => {
   assert.equal(after.next_action, "PREPARE_REREVIEW");
 });
 
+// The gate's second way out, declared: a split that will not be cut is
+// released by a continue re-acknowledgment, after which the phase declares
+// what it declares for every other run and the fix alone carries the round.
+test("a split given up among the findings walks out on continue", async (t) => {
+  const ctx = await reachCrossedFindings(t, "walk-split-four");
+  await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "continue" },
+  });
+  const after = await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    materials: { content: SIX_LINE_FIX },
+  });
+  assert.equal(after.next_action, "PREPARE_REREVIEW");
+});
+
 // #82 round nine's arm: a continuation round crosses a larger warning, the
 // continuation head recording moves the phase on its own, and the split is
-// acknowledged where the next round is prepared. The bind measures the
-// candidate, so the declaration has to name the cut before it.
-test("a split acknowledged where the round is prepared still walks out", async (t) => {
-  const ctx = await reachCrossedFindings(t, "walk-split-three");
+// acknowledged where the next round is prepared.
+async function reachCrossedPrepare(t, label) {
+  const ctx = await reachCrossedFindings(t, label);
   await runTurn(ctx, {
     expect: "ADDRESS_LOCAL_FINDINGS",
     use: [
@@ -942,6 +972,13 @@ test("a split acknowledged where the round is prepared still walks out", async (
     materials: { content: `${SIX_LINE_FIX}export const g = 8;\n` },
   });
   assert.equal(prepare.next_action, "PREPARE_LOCAL_REVIEW");
+  return ctx;
+}
+
+// The bind measures the candidate, so the declaration has to name the cut
+// before it.
+test("a split acknowledged where the round is prepared still walks out", async (t) => {
+  const ctx = await reachCrossedPrepare(t, "walk-split-three");
   await runTurn(ctx, {
     expect: "PREPARE_LOCAL_REVIEW",
     use: ["acknowledge_change_size_warning"],
@@ -953,6 +990,24 @@ test("a split acknowledged where the round is prepared still walks out", async (
     expect: "PREPARE_LOCAL_REVIEW",
     use: ["record_workflow_head"],
     materials: { cutContent: ONE_LINE_CUT },
+  });
+  const bound = await runTurn(ctx, { expect: "PREPARE_LOCAL_REVIEW" });
+  assert.equal(bound.next_action, "PLAN_CODEX_TASK_DISPATCH");
+});
+
+// The same arm released without its cut: the continue re-acknowledgment is
+// the declared exit, and the plain preparation binds the change as it stands.
+test("a split given up where the round is prepared walks out on continue", async (t) => {
+  const ctx = await reachCrossedPrepare(t, "walk-split-five");
+  await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "continue" },
   });
   const bound = await runTurn(ctx, { expect: "PREPARE_LOCAL_REVIEW" });
   assert.equal(bound.next_action, "PLAN_CODEX_TASK_DISPATCH");

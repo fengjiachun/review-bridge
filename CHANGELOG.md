@@ -30,6 +30,20 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   unchanged. Measured on 2026-09-10 with a full unattended round under the
   final launch line.
 
+### Fixed
+
+- Declare the second way out of an unexecuted change-size split, issue #91
+  (#119). `WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED` names two remedies, the
+  cut and a `continue` re-acknowledgment, and `required_inputs` named only
+  the cut. Both split arms now declare `acknowledge_change_size_warning`
+  ahead of the head recording, owed only if the split is given up without
+  its cut: the gate accepts the re-acknowledgment while the split is pending
+  and refuses it once a recorded cut has shrunk the change, which the ledger
+  cannot see, so the source text carries the condition rather than the
+  summary recomputing a diff. The recorded-cut arms declare it beside the
+  further cut, conditional on the gate refusing the cut already in. The
+  reachability walk takes the continue exit on both arms.
+
 ## 0.12.0 - 2026-09-10
 
 ### Changed
