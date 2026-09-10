@@ -488,6 +488,12 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     ],
     // Codex round twenty-two on #125: enumerating what can hide in a .git
     // does not converge; the container gets a clone the launcher makes.
+    // Codex round twenty-three on #125: the clone was pinned to the panel
+    // checkout's current HEAD, not the ledger's recorded snapshot head.
+    [
+      "the clone is detached at the review's recorded snapshot head, which the panel checkout must still be at",
+      /detached at the review's recorded snapshot head — which the panel checkout must still be at, or the launch is refused before anything starts/,
+    ],
     [
       "the mount is a fresh clone the launcher makes; the operator's .git never enters",
       /not that `\.git` but a fresh clone the launcher makes itself from the panel checkout .* the operator's `\.git` never enters the container/,
