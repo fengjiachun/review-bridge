@@ -17,6 +17,7 @@ import {
   authorizeRemotePublication,
   canonicalDigest,
   derivePublicationStatus,
+  finalizePublicationGate,
   getPublication,
   recordCodexReviewRequest,
   recordGithubSnapshot,
@@ -30,6 +31,7 @@ import {
   loadReportLedgers,
   renderReviewReport,
   reportRevision,
+  summaryDigest,
   writeReviewReport,
 } from "../src/report.mjs";
 import { atomicWriteCanonicalJson } from "../src/storage.mjs";
@@ -336,9 +338,14 @@ test("the footer names the review, both revisions, the render time, the ledger p
   assert.match(markdown, /## Footer\n\n- Review: `rb-2026-09-01T000000-000Z-0badf00d`\n- Review ledger state_version: 6\n- Publication ledger revision: none\n- Report revision: `6`\n- Rendered at: 2026-09-10T12:00:00\.000Z\n- Ledger: `\/store\/reviews\/x\/review\.json`\n/);
   assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE}\n`));
   assert.match(PROJECTION_NOTICE, /projection of the ledger, not evidence/);
-  assert.match(PROJECTION_NOTICE, /These ledgers -- the review ledger, and the publication ledger and the gate that authorized it when present -- remain the sole source of truth/);
+  assert.match(PROJECTION_NOTICE, /rendered from the review ledger and, when present, the publication ledger and its gate listed above, and from the publication summary the server computed/);
   assert.match(PROJECTION_NOTICE_REMOTE_ONLY, /projection of the ledger, not evidence/);
-  assert.match(PROJECTION_NOTICE_REMOTE_ONLY, /These ledgers -- the publication ledger and its bound authorization -- remain the sole source of truth/);
+  assert.match(PROJECTION_NOTICE_REMOTE_ONLY, /rendered from the publication ledger and its bound authorization listed above, and from the publication summary the server computed/);
+  for (const notice of [PROJECTION_NOTICE, PROJECTION_NOTICE_REMOTE_ONLY]) {
+    assert.doesNotMatch(notice, /sole source/);
+  }
+  // A review-only report has no publication summary line at all.
+  assert.doesNotMatch(markdown, /Publication summary/);
   // Without a directory the path is store-relative rather than invented.
   assert.match(render(cleanInTwoRounds()), /- Ledger: `reviews\/rb-2026-09-01T000000-000Z-0badf00d\/review\.json`/);
 });
@@ -501,11 +508,15 @@ test("a local-gate publication at MERGE_READY renders the pull request, Codex re
       `- Stored status \`MERGE_READY\` at revision ${ready.revision}; the publication summary derives \`MERGE_READY\`, next action \`${publicationSummary.next_action}\`, gate \`${publicationSummary.gate_state}\`\\.\\n- MERGE_READY rests on the observation recorded at revision ${ready.revision}, observed [^,]+, recorded [^,]+, canonical sha256 \`${canonicalDigest(publication.latest_observation)}\`\\.`,
     ),
   );
-  assert.match(markdown, new RegExp(`- Report revision: \`${review.state_version}-p${ready.revision}\``));
+  const digest = summaryDigest(publicationSummary);
+  assert.match(digest, /^[0-9a-f]{12}$/);
+  assert.match(markdown, new RegExp(`- Report revision: \`${review.state_version}-p${ready.revision}-s${digest}\``));
   // The footer lists every file the projection was made from, the gate that
-  // bound the publication included.
+  // bound the publication included, and names the summary by digest rather
+  // than enumerating what the server read to compute it.
   const directory = reviewDirectory(state);
-  assert.match(markdown, new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/publication\\.json\`, \`${directory}/gate\\.json\`\\n`));
+  assert.match(markdown, new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/publication\\.json\`, \`${directory}/gate\\.json\`\\n- Publication summary: computed by the server over its own inputs \\(gate file, workflow binding, resolution sources\\); digest s${digest}\\.\\n`));
+  assert.equal(reportRevision(review, publication, publicationSummary), `${review.state_version}-p${ready.revision}-s${digest}`);
   assert.equal(reportRevision(review, publication), `${review.state_version}-p${ready.revision}`);
 });
 
@@ -527,7 +538,7 @@ test("a remote-only publication renders from its publication and bound authoriza
   assert.match(markdown, new RegExp(`- Authorization: \`REMOTE_ONLY\`, acknowledgement \`LOCAL_REVIEW_SKIPPED\`, operator maintainer, at ${authorization.authorized_at}\\n- Authorized repository: \`[^\`]*/repo\`\\n- Codex trigger policy: \`EXPLICIT_ONLY\`\\n\\nAuthorization rationale:\\n\\n\`\`\`text\\nUse the GitHub Codex, CI, and review-thread gates only\\.\\n\`\`\``));
   assert.equal(markdown.match(/Use the GitHub Codex, CI, and review-thread gates only\./g).length, 1);
   assert.match(markdown, new RegExp(`- Stored status \`MERGE_READY\` at revision ${ready.revision}; the publication summary derives \`MERGE_READY\`, next action \`${publicationSummary.next_action}\`, gate \`ABSENT\`\\.`));
-  assert.match(markdown, new RegExp(`- Review ledger state_version: n/a \\(remote-only: no local review ledger\\)\\n- Publication ledger revision: ${ready.revision}\\n- Report revision: \`p${ready.revision}\`\\n- Rendered at: [^\\n]+\\n- Ledger: \`/store/reviews/x/publication\\.json\`, \`/store/reviews/x/remote-authorization\\.json\``));
+  assert.match(markdown, new RegExp(`- Review ledger state_version: n/a \\(remote-only: no local review ledger\\)\\n- Publication ledger revision: ${ready.revision}\\n- Report revision: \`p${ready.revision}-s${summaryDigest(publicationSummary)}\`\\n- Rendered at: [^\\n]+\\n- Ledger: \`/store/reviews/x/publication\\.json\`, \`/store/reviews/x/remote-authorization\\.json\`\\n- Publication summary: computed by the server over its own inputs \\(gate file, workflow binding, resolution sources\\); digest s${summaryDigest(publicationSummary)}\\.`));
   // The remote-only footer names the ledgers that were actually rendered.
   assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE_REMOTE_ONLY}\n`));
   assert.ok(!markdown.includes(PROJECTION_NOTICE));
@@ -642,6 +653,7 @@ test("a thread's outcome follows the frontier replay and the gate's invalidation
   // A hand-mutated ledger has no summary, and the report derives nothing on
   // its own.
   assert.match(markdown, /- Stored status `MERGE_READY` at revision 3; not derived here: no publication summary was supplied\.\n- No MERGE_READY derivation is rendered for this status\./);
+  assert.match(markdown, /- Publication summary: not supplied to this render\./);
 
   // The record was invalidated and unresolved for repair, and the observation
   // now shows the thread unresolved: a legitimate state, reported as such.
@@ -812,6 +824,16 @@ test("finding statuses must equal what their records derive, in both directions"
   assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
 });
 
+// Only the printed summary fields enter the digest, so a summary field the
+// report never shows cannot change the report's identity.
+test("the summary digest covers exactly the fields the report prints", () => {
+  const base = { status: "MERGE_READY", blocking_reason: null, next_action: "FINALIZE_PUBLICATION_GATE", gate_state: "ABSENT", revision: 3, gate_expires_in_seconds: null, required_inputs: {} };
+  assert.equal(summaryDigest(base), summaryDigest({ ...base, revision: 9, gate_expires_in_seconds: 120, required_inputs: { x: 1 }, latest_observed_at: "later" }));
+  for (const change of [{ status: "CHANGES_REQUIRED" }, { blocking_reason: "EVIDENCE_STALE" }, { next_action: "VERIFY_PUBLICATION_GATE" }, { gate_state: "PRESENT" }]) {
+    assert.notEqual(summaryDigest(base), summaryDigest({ ...base, ...change }), JSON.stringify(change));
+  }
+});
+
 // The ledger and its summary are read under separate locks. A snapshot
 // recorded between the two reads would file a report under revision N with
 // revision N+1's verdict; the loader compares the two and fails closed.
@@ -893,14 +915,37 @@ test("the store writer names the file by the ledger revision, returns a receipt,
   const withPublication = await writeReviewReport(state.store, state.reviewId, {
     renderedAt: RENDERED_AT,
   });
-  assert.equal(withPublication.path, path.join(directory, `report-r${review.state_version}-p${ready.revision}.md`));
+  assert.match(withPublication.summary_digest, /^[0-9a-f]{12}$/);
+  assert.equal(withPublication.path, path.join(directory, `report-r${review.state_version}-p${ready.revision}-s${withPublication.summary_digest}.md`));
   assert.equal(withPublication.reused, false);
   assert.equal(withPublication.publication_revision, ready.revision);
   const withPublicationText = await fsp.readFile(withPublication.path, "utf8");
   assert.match(withPublicationText, /- Pull request: owner\/repo#7/);
+  assert.match(withPublicationText, /gate `ABSENT`/);
   assert.match(withPublicationText, new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/publication\\.json\`, \`${directory}/gate\\.json\`\\n`));
   // The ledgers themselves are untouched by rendering.
   assert.deepEqual(await getPublication(state.store, state.reviewId), ready);
+  // Unchanged, the same three identities reuse the file.
+  const again = await writeReviewReport(state.store, state.reviewId, { renderedAt: "2026-09-12T00:00:00.000Z" });
+  assert.equal(again.reused, true);
+  assert.equal(again.path, withPublication.path);
+
+  // Finalizing the gate moves no ledger revision, only the summary: the
+  // report's identity follows the printed summary, so the next render is a
+  // new file whose gate section says so, not a reuse of the ABSENT one.
+  await finalizePublicationGate(state.store, state.reviewId, { expectedRevision: ready.revision });
+  const afterGate = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
+  assert.equal(afterGate.reused, false);
+  assert.equal(afterGate.publication_revision, ready.revision);
+  assert.notEqual(afterGate.summary_digest, withPublication.summary_digest);
+  assert.notEqual(afterGate.path, withPublication.path);
+  assert.equal(afterGate.path, path.join(directory, `report-r${review.state_version}-p${ready.revision}-s${afterGate.summary_digest}.md`));
+  const afterGateText = await fsp.readFile(afterGate.path, "utf8");
+  assert.match(afterGateText, /gate `PRESENT`/);
+  assert.match(afterGateText, /next action `VERIFY_PUBLICATION_GATE`/);
+  assert.match(afterGateText, new RegExp(`digest s${afterGate.summary_digest}\\.`));
+  // Both reports stay beside the ledger; the earlier one is not rewritten.
+  assert.equal(await fsp.readFile(withPublication.path, "utf8"), withPublicationText);
 });
 
 test("a remote-only publication is written as report-p<revision>.md", async (t) => {
@@ -908,9 +953,9 @@ test("a remote-only publication is written as report-p<revision>.md", async (t) 
   const ready = await reachReady(state);
   const directory = reviewDirectory(state);
   const written = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
-  assert.equal(written.path, path.join(directory, `report-p${ready.revision}.md`));
+  assert.equal(written.path, path.join(directory, `report-p${ready.revision}-s${written.summary_digest}.md`));
   assert.equal(written.reused, false);
-  assert.equal(written.revision, `p${ready.revision}`);
+  assert.equal(written.revision, `p${ready.revision}-s${written.summary_digest}`);
   assert.equal(written.review_state_version, null);
   assert.equal(written.publication_revision, ready.revision);
   const text = await fsp.readFile(written.path, "utf8");

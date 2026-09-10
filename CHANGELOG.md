@@ -53,8 +53,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   run it contains, so no finding title or rationale can open a heading,
   table row, or fence of its own. The
   author tool `render_review_report` writes
-  `reviews/<review_id>/report-r<revision>.md` (`report-p<revision>.md` when
-  remote-only) beside the ledger and returns a receipt -- path, byte count,
+  `reviews/<review_id>/report-r<state_version>[-p<revision>-s<summary digest>].md`
+  (`report-p<revision>-s<summary digest>.md` when remote-only) beside the
+  ledger -- the digest covers the summary fields the report prints, so a gate
+  appearing or evidence expiring, which move no ledger revision, write a new
+  report instead of reusing one that says otherwise -- and returns a receipt -- path, byte count,
   sha256, the ledger revisions rendered, and whether the file at that
   revision already existed -- never the Markdown, which can run to megabytes
   and would land in the driver's context after every gate; it changes no
@@ -69,11 +72,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   a failure there changes no gate and no workflow state.
   `REVIEW_REPORT_CONTRACT` pins both steps in the source and packaged skill.
   The footer states, in the terms the README uses for operator narration,
-  that the report is a projection of the ledger, not evidence, naming the
-  ledgers that were rendered, gate or authorization file included: the
-  review ledger and the publication ledger and the gate that authorized it
-  when present, or the publication ledger and its bound authorization for a
-  remote-only publication.
+  that the report is a projection of the ledger, not evidence, naming only
+  what the report itself read: the ledger files it rendered (the review
+  ledger, the publication ledger and its gate or authorization file) and the
+  publication summary the server computed over its own inputs, by digest.
 
 ### Changed
 

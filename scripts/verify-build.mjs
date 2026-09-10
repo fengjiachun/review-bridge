@@ -1361,7 +1361,8 @@ try {
     // path of, and the digest lets a reader tie the two together.
     assert.equal(renderedReport.reused, false);
     assert.equal(renderedReport.markdown, undefined);
-    assert.match(path.basename(renderedReport.path), /^report-r\d+-p\d+\.md$/);
+    assert.match(path.basename(renderedReport.path), /^report-r\d+-p\d+-s[0-9a-f]{12}\.md$/);
+    assert.match(renderedReport.summary_digest, /^[0-9a-f]{12}$/);
     const renderedBytes = await fsp.readFile(renderedReport.path);
     assert.equal(renderedBytes.length, renderedReport.bytes);
     assert.equal(
@@ -1441,7 +1442,7 @@ try {
     });
     assert.equal(remoteReport.reused, false);
     assert.equal(remoteReport.review_state_version, null);
-    assert.match(path.basename(remoteReport.path), /^report-p\d+\.md$/);
+    assert.match(path.basename(remoteReport.path), /^report-p\d+-s[0-9a-f]{12}\.md$/);
     const remoteReportText = await fsp.readFile(remoteReport.path, "utf8");
     assert.match(remoteReportText, /authorized `REMOTE_ONLY` with local review skipped/);
     assert.match(remoteReportText, /projection of the ledger, not evidence/);

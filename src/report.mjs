@@ -16,13 +16,12 @@ import {
 
 // The footer sentence, stated in the terms README uses for operator narration.
 // A report is read by a person; nothing a person reads here advances a ledger.
-// Which ledger is the source of truth depends on what was rendered: the review
-// ledger (and the publication beside it) when a local review exists, the
-// publication and its bound authorization when the review was skipped.
+// The footer names only what the report itself read: the ledger files listed
+// there and the publication summary the server computed over its own inputs.
 export const PROJECTION_NOTICE =
-  "This report is a projection of the ledger, not evidence. These ledgers -- the review ledger, and the publication ledger and the gate that authorized it when present -- remain the sole source of truth: nothing in this report advances or proves review state, and citing it as evidence is a misuse. It can be regenerated from them at any time.";
+  "This report is a projection of the ledger, not evidence. It was rendered from the review ledger and, when present, the publication ledger and its gate listed above, and from the publication summary the server computed: nothing in this report advances or proves review state, and citing it as evidence is a misuse. It can be regenerated from them at any time.";
 export const PROJECTION_NOTICE_REMOTE_ONLY =
-  "This report is a projection of the ledger, not evidence. These ledgers -- the publication ledger and its bound authorization -- remain the sole source of truth: nothing in this report advances or proves publication state, and citing it as evidence is a misuse. It can be regenerated from them at any time.";
+  "This report is a projection of the ledger, not evidence. It was rendered from the publication ledger and its bound authorization listed above, and from the publication summary the server computed: nothing in this report advances or proves publication state, and citing it as evidence is a misuse. It can be regenerated from them at any time.";
 
 const REVIEW_ID_PATTERN = /^rb-[0-9TZ-]+-[a-f0-9]{8}$/;
 const PREPARED_EVENTS = ["REVIEW_PREPARED", "REREVIEW_PREPARED"];
@@ -562,12 +561,29 @@ function reportError(code, message, details) {
   return Object.assign(new Error(message), { code, details });
 }
 
-export function reportRevision(review, publication) {
-  if (review == null) return `p${publication.revision}`;
+// The summary fields the report prints, digested. The summary changes without
+// the ledger's revision moving -- a gate file appears, evidence expires by the
+// clock -- so a report's identity has to carry what it printed of it, or a
+// stale report would be reused as the current one. Only the printed fields:
+// a field the report never shows must not change the report.
+export function summaryDigest(summary) {
+  return canonicalDigest({
+    status: summary.status,
+    blocking_reason: summary.blocking_reason ?? null,
+    next_action: summary.next_action,
+    gate_state: summary.gate_state,
+  }).slice(0, 12);
+}
+
+// `r<state_version>[-p<revision>-s<summary digest>]` with a review,
+// `p<revision>-s<summary digest>` without one.
+export function reportRevision(review, publication, summary = null) {
+  const summaryPart = summary == null ? "" : `-s${summaryDigest(summary)}`;
+  if (review == null) return `p${publication.revision}${summaryPart}`;
   const stateVersion = review.state_version ?? 0;
   return publication == null
     ? String(stateVersion)
-    : `${stateVersion}-p${publication.revision}`;
+    : `${stateVersion}-p${publication.revision}${summaryPart}`;
 }
 
 // `review` is null for a REMOTE_ONLY publication, which has no review ledger;
@@ -624,9 +640,16 @@ export function renderReviewReport(
       `- Review: ${code(reviewId)}`,
       `- Review ledger state_version: ${review == null ? "n/a (remote-only: no local review ledger)" : (review.state_version ?? 0)}`,
       `- Publication ledger revision: ${publication == null ? "none" : publication.revision}`,
-      `- Report revision: ${code(reportRevision(review, publication))}`,
+      `- Report revision: ${code(reportRevision(review, publication, publicationSummary))}`,
       `- Rendered at: ${inline(renderedAt)}`,
       `- Ledger: ${ledgers.join(", ")}`,
+      ...(publication == null
+        ? []
+        : [
+            publicationSummary == null
+              ? "- Publication summary: not supplied to this render."
+              : `- Publication summary: computed by the server over its own inputs (gate file, workflow binding, resolution sources); digest s${summaryDigest(publicationSummary)}.`,
+          ]),
     ].join("\n"),
     review == null ? PROJECTION_NOTICE_REMOTE_ONLY : PROJECTION_NOTICE,
   ];
@@ -750,8 +773,9 @@ async function createExclusive(filePath, data) {
 export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}) {
   const { directory, review, publication, authorization, publicationSummary } =
     await loadReportLedgers(storeRoot, reviewId);
-  const revision = reportRevision(review, publication);
-  // `r<state_version>[-p<revision>]` with a review, `p<revision>` without one.
+  const revision = reportRevision(review, publication, publicationSummary);
+  // A file exists per (state_version, publication revision, summary digest):
+  // the same three again reuse it, any of them moving writes a new one.
   const filePath = path.join(
     directory,
     review == null ? `report-${revision}.md` : `report-r${revision}.md`,
@@ -772,6 +796,7 @@ export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}
     review_id: reviewId,
     review_state_version: review == null ? null : (review.state_version ?? 0),
     publication_revision: publication?.revision ?? null,
+    summary_digest: publicationSummary == null ? null : summaryDigest(publicationSummary),
     revision,
     path: filePath,
     bytes: bytes.length,
