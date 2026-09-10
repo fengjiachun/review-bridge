@@ -30,6 +30,22 @@ const REVIEWER_SERVER = "review-bridge-reviewer";
 const EGRESS_ALLOW = ["chatgpt.com", "api.openai.com"];
 const PROXY_PORT = 3128;
 const PROXY_ALIAS = "egress";
+// Every proxy variable a client may read, pinned explicitly: the Docker CLI
+// injects the lowercase pair, ALL_PROXY, and NO_PROXY from its own proxy
+// configuration, curl prefers the lowercase names, and NO_PROXY can switch a
+// proxy off wholesale. The four proxy names point at the sidecar; the four
+// override names are set to the empty string rather than left unset.
+const PROXY_URL = `http://${PROXY_ALIAS}:${PROXY_PORT}`;
+const PROXY_ENV = {
+  HTTP_PROXY: PROXY_URL,
+  HTTPS_PROXY: PROXY_URL,
+  http_proxy: PROXY_URL,
+  https_proxy: PROXY_URL,
+  ALL_PROXY: "",
+  all_proxy: "",
+  NO_PROXY: "",
+  no_proxy: "",
+};
 const CONTAINER_CODEX_HOME = "/codex-home";
 const CONTAINER_MARKETPLACE = "/marketplace";
 const CONTAINER_STORE = "/store";
@@ -627,15 +643,9 @@ function containerArgs({ mounts, volume }, network, extra = [], { withoutCheckou
     if (withoutCheckout && mount[0] === mount[1]) continue;
     args.push("--mount", bindMount(mount));
   }
-  args.push(
-    "-e",
-    `CODEX_HOME=${CONTAINER_CODEX_HOME}`,
-    "-e",
-    `HTTPS_PROXY=http://${PROXY_ALIAS}:${PROXY_PORT}`,
-    "-e",
-    `HTTP_PROXY=http://${PROXY_ALIAS}:${PROXY_PORT}`,
-    ...extra,
-  );
+  args.push("-e", `CODEX_HOME=${CONTAINER_CODEX_HOME}`);
+  for (const [name, value] of Object.entries(PROXY_ENV)) args.push("-e", `${name}=${value}`);
+  args.push(...extra);
   return args;
 }
 
@@ -748,8 +758,7 @@ const curl = (env) => {
 };
 emit({ kind: "egress", via: "proxy", ...curl(process.env) });
 const direct = { ...process.env };
-delete direct.HTTPS_PROXY;
-delete direct.HTTP_PROXY;
+for (const name of ${JSON.stringify(Object.keys(PROXY_ENV))}) direct[name] = "";
 emit({ kind: "egress", via: "direct", ...curl(direct) });
 emit({ kind: "codex-version", value: (spawnSync("codex", ["--version"], { encoding: "utf8" }).stdout || "").trim() });
 emit({ kind: "uid", value: process.getuid() });

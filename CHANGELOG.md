@@ -49,7 +49,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   rather than relaxed to fit a second sandbox. Egress goes only through a
   sidecar proxy on an internal Docker network that admits `chatgpt.com` and
   `api.openai.com`; `https://example.com` fails through the proxy and has no
-  route without it, while the model calls complete. Before the reviewer
+  route without it, while the model calls complete. All eight proxy variables
+  are pinned on the container (`HTTP_PROXY`, `HTTPS_PROXY` and their lowercase
+  forms at the sidecar; `ALL_PROXY`, `all_proxy`, `NO_PROXY`, `no_proxy`
+  explicitly empty), so a Docker CLI proxy configuration cannot inject its own,
+  and the probe's direct check empties all eight. Before the reviewer
   starts, a probe in the same container confirms the host home's sensitive
   contents (`~/.ssh`, `~/.codex` and its `auth.json`, `~/Library`, `~/.gnupg`,
   `~/.aws`, `/root/.ssh`, the store) are absent and stops the launch if not

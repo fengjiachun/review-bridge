@@ -321,7 +321,16 @@ test("--dry-run prints the mount table and the container launch without Docker",
   assert.match(out, /docker network create --internal review-bridge-advisory-/);
   assert.match(out, /--network-alias egress .* --egress-proxy/);
   assert.match(out, /docker network connect bridge review-bridge-advisory-\S+-egress/);
-  assert.match(out, /-e HTTPS_PROXY=http:\/\/egress:3128/);
+  // All eight proxy variables are pinned on every container: the four proxy
+  // names at the sidecar, the four override names explicitly empty.
+  for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]) {
+    assert.match(codexLine, new RegExp(` -e ${name}=http://egress:3128 `));
+  }
+  for (const name of ["ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"]) {
+    assert.match(codexLine, new RegExp(` -e ${name}= `));
+  }
+  // The direct probe empties all eight before its curl.
+  assert.match(out, /for \(const name of \["HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy","ALL_PROXY","all_proxy","NO_PROXY","no_proxy"\]\) direct\[name\] = ""/);
   assert.match(out, /-e CODEX_HOME=\/codex-home/);
   assert.match(out, /\/codex-home\/config\.toml:\n(?:.*\n)*? {2}\[plugins\."review-bridge@review-bridge-local"\]\n {2}enabled = true/);
   assert.match(out, /source = "\/marketplace"/);
