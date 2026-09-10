@@ -153,39 +153,54 @@ if (!args.includes("codex")) {
   const reviewId = args[args.length - 1].match(/rb-[0-9TZ-]+-[a-f0-9]{8}/)[0];
   const { submitInitialReview } = await import(process.env.FAKE_CORE);
   process.stdout.write("OpenAI Codex v0.153.4\\napproval: granular\\nsandbox: danger-full-access\\nsession id: 00000000-0000-0000-0000-000000000000\\n");
-  for (const tool of ["list_pending_reviews", "open_review"]) process.stdout.write("mcp: review-bridge-reviewer/" + tool + " started\\nmcp: review-bridge-reviewer/" + tool + " (completed)\\n");
+  // Every call is printed as codex prints it and recorded as codex records
+  // it: one McpToolCall item in the main rollout (session id as in the
+  // header). Variants leave a call unrecorded, record it as a transport
+  // failure, or park an answered failure in a subagent rollout.
+  const records = [];
+  const scratch = path.dirname(bind("/codex-home/config.toml"));
+  let n = 0;
+  const call = (tool, { outcome = "completed", record = true } = {}) => {
+    n += 1;
+    process.stdout.write("mcp: review-bridge-reviewer/" + tool + " started\\nmcp: review-bridge-reviewer/" + tool + (outcome === "completed" ? " (completed)" : " (failed)") + "\\n");
+    if (!record) return;
+    const item = { type: "McpToolCall", id: "exec-" + n, server: "review-bridge-reviewer", tool, arguments: {}, status: outcome === "completed" ? "completed" : "failed" };
+    if (outcome === "completed") item.result = { content: [{ type: "text", text: "{}" }] };
+    if (outcome === "answered") item.result = { content: [{ type: "text", text: JSON.stringify({ error: "git show failed (128): fatal: path 'nope.js' does not exist in 'abc'" }) }], isError: true };
+    if (outcome === "transport") item.error = "MCP tool call failed: transport closed";
+    records.push(item);
+  };
+  call("list_pending_reviews");
+  call("open_review");
+  const variant = process.env.FAKE_SERVER_ERROR || "";
+  if (variant === "answered") call("read_snapshot_file", { outcome: "answered" });
+  if (variant === "unexplained") { call("read_snapshot_file", { outcome: "answered" }); call("search_snapshot", { outcome: "transport" }); }
+  if (variant === "no-record") call("search_snapshot", { outcome: "answered", record: false });
+  if (variant === "subagent-answered") call("search_snapshot", { outcome: "transport" });
   const tamper = process.env.FAKE_TAMPER || "";
-  if (process.env.FAKE_SERVER_ERROR) {
-    // A call the server answered with an error: printed as (failed) by codex
-    // and recorded as a failed McpToolCall item carrying the server's result.
-    process.stdout.write("mcp: review-bridge-reviewer/read_snapshot_file started\\nmcp: review-bridge-reviewer/read_snapshot_file (failed)\\n");
-    const scratch = path.dirname(bind("/codex-home/config.toml"));
-    fs.mkdirSync(path.join(scratch, "sessions"), { recursive: true });
-    const answered = { type: "McpToolCall", id: "exec-1", server: "review-bridge-reviewer", tool: "read_snapshot_file", arguments: {}, status: "failed", result: { content: [{ type: "text", text: JSON.stringify({ error: "git show failed (128): fatal: path 'nope.js' does not exist in 'abc'" }) }], isError: true } };
-    const lines = [
-      JSON.stringify({ type: "session_meta", payload: { id: "main" } }),
-      JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item: answered } }),
-      // Noise that must explain nothing: an error object in a script output
-      // and in a shell item's text.
-      JSON.stringify({ type: "response_item", payload: { type: "custom_tool_call_output", call_id: "c9", output: JSON.stringify({ error: "x" }) } }),
-      JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item: { type: "CommandExecution", id: "exec-9", status: "completed", aggregated_output: JSON.stringify({ error: "x" }) } } }),
-    ];
-    if (process.env.FAKE_SERVER_ERROR === "unexplained") {
-      // A call nobody answered: (failed) in the transcript, a failed item
-      // with a transport error and no result in the rollout.
-      process.stdout.write("mcp: review-bridge-reviewer/search_snapshot started\\nmcp: review-bridge-reviewer/search_snapshot (failed)\\n");
-      lines.push(JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item: { type: "McpToolCall", id: "exec-2", server: "review-bridge-reviewer", tool: "search_snapshot", arguments: {}, status: "failed", error: "MCP tool call failed: transport closed" } } }));
-    }
-    if (process.env.FAKE_SERVER_ERROR === "no-record") {
-      // A (failed) line with no McpToolCall record at all.
-      process.stdout.write("mcp: review-bridge-reviewer/search_snapshot started\\nmcp: review-bridge-reviewer/search_snapshot (failed)\\n");
-    }
-    fs.writeFileSync(path.join(scratch, "sessions", "rollout-main.jsonl"), lines.join("\\n") + "\\n");
-  }
   if (tamper !== "no-verdict") {
     await submitInitialReview(staged, reviewId, [{ severity: "major", title: "one", explanation: "first", path: "app.js", line: 1 }], "CODEX_TASK");
     if (process.env.FAKE_BIG) for (let i = 0; i < 40000; i += 1) process.stdout.write("codex\\nfiller line " + i + " ".repeat(60) + "\\n");
-    process.stdout.write("mcp: review-bridge-reviewer/submit_review started\\nmcp: review-bridge-reviewer/submit_review (completed)\\n");
+    call("submit_review");
+  }
+  if (variant === "extra-line") process.stdout.write("mcp: review-bridge-reviewer/list_pending_reviews started\\nmcp: review-bridge-reviewer/list_pending_reviews (completed)\\n");
+  fs.mkdirSync(path.join(scratch, "sessions"), { recursive: true });
+  const event = (item) => JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item } });
+  fs.writeFileSync(path.join(scratch, "sessions", "rollout-main.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "00000000-0000-0000-0000-000000000000" } }),
+    ...records.map(event),
+    // Noise that must explain nothing: an error object in a script output
+    // and in a shell item's text.
+    JSON.stringify({ type: "response_item", payload: { type: "custom_tool_call_output", call_id: "c9", output: JSON.stringify({ error: "x" }) } }),
+    event({ type: "CommandExecution", id: "exec-9", status: "completed", aggregated_output: JSON.stringify({ error: "x" }) }),
+  ].join("\\n") + "\\n");
+  if (variant === "subagent-answered") {
+    // A subagent's rollout holding an answered failure for the same tool:
+    // it must not stand in for the main run's transport failure.
+    fs.writeFileSync(path.join(scratch, "sessions", "rollout-sub.jsonl"), [
+      JSON.stringify({ type: "session_meta", payload: { id: "11111111-1111-1111-1111-111111111111", parent_thread_id: "00000000-0000-0000-0000-000000000000" } }),
+      event({ type: "McpToolCall", id: "exec-sub", server: "review-bridge-reviewer", tool: "search_snapshot", arguments: {}, status: "failed", result: { content: [{ type: "text", text: JSON.stringify({ error: "answered elsewhere" }) }], isError: true } }),
+    ].join("\\n") + "\\n");
   }
   const reviewDir = path.join(staged, "reviews", reviewId);
   const ledgerPath = path.join(reviewDir, "review.json");
@@ -387,7 +402,7 @@ test("with a stand-in docker the launcher stages the review, runs, validates, an
   const env = await fakeDocker(f, { big: true });
   const result = launch(f, ["--review-id", f.reviewId], env);
   assert.equal(result.status, 0, `${result.stdout.slice(-3000)}\n${result.stderr}`);
-  assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: PASS — list_pending_reviews 1\/1, open_review 1\/1, submit_review 1\/1/);
+  assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: PASS — list_pending_reviews 1\/1, open_review 1\/1, submit_review 1\/1$/m);
   assert.match(result.stdout, /criterion 2 host filesystem absent: PASS/);
   assert.match(
     result.stdout,
@@ -519,26 +534,41 @@ test("a call the server answered with an error is not a failed call; one nobody 
   assert.equal(result.status, 0, result.stdout.slice(-2000));
   assert.match(
     result.stdout,
-    /criterion 1 MCP calls completed inside the container: PASS — .*read_snapshot_file 0\/1.*; 1 of 1 failed call\(s\) answered by the server with an error \(read_snapshot_file: "git show failed \(128\): fatal: path 'nope\.js' does not exist in 'abc'"\)/,
+    /criterion 1 MCP calls completed inside the container: PASS — list_pending_reviews 1\/1, open_review 1\/1, read_snapshot_file 0\/1, submit_review 1\/1; 1 failed call\(s\) answered by the server with an error \(read_snapshot_file: "git show failed \(128\): fatal: path 'nope\.js' does not exist in 'abc'"\)$/m,
   );
   const g = await fixture(t, { realReview: true });
   const hostBefore = await fsp.readFile(path.join(g.store, "reviews", g.reviewId, "review.json"));
   result = launch(g, ["--review-id", g.reviewId], await fakeDocker(g, { serverError: "unexplained" }));
   assert.equal(result.status, 1, result.stdout.slice(-2000));
-  assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: FAIL — .*; 1 of 2 failed call\(s\) answered by the server with an error \(.*\), 1 unexplained/);
+  assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: FAIL — .*search_snapshot 0\/1.*; 1 failed call\(s\) answered by the server with an error \(read_snapshot_file: .*\); 1 call\(s\) failed without a server answer: search_snapshot$/m);
   // The reviewer did submit into the staged store, but a run with an
   // unexplained failure must not advance the host ledger: a REVIEW_SUBMITTED
   // ledger could not be launched again.
-  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: FAIL — refused — pre-copy criteria failed: 1 unexplained failed MCP call\(s\); host store unwritten/);
+  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: FAIL — refused — pre-copy criteria failed: 1 call\(s\) failed without a server answer: search_snapshot; host store unwritten/);
   assert.deepEqual(await fsp.readFile(path.join(g.store, "reviews", g.reviewId, "review.json")), hostBefore);
   assert.equal((await loadReview(g.store, g.reviewId)).status, "WAITING_FOR_REVIEW");
-  // A (failed) line with no record of its own is unexplained too, whatever
-  // error objects other outputs carry.
+  // A (failed) line with no record of its own is a transcript/rollout
+  // mismatch, whatever error objects other outputs carry.
   const h = await fixture(t, { realReview: true });
   result = launch(h, ["--review-id", h.reviewId], await fakeDocker(h, { serverError: "no-record" }));
   assert.equal(result.status, 1, result.stdout.slice(-2000));
-  assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: FAIL — .*, 1 unexplained/);
+  assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: FAIL — .*; transcript\/rollout mismatch: 4 started line\(s\) in the transcript, 3 record\(s\) in the main rollout$/m);
   assert.equal((await loadReview(h.store, h.reviewId)).status, "WAITING_FOR_REVIEW");
+  // An answered failure in a subagent's rollout does not stand in for the
+  // main run's transport failure: the criterion reads the main rollout only.
+  const i = await fixture(t, { realReview: true });
+  result = launch(i, ["--review-id", i.reviewId], await fakeDocker(i, { serverError: "subagent-answered" }));
+  assert.equal(result.status, 1, result.stdout.slice(-2000));
+  assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: FAIL — .*; 1 call\(s\) failed without a server answer: search_snapshot$/m);
+  assert.doesNotMatch(result.stdout, /answered elsewhere/);
+  assert.equal((await loadReview(i.store, i.reviewId)).status, "WAITING_FOR_REVIEW");
+  // Every record completed but the transcript shows one more started line
+  // than the rollout records: a mismatch, and the host stays untouched.
+  const j = await fixture(t, { realReview: true });
+  result = launch(j, ["--review-id", j.reviewId], await fakeDocker(j, { serverError: "extra-line" }));
+  assert.equal(result.status, 1, result.stdout.slice(-2000));
+  assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: FAIL — list_pending_reviews 1\/1, open_review 1\/1, submit_review 1\/1; transcript\/rollout mismatch: 4 started line\(s\) in the transcript, 3 record\(s\) in the main rollout$/m);
+  assert.equal((await loadReview(j.store, j.reviewId)).status, "WAITING_FOR_REVIEW");
 });
 
 test("a nonzero codex exit leaves the host ledger untouched even when the staged ledger holds a verdict", async (t) => {

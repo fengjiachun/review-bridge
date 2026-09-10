@@ -937,21 +937,28 @@ async function guardianVerdicts(sessionsRoot) {
   return verdicts;
 }
 
-// Codex prints `(failed)` both when the server answered a call with an error
-// result and when the call did not complete at all. The two differ for the
-// criterion: an answered error (a path that is not in the snapshot, say) is
-// the server working. The main rollout records every MCP call as its own
-// `McpToolCall` item, with the server's result when there was one, so each
-// failed call is judged on its own record: answered when its record carries
-// a result, unexplained otherwise — including a call with no record at all.
-// Nothing else in the rollout (a script output that happens to contain an
-// error object) counts.
-async function reviewerCallRecords(sessionsRoot) {
-  const records = [];
+// Criterion 1 is derived from the main rollout alone: the one whose
+// session_meta id is the session id codex printed in its header, never a
+// subagent's. Each MCP call is its own `McpToolCall` item there, with the
+// server's result when there was one, so the criterion is a property of
+// every record, not a count: every reviewer call completed or was answered
+// with an error by the server (a path that is not in the snapshot, say). A
+// call with a transport error, or with no result, fails it. The transcript's
+// `mcp:` lines are kept only as a cross-check: a started count that differs
+// from the record count is a mismatch and fails it too.
+async function mainRolloutRecords(sessionsRoot, sessionId) {
   for await (const file of walkFiles(sessionsRoot)) {
     if (!file.endsWith(".jsonl")) continue;
     const text = await fsp.readFile(file, "utf8");
-    if (text.includes('"thread_source":"guardian_review"')) continue;
+    const firstLine = text.slice(0, text.indexOf("\n"));
+    let meta;
+    try {
+      meta = JSON.parse(firstLine);
+    } catch {
+      continue;
+    }
+    if (meta?.type !== "session_meta" || meta.payload?.id !== sessionId) continue;
+    const records = [];
     for (const line of text.split("\n")) {
       if (!line.includes('"McpToolCall"')) continue;
       let event;
@@ -963,17 +970,48 @@ async function reviewerCallRecords(sessionsRoot) {
       const item = event.payload?.item;
       if (event.payload?.type !== "item_completed" || item?.type !== "McpToolCall") continue;
       if (item.server !== REVIEWER_SERVER) continue;
-      const answered = item.status === "completed" || (item.result != null && item.error == null);
+      const completed = item.status === "completed";
+      const answered = !completed && item.result != null && item.error == null;
       let message = null;
-      if (item.status !== "completed" && answered) {
-        const text = item.result?.content?.map((part) => part?.text ?? "").join(" ") ?? "";
-        const match = text.match(/"error":"((?:[^"\\]|\\.){0,200})/);
-        message = match ? match[1] : text.slice(0, 200);
+      if (answered) {
+        const resultText = item.result?.content?.map((part) => part?.text ?? "").join(" ") ?? "";
+        const match = resultText.match(/"error":"((?:[^"\\]|\\.){0,200})/);
+        message = match ? match[1] : resultText.slice(0, 200);
       }
-      records.push({ id: item.id, tool: item.tool, status: item.status, answered, message });
+      records.push({ id: item.id, tool: item.tool, completed, answered, message });
     }
+    return records;
   }
-  return records;
+  return null;
+}
+
+function judgeMcpCalls(records, startedLines) {
+  const reasons = [];
+  if (records == null) reasons.push("no main rollout found under the isolated CODEX_HOME");
+  const list = records ?? [];
+  if (records != null && list.length === 0) reasons.push("no reviewer MCP call recorded in the main rollout");
+  const unexplained = list.filter((record) => !record.completed && !record.answered);
+  if (unexplained.length > 0) {
+    reasons.push(`${unexplained.length} call(s) failed without a server answer: ${unexplained.map((record) => record.tool).join(", ")}`);
+  }
+  if (records != null && startedLines !== list.length) {
+    reasons.push(`transcript/rollout mismatch: ${startedLines} started line(s) in the transcript, ${list.length} record(s) in the main rollout`);
+  }
+  const perTool = new Map();
+  for (const record of list) {
+    const entry = perTool.get(record.tool) ?? { total: 0, completed: 0 };
+    entry.total += 1;
+    if (record.completed) entry.completed += 1;
+    perTool.set(record.tool, entry);
+  }
+  const answered = list.filter((record) => record.answered);
+  const detail =
+    [...perTool.entries()].map(([tool, entry]) => `${tool} ${entry.completed}/${entry.total}`).join(", ") +
+    (answered.length
+      ? `; ${answered.length} failed call(s) answered by the server with an error (${answered.slice(0, 3).map((record) => `${record.tool}: "${record.message}"`).join(", ")}${answered.length > 3 ? ", …" : ""})`
+      : "") +
+    (reasons.length ? `; ${reasons.join("; ")}` : "");
+  return { ok: reasons.length === 0, reasons, detail: detail || reasons.join("; ") };
 }
 
 function summarizeProxyLog(log) {
@@ -1237,11 +1275,11 @@ async function main() {
   const mcp = parseMcpLines(transcriptText);
   const reviewerCalls = [...mcp.entries()].filter(([key]) => key.startsWith(`${REVIEWER_SERVER}/`));
   const started = reviewerCalls.reduce((sum, [, entry]) => sum + entry.started, 0);
-  const completed = reviewerCalls.reduce((sum, [, entry]) => sum + entry.completed, 0);
-  const failedCalls = started - completed;
-  const callRecords = failedCalls > 0 ? await reviewerCallRecords(path.join(scratch, "sessions")) : [];
-  const answeredFailures = callRecords.filter((record) => record.status !== "completed" && record.answered);
-  const explained = answeredFailures.length;
+  const sessionId = transcriptText.match(/^session id: (\S+)$/m)?.[1] ?? null;
+  const mcpJudgement = judgeMcpCalls(
+    sessionId ? await mainRolloutRecords(path.join(scratch, "sessions"), sessionId) : null,
+    started,
+  );
   // The copy-back happens only after criteria 1 and 2 and the exit code have
   // passed: a host ledger advanced to REVIEW_SUBMITTED or CLEAN cannot be
   // launched again, so a run with an unexplained failure or a nonzero exit
@@ -1249,12 +1287,10 @@ async function main() {
   // staged store at the file level, replay the verdict through the host's own
   // submit_review under the host review's lock, and keep the replay only if
   // it equals the staged ledger; otherwise refuse with the reasons.
-  // Every started call must be either completed or a failed call whose own
-  // record carries the server's answer; a mismatch in either direction fails.
-  const mcpOk = started > 0 && completed + explained === started;
+  const mcpOk = mcpJudgement.ok;
   const preCopyFailures = [
     ...(codexExit === 0 ? [] : [`codex exited ${codexExit}`]),
-    ...(mcpOk ? [] : [failedCalls > explained ? `${failedCalls - explained} unexplained failed MCP call(s)` : "no reviewer MCP call completed"]),
+    ...(mcpOk ? [] : mcpJudgement.reasons),
     ...(boundary.failures.length === 0 ? [] : ["the boundary did not hold"]),
   ];
   const inspection = preCopyFailures.length > 0 ? { reasons: [], ledgerChanged: false } : await inspectStagedStore(inputs, stage);
@@ -1285,18 +1321,7 @@ async function main() {
   }
   const verdicts = await guardianVerdicts(path.join(scratch, "sessions"));
   const criteria = [
-    [
-      "1 MCP calls completed inside the container",
-      mcpOk,
-      reviewerCalls.length === 0
-        ? "no reviewer MCP call in the transcript"
-        : reviewerCalls
-            .map(([key, entry]) => `${key.split("/")[1]} ${entry.completed}/${entry.started}`)
-            .join(", ") +
-          (failedCalls > 0
-            ? `; ${explained} of ${failedCalls} failed call(s) answered by the server with an error (${answeredFailures.slice(0, 3).map((record) => `${record.tool}: "${record.message}"`).join(", ")}${answeredFailures.length > 3 ? ", …" : ""})${failedCalls > explained ? `, ${failedCalls - explained} unexplained` : explained > failedCalls ? `, ${explained - failedCalls} more answered failures than failed lines` : ""}`
-            : ""),
-    ],
+    ["1 MCP calls completed inside the container", mcpOk, mcpJudgement.detail],
     [
       "2 host filesystem absent",
       boundary.failures.length === 0,

@@ -36,8 +36,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   is forgeable from inside the container). The boundary probe treats any
   HTTP status on the direct egress check as traffic that left the container
   (round-two P1), the codex transcript is flushed before the launcher reads
-  it (round-two P2), and a failed reviewer call counts as answered only when
-  its own `McpToolCall` record in the rollout carries the server's result. The
+  it (round-two P2), and the first criterion is derived from the main rollout's own
+  `McpToolCall` records alone — every reviewer call completed or was answered
+  with an error by the server — with the transcript's `mcp:` lines kept only
+  as a cross-check that fails on a mismatch. The
   isolated `CODEX_HOME` is a Docker volume and the working directory a tmpfs
   rather than host directories — nothing Codex keeps there needs to be on the
   host during the run — and the sessions are copied out of the volume
