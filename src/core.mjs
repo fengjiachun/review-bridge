@@ -229,6 +229,7 @@ const LEDGER_FINDING_STATUSES = [
   "STILL_OPEN",
 ];
 const LEDGER_DISPOSITIONS = ["fixed", "rejected", "human_required"];
+const LEDGER_RESPONSE_EVENTS = ["AUTHOR_RESPONDED", "AUTHOR_ESCALATED"];
 const LEDGER_DECISIONS = ["resolved", "rebuttal_accepted", "still_open"];
 
 // Field tables. Every record kind the review ledger holds has one, placed
@@ -380,7 +381,12 @@ function decisionStatus(decision) {
 // decision's status once the rereviewer decided. A decision with no
 // resolution behind it derives to nothing, since no writer produces one.
 function derivedFindingStatus(resolution, decision) {
-  if (decision != null) return resolution == null ? null : decisionStatus(decision.decision);
+  if (decision != null) {
+    // No writer decides a finding the author escalated: the escalation stops
+    // the review before any rereview.
+    if (resolution == null || resolution.disposition === "human_required") return null;
+    return decisionStatus(decision.decision);
+  }
   if (resolution != null) return dispositionStatus(resolution.disposition);
   return "OPEN";
 }
@@ -671,15 +677,54 @@ function reviewLedgerDefect(review, reviewId) {
       return `a ${key} names no finding: ${JSON.stringify(orphan.finding_id)}`;
     }
   }
+  // The author's response to each round is derived from the dispositions
+  // answering that round's findings -- any human_required escalates, else the
+  // author responded -- and compared with the history: exactly that event,
+  // and an escalated round has no rereview decision on any of its findings.
+  const findingById = new Map(review.findings.map((finding) => [finding.id, finding]));
+  const responded = new Map();
+  for (const resolution of review.resolutions) {
+    const round = findingById.get(resolution.finding_id).introduced_round;
+    const info = responded.get(round) ?? { escalated: false };
+    info.escalated ||= resolution.disposition === "human_required";
+    responded.set(round, info);
+  }
+  for (const [round, info] of responded) {
+    const expected = info.escalated ? "AUTHOR_ESCALATED" : "AUTHOR_RESPONDED";
+    const recorded = review.history
+      .filter((entry) => LEDGER_RESPONSE_EVENTS.includes(entry.event) && entry.round === round)
+      .map((entry) => entry.event);
+    if (recorded.length !== 1 || recorded[0] !== expected) {
+      return `round ${round} author response derives ${expected} from its dispositions, but the history records ${recorded.length === 0 ? "none" : recorded.join(", ")}`;
+    }
+    if (info.escalated) {
+      const decided = review.rereview_decisions.find(
+        (decision) => findingById.get(decision.finding_id)?.introduced_round === round,
+      );
+      if (decided != null) {
+        return `round ${round} was escalated, but a rereview decision names ${JSON.stringify(decided.finding_id)}`;
+      }
+    }
+  }
+  for (const entry of review.history) {
+    if (LEDGER_RESPONSE_EVENTS.includes(entry.event) && !responded.has(entry.round)) {
+      return `history records ${entry.event} for round ${entry.round}, but no resolution answers a round-${entry.round} finding`;
+    }
+  }
   const resolutionByFinding = new Map(review.resolutions.map((entry) => [entry.finding_id, entry]));
   const decisionByFinding = new Map(review.rereview_decisions.map((entry) => [entry.finding_id, entry]));
   for (const finding of review.findings) {
-    const derived = derivedFindingStatus(
-      resolutionByFinding.get(finding.id),
-      decisionByFinding.get(finding.id),
-    );
+    const resolution = resolutionByFinding.get(finding.id);
+    const decision = decisionByFinding.get(finding.id);
+    const derived = derivedFindingStatus(resolution, decision);
     if (derived !== finding.status) {
-      return `finding ${JSON.stringify(finding.id)} is ${JSON.stringify(finding.status)} but its records derive ${derived == null ? "no status (a decision with no resolution)" : JSON.stringify(derived)}`;
+      const why =
+        derived != null
+          ? JSON.stringify(derived)
+          : resolution == null
+            ? "no status (a decision with no resolution)"
+            : "no status (a decision on a human_required finding)";
+      return `finding ${JSON.stringify(finding.id)} is ${JSON.stringify(finding.status)} but its records derive ${why}`;
     }
   }
   return null;

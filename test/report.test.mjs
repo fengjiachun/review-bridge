@@ -895,8 +895,11 @@ test("finding statuses must equal what their records derive, in both directions"
     });
     assert.ok(!(await fsp.readdir(reviewDirectory(state))).some((name) => name.startsWith("report-")));
   };
-  // Records cleared under findings that still read RESOLVED.
-  await tamper((review) => { review.resolutions = []; review.rereview_decisions = []; }, /finding "F-001" is "RESOLVED" but its records derive "OPEN"/);
+  // Records cleared under findings that still read RESOLVED: the response
+  // event the history holds now answers nothing, which is caught first.
+  await tamper((review) => { review.resolutions = []; review.rereview_decisions = []; }, /history records AUTHOR_RESPONDED for round 1, but no resolution answers a round-1 finding/);
+  // Decisions cleared alone: the statuses no longer follow from the records.
+  await tamper((review) => { review.rereview_decisions = []; }, /finding "F-001" is "RESOLVED" but its records derive "AUTHOR_FIXED"/);
   // A decision with no finding.
   await tamper((review) => { review.rereview_decisions.push({ finding_id: "F-009", decision: "resolved", rationale: "x", verification: "", submitted_at: review.updated_at }); }, /a rereview decision names no finding: "F-009"/);
   // A decision with a finding but no resolution behind it.
@@ -935,6 +938,25 @@ test("finding statuses must equal what their records derive, in both directions"
   await tamper((review) => { review.advisory = true; }, /history entry 3 \(ERRATUM_APPENDED\) violates the writer's precondition: advisory review/);
   await tamper((review) => { review.history.find((entry) => entry.event === "FINDINGS_SUBMITTED").count = 101; }, /history entry 2 \(FINDINGS_SUBMITTED\) violates the writer's precondition: more than 100 findings/);
   await tamper((review) => { review.history.find((entry) => entry.event === "FINDINGS_SUBMITTED").count = 0; }, /history entry 2 \(FINDINGS_SUBMITTED\) violates the writer's precondition: fewer than 1 finding/);
+  // The author's response event is derived from the dispositions: an
+  // escalation among them means AUTHOR_ESCALATED, and nothing after it.
+  await tamper((review) => { review.resolutions[0].disposition = "human_required"; }, /round 1 author response derives AUTHOR_ESCALATED from its dispositions, but the history records AUTHOR_RESPONDED/);
+  await tamper((review) => {
+    // A genuinely escalated shape: one round, stopped at the escalation --
+    // except that a rereview decision was left on an escalated finding.
+    review.status = "HUMAN_REQUIRED";
+    review.current_round = 1;
+    review.rounds = [review.rounds[0]];
+    review.clean_snapshot_hash = null;
+    review.history = review.history.slice(0, 4);
+    review.history[3] = { ...review.history[3], event: "AUTHOR_ESCALATED" };
+    review.state_version = review.history.length;
+    review.last_transition_state_version = review.history.length;
+    review.resolutions[0].disposition = "human_required";
+    review.findings[0].status = "HUMAN_REQUIRED";
+    review.findings[1].status = "AUTHOR_REJECTED";
+    review.rereview_decisions = [review.rereview_decisions[0]];
+  }, /round 1 was escalated, but a rereview decision names "F-001"/);
   // The continuation marker without the event that would have set it.
   await tamper((review) => { review.continued_by_review_id = "rb-2026-09-02T000000-000Z-0000c0de"; }, /continued_by_review_id "rb-2026-09-02T000000-000Z-0000c0de" is recorded, but the history holds no REVIEW_CONTINUED event/);
   // Spliced in right after the author responded, where the writer would
