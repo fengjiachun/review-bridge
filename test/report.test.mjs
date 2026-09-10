@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { canonicalDigest } from "../src/publication.mjs";
+import { canonicalJsonBytes, sha256 } from "../src/storage.mjs";
 import {
   PROJECTION_NOTICE,
   renderReviewReport,
@@ -588,9 +589,32 @@ async function store(t) {
 
 async function writeLedger(root, name, value) {
   const directory = path.join(root, "reviews", REVIEW_ID);
-  await fsp.mkdir(directory, { recursive: true });
-  await fsp.writeFile(path.join(directory, name), `${JSON.stringify(value)}\n`);
+  await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
+  await fsp.writeFile(path.join(directory, name), canonicalJsonBytes(value), { mode: 0o600 });
   return directory;
+}
+
+// A remote-only publication bound to its authorization file the way
+// authorize_remote_publication and start_publication leave them: the ledger's
+// authorization carries the sidecar's digest, head, and base.
+async function writeRemoteOnlyLedgers(root, mutateSidecar = (value) => value) {
+  const sidecar = mutateSidecar(remoteAuthorization());
+  const directory = await writeLedger(root, "remote-authorization.json", sidecar);
+  const publication = mergeReadyPublication();
+  publication.authorization = {
+    mode: "REMOTE_ONLY",
+    acknowledgement: "LOCAL_REVIEW_SKIPPED",
+    authorized_at: "2026-09-01T00:39:00.000Z",
+    base_sha: BASE,
+    head_sha: HEAD_TWO,
+    operator_label: "jeremy",
+    rationale: "Standing instruction: remote-only review.",
+    reviewer_provider: null,
+    snapshot_hash: null,
+    source_sha256: sha256(canonicalJsonBytes(remoteAuthorization())),
+  };
+  await writeLedger(root, "publication.json", publication);
+  return { directory, publication };
 }
 
 test("the store writer names the file by the ledger revision and is idempotent at that revision", async (t) => {
@@ -646,10 +670,7 @@ test("the store writer names the file by the ledger revision and is idempotent a
 
 test("a remote-only publication is written as report-p<revision>.md from the publication and authorization alone", async (t) => {
   const root = await store(t);
-  const directory = await writeLedger(root, "remote-authorization.json", remoteAuthorization());
-  const publication = mergeReadyPublication();
-  publication.authorization = { ...publication.authorization, mode: "REMOTE_ONLY", acknowledgement: "LOCAL_REVIEW_SKIPPED", operator_label: "jeremy" };
-  await writeLedger(root, "publication.json", publication);
+  const { directory } = await writeRemoteOnlyLedgers(root);
   const written = await writeReviewReport(root, REVIEW_ID, { renderedAt: RENDERED_AT });
   assert.equal(written.path, path.join(directory, "report-p5.md"));
   assert.equal(written.reused, false);
@@ -665,6 +686,62 @@ test("a remote-only publication is written as report-p<revision>.md from the pub
     (await fsp.readdir(directory)).sort(),
     ["publication.json", "remote-authorization.json", "report-p5.md"],
   );
+});
+
+// The sidecar is admitted only through the publication reader's own binding
+// check, so an edited or replaced authorization file fails the render instead
+// of lending the report a head, base, operator, or rationale the ledger never
+// bound; a missing sidecar is the same failure.
+test("a remote-only authorization file that the ledger does not bind fails the render closed", async (t) => {
+  const root = await store(t);
+  const { directory } = await writeRemoteOnlyLedgers(root, (sidecar) => ({
+    ...sidecar,
+    head_sha: "d".repeat(40),
+    rationale: "an edited rationale",
+  }));
+  await assert.rejects(writeReviewReport(root, REVIEW_ID), (error) => {
+    assert.equal(error.code, "REMOTE_AUTHORIZATION_INVALID");
+    assert.match(error.message, /publication authorization changed/);
+    return true;
+  });
+  assert.deepEqual(
+    (await fsp.readdir(directory)).sort(),
+    ["publication.json", "remote-authorization.json"],
+  );
+
+  // A sidecar with the bound head but different bytes is the same failure:
+  // the ledger binds the digest, not only the fields the report prints.
+  await fsp.rm(path.join(directory, "remote-authorization.json"));
+  await writeLedger(root, "remote-authorization.json", {
+    ...remoteAuthorization(),
+    operator_label: "someone else",
+  });
+  await assert.rejects(writeReviewReport(root, REVIEW_ID), { code: "REMOTE_AUTHORIZATION_INVALID" });
+
+  await fsp.rm(path.join(directory, "remote-authorization.json"));
+  await assert.rejects(writeReviewReport(root, REVIEW_ID), { code: "PUBLICATION_AUTHORIZATION_INVALID" });
+  assert.deepEqual(await fsp.readdir(directory), ["publication.json"]);
+});
+
+// Two renderers racing on one revision must leave one file, and each receipt
+// must describe that file: the loser reuses the winner's bytes rather than
+// replacing them with a render that differs by its render time.
+test("concurrent renders at one revision produce one file that both receipts describe", async (t) => {
+  const root = await store(t);
+  const directory = await writeLedger(root, "review.json", cleanInTwoRounds());
+  const [first, second] = await Promise.all([
+    writeReviewReport(root, REVIEW_ID, { renderedAt: "2026-09-10T12:00:00.000Z" }),
+    writeReviewReport(root, REVIEW_ID, { renderedAt: "2026-09-10T12:00:01.000Z" }),
+  ]);
+  assert.equal(first.path, second.path);
+  assert.equal(first.sha256, second.sha256);
+  assert.equal(first.bytes, second.bytes);
+  assert.deepEqual([first.reused, second.reused].sort(), [false, true]);
+  const onDisk = await fsp.readFile(first.path);
+  assert.equal(crypto.createHash("sha256").update(onDisk).digest("hex"), first.sha256);
+  assert.equal(onDisk.length, first.bytes);
+  // No temporary file survives the race.
+  assert.deepEqual((await fsp.readdir(directory)).sort(), ["report-r6.md", "review.json"]);
 });
 
 test("a missing or malformed ledger is a structured error, and an invalid ID never reaches the store", async (t) => {

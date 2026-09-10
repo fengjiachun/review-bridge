@@ -1,8 +1,12 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { canonicalDigest, resolutionFrontier } from "./publication.mjs";
-import { atomicWriteFile } from "./storage.mjs";
+import {
+  canonicalDigest,
+  readBoundRemoteAuthorization,
+  resolutionFrontier,
+} from "./publication.mjs";
 
 // The footer sentence, stated in the terms README uses for operator narration.
 // A report is read by a person; nothing a person reads here advances a ledger.
@@ -593,18 +597,50 @@ export async function loadReportLedgers(storeRoot, reviewId) {
       { review_id: reviewId, path: path.join(directory, "review.json") },
     );
   }
+  // The authorization file is admitted by the publication reader's own judge,
+  // bound to this ledger; a sidecar it rejects, or one that is missing, fails
+  // the render rather than lending the report fields the ledger never bound.
   const remoteAuthorization =
     review == null
-      ? await readLedger(path.join(directory, "remote-authorization.json"), reviewId)
+      ? await readBoundRemoteAuthorization(storeRoot, reviewId, publication)
       : null;
   return { directory, review, publication, remoteAuthorization };
+}
+
+// Publishes fully written bytes at `filePath` only if nothing is there yet: the
+// temporary file is complete before the link, and link refuses an existing
+// target, so two renderers racing on one revision leave exactly one file and
+// neither ever sees the other's partial write.
+async function createExclusive(filePath, data) {
+  const temporary = `${filePath}.${crypto.randomBytes(16).toString("hex")}.tmp`;
+  const handle = await fsp.open(
+    temporary,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+    0o600,
+  );
+  try {
+    await handle.writeFile(data);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  try {
+    await fsp.link(temporary, filePath);
+    return true;
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    return false;
+  } finally {
+    await fsp.unlink(temporary).catch(() => {});
+  }
 }
 
 // Writes `report-r<revision>.md` beside the ledger and returns a receipt. The
 // ledger at a revision is immutable, so the report at that revision is too: an
 // existing file is kept as it is rather than rewritten with a fresh render
-// time. The Markdown itself stays in the file: a report can run to megabytes,
-// and the driver that calls this after a gate needs the path, not the bytes.
+// time, and the receipt always describes the bytes actually at the path. The
+// Markdown itself stays in the file: a report can run to megabytes, and the
+// driver that calls this after a gate needs the path, not the bytes.
 export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}) {
   const { directory, review, publication, remoteAuthorization } =
     await loadReportLedgers(storeRoot, reviewId);
@@ -614,22 +650,17 @@ export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}
     directory,
     review == null ? `report-${revision}.md` : `report-r${revision}.md`,
   );
-  let bytes;
   let reused = true;
-  try {
-    bytes = await fsp.readFile(filePath);
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
+  if (!fs.existsSync(filePath)) {
     const markdown = renderReviewReport(review, {
       publication,
       remoteAuthorization,
       renderedAt,
       ledgerDirectory: directory,
     });
-    await atomicWriteFile(filePath, markdown);
-    bytes = Buffer.from(markdown, "utf8");
-    reused = false;
+    reused = !(await createExclusive(filePath, markdown));
   }
+  const bytes = await fsp.readFile(filePath);
   return {
     review_id: reviewId,
     review_state_version: review == null ? null : (review.state_version ?? 0),

@@ -3006,6 +3006,15 @@ async function readBoundAuthorization(
   return actual;
 }
 
+// The report renders a remote-only publication from its authorization file,
+// and that file is admitted only by the same judge every publication read
+// uses: canonical bytes, the fields the authorization requires, and the
+// ledger's binding to it (head, base, source digest). A sidecar that was
+// edited, replaced, or belongs to another head fails here, not in the report.
+export async function readBoundRemoteAuthorization(storeRoot, reviewId, ledger) {
+  return readBoundAuthorization(pathsFor(storeRoot, reviewId), reviewId, ledger);
+}
+
 async function openAuthorizationFiles(
   paths,
   reviewId,
