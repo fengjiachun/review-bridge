@@ -741,7 +741,10 @@ writes a new report rather than reusing one that says otherwise. Both read every
 itself uses, so a publication that is not canonical, names another review, or
 is not bound to the gate or authorization file beside it fails the render with
 that reader's error, and a review ledger whose bytes, shape, or round snapshot
-commitments are not what the store wrote is refused as well. Neither changes a ledger, consumes a round, or touches
+commitments are not what the store wrote is refused as well. A review created
+before `worktree_clean` was recorded cannot be rendered: the store's own
+snapshot reproduction needs it, and the report keeps no second hash format
+(`ROUND_SNAPSHOT_UNREPRODUCIBLE`). Neither changes a ledger, consumes a round, or touches
 a gate. The workflow skill renders the report once `LOCAL_GATE_PASSED` is
 recorded and again once a publication reads `MERGE_READY`, and opens it in
 Plannotator when that tool is on PATH; annotations never flow back into the

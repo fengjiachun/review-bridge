@@ -606,6 +606,16 @@ function reviewLedgerDefect(review, reviewId) {
   return null;
 }
 
+// The round fields snapshotHashFromReviewRound hashes or checks the type of.
+// A round lacking one is older than the function and cannot be reproduced.
+const SNAPSHOT_HASH_INPUTS = [
+  ["changed_files", Array.isArray],
+  ["deleted_files", Array.isArray],
+  ["overlays", Array.isArray],
+  ["worktree_clean", (value) => typeof value === "boolean"],
+  ["patch_bytes", Number.isInteger],
+];
+
 function reviewLedgerInvalid(reviewId, filePath, reason) {
   return Object.assign(new Error(`review ledger ${reviewId} is invalid: ${reason}`), {
     code: "REVIEW_LEDGER_INVALID",
@@ -657,6 +667,29 @@ export async function loadValidatedReview(storeRoot, reviewId) {
       if (!(key in round) || canonicalJson(manifest[key]) !== canonicalJson(round[key])) {
         throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} ${key} differs from its immutable manifest`);
       }
+    }
+    // The snapshot commitment is reproduced by the store's own function, the
+    // one finalize, rereview, and the gate use. A round written before that
+    // function's inputs existed -- worktree_clean above all -- cannot be
+    // reproduced by the store at all, and is named as such rather than as a
+    // damaged ledger; no second hash format is kept for it.
+    const unreproducible = SNAPSHOT_HASH_INPUTS.filter(([field, ok]) => !ok(round[field]));
+    if (unreproducible.length > 0) {
+      throw Object.assign(
+        new Error(
+          `review ${reviewId} round ${round.round} predates ${unreproducible.map(([field]) => field).join(", ")}: the store cannot reproduce this round's snapshot hash`,
+        ),
+        {
+          code: "ROUND_SNAPSHOT_UNREPRODUCIBLE",
+          details: {
+            review_id: reviewId,
+            path: filePath,
+            round: round.round,
+            missing: unreproducible.map(([field]) => field),
+            reason: "the store cannot reproduce this round's snapshot hash",
+          },
+        },
+      );
     }
     let reproduced;
     try {
