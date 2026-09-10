@@ -54,7 +54,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   error and nothing is written, and a review created before `worktree_clean`
   was recorded is refused as `ROUND_SNAPSHOT_UNREPRODUCIBLE`, since the
   store's own snapshot reproduction needs it and no second hash format is
-  kept. Every reviewer- or author-supplied string is
+  kept; a continuation is held to its source through the same loader, its
+  own sources included and cycles refused, and a continuation prepared before
+  the source freeze, whose source never recorded it, is refused as well. Every reviewer- or author-supplied string is
   rendered as one escaped line or inside a fence longer than any backtick
   run it contains, so no finding title or rationale can open a heading,
   table row, or fence of its own. The

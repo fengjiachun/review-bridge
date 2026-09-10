@@ -230,8 +230,6 @@ const LEDGER_FINDING_STATUSES = [
 ];
 const LEDGER_DISPOSITIONS = ["fixed", "rejected", "human_required"];
 const LEDGER_RESPONSE_EVENTS = ["AUTHOR_RESPONDED", "AUTHOR_ESCALATED"];
-// When preparing a continuation began freezing its source (0.10.0).
-const CONTINUATION_FREEZE_SINCE = Date.parse("2026-09-01T00:00:00Z");
 const LEDGER_DECISIONS = ["resolved", "rebuttal_accepted", "still_open"];
 
 // Field tables. Every record kind the review ledger holds has one, placed
@@ -864,9 +862,19 @@ function reviewLedgerInvalid(reviewId, filePath, reason) {
 // immutable manifest and patch beside it, the way the gate reproduces the
 // clean round's. For readers that combine the review with other ledgers; the
 // tools' own read path is loadReview and is unchanged.
-export async function loadValidatedReview(storeRoot, reviewId) {
+export async function loadValidatedReview(storeRoot, reviewId, { visited = new Set() } = {}) {
   assertReviewId(reviewId);
   const filePath = reviewFile(storeRoot, reviewId);
+  // A continuation's source is validated the same way, and its source in
+  // turn; the chain is a line back to a first review, so a review met twice
+  // is a cycle, not a longer chain.
+  if (visited.has(reviewId)) {
+    throw Object.assign(new Error(`continuation chain cycles at ${reviewId}`), {
+      code: "CONTINUATION_CHAIN_CYCLE",
+      details: { review_id: reviewId, path: filePath, chain: [...visited] },
+    });
+  }
+  visited.add(reviewId);
   let bytes;
   try {
     bytes = await fsp.readFile(filePath);
@@ -899,11 +907,6 @@ export async function loadValidatedReview(storeRoot, reviewId) {
     ...(review.carried_findings ?? []).map((carried) => carried.continued_from_review_id),
     ...(review.errata ?? []).filter((erratum) => erratum.continued_from_review_id != null).map((erratum) => erratum.continued_from_review_id),
   ]);
-  // Continuations prepared before this release found their source unfrozen;
-  // the freeze that marks a source landed with 0.10.0 (2026-09-01), and no
-  // continuation prepared since can have an unmarked source.
-  const preparedAt = Date.parse(review.history[0]?.at ?? "");
-  const preparedBeforeFreeze = Number.isFinite(preparedAt) && preparedAt < CONTINUATION_FREEZE_SINCE;
   for (const sourceId of sources) {
     if (sourceId === reviewId) {
       throw Object.assign(new Error(`review ${reviewId} carries records from itself: a review cannot continue itself`), {
@@ -911,13 +914,25 @@ export async function loadValidatedReview(storeRoot, reviewId) {
         details: { review_id: reviewId, source_review_id: sourceId, path: filePath, reason: "a review cannot continue itself" },
       });
     }
+    // The source is held to everything this review is held to, through the
+    // same loader, its own sources included.
     let source;
     try {
-      source = await loadReview(storeRoot, sourceId);
+      source = await loadValidatedReview(storeRoot, sourceId, { visited });
     } catch (error) {
+      if (error?.code === "CONTINUATION_CHAIN_CYCLE") throw error;
+      if (error?.code === "REVIEW_NOT_FOUND") {
+        throw Object.assign(
+          new Error(`review ${reviewId} carries records from ${sourceId}, which is not in the store: ${error.message}`),
+          { code: "CONTINUATION_SOURCE_MISSING", details: { review_id: reviewId, source_review_id: sourceId, path: filePath } },
+        );
+      }
       throw Object.assign(
-        new Error(`review ${reviewId} carries records from ${sourceId}, which is not in the store: ${error.message}`),
-        { code: "CONTINUATION_SOURCE_MISSING", details: { review_id: reviewId, source_review_id: sourceId, path: filePath } },
+        new Error(`review ${reviewId} carries records from ${sourceId}, which does not validate: ${error.message}`),
+        {
+          code: "CONTINUATION_SOURCE_INVALID",
+          details: { review_id: reviewId, source_review_id: sourceId, path: filePath, source_code: error?.code ?? null, source_reason: error?.details?.reason ?? error?.message },
+        },
       );
     }
     const mismatch = (what) =>
@@ -927,16 +942,19 @@ export async function loadValidatedReview(storeRoot, reviewId) {
       });
     // The freeze records the continuation on the source as an event, one per
     // continuation, so a re-continued source still names every continuation;
-    // the mutable top-level marker names only the newest. Before the freeze
-    // existed a continuation left its source untouched, so a source with no
-    // freeze record of any kind -- no event, no marker -- is accepted only
-    // when this review itself was prepared before the freeze existed; a
-    // source that was frozen but never into this review, or an unmarked
-    // source behind a continuation prepared since, is a disagreement.
+    // the mutable top-level marker names only the newest. A source with no
+    // such event for this review is refused: either it was frozen into some
+    // other continuation, or the continuation predates the source freeze
+    // (0.10.0) and, like a round the store cannot reproduce, is not
+    // renderable. No exception by date or marker: neither can be bound.
     const continuedEvents = (source.history ?? []).filter((entry) => entry.event === "REVIEW_CONTINUED");
-    const everFrozen = continuedEvents.length > 0 || source.continued_by_review_id != null;
-    if (!continuedEvents.some((entry) => entry.continued_by_review_id === reviewId) && (everFrozen || !preparedBeforeFreeze)) {
-      throw mismatch(`records frozen from a source that never recorded continuation into ${reviewId}`);
+    if (!continuedEvents.some((entry) => entry.continued_by_review_id === reviewId)) {
+      const everFrozen = continuedEvents.length > 0 || source.continued_by_review_id != null;
+      throw mismatch(
+        everFrozen
+          ? `records frozen from a source that never recorded continuation into ${reviewId}`
+          : `records from a source that was never frozen: the continuation predates the source freeze; not renderable`,
+      );
     }
     const frozen = new Map(
       source.findings.filter((finding) => finding.status === "OPEN").map((finding) => [finding.id, finding]),

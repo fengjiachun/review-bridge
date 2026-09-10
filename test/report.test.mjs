@@ -1301,6 +1301,8 @@ test("the continuation marker must be the one the history's REVIEW_CONTINUED eve
   };
   await tamper((review) => { review.continued_by_review_id = "rb-2026-09-02T000000-000Z-0000c0de"; }, /continued_by_review_id "rb-2026-09-02T000000-000Z-0000c0de" is not the "rb-[^"]+" the history's REVIEW_CONTINUED event names/);
   await tamper((review) => { delete review.continued_by_review_id; }, /continued_by_review_id null is not the "rb-[^"]+" the history's REVIEW_CONTINUED event names/);
+  // Restored: the continuation validates its source through the same loader.
+  await fsp.writeFile(reviewPath, original, { mode: 0o600 });
   // The continuation itself carries the source's open finding and renders too.
   const continuation = await writeReviewReport(state.store, state.continuationId, { renderedAt: RENDERED_AT });
   assert.match(await fsp.readFile(continuation.path, "utf8"), new RegExp(`carried finding\\(s\\): \`F-002\` from \`${state.sourceId}\``));
@@ -1340,27 +1342,42 @@ test("the continuation marker must be the one the history's REVIEW_CONTINUED eve
     assert.match(error.message, new RegExp(`source that never recorded continuation into ${state.continuationId}`));
     return true;
   });
-  // A source with no freeze record at all is accepted only behind a
-  // continuation prepared before the freeze existed; this continuation was
-  // prepared today, so an unmarked source is a disagreement.
+  // A source with no freeze record at all is a continuation the source
+  // never vouched for -- the shape of a continuation prepared before the
+  // source freeze existed -- and is refused by that name, whatever the dates.
   const unfrozen = JSON.parse(sourceOriginal);
   unfrozen.history = unfrozen.history.filter((entry) => entry.event !== "REVIEW_CONTINUED");
   delete unfrozen.continued_by_review_id;
   await fsp.writeFile(sourcePath, `${JSON.stringify(unfrozen, null, 2)}\n`, { mode: 0o600 });
   await assert.rejects(writeReviewReport(state.store, state.continuationId), (error) => {
     assert.equal(error.code, "CONTINUATION_SOURCE_MISMATCH");
-    assert.match(error.message, /never recorded continuation into/);
+    assert.match(error.message, /the continuation predates the source freeze; not renderable/);
     return true;
   });
-  // The same pair with the continuation's own prepare backdated before the
-  // freeze existed: the pre-freeze writer's shape, accepted.
-  const backdated = JSON.parse(continuationOriginal);
-  backdated.history[0].at = "2026-08-20T00:00:00.000Z";
-  await fsp.writeFile(continuationPath, `${JSON.stringify(backdated, null, 2)}\n`, { mode: 0o600 });
-  const fromUnfrozen = await writeReviewReport(state.store, state.continuationId, { renderedAt: RENDERED_AT });
-  assert.equal(fromUnfrozen.reused, false);
-  await fsp.rm(fromUnfrozen.path);
-  await fsp.writeFile(continuationPath, continuationOriginal, { mode: 0o600 });
+  // The source is validated as the continuation is: a source stripped of
+  // its rounds (no manifest, no patch) fails its own validation, named
+  // apart with the source's error carried along.
+  await fsp.writeFile(sourcePath, sourceOriginal, { mode: 0o600 });
+  await fsp.rename(path.join(state.store, "reviews", state.sourceId, "rounds"), path.join(state.store, "reviews", state.sourceId, "rounds.away"));
+  await assert.rejects(writeReviewReport(state.store, state.continuationId), (error) => {
+    assert.equal(error.code, "CONTINUATION_SOURCE_INVALID");
+    assert.equal(error.details.source_review_id, state.sourceId);
+    assert.equal(error.details.source_code, "REVIEW_LEDGER_INVALID");
+    assert.match(error.details.source_reason, /manifest unreadable/);
+    return true;
+  });
+  await fsp.rename(path.join(state.store, "reviews", state.sourceId, "rounds.away"), path.join(state.store, "reviews", state.sourceId, "rounds"));
+  // Two reviews carrying from each other: the chain cycles, and is refused
+  // as such rather than walked forever.
+  const cyclic = JSON.parse(sourceOriginal);
+  const back = JSON.parse(continuationOriginal).carried_findings[0];
+  cyclic.carried_findings = [{ ...back, continued_from_review_id: state.continuationId }];
+  await fsp.writeFile(sourcePath, `${JSON.stringify(cyclic, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.continuationId), (error) => {
+    assert.equal(error.code, "CONTINUATION_CHAIN_CYCLE");
+    assert.deepEqual(error.details.chain, [state.continuationId, state.sourceId]);
+    return true;
+  });
   await fsp.writeFile(sourcePath, sourceOriginal, { mode: 0o600 });
   // A review cannot continue itself, whatever the dates.
   await tamperContinuation((ledger) => { ledger.carried_findings[0].continued_from_review_id = ledger.id; }, "CONTINUATION_SOURCE_MISMATCH", /a review cannot continue itself/);

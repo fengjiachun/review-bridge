@@ -744,7 +744,10 @@ that reader's error, and a review ledger whose bytes, shape, or round snapshot
 commitments are not what the store wrote is refused as well. A review created
 before `worktree_clean` was recorded cannot be rendered: the store's own
 snapshot reproduction needs it, and the report keeps no second hash format
-(`ROUND_SNAPSHOT_UNREPRODUCIBLE`). Neither changes a ledger, consumes a round, or touches
+(`ROUND_SNAPSHOT_UNREPRODUCIBLE`). Nor can a continuation prepared before the
+source freeze: its source never recorded it, and the report accepts no
+continuation its source does not vouch for (`CONTINUATION_SOURCE_MISMATCH`);
+a source is validated the way the continuation is, its own sources included. Neither changes a ledger, consumes a round, or touches
 a gate. The workflow skill renders the report once `LOCAL_GATE_PASSED` is
 recorded and again once a publication reads `MERGE_READY`, and opens it in
 Plannotator when that tool is on PATH; annotations never flow back into the
