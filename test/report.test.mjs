@@ -1275,6 +1275,31 @@ test("a review ledger edited in place is refused as REVIEW_LEDGER_INVALID", asyn
   assert.equal(written.reused, false);
 });
 
+// A round written before worktree_clean existed cannot have its snapshot
+// hash reproduced by the store's own function, and is refused by that name
+// rather than as a damaged ledger; the report keeps no second hash format.
+test("a round older than the store's snapshot inputs is refused as unreproducible, by name", async (t) => {
+  const state = await gatedFixture(t);
+  const directory = reviewDirectory(state);
+  const reviewPath = path.join(directory, "review.json");
+  const manifestPath = path.join(directory, "rounds", "1", "manifest.json");
+  const review = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  const manifest = JSON.parse(await fsp.readFile(manifestPath, "utf8"));
+  delete review.rounds[0].worktree_clean;
+  delete manifest.worktree_clean;
+  await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
+  await fsp.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+    assert.equal(error.code, "ROUND_SNAPSHOT_UNREPRODUCIBLE");
+    assert.equal(error.details.round, 1);
+    assert.deepEqual(error.details.missing, ["worktree_clean"]);
+    assert.equal(error.details.reason, "the store cannot reproduce this round's snapshot hash");
+    assert.match(error.message, /predates worktree_clean/);
+    return true;
+  });
+  assert.ok(!(await fsp.readdir(directory)).some((name) => name.startsWith("report-")));
+});
+
 // A LOCAL_GATE_PASSED review minted its gate; a store without it, or with a
 // gate that does not attest the review's clean snapshot, is incomplete and is
 // not rendered as a passed gate.
