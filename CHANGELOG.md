@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.12.0 - 2026-09-10
 
 ### Changed
 
@@ -95,6 +95,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `--skip-git-repo-check` reason, and the absence of the bypass flag from the
   whole section; the `CLAUDE_DESKTOP` boundary and the HERMES and DeepSeek
   Harness sections are untouched.
+
+### Fixed
+
+- Move the lockfile past the `hono` advisories `npm audit` reports against
+  the transitive dependency of `@modelcontextprotocol/sdk`, which failed the
+  audit step on every pull request. `hono` goes from 4.12.34 to 4.13.7,
+  lockfile only, with no change to `package.json`. (#116)
 
 ## 0.11.0 - 2026-09-05
 
