@@ -11,6 +11,33 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Changed
 
+- The HERMES and DeepSeek Harness dispatch sections state their launch
+  discipline as what must never happen rather than as a count of launches,
+  issue #110 and issue #112 (#117). "One new instance per `review_id`" and
+  "One new session per `review_id`" give way to the two bars the
+  `CODEX_TASK` section adopted on #108 — never two reviewers on the same
+  round at once, never review from the author profile — with launches
+  unrationed within them, so a DeepSeek Harness round two, which is a fresh
+  launch, is that review's next round rather than the launch the count
+  forbade, and a HERMES round two, still a resume of the round-one instance,
+  reads as round two's launch rather than as an exception. Both sections gain
+  the replacement rule: a launch that exited without submitting a verdict — a
+  nonzero exit, or a zero exit with nothing in the ledger — is replaced in the
+  same shape, judged by the process having exited and never by
+  `wait_for_review_state` timing out, since replacing a merely slow reviewer
+  creates exactly the concurrent pair the first bar forbids; a HERMES
+  round-one replacement is a fresh instance, whose `session_id:` is the one
+  round two resumes. Both launches may run unattended under the 2026-09-04
+  dispatch ruling, each section speaking for its own launch only, and the
+  "operator-present manual flow" framing is gone from both sections and both
+  packaged READMEs. `SHARED_REQUIREMENTS` in `scripts/dispatch-contract.mjs`
+  drops the launch count and the operator-present anchor and pins the two
+  bars, the replacement rule and its exit judge, the unattended clearance,
+  and the unchanged `CLAUDE_DESKTOP` boundary, and both provider contracts
+  refuse the count-style and operator-present wordings on their own
+  sections; the round-two anchors are per provider, because the two
+  runtimes' round two differ. The `CODEX_TASK` section and the
+  `CLAUDE_DESKTOP` boundary are untouched.
 - The unattended `CODEX_TASK` launch drops
   `--dangerously-bypass-approvals-and-sandbox` and runs the reviewer inside
   Codex's own `workspace-write` sandbox, on codex-cli 0.153.4 or newer

@@ -809,13 +809,15 @@ shell launch between them.
    finding from the ledger and, after `submit_resolutions`, every persisted
    disposition.
 
-The launch discipline is fixed. One new instance per `review_id`: never resume
-or continue an existing Hermes session for a new review, never launch the
-author profile to review, and never pass any authoring history — not the diff
-you wrote, the requirement discussion, your reasoning, or this session's
-transcript. That request is the whole handoff.
+The launch discipline is fixed, and it states what must never happen rather
+than counting launches. Never run two reviewers on the same round at once, and
+never review from the author profile: never launch the author profile to
+review, never resume or continue an existing Hermes session for a new review,
+and never pass any authoring history — not the diff you wrote, the requirement
+discussion, your reasoning, or this session's transcript. Within those two
+bars launches are not rationed. That request is the whole handoff.
 
-Only a round-two rereview of the same `review_id` may resume the instance that
+A round-two rereview of the same `review_id` resumes the instance that
 produced round one, in the same shape as the launch:
 
 ```bash
@@ -823,7 +825,24 @@ hermes -p <reviewer-profile> chat --resume <session-id> -q '<rereview request>'
 ```
 
 Send it the same review ID and a request to rereview the author's resolutions
-with the packaged reviewer skill.
+with the packaged reviewer skill. That resume is round two's launch, so it is
+required rather than an exception, and it starts no second reviewer: the
+resumed instance is the one reviewer on that round.
+
+A launch that has exited without submitting a verdict — a nonzero exit, or a
+zero exit with nothing recorded in the ledger — leaves that round with no
+reviewer working it, so start a replacement launch in the same shape as the
+original; that replacement is the same round, and both bars still hold,
+because the reviewer it replaces is gone. Judge that by the process having
+exited, never by `wait_for_review_state` timing out: a timeout says the round
+is unfinished, not that the reviewer is gone, and replacing a reviewer that is
+merely slow creates exactly the concurrent pair the first bar forbids. The
+driver started the process, so it has the exit status to judge by. A
+round-one replacement is a fresh instance, not a resume: the launch it
+replaces produced no round one, so there is nothing to resume, and the
+replacement's own `session_id:` line is the one round two resumes. A
+round-two replacement resumes the round-one instance again, as the launch it
+replaces did.
 
 Launch it outside the repository under review. Hermes injects project context
 from the working directory — the first of `.hermes.md`, `AGENTS.md`,
@@ -839,11 +858,16 @@ repository by recorded path, never from its own working directory. Its
 `SOUL.md`, memory, and skills come from the reviewer profile's Hermes home,
 which `-p` already separates.
 
-This is the operator-present manual flow, and the operator's presence is what
-attests that the reviewer was launched this way. Review Bridge records the
-review's `HERMES` binding; it observes nothing about how the instance was
-started, and this section adds no mechanism that would. The autonomous
-workflow above continues to accept `CODEX_TASK` dispatch only.
+This launch may run unattended; it needs no operator at the keyboard. The
+tool prompt step 3 warns of is the one way it can stall, and the launch output
+is where that shows. Review Bridge records the review's `HERMES` binding; it
+observes nothing about how the instance was started, and this section adds no
+mechanism that would. The autonomous workflow above continues to accept
+`CODEX_TASK` dispatch only. The `CLAUDE_DESKTOP` boundary is unchanged, and
+nothing above narrows it: never launch, script, or otherwise programmatically
+invoke a Claude reviewer from this session — the operator opens that
+conversation themselves, an account-compliance boundary rather than a
+convenience.
 
 ## Dispatching a DEEPSEEK_HARNESS review
 
@@ -884,13 +908,16 @@ the shell launch between them.
    finding from the ledger and, after `submit_resolutions`, every persisted
    disposition.
 
-The launch discipline is fixed. One new session per `review_id`: never
-continue an existing DeepSeek Harness session for a new review, never launch
-the author profile to review, and never pass any authoring history — not the
-diff you wrote, the requirement discussion, your reasoning, or this session's
-transcript. That request is the whole handoff.
+The launch discipline is fixed, and it states what must never happen rather
+than counting launches. Never run two reviewers on the same round at once, and
+never review from the author profile: never launch the author profile to
+review, never continue an existing DeepSeek Harness session for a new review,
+and never pass any authoring history — not the diff you wrote, the requirement
+discussion, your reasoning, or this session's transcript. Within those two
+bars launches are not rationed. That request is the whole handoff.
 
-A round-two rereview of the same `review_id` is another launch in the same
+A round-two rereview of the same `review_id` is that review's next round, so
+its launch is required rather than an exception: another launch in the same
 shape, carrying the same review ID and a request to rereview the author's
 resolutions with the packaged reviewer skill:
 
@@ -908,6 +935,18 @@ already requires each `rebuttal_accepted` decision to carry verification the
 reviewer performed itself rather than recalled, so the evidence bar is the one
 a resumed context would have faced.
 
+A launch that has exited without submitting a verdict — a nonzero exit, or a
+zero exit with nothing recorded in the ledger — leaves that round with no
+reviewer working it, so start a replacement launch in the same shape as the
+original; that replacement is the same round, and both bars still hold,
+because the reviewer it replaces is gone. Judge that by the process having
+exited, never by `wait_for_review_state` timing out: a timeout says the round
+is unfinished, not that the reviewer is gone, and replacing a reviewer that is
+merely slow creates exactly the concurrent pair the first bar forbids. The
+driver started the process, so it has the exit status to judge by, and for
+this runtime that is the whole signal: the headless run is silent until it
+ends, so the zero exit that submitted nothing shows only in the ledger.
+
 Launch it outside the repository under review. The invoking directory is the
 session's workspace root, and DeepSeek Harness loads `AGENTS.md` and
 `CLAUDE.md` from the project root — the nearest `.git` ancestor — down to that
@@ -922,11 +961,16 @@ from its own working directory. Its skills and user-global instructions come
 from the packaged reviewer profile snippet, which scopes both to the release
 directory.
 
-This is the operator-present manual flow, and the operator's presence is what
-attests that the reviewer was launched this way. Review Bridge records the
-review's `DEEPSEEK_HARNESS` binding; it observes nothing about how the session
-was started, and this section adds no mechanism that would. The autonomous
-workflow above continues to accept `CODEX_TASK` dispatch only.
+This launch may run unattended; it needs no operator at the keyboard: the
+headless runner takes its one task from the command line and runs to its
+exit. Review Bridge records the review's `DEEPSEEK_HARNESS` binding; it
+observes nothing about how the session was started, and this section adds no
+mechanism that would. The autonomous workflow above continues to accept
+`CODEX_TASK` dispatch only. The `CLAUDE_DESKTOP` boundary is unchanged, and
+nothing above narrows it: never launch, script, or otherwise programmatically
+invoke a Claude reviewer from this session — the operator opens that
+conversation themselves, an account-compliance boundary rather than a
+convenience.
 
 ## Handle findings
 

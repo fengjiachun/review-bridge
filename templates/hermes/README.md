@@ -119,21 +119,40 @@ above requires is unchanged; only who performs the launch changes.
    report each disposition after the author records it — reading both from the
    review ledger rather than from chat text.
 
-One new instance per review ID. Never resume or continue an existing Hermes
-session for a new review, never launch the author profile to review, and never
-pass any authoring history — the diff, the requirement discussion, the
-author's reasoning, or the driver session's transcript. That request is the
-whole handoff.
+The launch discipline states what must never happen rather than counting
+launches. Never run two reviewers on the same round at once, and never review
+from the author profile: never launch the author profile to review, never
+resume or continue an existing Hermes session for a new review, and never pass
+any authoring history — the diff, the requirement discussion, the author's
+reasoning, or the driver session's transcript. Within those two bars launches
+are not rationed. That request is the whole handoff.
 
-Only a round-two rereview of the same review ID may resume the instance that
-produced round one, in the same shape as the launch:
+A round-two rereview of the same review ID resumes the instance that produced
+round one, in the same shape as the launch:
 
 ```bash
 hermes -p <reviewer-profile> chat --resume <session-id> -q '<rereview request>'
 ```
 
 Send it the same review ID and a request to rereview the author's resolutions
-with the packaged reviewer skill.
+with the packaged reviewer skill. That resume is round two's launch, so it is
+required rather than an exception, and it starts no second reviewer: the
+resumed instance is the one reviewer on that round.
+
+A launch that has exited without submitting a verdict — a nonzero exit, or a
+zero exit with nothing recorded in the ledger — leaves that round with no
+reviewer working it, so start a replacement launch in the same shape as the
+original; that replacement is the same round, and both bars still hold,
+because the reviewer it replaces is gone. Judge that by the process having
+exited, never by `wait_for_review_state` timing out: a timeout says the round
+is unfinished, not that the reviewer is gone, and replacing a reviewer that is
+merely slow creates exactly the concurrent pair the first bar forbids. The
+driver started the process, so it has the exit status to judge by. A
+round-one replacement is a fresh instance, not a resume: the launch it
+replaces produced no round one, so there is nothing to resume, and the
+replacement's own `session_id:` line is the one round two resumes. A
+round-two replacement resumes the round-one instance again, as the launch it
+replaces did.
 
 Launch it outside the repository under review. Hermes injects project context
 from the working directory — the first of `.hermes.md`, `AGENTS.md`,
@@ -149,11 +168,16 @@ from the author's repository by recorded path, never from its own working
 directory. Its `SOUL.md`, memory, and skills come from the reviewer profile's
 Hermes home, which `-p` already separates.
 
-This is the operator-present manual flow, and the operator's presence is what
-attests that the reviewer was launched this way. Review Bridge records the
-review's `HERMES` binding; it observes nothing about how the instance was
-started, and this section adds no mechanism that would. Local autonomous task
-creation still accepts `CODEX_TASK` dispatch only.
+This launch may run unattended; it needs no operator at the keyboard. The
+tool prompt step 3 warns of is the one way it can stall, and the launch output
+is where that shows. Review Bridge records the review's `HERMES` binding; it
+observes nothing about how the instance was started, and this section adds no
+mechanism that would. Local autonomous task creation still accepts
+`CODEX_TASK` dispatch only. The `CLAUDE_DESKTOP` boundary is unchanged, and
+nothing above narrows it: never launch, script, or otherwise programmatically
+invoke a Claude reviewer from the driver session — the operator opens that
+conversation themselves, an account-compliance boundary rather than a
+convenience.
 
 ## Upgrade
 

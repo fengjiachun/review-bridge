@@ -36,12 +36,39 @@ const SHARED_REQUIREMENTS = [
   ],
   ["the request is single-quoted", /[Ss]ingle-quote that request[\s\S]*?backticks/],
   ["the launch does not block the wait", /background it or use a separate terminal/],
+  // Stated as prohibitions rather than a count, the form CODEX_TASK moved to
+  // on #108. A count of launches per review or per round forbids some launch
+  // the round needs — round two, or a replacement for a reviewer that
+  // exited without submitting — so the rule names the two conditions it
+  // protects and leaves launches unrationed within them. What round two is
+  // differs by runtime, so each provider's list below states its own.
   [
-    "one launch per review",
-    /[Oo]ne new (?:instance|session) per (?:`review_id`|review ID)/,
+    "the discipline states prohibitions rather than a count",
+    /states what must never happen rather than counting launches/,
   ],
+  [
+    "no two reviewers on one round at once",
+    /Never run two reviewers on the same round at once/,
+  ],
+  ["no reviewing from the author profile", /never review from the author profile/],
   ["no author profile", /[Nn]ever launch the author profile to review/],
   ["no authoring history", /[Nn]ever pass any authoring history/],
+  // Without a replacement the round strands: the reviewer is gone, the state
+  // never moves, and the wait can only keep timing out.
+  [
+    "a launch that exited without a verdict is replaced",
+    /exited without submitting a verdict[\s\S]*?start a replacement launch in the same shape as the original/,
+  ],
+  // The distinction the replacement rule stands on. A timeout is not death,
+  // and replacing a slow reviewer manufactures the pair the first bar bans.
+  [
+    "the replacement is judged by the process exit, not by the wait",
+    /Judge that by the process having exited, never by `wait_for_review_state` timing out/,
+  ],
+  [
+    "replacing a merely slow reviewer would create the forbidden pair",
+    /replacing a reviewer that is merely slow creates exactly the concurrent pair the first bar forbids/,
+  ],
   // Both runtimes inject project context from the working directory, so a
   // reviewer launched inside the authoring worktree inherits that workspace's
   // rules.
@@ -49,24 +76,48 @@ const SHARED_REQUIREMENTS = [
     "the launch happens outside the repository under review",
     /[Ll]aunch it outside the repository under review/,
   ],
-  // The boundary these contracts must never quietly lose.
-  ["the flow is operator-present", /operator-present manual flow/],
+  // The 2026-09-04 ruling: unattended shell dispatch is cleared for every
+  // non-Claude provider. Each section says so for its own launch only.
+  ["the dispatch may run unattended", /may run unattended/],
   [
     "nothing verifies the dispatch",
     /observes nothing about how the (?:instance|session) was started/,
   ],
   ["autonomous dispatch stays CODEX_TASK-only", /`CODEX_TASK` dispatch only/],
+  // The boundary these contracts must never quietly lose: an unattended
+  // HERMES or DeepSeek Harness launch is cleared, a programmatic Claude
+  // launch never is.
+  [
+    "the Claude boundary is unchanged",
+    /[Nn]ever launch, script, or otherwise programmatically invoke a Claude reviewer/,
+  ],
+  ["the Claude boundary is a compliance line", /account-compliance boundary/],
+];
+
+// The two forms the discipline must not drift back to, guarded on the section
+// body so the `CLAUDE_DESKTOP` sentence — which does say the operator opens
+// that conversation — is out of their reach.
+const SHARED_STRUCTURAL = [
+  [
+    "doesNotMatch",
+    /[Oo]ne new (?:instance|session) per (?:`review_id`|review ID)/,
+    "the discipline regressed to a launch count",
+  ],
+  [
+    "doesNotMatch",
+    /operator-present manual flow/,
+    "the launch regressed to an operator-present flow",
+  ],
 ];
 
 // CODEX_TASK does not reuse SHARED_REQUIREMENTS. Those claims are worded for a
-// reviewer "instance" or "session" that the operator is present to launch, and
-// they close each provider's section by handing autonomous dispatch back to
-// CODEX_TASK. CODEX_TASK is that provider: it launches a "task", it may run
-// unattended, and its launch has a boundary the other two do not — Codex's
-// own `workspace-write` sandbox around the reviewer's shell, with the MCP
-// calls that sandbox leaves gated routed to Codex's guardian subagent. So its
-// contract states the genuinely shared claims itself and adds the ones only
-// that launch makes true.
+// reviewer "instance" or "session" launched from a profile, and they close
+// each provider's section by handing autonomous dispatch back to CODEX_TASK.
+// CODEX_TASK is that provider: it launches a "task", and its launch has a
+// boundary the other two do not — Codex's own `workspace-write` sandbox
+// around the reviewer's shell, with the MCP calls that sandbox leaves gated
+// routed to Codex's guardian subagent. So its contract states the genuinely
+// shared claims itself and adds the ones only that launch makes true.
 export const CODEX_TASK_DISPATCH_CONTRACT = {
   requirements: [
     [
@@ -344,7 +395,7 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // section claimed unattended dispatch was cleared for all three
     // shell-launchable providers, which contradicted the HERMES and DeepSeek
     // Harness sections still calling themselves operator-present. This section
-    // speaks for its own launch only; aligning the other two is separate work.
+    // speaks for its own launch only; the other two speak for theirs.
     [
       "the section makes no claim about the other providers' launches",
       /What the HERMES and DeepSeek Harness sections require of their own launches is stated there and is neither changed nor described by this one/,
@@ -433,12 +484,31 @@ export const HERMES_DISPATCH_CONTRACT = {
       "no context reuse",
       /[Nn]ever resume or continue an existing Hermes session for a new review/,
     ],
+    // Round two on this runtime is a resume of the round-one instance, and it
+    // has to be read as that round's launch rather than as a second reviewer
+    // beside the first — or as an exception the two bars carve out.
+    [
+      "round two resumes the round-one instance",
+      /[Aa] round-two rereview of the same (?:`review_id`|review ID) resumes the instance that produced round one/,
+    ],
+    [
+      "the resume is round two's launch, required rather than excepted",
+      /That resume is round two's launch, so it is required rather than an exception/,
+    ],
+    // A replacement in round one cannot resume: the launch it replaces
+    // produced no round one. Losing this leaves a driver resuming a dead
+    // session, or holding a `session_id:` from the wrong instance.
+    [
+      "a round-one replacement is a fresh instance whose session id round two resumes",
+      /round-one replacement is a fresh instance, not a resume[\s\S]*?replacement's own `session_id:` line is the one round two resumes/,
+    ],
     [
       "the working directory is redirectable",
       /`--in <directory outside the worktree>`/,
     ],
   ],
   structural: [
+    ...SHARED_STRUCTURAL,
     // The launch must stay non-interactive and must not hold the shell. A bare
     // `hermes -p <profile> chat` is an interactive REPL: a driver session can
     // neither hand it the reviewer request nor reach the wait while it blocks.
@@ -476,6 +546,13 @@ export const DEEPSEEK_HARNESS_DISPATCH_CONTRACT = {
       "no context reuse",
       /[Nn]ever continue an existing DeepSeek Harness session for a new review/,
     ],
+    // Round two on this runtime is another launch, so it is the launch the
+    // count-style rule read as forbidden (#110); the section has to say it is
+    // the next round the rule requires.
+    [
+      "a round-two launch is required by the rule rather than excepted from it",
+      /[Aa] round-two rereview of the same (?:`review_id`|review ID) is that review's next round, so its launch is required rather than an exception/,
+    ],
     // The whole reason this provider needs no resume: the headless runner mints
     // a fresh session per invocation and names none, so round two is rebuilt
     // from the ledger rather than inherited. Losing this claim would leave a
@@ -501,6 +578,7 @@ export const DEEPSEEK_HARNESS_DISPATCH_CONTRACT = {
     ],
   ],
   structural: [
+    ...SHARED_STRUCTURAL,
     // The launch is a one-shot headless run taking the request as its only
     // positional. Without one, `dsh --profile <name>` boots whatever surface
     // the profile's bundles select and never reads a task.
