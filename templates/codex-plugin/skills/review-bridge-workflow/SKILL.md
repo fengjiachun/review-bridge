@@ -842,9 +842,11 @@ otherwise carries what the host launch carries — the guardian as approver,
 the granular refusal, memories pinned off, the author server disabled, stdin
 closed — plus the reviewer server restated at its container path with the
 store's container path in its environment. Egress goes only through a sidecar
-proxy on an internal Docker network that admits `chatgpt.com` and
-`api.openai.com`, allowlisted by CONNECT host and by the TLS SNI the client
-then presents, and refuses every other host: `curl https://example.com`
+proxy on an internal Docker network that admits `chatgpt.com`,
+`api.openai.com`, and `auth.openai.com` (the token refresh endpoint; refreshed
+tokens are not persisted back, since `auth.json` is read-only in the
+container), allowlisted by CONNECT host and by the TLS SNI the client then
+presents, and refuses every other host: `curl https://example.com`
 from inside fails through the proxy and has no route without it, while the
 model calls complete (measured 2026-09-10). On exit the launcher prints the
 three criteria it verified — the reviewer's MCP calls completed inside the

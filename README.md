@@ -457,7 +457,8 @@ never copied back — the verdict is replayed through the host's own
 `submit_review` under the review's state lock and kept only if the replay
 equals the staged ledger), an isolated
 `CODEX_HOME`, and egress only through a sidecar proxy that admits
-`chatgpt.com` and `api.openai.com`. Inside the container the reviewer runs
+`chatgpt.com`, `api.openai.com`, and `auth.openai.com`, by CONNECT host and
+by the TLS SNI the client then presents. Inside the container the reviewer runs
 with `--sandbox danger-full-access`; the container's own default confinement
 is the boundary and is not weakened to fit Codex's nested sandbox. The
 launcher fails closed without Docker and prints the three criteria it

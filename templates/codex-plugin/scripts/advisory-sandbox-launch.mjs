@@ -27,7 +27,13 @@ const MARKETPLACE_NAME = "review-bridge-local";
 const PLUGIN_NAME = "review-bridge";
 const AUTHOR_SERVER = "review-bridge-author";
 const REVIEWER_SERVER = "review-bridge-reviewer";
-const EGRESS_ALLOW = ["chatgpt.com", "api.openai.com"];
+// chatgpt.com carries the model calls in ChatGPT-token mode, api.openai.com
+// in API-key mode, and auth.openai.com is the token refresh endpoint an
+// expired ChatGPT token is renewed against mid-run. Refreshed tokens are not
+// persisted back: auth.json is read-only in the container, so the next run
+// refreshes again.
+const EGRESS_ALLOW = ["chatgpt.com", "api.openai.com", "auth.openai.com"];
+const listOf = (names) => `${names.slice(0, -1).join(", ")}, and ${names.at(-1)}`;
 const PROXY_PORT = 3128;
 const PROXY_ALIAS = "egress";
 // Every proxy variable a client may read, pinned explicitly: the Docker CLI
@@ -118,8 +124,10 @@ const USAGE = `Usage: advisory-sandbox-launch.mjs --review-id <id> [--store <pat
   plus @openai/codex@${CODEX_VERSION}) is built on first use and reused.
   The operator's ~/.codex/auth.json is bind-mounted read-only and never copied
   into an image layer. Egress from the container goes only through a sidecar
-  proxy that admits ${EGRESS_ALLOW.join(" and ")}, allowlisted by CONNECT host
-  and by the TLS SNI the client then presents; everything else is refused.
+  proxy that admits ${listOf(EGRESS_ALLOW)}, allowlisted by CONNECT host and by
+  the TLS SNI the client then presents; everything else is refused. The last
+  is the token refresh endpoint; refreshed tokens are not persisted back
+  (auth.json is read-only in the container).
 
   On exit the launcher prints the three criteria it just verified — the
   reviewer's MCP calls completed inside the container, the host filesystem
@@ -146,9 +154,19 @@ const USAGE = `Usage: advisory-sandbox-launch.mjs --review-id <id> [--store <pat
   launcher does not touch how auth.json is produced.
 `;
 
+// Every exit goes through process.exitCode and a natural return, never
+// process.exit() after a write: stdout and stderr may be pipes, and a write
+// followed by process.exit() can lose its tail when the reader is slow. fail()
+// therefore throws, and the top level turns the throw into the exit code.
+class LaunchFailure extends Error {
+  constructor(message, code) {
+    super(message);
+    this.code = code;
+  }
+}
+
 function fail(message, code = 2) {
-  process.stderr.write(`advisory-sandbox-launch: ${message}\n`);
-  process.exit(code);
+  throw new LaunchFailure(message, code);
 }
 
 function shellQuote(value) {
@@ -288,8 +306,8 @@ function runEgressProxy() {
         deny(parsed.name);
         return;
       }
+      log("allow", "connect", request.url);
       const upstream = net.connect(upstreamPort, host, () => {
-        log("allow", "connect", request.url);
         upstream.write(buffered);
         upstream.pipe(socket);
         socket.pipe(upstream);
@@ -835,7 +853,7 @@ for (const target of spec.ancestors) {
   try { children = fs.readdirSync(target); } catch {}
   emit({ kind: "ancestor", path: target, children });
 }
-if (spec.mode === "baseline") process.exit(0);
+if (spec.mode !== "baseline") {
 const head = spawnSync("git", ["-C", spec.checkout, "rev-parse", "HEAD"], { encoding: "utf8" });
 emit({ kind: "checkout-head", value: ((head.stdout || "") + (head.stderr || "")).trim() });
 let writable = false;
@@ -856,6 +874,7 @@ for (const name of ${JSON.stringify(Object.keys(PROXY_ENV))}) direct[name] = "";
 emit({ kind: "egress", via: "direct", ...curl(direct) });
 emit({ kind: "codex-version", value: (spawnSync("codex", ["--version"], { encoding: "utf8" }).stdout || "").trim() });
 emit({ kind: "uid", value: process.getuid() });
+}
 `;
 
 // mode "baseline" runs in a container without the checkout mount and answers
@@ -1320,7 +1339,7 @@ async function main() {
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.on(signal, () => {
       cleanup();
-      process.exit(130);
+      process.stderr.write("advisory-sandbox-launch: interrupted\n", () => process.exit(130));
     });
   }
 
@@ -1378,7 +1397,7 @@ async function main() {
     elapsed = (Date.now() - started) / 1000;
   } catch (error) {
     cleanup();
-    fail(error.message, 1);
+    fail(error instanceof LaunchFailure ? error.message : error.message, error instanceof LaunchFailure ? error.code : 1);
   } finally {
     cleanup();
   }
@@ -1466,7 +1485,17 @@ async function main() {
   ];
   process.stdout.write(lines.join("\n"));
   const failed = criteria.some(([, ok]) => !ok);
-  process.exit(codexExit !== 0 ? codexExit || 1 : failed ? 1 : 0);
+  process.exitCode = codexExit !== 0 ? codexExit || 1 : failed ? 1 : 0;
 }
 
-await main();
+try {
+  await main();
+} catch (error) {
+  if (error instanceof LaunchFailure) {
+    process.stderr.write(`advisory-sandbox-launch: ${error.message}\n`);
+    process.exitCode = error.code;
+  } else {
+    process.stderr.write(`advisory-sandbox-launch: ${error?.stack ?? error}\n`);
+    process.exitCode = 1;
+  }
+}

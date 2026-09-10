@@ -52,8 +52,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   container the launch is `--sandbox danger-full-access`: Codex's nested bubblewrap does not start under
   Docker's default confinement, and the container's own confinement is kept
   rather than relaxed to fit a second sandbox. Egress goes only through a
-  sidecar proxy on an internal Docker network that admits `chatgpt.com` and
-  `api.openai.com`, allowlisted by CONNECT host and by the TLS SNI the client
+  sidecar proxy on an internal Docker network that admits `chatgpt.com`,
+  `api.openai.com`, and `auth.openai.com` (the token refresh endpoint;
+  refreshed tokens are not persisted back, since `auth.json` is read-only in
+  the container), allowlisted by CONNECT host and by the TLS SNI the client
   then presents (a ClientHello naming another host, no SNI, or a first record
   that is not a ClientHello closes the tunnel before any byte goes upstream,
   so the allowlist cannot be fronted); `https://example.com` fails through the

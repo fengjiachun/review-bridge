@@ -277,7 +277,8 @@ test("--help states the launch, the mounts, the egress allowlist, and the residu
   assert.match(result.stdout, /under \/private\/tmp\/ or\s+\/Volumes\/, because Docker Desktop stops serving files there/);
   assert.match(result.stdout, /the validated verdict was copied back to the host store/);
   assert.match(result.stdout, /auth\.json is bind-mounted read-only and never copied\s+into an image layer/);
-  assert.match(result.stdout, /admits chatgpt\.com and api\.openai\.com, allowlisted by CONNECT host\s+and by the TLS SNI the client then presents/);
+  assert.match(result.stdout, /admits chatgpt\.com, api\.openai\.com, and auth\.openai\.com, allowlisted by CONNECT host and by\s+the TLS SNI the client then presents/);
+  assert.match(result.stdout, /refreshed tokens are not persisted back\s+\(auth\.json is read-only in the container\)/);
   assert.match(result.stdout, /Residual: the one host secret inside the container is auth\.json/);
 });
 
@@ -760,7 +761,11 @@ test("the launcher source keeps the container's default confinement and the read
   assert.match(source, /\[inputs\.authJson, `\$\{CONTAINER_CODEX_HOME\}\/auth\.json`, "ro"\]/);
   assert.match(source, /npm install -g @openai\/codex@\$\{CODEX_VERSION\}/);
   assert.match(source, /const CODEX_VERSION = "0\.153\.4"/);
-  assert.match(source, /const EGRESS_ALLOW = \["chatgpt\.com", "api\.openai\.com"\]/);
+  assert.match(source, /const EGRESS_ALLOW = \["chatgpt\.com", "api\.openai\.com", "auth\.openai\.com"\]/);
+  // No exit after a write: every path sets process.exitCode, except the
+  // signal handler, which exits from the write callback.
+  assert.equal((source.match(/process\.exit\(\d/g) ?? []).length, 1);
+  assert.match(source, /process\.stderr\.write\("advisory-sandbox-launch: interrupted\\n", \(\) => process\.exit\(130\)\)/);
 });
 
 // The sidecar itself, run locally: CONNECT to an allowlisted host is admitted
@@ -789,13 +794,13 @@ async function withEgressProxy(t, run) {
   await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
   const listenPort = 20000 + Math.floor(Math.random() * 20000);
   const proxy = spawn(process.execPath, [launcherSource, "--egress-proxy"], {
-    env: { ...process.env, EGRESS_ALLOW: "localhost", EGRESS_LISTEN_PORT: String(listenPort), EGRESS_UPSTREAM_PORT: String(upstream.address().port) },
+    env: { ...process.env, EGRESS_ALLOW: "localhost,auth.openai.com", EGRESS_LISTEN_PORT: String(listenPort), EGRESS_UPSTREAM_PORT: String(upstream.address().port) },
   });
   let log = "";
   proxy.stdout.on("data", (chunk) => { log += chunk; });
   await new Promise((resolve) => { const poll = () => (log.includes("listening") ? resolve() : setTimeout(poll, 50)); poll(); });
   t.after(() => { proxy.kill(); upstream.close(); });
-  const connect = (firstRecords) =>
+  const connect = (firstRecords, authority = "localhost:443") =>
     new Promise((resolve) => {
       const socket = net.connect(listenPort, "127.0.0.1");
       let received = Buffer.alloc(0);
@@ -810,7 +815,7 @@ async function withEgressProxy(t, run) {
       });
       socket.on("close", () => resolve({ established, received }));
       socket.on("error", () => {});
-      socket.write("CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\n\r\n");
+      socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
       setTimeout(() => socket.destroy(), 1500);
     });
   await run({ connect, log: () => log });
@@ -840,5 +845,34 @@ test("the sidecar tunnels only a ClientHello whose SNI equals the CONNECT host",
     assert.equal(result.received.length, 0);
     assert.equal((log().match(/deny sni-mismatch localhost:443 sni=none/g) ?? []).length, 2);
     assert.equal((log().match(/allow connect localhost:443/g) ?? []).length, 2);
+    // The refresh endpoint is admitted the same way: CONNECT host and SNI
+    // both auth.openai.com. The allow decision is logged before the upstream
+    // connection, so this needs no network.
+    await connect([clientHello("auth.openai.com")], "auth.openai.com:443");
+    assert.match(log(), /allow connect auth\.openai\.com:443/);
+    await connect([clientHello("chatgpt.com")], "auth.openai.com:443");
+    assert.match(log(), /deny sni-mismatch auth\.openai\.com:443 sni=chatgpt\.com/);
   });
+});
+
+// The report must reach a slow reader whole: the launcher sets the exit code
+// and returns rather than exiting after its last write.
+test("the final report arrives complete on a slowly drained stdout", async (t) => {
+  const f = await fixture(t, { realReview: true });
+  const env = await fakeDocker(f, { big: true });
+  const child = spawn(process.execPath, [f.launcher, "--review-id", f.reviewId], {
+    env: { ...process.env, HOME: f.home, CODEX_HOME: undefined, REVIEW_BRIDGE_HOME: f.store, ...env },
+  });
+  child.stdout.pause();
+  let out = "";
+  child.stderr.on("data", () => {});
+  const exited = new Promise((resolve) => child.on("close", resolve));
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  child.stdout.on("data", (chunk) => { out += chunk; });
+  child.stdout.resume();
+  const code = await exited;
+  assert.equal(code, 0, out.slice(-1500));
+  assert.match(out, /^residual: the one host secret inside was .*by the sidecar\n?$/m);
+  const scratch = out.match(/^scratch (.+)$/m)[1];
+  t.after(() => fsp.rm(scratch, { recursive: true, force: true }));
 });

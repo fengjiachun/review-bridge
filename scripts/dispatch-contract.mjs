@@ -523,10 +523,16 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // an allowlist the section names, measured both ways.
     [
       "egress is an allowlist through a sidecar",
-      /sidecar proxy on an internal Docker network that admits `chatgpt\.com` and `api\.openai\.com`, allowlisted by CONNECT host and by the TLS SNI the client then presents, and refuses every other host/,
+      /sidecar proxy on an internal Docker network that admits `chatgpt\.com`, `api\.openai\.com`, and `auth\.openai\.com`[^:]*allowlisted by CONNECT host and by the TLS SNI the client then presents, and refuses every other host/,
     ],
     // Codex round eleven on #125: the CONNECT authority alone can be fronted;
     // the name the client then announces has to match it.
+    // Codex round twelve on #125: the refresh endpoint is on the list and the
+    // refreshed token stays in the container.
+    [
+      "refreshed tokens are not persisted back",
+      /refreshed tokens are not persisted back, since `auth\.json` is read-only in the container/,
+    ],
     [
       "the allowlist binds the TLS SNI to the CONNECT host",
       /allowlisted by CONNECT host and by the TLS SNI the client then presents/,

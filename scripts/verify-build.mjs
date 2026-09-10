@@ -722,7 +722,7 @@ const advisoryHelp = run(process.execPath, [advisoryLauncher, "--help"], pluginR
 assert.match(advisoryHelp, /Usage: advisory-sandbox-launch\.mjs --review-id <id>/);
 assert.match(advisoryHelp, /Fails closed, exit 2, when Docker is unavailable/);
 assert.match(advisoryHelp, /bind-mounted read-only and never copied\s+into an image layer/);
-assert.match(advisoryHelp, /admits chatgpt\.com and api\.openai\.com/);
+assert.match(advisoryHelp, /admits chatgpt\.com, api\.openai\.com, and auth\.openai\.com/);
 const advisoryBadId = spawnSync(
   process.execPath,
   [advisoryLauncher, "--review-id", "not-a-review", "--dry-run"],
