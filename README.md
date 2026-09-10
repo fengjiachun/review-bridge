@@ -744,7 +744,12 @@ that reader's error, and a review ledger whose bytes, shape, or round snapshot
 commitments are not what the store wrote is refused as well. A review created
 before `worktree_clean` was recorded cannot be rendered: the store's own
 snapshot reproduction needs it, and the report keeps no second hash format
-(`ROUND_SNAPSHOT_UNREPRODUCIBLE`). Nor can a continuation prepared before the
+(`ROUND_SNAPSHOT_UNREPRODUCIBLE`). The same class holds a successor round
+prepared before its snapshot commitment covered the proof: from this release
+the manifest of a round reviewed as a successor records the delta's digest and
+the two heads it spans, the snapshot hash is computed over them, and so the
+gate's `snapshot_hash` vouches for the delta; an older successor round carries
+no such commitment and cannot be reproduced. Nor can a continuation prepared before the
 source freeze: its source never recorded it, and the report accepts no
 continuation its source does not vouch for (`CONTINUATION_SOURCE_MISMATCH`);
 a source is validated the way the continuation is, its own sources included.

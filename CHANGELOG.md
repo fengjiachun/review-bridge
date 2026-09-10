@@ -66,7 +66,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   record, each of which proved unbindable -- which in the operator's store
   at the time of writing is 34 ledgers. A
   successor proof's file lists are compared with the paths its stored delta
-  names. Every reviewer- or author-supplied string is
+  names. The snapshot commitment of a round reviewed as a successor now
+  covers the proof -- the delta's digest and the two heads it spans enter the
+  hash, and the manifest records them -- so the gate's `snapshot_hash`
+  vouches for the delta and a delta swapped afterwards makes the round
+  unreproducible; a FULL round hashes as before. A successor round prepared
+  before this change carries no such commitment and is refused as
+  `ROUND_SNAPSHOT_UNREPRODUCIBLE`; a successor review still in flight across
+  the upgrade must be prepared again. Every reviewer- or author-supplied string is
   rendered as one escaped line or inside a fence longer than any backtick
   run it contains, so no finding title or rationale can open a heading,
   table row, or fence of its own. The

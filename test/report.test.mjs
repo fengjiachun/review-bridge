@@ -1788,6 +1788,77 @@ test("a successor proof is bound to its round's head and base and to the parent'
   assert.equal((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).reused, false);
 });
 
+// The snapshot commitment of a successor round covers its proof: the round's
+// manifest records the delta digest and the two heads, the hash is computed
+// over them, and the gate minted on a clean successor vouches for the delta.
+// A delta swapped afterwards, however consistently, leaves the round
+// unreproducible; a successor round without the commitment predates it.
+test("a successor round's snapshot commitment covers its proof, and a swapped delta is unreproducible", async (t) => {
+  const state = await successorFixture(t);
+  const directory = path.join(state.store, "reviews", state.successorId);
+  const reviewPath = path.join(directory, "review.json");
+  const original = await fsp.readFile(reviewPath, "utf8");
+  const genuine = JSON.parse(original);
+  const round = genuine.rounds[0];
+  assert.equal(round.successor_delta_sha256, round.successor.delta_sha256);
+  assert.equal(round.successor_parent_head_sha, round.successor.parent_head_sha);
+  assert.equal(round.successor_current_head_sha, round.successor.current_head_sha);
+  const manifest = JSON.parse(await fsp.readFile(path.join(directory, "rounds", "1", "manifest.json"), "utf8"));
+  assert.equal(manifest.snapshot_hash, round.snapshot_hash);
+  assert.equal(manifest.successor_delta_sha256, round.successor.delta_sha256);
+  // The successor review is reviewed CLEAN and gated: the gate's snapshot
+  // hash is the committed one.
+  await submitInitialReview(state.store, state.successorId, [], "CLAUDE_DESKTOP");
+  await finalizeLocalGate(state.store, state.successorId);
+  const gate = JSON.parse(await fsp.readFile(path.join(directory, "gate.json"), "utf8"));
+  assert.equal(gate.snapshot_hash, round.snapshot_hash);
+  const gated = await fsp.readFile(reviewPath, "utf8");
+  assert.equal((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).reused, false);
+
+  // Delta, artifact, and proof swapped together for another parseable delta
+  // with a consistent digest: every artifact check passes, the commitment
+  // does not reproduce.
+  const deltaPath = path.join(directory, "rounds", "1", "successor.diff");
+  const proofPath = path.join(directory, "rounds", "1", "successor.json");
+  const deltaOriginal = await fsp.readFile(deltaPath);
+  const proofOriginal = await fsp.readFile(proofPath, "utf8");
+  const swappedDelta = Buffer.from(deltaOriginal.toString("utf8").replace("export const checked = true;", "export const checked = false;"), "utf8");
+  assert.notEqual(swappedDelta.toString("utf8"), deltaOriginal.toString("utf8"));
+  const swapped = JSON.parse(gated);
+  swapped.rounds[0].successor.delta_bytes = swappedDelta.length;
+  swapped.rounds[0].successor.delta_sha256 = crypto.createHash("sha256").update(swappedDelta).digest("hex");
+  swapped.rounds[0].successor_delta_sha256 = swapped.rounds[0].successor.delta_sha256;
+  await fsp.writeFile(deltaPath, swappedDelta, { mode: 0o600 });
+  await fsp.writeFile(proofPath, `${JSON.stringify(swapped.rounds[0].successor, null, 2)}\n`, { mode: 0o600 });
+  await fsp.writeFile(reviewPath, `${JSON.stringify(swapped, null, 2)}\n`, { mode: 0o600 });
+  const manifestPath = path.join(directory, "rounds", "1", "manifest.json");
+  const manifestOriginal = await fsp.readFile(manifestPath, "utf8");
+  await fsp.writeFile(manifestPath, `${JSON.stringify({ ...JSON.parse(manifestOriginal), successor_delta_sha256: swapped.rounds[0].successor.delta_sha256 }, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.successorId), (error) => {
+    assert.equal(error.code, "REVIEW_LEDGER_INVALID", error.message);
+    assert.match(error.details.reason, /round 1 snapshot_hash is not reproduced by its patch/);
+    return true;
+  });
+  // A successor round stripped of its commitment predates it, and is named
+  // as unreproducible rather than as a hash mismatch.
+  const stripped = JSON.parse(gated);
+  for (const key of ["successor_delta_sha256", "successor_parent_head_sha", "successor_current_head_sha"]) delete stripped.rounds[0][key];
+  const strippedManifest = JSON.parse(manifestOriginal);
+  for (const key of ["successor_delta_sha256", "successor_parent_head_sha", "successor_current_head_sha"]) delete strippedManifest[key];
+  await fsp.writeFile(deltaPath, deltaOriginal, { mode: 0o600 });
+  await fsp.writeFile(proofPath, proofOriginal, { mode: 0o600 });
+  await fsp.writeFile(reviewPath, `${JSON.stringify(stripped, null, 2)}\n`, { mode: 0o600 });
+  await fsp.writeFile(manifestPath, `${JSON.stringify(strippedManifest, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.successorId), (error) => {
+    assert.equal(error.code, "ROUND_SNAPSHOT_UNREPRODUCIBLE", error.message);
+    assert.deepEqual(error.details.missing, ["successor_delta_sha256", "successor_parent_head_sha", "successor_current_head_sha"]);
+    return true;
+  });
+  await fsp.writeFile(reviewPath, gated, { mode: 0o600 });
+  await fsp.writeFile(manifestPath, manifestOriginal, { mode: 0o600 });
+  assert.equal((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).reused, true);
+});
+
 // git quotes a non-ASCII path in a diff header as octal escapes over its
 // UTF-8 bytes (core.quotepath, the default); the delta reader decodes the
 // bytes whole, so the path equals the one the writer listed.

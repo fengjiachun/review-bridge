@@ -899,6 +899,13 @@ function successorFilesFromDelta(delta) {
 
 // The round fields snapshotHashFromReviewRound hashes or checks the type of.
 // A round lacking one is older than the function and cannot be reproduced.
+// The proof commitments a successor round's snapshot hash covers; a successor
+// round without them predates the commitment.
+const SUCCESSOR_COMMITMENT_INPUTS = [
+  ["successor_delta_sha256", (value) => typeof value === "string"],
+  ["successor_parent_head_sha", (value) => typeof value === "string"],
+  ["successor_current_head_sha", (value) => typeof value === "string"],
+];
 const SNAPSHOT_HASH_INPUTS = [
   ["changed_files", Array.isArray],
   ["deleted_files", Array.isArray],
@@ -1086,7 +1093,10 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
     // function's inputs existed -- worktree_clean above all -- cannot be
     // reproduced by the store at all, and is named as such rather than as a
     // damaged ledger; no second hash format is kept for it.
-    const unreproducible = SNAPSHOT_HASH_INPUTS.filter(([field, ok]) => !ok(round[field]));
+    const unreproducible = [
+      ...SNAPSHOT_HASH_INPUTS,
+      ...(round.successor == null ? [] : SUCCESSOR_COMMITMENT_INPUTS),
+    ].filter(([field, ok]) => !ok(round[field]));
     if (unreproducible.length > 0) {
       throw Object.assign(
         new Error(
@@ -1610,21 +1620,17 @@ async function buildSnapshot({
   const deletedFiles = [...deletedFromBase]
     .filter((relativePath) => !untrackedPaths.has(relativePath))
     .sort();
-  const hash = crypto.createHash("sha256");
-  hash.update(
-    JSON.stringify({
-      baseSha,
-      headSha,
-      requirement,
-      implementationScope,
-      changedFiles,
-      deletedFiles,
-      overlays,
-      worktreeClean,
-    }),
-  );
-  hash.update(patch);
-  const snapshotHash = hash.digest("hex");
+  const snapshotHash = snapshotDigest({
+    baseSha,
+    headSha,
+    requirement,
+    implementationScope,
+    changedFiles,
+    deletedFiles,
+    overlays,
+    worktreeClean,
+    patch,
+  });
 
   const manifest = {
     version: 1,
@@ -1651,6 +1657,79 @@ async function buildSnapshot({
 
 function sha256(content) {
   return crypto.createHash("sha256").update(content).digest("hex");
+}
+
+// The snapshot commitment: the round's identity and its patch, and, for a
+// round reviewed as a successor, the proof's own commitments -- the delta's
+// digest and the two heads it spans -- so the gate's snapshot hash covers the
+// proof and a delta swapped afterwards makes the round unreproducible. A
+// FULL round hashes exactly as before.
+function snapshotDigest({
+  baseSha,
+  headSha,
+  requirement,
+  implementationScope,
+  changedFiles,
+  deletedFiles,
+  overlays,
+  worktreeClean,
+  patch,
+  successor = null,
+}) {
+  const hash = crypto.createHash("sha256");
+  hash.update(
+    JSON.stringify({
+      baseSha,
+      headSha,
+      requirement,
+      implementationScope,
+      changedFiles,
+      deletedFiles,
+      overlays,
+      worktreeClean,
+      ...(successor == null
+        ? {}
+        : {
+            successor: {
+              deltaSha256: successor.delta_sha256,
+              parentHeadSha: successor.parent_head_sha,
+              currentHeadSha: successor.current_head_sha,
+            },
+          }),
+    }),
+  );
+  hash.update(patch);
+  return hash.digest("hex");
+}
+
+// Folds a successor proof into the round's manifest after the proof exists:
+// the manifest gains the proof's commitments and its snapshot hash is
+// recomputed over them, and the stored manifest is rewritten so the round and
+// the file agree. Without a proof the manifest is returned untouched.
+async function foldSuccessorIntoManifest({ roundRoot, manifest, patch, successor, requirement, implementationScope, write }) {
+  if (successor == null) return manifest;
+  const folded = {
+    ...manifest,
+    successor_delta_sha256: successor.delta_sha256,
+    successor_parent_head_sha: successor.parent_head_sha,
+    successor_current_head_sha: successor.current_head_sha,
+  };
+  folded.snapshot_hash = snapshotDigest({
+    baseSha: manifest.base_sha,
+    headSha: manifest.head_sha,
+    requirement,
+    implementationScope,
+    changedFiles: manifest.changed_files,
+    deletedFiles: manifest.deleted_files,
+    overlays: manifest.overlays,
+    worktreeClean: manifest.worktree_clean,
+    patch,
+    successor,
+  });
+  if (write) {
+    await atomicWriteJson(path.join(roundRoot, "manifest.json"), folded);
+  }
+  return folded;
 }
 
 async function snapshotHashFromReviewRound(
@@ -1691,21 +1770,40 @@ async function snapshotHashFromReviewRound(
   ) {
     throw new Error("review change size does not match its immutable patch");
   }
-  const hash = crypto.createHash("sha256");
-  hash.update(
-    JSON.stringify({
-      baseSha: round.base_sha,
-      headSha: round.head_sha,
-      requirement: review.requirement,
-      implementationScope: review.implementation_scope,
-      changedFiles: round.changed_files,
-      deletedFiles: round.deleted_files,
-      overlays: round.overlays,
-      worktreeClean: round.worktree_clean,
-    }),
-  );
-  hash.update(patch);
-  return hash.digest("hex");
+  // A successor round's commitment covers its proof. The round carries the
+  // proof's commitments beside the proof; a successor round without them
+  // predates this commitment and the store cannot reproduce it.
+  let successor = null;
+  if (round.successor != null) {
+    const commitment = {
+      delta_sha256: round.successor_delta_sha256,
+      parent_head_sha: round.successor_parent_head_sha,
+      current_head_sha: round.successor_current_head_sha,
+    };
+    if (Object.values(commitment).some((value) => typeof value !== "string")) {
+      throw new Error("review round predates the successor commitment");
+    }
+    if (
+      commitment.delta_sha256 !== round.successor.delta_sha256 ||
+      commitment.parent_head_sha !== round.successor.parent_head_sha ||
+      commitment.current_head_sha !== round.successor.current_head_sha
+    ) {
+      throw new Error("review round's successor commitment does not match its proof");
+    }
+    successor = commitment;
+  }
+  return snapshotDigest({
+    baseSha: round.base_sha,
+    headSha: round.head_sha,
+    requirement: review.requirement,
+    implementationScope: review.implementation_scope,
+    changedFiles: round.changed_files,
+    deletedFiles: round.deleted_files,
+    overlays: round.overlays,
+    worktreeClean: round.worktree_clean,
+    patch,
+    successor,
+  });
 }
 
 async function repositoryIdentity(repositoryPath) {
@@ -1804,6 +1902,11 @@ const ROUND_FIELDS = [
   },
   // Absent on rounds older than successor reviews; null on a FULL round since.
   { field: "successor", describe: "null or a successor proof", optional: true, ok: nullOr((v) => recordDefect(v, SUCCESSOR_FIELDS, {}, "successor") == null) },
+  // The proof's commitments the snapshot hash covers, present beside a proof
+  // written since the commitment existed.
+  { field: "successor_delta_sha256", describe: "a digest", optional: true, ok: isDigest },
+  { field: "successor_parent_head_sha", describe: "a commit", optional: true, ok: isSha },
+  { field: "successor_current_head_sha", describe: "a commit", optional: true, ok: isSha },
 ];
 
 async function buildSuccessorArtifacts({
@@ -2557,7 +2660,7 @@ export async function prepareReview(
   await fsp.mkdir(root, { recursive: true, mode: 0o700 });
   return withReviewMutationLock(storeRoot, id, async () => {
     const roundRoot = roundDirectory(storeRoot, id, 1);
-    const { manifest } = await buildSnapshot({
+    const { manifest, patch } = await buildSnapshot({
       repositoryPath,
       baseRef,
       requirement,
@@ -2601,6 +2704,15 @@ export async function prepareReview(
       manifest,
       roundRoot,
     });
+    const committed = await foldSuccessorIntoManifest({
+      roundRoot,
+      manifest,
+      patch,
+      successor: successorResult.successor,
+      requirement,
+      implementationScope,
+      write: true,
+    });
     const carried =
       continuedReview == null
         ? { carriedFindings: [], carriedErrata: [] }
@@ -2623,7 +2735,7 @@ export async function prepareReview(
       status: "WAITING_FOR_REVIEW",
       current_round: 1,
       max_rounds: MAX_ROUNDS,
-      rounds: [{ round: 1, ...manifest, successor: successorResult.successor }],
+      rounds: [{ round: 1, ...committed, successor: successorResult.successor }],
       findings: [],
       resolutions: [],
       rereview_decisions: [],
@@ -3269,7 +3381,7 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
   }
   const round = review.current_round + 1;
   const roundRoot = roundDirectory(storeRoot, review.id, round);
-  const { manifest } = await buildSnapshot({
+  const { manifest, patch } = await buildSnapshot({
     repositoryPath: review.repository_path,
     baseRef: review.base_ref,
     requirement: review.requirement,
@@ -3314,9 +3426,18 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
   // a fresh context that submits without opening — its verdict then records
   // zero rather than inheriting round one's open.
   review.last_opened_errata_watermark = 0;
+  const committed = await foldSuccessorIntoManifest({
+    roundRoot,
+    manifest,
+    patch,
+    successor: successorResult.successor,
+    requirement: review.requirement,
+    implementationScope: review.implementation_scope,
+    write: true,
+  });
   review.rounds.push({
     round,
-    ...manifest,
+    ...committed,
     successor: successorResult.successor,
   });
   review.review_strategy = successorResult.strategy;
@@ -3515,13 +3636,24 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
       "stored review patch does not match its snapshot commitment",
     );
   }
-  const { manifest } = await buildSnapshot({
+  const fresh = await buildSnapshot({
     repositoryPath: review.repository_path,
     baseRef: review.base_ref,
     requirement: review.requirement,
     implementationScope: review.implementation_scope,
     roundRoot: "",
     writeFiles: false,
+  });
+  // The clean round's proof is part of its commitment, so the fresh
+  // snapshot is committed the same way before the two are compared.
+  const manifest = await foldSuccessorIntoManifest({
+    roundRoot: "",
+    manifest: fresh.manifest,
+    patch: fresh.patch,
+    successor: cleanRound.successor,
+    requirement: review.requirement,
+    implementationScope: review.implementation_scope,
+    write: false,
   });
   if (manifest.snapshot_hash !== review.clean_snapshot_hash) {
     throw new Error(
