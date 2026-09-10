@@ -465,6 +465,10 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       /accepts a local Git configuration holding only what a fresh clone writes/,
     ],
     [
+      "every URL-valued key on the allowlist gets the credential test",
+      /with any of those URL values that carries a credential refused as well/,
+    ],
+    [
       "core.* is not accepted wholesale",
       /the `core\.\*` keys a fresh clone writes/,
     ],

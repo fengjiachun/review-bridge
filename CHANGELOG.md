@@ -73,7 +73,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   whose local Git configuration holds more than a fresh clone writes (only
   the `core.*` keys a fresh clone writes, a remote's `url` and `fetch`, a branch's `remote`, `merge`, and
   `rebase`, `extensions.*`, and a submodule's `url` and `active` are accepted,
-  includes followed, a remote URL carrying a credential refused too; a
+  includes followed, any remote or submodule URL carrying a credential refused too; a
   denylist of `.extraheader`, `credential.*`, `http.cookieFile`, and their
   kind was bypassed three times in review) or that is not a self-contained
   clone (a linked worktree, a clone with alternates —

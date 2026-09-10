@@ -373,8 +373,8 @@ async function marketplaceFromCodexConfig() {
 // core.gitProxy, or core.sshCommand, an include.path — because a denylist of
 // secret-bearing keys does not converge (three were found in as many review
 // rounds) and the panel checkout is a fresh clone, so nothing else belongs
-// there. A remote URL that carries a credential is refused as well. Values
-// are never printed; a key that is itself a URL is printed with its userinfo
+// there. A URL-valued key — a remote's or a submodule's url — whose value
+// carries a credential is refused as well. Values are never printed; a key that is itself a URL is printed with its userinfo
 // redacted.
 //
 // The core keys are what `git clone` writes as observed: on macOS (git
@@ -383,12 +383,18 @@ async function marketplaceFromCodexConfig() {
 // those; Windows adds symlinks. core.* as a whole is not accepted, because
 // core.askPass, core.gitProxy, and core.sshCommand carry commands and
 // credentials.
+// An entry marked `url` holds a URL as its value, and every such value is
+// held to the credential test below — remote and submodule URLs alike, and
+// whatever URL-valued key joins this list later — rather than the test being
+// tied to one key name.
 const FRESH_CLONE_CONFIG_KEYS = [
-  /^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)$/,
-  /^remote\..+\.(url|fetch)$/,
-  /^branch\..+\.(remote|merge|rebase)$/,
-  /^extensions\.[^.]+$/,
-  /^submodule\..+\.(url|active)$/,
+  { pattern: /^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)$/ },
+  { pattern: /^remote\..+\.url$/, url: true },
+  { pattern: /^remote\..+\.fetch$/ },
+  { pattern: /^branch\..+\.(remote|merge|rebase)$/ },
+  { pattern: /^extensions\.[^.]+$/ },
+  { pattern: /^submodule\..+\.url$/, url: true },
+  { pattern: /^submodule\..+\.active$/ },
 ];
 
 function gitConfigViolations(repository) {
@@ -416,9 +422,10 @@ function gitConfigViolations(repository) {
       const newline = entry.indexOf("\n");
       const key = newline === -1 ? entry : entry.slice(0, newline);
       const value = newline === -1 ? "" : entry.slice(newline + 1);
-      if (!FRESH_CLONE_CONFIG_KEYS.some((pattern) => pattern.test(key))) {
+      const allowed = FRESH_CLONE_CONFIG_KEYS.find((entry) => entry.pattern.test(key));
+      if (!allowed) {
         violations.push(redact(key));
-      } else if (/^remote\..+\.url$/.test(key) && urlCredential(value)) {
+      } else if (allowed.url && urlCredential(value)) {
         violations.push(`${key} (credential in the URL)`);
       }
     }

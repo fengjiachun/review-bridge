@@ -696,6 +696,19 @@ test("a checkout whose Git configuration carries a credential is refused before 
     assert.match(result.stderr, new RegExp(`holds more than a fresh clone writes \\(${key.toLowerCase().replace(".", "\\.")}\\)`));
     assert.doesNotMatch(result.stderr, /\.git\/(cookies|client\.key)/);
   }
+  // Every URL-valued key on the allowlist gets the credential test, a
+  // submodule's url as much as a remote's; a clean submodule url passes.
+  const r = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", r.checkout, "config", "submodule.private.url", "https://ghp_subm0dule@github.com/x/private.git"]);
+  result = launch(r, ["--review-id", r.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /holds more than a fresh clone writes \(submodule\.private\.url \(credential in the URL\)\)/);
+  assert.doesNotMatch(result.stderr, /ghp_subm0dule/);
+  const s2 = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", s2.checkout, "config", "submodule.public.url", "https://github.com/x/public.git"]);
+  spawnSync("git", ["-C", s2.checkout, "config", "submodule.public.active", "true"]);
+  result = launch(s2, ["--review-id", s2.reviewId, "--dry-run"]);
+  assert.equal(result.status, 0, result.stderr);
   // core.* is not accepted wholesale: the keys that carry a command or a
   // credential are refused by name.
   for (const [key, value] of [["core.askPass", "/tmp/askpass.sh"], ["core.gitProxy", "/tmp/proxy.sh"], ["core.sshCommand", "ssh -i .git/id"]]) {
