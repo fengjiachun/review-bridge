@@ -178,17 +178,25 @@ function render(review, options = {}) {
 // a passed local gate, and a publication carried to MERGE_READY, or a
 // remote-only authorization published the same way.
 
+// Commit dates are pinned so two fixtures built in the same second, or in
+// different seconds, produce the same SHAs for the same content: whether two
+// fixtures differ is then decided by their content, never by the clock.
 function git(cwd, ...args) {
   const result = spawnSync("git", args, {
     cwd,
     encoding: "utf8",
-    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" },
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_AUTHOR_DATE: "2026-09-01T00:00:00Z",
+      GIT_COMMITTER_DATE: "2026-09-01T00:00:00Z",
+    },
   });
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();
 }
 
-async function gatedFixture(t) {
+async function gatedFixture(t, { change = "export const value = 2;\n" } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-report-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const repository = path.join(root, "repo");
@@ -202,7 +210,7 @@ async function gatedFixture(t) {
   git(repository, "commit", "-m", "base");
   const baseSha = git(repository, "rev-parse", "HEAD");
   git(repository, "switch", "-c", "agent/change");
-  await fsp.writeFile(path.join(repository, "value.js"), "export const value = 2;\n");
+  await fsp.writeFile(path.join(repository, "value.js"), change);
   git(repository, "add", ".");
   git(repository, "commit", "-m", "change");
   const headSha = git(repository, "rev-parse", "HEAD");
@@ -1217,9 +1225,14 @@ test("a local-gate publication's gate is held to the review ledger beside it", a
   assert.equal(genuine.reused, false);
   await fsp.rm(genuine.path);
 
-  // Another review's ledger and rounds, re-labelled with this review's id so
-  // the ledger validates on its own terms; only the gate can tell it apart.
-  const other = await gatedFixture(t);
+  // Another change's review ledger and rounds, re-labelled with this
+  // review's id so the ledger validates on its own terms; only the gate can
+  // tell it apart. The other change shares the base commit (same content,
+  // pinned dates) and differs in its head, so the differing field is known
+  // rather than left to whatever the two fixtures happen to produce.
+  const other = await gatedFixture(t, { change: "export const value = 3;\n" });
+  assert.equal(other.baseSha, state.baseSha);
+  assert.notEqual(other.headSha, state.headSha);
   const otherDirectory = reviewDirectory(other);
   const foreign = JSON.parse(await fsp.readFile(path.join(otherDirectory, "review.json"), "utf8"));
   foreign.id = state.reviewId;
@@ -1229,7 +1242,9 @@ test("a local-gate publication's gate is held to the review ledger beside it", a
   await fsp.writeFile(keep.reviewPath, `${JSON.stringify(foreign, null, 2)}\n`, { mode: 0o600 });
   await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
     assert.equal(error.code, "LOCAL_GATE_INVALID");
-    assert.ok(["base_sha", "head_sha", "snapshot_hash"].includes(error.details.field), error.details.field);
+    assert.equal(error.details.field, "head_sha");
+    assert.equal(error.details.gate, state.headSha);
+    assert.equal(error.details.review, other.headSha);
     return true;
   });
   assert.ok(!(await fsp.readdir(directory)).some((name) => name.startsWith("report-")));
