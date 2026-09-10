@@ -33,7 +33,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   the publication read surfaces use. Every ledger is admitted by the reader
   the server itself uses -- the review by a new `loadValidatedReview`
   in `core.mjs` that admits only a ledger the store could have written (its
-  own serialization, the state machine's statuses and shape, `state_version`
+  own serialization, the state machine's shape with the history replayed
+  through the writers' own transitions to the stored status and the rounds
+  the ledger holds, a clean verdict committing to the last round with no
+  finding left open, `state_version`
   not below the history, and every round's snapshot commitment reproduced
   from the immutable manifest and patch beside it, as the gate reproduces the
   clean round's) and is used by the report alone, the publication by the canonical, schema-validated reader that
@@ -62,7 +65,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `REVIEW_REPORT_CONTRACT` pins both steps in the source and packaged skill.
   The footer states, in the terms the README uses for operator narration,
   that the report is a projection of the ledger, not evidence, naming the
-  ledgers that were rendered: the review ledger and the publication ledger
+  ledgers that were rendered, gate or authorization file included: the
+  review ledger and the publication ledger and the gate that authorized it
   when present, or the publication ledger and its bound authorization for a
   remote-only publication.
 

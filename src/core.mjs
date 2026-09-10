@@ -230,6 +230,52 @@ const LEDGER_FINDING_STATUSES = [
 ];
 const LEDGER_DISPOSITIONS = ["fixed", "rejected", "human_required"];
 const LEDGER_DECISIONS = ["resolved", "rebuttal_accepted", "still_open"];
+// Every history event this module records, the statuses it is recorded from,
+// and the status it leaves the review in. Read from the writers above and
+// below; a ledger whose history does not replay through this table was not
+// written by them. `null` as a source is the ledger's creation.
+const LEDGER_TRANSITIONS = {
+  REVIEW_PREPARED: { from: [null], to: "WAITING_FOR_REVIEW", opensRound: true },
+  INITIAL_REVIEW_CLEAN: { from: ["WAITING_FOR_REVIEW"], to: "CLEAN" },
+  FINDINGS_SUBMITTED: { from: ["WAITING_FOR_REVIEW"], to: "REVIEW_SUBMITTED" },
+  AUTHOR_RESPONDED: { from: ["REVIEW_SUBMITTED"], to: "AUTHOR_RESPONDED" },
+  AUTHOR_ESCALATED: { from: ["REVIEW_SUBMITTED"], to: "HUMAN_REQUIRED" },
+  ROUND_LIMIT_REACHED: { from: ["AUTHOR_RESPONDED"], to: "HUMAN_REQUIRED" },
+  REREVIEW_PREPARED: { from: ["AUTHOR_RESPONDED"], to: "WAITING_FOR_REREVIEW", opensRound: true },
+  REREVIEW_UNRESOLVED: { from: ["WAITING_FOR_REREVIEW"], to: "HUMAN_REQUIRED" },
+  REREVIEW_CONTINUABLE_FINDINGS: { from: ["WAITING_FOR_REREVIEW"], to: "CONTINUABLE_FINDINGS" },
+  REREVIEW_CLEAN: { from: ["WAITING_FOR_REREVIEW"], to: "CLEAN" },
+  LOCAL_GATE_PASSED: { from: ["CLEAN"], to: "LOCAL_GATE_PASSED" },
+  REVIEW_CONTINUED: { from: ["CONTINUABLE_FINDINGS"], to: "CONTINUABLE_FINDINGS" },
+  // An erratum changes no state; it is refused only where the writer refuses
+  // it, which the replay does not second-guess.
+  ERRATUM_APPENDED: { from: LEDGER_REVIEW_STATUSES, to: null },
+};
+
+// Replays the history through the transition table and returns the status
+// and round it ends at, or the first defect.
+function replayReviewHistory(history) {
+  let status = null;
+  let round = 0;
+  for (const [index, entry] of history.entries()) {
+    const transition = LEDGER_TRANSITIONS[entry?.event];
+    if (transition == null) {
+      return { defect: `history entry ${index + 1} has unknown event ${JSON.stringify(entry?.event)}` };
+    }
+    if (typeof entry.at !== "string") {
+      return { defect: `history entry ${index + 1} has no timestamp` };
+    }
+    if (!transition.from.includes(status)) {
+      return { defect: `history entry ${index + 1} (${entry.event}) is not a transition from ${status ?? "creation"}` };
+    }
+    if (transition.opensRound) round += 1;
+    if (entry.round != null && entry.round !== round) {
+      return { defect: `history entry ${index + 1} (${entry.event}) names round ${entry.round} during round ${round}` };
+    }
+    if (transition.to != null) status = transition.to;
+  }
+  return { status, round };
+}
 
 // The structural shape a review ledger this module wrote always has. A field
 // the state machine would never produce is a ledger edited or rolled back by
@@ -274,10 +320,15 @@ function reviewLedgerDefect(review, reviewId) {
   ) {
     return "last_transition_state_version is ahead of state_version";
   }
-  for (const [index, entry] of review.history.entries()) {
-    if (entry == null || typeof entry.event !== "string" || typeof entry.at !== "string") {
-      return `history entry ${index + 1} is malformed`;
-    }
+  // The history must replay to the stored status through the writers' own
+  // transitions, and must have opened exactly the rounds the ledger holds.
+  const replay = replayReviewHistory(review.history);
+  if (replay.defect != null) return replay.defect;
+  if (replay.status !== review.status) {
+    return `history replays to ${replay.status ?? "no status"}, but status is ${review.status}`;
+  }
+  if (replay.round !== review.rounds.length) {
+    return `history opened ${replay.round} round(s), but the ledger holds ${review.rounds.length}`;
   }
   // Rounds are numbered by position, bounded by the store, and the current
   // round is the last one.
@@ -296,11 +347,18 @@ function reviewLedgerDefect(review, reviewId) {
   if (review.current_round !== review.rounds.length) {
     return `current_round ${review.current_round} does not name the last of ${review.rounds.length} rounds`;
   }
-  if (
-    review.clean_snapshot_hash != null &&
-    !review.rounds.some((round) => round.snapshot_hash === review.clean_snapshot_hash)
-  ) {
-    return "clean_snapshot_hash names no round";
+  // A clean verdict commits to the round it was given on, and only a review
+  // with no finding left open can carry one.
+  if (["CLEAN", "LOCAL_GATE_PASSED"].includes(review.status)) {
+    if (review.clean_snapshot_hash !== review.rounds.at(-1).snapshot_hash) {
+      return "clean_snapshot_hash is not the last round's snapshot";
+    }
+    const open = review.findings.find((finding) => !RESOLVED_FINDING_STATUSES.has(finding?.status));
+    if (open != null) {
+      return `status is ${review.status} but finding ${JSON.stringify(open.id)} is ${JSON.stringify(open.status)}`;
+    }
+  } else if (review.clean_snapshot_hash != null) {
+    return `status is ${review.status} but a clean_snapshot_hash is recorded`;
   }
   // Findings and their responses: known enums, unique IDs, and every response
   // naming a finding that exists.

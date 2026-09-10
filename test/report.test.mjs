@@ -325,9 +325,9 @@ test("the footer names the review, both revisions, the render time, the ledger p
   assert.match(markdown, /## Footer\n\n- Review: `rb-2026-09-01T000000-000Z-0badf00d`\n- Review ledger state_version: 6\n- Publication ledger revision: none\n- Report revision: `6`\n- Rendered at: 2026-09-10T12:00:00\.000Z\n- Ledger: `\/store\/reviews\/x\/review\.json`\n/);
   assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE}\n`));
   assert.match(PROJECTION_NOTICE, /projection of the ledger, not evidence/);
-  assert.match(PROJECTION_NOTICE, /The review ledger, and the publication ledger when present, remain the sole source of truth/);
+  assert.match(PROJECTION_NOTICE, /These ledgers -- the review ledger, and the publication ledger and the gate that authorized it when present -- remain the sole source of truth/);
   assert.match(PROJECTION_NOTICE_REMOTE_ONLY, /projection of the ledger, not evidence/);
-  assert.match(PROJECTION_NOTICE_REMOTE_ONLY, /The publication ledger and its bound authorization remain the sole source of truth/);
+  assert.match(PROJECTION_NOTICE_REMOTE_ONLY, /These ledgers -- the publication ledger and its bound authorization -- remain the sole source of truth/);
   // Without a directory the path is store-relative rather than invented.
   assert.match(render(cleanInTwoRounds()), /- Ledger: `reviews\/rb-2026-09-01T000000-000Z-0badf00d\/review\.json`/);
 });
@@ -490,6 +490,10 @@ test("a local-gate publication at MERGE_READY renders the pull request, Codex re
     ),
   );
   assert.match(markdown, new RegExp(`- Report revision: \`${review.state_version}-p${ready.revision}\``));
+  // The footer lists every file the projection was made from, the gate that
+  // bound the publication included.
+  const directory = reviewDirectory(state);
+  assert.match(markdown, new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/publication\\.json\`, \`${directory}/gate\\.json\`\\n`));
   assert.equal(reportRevision(review, publication), `${review.state_version}-p${ready.revision}`);
 });
 
@@ -718,7 +722,7 @@ test("the store writer names the file by the ledger revision, returns a receipt,
   assert.equal(withPublication.publication_revision, ready.revision);
   const withPublicationText = await fsp.readFile(withPublication.path, "utf8");
   assert.match(withPublicationText, /- Pull request: owner\/repo#7/);
-  assert.match(withPublicationText, new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/publication\\.json\``));
+  assert.match(withPublicationText, new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/publication\\.json\`, \`${directory}/gate\\.json\`\\n`));
   // The ledgers themselves are untouched by rendering.
   assert.deepEqual(await getPublication(state.store, state.reviewId), ready);
 });
@@ -812,6 +816,15 @@ test("a review ledger edited in place is refused as REVIEW_LEDGER_INVALID", asyn
     return (await fsp.readdir(reviewDirectory(state))).filter((name) => name.startsWith("report-"));
   };
   assert.deepEqual(await tamper((review) => { review.status = "MERGED"; }), []);
+  // A legal status the history does not replay to: the gate transition is
+  // still the last event, so CLEAN is a rollback by hand.
+  assert.deepEqual(await tamper((review) => { review.status = "CLEAN"; }), []);
+  // An illegal transition spliced into the history.
+  assert.deepEqual(await tamper((review) => { review.history.splice(1, 0, { at: review.history[0].at, event: "REREVIEW_CLEAN", round: 1 }); }), []);
+  // A history that opens a round the ledger does not hold.
+  assert.deepEqual(await tamper((review) => { review.history.splice(1, 0, { at: review.history[0].at, event: "FINDINGS_SUBMITTED", round: 1 }, { at: review.history[0].at, event: "AUTHOR_RESPONDED", round: 1 }, { at: review.history[0].at, event: "REREVIEW_PREPARED", round: 2 }, { at: review.history[0].at, event: "REREVIEW_CLEAN", round: 2 }); review.history.splice(5, 1); }), []);
+  // A clean verdict over a finding still open.
+  assert.deepEqual(await tamper((review) => { review.findings.push({ id: "F-1", introduced_round: 1, severity: "minor", title: "t", explanation: "e", status: "OPEN" }); }), []);
   assert.deepEqual(await tamper((review) => { review.state_version = review.history.length - 1; }), []);
   assert.deepEqual(await tamper((review) => { review.rounds[0].snapshot_hash = "f".repeat(64); }), []);
   assert.deepEqual(await tamper((review) => { review.rounds[0].head_sha = "0".repeat(40); }), []);

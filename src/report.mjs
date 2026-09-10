@@ -20,9 +20,9 @@ import {
 // ledger (and the publication beside it) when a local review exists, the
 // publication and its bound authorization when the review was skipped.
 export const PROJECTION_NOTICE =
-  "This report is a projection of the ledger, not evidence. The review ledger, and the publication ledger when present, remain the sole source of truth: nothing in this report advances or proves review state, and citing it as evidence is a misuse. It can be regenerated from the ledger at any time.";
+  "This report is a projection of the ledger, not evidence. These ledgers -- the review ledger, and the publication ledger and the gate that authorized it when present -- remain the sole source of truth: nothing in this report advances or proves review state, and citing it as evidence is a misuse. It can be regenerated from them at any time.";
 export const PROJECTION_NOTICE_REMOTE_ONLY =
-  "This report is a projection of the ledger, not evidence. The publication ledger and its bound authorization remain the sole source of truth: nothing in this report advances or proves publication state, and citing it as evidence is a misuse. It can be regenerated from the ledger at any time.";
+  "This report is a projection of the ledger, not evidence. These ledgers -- the publication ledger and its bound authorization -- remain the sole source of truth: nothing in this report advances or proves publication state, and citing it as evidence is a misuse. It can be regenerated from them at any time.";
 
 const REVIEW_ID_PATTERN = /^rb-[0-9TZ-]+-[a-f0-9]{8}$/;
 const PREPARED_EVENTS = ["REVIEW_PREPARED", "REREVIEW_PREPARED"];
@@ -591,10 +591,15 @@ export function renderReviewReport(
   }
   const reviewId = review?.id ?? publication.review_id;
   const directory = ledgerDirectory ?? path.join("reviews", String(reviewId));
+  // Every file that was read and rendered, so the footer names exactly what
+  // the projection was made from: the bound authorization is gate.json for a
+  // local gate and the remote sidecar otherwise.
   const ledgers = [
     ...(review == null ? [] : ["review.json"]),
     ...(publication == null ? [] : ["publication.json"]),
-    ...(review == null && authorization != null ? ["remote-authorization.json"] : []),
+    ...(authorization == null
+      ? []
+      : [authorization.mode === "LOCAL_GATE" ? "gate.json" : "remote-authorization.json"]),
   ].map((name) => code(path.join(directory, name)));
   const sections = [
     `# Review report ${inline(reviewId)}`,
