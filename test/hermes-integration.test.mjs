@@ -381,6 +381,7 @@ test("Hermes reviewer MCP snippet binds HERMES with an exact release path and on
     "env",
     "timeout",
     "tools",
+    "trust",
   ]);
   assert.equal(server.command, "node");
   // args[0] is the server entry placeholder that the README requires rendering
@@ -401,6 +402,10 @@ test("Hermes reviewer MCP snippet binds HERMES with an exact release path and on
   assert.equal(server.enabled, true);
   assert.equal(server.timeout, 300);
   assert.equal(server.connect_timeout, 60);
+  // The unattended launch rests on this key: only a `trust: untrusted`
+  // server routes its MCP calls through Hermes' approval prompt, which an
+  // unattended launch has no one to answer.
+  assert.equal(server.trust, "full");
   assert.deepEqual(Object.keys(server.tools).sort(), [
     "include",
     "prompts",

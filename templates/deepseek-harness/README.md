@@ -174,15 +174,18 @@ above requires is unchanged; only who performs the launch changes.
    disposition after the author records it — reading both from the review
    ledger rather than from chat text.
 
-One new session per review ID. Never continue an existing DeepSeek Harness
-session for a new review, never launch the author profile to review, and never
-pass any authoring history — the diff, the requirement discussion, the
-author's reasoning, or the driver session's transcript. That request is the
-whole handoff.
+The launch discipline states what must never happen rather than counting
+launches. Never run two reviewers on the same round at once, and never review
+from the author profile: never launch the author profile to review, never
+continue an existing DeepSeek Harness session for a new review, and never pass
+any authoring history — the diff, the requirement discussion, the author's
+reasoning, or the driver session's transcript. Within those two bars launches
+are not rationed. That request is the whole handoff.
 
-A round-two rereview of the same review ID is another launch in the same
-shape, with the same review ID and a request to rereview the author's
-resolutions using the packaged reviewer skill:
+A round-two rereview of the same review ID is that review's next round, so its
+launch is required rather than an exception: another launch in the same shape,
+with the same review ID and a request to rereview the author's resolutions
+using the packaged reviewer skill:
 
 ```bash
 dsh --profile <reviewer-profile> '<the rereview request>'
@@ -198,6 +201,21 @@ material a resumed context would have been asked to decide against, and the
 reviewer skill already requires each `rebuttal_accepted` decision to carry
 verification the reviewer performed itself rather than recalled.
 
+A launch that has exited leaves the round to be judged from the ledger: if the
+ledger shows no verdict for this round, no reviewer is working it, so start a
+replacement launch in the same shape as the original; that replacement is the
+same round, and both bars still hold, because the reviewer it replaces is gone.
+The exit status, zero or not, establishes only that the process is gone — a run
+can submit its verdict and then fail while saving its session or printing its
+output, and a replacement started on that exit code alone would rerun a round
+the ledger already carries. Judge that by the process having exited, never by
+`wait_for_review_state` timing out: a timeout says the round is unfinished, not
+that the reviewer is gone, and replacing a reviewer that is merely slow creates
+exactly the concurrent pair the first bar forbids. The driver started the
+process, so it has the exit status to judge by, and for this runtime that is
+the whole signal: the headless run is silent until it ends, so the zero exit
+that submitted nothing shows only in the ledger.
+
 Launch it outside the repository under review. The invoking directory is the
 session's workspace root, and DeepSeek Harness loads `AGENTS.md` and
 `CLAUDE.md` from the project root — the nearest `.git` ancestor — down to that
@@ -212,11 +230,26 @@ working directory. Its skills and user-global instructions come from the
 reviewer profile's rendered snippet, which points both at this packaged
 directory.
 
-This is the operator-present manual flow, and the operator's presence is what
-attests that the reviewer was launched this way. Review Bridge records the
-review's `DEEPSEEK_HARNESS` binding; it observes nothing about how the session
-was started, and this section adds no mechanism that would. Local autonomous
-task creation still accepts `CODEX_TASK` dispatch only.
+This launch may run unattended; it needs no operator at the keyboard: the
+headless runner takes its one task from the command line and runs to its
+exit, and it never sits at an approval prompt. DeepSeek Harness routes a tool
+call to its approval seam only when a pre-execute listener answers `ask`; its
+MCP client registers the seven tools with no such listener, and when a
+listener does answer `ask` under the headless runner the seam fails closed at
+once — rejected, not waited on — because no answerer is composed there (read
+from the source). Measured on 2026-09-10 under this launch:
+`list_pending_reviews` completed, the run exited 0 after 42 s, and stderr
+stayed empty. A launch waiting on an answer would not have exited and would
+not be replaced; this runtime does not wait.
+
+Review Bridge records the review's `DEEPSEEK_HARNESS` binding; it observes
+nothing about how the session was started, and this section adds no
+mechanism that would. Local autonomous task creation still accepts
+`CODEX_TASK` dispatch only. The `CLAUDE_DESKTOP` boundary is unchanged, and
+nothing above narrows it: never launch, script, or otherwise programmatically
+invoke a Claude reviewer from the driver session — the operator opens that
+conversation themselves, an account-compliance boundary rather than a
+convenience.
 
 ## Upgrade
 

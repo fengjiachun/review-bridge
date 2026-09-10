@@ -24,6 +24,12 @@ mcp_servers:
     enabled: true
     timeout: 300
     connect_timeout: 60
+    # Hermes routes an MCP call through its approval prompt only on a server
+    # configured `trust: untrusted`. `full` is also its default for a server
+    # with no `trust` key; it is named here so the driver-dispatched launch
+    # rests on this snippet rather than on a default, since a prompt has no
+    # one to answer it when that launch runs unattended.
+    trust: full
     tools:
       include:
         - list_pending_reviews
