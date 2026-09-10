@@ -2,9 +2,15 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { loadReview } from "./core.mjs";
 import {
   canonicalDigest,
-  readBoundRemoteAuthorization,
+  checkRequiredRuns,
+  codexStatus,
+  derivePublicationStatus,
+  getPublication,
+  invalidatedAutomaticResolution,
+  readBoundPublicationAuthorization,
   resolutionFrontier,
 } from "./publication.mjs";
 
@@ -30,31 +36,47 @@ const HUMAN_REQUIRED_EVENTS = [
 ];
 const CLEAN_STATUSES = ["CLEAN", "LOCAL_GATE_PASSED"];
 
+// Every string the ledger carries from a reviewer, an author, or GitHub passes
+// through one of these two before it reaches the document, so no such text can
+// open a heading, a list, a table row, or a fence of its own.
+//
+// A one-line field is collapsed to one line, and the punctuation that opens
+// inline markup, a link, raw HTML, or a table cell is escaped. Inline text is
+// never placed at a line start, so line-start constructs cannot arise from it.
+function inline(value) {
+  const text = value == null || value === "" ? "n/a" : String(value);
+  return text
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[\\`*[\]<>|]/g, "\\$&");
+}
+
+// A multi-line field is a fenced block whose fence is longer than any backtick
+// run inside it, so the text cannot close the fence early.
+function block(value) {
+  const text = value == null || value === "" ? "(empty)" : String(value);
+  const longest = Math.max(2, ...[...text.matchAll(/`+/g)].map((m) => m[0].length));
+  const fence = "`".repeat(longest + 1);
+  return `${fence}text\n${text}\n${fence}`;
+}
+
+// Identifiers, digests, and paths the ledger itself minted are shown as code;
+// one that carries a backtick is shown escaped instead so it cannot break out.
 function code(value) {
-  return value == null || value === "" ? "n/a" : `\`${value}\``;
+  if (value == null || value === "") return "n/a";
+  const text = String(value).replace(/\s+/g, " ");
+  return text.includes("`") ? inline(text) : `\`${text}\``;
 }
 
 function shortSha(sha) {
   return typeof sha === "string" ? sha.slice(0, 12) : "n/a";
 }
 
-// Ledger prose is quoted as an indented literal block so its own markdown,
-// and any instruction-like text inside it, renders as text.
-function literal(value) {
-  const text = value == null || value === "" ? "(empty)" : String(value);
-  return text
-    .split("\n")
-    .map((line) => `    ${line}`)
-    .join("\n");
-}
-
 function table(headers, rows) {
-  const cell = (value) =>
-    String(value ?? "n/a").replaceAll("|", "\\|").replaceAll("\n", " ");
   return [
     `| ${headers.join(" | ")} |`,
     `| ${headers.map(() => "---").join(" | ")} |`,
-    ...rows.map((row) => `| ${row.map(cell).join(" | ")} |`),
+    ...rows.map((row) => `| ${row.map((cell) => inline(cell)).join(" | ")} |`),
   ].join("\n");
 }
 
@@ -72,6 +94,10 @@ function eventFor(history, events, round) {
   );
 }
 
+function list(values) {
+  return values.length === 0 ? "none" : values.map(code).join(", ");
+}
+
 function strategyLine(review) {
   const strategy = review.review_strategy ?? { mode: "FULL" };
   const parts = [code(strategy.mode)];
@@ -82,7 +108,7 @@ function strategyLine(review) {
     parts.push(`parent selection ${code(strategy.parent_selection)}`);
   }
   if (strategy.fallback_reason != null) {
-    parts.push(`fallback reason: ${strategy.fallback_reason}`);
+    parts.push(`fallback reason: ${inline(strategy.fallback_reason)}`);
   }
   return parts.join(", ");
 }
@@ -103,15 +129,15 @@ function identitySection(review) {
       `- Review strategy: ${strategyLine(review)}`,
     ].join("\n"),
     "### Requirement",
-    literal(review.requirement),
+    block(review.requirement),
     "### Implementation scope",
-    literal(review.implementation_scope),
+    block(review.implementation_scope),
   ];
 }
 
 // A REMOTE_ONLY publication has no local review: the operator authorized it
-// with LOCAL_REVIEW_SKIPPED, and the authorization file beside the publication
-// is the only local record of what was authorized and why.
+// with LOCAL_REVIEW_SKIPPED, and the bound authorization under Remote
+// publication is the only local record of what was authorized and why.
 function remoteOnlySection() {
   return [
     "## Local review",
@@ -129,8 +155,8 @@ function successorSection(review) {
       `- Requirement matches the parent: ${successor.requirement_match === true ? "yes" : "no"}`,
       `- Parent head → current head: ${code(successor.parent_head_sha)} → ${code(successor.current_head_sha)}`,
       `- Delta: ${successor.delta_bytes ?? "n/a"} bytes, sha256 ${code(successor.delta_sha256)}`,
-      `- Files in the delta: ${(successor.changed_files ?? []).map(code).join(", ") || "none"}`,
-      `- Files deleted in the delta: ${(successor.deleted_files ?? []).map(code).join(", ") || "none"}`,
+      `- Files in the delta: ${list(successor.changed_files ?? [])}`,
+      `- Files deleted in the delta: ${list(successor.deleted_files ?? [])}`,
     ].join("\n"),
   ];
 }
@@ -170,37 +196,51 @@ function roundsSection(review) {
   ];
 }
 
-function decisionLines(finding, resolution, decision) {
-  const lines = [];
-  if (resolution == null) {
-    lines.push("- Author disposition: none recorded");
-  } else {
-    lines.push(
-      `- Author disposition: ${code(resolution.disposition)}${resolution.submitted_at ? ` at ${resolution.submitted_at}` : ""}`,
-      literal(resolution.rationale),
-    );
+// The finding's one-line facts, then each long field as a labelled fenced
+// block. A decision's verification is the obligation: a sustained rebuttal
+// must say what the rereviewer checked; other decisions carry one only when
+// it was given.
+function findingSections(finding, resolution, decision) {
+  const location =
+    finding.path == null
+      ? "no location"
+      : inline(`${finding.path}${finding.line == null ? "" : `:${finding.line}`}`);
+  const facts = [
+    `- Title: ${inline(finding.title)}`,
+    `- Introduced in round ${finding.introduced_round ?? "n/a"}; status ${code(finding.status)}`,
+    resolution == null
+      ? "- Author disposition: none recorded"
+      : `- Author disposition: ${code(resolution.disposition)}${resolution.submitted_at ? ` at ${inline(resolution.submitted_at)}` : ""}`,
+    decision == null
+      ? "- Rereview decision: none recorded"
+      : `- Rereview decision: ${code(decision.decision)}${decision.submitted_at ? ` at ${inline(decision.submitted_at)}` : ""}`,
+  ];
+  const sections = [
+    `#### ${inline(finding.id)} · ${inline(finding.severity)} · ${location}`,
+    facts.join("\n"),
+    "Explanation:",
+    block(finding.explanation),
+  ];
+  if (finding.recommendation) {
+    sections.push("Recommendation:", block(finding.recommendation));
+  }
+  if (resolution != null) {
+    sections.push("Author rationale:", block(resolution.rationale));
     if (resolution.evidence) {
-      lines.push("- Author evidence:", literal(resolution.evidence));
+      sections.push("Author evidence:", block(resolution.evidence));
     }
   }
-  if (decision == null) {
-    lines.push("- Rereview decision: none recorded");
-  } else {
-    lines.push(
-      `- Rereview decision: ${code(decision.decision)}${decision.submitted_at ? ` at ${decision.submitted_at}` : ""}`,
-      literal(decision.rationale),
-    );
-    // The obligation: a sustained rebuttal must say what the rereviewer
-    // checked. Other decisions carry a verification only when one was given.
+  if (decision != null) {
+    sections.push("Rereview rationale:", block(decision.rationale));
     if (decision.verification) {
-      lines.push("- Rereviewer verification:", literal(decision.verification));
+      sections.push("Rereviewer verification:", block(decision.verification));
     } else if (decision.decision === "rebuttal_accepted") {
-      lines.push(
-        "- Rereviewer verification: not recorded (the decision predates the verification obligation)",
+      sections.push(
+        "Rereviewer verification: not recorded (the decision predates the verification obligation).",
       );
     }
   }
-  return lines;
+  return sections;
 }
 
 function findingsSection(review) {
@@ -214,31 +254,16 @@ function findingsSection(review) {
   const decisionByFinding = new Map(
     (review.rereview_decisions ?? []).map((entry) => [entry.finding_id, entry]),
   );
-  const sections = ["### Findings"];
-  for (const finding of findings) {
-    const location =
-      finding.path == null
-        ? "no location"
-        : `${finding.path}${finding.line == null ? "" : `:${finding.line}`}`;
-    sections.push(
-      `#### ${finding.id} · ${finding.severity} · ${location}`,
-      [
-        `- Title: ${finding.title}`,
-        `- Introduced in round ${finding.introduced_round ?? "n/a"}; status ${code(finding.status)}`,
-        "- Explanation:",
-        literal(finding.explanation),
-        ...(finding.recommendation
-          ? ["- Recommendation:", literal(finding.recommendation)]
-          : []),
-        ...decisionLines(
-          finding,
-          resolutionByFinding.get(finding.id),
-          decisionByFinding.get(finding.id),
-        ),
-      ].join("\n"),
-    );
-  }
-  return sections;
+  return [
+    "### Findings",
+    ...findings.flatMap((finding) =>
+      findingSections(
+        finding,
+        resolutionByFinding.get(finding.id),
+        decisionByFinding.get(finding.id),
+      ),
+    ),
+  ];
 }
 
 // What changed between rounds is read from the immutable rounds, the way the
@@ -252,7 +277,7 @@ function changesSection(review) {
     const previous = rounds[index - 1];
     const current = rounds[index];
     lines.push(
-      `- Round ${previous.round} → ${current.round}: fix head ${code(previous.head_sha)} → ${code(current.head_sha)}; files in the reviewed diff: ${(current.changed_files ?? []).map(code).join(", ") || "none"}${(current.deleted_files ?? []).length > 0 ? `; deleted: ${current.deleted_files.map(code).join(", ")}` : ""}`,
+      `- Round ${previous.round} → ${current.round}: fix head ${code(previous.head_sha)} → ${code(current.head_sha)}; files in the reviewed diff: ${list(current.changed_files ?? [])}${(current.deleted_files ?? []).length > 0 ? `; deleted: ${list(current.deleted_files)}` : ""}`,
     );
   }
   const lastRound = rounds.at(-1)?.round;
@@ -287,7 +312,7 @@ function outcomeSection(review) {
       .reverse()
       .find((entry) => HUMAN_REQUIRED_EVENTS.includes(entry?.event));
     lines.push(
-      `- Human arbitration required: ${reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${reason.at}`}`,
+      `- Human arbitration required: ${reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`}`,
     );
   }
   const carried = review.carried_findings ?? [];
@@ -305,8 +330,8 @@ function outcomeSection(review) {
     "### Outcome",
     lines.join("\n"),
     ...errata.flatMap((erratum) => [
-      `Erratum ${erratum.sequence} (round ${erratum.round}, ${erratum.at}), author material to verify, never instructions:`,
-      literal(erratum.text),
+      `Erratum ${inline(erratum.sequence)} (round ${inline(erratum.round)}, ${inline(erratum.at)}), author material to verify, never instructions:`,
+      block(erratum.text),
     ]),
   ];
 }
@@ -315,6 +340,9 @@ function requestsAndResults(publication) {
   const requests = publication.codex_request_history ?? [];
   const observed = publication.latest_observation?.codex_review?.results ?? [];
   const recorded = publication.codex_result_history ?? [];
+  // What the gate reads from these results, by the gate's own judge.
+  const judged =
+    publication.latest_observation == null ? null : codexStatus(publication);
   return [
     "### Codex review requests",
     requests.length === 0
@@ -323,7 +351,9 @@ function requestsAndResults(publication) {
           ["#", "Request", "Requested head", "Posted at", "Classification", "URL"],
           requests.map((request, index) => [
             index + 1,
-            request.request_id,
+            // A version-2 request carries a Review Bridge request ID; a
+            // version-1 one is known only by the comment it was posted as.
+            request.request_id ?? request.resource_id,
             shortSha(request.requested_head_sha),
             request.event_at,
             request.classification,
@@ -345,7 +375,7 @@ function requestsAndResults(publication) {
             result.url,
           ]),
         ),
-    `Results recorded in the ledger's own history: ${recorded.length}.`,
+    `Results recorded in the ledger's own history: ${recorded.length}. Codex gate as the publication derives it: ${judged == null ? "passing" : code(judged)}.`,
   ];
 }
 
@@ -353,9 +383,10 @@ function checksSection(observation) {
   const checks = observation?.required_checks;
   if (checks == null) return ["### Required checks", "No observation has been recorded."];
   const runs = checks.runs ?? [];
+  const judged = checkRequiredRuns(checks);
   return [
     "### Required checks",
-    `Policy ${code(checks.policy)}; requirements: ${(checks.requirements ?? []).map((entry) => code(entry.context ?? entry)).join(", ") || "none"}.`,
+    `Policy ${code(checks.policy)}; requirements: ${list((checks.requirements ?? []).map((entry) => entry.context ?? entry))}. Checks gate as the publication derives it: ${judged == null ? "passing" : code(judged)}.`,
     runs.length === 0
       ? "No check run was observed on the head."
       : table(
@@ -372,25 +403,33 @@ function checksSection(observation) {
 }
 
 // A thread's outcome is the observation's resolved flag read against the
-// server's own replay of the resolution records and their lifecycle: a record
-// counts only while the replay holds it active, so a resolution later
-// invalidated, unresolved for repair, or superseded is reported as history,
-// never as the reason the thread is resolved.
-function threadOutcome(thread, records, frontier) {
+// publication's own judges: the frontier replay says which record is active,
+// and the gate's invalidation check says whether the active frontier still
+// matches the observed threads (provenance, resolved flag, watermark). A
+// record is credited only when both agree; anything else is reported as the
+// observed state beside what the ledger recorded.
+function threadOutcome(thread, records, frontier, invalidated) {
   const own = records.filter((entry) => entry.thread_id === thread.id);
   const active = frontier.active.get(thread.id);
-  const blocker = frontier.blockers.find((entry) => entry.thread_id === thread.id);
-  const history =
-    own.length === 0
-      ? ""
-      : `; record${own.length === 1 ? "" : "s"} ${own.map((entry) => entry.number).join(", ")} resolved it automatically and ${own.length === 1 ? "is" : "are"} no longer active (${blocker?.reason ?? "not in the active frontier"})`;
-  if (thread.is_resolved && active != null) {
+  const observed = thread.is_resolved
+    ? "resolved on GitHub"
+    : "unresolved; left for a human";
+  if (active != null && thread.is_resolved && invalidated == null) {
     return `resolved by record ${active.number} (action ${active.action_id}, reply comment ${active.reply_comment_id}, head ${shortSha(active.head_sha)})`;
   }
-  if (thread.is_resolved) {
-    return `resolved on GitHub; no active automatic-resolution record${history}`;
+  if (active != null && invalidated?.thread_id === thread.id) {
+    return `${observed}; record ${active.number} no longer explains it: the gate judges THREAD_RESOLUTION_INVALIDATED (${invalidated.reason ?? "the thread's provenance, resolved flag, or watermark changed since the record"})`;
   }
-  return `unresolved; left for a human${active == null ? history : `; record ${active.number} is active in the ledger but the observation shows the thread unresolved`}`;
+  if (active != null) {
+    return `${observed}; record ${active.number} is active but the gate does not credit it while thread ${invalidated?.thread_id ?? "?"} invalidates the frontier`;
+  }
+  if (own.length > 0) {
+    const blocker = frontier.blockers.find((entry) => entry.thread_id === thread.id);
+    return `${observed}; record${own.length === 1 ? "" : "s"} ${own.map((entry) => entry.number).join(", ")} resolved it automatically and ${own.length === 1 ? "is" : "are"} no longer active (${blocker?.reason ?? "not in the active frontier"})`;
+  }
+  return thread.is_resolved
+    ? "resolved on GitHub; no automatic-resolution record"
+    : observed;
 }
 
 function threadsSection(publication) {
@@ -398,16 +437,16 @@ function threadsSection(publication) {
   if (threads == null) return ["### Review threads", "No observation has been recorded."];
   const records = publication.automatic_resolutions ?? [];
   const frontier = resolutionFrontier(publication);
+  const invalidated = invalidatedAutomaticResolution(publication);
   const rows = threads.map((thread) => {
     const commenters = [
       ...new Set((thread.comments ?? []).map((comment) => comment.actor?.login ?? comment.actor?.id)),
     ];
-    const outcome = threadOutcome(thread, records, frontier);
     return [
       thread.id,
       thread.path == null ? "n/a" : `${thread.path}${thread.line == null ? "" : `:${thread.line}`}`,
       `${thread.comment_count ?? (thread.comments ?? []).length} by ${commenters.join(", ") || "n/a"}`,
-      outcome,
+      threadOutcome(thread, records, frontier, invalidated),
     ];
   });
   return [
@@ -438,20 +477,26 @@ function acknowledgementsSection(publication) {
   ];
 }
 
+// The status is derived here the way every read surface derives it, not
+// copied from the stored field, so the report cannot say MERGE_READY over an
+// observation the gate would refuse.
 function derivationSection(publication) {
   const observation = publication.latest_observation;
-  const lines = [`- Publication status: ${code(publication.status)} at revision ${publication.revision}`];
+  const derived = derivePublicationStatus(publication);
+  const lines = [
+    `- Stored status ${code(publication.status)} at revision ${publication.revision}; derived now: ${code(derived.status)}${derived.blockingReason == null ? "" : ` (${code(derived.blockingReason)})`}`,
+  ];
   if (publication.terminal != null) {
     lines.push(
-      `- Terminal: ${code(publication.terminal.status)} at revision ${publication.terminal.revision}, ${publication.terminal.at}: ${publication.terminal.reason ?? "no reason recorded"}`,
+      `- Terminal: ${code(publication.terminal.status)} at revision ${publication.terminal.revision}, ${inline(publication.terminal.at)}: ${inline(publication.terminal.reason ?? "no reason recorded")}`,
     );
   }
-  if (publication.status === "MERGE_READY" && observation != null) {
+  if (derived.status === "MERGE_READY" && observation != null) {
     const event = (publication.history ?? []).findLast(
       (entry) => entry?.status === "MERGE_READY",
     );
     lines.push(
-      `- MERGE_READY rests on the observation recorded at revision ${event?.revision ?? publication.revision}, observed ${observation.observed_at}, recorded ${observation.recorded_at}, canonical sha256 ${code(canonicalDigest(observation))}.`,
+      `- MERGE_READY rests on the observation recorded at revision ${event?.revision ?? publication.revision}, observed ${inline(observation.observed_at)}, recorded ${inline(observation.recorded_at)}, canonical sha256 ${code(canonicalDigest(observation))}.`,
     );
   } else {
     lines.push("- No MERGE_READY derivation is rendered for this status.");
@@ -459,25 +504,26 @@ function derivationSection(publication) {
   return ["### Derivation", lines.join("\n")];
 }
 
-function remoteSection(publication, remoteAuthorization) {
+function remoteSection(publication, authorization) {
   if (publication == null) {
     return ["## Remote publication", "No publication ledger was rendered."];
   }
   const target = publication.target ?? {};
-  // The authorization file beside a remote-only publication carries the
-  // repository and time the publication's own copy does not.
-  const authorization = remoteAuthorization ?? publication.authorization ?? {};
+  // The bound authorization -- the gate file or remote sidecar the store
+  // reader admitted -- carries the repository and time the ledger's own copy
+  // does not; without one the ledger's copy is shown.
+  const record = authorization ?? publication.authorization ?? {};
   const observation = publication.latest_observation;
   return [
     "## Remote publication",
     [
-      `- Pull request: ${target.owner ?? "n/a"}/${target.repo ?? "n/a"}#${target.pr_number ?? "n/a"}, ${code(target.head_branch)} into ${code(target.base_branch)}`,
-      `- Authorized head: ${code(authorization.head_sha)} over base ${code(authorization.base_sha)}`,
-      `- Authorization: ${code(authorization.mode)}${authorization.acknowledgement ? `, acknowledgement ${code(authorization.acknowledgement)}` : ""}${authorization.operator_label ? `, operator ${authorization.operator_label}` : ""}${authorization.authorized_at ? `, at ${authorization.authorized_at}` : ""}`,
-      ...(authorization.repository_path ? [`- Authorized repository: ${code(authorization.repository_path)}`] : []),
-      ...(authorization.rationale ? ["- Authorization rationale:", literal(authorization.rationale)] : []),
+      `- Pull request: ${inline(target.owner)}/${inline(target.repo)}#${inline(target.pr_number)}, ${code(target.head_branch)} into ${code(target.base_branch)}`,
+      `- Authorized head: ${code(record.head_sha)} over base ${code(record.base_sha)}`,
+      `- Authorization: ${code(record.mode)}${record.acknowledgement ? `, acknowledgement ${code(record.acknowledgement)}` : ""}${record.operator_label ? `, operator ${inline(record.operator_label)}` : ""}${record.authorized_at ? `, at ${inline(record.authorized_at)}` : ""}${record.reviewer_provider ? `, gated by ${code(record.reviewer_provider)}` : ""}`,
+      ...(record.repository_path ? [`- Authorized repository: ${code(record.repository_path)}`] : []),
       `- Codex trigger policy: ${code(target.codex_trigger_policy?.mode)}`,
     ].join("\n"),
+    ...(record.rationale ? ["Authorization rationale:", block(record.rationale)] : []),
     ...requestsAndResults(publication),
     ...checksSection(observation),
     ...threadsSection(publication),
@@ -505,12 +551,13 @@ export function reportRevision(review, publication) {
 }
 
 // `review` is null for a REMOTE_ONLY publication, which has no review ledger;
-// the publication is then required and the header comes from the authorization.
+// the publication is then required. `authorization` is the bound gate or
+// sidecar the store reader admitted, when the caller read one.
 export function renderReviewReport(
   review,
   {
     publication = null,
-    remoteAuthorization = null,
+    authorization = null,
     renderedAt = new Date().toISOString(),
     ledgerDirectory = null,
   } = {},
@@ -530,10 +577,10 @@ export function renderReviewReport(
   const ledgers = [
     ...(review == null ? [] : ["review.json"]),
     ...(publication == null ? [] : ["publication.json"]),
-    ...(review == null && remoteAuthorization != null ? ["remote-authorization.json"] : []),
+    ...(review == null && authorization != null ? ["remote-authorization.json"] : []),
   ].map((name) => code(path.join(directory, name)));
   const sections = [
-    `# Review report ${reviewId}`,
+    `# Review report ${inline(reviewId)}`,
     ...(review == null
       ? remoteOnlySection()
       : [
@@ -544,14 +591,14 @@ export function renderReviewReport(
           ...changesSection(review),
           ...outcomeSection(review),
         ]),
-    ...remoteSection(publication, review == null ? remoteAuthorization : null),
+    ...remoteSection(publication, authorization),
     "## Footer",
     [
       `- Review: ${code(reviewId)}`,
       `- Review ledger state_version: ${review == null ? "n/a (remote-only: no local review ledger)" : (review.state_version ?? 0)}`,
       `- Publication ledger revision: ${publication == null ? "none" : publication.revision}`,
       `- Report revision: ${code(reportRevision(review, publication))}`,
-      `- Rendered at: ${renderedAt}`,
+      `- Rendered at: ${inline(renderedAt)}`,
       `- Ledger: ${ledgers.join(", ")}`,
     ].join("\n"),
     PROJECTION_NOTICE,
@@ -559,28 +606,38 @@ export function renderReviewReport(
   return `${sections.join("\n\n")}\n`;
 }
 
-async function readLedger(filePath, reviewId) {
-  try {
-    return JSON.parse(await fsp.readFile(filePath, "utf8"));
-  } catch (error) {
-    if (error?.code === "ENOENT") return null;
-    throw reportError("LEDGER_UNREADABLE", `cannot read ${filePath}: ${error.message}`, {
-      review_id: reviewId,
-      path: filePath,
-    });
-  }
-}
-
-// The ledgers a report is rendered from, read as the bytes on disk. Each is
-// optional on its own -- a review that never published has no publication, a
-// REMOTE_ONLY publication has no review -- but one of the two must exist.
+// The ledgers a report is rendered from, each admitted by the reader the
+// server itself uses -- never as raw bytes, because the report combines two or
+// three files and files a document under the review's name. Each is optional
+// on its own: a review that never published has no publication, a REMOTE_ONLY
+// publication has no review. One of the two must exist, and a publication
+// must be bound to the authorization file beside it.
 export async function loadReportLedgers(storeRoot, reviewId) {
   if (typeof reviewId !== "string" || !REVIEW_ID_PATTERN.test(reviewId)) {
     throw reportError("INVALID_REVIEW_ID", "invalid review_id", { review_id: reviewId });
   }
   const directory = path.join(storeRoot, "reviews", reviewId);
-  const review = await readLedger(path.join(directory, "review.json"), reviewId);
-  const publication = await readLedger(path.join(directory, "publication.json"), reviewId);
+  const reviewPath = path.join(directory, "review.json");
+  let review = null;
+  if (fs.existsSync(reviewPath)) {
+    review = await loadReview(storeRoot, reviewId);
+    // loadReview reads by directory; the ledger inside has to be that review.
+    if (review?.id !== reviewId) {
+      throw reportError(
+        "REVIEW_LEDGER_INVALID",
+        `review.json names ${JSON.stringify(review?.id ?? null)}, not ${reviewId}`,
+        { review_id: reviewId, path: reviewPath },
+      );
+    }
+  }
+  let publication = null;
+  try {
+    // Canonical bytes, the stored-ledger schema, and the review_id inside are
+    // all checked by the publication reader.
+    publication = await getPublication(storeRoot, reviewId);
+  } catch (error) {
+    if (error?.code !== "PUBLICATION_NOT_FOUND") throw error;
+  }
   if (review == null && publication == null) {
     throw reportError(
       "REVIEW_NOT_FOUND",
@@ -593,44 +650,47 @@ export async function loadReportLedgers(storeRoot, reviewId) {
   if (review == null && !isRemoteOnly(publication)) {
     throw reportError(
       "REVIEW_LEDGER_MISSING",
-      `review ledger missing for a LOCAL_GATE publication: ${path.join(directory, "review.json")}`,
-      { review_id: reviewId, path: path.join(directory, "review.json") },
+      `review ledger missing for a LOCAL_GATE publication: ${reviewPath}`,
+      { review_id: reviewId, path: reviewPath },
     );
   }
-  // The authorization file is admitted by the publication reader's own judge,
-  // bound to this ledger; a sidecar it rejects, or one that is missing, fails
-  // the render rather than lending the report fields the ledger never bound.
-  const remoteAuthorization =
-    review == null
-      ? await readBoundRemoteAuthorization(storeRoot, reviewId, publication)
-      : null;
-  return { directory, review, publication, remoteAuthorization };
+  // The gate file or remote sidecar, admitted by the publication reader's own
+  // binding check; a file it rejects, or one that is missing, fails the
+  // render rather than lending the report fields the ledger never bound.
+  const authorization =
+    publication == null
+      ? null
+      : await readBoundPublicationAuthorization(storeRoot, reviewId, publication);
+  return { directory, review, publication, authorization };
 }
 
 // Publishes fully written bytes at `filePath` only if nothing is there yet: the
 // temporary file is complete before the link, and link refuses an existing
 // target, so two renderers racing on one revision leave exactly one file and
-// neither ever sees the other's partial write.
+// neither ever sees the other's partial write. Whatever fails, the temporary
+// file is removed.
 async function createExclusive(filePath, data) {
   const temporary = `${filePath}.${crypto.randomBytes(16).toString("hex")}.tmp`;
-  const handle = await fsp.open(
-    temporary,
-    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
-    0o600,
-  );
+  let handle = null;
+  let linking = false;
   try {
+    handle = await fsp.open(
+      temporary,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+      0o600,
+    );
     await handle.writeFile(data);
     await handle.sync();
-  } finally {
     await handle.close();
-  }
-  try {
+    handle = null;
+    linking = true;
     await fsp.link(temporary, filePath);
     return true;
   } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
-    return false;
+    if (linking && error?.code === "EEXIST") return false;
+    throw error;
   } finally {
+    await handle?.close().catch(() => {});
     await fsp.unlink(temporary).catch(() => {});
   }
 }
@@ -642,7 +702,7 @@ async function createExclusive(filePath, data) {
 // Markdown itself stays in the file: a report can run to megabytes, and the
 // driver that calls this after a gate needs the path, not the bytes.
 export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}) {
-  const { directory, review, publication, remoteAuthorization } =
+  const { directory, review, publication, authorization } =
     await loadReportLedgers(storeRoot, reviewId);
   const revision = reportRevision(review, publication);
   // `r<state_version>[-p<revision>]` with a review, `p<revision>` without one.
@@ -654,7 +714,7 @@ export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}
   if (!fs.existsSync(filePath)) {
     const markdown = renderReviewReport(review, {
       publication,
-      remoteAuthorization,
+      authorization,
       renderedAt,
       ledgerDirectory: directory,
     });

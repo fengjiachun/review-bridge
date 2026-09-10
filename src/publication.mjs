@@ -3006,12 +3006,13 @@ async function readBoundAuthorization(
   return actual;
 }
 
-// The report renders a remote-only publication from its authorization file,
-// and that file is admitted only by the same judge every publication read
-// uses: canonical bytes, the fields the authorization requires, and the
-// ledger's binding to it (head, base, source digest). A sidecar that was
-// edited, replaced, or belongs to another head fails here, not in the report.
-export async function readBoundRemoteAuthorization(storeRoot, reviewId, ledger) {
+// The report renders a publication beside the authorization that gated it,
+// and that authorization -- gate.json for a local gate, the remote sidecar
+// otherwise -- is admitted only by the same judge every publication read uses:
+// canonical bytes, the fields the authorization requires, and the ledger's
+// binding to it by head, base, and source digest. A file that was edited,
+// replaced, or belongs to another head fails here, not in the report.
+export async function readBoundPublicationAuthorization(storeRoot, reviewId, ledger) {
   return readBoundAuthorization(pathsFor(storeRoot, reviewId), reviewId, ledger);
 }
 
@@ -3846,7 +3847,7 @@ function decidingRunsFor(requirement, runs) {
   return byKind;
 }
 
-function checkRequiredRuns(requiredChecks) {
+export function checkRequiredRuns(requiredChecks) {
   if (requiredChecks.collection.status !== "COMPLETE") {
     return "EVIDENCE_INCOMPLETE";
   }
@@ -4330,7 +4331,7 @@ function codexDecision(ledger) {
   return status("GITHUB_REVIEW_UNKNOWN");
 }
 
-function codexStatus(ledger) {
+export function codexStatus(ledger) {
   return codexDecision(ledger).status;
 }
 
@@ -4508,7 +4509,7 @@ function derivePublication(
 // event retired is audit evidence, not a live claim, so it is never compared
 // against the current watermark as though it were still active; a chain that
 // cannot be replayed as one linear frontier blocks through its own reason.
-function invalidatedAutomaticResolution(ledger) {
+export function invalidatedAutomaticResolution(ledger) {
   const frontier = resolutionFrontier(ledger);
   if (frontier.blockers.length > 0) {
     // A blocker invalidates the frontier even when it names no record

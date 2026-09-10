@@ -23,6 +23,11 @@ const USAGE = `Usage: review-report.mjs <review_id> [--json] [--store <path>]
                   Markdown itself.
   --store <path>  Read this store instead of the configured one.
 
+  Every ledger is admitted by the reader the server itself uses: a
+  publication must be canonical, name this review, and be bound to the gate
+  or authorization file beside it, or the render fails with that reader's
+  error and prints nothing.
+
   Read-only: nothing is written, not even the report file the author tool
   render_review_report writes beside the ledger. The store is the one the
   servers use; set REVIEW_BRIDGE_HOME or pass --store to point at another.
@@ -67,10 +72,10 @@ try {
   process.stderr.write(`${error.code ?? "ERROR"}: ${error.message}\n`);
   process.exit(1);
 }
-const { directory, review, publication, remoteAuthorization } = ledgers;
+const { directory, review, publication, authorization } = ledgers;
 const markdown = renderReviewReport(review, {
   publication,
-  remoteAuthorization,
+  authorization,
   ledgerDirectory: directory,
 });
 process.stdout.write(

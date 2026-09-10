@@ -734,7 +734,10 @@ checks, and threads a publication recorded. The tool writes
 `reviews/<review_id>/report-r<revision>.md` (`report-p<revision>.md` when
 remote-only) beside the ledger and returns a receipt -- path, byte count,
 sha256, the ledger revisions rendered -- rather than the Markdown, which can
-run to megabytes; the script only prints. Neither changes a ledger, consumes a round, or touches
+run to megabytes; the script only prints. Both read every ledger through the reader the server
+itself uses, so a publication that is not canonical, names another review, or
+is not bound to the gate or authorization file beside it fails the render with
+that reader's error. Neither changes a ledger, consumes a round, or touches
 a gate. The workflow skill renders the report once `LOCAL_GATE_PASSED` is
 recorded and again once a publication reads `MERGE_READY`, and opens it in
 Plannotator when that tool is on PATH; annotations never flow back into the

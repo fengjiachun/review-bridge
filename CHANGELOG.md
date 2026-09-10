@@ -28,7 +28,18 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   thread's outcome is the observation's resolved flag read against the
   server's own replay of the resolution records and their lifecycle, so a
   resolution later invalidated, unresolved for repair, or superseded is
-  reported as history rather than as the reason the thread is resolved. The
+  reported as history rather than as the reason the thread is resolved; the
+  Codex and checks gates and the derived status come from the same functions
+  the publication read surfaces use. Every ledger is admitted by the reader
+  the server itself uses -- the review by its loader with its identity
+  checked, the publication by the canonical, schema-validated reader that
+  requires the review ID inside to match, and the gate or authorization file
+  by the binding check that ties it to the ledger -- so a file copied in from
+  another review or edited in place fails the render with that reader's
+  error and nothing is written. Every reviewer- or author-supplied string is
+  rendered as one escaped line or inside a fence longer than any backtick
+  run it contains, so no finding title or rationale can open a heading,
+  table row, or fence of its own. The
   author tool `render_review_report` writes
   `reviews/<review_id>/report-r<revision>.md` (`report-p<revision>.md` when
   remote-only) beside the ledger and returns a receipt -- path, byte count,
