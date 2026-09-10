@@ -463,9 +463,16 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the host store is never mounted; one staged review goes in and is validated on the way back",
       /host store is never mounted; one staged review is copied in and validated on the way back/,
     ],
+    // Codex round two on #125: a field comparison of the staged ledger is
+    // forgeable from inside the container; the host must compute the result
+    // itself. The staged bytes are never written.
     [
-      "the copy-back writes under the review's own state lock, and only when the checks hold",
-      /writes the verdict to the host store, under that review's own state lock, only when the staged ledger still names the same review, provider, advisory flag, repository, and base, moved only along `submit_review`'s transitions/,
+      "the verdict is replayed through the host's own submit_review; the staged bytes are never copied",
+      /staged bytes are never copied: the verdict is replayed through the host's own `submit_review` against the host ledger, under that review's own state lock/,
+    ],
+    [
+      "a ledger the replay cannot produce is refused",
+      /[Aa] staged ledger the replay cannot produce — a status the payload does not reach, a snapshot hash or a history the host never wrote — is refused/,
     ],
     [
       "a failed check leaves the host store unwritten",

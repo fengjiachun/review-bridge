@@ -111,7 +111,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", r
 // records derived from the probe's own argument, and plays the reviewer by
 // moving the staged ledger with the server's own submit — or, when asked,
 // by also leaving the kind of trace the copy-back must refuse.
-async function fakeDocker(f, { tamper = "" } = {}) {
+async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "" } = {}) {
   const bin = path.join(f.root, "bin");
   await fsp.mkdir(bin, { recursive: true });
   const runner = path.join(bin, "fake-run.mjs");
@@ -131,7 +131,7 @@ if (!args.includes("codex")) {
   out.push({ kind: "checkout-head", value: spawnSync("git", ["-C", spec.checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim() });
   out.push({ kind: "store-writable", value: true });
   out.push({ kind: "egress", via: "proxy", code: "000", exit: 56 });
-  out.push({ kind: "egress", via: "direct", code: "000", exit: 6 });
+  out.push({ kind: "egress", via: "direct", code: process.env.FAKE_DIRECT_CODE || "000", exit: process.env.FAKE_DIRECT_CODE ? 0 : 6 });
   out.push({ kind: "codex-version", value: "codex-cli 0.153.4" });
   out.push({ kind: "uid", value: process.getuid() });
   process.stdout.write(out.map((r) => JSON.stringify(r)).join("\\n") + "\\n");
@@ -142,15 +142,34 @@ if (!args.includes("codex")) {
   process.stdout.write("OpenAI Codex v0.153.4\\napproval: granular\\nsandbox: danger-full-access\\nsession id: 00000000-0000-0000-0000-000000000000\\n");
   for (const tool of ["list_pending_reviews", "open_review"]) process.stdout.write("mcp: review-bridge-reviewer/" + tool + " started\\nmcp: review-bridge-reviewer/" + tool + " (completed)\\n");
   const tamper = process.env.FAKE_TAMPER || "";
+  if (process.env.FAKE_SERVER_ERROR) {
+    // A call the server answered with an error: printed as (failed) by codex
+    // and recorded as an error result in the main rollout.
+    process.stdout.write("mcp: review-bridge-reviewer/read_snapshot_file started\\nmcp: review-bridge-reviewer/read_snapshot_file (failed)\\n");
+    const scratch = path.dirname(bind("/codex-home/config.toml"));
+    fs.mkdirSync(path.join(scratch, "sessions"), { recursive: true });
+    const output = JSON.stringify({ content: [{ type: "text", text: JSON.stringify({ error: "git show failed (128): fatal: path 'nope.js' does not exist in 'abc'" }) }], isError: true });
+    fs.writeFileSync(path.join(scratch, "sessions", "rollout-main.jsonl"), [
+      JSON.stringify({ type: "session_meta", payload: { id: "main" } }),
+      JSON.stringify({ type: "response_item", payload: { type: "function_call_output", call_id: "c1", output: output } }),
+    ].join("\\n") + "\\n");
+    if (process.env.FAKE_SERVER_ERROR === "unexplained") process.stdout.write("mcp: review-bridge-reviewer/search_snapshot started\\nmcp: review-bridge-reviewer/search_snapshot (failed)\\n");
+  }
   if (tamper !== "no-verdict") {
-    await submitInitialReview(staged, reviewId, [{ severity: "major", title: "one", explanation: "first" }], "CODEX_TASK");
+    await submitInitialReview(staged, reviewId, [{ severity: "major", title: "one", explanation: "first", path: "app.js", line: 1 }], "CODEX_TASK");
+    if (process.env.FAKE_BIG) for (let i = 0; i < 40000; i += 1) process.stdout.write("codex\\nfiller line " + i + " ".repeat(60) + "\\n");
     process.stdout.write("mcp: review-bridge-reviewer/submit_review started\\nmcp: review-bridge-reviewer/submit_review (completed)\\n");
   }
   const reviewDir = path.join(staged, "reviews", reviewId);
+  const ledgerPath = path.join(reviewDir, "review.json");
+  const editLedger = (edit) => { const l = JSON.parse(fs.readFileSync(ledgerPath, "utf8")); edit(l); fs.writeFileSync(ledgerPath, JSON.stringify(l, null, 2) + "\\n"); };
+  if (tamper === "forge-clean") editLedger((l) => { l.status = "CLEAN"; l.findings = []; });
+  if (tamper === "findings") editLedger((l) => { l.findings.push({ ...l.findings[0], id: "F-002", title: "planted", status: "RESOLVED" }); });
+  if (tamper === "hash") editLedger((l) => { l.rounds[0].snapshot_hash = "0".repeat(64); });
   if (tamper === "outside") fs.writeFileSync(path.join(staged, "other.txt"), "x");
   if (tamper === "extra") fs.writeFileSync(path.join(reviewDir, "notes.txt"), "x");
   if (tamper === "snapshot") fs.appendFileSync(path.join(reviewDir, "rounds", "1", "manifest.json"), "\\n");
-  if (tamper === "id") { const l = JSON.parse(fs.readFileSync(path.join(reviewDir, "review.json"), "utf8")); l.advisory = false; fs.writeFileSync(path.join(reviewDir, "review.json"), JSON.stringify(l)); }
+  if (tamper === "id") editLedger((l) => { l.advisory = false; });
   if (tamper === "sibling") { fs.mkdirSync(path.join(staged, "reviews", "rb-2026-01-01T000000-000Z-00000000"), { recursive: true }); fs.writeFileSync(path.join(staged, "reviews", "rb-2026-01-01T000000-000Z-00000000", "review.json"), "{}"); }
 }
 `,
@@ -177,12 +196,16 @@ esac
     FAKE_RUN: runner,
     FAKE_CORE: path.join(f.plugin, "server", "core.mjs"),
     FAKE_TAMPER: tamper,
+    FAKE_DIRECT_CODE: directCode,
+    FAKE_BIG: big ? "1" : "",
+    FAKE_SERVER_ERROR: serverError,
   };
 }
 
 function launch(f, args, env = {}) {
   return spawnSync(process.execPath, [f.launcher, ...args], {
     encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
     env: {
       ...process.env,
       HOME: f.home,
@@ -310,21 +333,35 @@ test("a checkout path with a space stays one path through the mount and the prob
 
 test("with a stand-in docker the launcher stages the review, runs, validates, and copies the verdict back", async (t) => {
   const f = await fixture(t, { realReview: true, checkoutName: "My Projects/review bridge" });
-  const env = await fakeDocker(f);
+  // The fake reviewer floods the transcript before its last mcp: lines, so
+  // criterion 1 depends on the transcript being flushed before it is read.
+  const env = await fakeDocker(f, { big: true });
   const result = launch(f, ["--review-id", f.reviewId], env);
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.status, 0, `${result.stdout.slice(-3000)}\n${result.stderr}`);
   assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: PASS — list_pending_reviews 1\/1, open_review 1\/1, submit_review 1\/1/);
   assert.match(result.stdout, /criterion 2 host filesystem absent: PASS/);
   assert.match(
     result.stdout,
-    /criterion 3 validated verdict copied back to the host store: PASS — copy-back applied under the review's state lock — status WAITING_FOR_REVIEW → REVIEW_SUBMITTED, state_version 1 → 2, findings 1, 0 round file\(s\) added/,
+    /criterion 3 validated verdict copied back to the host store: PASS — copy-back applied — the verdict was replayed through the host's own submit_review against the host ledger under its state lock and matched the staged ledger; status WAITING_FOR_REVIEW → REVIEW_SUBMITTED, state_version 1 → 2, findings 1/,
   );
   assert.match(result.stdout, /egress: example\.com via proxy → 000 curl-exit=56, without proxy → 000 curl-exit=6; proxy log: allow chatgpt\.com:443 ×1, deny example\.com:443 ×1/);
   const ledger = await loadReview(f.store, f.reviewId);
   assert.equal(ledger.status, "REVIEW_SUBMITTED");
   assert.equal(ledger.state_version, 2);
   assert.equal(ledger.findings.length, 1);
+  assert.deepEqual(ledger.findings[0], {
+    id: "F-001",
+    introduced_round: 1,
+    severity: "major",
+    title: "one",
+    explanation: "first",
+    recommendation: "",
+    status: "OPEN",
+    path: "app.js",
+    line: 1,
+  });
   assert.equal(ledger.advisory, true);
+  assert.equal(ledger.history.at(-1).event, "FINDINGS_SUBMITTED");
   // The scratch directory named in the output holds the staged copy.
   const scratch = result.stdout.match(/^scratch (.+)$/m)[1];
   t.after(() => fsp.rm(scratch, { recursive: true, force: true }));
@@ -337,7 +374,13 @@ test("the copy-back refuses a staged store that carries anything but the review'
     ["sibling", /unexpected file outside the staged review: reviews\/rb-2026-01-01T000000-000Z-00000000\/review\.json/],
     ["extra", /an unexpected file was created in the staged review: notes\.txt/],
     ["snapshot", /an existing snapshot file was modified: rounds\/1\/manifest\.json/],
-    ["id", /the staged ledger's advisory changed to false/],
+    // The three forgeries the replay exists to catch: a status the payload
+    // does not reach, findings the server never normalized, a snapshot hash
+    // the host never wrote — and a flipped advisory flag, for good measure.
+    ["forge-clean", /does not match the host's own replay of its submit_review payload \(differs in: clean_snapshot_hash, history\)/],
+    ["findings", /does not match the host's own replay of its submit_review payload \(differs in: findings, history\)/],
+    ["hash", /does not match the host's own replay of its submit_review payload \(differs in: rounds\)/],
+    ["id", /does not match the host's own replay of its submit_review payload \(differs in: advisory\)/],
     ["no-verdict", /nothing to copy back — the staged ledger is unchanged/],
   ]) {
     const f = await fixture(t, { realReview: true });
@@ -419,6 +462,34 @@ test("the launcher refuses host paths Docker Desktop stops serving, naming the p
   result = launch(i, ["--review-id", REVIEW_ID, "--dry-run"], { TMPDIR: "/Volumes" });
   assert.equal(result.status, 2, result.stdout);
   assert.match(result.stderr, /the scratch directory \(TMPDIR\) \/Volumes is under \/Volumes\//);
+});
+
+test("a call the server answered with an error is not a failed call; one nobody answered is", async (t) => {
+  const f = await fixture(t, { realReview: true });
+  let result = launch(f, ["--review-id", f.reviewId], await fakeDocker(f, { serverError: "answered" }));
+  assert.equal(result.status, 0, result.stdout.slice(-2000));
+  assert.match(
+    result.stdout,
+    /criterion 1 MCP calls completed inside the container: PASS — .*read_snapshot_file 0\/1.*; 1 of 1 failed call\(s\) answered by the server with an error \("git show failed \(128\): fatal: path 'nope\.js' does not exist in 'abc'"\)/,
+  );
+  const g = await fixture(t, { realReview: true });
+  result = launch(g, ["--review-id", g.reviewId], await fakeDocker(g, { serverError: "unexplained" }));
+  assert.equal(result.status, 1, result.stdout.slice(-2000));
+  assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: FAIL — .*; 1 of 2 failed call\(s\) answered by the server with an error \(.*\), 1 unexplained/);
+});
+
+test("a direct egress answer with any HTTP status fails the boundary before the reviewer starts", async (t) => {
+  const f = await fixture(t, { realReview: true });
+  const env = await fakeDocker(f, { directCode: "403" });
+  const result = launch(f, ["--review-id", f.reviewId], env);
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(
+    result.stderr,
+    /the container boundary did not hold:\n {2}the container reached https:\/\/example\.com without the proxy \(HTTP 403, curl exit 0\)/,
+  );
+  assert.doesNotMatch(result.stdout, /mcp: /);
+  const ledger = await loadReview(f.store, f.reviewId);
+  assert.equal(ledger.state_version, 1);
 });
 
 test("the launcher fails closed when Docker is unavailable", async (t) => {

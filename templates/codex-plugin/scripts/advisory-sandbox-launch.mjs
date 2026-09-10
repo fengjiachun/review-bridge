@@ -107,13 +107,15 @@ const USAGE = `Usage: advisory-sandbox-launch.mjs --review-id <id> [--store <pat
   On exit the launcher prints the three criteria it just verified — the
   reviewer's MCP calls completed inside the container, the host filesystem
   was absent, the validated verdict was copied back to the host store — with
-  the guardian's verdict per call and the proxy's egress log. The copy-back
-  writes the host ledger under that review's own state lock, and only when
-  the staged ledger still names the same review, provider, advisory flag,
-  repository, and base, moved only along submit_review's transitions, left
-  every earlier snapshot file untouched, added nothing else to the staged
-  store, and the host ledger is still at its launch state_version; a failed
-  check leaves the host store unwritten and the staged copy for inspection. The isolated CODEX_HOME lives
+  the guardian's verdict per call and the proxy's egress log. The staged
+  bytes are never copied: the verdict is replayed through the host's own
+  submit_review against the host ledger, under that review's own state lock,
+  with the findings the staged ledger records as the payload, and the host
+  keeps the replay's result only when it equals the staged ledger field for
+  field, timestamps aside. A staged ledger the replay cannot produce, a staged
+  store that changed or added any other file, or a host ledger that moved
+  since launch is refused; a failed check leaves the host store unwritten and
+  the staged copy for inspection. The isolated CODEX_HOME lives
   in a Docker volume for the run and its sessions (the rollouts, guardian
   threads included) are copied into the scratch directory beside the codex
   transcript, which is kept and named for the record.
@@ -407,16 +409,13 @@ async function stageReview(inputs, stagedStore) {
   return { stagedStore, staged, digests };
 }
 
-// What may come back from the container: review.json moved by submit_review,
-// new files under rounds/, the server's lock artifacts, and nothing else —
-// no other review, no workflow, no edited snapshot, no deleted file, and a
-// ledger that still names the review it was launched as. Each failed check is
-// a named reason; the host store is written only when there are none.
-async function validateStagedReview(inputs, stage, before, loadReview) {
+// What may come back from the container at the file level: review.json
+// changed, the server's lock artifacts, and nothing else — no other review,
+// no new or edited or deleted file. Each failed check is a named reason.
+async function inspectStagedStore(inputs, stage) {
   const reasons = [];
   const reviewPrefix = path.join("reviews", inputs.reviewId) + path.sep;
   const seen = new Set();
-  const newRoundFiles = [];
   let ledgerChanged = false;
   for await (const file of walkFiles(stage.stagedStore)) {
     const relative = path.relative(stage.stagedStore, file);
@@ -430,73 +429,92 @@ async function validateStagedReview(inputs, stage, before, loadReview) {
     const digest = await sha256File(file);
     if (inner === "review.json") {
       ledgerChanged = digest !== stage.digests.get(inner);
-    } else if (stage.digests.has(inner)) {
-      if (digest !== stage.digests.get(inner)) {
-        reasons.push(`an existing snapshot file was modified: ${inner}`);
-      }
-    } else if (inner.startsWith(`rounds${path.sep}`)) {
-      newRoundFiles.push(inner);
-    } else {
+    } else if (!stage.digests.has(inner)) {
       reasons.push(`an unexpected file was created in the staged review: ${inner}`);
+    } else if (digest !== stage.digests.get(inner)) {
+      reasons.push(`an existing snapshot file was modified: ${inner}`);
     }
   }
   for (const known of stage.digests.keys()) {
     if (!seen.has(known)) reasons.push(`a staged file was deleted: ${known}`);
   }
-  let staged = null;
-  try {
-    staged = await loadReview(stage.stagedStore, inputs.reviewId);
-  } catch (error) {
-    reasons.push(`the staged ledger does not load: ${error.message}`);
-  }
-  if (staged) {
-    for (const [field, expected] of [
-      ["id", inputs.reviewId],
-      ["reviewer_provider", "CODEX_TASK"],
-      ["advisory", true],
-      ["repository_path", inputs.ledger.repository_path],
-      ["base_ref", inputs.ledger.base_ref],
-    ]) {
-      if (staged[field] !== expected) {
-        reasons.push(`the staged ledger's ${field} changed to ${JSON.stringify(staged[field])}`);
-      }
-    }
-    if (ledgerChanged) {
-      if (!["REVIEW_SUBMITTED", "CLEAN"].includes(staged.status)) {
-        reasons.push(`the staged ledger's status ${staged.status} is not a submit_review outcome`);
-      }
-      if (!(staged.state_version > before.stateVersion)) {
-        reasons.push(`the staged state_version ${staged.state_version} did not advance past ${before.stateVersion}`);
-      }
-    } else if (newRoundFiles.length > 0) {
-      reasons.push("round files were added without a ledger transition");
-    }
-  }
-  return { reasons, ledgerChanged, newRoundFiles, staged };
+  return { reasons, ledgerChanged };
 }
 
-// The write to the host store, under the same per-review state lock the
-// servers take, after re-reading that the host ledger did not move.
-async function copyBack(inputs, stage, before, validation, { loadReview, withStateLock, atomicWriteFile }) {
-  const realDirectory = path.join(inputs.store, "reviews", inputs.reviewId);
-  await withStateLock(
-    { directory: realDirectory, reviewId: inputs.reviewId, domain: "review" },
+// The staged bytes are never trusted and never copied. The one mutation an
+// advisory review admits is submit_review, so the staged ledger's findings
+// are taken as that call's payload and replayed through the server's own
+// submitInitialReview against a copy of the host ledger, under the host
+// review's state lock; the host keeps the replay's result only when it equals
+// the staged ledger field for field, timestamps aside. A staged ledger the
+// replay cannot produce — a status the payload does not reach, a snapshot
+// hash or a history the host never wrote — is refused.
+const TIMESTAMP_FIELDS = new Set(["updated_at"]);
+
+function comparableLedger(ledger) {
+  const copy = JSON.parse(JSON.stringify(ledger));
+  for (const field of TIMESTAMP_FIELDS) delete copy[field];
+  if (Array.isArray(copy.history)) {
+    copy.history = copy.history.map(({ at, ...event }) => event);
+  }
+  return copy;
+}
+
+function submitPayload(staged) {
+  if (!Array.isArray(staged.findings)) {
+    throw new Error("the staged ledger carries no findings array to replay");
+  }
+  return staged.findings.map((finding) => {
+    const payload = {
+      severity: finding?.severity,
+      title: finding?.title,
+      explanation: finding?.explanation,
+      recommendation: finding?.recommendation,
+    };
+    if (finding?.path != null) payload.path = finding.path;
+    if (finding?.line != null) payload.line = finding.line;
+    return payload;
+  });
+}
+
+async function replayAndCopyBack(inputs, stage, before, scratch, api) {
+  const { loadReview, submitInitialReview, withStateLock, atomicWriteFile, canonicalJson } = api;
+  const hostDirectory = path.join(inputs.store, "reviews", inputs.reviewId);
+  const replayStore = path.join(scratch, "replay");
+  const replayDirectory = path.join(replayStore, "reviews", inputs.reviewId);
+  return withStateLock(
+    { directory: hostDirectory, reviewId: inputs.reviewId, domain: "review" },
     async () => {
-      const current = await loadReview(inputs.store, inputs.reviewId);
-      if (current.state_version !== before.stateVersion) {
+      const host = await loadReview(inputs.store, inputs.reviewId);
+      if (host.state_version !== before.stateVersion) {
         throw new Error(
-          `the host ledger advanced to state_version ${current.state_version} during the run`,
+          `the host ledger advanced to state_version ${host.state_version} during the run`,
         );
       }
-      for (const relative of validation.newRoundFiles) {
-        const target = path.join(realDirectory, relative);
-        await fsp.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-        await atomicWriteFile(target, await fsp.readFile(path.join(stage.staged, relative)));
+      const staged = await loadReview(stage.stagedStore, inputs.reviewId);
+      await fsp.rm(replayStore, { recursive: true, force: true });
+      await fsp.mkdir(path.dirname(replayDirectory), { recursive: true, mode: 0o700 });
+      await fsp.cp(hostDirectory, replayDirectory, {
+        recursive: true,
+        filter: (entry) => !LOCK_ARTIFACTS.has(path.basename(entry)),
+      });
+      await submitInitialReview(replayStore, inputs.reviewId, submitPayload(staged), "CODEX_TASK");
+      const replayed = await loadReview(replayStore, inputs.reviewId);
+      const expected = comparableLedger(replayed);
+      const actual = comparableLedger(staged);
+      if (canonicalJson(expected) !== canonicalJson(actual)) {
+        const differing = [...new Set([...Object.keys(expected), ...Object.keys(actual)])]
+          .filter((key) => canonicalJson(expected[key] ?? null) !== canonicalJson(actual[key] ?? null))
+          .sort();
+        throw new Error(
+          `the staged ledger does not match the host's own replay of its submit_review payload (differs in: ${differing.join(", ")})`,
+        );
       }
       await atomicWriteFile(
-        path.join(realDirectory, "review.json"),
-        await fsp.readFile(path.join(stage.staged, "review.json")),
+        path.join(hostDirectory, "review.json"),
+        await fsp.readFile(path.join(replayDirectory, "review.json")),
       );
+      return replayed;
     },
   );
 }
@@ -682,14 +700,23 @@ function evaluateBoundary(output, inputs) {
       }
     } else if (record.kind === "egress") {
       const summary = `${record.code} curl-exit=${record.exit}`;
-      if (record.via === "proxy") facts.egressProxied = summary;
-      else facts.egressDirect = summary;
-      if (/^[23]\d\d$/.test(record.code)) {
-        failures.push(
-          record.via === "proxy"
-            ? `the proxy let https://example.com through (${summary})`
-            : `the container reached https://example.com without the proxy (${summary})`,
-        );
+      if (record.via === "proxy") {
+        // Through the proxy the expected answer is its refusal; only a
+        // success status means the allowlist let the host through.
+        facts.egressProxied = summary;
+        if (/^[23]\d\d$/.test(record.code)) {
+          failures.push(`the proxy let https://example.com through (${summary})`);
+        }
+      } else {
+        // Without the proxy any HTTP status at all — 403 and 5xx included —
+        // means traffic left the container; only a connection-level failure
+        // (no status, nonzero curl exit) is the boundary holding.
+        facts.egressDirect = summary;
+        if (record.code !== "000" || record.exit === 0) {
+          failures.push(
+            `the container reached https://example.com without the proxy (HTTP ${record.code}, curl exit ${record.exit})`,
+          );
+        }
       }
     } else if (record.kind === "checkout-head") {
       facts.checkoutHead = record.value;
@@ -784,6 +811,41 @@ async function guardianVerdicts(sessionsRoot) {
     }
   }
   return verdicts;
+}
+
+// Codex prints `(failed)` both when the server answered a call with an error
+// result and when the call failed to complete at all. The two differ for the
+// criterion: an answered error (a path that is not in the snapshot, say) is
+// the server working. The main rollout carries every tool output, so the
+// server's error answers are counted there and set against the failed lines;
+// only failures no answer accounts for count against the container.
+async function serverErrorAnswers(sessionsRoot) {
+  const messages = [];
+  for await (const file of walkFiles(sessionsRoot)) {
+    if (!file.endsWith(".jsonl")) continue;
+    const text = await fsp.readFile(file, "utf8");
+    if (text.includes('"thread_source":"guardian_review"')) continue;
+    for (const line of text.split("\n")) {
+      if (!line || !line.includes("function_call_output") && !line.includes("custom_tool_call_output")) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const payload = event.payload ?? {};
+      if (!["function_call_output", "custom_tool_call_output"].includes(payload.type)) continue;
+      const output = Array.isArray(payload.output)
+        ? payload.output.map((part) => part?.text ?? "").join(" ")
+        : String(payload.output ?? "");
+      // The server's `{"error":"…"}` may arrive raw or JSON-escaped one level
+      // deeper; the message ends at the first quote either way.
+      for (const match of output.matchAll(/\{\\?"error\\?":\\?"((?:[^"\\]|\\[^"]){0,200})/g)) {
+        messages.push(match[1]);
+      }
+    }
+  }
+  return messages;
 }
 
 function summarizeProxyLog(log) {
@@ -954,8 +1016,8 @@ async function main() {
   const transcriptPath = path.join(scratch, "codex.log");
   const before = await ledgerFacts(inputs.ledgerPath);
   const stage = await stageReview(inputs, stagedStore);
-  const { loadReview } = await import("../server/core.mjs");
-  const { withStateLock, atomicWriteFile } = await import("../server/storage.mjs");
+  const { loadReview, submitInitialReview } = await import("../server/core.mjs");
+  const { withStateLock, atomicWriteFile, canonicalJson } = await import("../server/storage.mjs");
 
   let proxyLog = "";
   let cleaned = false;
@@ -1021,11 +1083,11 @@ async function main() {
       forward(child.stdout);
       forward(child.stderr);
       child.on("error", reject);
-      child.on("close", (code) => {
-        transcript.end();
-        resolve(code);
-      });
+      child.on("close", (code) => resolve(code));
     });
+    // The last mcp: line is often the last bytes the child wrote; read the
+    // transcript only once the stream has flushed them.
+    await new Promise((resolve) => transcript.end(resolve));
     elapsed = (Date.now() - started) / 1000;
   } catch (error) {
     cleanup();
@@ -1039,17 +1101,28 @@ async function main() {
   const reviewerCalls = [...mcp.entries()].filter(([key]) => key.startsWith(`${REVIEWER_SERVER}/`));
   const started = reviewerCalls.reduce((sum, [, entry]) => sum + entry.started, 0);
   const completed = reviewerCalls.reduce((sum, [, entry]) => sum + entry.completed, 0);
-  // The copy-back: validate what the container left in the staged store,
-  // then write the host ledger under its lock, or refuse with the reasons.
-  const validation = await validateStagedReview(inputs, stage, before, loadReview);
+  const failedCalls = started - completed;
+  const answeredErrors = failedCalls > 0 ? await serverErrorAnswers(path.join(scratch, "sessions")) : [];
+  const explained = Math.min(failedCalls, answeredErrors.length);
+  // The copy-back: check what the container left in the staged store at the
+  // file level, then replay the verdict through the host's own submit_review
+  // under the host review's lock and keep the replay only if it equals the
+  // staged ledger; otherwise refuse with the reasons.
+  const inspection = await inspectStagedStore(inputs, stage);
   let copyBackOutcome;
-  if (validation.reasons.length > 0) {
-    copyBackOutcome = { ok: false, detail: `copy-back refused — ${validation.reasons.join("; ")}; host store unwritten, staged copy kept at ${stage.staged}` };
-  } else if (!validation.ledgerChanged) {
+  if (inspection.reasons.length > 0) {
+    copyBackOutcome = { ok: false, detail: `copy-back refused — ${inspection.reasons.join("; ")}; host store unwritten, staged copy kept at ${stage.staged}` };
+  } else if (!inspection.ledgerChanged) {
     copyBackOutcome = { ok: false, detail: "nothing to copy back — the staged ledger is unchanged, so no verdict was recorded" };
   } else {
     try {
-      await copyBack(inputs, stage, before, validation, { loadReview, withStateLock, atomicWriteFile });
+      await replayAndCopyBack(inputs, stage, before, scratch, {
+        loadReview,
+        submitInitialReview,
+        withStateLock,
+        atomicWriteFile,
+        canonicalJson,
+      });
       copyBackOutcome = { ok: true, detail: null };
     } catch (error) {
       copyBackOutcome = { ok: false, detail: `copy-back refused — ${error.message}; host store unwritten, staged copy kept at ${stage.staged}` };
@@ -1057,18 +1130,21 @@ async function main() {
   }
   const after = await ledgerFacts(inputs.ledgerPath);
   if (copyBackOutcome.ok) {
-    copyBackOutcome.detail = `copy-back applied under the review's state lock — status ${before.status} → ${after.status}, state_version ${before.stateVersion} → ${after.stateVersion}, findings ${after.findings}, ${validation.newRoundFiles.length} round file(s) added, review.json mtime ${before.mtime} → ${after.mtime}`;
+    copyBackOutcome.detail = `copy-back applied — the verdict was replayed through the host's own submit_review against the host ledger under its state lock and matched the staged ledger; status ${before.status} → ${after.status}, state_version ${before.stateVersion} → ${after.stateVersion}, findings ${after.findings}, review.json mtime ${before.mtime} → ${after.mtime}`;
   }
   const verdicts = await guardianVerdicts(path.join(scratch, "sessions"));
   const criteria = [
     [
       "1 MCP calls completed inside the container",
-      started > 0 && completed === started,
+      started > 0 && completed + explained === started,
       reviewerCalls.length === 0
         ? "no reviewer MCP call in the transcript"
         : reviewerCalls
             .map(([key, entry]) => `${key.split("/")[1]} ${entry.completed}/${entry.started}`)
-            .join(", "),
+            .join(", ") +
+          (failedCalls > 0
+            ? `; ${explained} of ${failedCalls} failed call(s) answered by the server with an error (${answeredErrors.slice(0, 3).map((m) => `"${m}"`).join(", ")}${answeredErrors.length > 3 ? ", …" : ""})${failedCalls > explained ? `, ${failedCalls - explained} unexplained` : ""}`
+            : ""),
     ],
     [
       "2 host filesystem absent",

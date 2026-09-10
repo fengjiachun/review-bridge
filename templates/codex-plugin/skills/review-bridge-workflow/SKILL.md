@@ -804,14 +804,17 @@ the one review under `/store`, read-write; and an empty working directory. The
 host store is never mounted; one staged review is copied in and validated on
 the way back, because under `danger-full-access` the reviewer's shell could
 otherwise read and rewrite every other ledger, lock, and workflow in the store,
-past the reviewer server's provider check and mutation lock. The launcher
-writes the verdict to the host store, under that review's own state lock, only
-when the staged ledger still names the same review, provider, advisory flag,
-repository, and base, moved only along `submit_review`'s transitions, left
-every earlier snapshot file untouched, added nothing else to the staged store,
-and the host ledger is still at the state version it was launched with; any
-failed check leaves the host store unwritten and the staged copy in the
-scratch directory for inspection. The host home is absent rather than denied:
+past the reviewer server's provider check and mutation lock. The staged
+bytes are never copied: the verdict is replayed through the host's own
+`submit_review` against the host ledger, under that review's own state lock,
+with the findings the staged ledger records as the payload, and the host keeps
+the replay's result only when it equals the staged ledger field for field,
+timestamps aside. A staged ledger the replay cannot produce — a status the
+payload does not reach, a snapshot hash or a history the host never wrote — is
+refused, as is a staged store that changed or added any other file, or is not
+the one review, and a host ledger that moved since launch; any failed check
+leaves the host store unwritten and the staged copy in the scratch directory
+for inspection. The host home is absent rather than denied:
 before the reviewer
 starts, the launcher's own shell probe reports `absent` for the operator's
 home, `~/.ssh`, `~/.codex`, and `/root/.ssh`, and the launch stops if any of

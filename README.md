@@ -452,8 +452,10 @@ only through the packaged `scripts/advisory-sandbox-launch.mjs` in the Codex
 plugin, which runs the reviewer inside a Linux container that is the
 filesystem read boundary: the operator's `auth.json` bind-mounted read-only,
 the packaged plugin and the author checkout read-only, a staged copy of the
-one review read-write (the host store is never mounted; the verdict is
-validated and copied back under the review's state lock), an isolated
+one review read-write (the host store is never mounted; the staged bytes are
+never copied back — the verdict is replayed through the host's own
+`submit_review` under the review's state lock and kept only if the replay
+equals the staged ledger), an isolated
 `CODEX_HOME`, and egress only through a sidecar proxy that admits
 `chatgpt.com` and `api.openai.com`. Inside the container the reviewer runs
 with `--sandbox danger-full-access`; the container's own default confinement

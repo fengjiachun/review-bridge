@@ -21,15 +21,22 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   marketplace and plugin, read-only; the author checkout, read-only at the
   path the ledger records; and a staged copy of the one review, read-write.
   The host store is never mounted: the review's directory is copied into a
-  scratch store, and after the run the launcher writes the verdict back to the
-  host store under that review's own state lock only when the staged ledger
-  still names the same review, provider, advisory flag, repository, and base,
-  moved only along `submit_review`'s transitions, left every earlier snapshot
-  file untouched, and nothing else in the staged store was created or
-  changed, with the host ledger still at its launch `state_version`; a failed
-  check leaves the host store unwritten and the staged copy for inspection
-  (Codex's round-one P1: a read-write host store under `danger-full-access`
-  would have handed an injected reviewer every other ledger and lock). The
+  scratch store, and after the run the staged bytes are never copied back —
+  the verdict is replayed through the host's own `submit_review` against the
+  host ledger, under that review's own state lock, with the findings the
+  staged ledger records as the payload, and the host keeps the replay's
+  result only when it equals the staged ledger field for field, timestamps
+  aside; a staged ledger the replay cannot produce (a forged `CLEAN`, findings
+  the server never normalized, a snapshot hash the host never wrote), a staged
+  store that changed or added any other file, or a host ledger that moved
+  since launch is refused, leaving the host store unwritten and the staged
+  copy for inspection (Codex's round-one P1: a read-write host store under
+  `danger-full-access` would have handed an injected reviewer every other
+  ledger and lock; its round-two P1: a field comparison of the staged ledger
+  is forgeable from inside the container). The boundary probe treats any
+  HTTP status on the direct egress check as traffic that left the container
+  (round-two P1), and the codex transcript is flushed before the launcher
+  reads it (round-two P2). The
   isolated `CODEX_HOME` is a Docker volume and the working directory a tmpfs
   rather than host directories — nothing Codex keeps there needs to be on the
   host during the run — and the sessions are copied out of the volume
