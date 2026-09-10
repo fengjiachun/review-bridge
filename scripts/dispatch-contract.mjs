@@ -297,6 +297,33 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the guardian bounds neither the shell nor the author surface",
       /It is not what bounds the shell[\s\S]*?not what keeps the author surface out of reach/,
     ],
+    // Issue #115. Under #114's launch the guardian also judged a requested
+    // shell escalation, and allowed one: a model-judged gate on the one thing
+    // the sandbox exists to refuse. The granular policy in the fence moves
+    // that refusal into configuration; the prose has to say so, or the
+    // guardian reads as still standing on that line. And the value has to
+    // carry why all five fields are there, or the line gets trimmed to the
+    // one that matters and stops parsing.
+    [
+      "escalation is refused by configuration, never judged by the guardian",
+      /[Ee]scalation is refused by configuration, never judged by the guardian/,
+    ],
+    [
+      "sandbox_approval=false is the category a shell escalation falls in",
+      /`sandbox_approval=false` is the category a shell escalation falls in/,
+    ],
+    [
+      "the escalation is refused in the router before any guardian thread exists",
+      /refused in Codex's tool router before any guardian thread exists/,
+    ],
+    [
+      "the granular value's five fields are all required",
+      /five fields and all five are required[\s\S]*?`missing field`/,
+    ],
+    [
+      "the guardian's deadline exposure is unchanged by the policy",
+      /`The automatic permission approval review did not finish before its deadline`[\s\S]*?exposure is unchanged, not added/,
+    ],
     // The neutral directory survives the sandbox for reasons of its own, and
     // they have to be stated or the directory reads as a leftover.
     [
@@ -439,21 +466,25 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // policy, and its writable roots named rather than inherited from the
     // host profile, the
     // guardian named as the approver of the MCP calls the sandbox leaves
-    // gated, the author server disabled, and stdin closed. The stdin redirect is part of the launch,
+    // gated, shell escalation refused by configuration (issue #115: the
+    // granular policy with every category false, so a `require_escalated`
+    // request is rejected in the router and never reaches the guardian; all
+    // five fields are required for the value to parse, so the whole literal
+    // is pinned), the author server disabled, and stdin closed. The stdin redirect is part of the launch,
     // not decoration: without it a non-TTY driver's stdin is appended to the
     // prompt as a `<stdin>` block, which breaks the single-task handoff, or
     // the launch blocks on EOF.
     [
       "match",
-      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
-      "launch is not the sandboxed one-shot form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, the author server disabled, and stdin closed",
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
+      "launch is not the sandboxed one-shot form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, the author server disabled, and stdin closed",
     ],
     // Round two is another launch, not a resume, and needs its own runnable
     // form in the same shape.
     [
       "match",
-      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
-      "round-two launch form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, the author server disabled, and stdin closed",
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
+      "round-two launch form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, the author server disabled, and stdin closed",
     ],
     [
       "doesNotMatch",

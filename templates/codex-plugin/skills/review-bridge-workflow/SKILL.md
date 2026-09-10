@@ -577,6 +577,7 @@ launch between them.
      -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
      -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' \
      -c 'approvals_reviewer="guardian_subagent"' \
+     -c 'approval_policy={granular={rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false}}' \
      -c 'mcp_servers.review-bridge-author.command="node"' \
      -c 'mcp_servers.review-bridge-author.enabled=false' \
      '<the reviewer request below>' < /dev/null
@@ -594,8 +595,9 @@ launch between them.
    first Review Bridge MCP call with `user cancelled MCP tool call` before it
    listed a single pending review (observed 2026-08-28 and 2026-09-04); on
    0.153.4 the same call completes under a header reporting
-   `approval: on-request` and
-   `sandbox: workspace-write [workdir]` (observed 2026-09-09).
+   `approval: granular` and
+   `sandbox: workspace-write [workdir]` (observed 2026-09-10; the header read
+   `approval: on-request` before the `approval_policy` line joined the launch).
    `--skip-git-repo-check` is there because the working directory is in no
    repository: without it `codex exec` refuses to start with `Not inside a
    trusted directory and --skip-git-repo-check was not specified`. Redirect
@@ -676,12 +678,42 @@ call `{"risk_level":"low","user_authorization":"high","outcome":"allow"}`
 from the request alone. The launch line sets that key itself rather than
 relying on the operator's `~/.codex/config.toml` to carry it, so the launch
 either works or fails with that message, on any machine. Be exact about what
-the guardian is: an automatic reviewer of the MCP calls, and by Codex's own
-account of the setting of any sandbox escalation the reviewer explicitly asks
-for, judging against the request as the trusted instruction and the transcript
-as untrusted evidence. It is not what bounds the shell — the sandbox denials
-above raised nothing for it to judge — and it is not what keeps the author
-surface out of reach, below.
+the guardian is: an automatic reviewer of the MCP calls, judging against the
+request as the trusted instruction and the transcript as untrusted evidence.
+It is not what bounds the shell — the sandbox denials above raised nothing for
+it to judge — and it is not what keeps the author surface out of reach, below.
+
+Nor, under this launch, does it judge sandbox escalations. By Codex's own
+account of the `approvals_reviewer` setting the guardian also reviews any
+escalation the reviewer explicitly asks for, and without the `approval_policy`
+line it did: a reviewer that requested `sandbox_permissions=require_escalated`
+for a write to `$HOME` had that request routed to the guardian, which allowed
+it as part of the task, and the file was written (observed 2026-09-10). That
+is a model-judged gate on the one thing the sandbox is there to refuse, and
+the `approval_policy` line beside `approvals_reviewer` closes it. Under the
+`granular` policy every approval category set to `false` is rejected by
+configuration instead of being raised, and `sandbox_approval=false` is the
+category a shell escalation falls in: the same request is refused in Codex's
+tool router before any guardian thread exists, the transcript carries
+`rejected by configuration` and `reject command — you cannot ask for escalated
+permissions if the approval policy is Granular(…)`, no `exec` line is printed
+for it, no guardian rollout is written for it, and the run exits normally with
+the file absent. Escalation is refused by configuration, never judged by the
+guardian, which now judges MCP calls only. The value has five fields and all
+five are required: the configuration deserializer refuses it with `missing
+field` for whichever is absent, so the line cannot be shortened to the one
+field that matters. All-`false` is the strictest form, and the reviewer needs
+none of the five — `rules` covers prefix-rule approvals, `skill_approval` does
+not gate reading the packaged reviewer skill (the skill was read and the MCP
+call completed under all-`false`), `request_permissions` is the tool a
+reviewer would use to ask for more, and `mcp_elicitations` are MCP
+elicitations, which the reviewer server never issues. MCP tool-call approval
+is not one of the five, which is why it still reaches `approvals_reviewer`.
+What the line does not change is the guardian's own exposure: its verdict has
+a deadline, and under host load a reviewer call can come back with
+`The automatic permission approval review did not finish before its deadline`
+under either policy — the MCP path is the same guardian path it was, so that
+exposure is unchanged, not added.
 
 The neutral working directory is still required, for two reasons that survive
 the sandbox. It is the sandbox's writable root, so a reviewer launched inside
@@ -749,6 +781,7 @@ codex exec --skip-git-repo-check --sandbox workspace-write \
   -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
   -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' \
   -c 'approvals_reviewer="guardian_subagent"' \
+  -c 'approval_policy={granular={rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false}}' \
   -c 'mcp_servers.review-bridge-author.command="node"' \
   -c 'mcp_servers.review-bridge-author.enabled=false' \
   '<the rereview request>' < /dev/null
