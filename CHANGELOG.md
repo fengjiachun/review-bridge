@@ -35,7 +35,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   ledger and lock; its round-two P1: a field comparison of the staged ledger
   is forgeable from inside the container). The boundary probe treats any
   HTTP status on the direct egress check as traffic that left the container
-  (round-two P1), the codex transcript is flushed before the launcher reads
+  (round-two P1) and requires the mounted checkout's HEAD, sha1 or sha256
+  length, to be the commit the host sees at that path, the codex transcript is flushed before the launcher reads
   it (round-two P2), and the first criterion is derived from the main rollout's own
   `McpToolCall` records alone — every reviewer call completed or was answered
   with an error by the server — with the transcript's `mcp:` lines kept only

@@ -1082,6 +1082,7 @@ function parseProbeRecords(output) {
 // that leads down to the checkout and removed nothing.
 function evaluateBoundary(baselineOutput, mountedOutput, inputs) {
   const { ancestors } = hostPathProbe(inputs);
+  const hostHead = (spawnSync("git", ["-C", inputs.repository, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout || "").trim();
   // The one name an ancestor may gain: the checkout's next path segment below
   // it (not the next probed ancestor, which skips the home directory).
   const wayDown = (ancestor) => path.relative(ancestor, inputs.repository).split(path.sep)[0];
@@ -1146,8 +1147,12 @@ function evaluateBoundary(baselineOutput, mountedOutput, inputs) {
       }
     } else if (record.kind === "checkout-head") {
       facts.checkoutHead = record.value;
-      if (!/^[0-9a-f]{40}$/.test(record.value)) {
+      // 40 hex for sha1, 64 for sha256 (extensions.objectformat is admitted),
+      // and the same commit the host sees at that path.
+      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(record.value)) {
         failures.push(`git cannot read the mounted checkout: ${record.value}`);
+      } else if (record.value !== hostHead) {
+        failures.push(`the mounted checkout's HEAD is ${record.value}, the host's is ${hostHead}`);
       }
     } else if (record.kind === "store-writable") {
       facts.storeWritable = record.value;

@@ -126,7 +126,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
 // records derived from the probe's own argument, and plays the reviewer by
 // moving the staged ledger with the server's own submit — or, when asked,
 // by also leaving the kind of trace the copy-back must refuse.
-async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "", volumeRmFail = false } = {}) {
+async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "", volumeRmFail = false, head = "" } = {}) {
   const bin = path.join(f.root, "bin");
   await fsp.mkdir(bin, { recursive: true });
   const runner = path.join(bin, "fake-run.mjs");
@@ -154,7 +154,7 @@ if (!args.includes("codex")) {
     out.push({ kind: "ancestor", path: p, children: mounted ? [...new Set([...image, wayDown(p), ...(process.env.FAKE_LEAK ? [process.env.FAKE_LEAK] : [])])] : image });
   });
   if (!mounted) { process.stdout.write(out.map((r) => JSON.stringify(r)).join("\\n") + "\\n"); process.exit(0); }
-  out.push({ kind: "checkout-head", value: spawnSync("git", ["-C", spec.checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim() });
+  out.push({ kind: "checkout-head", value: process.env.FAKE_HEAD || spawnSync("git", ["-C", spec.checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim() });
   out.push({ kind: "store-writable", value: true });
   out.push({ kind: "egress", via: "proxy", code: "000", exit: 56 });
   out.push({ kind: "egress", via: "direct", code: process.env.FAKE_DIRECT_CODE || "000", exit: process.env.FAKE_DIRECT_CODE ? 0 : 6 });
@@ -271,6 +271,7 @@ esac
     FAKE_LOGS_FAIL: logs === "fail" ? "1" : "",
     FAKE_CALLS: path.join(bin, "calls.log"),
     FAKE_VOLUME_RM_FAIL: volumeRmFail ? "1" : "",
+    FAKE_HEAD: head,
   };
 }
 
@@ -867,6 +868,39 @@ test("a host credential directory present inside the container fails the boundar
   const result = launch(f, ["--review-id", f.reviewId], env);
   assert.equal(result.status, 1, result.stdout);
   assert.match(result.stderr, new RegExp(`the container boundary did not hold:\\n {2}host path present inside the container: ${f.home}/\\.ssh`));
+  assert.doesNotMatch(result.stdout, /mcp: /);
+});
+
+test("the mounted checkout's HEAD must be the host's, at sha1 or sha256 length", async (t) => {
+  // A sha256 repository: git writes extensions.objectformat=sha256, which
+  // the configuration allowlist admits, and HEAD is 64 hex.
+  const previous = process.env.GIT_DEFAULT_HASH;
+  process.env.GIT_DEFAULT_HASH = "sha256";
+  let f;
+  try {
+    f = await fixture(t, { realReview: true });
+  } finally {
+    if (previous === undefined) delete process.env.GIT_DEFAULT_HASH;
+    else process.env.GIT_DEFAULT_HASH = previous;
+  }
+  const head = spawnSync("git", ["-C", f.checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  assert.match(head, /^[0-9a-f]{64}$/);
+  assert.match(await fsp.readFile(path.join(f.checkout, ".git", "config"), "utf8"), /objectformat = sha256/);
+  let result = launch(f, ["--review-id", f.reviewId], await fakeDocker(f));
+  assert.equal(result.status, 0, result.stdout.slice(-2500));
+  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: PASS/);
+  // 39 hex is not a commit id; a different commit is not this checkout.
+  const g = await fixture(t, { realReview: true });
+  result = launch(g, ["--review-id", g.reviewId], await fakeDocker(g, { head: "0123456789abcdef0123456789abcdef0123456" }));
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, /the container boundary did not hold:\n {2}git cannot read the mounted checkout: 0123456789abcdef0123456789abcdef0123456/);
+  assert.doesNotMatch(result.stdout, /mcp: /);
+  const h = await fixture(t, { realReview: true });
+  const hostHead = spawnSync("git", ["-C", h.checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  const other = hostHead.replace(/^./, hostHead[0] === "0" ? "1" : "0");
+  result = launch(h, ["--review-id", h.reviewId], await fakeDocker(h, { head: other }));
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, new RegExp(`the container boundary did not hold:\\n {2}the mounted checkout's HEAD is ${other}, the host's is ${hostHead}`));
   assert.doesNotMatch(result.stdout, /mcp: /);
 });
 
