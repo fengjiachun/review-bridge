@@ -230,6 +230,28 @@ const LEDGER_FINDING_STATUSES = [
 ];
 const LEDGER_DISPOSITIONS = ["fixed", "rejected", "human_required"];
 const LEDGER_DECISIONS = ["resolved", "rebuttal_accepted", "still_open"];
+
+// The finding status each author disposition and each rereview decision
+// leaves behind. The writers below set statuses through these, and the
+// validator derives the status every finding should have from the same two
+// maps, so the two cannot disagree.
+function dispositionStatus(disposition) {
+  return { fixed: "AUTHOR_FIXED", rejected: "AUTHOR_REJECTED", human_required: "HUMAN_REQUIRED" }[disposition];
+}
+
+function decisionStatus(decision) {
+  return { resolved: "RESOLVED", rebuttal_accepted: "REBUTTAL_ACCEPTED", still_open: "STILL_OPEN" }[decision];
+}
+
+// The status a finding must carry given the records that name it: OPEN with
+// no response, the disposition's status once the author responded, the
+// decision's status once the rereviewer decided. A decision with no
+// resolution behind it derives to nothing, since no writer produces one.
+function derivedFindingStatus(resolution, decision) {
+  if (decision != null) return resolution == null ? null : decisionStatus(decision.decision);
+  if (resolution != null) return dispositionStatus(resolution.disposition);
+  return "OPEN";
+}
 // Every history event this module records, the statuses it is recorded from,
 // and the status it leaves the review in. Read from the writers above and
 // below; a ledger whose history does not replay through this table was not
@@ -388,16 +410,29 @@ function reviewLedgerDefect(review, reviewId) {
     if (entries.some((id) => typeof id !== "string" || id === "")) return `a ${key} has no ID`;
     if (new Set(entries).size !== entries.length) return `${key} IDs are not unique`;
   }
+  // Every finding's status is derived from the records that name it and the
+  // whole table compared with what is stored, so a record without a finding,
+  // a finding whose records were removed, and a status that does not follow
+  // from its records are one and the same defect.
   const findingIds = new Set(review.findings.map((finding) => finding.id));
-  for (const resolution of review.resolutions) {
-    if (!findingIds.has(resolution.finding_id)) {
-      return `a resolution names no finding: ${JSON.stringify(resolution.finding_id)}`;
+  for (const [key, entries] of [
+    ["resolution", review.resolutions],
+    ["rereview decision", review.rereview_decisions],
+  ]) {
+    const orphan = entries.find((entry) => !findingIds.has(entry.finding_id));
+    if (orphan != null) {
+      return `a ${key} names no finding: ${JSON.stringify(orphan.finding_id)}`;
     }
   }
-  const answered = new Set(review.resolutions.map((resolution) => resolution.finding_id));
-  for (const decision of review.rereview_decisions) {
-    if (!answered.has(decision.finding_id)) {
-      return `a rereview decision names no resolution: ${JSON.stringify(decision.finding_id)}`;
+  const resolutionByFinding = new Map(review.resolutions.map((entry) => [entry.finding_id, entry]));
+  const decisionByFinding = new Map(review.rereview_decisions.map((entry) => [entry.finding_id, entry]));
+  for (const finding of review.findings) {
+    const derived = derivedFindingStatus(
+      resolutionByFinding.get(finding.id),
+      decisionByFinding.get(finding.id),
+    );
+    if (derived !== finding.status) {
+      return `finding ${JSON.stringify(finding.id)} is ${JSON.stringify(finding.status)} but its records derive ${derived == null ? "no status (a decision with no resolution)" : JSON.stringify(derived)}`;
     }
   }
   return null;
@@ -2295,12 +2330,8 @@ async function submitResolutionsWhileLocked(storeRoot, reviewId, inputs) {
       submitted_at: now(),
     };
     resolutions.push(resolution);
-    if (disposition === "fixed") {
-      finding.status = "AUTHOR_FIXED";
-    } else if (disposition === "rejected") {
-      finding.status = "AUTHOR_REJECTED";
-    } else {
-      finding.status = "HUMAN_REQUIRED";
+    finding.status = dispositionStatus(disposition);
+    if (disposition === "human_required") {
       humanRequired = true;
     }
   }
@@ -2537,12 +2568,8 @@ async function submitRereviewWhileLocked(
       submitted_at: now(),
     };
     review.rereview_decisions.push(record);
-    if (decision === "resolved") {
-      finding.status = "RESOLVED";
-    } else if (decision === "rebuttal_accepted") {
-      finding.status = "REBUTTAL_ACCEPTED";
-    } else {
-      finding.status = "STILL_OPEN";
+    finding.status = decisionStatus(decision);
+    if (decision === "still_open") {
       contested = true;
     }
   }

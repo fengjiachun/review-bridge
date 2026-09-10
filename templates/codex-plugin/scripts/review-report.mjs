@@ -72,10 +72,11 @@ try {
   process.stderr.write(`${error.code ?? "ERROR"}: ${error.message}\n`);
   process.exit(1);
 }
-const { directory, review, publication, authorization } = ledgers;
+const { directory, review, publication, authorization, publicationSummary } = ledgers;
 const markdown = renderReviewReport(review, {
   publication,
   authorization,
+  publicationSummary,
   ledgerDirectory: directory,
 });
 process.stdout.write(

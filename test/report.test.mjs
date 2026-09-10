@@ -7,18 +7,23 @@ import path from "node:path";
 import test from "node:test";
 import {
   finalizeLocalGate,
+  prepareRereview,
   prepareReview,
   submitInitialReview,
+  submitRereview,
+  submitResolutions,
 } from "../src/core.mjs";
 import {
   authorizeRemotePublication,
   canonicalDigest,
+  derivePublicationStatus,
   getPublication,
   recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
   threadWatermark,
 } from "../src/publication.mjs";
+import { startAutonomousWorkflow } from "../src/workflow.mjs";
 import {
   PROJECTION_NOTICE,
   PROJECTION_NOTICE_REMOTE_ONLY,
@@ -29,6 +34,12 @@ import {
 } from "../src/report.mjs";
 import { atomicWriteCanonicalJson } from "../src/storage.mjs";
 import { baseline, iso, observation } from "./helpers/github-observation.mjs";
+import {
+  gateAndPublishHead,
+  reachRemoteWait,
+  workflowInput,
+} from "./helpers/publication-chain";
+import { commit, fixture as workflowFixture } from "./helpers/repository-fixture";
 
 const REVIEW_ID = "rb-2026-09-01T000000-000Z-0badf00d";
 const BASE = "a".repeat(40);
@@ -470,13 +481,14 @@ test("rendering is a pure function of its inputs", () => {
 test("a local-gate publication at MERGE_READY renders the pull request, Codex result, checks, and the derivation the gate would make", async (t) => {
   const state = await gatedFixture(t);
   const ready = await reachReady(state);
-  const { review, publication, authorization } = await loadReportLedgers(state.store, state.reviewId);
+  const { review, publication, authorization, publicationSummary } = await loadReportLedgers(state.store, state.reviewId);
   assert.equal(review.id, state.reviewId);
   assert.equal(publication.revision, ready.revision);
   assert.equal(authorization.mode, "LOCAL_GATE");
   assert.equal(authorization.head_sha, state.headSha);
+  assert.equal(publicationSummary.status, "MERGE_READY");
 
-  const markdown = render(review, { publication, authorization, ledgerDirectory: reviewDirectory(state) });
+  const markdown = render(review, { publication, authorization, publicationSummary, ledgerDirectory: reviewDirectory(state) });
   assert.match(markdown, /## Remote publication\n\n- Pull request: owner\/repo#7, `agent\/change` into `main`\n/);
   assert.match(markdown, new RegExp(`- Authorized head: \`${state.headSha}\` over base \`${state.baseSha}\`\n- Authorization: \`LOCAL_GATE\`, gated by \`CLAUDE_DESKTOP\`\n- Authorized repository: \``));
   assert.match(markdown, /\| 1 \| (?:rbreq-[0-9a-f]{32}|100) \| [0-9a-f]{12} \| [^|]+\| RECOGNIZED \| https:\/\/github\.com\/owner\/repo\/issues\/7#issuecomment-100 \|/);
@@ -486,7 +498,7 @@ test("a local-gate publication at MERGE_READY renders the pull request, Codex re
   assert.match(
     markdown,
     new RegExp(
-      `- Stored status \`MERGE_READY\` at revision ${ready.revision}; derived now: \`MERGE_READY\`\\n- MERGE_READY rests on the observation recorded at revision ${ready.revision}, observed [^,]+, recorded [^,]+, canonical sha256 \`${canonicalDigest(publication.latest_observation)}\`\\.`,
+      `- Stored status \`MERGE_READY\` at revision ${ready.revision}; the publication summary derives \`MERGE_READY\`, next action \`${publicationSummary.next_action}\`, gate \`${publicationSummary.gate_state}\`\\.\\n- MERGE_READY rests on the observation recorded at revision ${ready.revision}, observed [^,]+, recorded [^,]+, canonical sha256 \`${canonicalDigest(publication.latest_observation)}\`\\.`,
     ),
   );
   assert.match(markdown, new RegExp(`- Report revision: \`${review.state_version}-p${ready.revision}\``));
@@ -500,12 +512,12 @@ test("a local-gate publication at MERGE_READY renders the pull request, Codex re
 test("a remote-only publication renders from its publication and bound authorization, without a review ledger", async (t) => {
   const state = await remoteFixture(t);
   const ready = await reachReady(state);
-  const { review, publication, authorization } = await loadReportLedgers(state.store, state.reviewId);
+  const { review, publication, authorization, publicationSummary } = await loadReportLedgers(state.store, state.reviewId);
   assert.equal(review, null);
   assert.equal(authorization.mode, "REMOTE_ONLY");
   assert.equal(authorization.source_sha256, publication.authorization.source_sha256);
 
-  const markdown = render(null, { publication, authorization, ledgerDirectory: "/store/reviews/x" });
+  const markdown = render(null, { publication, authorization, publicationSummary, ledgerDirectory: "/store/reviews/x" });
   assert.ok(markdown.startsWith(`# Review report ${state.reviewId}\n`));
   assert.match(markdown, /## Local review\n\nNone: this publication was authorized `REMOTE_ONLY` with local review skipped, so there is no review ledger, no rounds, and no findings to render\. The authorization is under Remote publication\.\n\n## Remote publication\n/);
   for (const absent of ["### Rounds", "### Findings", "### Changes between rounds", "### Outcome"]) {
@@ -514,7 +526,7 @@ test("a remote-only publication renders from its publication and bound authoriza
   // The authorization prints once, under Remote publication, from the bound file.
   assert.match(markdown, new RegExp(`- Authorization: \`REMOTE_ONLY\`, acknowledgement \`LOCAL_REVIEW_SKIPPED\`, operator maintainer, at ${authorization.authorized_at}\\n- Authorized repository: \`[^\`]*/repo\`\\n- Codex trigger policy: \`EXPLICIT_ONLY\`\\n\\nAuthorization rationale:\\n\\n\`\`\`text\\nUse the GitHub Codex, CI, and review-thread gates only\\.\\n\`\`\``));
   assert.equal(markdown.match(/Use the GitHub Codex, CI, and review-thread gates only\./g).length, 1);
-  assert.match(markdown, new RegExp(`- Stored status \`MERGE_READY\` at revision ${ready.revision}; derived now: \`MERGE_READY\``));
+  assert.match(markdown, new RegExp(`- Stored status \`MERGE_READY\` at revision ${ready.revision}; the publication summary derives \`MERGE_READY\`, next action \`${publicationSummary.next_action}\`, gate \`ABSENT\`\\.`));
   assert.match(markdown, new RegExp(`- Review ledger state_version: n/a \\(remote-only: no local review ledger\\)\\n- Publication ledger revision: ${ready.revision}\\n- Report revision: \`p${ready.revision}\`\\n- Rendered at: [^\\n]+\\n- Ledger: \`/store/reviews/x/publication\\.json\`, \`/store/reviews/x/remote-authorization\\.json\``));
   // The remote-only footer names the ledgers that were actually rendered.
   assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE_REMOTE_ONLY}\n`));
@@ -527,15 +539,15 @@ test("a remote-only publication renders from its publication and bound authoriza
 test("a publication with no observation yet says so in every observation-based section and judges nothing", async (t) => {
   const state = await gatedFixture(t);
   await startOnly(state);
-  const { review, publication, authorization } = await loadReportLedgers(state.store, state.reviewId);
+  const { review, publication, authorization, publicationSummary } = await loadReportLedgers(state.store, state.reviewId);
   assert.equal(publication.status, "PR_PENDING");
   assert.equal(publication.latest_observation, null);
-  const markdown = render(review, { publication, authorization });
+  const markdown = render(review, { publication, authorization, publicationSummary });
   assert.match(markdown, /### Codex review requests\n\nNo request was recorded\./);
   for (const heading of ["### Codex results in the latest observation", "### Required checks", "### Review threads"]) {
     assert.match(markdown, new RegExp(`${heading}\\n\\nNo observation has been recorded yet, so there is nothing here to judge\\.\\n`), heading);
   }
-  assert.match(markdown, /### Derivation\n\n- Stored status `PR_PENDING` at revision 1; derived now: `PR_PENDING` \(`NO_GITHUB_SNAPSHOT`\)\n- No observation has been recorded yet, so there is nothing here to judge\.\n/);
+  assert.match(markdown, /### Derivation\n\n- Stored status `PR_PENDING` at revision 1; the publication summary derives `PR_PENDING` \(`NO_GITHUB_SNAPSHOT`\), next action `POST_AND_RECORD_CODEX_REVIEW_REQUEST`, gate `ABSENT`\.\n- No observation has been recorded yet, so there is nothing here to judge\.\n/);
   assert.doesNotMatch(markdown, /passing/);
   assert.doesNotMatch(markdown, /MERGE_READY rests on/);
   assert.equal(markdown.match(/No observation has been recorded yet/g).length, 4);
@@ -627,7 +639,9 @@ test("a thread's outcome follows the frontier replay and the gate's invalidation
   threads.threads = [commented];
   markdown = render(cleanInTwoRounds(), { publication });
   assert.match(markdown, /\| PRRT_1 \| src\/value\.js:1 \| 2 by codex\\\[bot\\\], author \| resolved on GitHub; record 1 no longer explains it: the gate judges THREAD_RESOLUTION_INVALIDATED \(the thread's provenance, resolved flag, or watermark changed since the record\) \|/);
-  assert.match(markdown, /derived now: `CHANGES_REQUIRED` \(`THREAD_RESOLUTION_INVALIDATED`\)/);
+  // A hand-mutated ledger has no summary, and the report derives nothing on
+  // its own.
+  assert.match(markdown, /- Stored status `MERGE_READY` at revision 3; not derived here: no publication summary was supplied\.\n- No MERGE_READY derivation is rendered for this status\./);
 
   // The record was invalidated and unresolved for repair, and the observation
   // now shows the thread unresolved: a legitimate state, reported as such.
@@ -674,6 +688,128 @@ test("a thread's outcome follows the frontier replay and the gate's invalidation
   threads.unresolved_count = 0;
   markdown = render(cleanInTwoRounds(), { publication });
   assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| resolved on GitHub; no automatic-resolution record \|/);
+});
+
+// The gate section is the publication summary's verdict, never a bare
+// derivation: on a workflow-bound ledger the summary's terminal replay refuses
+// a resolved thread the workflow owns no proof for, where derivePublication
+// over the ledger alone still says MERGE_READY.
+test("the derivation section agrees with the publication summary where a bare derivation would not", async (t) => {
+  const state = await workflowFixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(state.store, workflowInput(state.repository, state.baseSha));
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(state, workflow, headSha, "one");
+  await reachRemoteWait(state, atPublication, reviewId, headSha, Date.now(), (payload) => {
+    // Ready to merge on its face, with one thread resolved by nobody the
+    // workflow can account for.
+    payload.pull_request.is_draft = false;
+    const thread = observedThread("PRRT_unowned", headSha);
+    payload.review_threads.threads = [thread];
+    payload.review_threads.total_count = 1;
+    payload.review_threads.unresolved_count = 0;
+    return payload;
+  });
+
+  const { review, publication, authorization, publicationSummary } = await loadReportLedgers(state.store, reviewId);
+  const bare = derivePublicationStatus(publication);
+  assert.equal(bare.status, "MERGE_READY");
+  assert.notEqual(publicationSummary.status, "MERGE_READY");
+  const markdown = render(review, { publication, authorization, publicationSummary });
+  assert.match(
+    markdown,
+    new RegExp(`- Stored status \`${publication.status}\` at revision ${publication.revision}; the publication summary derives \`${publicationSummary.status}\` \\(\`${publicationSummary.blocking_reason}\`\\), next action \`${publicationSummary.next_action}\`, gate \`${publicationSummary.gate_state}\`\\.\\n- No MERGE_READY derivation is rendered for this status\\.`),
+  );
+  assert.doesNotMatch(markdown, /MERGE_READY rests on/);
+  assert.match(markdown, /\| PRRT_unowned \| [^|]+\| [^|]+\| resolved on GitHub; no automatic-resolution record \|/);
+});
+
+// A review that carried findings through both rounds, built through the
+// writers, so the validator's derived status table meets real records.
+async function reviewedFixture(t) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-report-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const repository = path.join(root, "repo");
+  const store = path.join(root, "store");
+  await fsp.mkdir(repository);
+  git(repository, "init", "-b", "main");
+  git(repository, "config", "user.name", "Review Bridge Test");
+  git(repository, "config", "user.email", "review-bridge@example.invalid");
+  await fsp.writeFile(path.join(repository, "value.js"), "export const value = 1;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "base");
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  git(repository, "switch", "-c", "agent/change");
+  await fsp.writeFile(path.join(repository, "value.js"), "export const value = 2;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "change");
+  const review = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Change the exported value.",
+    implementationScope: "Update value.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
+  });
+  await submitInitialReview(store, review.id, [
+    { severity: "major", title: "wrong value", explanation: "should be 3", recommendation: "set 3", path: "value.js", line: 1 },
+    { severity: "nit", title: "style", explanation: "fine as is", recommendation: "" },
+  ], "CLAUDE_DESKTOP");
+  await submitResolutions(store, review.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "set to 3" },
+    { finding_id: "F-002", disposition: "rejected", rationale: "intended" },
+  ]);
+  await fsp.writeFile(path.join(repository, "value.js"), "export const value = 3;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "fix");
+  await prepareRereview(store, review.id);
+  await submitRereview(store, review.id, [
+    { finding_id: "F-001", decision: "resolved", rationale: "verified", verification: "read value.js" },
+    { finding_id: "F-002", decision: "rebuttal_accepted", rationale: "agreed", verification: "reread the style" },
+  ], [], "CLAUDE_DESKTOP");
+  return { root, store, reviewId: review.id };
+}
+
+// Every finding's status is derived from its records and the whole table is
+// compared, so records removed under a finding, a record with no finding, and
+// a decision with no resolution behind it are all one defect.
+test("finding statuses must equal what their records derive, in both directions", async (t) => {
+  const state = await reviewedFixture(t);
+  const reviewPath = path.join(reviewDirectory(state), "review.json");
+  const original = await fsp.readFile(reviewPath, "utf8");
+  const genuine = JSON.parse(original);
+  assert.equal(genuine.status, "CLEAN");
+  assert.deepEqual(genuine.findings.map((finding) => finding.status), ["RESOLVED", "REBUTTAL_ACCEPTED"]);
+  // The genuine two-round ledger renders.
+  const written = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
+  assert.equal(written.reused, false);
+  assert.match(await fsp.readFile(written.path, "utf8"), /#### F-001 · major · value\.js:1[\s\S]*Rereview decision: `resolved`[\s\S]*#### F-002 · nit · no location[\s\S]*Rereview decision: `rebuttal_accepted`/);
+  await fsp.rm(written.path);
+
+  const tamper = async (mutate, expected) => {
+    const review = JSON.parse(original);
+    mutate(review);
+    await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
+    await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+      assert.equal(error.code, "REVIEW_LEDGER_INVALID");
+      assert.match(error.details.reason, expected);
+      return true;
+    });
+    assert.ok(!(await fsp.readdir(reviewDirectory(state))).some((name) => name.startsWith("report-")));
+  };
+  // Records cleared under findings that still read RESOLVED.
+  await tamper((review) => { review.resolutions = []; review.rereview_decisions = []; }, /finding "F-001" is "RESOLVED" but its records derive "OPEN"/);
+  // A decision with no finding.
+  await tamper((review) => { review.rereview_decisions.push({ finding_id: "F-009", decision: "resolved", rationale: "x", verification: "", submitted_at: review.updated_at }); }, /a rereview decision names no finding: "F-009"/);
+  // A decision with a finding but no resolution behind it.
+  await tamper((review) => {
+    review.findings.push({ id: "F-003", introduced_round: 2, severity: "minor", title: "t", explanation: "e", recommendation: "", status: "RESOLVED" });
+    review.rereview_decisions.push({ finding_id: "F-003", decision: "resolved", rationale: "x", verification: "", submitted_at: review.updated_at });
+  }, /finding "F-003" is "RESOLVED" but its records derive no status \(a decision with no resolution\)/);
+  // A status that does not follow from its own records.
+  await tamper((review) => { review.findings[1].status = "RESOLVED"; }, /finding "F-002" is "RESOLVED" but its records derive "REBUTTAL_ACCEPTED"/);
+  // Restored, it renders again.
+  await fsp.writeFile(reviewPath, original, { mode: 0o600 });
+  assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
 });
 
 // ---------------------------------------------------------------------------

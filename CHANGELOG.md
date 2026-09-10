@@ -29,14 +29,17 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   server's own replay of the resolution records and their lifecycle, so a
   resolution later invalidated, unresolved for repair, or superseded is
   reported as history rather than as the reason the thread is resolved; the
-  Codex and checks gates and the derived status come from the same functions
-  the publication read surfaces use. Every ledger is admitted by the reader
+  Codex and checks gates come from the same functions the publication read
+  surfaces use, and the gate's verdict is the publication summary's own,
+  workflow binding and terminal replay included, never a bare derivation over
+  the ledger alone. Every ledger is admitted by the reader
   the server itself uses -- the review by a new `loadValidatedReview`
   in `core.mjs` that admits only a ledger the store could have written (its
   own serialization, the state machine's shape with the history replayed
   through the writers' own transitions to the stored status and the rounds
   the ledger holds, a clean verdict committing to the last round with no
-  finding left open, `state_version`
+  finding left open, every finding's status equal to the one its resolution
+  and rereview decision derive through the writers' own maps, `state_version`
   not below the history, and every round's snapshot commitment reproduced
   from the immutable manifest and patch beside it, as the gate reproduces the
   clean round's) and is used by the report alone, the publication by the canonical, schema-validated reader that

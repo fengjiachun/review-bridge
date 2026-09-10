@@ -7,8 +7,8 @@ import {
   canonicalDigest,
   checkRequiredRuns,
   codexStatus,
-  derivePublicationStatus,
   getPublication,
+  getPublicationSummary,
   invalidatedAutomaticResolution,
   readBoundPublicationAuthorization,
   resolutionFrontier,
@@ -492,14 +492,17 @@ function acknowledgementsSection(publication) {
   ];
 }
 
-// The status is derived here the way every read surface derives it, not
-// copied from the stored field, so the report cannot say MERGE_READY over an
-// observation the gate would refuse.
-function derivationSection(publication) {
+// The gate's verdict is the publication summary's, the one judgement that
+// carries the workflow binding and the terminal replay; a bare derivation
+// over the ledger alone can say MERGE_READY where the summary says
+// CHANGES_REQUIRED, so the report never derives on its own. Without a summary
+// it says so rather than guessing.
+function derivationSection(publication, summary) {
   const observation = publication.latest_observation;
-  const derived = derivePublicationStatus(publication);
   const lines = [
-    `- Stored status ${code(publication.status)} at revision ${publication.revision}; derived now: ${code(derived.status)}${derived.blockingReason == null ? "" : ` (${code(derived.blockingReason)})`}`,
+    summary == null
+      ? `- Stored status ${code(publication.status)} at revision ${publication.revision}; not derived here: no publication summary was supplied.`
+      : `- Stored status ${code(publication.status)} at revision ${publication.revision}; the publication summary derives ${code(summary.status)}${summary.blocking_reason == null ? "" : ` (${code(summary.blocking_reason)})`}, next action ${code(summary.next_action)}, gate ${code(summary.gate_state)}.`,
   ];
   if (publication.terminal != null) {
     lines.push(
@@ -508,7 +511,7 @@ function derivationSection(publication) {
   }
   if (observation == null) {
     lines.push(`- ${NO_OBSERVATION}`);
-  } else if (derived.status === "MERGE_READY") {
+  } else if (summary?.status === "MERGE_READY") {
     const event = (publication.history ?? []).findLast(
       (entry) => entry?.status === "MERGE_READY",
     );
@@ -521,7 +524,7 @@ function derivationSection(publication) {
   return ["### Derivation", lines.join("\n")];
 }
 
-function remoteSection(publication, authorization) {
+function remoteSection(publication, authorization, summary) {
   if (publication == null) {
     return ["## Remote publication", "No publication ledger was rendered."];
   }
@@ -545,7 +548,7 @@ function remoteSection(publication, authorization) {
     ...checksSection(observation),
     ...threadsSection(publication),
     ...acknowledgementsSection(publication),
-    ...derivationSection(publication),
+    ...derivationSection(publication, summary),
   ];
 }
 
@@ -569,12 +572,14 @@ export function reportRevision(review, publication) {
 
 // `review` is null for a REMOTE_ONLY publication, which has no review ledger;
 // the publication is then required. `authorization` is the bound gate or
-// sidecar the store reader admitted, when the caller read one.
+// sidecar the store reader admitted, and `publicationSummary` the summary the
+// server computed over the same ledger, when the caller read them.
 export function renderReviewReport(
   review,
   {
     publication = null,
     authorization = null,
+    publicationSummary = null,
     renderedAt = new Date().toISOString(),
     ledgerDirectory = null,
   } = {},
@@ -613,7 +618,7 @@ export function renderReviewReport(
           ...changesSection(review),
           ...outcomeSection(review),
         ]),
-    ...remoteSection(publication, authorization),
+    ...remoteSection(publication, authorization, publicationSummary),
     "## Footer",
     [
       `- Review: ${code(reviewId)}`,
@@ -677,7 +682,11 @@ export async function loadReportLedgers(storeRoot, reviewId) {
     publication == null
       ? null
       : await readBoundPublicationAuthorization(storeRoot, reviewId, publication);
-  return { directory, review, publication, authorization };
+  // The server's own judgement over the same ledger, workflow binding and
+  // terminal replay included; the report prints it and derives nothing.
+  const publicationSummary =
+    publication == null ? null : await getPublicationSummary(storeRoot, reviewId);
+  return { directory, review, publication, authorization, publicationSummary };
 }
 
 // Publishes fully written bytes at `filePath` only if nothing is there yet: the
@@ -718,7 +727,7 @@ async function createExclusive(filePath, data) {
 // Markdown itself stays in the file: a report can run to megabytes, and the
 // driver that calls this after a gate needs the path, not the bytes.
 export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}) {
-  const { directory, review, publication, authorization } =
+  const { directory, review, publication, authorization, publicationSummary } =
     await loadReportLedgers(storeRoot, reviewId);
   const revision = reportRevision(review, publication);
   // `r<state_version>[-p<revision>]` with a review, `p<revision>` without one.
@@ -731,6 +740,7 @@ export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}
     const markdown = renderReviewReport(review, {
       publication,
       authorization,
+      publicationSummary,
       renderedAt,
       ledgerDirectory: directory,
     });
