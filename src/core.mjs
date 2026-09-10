@@ -554,10 +554,25 @@ function reviewLedgerDefect(review, reviewId) {
     const defect = recordDefect(entry, [...HISTORY_COMMON_FIELDS, ...HISTORY_EVENT_FIELDS[entry.event]], { index, review }, label);
     if (defect != null) return defect;
   }
+  // A round prepared as SUCCESSOR carries its proof and a round prepared as
+  // FULL carries none: the prepared event's mode and the round's successor
+  // record are written together and must agree both ways.
+  for (const round of review.rounds) {
+    if (round == null || typeof round !== "object") continue;
+    const prepared = review.history.find(
+      (entry) => ["REVIEW_PREPARED", "REREVIEW_PREPARED"].includes(entry.event) && entry.round === round.round,
+    );
+    if (prepared?.mode == null) continue;
+    const hasProof = round.successor != null;
+    if ((prepared.mode === "SUCCESSOR") !== hasProof) {
+      return `round ${round.round} was prepared as ${prepared.mode}, but its successor proof is ${hasProof ? "present" : "absent"}`;
+    }
+  }
   for (const [index, round] of review.rounds.entries()) {
     const defect = recordDefect(round, ROUND_FIELDS, { index, review }, `round ${round?.round ?? index + 1}`);
     if (defect != null) return defect;
   }
+
   for (const [index, resolution] of review.resolutions.entries()) {
     const defect = recordDefect(resolution, RESOLUTION_FIELDS, { index, review }, `resolution ${index + 1}`);
     if (defect != null) return defect;
@@ -713,6 +728,32 @@ function reviewLedgerDefect(review, reviewId) {
   }
   const resolutionByFinding = new Map(review.resolutions.map((entry) => [entry.finding_id, entry]));
   const decisionByFinding = new Map(review.rereview_decisions.map((entry) => [entry.finding_id, entry]));
+  // The record sets are complete, the way the writers demand them: an
+  // answered round has exactly one resolution for every finding it raised
+  // (submitResolutions takes one per open finding), and a rereviewed round
+  // has exactly one decision for every fixed or rejected finding of the
+  // round before it (submitRereview takes one per author response); a
+  // decision with no rereview verdict behind it is refused as well.
+  const verdictRounds = new Set(
+    review.history
+      .filter((entry) => ["REREVIEW_UNRESOLVED", "REREVIEW_CONTINUABLE_FINDINGS", "REREVIEW_CLEAN"].includes(entry.event))
+      .map((entry) => entry.round),
+  );
+  for (const finding of review.findings) {
+    const round = finding.introduced_round;
+    const resolution = resolutionByFinding.get(finding.id);
+    if (responded.has(round) && resolution == null) {
+      return `round ${round} was answered, but finding ${JSON.stringify(finding.id)} has no resolution`;
+    }
+    if (resolution == null || !["fixed", "rejected"].includes(resolution.disposition)) continue;
+    const decided = decisionByFinding.has(finding.id);
+    if (verdictRounds.has(round + 1) && !decided) {
+      return `round ${round + 1} was rereviewed, but finding ${JSON.stringify(finding.id)} (${resolution.disposition}) has no decision`;
+    }
+    if (!verdictRounds.has(round + 1) && decided) {
+      return `finding ${JSON.stringify(finding.id)} has a rereview decision, but no rereview verdict for round ${round + 1} is recorded`;
+    }
+  }
   for (const finding of review.findings) {
     const resolution = resolutionByFinding.get(finding.id);
     const decision = decisionByFinding.get(finding.id);

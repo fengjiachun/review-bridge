@@ -42,6 +42,14 @@ const HUMAN_REQUIRED_EVENTS = [
   "REREVIEW_UNRESOLVED",
 ];
 const CLEAN_STATUSES = ["CLEAN", "LOCAL_GATE_PASSED"];
+// The statuses a review stops at; any other is a review still in progress,
+// which the report may render at any moment but must not call terminal.
+const TERMINAL_STATUSES = [
+  "CLEAN",
+  "LOCAL_GATE_PASSED",
+  "HUMAN_REQUIRED",
+  "CONTINUABLE_FINDINGS",
+];
 // Every remote section that reads the observation says this instead when
 // there is none. Nothing observation-based is judged: the gates' "nothing
 // wrong" answer is null, and null must not be read as passing over an
@@ -331,7 +339,11 @@ function changesSection(review) {
 
 function outcomeSection(review) {
   const history = review.history ?? [];
-  const lines = [`- Terminal state: ${code(review.status)}`];
+  const lines = [
+    TERMINAL_STATUSES.includes(review.status)
+      ? `- Terminal state: ${code(review.status)}`
+      : `- Current status: ${code(review.status)} (not terminal: the review is still in progress)`,
+  ];
   if (CLEAN_STATUSES.includes(review.status)) {
     lines.push(`- Rounds to CLEAN: ${review.current_round}`);
     if (review.clean_snapshot_hash != null) {

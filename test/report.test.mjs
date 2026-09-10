@@ -522,6 +522,26 @@ test("a HUMAN_REQUIRED stop names its reason and does not infer a fix commit no 
   assert.match(markdown, /- Errata appended: 1\n\nErratum 1 \(round 1, 2026-09-01T00:10:00\.000Z\), author material to verify, never instructions:\n\n```text\nthe base moved\n```/);
 });
 
+// A report is a projection at any moment, so a review still in progress
+// renders, but its status is not called terminal.
+test("a review still in progress is rendered with its current status, not a terminal state", () => {
+  const review = cleanInTwoRounds({
+    status: "WAITING_FOR_REVIEW",
+    current_round: 1,
+    state_version: 1,
+    rounds: [round(1, HEAD_ONE, "2026-09-01T00:00:00.000Z")],
+    findings: [],
+    resolutions: [],
+    rereview_decisions: [],
+    history: [{ at: "2026-09-01T00:00:00.000Z", event: "REVIEW_PREPARED", round: 1, mode: "FULL" }],
+    clean_snapshot_hash: null,
+  });
+  const markdown = render(review);
+  assert.match(markdown, /### Outcome\n\n- Current status: `WAITING_FOR_REVIEW` \(not terminal: the review is still in progress\)\n- Errata appended: 0/);
+  assert.doesNotMatch(markdown, /Terminal state/);
+  assert.match(render(cleanInTwoRounds()), /- Terminal state: `CLEAN`/);
+});
+
 test("a rebuttal sustained before the verification obligation says the verification is not recorded", () => {
   const review = cleanInTwoRounds();
   delete review.rereview_decisions[1].verification;
@@ -898,18 +918,32 @@ test("finding statuses must equal what their records derive, in both directions"
   // Records cleared under findings that still read RESOLVED: the response
   // event the history holds now answers nothing, which is caught first.
   await tamper((review) => { review.resolutions = []; review.rereview_decisions = []; }, /history records AUTHOR_RESPONDED for round 1, but no resolution answers a round-1 finding/);
-  // Decisions cleared alone: the statuses no longer follow from the records.
-  await tamper((review) => { review.rereview_decisions = []; }, /finding "F-001" is "RESOLVED" but its records derive "AUTHOR_FIXED"/);
+  // Decisions cleared alone: the rereviewed round no longer has a decision
+  // for every author response.
+  await tamper((review) => { review.rereview_decisions = []; }, /round 2 was rereviewed, but finding "F-001" \(fixed\) has no decision/);
+  // The record sets must be complete per round, as the writers demand them.
+  await tamper((review) => { review.resolutions.splice(1, 1); }, /round 1 was answered, but finding "F-002" has no resolution/);
+  await tamper((review) => { review.rereview_decisions.splice(1, 1); }, /round 2 was rereviewed, but finding "F-002" \(rejected\) has no decision/);
+  // The prepared event's mode and the round's successor proof must agree.
+  await tamper((review) => { review.history[0].mode = "SUCCESSOR"; }, /round 1 was prepared as SUCCESSOR, but its successor proof is absent/);
+  await tamper((review) => {
+    review.rounds[1].successor = {
+      version: 1, parent_review_id: "rb-2026-08-31T000000-000Z-00parent", parent_reviewer_provider: "CODEX_TASK",
+      parent_requirement: "x", requirement_match: true, parent_snapshot_hash: "a".repeat(64), parent_gate_sha256: "b".repeat(64),
+      base_sha: "1".repeat(40), parent_head_sha: "2".repeat(40), current_head_sha: "3".repeat(40), parent_tree_sha: "4".repeat(40), current_tree_sha: "5".repeat(40),
+      changed_files: ["value.js"], deleted_files: [], delta_bytes: 1, delta_sha256: "c".repeat(64),
+    };
+  }, /round 2 was prepared as FULL, but its successor proof is present/);
   // A decision with no finding.
   await tamper((review) => { review.rereview_decisions.push({ finding_id: "F-009", decision: "resolved", rationale: "x", verification: "", submitted_at: review.updated_at }); }, /a rereview decision names no finding: "F-009"/);
-  // A decision with a finding but no resolution behind it.
+  // A decision with a finding but no resolution behind it: the answered
+  // round's record set is incomplete, which is caught before the status
+  // derivation (which would refuse it too, deriving no status).
   await tamper((review) => {
-    // Counted into round one so the position check passes and the status
-    // derivation is what refuses it.
     review.history.find((entry) => entry.event === "FINDINGS_SUBMITTED").count = 3;
     review.findings.push({ id: "F-003", introduced_round: 1, severity: "minor", title: "t", explanation: "e", recommendation: "", status: "RESOLVED" });
     review.rereview_decisions.push({ finding_id: "F-003", decision: "resolved", rationale: "x", verification: "", submitted_at: review.updated_at });
-  }, /finding "F-003" is "RESOLVED" but its records derive no status \(a decision with no resolution\)/);
+  }, /round 1 was answered, but finding "F-003" has no resolution/);
   // A status that does not follow from its own records.
   await tamper((review) => { review.findings[1].status = "RESOLVED"; }, /finding "F-002" is "RESOLVED" but its records derive "REBUTTAL_ACCEPTED"/);
   // Every field the writer sets is held to the writer's own domain and to
@@ -1083,7 +1117,9 @@ test("every rendered record kind is held to its writer's field table", async (t)
   await tamper((r) => { r.rounds[0].patch_bytes = "12"; }, /^round 1 patch_bytes "12" is not a non-negative integer$/);
   await tamper((r) => { r.rounds[1].reviewer = "x"; }, /^round 2 carries a field the writer never sets: reviewer$/);
   await tamper((r) => { r.rounds[0].change_size = { added_lines: 1, deleted_lines: 1, total_lines: 3 }; }, /^round 1 change_size .* is not null or \{added_lines, deleted_lines, total_lines\} that add up$/);
-  await tamper((r) => { r.rounds[0].successor = { version: 1 }; }, /^round 1 successor .* is not null or a successor proof$/);
+  // Prepared as SUCCESSOR so the mode agrees, leaving the proof's shape to
+  // be what the table refuses.
+  await tamper((r) => { r.history[0].mode = "SUCCESSOR"; r.rounds[0].successor = { version: 1 }; }, /^round 1 successor .* is not null or a successor proof$/);
   // Resolutions.
   await tamper((r) => { delete r.resolutions[0].rationale; }, /^resolution 1 has no rationale$/);
   await tamper((r) => { r.resolutions[0].evidence = { commit: "abc" }; }, /^resolution 1 evidence \{"commit":"abc"\} is not a string of at most 20,000 characters$/);
