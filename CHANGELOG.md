@@ -51,7 +51,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   review requiring its gate even before any publication exists -- so a file
   copied in from
   another review or edited in place fails the render with that reader's
-  error and nothing is written. Every reviewer- or author-supplied string is
+  error and nothing is written, and a review created before `worktree_clean`
+  was recorded is refused as `ROUND_SNAPSHOT_UNREPRODUCIBLE`, since the
+  store's own snapshot reproduction needs it and no second hash format is
+  kept. Every reviewer- or author-supplied string is
   rendered as one escaped line or inside a fence longer than any backtick
   run it contains, so no finding title or rationale can open a heading,
   table row, or fence of its own. The
