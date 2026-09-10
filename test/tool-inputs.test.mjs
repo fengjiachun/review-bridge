@@ -715,6 +715,46 @@ test("an acknowledged split keeps declaring the cut it owes", () => {
   }
 });
 
+// A split released with continue hands the driver back the ordinary table,
+// and the cut it committed before the release is still on the branch: the
+// bind and the advance both refuse a repository HEAD the ledger never
+// recorded. So the ordinary tables carry the head on the condition the
+// driver can check, independent of split state, and the bind re-reads the
+// revision the recording consumed.
+test("the ordinary tables declare the head whenever the repository is ahead", () => {
+  const released = (phase) => ({
+    phase,
+    change_size_budget: 100,
+    change_size_warning: {
+      total_lines: 90,
+      acknowledgment: {
+        decision: "continue",
+        total_lines: 90,
+        executed_at: null,
+      },
+    },
+  });
+  for (const action of ["PREPARE_LOCAL_REVIEW", "ADDRESS_LOCAL_FINDINGS"]) {
+    const workflow = released(action);
+    assert.equal(changeSizeWarningPending(workflow), false);
+    assert.equal(changeSizeSplitUnadmitted(workflow), false);
+    const declared = workflowRequiredInputs(action, workflow, {
+      changeSizeWarningPending: changeSizeWarningPending(workflow),
+      changeSizeSplitUnadmitted: changeSizeSplitUnadmitted(workflow),
+    });
+    assert.deepEqual(declared, WORKFLOW_ACTION_INPUTS[action]);
+    assert.match(
+      declared.record_workflow_head.find(([field]) => field === "head_sha")[1],
+      /required .*whenever the repository HEAD differs from the recorded head/,
+    );
+  }
+  assert.deepEqual(Object.keys(WORKFLOW_ACTION_INPUTS.PREPARE_LOCAL_REVIEW), [
+    "record_workflow_head",
+    "prepare_review",
+    "bind_workflow_review",
+  ]);
+});
+
 // A declared sequence whose earlier call writes the ledger a later call
 // addresses cannot hand both the same revision: the write increments it, and a
 // driver resolving the declaration once would send the consumed one.
@@ -723,6 +763,7 @@ test("a call after a write in its own sequence re-reads the revision", () => {
     calls[tool].find(([field]) => field === "expected_revision")[1];
   for (const [calls, tool] of [
     [WORKFLOW_ACTION_INPUTS.ADDRESS_LOCAL_FINDINGS, "advance_local_workflow"],
+    [WORKFLOW_ACTION_INPUTS.PREPARE_LOCAL_REVIEW, "bind_workflow_review"],
     [SPLIT_GATED_INPUTS.PREPARE_LOCAL_REVIEW, "record_workflow_head"],
     [SPLIT_GATED_INPUTS.ADDRESS_LOCAL_FINDINGS, "record_workflow_head"],
     [SPLIT_CUT_RECORDED_INPUTS.PREPARE_LOCAL_REVIEW, "record_workflow_head"],
