@@ -61,7 +61,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   ledger's `REVIEW_PREPARED` event as `continued_from_review_id`, and the
   validator takes the source from there alone: a ledger with carried records
   and no recorded source is refused as `CONTINUATION_SOURCE_UNRECORDED`, so
-  continuations prepared before this release are not renderable. A
+  continuations prepared before this release are not renderable, whether or
+  not their source was frozen -- no exception by date, marker, or carried
+  record, each of which proved unbindable -- which in the operator's store
+  at the time of writing is 34 ledgers. A
   successor proof's file lists are compared with the paths its stored delta
   names. Every reviewer- or author-supplied string is
   rendered as one escaped line or inside a fence longer than any backtick

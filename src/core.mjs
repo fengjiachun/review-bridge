@@ -852,14 +852,33 @@ function successorFilesFromDelta(delta) {
   if (blocks.length === 0 && text.trim() !== "") {
     throw new Error("no diff --git header");
   }
-  const unquote = (raw) =>
-    raw.startsWith('"')
-      ? raw
-          .slice(1, -1)
-          .replace(/\\(\d{3}|[\\"tnr])/g, (_match, escape) =>
-            /^\d{3}$/.test(escape) ? String.fromCharCode(parseInt(escape, 8)) : { "\\": "\\", '"': '"', t: "\t", n: "\n", r: "\r" }[escape],
-          )
-      : raw;
+  // git quotes a path with core.quotepath as C-style escapes over its UTF-8
+  // bytes, so the escapes are collected as bytes and decoded once, whole;
+  // decoding each octal escape as a character would split a multibyte
+  // character into several.
+  const unquote = (raw) => {
+    if (!raw.startsWith('"')) return raw;
+    const bytes = [];
+    const inner = raw.slice(1, -1);
+    for (let index = 0; index < inner.length; index += 1) {
+      const char = inner[index];
+      if (char !== "\\") {
+        bytes.push(...Buffer.from(char, "utf8"));
+        continue;
+      }
+      const next = inner[index + 1];
+      if (/[0-7]/.test(next ?? "") && /^[0-7]{3}$/.test(inner.slice(index + 1, index + 4))) {
+        bytes.push(parseInt(inner.slice(index + 1, index + 4), 8));
+        index += 3;
+        continue;
+      }
+      const simple = { "\\": 0x5c, '"': 0x22, t: 0x09, n: 0x0a, r: 0x0d, a: 0x07, b: 0x08, f: 0x0c, v: 0x0b }[next];
+      if (simple == null) throw new Error(`unreadable escape in ${JSON.stringify(raw)}`);
+      bytes.push(simple);
+      index += 1;
+    }
+    return Buffer.from(bytes).toString("utf8");
+  };
   for (const block of blocks) {
     const header = block.split("\n", 1)[0];
     const match = header.match(/^diff --git (?<a>"a\/(?:[^"\\]|\\.)*"|a\/\S+) (?<b>"b\/(?:[^"\\]|\\.)*"|b\/\S+)$/);
@@ -1098,15 +1117,37 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
       if (proof.base_sha != null && proof.base_sha !== round.base_sha) {
         throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof names base_sha ${proof.base_sha}, but the round's base is ${round.base_sha}`);
       }
+      // With the parent in the store, every field the proof took from the
+      // parent is recomputed the way buildSuccessorArtifacts computed it and
+      // compared; a parent not in the store leaves those fields to the field
+      // table's format checks.
       let parent = null;
       try {
         parent = await loadReview(storeRoot, proof.parent_review_id);
       } catch {
         parent = null;
       }
-      const parentHead = parent?.rounds?.at(-1)?.head_sha;
-      if (parent != null && parentHead !== proof.parent_head_sha) {
-        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof names parent_head_sha ${proof.parent_head_sha}, but parent ${proof.parent_review_id} ends at ${parentHead}`);
+      if (parent != null) {
+        let gateBytes = null;
+        try {
+          gateBytes = await fsp.readFile(path.join(reviewDirectory(storeRoot, proof.parent_review_id), "gate.json"));
+        } catch {
+          gateBytes = null;
+        }
+        const expectations = [
+          ["parent_head_sha", parent.rounds?.at(-1)?.head_sha],
+          ["parent_snapshot_hash", parent.clean_snapshot_hash ?? null],
+          ["parent_reviewer_provider", parent.reviewer_provider ?? "CLAUDE_DESKTOP"],
+          ["parent_requirement", parent.requirement],
+          ["requirement_match", parent.requirement === review.requirement],
+          ...(gateBytes == null ? [] : [["parent_gate_sha256", sha256(gateBytes)]]),
+        ];
+        for (const [field, expected] of expectations) {
+          if (!(field in proof)) continue;
+          if (proof[field] !== expected) {
+            throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof names ${field} ${JSON.stringify(proof[field])}, but parent ${proof.parent_review_id} gives ${JSON.stringify(expected)}`);
+          }
+        }
       }
     }
     let reproduced;

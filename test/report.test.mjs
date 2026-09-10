@@ -1711,9 +1711,10 @@ test("a local-gate publication's gate is held to the review ledger beside it", a
 
 // A successor review, prepared against a passed parent through the writer,
 // so its proof is bound to its round and to the parent in the store.
-async function successorFixture(t) {
+async function successorFixture(t, { extraFile = null } = {}) {
   const parent = await gatedFixture(t);
   await fsp.writeFile(path.join(parent.repository, "value.test.js"), "export const checked = true;\n");
+  if (extraFile != null) await fsp.writeFile(path.join(parent.repository, extraFile), "non-ascii path\n");
   git(parent.repository, "add", ".");
   git(parent.repository, "commit", "-m", "add a test");
   const successor = await prepareReview(parent.store, {
@@ -1750,7 +1751,7 @@ test("a successor proof is bound to its round's head and base and to the parent'
   };
   await tamper((review) => { review.rounds[0].successor.current_head_sha = "1".repeat(40); }, /round 1 successor proof names current_head_sha 1{40}, but the round's head is [0-9a-f]{40}/);
   await tamper((review) => { review.rounds[0].successor.base_sha = "2".repeat(40); }, /round 1 successor proof names base_sha 2{40}, but the round's base is [0-9a-f]{40}/);
-  await tamper((review) => { review.rounds[0].successor.parent_head_sha = "3".repeat(40); }, new RegExp(`round 1 successor proof names parent_head_sha 3{40}, but parent ${state.parentId} ends at [0-9a-f]{40}`));
+  await tamper((review) => { review.rounds[0].successor.parent_head_sha = "3".repeat(40); }, new RegExp(`round 1 successor proof names parent_head_sha "3{40}", but parent ${state.parentId} gives "[0-9a-f]{40}"`));
   // The proof's file lists are what its stored delta names. The stored
   // proof artifact is edited alongside the ledger so the artifact comparison
   // passes and the delta itself is what refuses the extra path.
@@ -1768,7 +1769,34 @@ test("a successor proof is bound to its round's head and base and to the parent'
     return true;
   });
   await fsp.writeFile(proofPath, proofOriginal, { mode: 0o600 });
+  // Every field the proof took from the parent is recomputed from the parent
+  // in the store; the artifact is edited alongside so the field is what is
+  // named.
+  for (const [field, value] of [["requirement_match", false], ["parent_reviewer_provider", "CODEX_TASK"], ["parent_requirement", "something else"], ["parent_snapshot_hash", "9".repeat(64)], ["parent_gate_sha256", "8".repeat(64)]]) {
+    const changed = JSON.parse(original);
+    changed.rounds[0].successor[field] = value;
+    await fsp.writeFile(reviewPath, `${JSON.stringify(changed, null, 2)}\n`, { mode: 0o600 });
+    await fsp.writeFile(proofPath, `${JSON.stringify(changed.rounds[0].successor, null, 2)}\n`, { mode: 0o600 });
+    await assert.rejects(writeReviewReport(state.store, state.successorId), (error) => {
+      assert.equal(error.code, "REVIEW_LEDGER_INVALID", `${field}: ${error.message}`);
+      assert.match(error.details.reason, new RegExp(`round 1 successor proof names ${field} ${JSON.stringify(value).replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}, but parent ${state.parentId} gives `));
+      return true;
+    });
+  }
+  await fsp.writeFile(proofPath, proofOriginal, { mode: 0o600 });
   await fsp.writeFile(reviewPath, original, { mode: 0o600 });
+  assert.equal((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).reused, false);
+});
+
+// git quotes a non-ASCII path in a diff header as octal escapes over its
+// UTF-8 bytes (core.quotepath, the default); the delta reader decodes the
+// bytes whole, so the path equals the one the writer listed.
+test("a successor delta with a quoted non-ASCII path yields the path the writer listed", async (t) => {
+  const state = await successorFixture(t, { extraFile: "café.txt" });
+  const proof = JSON.parse(await fsp.readFile(path.join(state.store, "reviews", state.successorId, "review.json"), "utf8")).rounds[0].successor;
+  assert.deepEqual(proof.changed_files, ["café.txt", "value.test.js"]);
+  const delta = await fsp.readFile(path.join(state.store, "reviews", state.successorId, "rounds", "1", "successor.diff"), "utf8");
+  assert.match(delta, /^diff --git "a\/caf\\303\\251\.txt" "b\/caf\\303\\251\.txt"$/m);
   assert.equal((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).reused, false);
 });
 
