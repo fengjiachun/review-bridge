@@ -849,6 +849,7 @@ async function reviewedFixture(t, {
     { finding_id: "F-001", decision: "resolved", rationale: "verified", verification: "read value.js" },
     { finding_id: "F-002", decision: "rebuttal_accepted", rationale: "agreed", verification: "reread the style" },
   ],
+  newFindings = [],
 } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-report-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
@@ -886,7 +887,7 @@ async function reviewedFixture(t, {
   git(repository, "add", ".");
   git(repository, "commit", "-m", "fix");
   await prepareRereview(store, review.id);
-  await submitRereview(store, review.id, decisions, [], "CLAUDE_DESKTOP");
+  await submitRereview(store, review.id, decisions, newFindings, "CLAUDE_DESKTOP");
   return { root, store, reviewId: review.id };
 }
 
@@ -1066,6 +1067,43 @@ test("a rereview verdict must be the one its decisions and new findings derive",
     assert.match(error.details.reason, /round 2 rereview derives REREVIEW_CLEAN from its decisions and new findings, but the history records REREVIEW_UNRESOLVED/);
     return true;
   });
+});
+
+// Before CONTINUABLE_FINDINGS existed the writer recorded a rereview that
+// raised new findings without contesting any as REREVIEW_UNRESOLVED; ledgers
+// from then carry no writer version, so that encoding of this one case is
+// accepted beside the current one, and only this one.
+test("the older writer's REREVIEW_UNRESOLVED for a rereview that raised findings is accepted, nothing else is", async (t) => {
+  const state = await reviewedFixture(t, {
+    newFindings: [{ severity: "minor", title: "raised on rereview", explanation: "new", recommendation: "" }],
+  });
+  const reviewPath = path.join(reviewDirectory(state), "review.json");
+  const original = await fsp.readFile(reviewPath, "utf8");
+  const genuine = JSON.parse(original);
+  assert.equal(genuine.status, "CONTINUABLE_FINDINGS");
+  assert.equal(genuine.history.at(-1).event, "REREVIEW_CONTINUABLE_FINDINGS");
+  // Re-encoded the way the older writer would have written the same round.
+  const older = JSON.parse(original);
+  older.history.at(-1).event = "REREVIEW_UNRESOLVED";
+  older.status = "HUMAN_REQUIRED";
+  await fsp.writeFile(reviewPath, `${JSON.stringify(older, null, 2)}\n`, { mode: 0o600 });
+  const written = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
+  assert.equal(written.reused, false);
+  assert.match(await fsp.readFile(written.path, "utf8"), /- Human arbitration required: `REREVIEW_UNRESOLVED`/);
+  await fsp.rm(written.path);
+  // The other direction is not an older encoding: a clean verdict recorded
+  // over a round that raised a finding.
+  const clean = JSON.parse(original);
+  clean.history.at(-1).event = "REREVIEW_CLEAN";
+  clean.status = "CLEAN";
+  clean.clean_snapshot_hash = clean.rounds.at(-1).snapshot_hash;
+  await fsp.writeFile(reviewPath, `${JSON.stringify(clean, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+    assert.equal(error.code, "REVIEW_LEDGER_INVALID");
+    return true;
+  });
+  await fsp.writeFile(reviewPath, original, { mode: 0o600 });
+  assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
 });
 
 // The ledger and its summary are read under separate locks. A snapshot

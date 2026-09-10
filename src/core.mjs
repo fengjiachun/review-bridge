@@ -767,7 +767,13 @@ function reviewLedgerDefect(review, reviewId) {
     const recorded = review.history.find(
       (entry) => ["REREVIEW_UNRESOLVED", "REREVIEW_CONTINUABLE_FINDINGS", "REREVIEW_CLEAN"].includes(entry.event) && entry.round === verdictRound,
     ).event;
-    if (recorded !== expected) {
+    // Before CONTINUABLE_FINDINGS existed, the writer recorded a rereview
+    // that raised new findings without contesting any as REREVIEW_UNRESOLVED
+    // and stopped for a human. Ledgers written then carry no writer version,
+    // so that encoding of this one case is accepted alongside the current
+    // one; it replays consistently to HUMAN_REQUIRED either way.
+    const olderEncoding = expected === "REREVIEW_CONTINUABLE_FINDINGS" && recorded === "REREVIEW_UNRESOLVED";
+    if (recorded !== expected && !olderEncoding) {
       return `round ${verdictRound} rereview derives ${expected} from its decisions and new findings, but the history records ${recorded}`;
     }
   }
