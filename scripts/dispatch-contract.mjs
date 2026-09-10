@@ -468,6 +468,12 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "every URL-valued key on the allowlist gets the credential test",
       /with any of those URL values that carries a credential refused as well/,
     ],
+    // Codex round twenty-one on #125: `git config --list` shows no comment,
+    // so a template can leave a token in one.
+    [
+      "the raw .git/config is held to blank, header, and key = value lines",
+      /the raw file held to blank, section-header, and `key = value` lines/,
+    ],
     [
       "a key whose name carries a URL or a user is refused outright",
       /any key whose name itself carries `:\/\/` or a `user:pass@`/,

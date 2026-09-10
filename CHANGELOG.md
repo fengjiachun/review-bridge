@@ -83,10 +83,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   base image), judged against the same image run without the checkout mount
   so that what the image carries is never read as the host's; a checkout
   whose local Git configuration holds more than a fresh clone writes (only
-  the `core.*` keys a fresh clone writes, `extensions.objectformat` and
-  `extensions.refstorage` with the values git writes, a remote's `url` and `fetch`, a branch's `remote`, `merge`, and
-  `rebase`, `extensions.*`, and a submodule's `url` and `active` are accepted,
-  includes followed, any remote or submodule URL carrying a credential refused too; a
+  the `core.*` keys a fresh clone writes, `extensions.objectformat` as `sha1`
+  or `sha256`, a remote's `url` and `fetch`, a branch's `remote`, `merge`, and
+  `rebase`, and a submodule's `url` and `active` are accepted, includes
+  followed, the raw file held to blank, section-header, and `key = value`
+  lines so a comment cannot carry a token past the key check, any remote or submodule URL carrying a credential refused too; a
   denylist of `.extraheader`, `credential.*`, `http.cookieFile`, and their
   kind was bypassed three times in review) or that is not a self-contained
   clone (a linked worktree, a clone with alternates —

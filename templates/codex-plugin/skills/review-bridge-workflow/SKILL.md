@@ -824,9 +824,11 @@ ancestor of the checkout may gain exactly the one name that leads down to it.
 Before anything is started the launcher reads the checkout's local Git
 configuration and accepts a local Git configuration holding only what a fresh
 clone writes — the `core.*` keys a fresh clone writes, a remote's `url` and
-`fetch`, a branch's `remote`, `merge`, and `rebase`, `extensions.*`, a
-submodule's `url` and `active` — with any of those URL values that carries a
-credential refused as well; anything else (an `http.<url>.extraheader` such as
+`fetch`, a branch's `remote`, `merge`, and `rebase`, `extensions.objectformat`
+as `sha1` or `sha256`, a submodule's `url` and `active` — with any of those
+URL values that carries a credential refused as well, and the raw file held to
+blank, section-header, and `key = value` lines, since a comment is invisible
+to the key check and can carry a token; anything else (an `http.<url>.extraheader` such as
 `actions/checkout` writes, any `credential.*` setting, an `http.cookieFile` or
 `http.sslKey` pointing into the checkout, a `core.askPass`, `core.gitProxy`,
 or `core.sshCommand`, an `include.path`, or any key whose name itself carries

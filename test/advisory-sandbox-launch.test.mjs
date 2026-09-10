@@ -775,6 +775,37 @@ test("a checkout whose Git configuration carries a credential is refused before 
   assert.equal(result.status, 2, result.stdout);
   assert.match(result.stderr, /holds more than a fresh clone writes \(extensions\.objectformat \(unexpected value\)\)|cannot read the author checkout's Git configuration: .*'<redacted>'/s);
   assert.doesNotMatch(result.stderr, /ghp_v4lue/);
+  // extensions.refstorage is not accepted at all.
+  const e4 = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", e4.checkout, "config", "core.repositoryformatversion", "1"]);
+  spawnSync("git", ["-C", e4.checkout, "config", "extensions.refStorage", "reftable"]);
+  result = launch(e4, ["--review-id", e4.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /holds more than a fresh clone writes \(extensions\.refstorage\)|cannot read the author checkout's Git configuration/);
+  // A comment is invisible to `git config --list`; the raw file is held to
+  // blank, header, and key = value lines, and a comment line is refused by
+  // its line number, its text unprinted. A continuation and a line count over
+  // the cap are refused the same way.
+  const c1 = await fixture(t, { realReview: true });
+  const config = path.join(c1.checkout, ".git", "config");
+  const clean = await fsp.readFile(config, "utf8");
+  await fsp.writeFile(config, `${clean}# ghp_c0mment\n`);
+  result = launch(c1, ["--review-id", c1.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, new RegExp(`holds more than a fresh clone writes \\(\\.git/config line ${clean.split("\n").length} \\(not a section header or a key = value line\\)\\)`));
+  assert.doesNotMatch(result.stderr, /ghp_c0mment/);
+  await fsp.writeFile(config, `${clean}[remote "extra"]\n\turl = https://example.com/a.git \\\n ghp_c0ntinued\n`);
+  result = launch(c1, ["--review-id", c1.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /\.git\/config line \d+ \(not a section header or a key = value line\)/);
+  assert.doesNotMatch(result.stderr, /ghp_c0ntinued/);
+  await fsp.writeFile(config, `${clean}${"\n".repeat(200)}`);
+  result = launch(c1, ["--review-id", c1.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /\.git\/config \(more than 200 lines\)/);
+  await fsp.writeFile(config, clean);
+  result = launch(c1, ["--review-id", c1.reviewId, "--dry-run"]);
+  assert.equal(result.status, 0, result.stderr);
   // core.* is not accepted wholesale: the keys that carry a command or a
   // credential are refused by name.
   for (const [key, value] of [["core.askPass", "/tmp/askpass.sh"], ["core.gitProxy", "/tmp/proxy.sh"], ["core.sshCommand", "ssh -i .git/id"]]) {

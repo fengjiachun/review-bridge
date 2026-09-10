@@ -395,17 +395,36 @@ const FRESH_CLONE_CONFIG_KEYS = [
   { pattern: /^branch\..+\.(remote|merge|rebase)$/ },
   // extensions.* is not accepted wholesale (a value can be anything, a
   // token included). git writes extensions.objectformat only for
-  // --object-format=sha256 and extensions.refstorage only for
-  // --ref-format=reftable (git ≥ 2.45); both are enumerated with the values
-  // git itself writes.
+  // --object-format=sha256; it is enumerated with the values git itself
+  // writes. extensions.refstorage (reftable) is not accepted: the skill's
+  // clone carries no --ref-format, and the layout check knows no
+  // .git/reftable.
   { pattern: /^extensions\.objectformat$/, values: ["sha1", "sha256"] },
-  { pattern: /^extensions\.refstorage$/, values: ["files", "reftable"] },
   { pattern: /^submodule\..+\.url$/, url: true },
   { pattern: /^submodule\..+\.active$/ },
 ];
 
+// What a line of a fresh clone's .git/config can be: blank, a section header,
+// or `key = value`. `git config --list` shows none of a comment, so a
+// template can leave `# <token>` in the file unseen by the key check; the raw
+// bytes are held to these three shapes, and a value may not carry the
+// comment or continuation characters. Reported by line number only.
+const CONFIG_LINE = /^\s*(?:|\[[A-Za-z0-9.-]+(?:\s+"[^"\\]*")?\]\s*|[A-Za-z][A-Za-z0-9-]*\s*=\s*[^#;\\]*)$/;
+const CONFIG_LINE_LIMIT = 200;
+
 function gitConfigViolations(repository) {
   const violations = [];
+  let raw;
+  try {
+    raw = fs.readFileSync(path.join(repository, ".git", "config"), "utf8");
+  } catch (error) {
+    fail(`cannot read the author checkout's .git/config: ${error.message}`);
+  }
+  const lines = raw.split("\n");
+  if (lines.length > CONFIG_LINE_LIMIT) violations.push(`.git/config (more than ${CONFIG_LINE_LIMIT} lines)`);
+  lines.forEach((line, index) => {
+    if (!CONFIG_LINE.test(line)) violations.push(`.git/config line ${index + 1} (not a section header or a key = value line)`);
+  });
   const urlCredential = (text) =>
     /:\/\/[^/\s@]*:[^/\s@]*@/.test(text) || /(?:^|\.)https?:\/\/[^/\s@]+@/i.test(text);
   const redact = (key) => key.replace(/[^./@\s]*@/g, "<redacted>@");
