@@ -416,17 +416,93 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // enters the model's context and leaves through the verdict before an
     // operator could act. So the requirement is the read boundary alone,
     // and the section has to say why the hand-opened path was withdrawn.
+    // Issue #109 phase three supplies that boundary as the packaged
+    // container launcher, and the section has to name it as the only
+    // advisory launch, or the member reads as still unavailable — or as
+    // launchable some other way.
     [
-      "an advisory CODEX_TASK member needs an external sandbox with a read boundary",
-      /launched only inside a real external sandbox with a filesystem read boundary/,
+      "an advisory CODEX_TASK member is launched only through the packaged launcher",
+      /launched only through the packaged `\.\.\/\.\.\/scripts\/advisory-sandbox-launch\.mjs`/,
     ],
     [
       "opening the task by hand is not a mitigation",
       /Opening the task by hand is not a mitigation[\s\S]*?before an operator could intervene/,
     ],
     [
-      "the advisory member is unavailable until a read boundary exists",
-      /Until such a read boundary exists[\s\S]*?advisory `CODEX_TASK` member is not available/,
+      "without Docker the advisory member is unavailable rather than opened another way",
+      /Without Docker the launcher fails closed and the advisory `CODEX_TASK` member is unavailable rather than opened another way/,
+    ],
+    // What makes the container a read boundary: the host is absent, not
+    // denied, and the section has to say which mounts are the whole of what
+    // exists inside, with the mode each one needs — or the table drifts to
+    // whatever is convenient (a read-write checkout, a copied credential).
+    [
+      "the container is the read boundary",
+      /inside a Linux container that is the read boundary/,
+    ],
+    ["the host is absent rather than denied", /host home is absent rather than denied/],
+    [
+      "the credential is a read-only bind mount, never an image layer",
+      /`auth\.json` as a read-only bind mount, never copied into an image layer/,
+    ],
+    [
+      "the checkout is mounted read-only at its recorded path",
+      /author checkout, read-only at the path the ledger records, because the reviewer server reads it by recorded path/,
+    ],
+    // Codex round one on #125: a read-write host store inside a
+    // danger-full-access container hands an injected reviewer every other
+    // ledger and lock. What goes in is one staged review; what comes back is
+    // validated before the host store is written.
+    [
+      "the host store is never mounted; one staged review goes in and is validated on the way back",
+      /host store is never mounted; one staged review is copied in and validated on the way back/,
+    ],
+    [
+      "the copy-back writes under the review's own state lock, and only when the checks hold",
+      /writes the verdict to the host store, under that review's own state lock, only when the staged ledger still names the same review, provider, advisory flag, repository, and base, moved only along `submit_review`'s transitions/,
+    ],
+    [
+      "a failed check leaves the host store unwritten",
+      /any failed check leaves the host store unwritten and the staged copy in the scratch directory for inspection/,
+    ],
+    // The 2026-09-10 ruling: danger-full-access inside, and the container's
+    // own confinement untouched. Losing the reason lets the next reader
+    // "fix" the inner sandbox by weakening the outer one.
+    [
+      "the inner sandbox is danger-full-access because the nested one cannot start",
+      /`--sandbox danger-full-access`, because Codex's nested bubblewrap does not start under Docker's default confinement/,
+    ],
+    [
+      "the container's own confinement is not relaxed to fit a second sandbox",
+      /relaxing that confinement to fit a second sandbox inside would weaken the one boundary that matters/,
+    ],
+    [
+      "the isolated CODEX_HOME empties the host's MCP set",
+      /isolated `CODEX_HOME`[\s\S]*?host's other MCP servers are absent by construction/,
+    ],
+    // The egress residual the ruling required closed or stated: closed, by
+    // an allowlist the section names, measured both ways.
+    [
+      "egress is an allowlist through a sidecar",
+      /sidecar proxy on an internal Docker network that admits `chatgpt\.com` and `api\.openai\.com` and refuses every other host/,
+    ],
+    [
+      "the egress block was measured with and without the proxy",
+      /`curl https:\/\/example\.com` from inside fails through the proxy and has no route without it/,
+    ],
+    [
+      "the launcher prints the three criteria it verified",
+      /three criteria it verified — the reviewer's MCP calls completed inside the container, the host filesystem was absent, the validated verdict was copied back to the host store/,
+    ],
+    // The credential residual is stated rather than closed, with the
+    // operator's narrower option named.
+    [
+      "the one host secret inside is named",
+      /the one host secret inside the container is `auth\.json`/,
+    ],
+    [
+      "a narrower credential is the operator's option",
+      /narrowly scoped API key in place of the ChatGPT token is the operator's option/,
     ],
     [
       "the advisory fence does not depend on the launch",
@@ -532,6 +608,35 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "doesNotMatch",
       /`CODEX_TASK` member is opened by the operator by hand/,
       "the advisory CODEX_TASK member regressed to a hand-opened launch option",
+    ],
+    // The advisory launch is the packaged launcher, in a runnable form.
+    [
+      "match",
+      /```bash\n *node \.\.\/\.\.\/scripts\/advisory-sandbox-launch\.mjs --review-id <review_id>\n```/,
+      "the advisory launch is not the packaged container launcher in a runnable form",
+    ],
+    // The container's default confinement is the boundary. A weakened
+    // container that lets Codex's nested sandbox start must not appear, in
+    // the fence or in the prose as an alternative.
+    [
+      "doesNotMatch",
+      /seccomp=unconfined|apparmor=unconfined|--security-opt|--privileged/,
+      "the advisory launch regressed to a weakened container",
+    ],
+    // The host store mounted read-write into the container: the form Codex's
+    // round one on #125 refused, and the one a "simpler" mount table drifts
+    // back to.
+    [
+      "doesNotMatch",
+      /the store, read-write, since the verdict is written through it/,
+      "the host store regressed to a read-write mount inside the container",
+    ],
+    // The pre-launcher form: the member was unavailable until a boundary
+    // existed. The boundary exists now, and the sentence must not come back.
+    [
+      "doesNotMatch",
+      /advisory `CODEX_TASK` member is not available/,
+      "the advisory CODEX_TASK member regressed to unavailable",
     ],
     // The prose names `codex exec resume` to say the flow declines it, so the
     // guard is against a runnable resume form, not the mention.
@@ -874,15 +979,24 @@ export const ADVISORY_PANEL_CONTRACT = {
     ],
     // The #108 bar, upheld by the #114 Codex P1-3 for a new reason: the
     // unattended launch's sandbox bounds writes and network, not reads, so
-    // the CODEX_TASK member is manual or externally sandboxed like the Claude
-    // one, not the headless launch the dispatch section gives.
+    // the CODEX_TASK member never takes the headless launch the dispatch
+    // section gives. Issue #109 phase three supplies the read boundary as
+    // the packaged container launcher, the member's only launch.
     [
-      "the Codex member is externally sandboxed with a read boundary",
-      /`CODEX_TASK` — \*\*launched only inside a real external sandbox with a filesystem read boundary\.\*\*/,
+      "the Codex member is launched only through the packaged launcher",
+      /`CODEX_TASK` — \*\*launched only through the packaged advisory sandbox launcher\*\*, `node \.\.\/\.\.\/scripts\/advisory-sandbox-launch\.mjs --review-id <review_id>`/,
+    ],
+    [
+      "the launcher's container is the read boundary",
+      /inside a Linux container that is the filesystem read boundary/,
     ],
     [
       "hand-opening the Codex member is no substitute",
       /Opening the task by hand is not a substitute/,
+    ],
+    [
+      "without Docker the Codex member is unavailable rather than opened another way",
+      /without Docker this member is unavailable rather than opened another way/,
     ],
     [
       "the panel never takes the unattended launch",

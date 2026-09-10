@@ -9,6 +9,64 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Added
+
+- The advisory `CODEX_TASK` member is launchable again, through a container
+  that is the filesystem read boundary, issue #109 (#125). The packaged
+  Codex plugin gains `scripts/advisory-sandbox-launch.mjs`, the only launch
+  an advisory review takes. It builds or reuses a `node:22.22.0-bookworm`
+  image with `@openai/codex@0.153.4`, and runs the reviewer under an isolated
+  `CODEX_HOME` with exactly these mounts: the operator's `auth.json` as a
+  read-only bind mount, never copied into an image layer; the packaged
+  marketplace and plugin, read-only; the author checkout, read-only at the
+  path the ledger records; and a staged copy of the one review, read-write.
+  The host store is never mounted: the review's directory is copied into a
+  scratch store, and after the run the launcher writes the verdict back to the
+  host store under that review's own state lock only when the staged ledger
+  still names the same review, provider, advisory flag, repository, and base,
+  moved only along `submit_review`'s transitions, left every earlier snapshot
+  file untouched, and nothing else in the staged store was created or
+  changed, with the host ledger still at its launch `state_version`; a failed
+  check leaves the host store unwritten and the staged copy for inspection
+  (Codex's round-one P1: a read-write host store under `danger-full-access`
+  would have handed an injected reviewer every other ledger and lock). The
+  isolated `CODEX_HOME` is a Docker volume and the working directory a tmpfs
+  rather than host directories — nothing Codex keeps there needs to be on the
+  host during the run — and the sessions are copied out of the volume
+  afterwards. Inside the
+  container the launch is `--sandbox danger-full-access`: Codex's nested bubblewrap does not start under
+  Docker's default confinement, and the container's own confinement is kept
+  rather than relaxed to fit a second sandbox. Egress goes only through a
+  sidecar proxy on an internal Docker network that admits `chatgpt.com` and
+  `api.openai.com`; `https://example.com` fails through the proxy and has no
+  route without it, while the model calls complete. Before the reviewer
+  starts, a shell probe in the same container confirms the host home,
+  `~/.ssh`, `~/.codex`, and `/root/.ssh` are absent and stops the launch if
+  not; on exit the launcher prints the three criteria it verified (MCP calls
+  completed inside the container, host filesystem absent, validated verdict
+  copied back to the host store), the guardian's verdict per call, and the
+  proxy's egress log, and exits nonzero when a criterion fails. The probe
+  answers in JSON records rather than space-split text, so a path with a
+  space in it is one path (Codex's round-one P2). It fails closed, exit 2,
+  when Docker is unavailable or any mount source is missing, and refuses a
+  ledger that is not an advisory `CODEX_TASK` review waiting for review.
+  `--dry-run` validates the inputs and prints the docker commands without
+  Docker. The residual is stated: the one host secret inside is `auth.json`,
+  and a narrowly scoped API key in place of the ChatGPT token is the
+  operator's option. The packaged workflow skill's advisory sentences now
+  name the launcher as the required form in both the `CODEX_TASK` dispatch
+  section and the advisory panel table, with the "unavailable until a read
+  boundary exists" logic replaced by "unavailable without Docker rather than
+  opened another way"; `CODEX_TASK_DISPATCH_CONTRACT` and
+  `ADVISORY_PANEL_CONTRACT` anchor the launcher, the mount table and its
+  modes, the inner-sandbox reason, the egress allowlist, the three criteria,
+  and the residual, and refuse a weakened container or the pre-launcher
+  "not available" sentence. Hand-opening stays no mitigation; the advisory
+  fence (`finalize_local_gate` refuses, terminal state a report) is
+  unchanged; the HERMES, DeepSeek Harness, and `CLAUDE_DESKTOP` sections are
+  untouched. Verified on 2026-09-10 with one full advisory review of PR #119
+  run inside the container.
+
 ### Changed
 
 - The `CODEX_TASK` launch refuses shell escalation by configuration,

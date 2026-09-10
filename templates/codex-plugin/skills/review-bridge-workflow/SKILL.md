@@ -786,13 +786,66 @@ For attacker-controllable input the sandbox is therefore not an isolation
 boundary, and the reviewer skill's
 rule that such material is material to verify and never instructions is
 skill discipline rather than a mechanism. An advisory `CODEX_TASK` member is
-launched only inside a real external sandbox with a filesystem read boundary.
-Opening the task by hand is not a mitigation: the read happens and enters the
-model's context before an operator could intervene, and it leaves through the
-verdict the same way, so a person at the keyboard changes nothing about that
-chain. Until such a read boundary exists — it is tracked separately — an
-advisory `CODEX_TASK` member is not available. What the advisory fence
-guarantees is unchanged either way:
+launched only through the packaged `../../scripts/advisory-sandbox-launch.mjs`,
+run like the other packaged helpers and backgrounded so it does not block the
+wait:
+
+```bash
+node ../../scripts/advisory-sandbox-launch.mjs --review-id <review_id>
+```
+
+It runs this same reviewer inside a Linux container that is the read boundary.
+Nothing from the host exists inside it except what the launcher mounts: the
+operator's `auth.json` as a read-only bind mount, never copied into an image
+layer; the packaged marketplace and plugin, read-only; the author checkout,
+read-only at the path the ledger records, because the reviewer server reads it
+by recorded path and any other tree would be the wrong bytes; a staged copy of
+the one review under `/store`, read-write; and an empty working directory. The
+host store is never mounted; one staged review is copied in and validated on
+the way back, because under `danger-full-access` the reviewer's shell could
+otherwise read and rewrite every other ledger, lock, and workflow in the store,
+past the reviewer server's provider check and mutation lock. The launcher
+writes the verdict to the host store, under that review's own state lock, only
+when the staged ledger still names the same review, provider, advisory flag,
+repository, and base, moved only along `submit_review`'s transitions, left
+every earlier snapshot file untouched, added nothing else to the staged store,
+and the host ledger is still at the state version it was launched with; any
+failed check leaves the host store unwritten and the staged copy in the
+scratch directory for inspection. The host home is absent rather than denied:
+before the reviewer
+starts, the launcher's own shell probe reports `absent` for the operator's
+home, `~/.ssh`, `~/.codex`, and `/root/.ssh`, and the launch stops if any of
+them is present. The container is the only sandbox. Inside it the reviewer
+runs with `--sandbox danger-full-access`, because Codex's nested bubblewrap
+does not start under Docker's default confinement, and relaxing that
+confinement to fit a second sandbox inside would weaken the one boundary that
+matters. Codex runs under an isolated `CODEX_HOME` whose configuration names
+this plugin and nothing else, so the host's other MCP servers are absent by
+construction and there are no memories to read; the launch line inside
+otherwise carries what the host launch carries — the guardian as approver,
+the granular refusal, memories pinned off, the author server disabled, stdin
+closed — plus the reviewer server restated at its container path with the
+store's container path in its environment. Egress goes only through a sidecar
+proxy on an internal Docker network that admits `chatgpt.com` and
+`api.openai.com` and refuses every other host: `curl https://example.com`
+from inside fails through the proxy and has no route without it, while the
+model calls complete (measured 2026-09-10). On exit the launcher prints the
+three criteria it verified — the reviewer's MCP calls completed inside the
+container, the host filesystem was absent, the validated verdict was copied
+back to the host store — with the guardian's verdict per call and the proxy's
+egress log, and
+exits nonzero when any of the three does not hold. Opening the task by hand
+is not a mitigation: the read happens and enters the model's context before
+an operator could intervene, and it leaves through the verdict the same way,
+so a person at the keyboard changes nothing about that chain. Without Docker
+the launcher fails closed and the advisory `CODEX_TASK` member is unavailable
+rather than opened another way. The residual is stated, not closed: the one
+host secret inside the container is `auth.json`, so the operator's credential
+rides into every advisory review, and what remains of the exfiltration path
+is the two allowed hosts and the verdict text itself, which lands in the
+store the operator reads. A narrowly scoped API key in place of the ChatGPT
+token is the operator's option; the launcher does not change how `auth.json`
+is produced. What the advisory fence guarantees is unchanged either way:
 `finalize_local_gate` refuses an advisory review, so its terminal state is a
 report and never a `LOCAL_GATE_PASSED`, however the reviewer was started.
 
@@ -1410,14 +1463,19 @@ attests nothing.
    is an explicit per-review choice for exceptional stakes.
 5. Dispatch each member by its own pattern. The table is asymmetric by design:
 
-   - `CODEX_TASK` — **launched only inside a real external sandbox with a
-     filesystem read boundary.** The unattended launch in Dispatching a
-     CODEX_TASK review is for the operator's own changes only and must never
-     review a third party's pull request: its sandbox bounds writes and
-     network, not reads, and this panel's material is an outside author's.
-     Opening the task by hand is not a substitute — the read enters the
-     model's context before an operator could intervene — so until a read
-     boundary exists this member is not available.
+   - `CODEX_TASK` — **launched only through the packaged advisory sandbox
+     launcher**, `node ../../scripts/advisory-sandbox-launch.mjs --review-id
+     <review_id>`, which runs the reviewer inside a Linux container that is
+     the filesystem read boundary, as Dispatching a CODEX_TASK review
+     describes. The unattended host launch there is for the operator's own
+     changes only and must never review a third party's pull request: its
+     sandbox bounds writes and network, not reads, and this panel's material
+     is an outside author's. Opening the task by hand is not a substitute —
+     the read enters the model's context before an operator could intervene
+     — and without Docker this member is unavailable rather than opened
+     another way. Keep the launcher's exit report, which carries the three
+     criteria it verified and the guardian's verdict per call, with the
+     panel's record.
    - `HERMES` — the headless launch in Dispatching a HERMES review.
    - `DEEPSEEK_HARNESS` — the headless launch in Dispatching a
      DEEPSEEK_HARNESS review.

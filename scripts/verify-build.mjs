@@ -708,6 +708,28 @@ assert.ok(
     path.join(pluginRoot, "scripts", "inspect-publication-audit.mjs"),
   ),
 );
+// The advisory sandbox launcher ships beside the other helpers and is the
+// only launch the advisory CODEX_TASK member takes; the packaged skill has to
+// point at it and the packaged copy has to run.
+const advisoryLauncher = path.join(
+  pluginRoot,
+  "scripts",
+  "advisory-sandbox-launch.mjs",
+);
+assert.ok(await fsp.stat(advisoryLauncher));
+assert.match(workflowSkill, /\.\.\/\.\.\/scripts\/advisory-sandbox-launch\.mjs --review-id <review_id>/);
+const advisoryHelp = run(process.execPath, [advisoryLauncher, "--help"], pluginRoot);
+assert.match(advisoryHelp, /Usage: advisory-sandbox-launch\.mjs --review-id <id>/);
+assert.match(advisoryHelp, /Fails closed, exit 2, when Docker is unavailable/);
+assert.match(advisoryHelp, /bind-mounted read-only and never copied\s+into an image layer/);
+assert.match(advisoryHelp, /admits chatgpt\.com and api\.openai\.com/);
+const advisoryBadId = spawnSync(
+  process.execPath,
+  [advisoryLauncher, "--review-id", "not-a-review", "--dry-run"],
+  { cwd: pluginRoot, encoding: "utf8" },
+);
+assert.equal(advisoryBadId.status, 2);
+assert.match(advisoryBadId.stderr, /invalid --review-id/);
 
 const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
 assertAuthorServerDisabledInLaunches(

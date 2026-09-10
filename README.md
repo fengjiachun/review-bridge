@@ -447,6 +447,23 @@ request reports findings and can never mint a gate over code this operator did
 not author. A ledger written before advisory mode carries no flag and gates as
 it always did.
 
+A panel's `CODEX_TASK` member reads a third party's diff, so it is launched
+only through the packaged `scripts/advisory-sandbox-launch.mjs` in the Codex
+plugin, which runs the reviewer inside a Linux container that is the
+filesystem read boundary: the operator's `auth.json` bind-mounted read-only,
+the packaged plugin and the author checkout read-only, a staged copy of the
+one review read-write (the host store is never mounted; the verdict is
+validated and copied back under the review's state lock), an isolated
+`CODEX_HOME`, and egress only through a sidecar proxy that admits
+`chatgpt.com` and `api.openai.com`. Inside the container the reviewer runs
+with `--sandbox danger-full-access`; the container's own default confinement
+is the boundary and is not weakened to fit Codex's nested sandbox. The
+launcher fails closed without Docker and prints the three criteria it
+verified on exit. The residual is the credential it must carry: a narrowly
+scoped API key in place of the ChatGPT token is the operator's option. The
+packaged workflow skill's Dispatching a CODEX_TASK review section states the
+full form.
+
 ## Autonomous workflow
 
 An explicitly authorized schema-version-1 workflow persists RFC 0003's
@@ -760,6 +777,10 @@ Ledger](docs/rfcs/0001-github-publication-ledger.md).
 - Local, remote-only, and publication gates are workflow attestations, not Git
   or GitHub security boundaries. Review Bridge does not install a `pre-push`
   hook.
+- An advisory `CODEX_TASK` review over a third party's pull request runs only
+  inside the container the packaged `advisory-sandbox-launch.mjs` builds; the
+  host filesystem is absent there, not denied, and the one host secret inside
+  is the operator's `auth.json`.
 - The Review Bridge MCP server receives no GitHub credentials. The packaged
   Codex skill and read-only observation collector use the user's separately
   configured GitHub tools after the selected publication authorization exists.

@@ -947,6 +947,10 @@ test("verify-build validates packaged Hermes artifacts, HERMES binding, isolatio
   // Both new #71 contracts land on packaged copies too: the panel section and
   // the third-party boundary on all four reviewer surfaces.
   assert.match(verify, /ADVISORY_PANEL_CONTRACT/);
+  // The advisory sandbox launcher is checked on the packaged copy too: it
+  // exists, its --help states the launch, and the packaged skill names it.
+  assert.match(verify, /advisory-sandbox-launch\.mjs/);
+  assert.match(verify, /advisoryLauncher, "--help"/);
   for (const surface of [
     "reviewerSkill",
     "reviewInstructions",
