@@ -1259,6 +1259,7 @@ async function continuedFixture(t) {
   await submitInitialReview(store, source.id, [
     { severity: "major", title: "wrong value", explanation: "should be 3", recommendation: "set 3" },
   ], "CLAUDE_DESKTOP");
+  await appendReviewErratum(store, source.id, "the base moved under the source review");
   await submitResolutions(store, source.id, [{ finding_id: "F-001", disposition: "fixed", rationale: "set to 3" }]);
   await fsp.writeFile(path.join(repository, "value.js"), "export const value = 3;\n");
   git(repository, "add", ".");
@@ -1326,6 +1327,9 @@ test("the continuation marker must be the one the history's REVIEW_CONTINUED eve
     assert.ok(!(await fsp.readdir(path.dirname(continuationPath))).some((name) => name.startsWith("report-")));
   };
   await tamperContinuation((ledger) => { ledger.carried_findings.push({ ...ledger.carried_findings[0], finding_id: "F-003" }); }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-003" as open/);
+  // The source is still named through the carried erratum, so an emptied
+  // carried set is compared with the source's open findings and refused.
+  await tamperContinuation((ledger) => { assert.equal(ledger.errata.filter((e) => e.continued_from_review_id).length, 1); ledger.carried_findings = []; }, "CONTINUATION_SOURCE_MISMATCH", /only part of the open findings \(source finding "F-002" is not carried\)/);
   await tamperContinuation((ledger) => { ledger.carried_findings[0].fingerprint_sha256 = "e".repeat(64); }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-002" with fingerprint "e{64}"/);
   await tamperContinuation((ledger) => { ledger.carried_findings[0].title = "reworded"; }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-002" whose carried content does not hash to its fingerprint/);
   await fsp.writeFile(continuationPath, continuationOriginal, { mode: 0o600 });
@@ -1694,6 +1698,52 @@ test("a local-gate publication's gate is held to the review ledger beside it", a
     return true;
   });
   assert.ok(!(await fsp.readdir(directory)).some((name) => name.startsWith("report-")));
+});
+
+// A successor review, prepared against a passed parent through the writer,
+// so its proof is bound to its round and to the parent in the store.
+async function successorFixture(t) {
+  const parent = await gatedFixture(t);
+  await fsp.writeFile(path.join(parent.repository, "value.test.js"), "export const checked = true;\n");
+  git(parent.repository, "add", ".");
+  git(parent.repository, "commit", "-m", "add a test");
+  const successor = await prepareReview(parent.store, {
+    repositoryPath: parent.repository,
+    baseRef: parent.baseSha,
+    requirement: "Change the exported value.",
+    implementationScope: "Update value.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
+    parentReviewId: parent.reviewId,
+  });
+  assert.equal(successor.review_strategy.mode, "SUCCESSOR");
+  return { ...parent, parentId: parent.reviewId, successorId: successor.id, headSha: git(parent.repository, "rev-parse", "HEAD") };
+}
+
+test("a successor proof is bound to its round's head and base and to the parent's last head", async (t) => {
+  const state = await successorFixture(t);
+  const reviewPath = path.join(state.store, "reviews", state.successorId, "review.json");
+  const original = await fsp.readFile(reviewPath, "utf8");
+  const genuine = JSON.parse(original);
+  assert.equal(genuine.rounds[0].successor.current_head_sha, state.headSha);
+  assert.equal(genuine.rounds[0].successor.parent_review_id, state.parentId);
+  const written = await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT });
+  assert.match(await fsp.readFile(written.path, "utf8"), /#### Round 1 strategy: `SUCCESSOR`/);
+  await fsp.rm(written.path);
+  const tamper = async (mutate, expected) => {
+    const review = JSON.parse(original);
+    mutate(review);
+    await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
+    await assert.rejects(writeReviewReport(state.store, state.successorId), (error) => {
+      assert.equal(error.code, "REVIEW_LEDGER_INVALID", error.message);
+      assert.match(error.details.reason, expected);
+      return true;
+    });
+  };
+  await tamper((review) => { review.rounds[0].successor.current_head_sha = "1".repeat(40); }, /round 1 successor proof names current_head_sha 1{40}, but the round's head is [0-9a-f]{40}/);
+  await tamper((review) => { review.rounds[0].successor.base_sha = "2".repeat(40); }, /round 1 successor proof names base_sha 2{40}, but the round's base is [0-9a-f]{40}/);
+  await tamper((review) => { review.rounds[0].successor.parent_head_sha = "3".repeat(40); }, new RegExp(`round 1 successor proof names parent_head_sha 3{40}, but parent ${state.parentId} ends at [0-9a-f]{40}`));
+  await fsp.writeFile(reviewPath, original, { mode: 0o600 });
+  assert.equal((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).reused, false);
 });
 
 // Two renderers racing on one revision must leave one file, and each receipt

@@ -972,11 +972,12 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
         throw mismatch(`finding ${JSON.stringify(carried.finding_id)} whose carried content does not hash to its fingerprint`);
       }
     }
-    if (carriedFromSource.length > 0) {
-      const carriedIds = new Set(carriedFromSource.map((carried) => carried.finding_id));
-      const missing = [...frozen.keys()].find((id) => !carriedIds.has(id));
-      if (missing != null) throw mismatch(`only part of the open findings (source finding ${JSON.stringify(missing)} is not carried)`);
-    }
+    // The carried set equals the source's open set, the empty set included:
+    // a review that names a source through any carried record -- a finding
+    // or an erratum -- carries all of that source's open findings.
+    const carriedIds = new Set(carriedFromSource.map((carried) => carried.finding_id));
+    const missing = [...frozen.keys()].find((id) => !carriedIds.has(id));
+    if (missing != null) throw mismatch(`only part of the open findings (source finding ${JSON.stringify(missing)} is not carried)`);
     const sourceErrata = source.errata ?? [];
     for (const [index, erratum] of (review.errata ?? []).entries()) {
       if (erratum.continued_from_review_id !== sourceId) continue;
@@ -1021,6 +1022,30 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
           },
         },
       );
+    }
+    // A successor proof is bound to the round it proves -- its current head
+    // and base are the round's -- and to its parent when the parent is in
+    // the store: parent_head_sha is the parent's last round's head. A parent
+    // that is not in the store leaves parent_head_sha to the field table's
+    // format check alone.
+    if (round.successor != null) {
+      const proof = round.successor;
+      if (proof.current_head_sha !== round.head_sha) {
+        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof names current_head_sha ${proof.current_head_sha}, but the round's head is ${round.head_sha}`);
+      }
+      if (proof.base_sha != null && proof.base_sha !== round.base_sha) {
+        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof names base_sha ${proof.base_sha}, but the round's base is ${round.base_sha}`);
+      }
+      let parent = null;
+      try {
+        parent = await loadReview(storeRoot, proof.parent_review_id);
+      } catch {
+        parent = null;
+      }
+      const parentHead = parent?.rounds?.at(-1)?.head_sha;
+      if (parent != null && parentHead !== proof.parent_head_sha) {
+        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof names parent_head_sha ${proof.parent_head_sha}, but parent ${proof.parent_review_id} ends at ${parentHead}`);
+      }
     }
     let reproduced;
     try {
