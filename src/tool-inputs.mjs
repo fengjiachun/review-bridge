@@ -601,10 +601,10 @@ const releaseSplit = (condition) => [
   ["operator_label", "the deciding human"],
 ];
 
-// The acknowledgment is made, and a split still owes the cut the bind measures.
-// The calls are the gated ones without the acknowledgment that has already
-// happened, and the recording is stated as required until a gate admits the
-// cut, because a ledger cannot see a cut it has not yet measured.
+// The split is acknowledged and still owes the cut the bind measures. The
+// recording is stated as required until a gate admits the cut, because a
+// ledger cannot see a cut it has not yet measured, and the release declared
+// above it is the one other way the cut stops being owed.
 export const SPLIT_GATED_INPUTS = {
   PREPARE_LOCAL_REVIEW: {
     acknowledge_change_size_warning: releaseSplit(
@@ -613,7 +613,10 @@ export const SPLIT_GATED_INPUTS = {
     record_workflow_head: [
       WORKFLOW_ID,
       afterWrite(WORKFLOW_REVISION, "any re-acknowledgment"),
-      ["head_sha", "the cut you committed, required until a gate admits it"],
+      [
+        "head_sha",
+        "the cut you committed, required until a gate admits it or the split is released",
+      ],
     ],
     prepare_review: WORKFLOW_ACTION_INPUTS.PREPARE_LOCAL_REVIEW.prepare_review,
     bind_workflow_review: [
@@ -636,7 +639,7 @@ export const SPLIT_GATED_INPUTS = {
       afterWrite(WORKFLOW_REVISION, "any re-acknowledgment"),
       [
         "head_sha",
-        "the cut you committed, carrying any fix, required until a gate admits it",
+        "the cut you committed, carrying any fix, required until a gate admits it or the split is released; after a release, the committed fix alone, required when any resolution is fixed",
       ],
     ],
     ...SUBMIT_RESOLUTIONS,
@@ -663,7 +666,10 @@ export const SPLIT_CUT_RECORDED_INPUTS = {
     record_workflow_head: [
       WORKFLOW_ID,
       afterWrite(WORKFLOW_REVISION, "any re-acknowledgment"),
-      ["head_sha", "a further cut, required only if the bind refuses the recorded one"],
+      [
+        "head_sha",
+        "a further cut, required only if the bind refuses the recorded one and the split is not released",
+      ],
     ],
     prepare_review: WORKFLOW_ACTION_INPUTS.PREPARE_LOCAL_REVIEW.prepare_review,
     bind_workflow_review: [
@@ -681,7 +687,7 @@ export const SPLIT_CUT_RECORDED_INPUTS = {
       afterWrite(WORKFLOW_REVISION, "any re-acknowledgment"),
       [
         "head_sha",
-        "a further cut, required only if the advance refuses the recorded one",
+        "a further cut, required only if the advance refuses the recorded one and the split is not released",
       ],
     ],
     ...SUBMIT_RESOLUTIONS,
