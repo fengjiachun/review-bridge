@@ -812,6 +812,46 @@ test("finding statuses must equal what their records derive, in both directions"
   assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
 });
 
+// The ledger and its summary are read under separate locks. A snapshot
+// recorded between the two reads would file a report under revision N with
+// revision N+1's verdict; the loader compares the two and fails closed.
+test("a publication that moves between the ledger read and the summary read fails the render closed", async (t) => {
+  const state = await gatedFixture(t);
+  const ready = await reachReady(state);
+  const advanceBetweenReads = async (storeRoot, reviewId) => {
+    const ledger = await getPublication(storeRoot, reviewId);
+    const at = Date.now() + 10_000;
+    await recordGithubSnapshot(
+      storeRoot,
+      reviewId,
+      {
+        expectedRevision: ledger.revision,
+        observation: observation({ at, baseSha: state.baseSha, headSha: state.headSha, requestId: 100, requestAt: at - 5_000 }),
+      },
+      { clock: () => at + 10 },
+    );
+    return ledger;
+  };
+  await assert.rejects(
+    loadReportLedgers(state.store, state.reviewId, { readPublication: advanceBetweenReads }),
+    (error) => {
+      assert.equal(error.code, "PUBLICATION_MOVED_DURING_RENDER");
+      assert.deepEqual(error.details, {
+        review_id: state.reviewId,
+        publication_revision: ready.revision,
+        summary_revision: ready.revision + 1,
+      });
+      return true;
+    },
+  );
+  assert.ok(!(await fsp.readdir(reviewDirectory(state))).some((name) => name.startsWith("report-")));
+  // Read again without interference, the two agree and the report renders
+  // under the revision the ledger now holds.
+  const written = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
+  assert.equal(written.publication_revision, ready.revision + 1);
+  assert.equal(written.reused, false);
+});
+
 // ---------------------------------------------------------------------------
 // The store writer.
 

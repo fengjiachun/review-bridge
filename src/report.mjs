@@ -639,7 +639,13 @@ export function renderReviewReport(
 // on its own: a review that never published has no publication, a REMOTE_ONLY
 // publication has no review. One of the two must exist, and a publication
 // must be bound to the authorization file beside it.
-export async function loadReportLedgers(storeRoot, reviewId) {
+export async function loadReportLedgers(
+  storeRoot,
+  reviewId,
+  // The publication reader is injectable so a test can move the ledger
+  // between the two reads below; callers never pass it.
+  { readPublication = getPublication } = {},
+) {
   if (typeof reviewId !== "string" || !REVIEW_ID_PATTERN.test(reviewId)) {
     throw reportError("INVALID_REVIEW_ID", "invalid review_id", { review_id: reviewId });
   }
@@ -655,7 +661,7 @@ export async function loadReportLedgers(storeRoot, reviewId) {
   try {
     // Canonical bytes, the stored-ledger schema, and the review_id inside are
     // all checked by the publication reader.
-    publication = await getPublication(storeRoot, reviewId);
+    publication = await readPublication(storeRoot, reviewId);
   } catch (error) {
     if (error?.code !== "PUBLICATION_NOT_FOUND") throw error;
   }
@@ -686,6 +692,21 @@ export async function loadReportLedgers(storeRoot, reviewId) {
   // terminal replay included; the report prints it and derives nothing.
   const publicationSummary =
     publication == null ? null : await getPublicationSummary(storeRoot, reviewId);
+  // The ledger and the summary are read under separate locks, so a snapshot
+  // recorded between them leaves a summary of revision N+1 beside a ledger of
+  // revision N. An immutable report filed under N must not carry N+1's
+  // verdict: the render fails closed and the caller renders again.
+  if (publicationSummary != null && publicationSummary.revision !== publication.revision) {
+    throw reportError(
+      "PUBLICATION_MOVED_DURING_RENDER",
+      `publication ${reviewId} moved from revision ${publication.revision} to ${publicationSummary.revision} while the report was being read`,
+      {
+        review_id: reviewId,
+        publication_revision: publication.revision,
+        summary_revision: publicationSummary.revision,
+      },
+    );
+  }
   return { directory, review, publication, authorization, publicationSummary };
 }
 

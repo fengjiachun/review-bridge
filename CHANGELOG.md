@@ -32,7 +32,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   Codex and checks gates come from the same functions the publication read
   surfaces use, and the gate's verdict is the publication summary's own,
   workflow binding and terminal replay included, never a bare derivation over
-  the ledger alone. Every ledger is admitted by the reader
+  the ledger alone; a publication that moves between the ledger read and the
+  summary read fails the render with `PUBLICATION_MOVED_DURING_RENDER`
+  rather than filing one revision's report with the next revision's verdict. Every ledger is admitted by the reader
   the server itself uses -- the review by a new `loadValidatedReview`
   in `core.mjs` that admits only a ledger the store could have written (its
   own serialization, the state machine's shape with the history replayed
