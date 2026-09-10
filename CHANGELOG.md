@@ -42,9 +42,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   as a cross-check that fails on a mismatch. That criterion is run-health evidence recorded inside the
   container and forgeable by a reviewer with shell access, and the copy-back's
   integrity rests on the host replay, not on it. A key whose name carries
-  `://` or `@` at all (`url.<url>.insteadOf`, `remote.<url>.url`) is refused
-  before the allowlist is consulted and printed with its userinfo redacted,
-  and the codex `auth.json` path is
+  `://` or a `user:pass@` (`url.<url>.insteadOf`, `remote.<url>.url`) is
+  refused before the allowlist is consulted and printed with its userinfo
+  redacted; the `.git` directory is held to what a fresh clone writes as well
+  (no hook but `*.sample`, nothing under `info` but `exclude`, no other
+  top-level entry), since `git clone` copies the operator's `init.templateDir`
+  into it, and the packaged skill's panel clone now uses `--template=`; and the codex `auth.json` path is
   held to the same host-prefix check as the other mounts. The
   isolated `CODEX_HOME` is a Docker volume and the working directory a tmpfs
   rather than host directories — nothing Codex keeps there needs to be on the

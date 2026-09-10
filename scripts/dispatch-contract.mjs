@@ -470,7 +470,15 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     ],
     [
       "a key whose name carries a URL or a user is refused outright",
-      /any key whose name itself carries `:\/\/` or `@`/,
+      /any key whose name itself carries `:\/\/` or a `user:pass@`/,
+    ],
+    [
+      "the .git layout is held to what a fresh clone writes",
+      /a `\.git` holding more than a fresh clone writes \(a hook that is not a `\*\.sample`, anything under `info` but `exclude`, any other top-level entry\) is refused the same way/,
+    ],
+    [
+      "a remote or branch named after a secret is stated as undetectable",
+      /a remote or branch named after a secret is not detectable; the panel clone is yours to keep clean/,
     ],
     [
       "core.* is not accepted wholesale",
@@ -998,6 +1006,10 @@ export const ADVISORY_PANEL_CONTRACT = {
       /container launcher below reads only a self-contained clone/,
     ],
     [
+      "the panel clone uses an empty template",
+      /`--template=` clones with an empty template, so no hook or helper from the operator's `init\.templateDir` rides into the panel's `\.git`/,
+    ],
+    [
       "the refs and the merge base live in the clone",
       /merge base is computed from the refs the fetch just wrote, in the clone/,
     ],
@@ -1158,7 +1170,7 @@ export const ADVISORY_PANEL_CONTRACT = {
     // worktree the container cannot read.
     [
       "match",
-      /```bash\n *git clone <remote-url> <path outside any authoring tree>\n/,
+      /```bash\n *git clone --template= <remote-url> <path outside any authoring tree>\n/,
       "the panel checkout is not a clone in a runnable form",
     ],
     [

@@ -375,7 +375,7 @@ async function marketplaceFromCodexConfig() {
 // rounds) and the panel checkout is a fresh clone, so nothing else belongs
 // there. A URL-valued key — a remote's or a submodule's url — whose value
 // carries a credential is refused as well. Values are never printed; a key that is itself a URL is printed with its userinfo
-// redacted, and a key whose name carries `://` or `@` at all is refused
+// redacted, and a key whose name carries `://` or a `user:pass@` is refused
 // before the allowlist is consulted.
 //
 // The core keys are what `git clone` writes as observed: on macOS (git
@@ -423,12 +423,13 @@ function gitConfigViolations(repository) {
       const newline = entry.indexOf("\n");
       const key = newline === -1 ? entry : entry.slice(0, newline);
       const value = newline === -1 ? "" : entry.slice(newline + 1);
-      // A subsection name can itself be a URL (`remote.<url>.url`) or carry
-      // a user (`branch.feat@x.remote`); a fresh clone names no remote,
-      // branch, or submodule with `://` or `@`, so such a key is refused
-      // before the allowlist is consulted, without relying on the URL test's
-      // shape.
-      if (key.includes("://") || key.includes("@")) {
+      // A subsection name can itself be a URL (`remote.<url>.url`) or a
+      // `user:pass@host`; such a key is refused before the allowlist is
+      // consulted, without relying on the URL test's shape. A bare `@` is
+      // allowed — `release@v1` is a legitimate branch name the panel flow
+      // writes as `branch.release@v1.remote`. A remote or branch named after
+      // a secret with neither marker is not detectable here.
+      if (key.includes("://") || /[^./@\s]*:[^./@\s]*@/.test(key)) {
         violations.push(redact(key));
         continue;
       }
@@ -441,6 +442,59 @@ function gitConfigViolations(repository) {
     }
   }
   return [...new Set(violations)];
+}
+
+// The .git directory of a fresh clone, by entry. `git clone` copies the
+// operator's init.templateDir into a new .git — hooks, helpers, anything —
+// and the configuration check cannot see those, so the skill clones with
+// `--template=` and the launcher holds the layout to what a fresh clone
+// plus the skill's fetch and checkout write. Observed on macOS (git 2.54,
+// Apple Git-157): a `--template=` clone + fetch + detached checkout leaves
+// FETCH_HEAD, HEAD, config, index, logs, objects, packed-refs, refs and no
+// hooks or info directory; a default-template clone adds description,
+// hooks/*.sample, and info/exclude. ORIG_HEAD, shallow, branches, and
+// COMMIT_EDITMSG are what other ordinary git operations on such a clone
+// write. Anything else at the top level, any hook that is not a *.sample,
+// and anything under info but exclude is refused by name. The working tree
+// itself is the repository's own content and is not inspected.
+const FRESH_CLONE_GIT_ENTRIES = new Set([
+  "HEAD",
+  "config",
+  "description",
+  "hooks",
+  "info",
+  "objects",
+  "refs",
+  "logs",
+  "index",
+  "packed-refs",
+  "FETCH_HEAD",
+  "ORIG_HEAD",
+  "shallow",
+  "branches",
+  "COMMIT_EDITMSG",
+]);
+
+async function gitLayoutViolations(repository) {
+  const gitDir = path.join(repository, ".git");
+  const violations = [];
+  const list = async (directory) => {
+    try {
+      return await fsp.readdir(directory);
+    } catch {
+      return [];
+    }
+  };
+  for (const entry of await list(gitDir)) {
+    if (!FRESH_CLONE_GIT_ENTRIES.has(entry)) violations.push(`.git/${entry}`);
+  }
+  for (const entry of await list(path.join(gitDir, "hooks"))) {
+    if (!entry.endsWith(".sample")) violations.push(`.git/hooks/${entry}`);
+  }
+  for (const entry of await list(path.join(gitDir, "info"))) {
+    if (entry !== "exclude") violations.push(`.git/info/${entry}`);
+  }
+  return violations.sort();
 }
 
 function run(command, args, options = {}) {
@@ -566,6 +620,12 @@ async function resolveInputs(options) {
   if (violations.length > 0) {
     fail(
       `the author checkout's local Git configuration holds more than a fresh clone writes (${violations.join(", ")}); the checkout is mounted whole, so use a fresh clone of the pull request's repository`,
+    );
+  }
+  const layoutViolations = await gitLayoutViolations(repository);
+  if (layoutViolations.length > 0) {
+    fail(
+      `the author checkout's .git holds more than a fresh clone writes (${layoutViolations.join(", ")}); the checkout is mounted whole, so use a fresh clone made with --template= of the pull request's repository`,
     );
   }
   // Again on the real paths, so a symlink such as /tmp → /private/tmp cannot

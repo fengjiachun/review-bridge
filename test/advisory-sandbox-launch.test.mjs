@@ -704,11 +704,19 @@ test("a checkout whose Git configuration carries a credential is refused before 
   assert.equal(result.status, 2, result.stdout);
   assert.match(result.stderr, /holds more than a fresh clone writes \(remote\.https:\/\/<redacted>@github\.com\/\.url\)/);
   assert.doesNotMatch(result.stderr, /ghp_n4me/);
+  // A bare `@` in a branch name is legitimate (`release@v1`); a `user:pass@`
+  // in a subsection name is not.
   const v = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", v.checkout, "config", "branch.feat@x.remote", "origin"]);
-  result = launch(v, ["--review-id", v.reviewId], { PATH });
+  spawnSync("git", ["-C", v.checkout, "config", "branch.release@v1.remote", "origin"]);
+  spawnSync("git", ["-C", v.checkout, "config", "branch.release@v1.merge", "refs/heads/release@v1"]);
+  result = launch(v, ["--review-id", v.reviewId, "--dry-run"]);
+  assert.equal(result.status, 0, result.stderr);
+  const w = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", w.checkout, "config", "remote.user:pass@host.url", "https://github.com/x/y.git"]);
+  result = launch(w, ["--review-id", w.reviewId], { PATH });
   assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /holds more than a fresh clone writes \(branch\.<redacted>@x\.remote\)/);
+  assert.match(result.stderr, /holds more than a fresh clone writes \(remote\.<redacted>@host\.url\)/);
+  assert.doesNotMatch(result.stderr, /user:pass/);
   // Every URL-valued key on the allowlist gets the credential test, a
   // submodule's url as much as a remote's; a clean submodule url passes.
   const r = await fixture(t, { realReview: true });
@@ -740,14 +748,29 @@ test("a checkout whose Git configuration carries a credential is refused before 
   const bare = path.join(origin.root, "origin.git");
   spawnSync("git", ["clone", "-q", "--bare", origin.repository, bare]);
   const panel = path.join(origin.root, "panel-clone");
-  spawnSync("git", ["clone", "-q", bare, panel]);
+  spawnSync("git", ["clone", "-q", "--template=", bare, panel]);
   spawnSync("git", ["-C", panel, "fetch", "-q", "origin", "+main:refs/review-bridge/1/base", "+agent/workflow-core:refs/review-bridge/1/head"]);
   spawnSync("git", ["-C", panel, "checkout", "-q", "--detach", "refs/review-bridge/1/head"]);
   const o = await fixture(t, { checkoutPath: panel });
   result = launch(o, ["--review-id", REVIEW_ID, "--dry-run"]);
   // On a failure here, the message names the key git wrote that the
   // enumeration lacks; add it to FRESH_CLONE_CONFIG_KEYS with the platform.
-  assert.equal(result.status, 0, `${result.stderr}\nclone config:\n${spawnSync("git", ["-C", panel, "config", "--local", "--list"], { encoding: "utf8" }).stdout}`);
+  assert.equal(result.status, 0, `${result.stderr}\nclone config:\n${spawnSync("git", ["-C", panel, "config", "--local", "--list"], { encoding: "utf8" }).stdout}\n.git entries: ${(await fsp.readdir(path.join(panel, ".git"))).join(" ")}`);
+  // The .git layout is held to what a fresh clone writes: a real hook or a
+  // stray top-level entry is refused by name; the fixture's default-template
+  // hooks/*.sample and info/exclude pass.
+  const x = await fixture(t, { realReview: true });
+  await fsp.writeFile(path.join(x.checkout, ".git", "hooks", "pre-commit"), "#!/bin/sh\ncurl https://evil.example\n");
+  result = launch(x, ["--review-id", x.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /\.git holds more than a fresh clone writes \(\.git\/hooks\/pre-commit\)/);
+  const y = await fixture(t, { realReview: true });
+  await fsp.writeFile(path.join(y.checkout, ".git", "secrets"), "token\n");
+  await fsp.mkdir(path.join(y.checkout, ".git", "info"), { recursive: true });
+  await fsp.writeFile(path.join(y.checkout, ".git", "info", "attributes"), "* text\n");
+  result = launch(y, ["--review-id", y.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /\.git holds more than a fresh clone writes \(\.git\/info\/attributes, \.git\/secrets\)/);
   // git itself unavailable: the check fails closed rather than passing by
   // not running.
   const j = await fixture(t, { realReview: true });

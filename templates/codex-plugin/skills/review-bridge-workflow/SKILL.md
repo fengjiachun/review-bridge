@@ -830,11 +830,15 @@ credential refused as well; anything else (an `http.<url>.extraheader` such as
 `actions/checkout` writes, any `credential.*` setting, an `http.cookieFile` or
 `http.sslKey` pointing into the checkout, a `core.askPass`, `core.gitProxy`,
 or `core.sshCommand`, an `include.path`, or any key whose name itself carries
-`://` or `@`) is refused by key name, because the checkout's `.git/config`
-rides into the container with the mount and a denylist of secret-bearing keys
-does not converge. That check reads Git configuration only, includes followed,
+`://` or a `user:pass@`) is refused by key name, because the checkout's
+`.git/config` rides into the container with the mount and a denylist of
+secret-bearing keys does not converge; a `.git` holding more than a fresh
+clone writes (a hook that is not a `*.sample`, anything under `info` but
+`exclude`, any other top-level entry) is refused the same way. That check reads Git configuration only, includes followed,
 and not the working tree: a `.env` or `.netrc` in the tree is kept out by the
-panel checkout being a fresh clone, not by the launcher. And it refuses a
+panel checkout being a fresh clone, not by the launcher, and a remote or
+branch named after a secret is not detectable; the panel clone is yours to
+keep clean. And it refuses a
 checkout that is not a self-contained clone — a linked worktree, whose
 `.git` is a file pointing into the main repository, or a clone with
 alternates — because inside the container only the checkout itself
@@ -1439,7 +1443,7 @@ attests nothing.
    tree:
 
    ```bash
-   git clone <remote-url> <path outside any authoring tree>
+   git clone --template= <remote-url> <path outside any authoring tree>
    git -C <path outside any authoring tree> fetch origin \
      '+<target-branch>:refs/review-bridge/<pr-number>/base' \
      '+pull/<pr-number>/head:refs/review-bridge/<pr-number>/head'
@@ -1449,8 +1453,11 @@ attests nothing.
      refs/review-bridge/<pr-number>/head
    ```
 
-   Both refspecs name their destination, and the merge base is computed from
-   the refs the fetch just wrote, in the clone. A source-only refspec would not be enough: it
+   `--template=` clones with an empty template, so no hook or helper from the
+   operator's `init.templateDir` rides into the panel's `.git`; the launcher
+   refuses a `.git` holding more than a fresh clone writes. Both refspecs name
+   their destination, and the merge base is computed from the refs the fetch
+   just wrote, in the clone. A source-only refspec would not be enough: it
    fetches the commit but leaves updating any remote-tracking ref to
    `remote.<name>.fetch`, so under a narrow refmap — a `--single-branch` clone
    whose tracked branch is not this pull request's target —
