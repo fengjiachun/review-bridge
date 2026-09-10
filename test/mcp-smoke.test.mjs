@@ -103,6 +103,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
     "record_thread_unresolve_observation",
     "record_workflow_head",
     "release_workflow_claims",
+    "render_review_report",
     "resume_autonomous_workflow",
     "start_autonomous_workflow",
     "start_publication",

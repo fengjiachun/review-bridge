@@ -17,6 +17,7 @@ import {
   DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
   extractMarkdownSection,
   HERMES_DISPATCH_CONTRACT,
+  REVIEW_REPORT_CONTRACT,
 } from "../scripts/dispatch-contract.mjs";
 
 const { deepSeekHarnessClientEntry, parseMcpSnippet } = mcpSnippets;
@@ -947,6 +948,7 @@ test("verify-build validates packaged Hermes artifacts, HERMES binding, isolatio
   // Both new #71 contracts land on packaged copies too: the panel section and
   // the third-party boundary on all four reviewer surfaces.
   assert.match(verify, /ADVISORY_PANEL_CONTRACT/);
+  assert.match(verify, /REVIEW_REPORT_CONTRACT/);
   for (const surface of [
     "reviewerSkill",
     "reviewInstructions",
@@ -1255,6 +1257,21 @@ test("the advisory panel section pins the fence, the dispatch asymmetry, and the
     "Codex workflow skill (advisory panel)",
     ADVISORY_PANEL_CONTRACT,
   );
+});
+
+// The report step lives in two sections of the skill, Finish and Publish, and
+// the contract beside the advisory one holds both to the same sentences so
+// neither can drift into treating the report as a gate or as evidence.
+test("the Finish and Publish steps pin the report render, its trigger, and the Plannotator gate", async () => {
+  const skill = await readRequired(WORKFLOW_SKILL);
+  for (const heading of ["## Finish", "## Publish through GitHub"]) {
+    assertDispatchContract(
+      skill,
+      heading,
+      `Codex workflow skill (${heading.slice(3)})`,
+      REVIEW_REPORT_CONTRACT,
+    );
+  }
 });
 
 // Every reviewer surface is a panel member, so every one has to carry the

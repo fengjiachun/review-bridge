@@ -112,6 +112,12 @@ const PUBLICATION_TARGET_INPUTS = [
   ],
 ];
 
+// The report a passed gate is followed by: a read of the ledgers, written
+// beside them, that advances nothing. Declared where the workflow skill calls
+// it -- once the local gate is recorded, and once the publication reads
+// MERGE_READY -- so a driver finds it here rather than in prose.
+const REVIEW_REPORT = [["review_id", "id"]];
+
 export const REVIEW_ACTION_INPUTS = {
   AUTHOR_RESOLUTIONS: {
     submit_resolutions: [
@@ -133,6 +139,7 @@ export const REVIEW_ACTION_INPUTS = {
   PREPARE_REREVIEW: { prepare_rereview: [["review_id", "id"]] },
   FINALIZE_LOCAL_GATE: { finalize_local_gate: [["review_id", "id"]] },
   PUBLISH: {
+    render_review_report: REVIEW_REPORT,
     start_publication: [["review_id", "id"], ...PUBLICATION_TARGET_INPUTS],
   },
   HUMAN_ARBITRATION: {
@@ -175,6 +182,7 @@ export const PUBLICATION_ACTION_INPUTS = {
     ],
   },
   FINALIZE_PUBLICATION_GATE: {
+    render_review_report: [["review_id", "review_id"]],
     finalize_publication_gate: [
       ["review_id", "review_id"],
       ["expected_revision", "revision"],

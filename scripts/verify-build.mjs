@@ -15,6 +15,7 @@ import {
   CODEX_TASK_DISPATCH_CONTRACT,
   DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
   HERMES_DISPATCH_CONTRACT,
+  REVIEW_REPORT_CONTRACT,
 } from "./dispatch-contract.mjs";
 import {
   deepSeekHarnessClientEntry,
@@ -482,6 +483,14 @@ assertDispatchContract(
   "packaged Codex workflow skill",
   ADVISORY_PANEL_CONTRACT,
 );
+for (const heading of ["## Finish", "## Publish through GitHub"]) {
+  assertDispatchContract(
+    workflowSkill,
+    heading,
+    "packaged Codex workflow skill",
+    REVIEW_REPORT_CONTRACT,
+  );
+}
 assert.match(
   workflowSkill,
   /Leave `parent_review_id` unset unless you have a specific parent in mind/,
@@ -708,6 +717,14 @@ assert.ok(
     path.join(pluginRoot, "scripts", "inspect-publication-audit.mjs"),
   ),
 );
+const reportScript = path.join(pluginRoot, "scripts", "review-report.mjs");
+assert.ok(await fsp.stat(reportScript));
+const reportHelp = run(process.execPath, [reportScript, "--help"], pluginRoot);
+assert.match(
+  reportHelp,
+  /Usage: review-report\.mjs <review_id> \[--json\] \[--store <path>\]/,
+);
+assert.match(reportHelp, /projection of the ledger, not evidence/);
 
 const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
 assertAuthorServerDisabledInLaunches(
@@ -1324,6 +1341,28 @@ try {
     );
     assert.equal(auditInspection.status, 0, auditInspection.stderr);
     assert.equal(JSON.parse(auditInspection.stdout).valid, true);
+
+    // The packaged report script and the author tool render the same ledgers:
+    // the script prints and writes nothing, the tool writes the report beside
+    // the ledger and returns what it wrote.
+    const packagedReport = spawnSync(
+      process.execPath,
+      [reportScript, prepared.id, "--store", store],
+      { cwd: pluginRoot, encoding: "utf8" },
+    );
+    assert.equal(packagedReport.status, 0, packagedReport.stderr);
+    assert.match(packagedReport.stdout, /^# Review report /);
+    assert.match(packagedReport.stdout, /## Remote publication/);
+    assert.match(packagedReport.stdout, /projection of the ledger, not evidence/);
+    const renderedReport = await call(author, "render_review_report", {
+      review_id: prepared.id,
+    });
+    assert.equal(renderedReport.written, true);
+    assert.match(path.basename(renderedReport.path), /^report-r\d+-p\d+\.md$/);
+    assert.equal(
+      await fsp.readFile(renderedReport.path, "utf8"),
+      renderedReport.markdown,
+    );
 
     const remoteAuthorization = await call(
       author,

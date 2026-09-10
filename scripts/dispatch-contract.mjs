@@ -969,6 +969,48 @@ export const ADVISORY_PANEL_CONTRACT = {
 // a panel member, so every one carries it: naming three of four would leave the
 // omitted provider reading a stranger's diff with no rule about what that text
 // is. Matched on flattened text, so a rewrap cannot break it.
+// The report step the Finish and Publish sections each carry (#123). Both
+// sections say the same thing, so one contract holds both: the render is the
+// driver's call after the gate, never the gate's; Plannotator is optional and
+// PATH-gated; nothing a reader does there reaches the ledger; and the report
+// is a projection, not evidence, so its failure moves nothing.
+export const REVIEW_REPORT_CONTRACT = {
+  requirements: [
+    ["the report is rendered by calling the tool", /call `render_review_report`/],
+    [
+      "the render follows the recorded gate or MERGE_READY",
+      /(?:Once `LOCAL_GATE_PASSED` is recorded|Once the ledger reads `MERGE_READY`), call `render_review_report`/,
+    ],
+    ["the returned path is printed", /print the returned path/],
+    [
+      "Plannotator is PATH-gated",
+      /If `command -v plannotator` finds Plannotator on PATH/,
+    ],
+    ["the annotate command form", /run `plannotator annotate <path>`/],
+    [
+      "without Plannotator the path is the whole step",
+      /otherwise the printed path is the whole step/,
+    ],
+    [
+      "annotations do not flow back into the ledger",
+      /Annotations never flow back into the ledger/,
+    ],
+    [
+      "decisions go through the ordinary tools",
+      /whatever the reader decides goes through the ordinary tools/,
+    ],
+    [
+      "the report is a projection, not evidence",
+      /report is a projection of the ledger, not evidence/,
+    ],
+    [
+      "a failure changes no gate and no workflow state",
+      /failure in this step changes no gate and no workflow state/,
+    ],
+  ],
+  structural: [],
+};
+
 const THIRD_PARTY_MATERIAL_SENTENCES = [
   [
     "the reviewed material is bounded as third-party text",

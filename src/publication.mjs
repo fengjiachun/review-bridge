@@ -369,7 +369,7 @@ function clone(value) {
   return structuredClone(value);
 }
 
-function canonicalDigest(value) {
+export function canonicalDigest(value) {
   return sha256(Buffer.from(canonicalJson(value), "utf8"));
 }
 

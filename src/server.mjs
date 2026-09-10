@@ -24,6 +24,7 @@ import {
   submitResolutions,
   waitForReviewState,
 } from "./core.mjs";
+import { writeReviewReport } from "./report.mjs";
 import {
   acknowledgeCodexReviewAmbiguity,
   authorizeRemotePublication,
@@ -1296,6 +1297,17 @@ if (role === "author") {
         input.review_id,
         input.expected_state_version,
       ),
+  );
+
+  register(
+    "render_review_report",
+    {
+      title: "Render review report",
+      description:
+        "Render a human-readable Markdown report of a review from its ledger and, when present, its publication ledger, and write it to reviews/<review_id>/report-r<revision>.md beside them. Read-only over the ledgers: it changes no review or publication state, consumes no round, and touches no gate. The report is a projection of the ledger, not evidence.",
+      inputSchema: { review_id: z.string() },
+    },
+    (input) => writeReviewReport(storeRoot, input.review_id),
   );
 
   register(

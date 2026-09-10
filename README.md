@@ -723,6 +723,21 @@ itself so a number can be replayed against the ledgers it came from. It reads
 one store, writes nothing, sends nothing anywhere, and lists a ledger it cannot
 parse as skipped rather than repairing it.
 
+The author tool `render_review_report` and the packaged
+`scripts/review-report.mjs <review_id> [--json] [--store <path>]` render one
+review's ledger, and its publication ledger when present, as a Markdown report
+a person can read in one sitting: requirement and scope, each round's findings
+with the author's disposition and the rereviewer's decision, what changed
+between rounds, the terminal state, and the pull request, Codex results,
+checks, and threads a publication recorded. The tool writes
+`reviews/<review_id>/report-r<revision>.md` beside the ledger and returns it;
+the script only prints. Neither changes a ledger, consumes a round, or touches
+a gate. The workflow skill renders the report once `LOCAL_GATE_PASSED` is
+recorded and again once a publication reads `MERGE_READY`, and opens it in
+Plannotator when that tool is on PATH; annotations never flow back into the
+ledger. Like operator narration, the report is a projection of the ledger, not
+evidence.
+
 ### Head-SHA discipline
 
 Before requesting GitHub review, both the local branch head and PR head must
