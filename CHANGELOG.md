@@ -103,6 +103,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   audit step on every pull request. `hono` goes from 4.12.34 to 4.13.7,
   lockfile only, with no change to `package.json`. (#116)
 
+### Internal
+
+- (#118) The 0.12.0 release pull request, whose merge carries the v0.12.0
+  tag, so no later release inherits this line.
+
 ## 0.11.0 - 2026-09-05
 
 ### Added
