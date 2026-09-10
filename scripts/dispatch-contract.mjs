@@ -334,6 +334,27 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the working directory is the sandbox's writable root",
       /It is the sandbox's writable root/,
     ],
+    // Issue #121. The 2026-09-10 field run showed the operator's Codex
+    // memories reaching the reviewer: a channel the launch did not close,
+    // carrying authoring history to a process handed only a review_id. The
+    // prose has to name that channel and what each key closes, or the two
+    // lines read as tuning and get dropped with the next reformat.
+    [
+      "host memories were a channel the launch line did not close",
+      /authoring history reaching the reviewer through a channel the launch line did not close/,
+    ],
+    [
+      "use_memories=false closes the read side",
+      /`memories\.use_memories=false` closes the read side/,
+    ],
+    [
+      "generate_memories=false closes the write side",
+      /`memories\.generate_memories=false` closes the write side/,
+    ],
+    [
+      "the memory keys were confirmed by the parser refusing a non-boolean",
+      /configuration parser refusing a non-boolean for each[\s\S]*?`in memories\.use_memories` and `in memories\.generate_memories`/,
+    ],
     // The sandbox stops at the shell. An MCP server is a child of Codex
     // outside it — measured, not assumed — which is both why the reviewer
     // server can write its store and why the author server has to be
@@ -470,21 +491,26 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // granular policy with every category false, so a `require_escalated`
     // request is rejected in the router and never reaches the guardian; all
     // five fields are required for the value to parse, so the whole literal
-    // is pinned), the author server disabled, and stdin closed. The stdin redirect is part of the launch,
+    // is pinned), Codex's memory feature pinned off on both sides (issue
+    // #121: with the host's use_memories the reviewer's first shell command
+    // searched the operator's memories and hit lines about the change under
+    // review, so the read side is closed; a review is not a session the
+    // operator's memories should record, so the write side is too), the
+    // author server disabled, and stdin closed. The stdin redirect is part of the launch,
     // not decoration: without it a non-TTY driver's stdin is appended to the
     // prompt as a `<stdin>` block, which breaks the single-task handoff, or
     // the launch blocks on EOF.
     [
       "match",
-      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
-      "launch is not the sandboxed one-shot form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, the author server disabled, and stdin closed",
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'memories\.use_memories=false' \\\n *-c 'memories\.generate_memories=false' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
+      "launch is not the sandboxed one-shot form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, memories pinned off, the author server disabled, and stdin closed",
     ],
     // Round two is another launch, not a resume, and needs its own runnable
     // form in the same shape.
     [
       "match",
-      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
-      "round-two launch form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, the author server disabled, and stdin closed",
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'memories\.use_memories=false' \\\n *-c 'memories\.generate_memories=false' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
+      "round-two launch form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, memories pinned off, the author server disabled, and stdin closed",
     ],
     [
       "doesNotMatch",
