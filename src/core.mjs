@@ -231,6 +231,138 @@ const LEDGER_FINDING_STATUSES = [
 const LEDGER_DISPOSITIONS = ["fixed", "rejected", "human_required"];
 const LEDGER_DECISIONS = ["resolved", "rebuttal_accepted", "still_open"];
 
+// Field tables. Every record kind the review ledger holds has one, placed
+// beside the writer that produces it: one entry per field the writer sets,
+// with the type, value domain, length bound, timestamp format, or reference
+// into the ledger the writer guarantees. The validator checks a record from
+// its table and nowhere else, so what the writer sets is what the validator
+// checks: a field the writer never sets is refused, a required field that is
+// missing is refused, and a field outside its domain is refused by name.
+const SHA_PATTERN = /^[0-9a-f]{40}$/;
+const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
+const REVIEW_ID_LEDGER_PATTERN = /^rb-[0-9TZ-]+-[a-f0-9]{8}$/;
+const isTimestamp = (value) => typeof value === "string" && Number.isFinite(Date.parse(value));
+const isText = (max, { allowEmpty = false } = {}) => (value) =>
+  typeof value === "string" && (allowEmpty || value !== "") && value.length <= max;
+const isStringList = (value) => Array.isArray(value) && value.every((item) => typeof item === "string");
+const isCount = (value) => Number.isInteger(value) && value >= 0;
+const isSha = (value) => SHA_PATTERN.test(value ?? "");
+const isDigest = (value) => DIGEST_PATTERN.test(value ?? "");
+const isReviewIdValue = (value) => typeof value === "string" && REVIEW_ID_LEDGER_PATTERN.test(value);
+const nullOr = (ok) => (value, context) => value === null || ok(value, context);
+const oneOf = (values) => (value) => values.includes(value);
+
+// The first way `record` departs from `fields`, named after `label`, or null.
+function recordDefect(record, fields, context, label) {
+  if (record == null || typeof record !== "object" || Array.isArray(record)) {
+    return `${label} is not an object`;
+  }
+  const known = new Set(fields.map((entry) => entry.field));
+  const unknown = Object.keys(record).find((key) => !known.has(key));
+  if (unknown != null) {
+    return `${label} carries a field the writer never sets: ${unknown}`;
+  }
+  for (const { field, describe, optional, ok } of fields) {
+    if (!(field in record)) {
+      if (optional) continue;
+      return `${label} has no ${field}`;
+    }
+    if (!ok(record[field], { ...context, record })) {
+      return `${label} ${field} ${JSON.stringify(record[field])} is not ${describe}`;
+    }
+  }
+  return null;
+}
+
+// The review strategy prepareReview and prepareRereview record.
+const STRATEGY_FIELDS = [
+  { field: "mode", describe: "FULL or SUCCESSOR", ok: oneOf(["FULL", "SUCCESSOR"]) },
+  { field: "parent_review_id", describe: "null or a review ID", ok: nullOr(isReviewIdValue) },
+  { field: "fallback_reason", describe: "null or a string", ok: nullOr((value) => typeof value === "string") },
+  { field: "parent_selection", describe: "NONE, EXPLICIT, or AUTOMATIC", optional: true, ok: oneOf(["NONE", "EXPLICIT", "AUTOMATIC"]) },
+];
+
+// The history events the writers push, keyed by event: the fields each
+// writer records beyond `at` and `event`. Fields that arrived with a later
+// release are optional, so a ledger written before them still validates.
+const HISTORY_EVENT_FIELDS = {
+  REVIEW_PREPARED: [
+    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
+    { field: "mode", describe: "FULL or SUCCESSOR", optional: true, ok: oneOf(["FULL", "SUCCESSOR"]) },
+  ],
+  INITIAL_REVIEW_CLEAN: [
+    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
+    { field: "errata_watermark", describe: "a non-negative integer", optional: true, ok: isCount },
+  ],
+  FINDINGS_SUBMITTED: [
+    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
+    { field: "count", describe: "a non-negative integer", optional: true, ok: isCount },
+    { field: "errata_watermark", describe: "a non-negative integer", optional: true, ok: isCount },
+  ],
+  AUTHOR_RESPONDED: [{ field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 }],
+  AUTHOR_ESCALATED: [{ field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 }],
+  ERRATUM_APPENDED: [
+    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
+    { field: "sequence", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
+  ],
+  ROUND_LIMIT_REACHED: [],
+  REREVIEW_PREPARED: [
+    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
+    { field: "mode", describe: "FULL or SUCCESSOR", optional: true, ok: oneOf(["FULL", "SUCCESSOR"]) },
+  ],
+  REREVIEW_UNRESOLVED: [
+    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
+    { field: "new_findings", describe: "a non-negative integer", optional: true, ok: isCount },
+    { field: "errata_watermark", describe: "a non-negative integer", optional: true, ok: isCount },
+  ],
+  REREVIEW_CONTINUABLE_FINDINGS: [
+    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
+    { field: "new_findings", describe: "a non-negative integer", optional: true, ok: isCount },
+    { field: "errata_watermark", describe: "a non-negative integer", optional: true, ok: isCount },
+  ],
+  REREVIEW_CLEAN: [
+    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
+    { field: "errata_watermark", describe: "a non-negative integer", optional: true, ok: isCount },
+  ],
+  LOCAL_GATE_PASSED: [],
+  REVIEW_CONTINUED: [{ field: "continued_by_review_id", describe: "a review ID", ok: isReviewIdValue }],
+};
+const HISTORY_COMMON_FIELDS = [
+  { field: "at", describe: "a timestamp", ok: isTimestamp },
+  { field: "event", describe: "a history event the writers record", ok: (v) => v in HISTORY_EVENT_FIELDS },
+];
+
+// The top-level ledger prepareReview writes and the later writers update.
+// Fields that arrived with a later release are optional.
+const REVIEW_LEDGER_FIELDS = [
+  { field: "version", describe: "1", ok: (v) => v === 1 },
+  { field: "id", describe: "a review ID", ok: isReviewIdValue },
+  { field: "created_at", describe: "a timestamp", ok: isTimestamp },
+  { field: "updated_at", describe: "a timestamp", ok: isTimestamp },
+  { field: "state_version", describe: "a positive integer", optional: true, ok: (v) => Number.isInteger(v) && v >= 1 },
+  { field: "last_transition_state_version", describe: "a positive integer", optional: true, ok: (v) => Number.isInteger(v) && v >= 1 },
+  { field: "repository_path", describe: "a non-empty absolute path", ok: (v) => typeof v === "string" && path.isAbsolute(v) },
+  { field: "base_ref", describe: "a non-empty string", ok: isText(4096) },
+  { field: "requirement", describe: `a non-empty string of at most ${MAX_TEXT_FIELD} characters`, ok: isText(MAX_TEXT_FIELD) },
+  { field: "implementation_scope", describe: `a non-empty string of at most ${MAX_TEXT_FIELD} characters`, ok: isText(MAX_TEXT_FIELD) },
+  { field: "reviewer_provider", describe: "a reviewer provider", optional: true, ok: (v) => REVIEWER_PROVIDERS.includes(v) },
+  { field: "advisory", describe: "a boolean", optional: true, ok: (v) => typeof v === "boolean" },
+  { field: "review_strategy", describe: "a review strategy", optional: true, ok: (v) => recordDefect(v, STRATEGY_FIELDS, {}, "review_strategy") == null },
+  { field: "status", describe: "a review status", ok: oneOf(LEDGER_REVIEW_STATUSES) },
+  { field: "current_round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
+  { field: "max_rounds", describe: String(MAX_ROUNDS), ok: (v) => v === MAX_ROUNDS },
+  { field: "rounds", describe: "an array", ok: Array.isArray },
+  { field: "findings", describe: "an array", ok: Array.isArray },
+  { field: "resolutions", describe: "an array", ok: Array.isArray },
+  { field: "rereview_decisions", describe: "an array", ok: Array.isArray },
+  { field: "errata", describe: "an array", optional: true, ok: Array.isArray },
+  { field: "carried_findings", describe: "an array", optional: true, ok: Array.isArray },
+  { field: "history", describe: "an array", ok: Array.isArray },
+  { field: "last_opened_errata_watermark", describe: "a non-negative integer", optional: true, ok: isCount },
+  { field: "clean_snapshot_hash", describe: "null or a digest", optional: true, ok: nullOr(isDigest) },
+  { field: "continued_by_review_id", describe: "null or a review ID", optional: true, ok: nullOr(isReviewIdValue) },
+];
+
 // The finding status each author disposition and each rereview decision
 // leaves behind. The writers below set statuses through these, and the
 // validator derives the status every finding should have from the same two
@@ -315,36 +447,55 @@ function reviewLedgerDefect(review, reviewId) {
   if (review.id !== reviewId) {
     return `review.json names ${JSON.stringify(review.id ?? null)}, not ${reviewId}`;
   }
-  if (!LEDGER_REVIEW_STATUSES.includes(review.status)) {
-    return `unknown status ${JSON.stringify(review.status)}`;
+  // The top level, then every record kind it holds, each from its writer's
+  // own table.
+  const top = recordDefect(review, REVIEW_LEDGER_FIELDS, {}, "review ledger");
+  if (top != null) return top;
+  if (review.review_strategy != null) {
+    const defect = recordDefect(review.review_strategy, STRATEGY_FIELDS, {}, "review_strategy");
+    if (defect != null) return defect;
   }
-  if (review.reviewer_provider != null && !REVIEWER_PROVIDERS.includes(review.reviewer_provider)) {
-    return `unknown reviewer_provider ${JSON.stringify(review.reviewer_provider)}`;
+  for (const [index, entry] of review.history.entries()) {
+    const label = `history entry ${index + 1}${typeof entry?.event === "string" ? ` (${entry.event})` : ""}`;
+    // The event picks the table, so an unknown event is named as such rather
+    // than as a stray field of an empty table.
+    if (entry == null || typeof entry !== "object" || !(entry.event in HISTORY_EVENT_FIELDS)) {
+      return `${label} event ${JSON.stringify(entry?.event ?? null)} is not a history event the writers record`;
+    }
+    const defect = recordDefect(entry, [...HISTORY_COMMON_FIELDS, ...HISTORY_EVENT_FIELDS[entry.event]], { index, review }, label);
+    if (defect != null) return defect;
   }
-  for (const key of ["requirement", "implementation_scope", "repository_path", "base_ref", "created_at", "updated_at"]) {
-    if (typeof review[key] !== "string") return `${key} is not a string`;
+  for (const [index, round] of review.rounds.entries()) {
+    const defect = recordDefect(round, ROUND_FIELDS, { index, review }, `round ${round?.round ?? index + 1}`);
+    if (defect != null) return defect;
   }
-  for (const key of ["rounds", "findings", "resolutions", "rereview_decisions", "history"]) {
-    if (!Array.isArray(review[key])) return `${key} is not an array`;
+  for (const [index, resolution] of review.resolutions.entries()) {
+    const defect = recordDefect(resolution, RESOLUTION_FIELDS, { index, review }, `resolution ${index + 1}`);
+    if (defect != null) return defect;
   }
-  if (review.errata != null && !Array.isArray(review.errata)) return "errata is not an array";
-  if (review.carried_findings != null && !Array.isArray(review.carried_findings)) {
-    return "carried_findings is not an array";
+  for (const [index, decision] of review.rereview_decisions.entries()) {
+    const defect = recordDefect(decision, REREVIEW_DECISION_FIELDS, { index, review }, `rereview decision ${index + 1}`);
+    if (defect != null) return defect;
+  }
+  for (const [index, erratum] of (review.errata ?? []).entries()) {
+    const defect = recordDefect(erratum, ERRATUM_FIELDS, { index, review }, `erratum ${index + 1}`);
+    if (defect != null) return defect;
+  }
+  for (const [index, carried] of (review.carried_findings ?? []).entries()) {
+    const defect = recordDefect(carried, CARRIED_FINDING_FIELDS, { index, review }, `carried finding ${index + 1}`);
+    if (defect != null) return defect;
   }
   // Every save increments state_version and every history entry rode on a
   // save, so the version can never fall below the history; a transition
-  // stamp names a version that has happened.
-  const stateVersion = review.state_version ?? 0;
-  if (!Number.isInteger(stateVersion) || stateVersion < 1) {
-    return "state_version is not a positive integer";
-  }
+  // stamp names a version that has happened. A ledger older than the field
+  // has neither to compare.
+  const stateVersion = review.state_version ?? review.history.length;
   if (stateVersion < review.history.length) {
     return `state_version ${stateVersion} is below the ${review.history.length} history entries`;
   }
   if (
     review.last_transition_state_version != null &&
-    (!Number.isInteger(review.last_transition_state_version) ||
-      review.last_transition_state_version > stateVersion)
+    review.last_transition_state_version > stateVersion
   ) {
     return "last_transition_state_version is ahead of state_version";
   }
@@ -358,19 +509,9 @@ function reviewLedgerDefect(review, reviewId) {
   if (replay.round !== review.rounds.length) {
     return `history opened ${replay.round} round(s), but the ledger holds ${review.rounds.length}`;
   }
-  // Rounds are numbered by position, bounded by the store, and the current
-  // round is the last one.
+  // Rounds are bounded by the store, and the current round is the last one.
   if (review.rounds.length === 0 || review.rounds.length > MAX_ROUNDS) {
     return `rounds holds ${review.rounds.length} entries`;
-  }
-  for (const [index, round] of review.rounds.entries()) {
-    if (round?.round !== index + 1) return `round ${index + 1} is not numbered by its position`;
-    for (const key of ["base_sha", "head_sha"]) {
-      if (!/^[0-9a-f]{40}$/.test(round[key] ?? "")) return `round ${round.round} ${key} is not a commit`;
-    }
-    if (!/^[0-9a-f]{64}$/.test(round.snapshot_hash ?? "")) {
-      return `round ${round.round} snapshot_hash is not a digest`;
-    }
   }
   if (review.current_round !== review.rounds.length) {
     return `current_round ${review.current_round} does not name the last of ${review.rounds.length} rounds`;
@@ -388,22 +529,11 @@ function reviewLedgerDefect(review, reviewId) {
   } else if (review.clean_snapshot_hash != null) {
     return `status is ${review.status} but a clean_snapshot_hash is recorded`;
   }
-  // Findings: every field the writer sets, checked from the writer's own
-  // table; then their responses: known enums, unique IDs, and every response
-  // naming a finding that exists.
+  // Findings from the writer's table; then the responses' identities: unique
+  // IDs, and every response naming a finding that exists.
   for (const [index, finding] of review.findings.entries()) {
     const defect = findingDefect(finding, index, review);
     if (defect != null) return defect;
-  }
-  for (const resolution of review.resolutions) {
-    if (!LEDGER_DISPOSITIONS.includes(resolution?.disposition)) {
-      return `unknown disposition ${JSON.stringify(resolution?.disposition)}`;
-    }
-  }
-  for (const decision of review.rereview_decisions) {
-    if (!LEDGER_DECISIONS.includes(decision?.decision)) {
-      return `unknown rereview decision ${JSON.stringify(decision?.decision)}`;
-    }
   }
   for (const [key, entries] of [
     ["finding", review.findings.map((finding) => finding.id)],
@@ -489,7 +619,7 @@ export async function loadValidatedReview(storeRoot, reviewId) {
       throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} manifest unreadable: ${error.message}`);
     }
     for (const key of Object.keys(manifest)) {
-      if (canonicalJson(manifest[key]) !== canonicalJson(round[key])) {
+      if (!(key in round) || canonicalJson(manifest[key]) !== canonicalJson(round[key])) {
         throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} ${key} differs from its immutable manifest`);
       }
     }
@@ -1078,6 +1208,58 @@ async function verifySuccessorArtifacts(
   }
 }
 
+// The successor proof buildSuccessorArtifacts writes to successor.json and
+// into the round. The validator also requires the stored artifact to equal
+// the round's copy byte for byte, through verifySuccessorArtifacts.
+const SUCCESSOR_FIELDS = [
+  { field: "version", describe: "1", ok: (v) => v === 1 },
+  { field: "parent_review_id", describe: "a review ID", ok: isReviewIdValue },
+  { field: "parent_reviewer_provider", describe: "a reviewer provider", ok: (v) => REVIEWER_PROVIDERS.includes(v) },
+  { field: "parent_requirement", describe: "a string", optional: true, ok: (v) => typeof v === "string" },
+  { field: "requirement_match", describe: "a boolean", optional: true, ok: (v) => typeof v === "boolean" },
+  { field: "parent_snapshot_hash", describe: "a digest", ok: isDigest },
+  { field: "parent_gate_sha256", describe: "a digest", ok: isDigest },
+  { field: "base_sha", describe: "a commit", ok: isSha },
+  { field: "parent_head_sha", describe: "a commit", ok: isSha },
+  { field: "current_head_sha", describe: "a commit", ok: isSha },
+  { field: "parent_tree_sha", describe: "a tree", ok: isSha },
+  { field: "current_tree_sha", describe: "a tree", ok: isSha },
+  { field: "changed_files", describe: "a list of paths", ok: isStringList },
+  { field: "deleted_files", describe: "a list of paths", ok: isStringList },
+  { field: "delta_bytes", describe: "a non-negative integer", ok: isCount },
+  { field: "delta_sha256", describe: "a digest", ok: isDigest },
+];
+
+// The round buildSnapshot writes to manifest.json plus its position and its
+// successor proof. Every manifest key is also compared with manifest.json by
+// the validator. change_size arrived with a later release, so it is optional.
+const ROUND_FIELDS = [
+  { field: "round", describe: "the round's position", ok: (v, { index }) => v === index + 1 },
+  { field: "version", describe: "1", ok: (v) => v === 1 },
+  { field: "captured_at", describe: "a timestamp", ok: isTimestamp },
+  { field: "repository_path", describe: "the review's repository_path", ok: (v, { review }) => v === review.repository_path },
+  { field: "base_ref", describe: "the review's base_ref", ok: (v, { review }) => v === review.base_ref },
+  { field: "base_sha", describe: "a commit", ok: isSha },
+  { field: "head_sha", describe: "a commit", ok: isSha },
+  { field: "snapshot_hash", describe: "a digest", ok: isDigest },
+  { field: "changed_files", describe: "a list of paths", ok: isStringList },
+  { field: "deleted_files", describe: "a list of paths", ok: isStringList },
+  { field: "overlays", describe: "a list of overlay records", ok: (v) => Array.isArray(v) && v.every((o) => o != null && typeof o === "object" && typeof o.path === "string") },
+  { field: "worktree_clean", describe: "a boolean", optional: true, ok: (v) => typeof v === "boolean" },
+  { field: "patch_bytes", describe: "a non-negative integer", ok: isCount },
+  {
+    field: "change_size",
+    describe: "null or {added_lines, deleted_lines, total_lines} that add up",
+    optional: true,
+    ok: nullOr((v) =>
+      v != null && typeof v === "object" && !Array.isArray(v) &&
+      Object.keys(v).every((key) => ["added_lines", "deleted_lines", "total_lines"].includes(key)) &&
+      isCount(v.added_lines) && isCount(v.deleted_lines) && v.total_lines === v.added_lines + v.deleted_lines),
+  },
+  // Absent on rounds older than successor reviews; null on a FULL round since.
+  { field: "successor", describe: "null or a successor proof", optional: true, ok: nullOr((v) => recordDefect(v, SUCCESSOR_FIELDS, {}, "successor") == null) },
+];
+
 async function buildSuccessorArtifacts({
   storeRoot,
   parentReviewId,
@@ -1399,6 +1581,36 @@ export function continuationFindingFingerprint(finding) {
     }),
   );
 }
+
+// The carried finding continuationFindings freezes into a continuation.
+const CARRIED_FINDING_FIELDS = [
+  { field: "continued_from_review_id", describe: "a review ID", ok: isReviewIdValue },
+  { field: "finding_id", describe: "a finding ID", ok: (v) => /^F-\d{3,}$/.test(v ?? "") },
+  { field: "fingerprint_sha256", describe: "a digest", ok: isDigest },
+  { field: "severity", describe: "blocker, major, minor, or nit", ok: oneOf(["blocker", "major", "minor", "nit"]) },
+  { field: "title", describe: "a non-empty string of at most 500 characters", ok: isText(500) },
+  { field: "explanation", describe: "a non-empty string of at most 20,000 characters", ok: isText(20_000) },
+  { field: "recommendation", describe: "a string of at most 20,000 characters", ok: isText(20_000, { allowEmpty: true }) },
+  { field: "path", describe: "absent, or a safe relative path", optional: true, ok: (v) => { try { return safeRelativePath(v, "finding.path") === v; } catch { return false; } } },
+  { field: "line", describe: "absent, or a positive integer", optional: true, ok: (v) => Number.isInteger(v) && v >= 1 },
+];
+
+// The erratum appendReviewErratum records, and the copy continuationErrata
+// carries into a continuation with the source it came from.
+const ERRATUM_FIELDS = [
+  { field: "sequence", describe: "the erratum's position", ok: (v, { index }) => v === index + 1 },
+  { field: "at", describe: "a timestamp", ok: isTimestamp },
+  {
+    field: "round",
+    describe: "a round the ledger holds, or a positive integer for an erratum carried from a source review",
+    ok: (v, { review, record }) =>
+      record.continued_from_review_id != null
+        ? Number.isInteger(v) && v >= 1
+        : review.rounds.some((round) => round.round === v),
+  },
+  { field: "text", describe: `a non-empty string of at most ${MAX_ERRATUM_TEXT} characters`, ok: isText(MAX_ERRATUM_TEXT) },
+  { field: "continued_from_review_id", describe: "a review ID", optional: true, ok: isReviewIdValue },
+];
 
 function continuationFindings(review) {
   return review.findings
@@ -2232,27 +2444,8 @@ const FINDING_FIELDS = [
   },
 ];
 
-// The first way a stored finding departs from what normalizeFinding writes,
-// or null.
 function findingDefect(finding, index, review) {
-  if (finding == null || typeof finding !== "object" || Array.isArray(finding)) {
-    return `finding ${index + 1} is not an object`;
-  }
-  const known = new Set(FINDING_FIELDS.map((entry) => entry.field));
-  const unknown = Object.keys(finding).find((key) => !known.has(key));
-  if (unknown != null) {
-    return `finding ${JSON.stringify(finding.id ?? index + 1)} carries a field the writer never sets: ${unknown}`;
-  }
-  for (const { field, describe, optional, ok } of FINDING_FIELDS) {
-    if (!(field in finding)) {
-      if (optional) continue;
-      return `finding ${JSON.stringify(finding.id ?? index + 1)} has no ${field}`;
-    }
-    if (!ok(finding[field], { index, review })) {
-      return `finding ${JSON.stringify(finding.id ?? index + 1)} ${field} ${JSON.stringify(finding[field])} is not ${describe}`;
-    }
-  }
-  return null;
+  return recordDefect(finding, FINDING_FIELDS, { index, review }, `finding ${JSON.stringify(finding?.id ?? index + 1)}`);
 }
 
 function normalizeFinding(input, id, round) {
@@ -2358,6 +2551,15 @@ async function submitInitialReviewWhileLocked(
   await saveReviewTransition(storeRoot, review);
   return publicReview(review);
 }
+
+// The author response submitResolutions records per open finding.
+const RESOLUTION_FIELDS = [
+  { field: "finding_id", describe: "a finding ID", ok: (v) => /^F-\d{3,}$/.test(v ?? "") },
+  { field: "disposition", describe: "fixed, rejected, or human_required", ok: oneOf(LEDGER_DISPOSITIONS) },
+  { field: "rationale", describe: "a non-empty string of at most 20,000 characters", ok: isText(20_000) },
+  { field: "evidence", describe: "a string of at most 20,000 characters", ok: isText(20_000, { allowEmpty: true }) },
+  { field: "submitted_at", describe: "a timestamp", ok: isTimestamp },
+];
 
 export async function submitResolutions(storeRoot, reviewId, inputs) {
   return withReviewMutationLock(storeRoot, reviewId, () =>
@@ -2579,6 +2781,23 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
   await saveReviewTransition(storeRoot, review);
   return publicReview(review);
 }
+
+// The decision submitRereview records per author response. A sustained
+// rebuttal carries the verification the obligation requires; the other
+// decisions carry one only when the rereviewer gave it.
+const REREVIEW_DECISION_FIELDS = [
+  { field: "finding_id", describe: "a finding ID", ok: (v) => /^F-\d{3,}$/.test(v ?? "") },
+  { field: "decision", describe: "resolved, rebuttal_accepted, or still_open", ok: oneOf(LEDGER_DECISIONS) },
+  { field: "rationale", describe: "a non-empty string of at most 20,000 characters", ok: isText(20_000) },
+  {
+    field: "verification",
+    describe: "a string of at most 20,000 characters, non-empty for rebuttal_accepted",
+    // Older decisions predate the field; the report says so where it matters.
+    optional: true,
+    ok: (v, { record }) => isText(20_000, { allowEmpty: record.decision !== "rebuttal_accepted" })(v),
+  },
+  { field: "submitted_at", describe: "a timestamp", ok: isTimestamp },
+];
 
 export async function submitRereview(
   storeRoot,

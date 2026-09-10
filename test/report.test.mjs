@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  appendReviewErratum,
   finalizeLocalGate,
   prepareRereview,
   prepareReview,
@@ -851,6 +852,7 @@ async function reviewedFixture(t) {
     { severity: "major", title: "wrong value", explanation: "should be 3", recommendation: "set 3", path: "value.js", line: 1 },
     { severity: "nit", title: "style", explanation: "fine as is", recommendation: "" },
   ], "CLAUDE_DESKTOP");
+  await appendReviewErratum(store, review.id, "the base branch moved while this was under review");
   await submitResolutions(store, review.id, [
     { finding_id: "F-001", disposition: "fixed", rationale: "set to 3" },
     { finding_id: "F-002", disposition: "rejected", rationale: "intended" },
@@ -918,7 +920,7 @@ test("finding statuses must equal what their records derive, in both directions"
   // A FINDINGS_SUBMITTED that lost its round is refused by name; the gate
   // event, which the writer records without one, is not required to carry it.
   await tamper((review) => { delete review.history.find((entry) => entry.event === "FINDINGS_SUBMITTED").round; }, /history entry 2 \(FINDINGS_SUBMITTED\) has no round/);
-  await tamper((review) => { review.history.find((entry) => entry.event === "REREVIEW_PREPARED").round = 0; }, /history entry \d+ \(REREVIEW_PREPARED\) has no round/);
+  await tamper((review) => { review.history.find((entry) => entry.event === "REREVIEW_PREPARED").round = 0; }, /history entry \d+ \(REREVIEW_PREPARED\) round 0 is not a positive integer/);
   // Restored, it renders again.
   await fsp.writeFile(reviewPath, original, { mode: 0o600 });
   assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
@@ -972,6 +974,76 @@ test("a publication that moves between the ledger read and the summary read fail
   const written = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
   assert.equal(written.publication_revision, ready.revision + 1);
   assert.equal(written.reused, false);
+});
+
+// Every record kind the report renders has a field table beside its writer,
+// and each table refuses a missing required field, a field outside its
+// domain, and a field the writer never sets, by name.
+test("every rendered record kind is held to its writer's field table", async (t) => {
+  const state = await reviewedFixture(t);
+  const reviewPath = path.join(reviewDirectory(state), "review.json");
+  const original = await fsp.readFile(reviewPath, "utf8");
+  const genuine = JSON.parse(original);
+  assert.equal(genuine.errata.length, 1);
+  const tamper = async (mutate, expected) => {
+    const review = JSON.parse(original);
+    mutate(review);
+    await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
+    await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+      assert.equal(error.code, "REVIEW_LEDGER_INVALID", `${expected}: ${error.message}`);
+      assert.match(error.details.reason, expected);
+      return true;
+    });
+  };
+  // Top-level identity: types, domains, unknown fields, and agreement with
+  // the immutable rounds.
+  await tamper((r) => { delete r.requirement; }, /^review ledger has no requirement$/);
+  await tamper((r) => { r.max_rounds = "2"; }, /^review ledger max_rounds "2" is not 2$/);
+  await tamper((r) => { r.operator_note = "x"; }, /^review ledger carries a field the writer never sets: operator_note$/);
+  await tamper((r) => { r.repository_path = "/somewhere/else"; }, /^round 1 repository_path "[^"]+" is not the review's repository_path$/);
+  await tamper((r) => { r.base_ref = "origin/other"; }, /^round 1 base_ref "[^"]+" is not the review's base_ref$/);
+  // Strategy.
+  await tamper((r) => { r.review_strategy.mode = "PARTIAL"; }, /^review ledger review_strategy .* is not a review strategy$/);
+  await tamper((r) => { r.review_strategy.chosen_by = "me"; }, /is not a review strategy$/);
+  // History events, per event kind.
+  await tamper((r) => { delete r.history[0].at; }, /^history entry 1 \(REVIEW_PREPARED\) has no at$/);
+  await tamper((r) => { r.history[1].count = "2"; }, /^history entry 2 \(FINDINGS_SUBMITTED\) count "2" is not a non-negative integer$/);
+  await tamper((r) => { r.history[1].actor = "codex"; }, /^history entry 2 \(FINDINGS_SUBMITTED\) carries a field the writer never sets: actor$/);
+  await tamper((r) => { r.history[0].event = "REVIEW_STARTED"; }, /^history entry 1 \(REVIEW_STARTED\) event "REVIEW_STARTED" is not a history event the writers record$/);
+  // Rounds and their successor proof.
+  await tamper((r) => { delete r.rounds[0].patch_bytes; }, /^round 1 has no patch_bytes$/);
+  // A field the table allows to be absent is still held to the manifest.
+  await tamper((r) => { delete r.rounds[0].worktree_clean; }, /^round 1 worktree_clean differs from its immutable manifest$/);
+  await tamper((r) => { r.rounds[0].patch_bytes = "12"; }, /^round 1 patch_bytes "12" is not a non-negative integer$/);
+  await tamper((r) => { r.rounds[1].reviewer = "x"; }, /^round 2 carries a field the writer never sets: reviewer$/);
+  await tamper((r) => { r.rounds[0].change_size = { added_lines: 1, deleted_lines: 1, total_lines: 3 }; }, /^round 1 change_size .* is not null or \{added_lines, deleted_lines, total_lines\} that add up$/);
+  await tamper((r) => { r.rounds[0].successor = { version: 1 }; }, /^round 1 successor .* is not null or a successor proof$/);
+  // Resolutions.
+  await tamper((r) => { delete r.resolutions[0].rationale; }, /^resolution 1 has no rationale$/);
+  await tamper((r) => { r.resolutions[0].evidence = { commit: "abc" }; }, /^resolution 1 evidence \{"commit":"abc"\} is not a string of at most 20,000 characters$/);
+  await tamper((r) => { r.resolutions[1].reviewer_note = "x"; }, /^resolution 2 carries a field the writer never sets: reviewer_note$/);
+  await tamper((r) => { r.resolutions[0].submitted_at = "yesterday"; }, /^resolution 1 submitted_at "yesterday" is not a timestamp$/);
+  // Rereview decisions.
+  await tamper((r) => { delete r.rereview_decisions[0].rationale; }, /^rereview decision 1 has no rationale$/);
+  await tamper((r) => { r.rereview_decisions[1].verification = ""; }, /^rereview decision 2 verification "" is not a string of at most 20,000 characters, non-empty for rebuttal_accepted$/);
+  await tamper((r) => { r.rereview_decisions[0].verification = 7; }, /^rereview decision 1 verification 7 is not a string/);
+  await tamper((r) => { r.rereview_decisions[0].model = "x"; }, /^rereview decision 1 carries a field the writer never sets: model$/);
+  // Errata.
+  await tamper((r) => { delete r.errata[0].text; }, /^erratum 1 has no text$/);
+  await tamper((r) => { r.errata[0].round = 5; }, /^erratum 1 round 5 is not a round the ledger holds/);
+  await tamper((r) => { r.errata[0].author = "x"; }, /^erratum 1 carries a field the writer never sets: author$/);
+  // Carried findings (injected in the writer's shape first, then broken).
+  const carried = { continued_from_review_id: "rb-2026-08-31T000000-000Z-0000c0de", finding_id: "F-001", fingerprint_sha256: "a".repeat(64), severity: "minor", title: "t", explanation: "e", recommendation: "" };
+  await tamper((r) => { r.carried_findings = [{ ...carried, fingerprint_sha256: "nope" }]; }, /^carried finding 1 fingerprint_sha256 "nope" is not a digest$/);
+  await tamper((r) => { r.carried_findings = [(({ title, ...rest }) => rest)(carried)]; }, /^carried finding 1 has no title$/);
+  await tamper((r) => { r.carried_findings = [{ ...carried, carried_at: "x" }]; }, /^carried finding 1 carries a field the writer never sets: carried_at$/);
+  // A well-formed carried finding is accepted by the table (the rest of the
+  // ledger is unchanged, so the render then succeeds).
+  const review = JSON.parse(original);
+  review.carried_findings = [carried];
+  await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
+  assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
+  await fsp.writeFile(reviewPath, original, { mode: 0o600 });
 });
 
 // ---------------------------------------------------------------------------
