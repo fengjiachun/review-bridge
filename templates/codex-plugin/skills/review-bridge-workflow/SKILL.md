@@ -578,6 +578,8 @@ launch between them.
      -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' \
      -c 'approvals_reviewer="guardian_subagent"' \
      -c 'approval_policy={granular={rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false}}' \
+     -c 'memories.use_memories=false' \
+     -c 'memories.generate_memories=false' \
      -c 'mcp_servers.review-bridge-author.command="node"' \
      -c 'mcp_servers.review-bridge-author.enabled=false' \
      '<the reviewer request below>' < /dev/null
@@ -727,6 +729,30 @@ directory — so the task body must name the `review_id`: it is the reviewer's
 only pointer to the snapshot, and the seven-tool surface exposes no other way
 to discover which review it was sent to.
 
+Codex's memory feature is pinned off in both launch lines, for the reason
+stdin is closed. With the host's `[memories] use_memories = true` Codex
+prepends a memory summary to the reviewer's instructions and directs it to
+search `~/.codex/memories/MEMORY.md` before working, and in the first full
+unattended round under this launch the reviewer's first sandboxed shell
+commands were a read of the packaged reviewer skill and an `rg` over that
+file, whose hits were memory lines about the very change under review and the
+rulings around it (observed 2026-09-10). That is authoring history reaching
+the reviewer through a channel the launch line did not close: the request is
+the whole handoff, and a memory folder written by the operator's own sessions
+is the operator's history whatever it happens to say.
+`memories.use_memories=false` closes the read side, so no memory instructions
+are injected and nothing points the reviewer at that folder, and
+`memories.generate_memories=false` closes the write side, because a review is
+not a session the operator's memories should record. Both keys are pinned in
+the launch line rather than left to the host profile, like the sandbox and the
+approver. They are the two boolean fields of the `[memories]` table, and the
+key paths were confirmed the way the `granular` fields were, by the
+configuration parser refusing a non-boolean for each with `invalid type:
+string "x", expected a boolean` `in memories.use_memories` and
+`in memories.generate_memories` — an unknown key under `memories` is accepted
+silently, so acceptance of the `false` form confirms nothing and the refusal
+of the wrong type is the evidence.
+
 The sandbox does not reach MCP servers, so the launch shrinks its reachable
 surface rather than describing it. An MCP server is a child process of Codex
 running outside the sandbox: a probe server launched by this exact form wrote
@@ -782,6 +808,8 @@ codex exec --skip-git-repo-check --sandbox workspace-write \
   -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' \
   -c 'approvals_reviewer="guardian_subagent"' \
   -c 'approval_policy={granular={rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false}}' \
+  -c 'memories.use_memories=false' \
+  -c 'memories.generate_memories=false' \
   -c 'mcp_servers.review-bridge-author.command="node"' \
   -c 'mcp_servers.review-bridge-author.enabled=false' \
   '<the rereview request>' < /dev/null

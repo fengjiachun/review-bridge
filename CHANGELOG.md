@@ -29,6 +29,25 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `approval: granular`. The guardian's deadline exposure under host load is
   unchanged. Measured on 2026-09-10 with a full unattended round under the
   final launch line.
+- The `CODEX_TASK` launch pins Codex's memory feature off, issue #121
+  (#122). Both launch fences in the packaged workflow skill gain
+  `memories.use_memories=false` and `memories.generate_memories=false` beside
+  the `approval_policy` line. In the first full unattended round under the
+  0.12.0 launch the reviewer's first sandboxed shell commands were a read of
+  the packaged reviewer skill and an `rg` over `~/.codex/memories/MEMORY.md`,
+  and the hits were memory lines about the very change under review: with the
+  host's `[memories] use_memories = true` Codex had injected its memory
+  instructions into the reviewer, a channel by which authoring history reached
+  a process handed only a `review_id`, and one the launch line did not close.
+  `use_memories=false` closes the read side and `generate_memories=false` the
+  write side, since a review is not a session the operator's memories should
+  record. The key paths were confirmed by the configuration parser refusing a
+  non-boolean for each (an unknown key under `memories` is accepted silently).
+  Both keys are pinned in `CODEX_TASK_DISPATCH_CONTRACT` for both fences, with
+  the channel, the two closes, and the parser confirmation anchored. Measured
+  on 2026-09-10 with a positive control (the previous fence, memory
+  instructions injected and the memory file searched) and one full unattended
+  round under the new fence with neither.
 
 ## 0.12.0 - 2026-09-10
 
