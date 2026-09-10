@@ -833,8 +833,9 @@ or `core.sshCommand`, an `include.path`, or any key whose name itself carries
 `://` or a `user:pass@`) is refused by key name, because the checkout's
 `.git/config` rides into the container with the mount and a denylist of
 secret-bearing keys does not converge; a `.git` holding more than a fresh
-clone writes (a hook that is not a `*.sample`, anything under `info` but
-`exclude`, any other top-level entry) is refused the same way. That check reads Git configuration only, includes followed,
+`--template=` clone writes (any file under `hooks` or `info`, any other
+top-level entry) is refused the same way, and so is a remote or submodule
+URL carrying a query or a fragment. That check reads Git configuration only, includes followed,
 and not the working tree: a `.env` or `.netrc` in the tree is kept out by the
 panel checkout being a fresh clone, not by the launcher, and a remote or
 branch named after a secret is not detectable; the panel clone is yours to

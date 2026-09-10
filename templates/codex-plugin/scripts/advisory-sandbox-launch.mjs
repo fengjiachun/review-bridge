@@ -374,7 +374,7 @@ async function marketplaceFromCodexConfig() {
 // secret-bearing keys does not converge (three were found in as many review
 // rounds) and the panel checkout is a fresh clone, so nothing else belongs
 // there. A URL-valued key — a remote's or a submodule's url — whose value
-// carries a credential is refused as well. Values are never printed; a key that is itself a URL is printed with its userinfo
+// carries a credential, a query, or a fragment is refused as well. Values are never printed; a key that is itself a URL is printed with its userinfo
 // redacted, and a key whose name carries `://` or a `user:pass@` is refused
 // before the allowlist is consulted.
 //
@@ -438,6 +438,11 @@ function gitConfigViolations(repository) {
         violations.push(redact(key));
       } else if (allowed.url && urlCredential(value)) {
         violations.push(`${key} (credential in the URL)`);
+      } else if (allowed.url && /[?#]/.test(value)) {
+        // A git remote URL never needs a query or a fragment, and a token
+        // can ride in either (`?access_token=…`); refused without reading
+        // further.
+        violations.push(`${key} (query or fragment in the URL)`);
       }
     }
   }
@@ -447,20 +452,20 @@ function gitConfigViolations(repository) {
 // The .git directory of a fresh clone, by entry. `git clone` copies the
 // operator's init.templateDir into a new .git — hooks, helpers, anything —
 // and the configuration check cannot see those, so the skill clones with
-// `--template=` and the launcher holds the layout to what a fresh clone
-// plus the skill's fetch and checkout write. Observed on macOS (git 2.54,
-// Apple Git-157): a `--template=` clone + fetch + detached checkout leaves
-// FETCH_HEAD, HEAD, config, index, logs, objects, packed-refs, refs and no
-// hooks or info directory; a default-template clone adds description,
-// hooks/*.sample, and info/exclude. ORIG_HEAD, shallow, branches, and
+// `--template=` and the launcher accepts only the layout such a clone plus
+// the skill's fetch and checkout write; the default template gets no
+// allowance, since a helper can hide behind a *.sample name. Observed on
+// macOS (git 2.54, Apple Git-157): a `--template=` clone + fetch + detached
+// checkout leaves FETCH_HEAD, HEAD, config, index, logs, objects,
+// packed-refs, refs and no hooks or info directory. ORIG_HEAD, shallow, and
 // COMMIT_EDITMSG are what other ordinary git operations on such a clone
-// write. Anything else at the top level, any hook that is not a *.sample,
-// and anything under info but exclude is refused by name. The working tree
-// itself is the repository's own content and is not inspected.
+// write; hooks and info may exist only as empty directories. Anything else
+// at the top level, and any file under hooks or info, is refused by name.
+// The working tree itself is the repository's own content and is not
+// inspected.
 const FRESH_CLONE_GIT_ENTRIES = new Set([
   "HEAD",
   "config",
-  "description",
   "hooks",
   "info",
   "objects",
@@ -471,7 +476,6 @@ const FRESH_CLONE_GIT_ENTRIES = new Set([
   "FETCH_HEAD",
   "ORIG_HEAD",
   "shallow",
-  "branches",
   "COMMIT_EDITMSG",
 ]);
 
@@ -488,11 +492,10 @@ async function gitLayoutViolations(repository) {
   for (const entry of await list(gitDir)) {
     if (!FRESH_CLONE_GIT_ENTRIES.has(entry)) violations.push(`.git/${entry}`);
   }
-  for (const entry of await list(path.join(gitDir, "hooks"))) {
-    if (!entry.endsWith(".sample")) violations.push(`.git/hooks/${entry}`);
-  }
-  for (const entry of await list(path.join(gitDir, "info"))) {
-    if (entry !== "exclude") violations.push(`.git/info/${entry}`);
+  for (const directory of ["hooks", "info"]) {
+    for (const entry of await list(path.join(gitDir, directory))) {
+      violations.push(`.git/${directory}/${entry}`);
+    }
   }
   return violations.sort();
 }
@@ -1412,19 +1415,45 @@ async function main() {
   const { loadReview, submitInitialReview } = await import("../server/core.mjs");
   const { withStateLock, atomicWriteFile, canonicalJson } = await import("../server/storage.mjs");
 
+  // Every cleanup step runs on its own: a failure is recorded for the report
+  // and the next step still runs, so a proxy, network, or volume is never left
+  // behind and the sessions are always exported because an earlier step
+  // failed. The proxy log is bounded (last 200000 lines, 64 MB) and its
+  // failure is a note on the egress line, not a stop.
+  const PROXY_LOG_LINES = 200000;
   let proxyLog = "";
+  let proxyLogNote = null;
+  const cleanupFailures = [];
   let cleaned = false;
+  const step = (label, fn) => {
+    try {
+      fn();
+    } catch (error) {
+      cleanupFailures.push(`${label}: ${error.message}`);
+    }
+  };
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
-    spawnSync("docker", ["rm", "-f", codexName], { stdio: "ignore" });
-    proxyLog = run("docker", ["logs", proxyName]).stdout ?? "";
-    spawnSync("docker", ["rm", "-f", proxyName], { stdio: "ignore" });
-    spawnSync("docker", ["network", "rm", network], { stdio: "ignore" });
+    step("remove codex container", () => spawnSync("docker", ["rm", "-f", codexName], { stdio: "ignore" }));
+    step("collect proxy log", () => {
+      const result = spawnSync("docker", ["logs", "--tail", String(PROXY_LOG_LINES), proxyName], {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      if (result.error) throw result.error;
+      if (result.status !== 0) throw new Error((result.stderr || `docker logs exited ${result.status}`).trim());
+      proxyLog = result.stdout ?? "";
+      if (proxyLog.split("\n").length - 1 >= PROXY_LOG_LINES) {
+        proxyLogNote = `proxy log truncated to last ${PROXY_LOG_LINES} lines`;
+      }
+    });
+    step("remove proxy container", () => spawnSync("docker", ["rm", "-f", proxyName], { stdio: "ignore" }));
+    step("remove network", () => spawnSync("docker", ["network", "rm", network], { stdio: "ignore" }));
     // The rollouts are the guardian evidence; copy them out before the
     // volume goes.
-    spawnSync("docker", sessionsExport, { stdio: "ignore" });
-    spawnSync("docker", ["volume", "rm", homeVolume], { stdio: "ignore" });
+    step("export sessions", () => spawnSync("docker", sessionsExport, { stdio: "ignore" }));
+    step("remove volume", () => spawnSync("docker", ["volume", "rm", homeVolume], { stdio: "ignore" }));
   };
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.on(signal, () => {
@@ -1444,8 +1473,19 @@ async function main() {
         throw new Error(`docker ${args[0]} ${args[1]} failed: ${result.stderr.trim()}`);
       }
     }
+    // The readiness poll reads the proxy's log too; bounded the same way the
+    // final collection is, so a log that grows past the default buffer can
+    // never turn the poll into a failure.
+    const proxyListening = () => {
+      const result = spawnSync("docker", ["logs", "--tail", "20000", proxyName], {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      if (result.error) throw result.error;
+      return (result.stdout ?? "").includes("listening");
+    };
     const proxyDeadline = Date.now() + 15000;
-    while (!run("docker", ["logs", proxyName]).stdout.includes("listening")) {
+    while (!proxyListening()) {
       if (Date.now() > proxyDeadline) throw new Error("the egress proxy did not start");
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
@@ -1562,7 +1602,11 @@ async function main() {
         ? ["  (run-health evidence recorded inside the container and forgeable by a reviewer with shell access; the copy-back's integrity rests on the host replay, not on it)"]
         : []),
     ]),
-    `egress: example.com via proxy → ${boundary.facts.egressProxied}, without proxy → ${boundary.facts.egressDirect}; proxy log: ${summarizeProxyLog(proxyLog) || "(empty)"}`,
+    `egress: example.com via proxy → ${boundary.facts.egressProxied}, without proxy → ${boundary.facts.egressDirect}; proxy log: ${
+      cleanupFailures.find((failure) => failure.startsWith("collect proxy log"))
+        ? `unavailable: ${cleanupFailures.find((failure) => failure.startsWith("collect proxy log")).slice("collect proxy log: ".length)}`
+        : `${summarizeProxyLog(proxyLog) || "(empty)"}${proxyLogNote ? ` (${proxyLogNote})` : ""}`
+    }`,
     `guardian verdicts (${verdicts.length}):`,
     ...(verdicts.length
       ? verdicts.map(
@@ -1570,7 +1614,7 @@ async function main() {
             `  ${turn.tool ?? "?"}: ${turn.outcome ?? "?"} (risk ${turn.risk ?? "?"}, authorization ${turn.authorization ?? "?"}, ${turn.seconds?.toFixed(1)} s)`,
         )
       : ["  none found in the sessions copied out of the isolated CODEX_HOME"]),
-    `residual: the one host secret inside was ${inputs.authJson}, egress limited to ${EGRESS_ALLOW.join(", ")} by the sidecar`,
+    `residual: the one host secret inside was ${inputs.authJson}, egress limited to ${EGRESS_ALLOW.join(", ")} by the sidecar${cleanupFailures.length ? `; cleanup steps that failed: ${cleanupFailures.join("; ")}` : ""}`,
     "",
   ];
   process.stdout.write(lines.join("\n"));

@@ -474,7 +474,7 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     ],
     [
       "the .git layout is held to what a fresh clone writes",
-      /a `\.git` holding more than a fresh clone writes \(a hook that is not a `\*\.sample`, anything under `info` but `exclude`, any other top-level entry\) is refused the same way/,
+      /a `\.git` holding more than a fresh `--template=` clone writes \(any file under `hooks` or `info`, any other top-level entry\) is refused the same way, and so is a remote or submodule URL carrying a query or a fragment/,
     ],
     [
       "a remote or branch named after a secret is stated as undetectable",
