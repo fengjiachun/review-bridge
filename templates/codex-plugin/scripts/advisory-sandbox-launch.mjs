@@ -813,9 +813,19 @@ async function resolveInputs(options) {
   // has since been switched or reset would put other bytes under the same
   // recorded path. The launcher's clone is detached at the recorded head,
   // and the panel checkout must still be there.
-  const snapshotHead = ledger.rounds?.at(-1)?.head_sha;
+  const lastRound = ledger.rounds?.at(-1);
+  const snapshotHead = lastRound?.head_sha;
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(snapshotHead ?? "")) {
     fail(`the review records no snapshot head_sha in its last round`);
+  }
+  // The clone can materialize only commits. A snapshot prepared over a dirty
+  // tree carries overlays the MCP reads would see and the container's shell
+  // would not; refused rather than replayed (the panel clone is fresh, so it
+  // is clean by construction — this pins the premise).
+  if (lastRound.worktree_clean !== true || (lastRound.overlays?.length ?? 0) > 0) {
+    fail(
+      "the review's snapshot carries worktree overlays; the container review needs a clean commit — prepare it from the panel clone",
+    );
   }
   const panelHead = hostGit(["-C", repository, "rev-parse", "HEAD"]);
   if (panelHead.error || panelHead.status !== 0) {
@@ -1668,12 +1678,17 @@ async function main() {
   let cleaned = false;
   // A step fails on a spawn error or a nonzero exit alike; stderr's first
   // 200 characters go into the report.
-  const step = (label, fn) => {
+  // A step may name one stderr text that is not a failure: the codex
+  // container runs with --rm (so it is gone even when the launcher dies), and
+  // by the time cleanup runs Docker has usually removed it already.
+  const step = (label, fn, { tolerate = null } = {}) => {
     try {
       const result = fn();
       if (result?.error) throw result.error;
       if (result && result.status !== 0) {
-        throw new Error((result.stderr || `exited ${result.status}`).toString().trim().slice(0, 200));
+        const stderr = (result.stderr || "").toString();
+        if (tolerate && tolerate.test(stderr)) return;
+        throw new Error((stderr || `exited ${result.status}`).trim().slice(0, 200));
       }
     } catch (error) {
       cleanupFailures.push(`${label}: ${error.message}`);
@@ -1683,7 +1698,7 @@ async function main() {
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
-    step("remove codex container", () => spawnSync("docker", ["rm", "-f", codexName], quiet));
+    step("remove codex container", () => spawnSync("docker", ["rm", "-f", codexName], quiet), { tolerate: /No such container/ });
     step("collect proxy log", () => {
       const result = spawnSync("docker", ["logs", "--tail", String(PROXY_LOG_LINES), proxyName], {
         encoding: "utf8",

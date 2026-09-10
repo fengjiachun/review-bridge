@@ -851,7 +851,11 @@ itself runs on the host — those checks and the staging clone — runs in an
 isolated environment (no global or system configuration, an empty `HOME` and
 hooks path, no `GIT_*` from the operator's shell), so a `.gitattributes` in
 the reviewed tree can name no filter that resolves and nothing of the
-checkout runs on the host before the container exists. That check reads Git configuration only, includes followed,
+checkout runs on the host before the container exists. The review's last
+round must be a clean commit — `worktree_clean` true and no overlays — since
+the clone can materialize only commits; a snapshot prepared over a dirty
+tree is refused before anything starts, and the panel clone, being fresh, is
+clean by construction. That check reads Git configuration only, includes followed,
 and not the working tree: a `.env` or `.netrc` in the tree is kept out by the
 panel checkout being a fresh clone, not by the launcher, and a remote or
 branch named after a secret is not detectable; the panel clone is yours to

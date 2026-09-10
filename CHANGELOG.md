@@ -57,7 +57,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `.git` never enters the container — every git the launcher runs on the host
   for this runs isolated from the operator's global and system configuration,
   `HOME`, hooks, and `GIT_*` environment, so a `.gitattributes` filter in the
-  reviewed tree resolves to nothing and executes nothing on the host; the checks stay on the panel checkout
+  reviewed tree resolves to nothing and executes nothing on the host, and a
+  review whose last round was prepared over a dirty tree (overlays,
+  `worktree_clean` false) is refused since the clone can materialize only
+  commits; the checks stay on the panel checkout
   since
   `git clone` copies the operator's `init.templateDir` into it, and the
   packaged skill's panel clone now uses `--template=`; a remote or submodule

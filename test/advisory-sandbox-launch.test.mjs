@@ -111,7 +111,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
         status: "WAITING_FOR_REVIEW",
         state_version: 1,
         repository_path: checkout,
-        rounds: [{ round: 1, base_sha: fakeHead, head_sha: fakeHead }],
+        rounds: [{ round: 1, base_sha: fakeHead, head_sha: fakeHead, worktree_clean: true, overlays: [] }],
         ...ledger,
       }),
     );
@@ -135,7 +135,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
 // records derived from the probe's own argument, and plays the reviewer by
 // moving the staged ledger with the server's own submit — or, when asked,
 // by also leaving the kind of trace the copy-back must refuse.
-async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "", volumeRmFail = false, head = "" } = {}) {
+async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "", volumeRmFail = false, head = "", rmFail = "" } = {}) {
   const bin = path.join(f.root, "bin");
   await fsp.mkdir(bin, { recursive: true });
   const runner = path.join(bin, "fake-run.mjs");
@@ -259,7 +259,8 @@ case "$1 $2" in
   "version --format") echo "28.3.2 linux/arm64" ;;
   "image inspect") exit 0 ;;
   "volume rm") [ -n "\${FAKE_VOLUME_RM_FAIL}" ] && { echo "Error response from daemon: volume is in use" >&2; exit 1; }; exit 0 ;;
-  "network create"|"network connect"|"network rm"|"rm -f") exit 0 ;;
+  "rm -f") case "\${FAKE_RM_FAIL}:$3" in nosuch:*-codex) echo "Error response from daemon: No such container: $3" >&2; exit 1 ;; other:*-codex) echo "Error response from daemon: boom" >&2; exit 1 ;; esac; exit 0 ;;
+  "network create"|"network connect"|"network rm") exit 0 ;;
   "logs "*) # the readiness poll (--tail 20000) sees a short log; the final collection (--tail 200000) is where the variants bite
     case "$*" in *"--tail 200000"*) collecting=1 ;; *) collecting= ;; esac
     if [ -n "$collecting" ] && [ -n "\${FAKE_LOGS_FAIL}" ]; then echo "Error response from daemon: log driver failed" >&2; exit 1; fi
@@ -291,6 +292,7 @@ esac
     FAKE_LOGS_FAIL: logs === "fail" ? "1" : "",
     FAKE_CALLS: path.join(bin, "calls.log"),
     FAKE_VOLUME_RM_FAIL: volumeRmFail ? "1" : "",
+    FAKE_RM_FAIL: rmFail,
     FAKE_HEAD: head,
     FAKE_CHECKOUT_LOG: path.join(bin, "checkout.json"),
   };
@@ -1267,4 +1269,23 @@ test("a huge or failing docker logs leaves the report, the criteria, and every c
   assert.equal(result.status, 0, result.stdout.slice(-2000));
   assert.match(result.stdout, /cleanup steps that failed: remove volume: Error response from daemon: volume is in use/);
   assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: PASS/);
+  // The codex container runs with --rm, so Docker has usually removed it
+  // before cleanup; that one answer is not a failure, any other still is.
+  const i = await fixture(t, { realReview: true });
+  result = launch(i, ["--review-id", i.reviewId], await fakeDocker(i, { rmFail: "nosuch" }));
+  assert.equal(result.status, 0, result.stdout.slice(-2000));
+  assert.doesNotMatch(result.stdout, /cleanup steps that failed/);
+  const j = await fixture(t, { realReview: true });
+  result = launch(j, ["--review-id", j.reviewId], await fakeDocker(j, { rmFail: "other" }));
+  assert.equal(result.status, 0, result.stdout.slice(-2000));
+  assert.match(result.stdout, /cleanup steps that failed: remove codex container: Error response from daemon: boom/);
+});
+
+test("a snapshot prepared over a dirty tree is refused before Docker: the clone can materialize only commits", async (t) => {
+  const f = await fixture(t, { ledger: { rounds: [{ round: 1, base_sha: "0".repeat(40), head_sha: "0".repeat(40), worktree_clean: false, overlays: [{ path: "src/x.mjs", type: "modified" }] }] } });
+  const env = await fakeDocker(f);
+  const result = launch(f, ["--review-id", REVIEW_ID], env);
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /the review's snapshot carries worktree overlays; the container review needs a clean commit — prepare it from the panel clone/);
+  await assert.rejects(fsp.access(env.FAKE_CALLS), /ENOENT/);
 });

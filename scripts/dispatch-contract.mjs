@@ -501,6 +501,12 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the launcher's host git runs isolated from the operator's configuration",
       /Every git the launcher itself runs on the host — those checks and the staging clone — runs in an isolated environment \(no global or system configuration, an empty `HOME` and hooks path, no `GIT_\*` from the operator's shell\)/,
     ],
+    // Codex round twenty-six on #125: a snapshot prepared over a dirty tree
+    // carries overlays the clone cannot materialize.
+    [
+      "a snapshot with worktree overlays is refused",
+      /The review's last round must be a clean commit — `worktree_clean` true and no overlays — since the clone can materialize only commits; a snapshot prepared over a dirty tree is refused before anything starts/,
+    ],
     [
       "the mount is a fresh clone the launcher makes; the operator's .git never enters",
       /not that `\.git` but a fresh clone the launcher makes itself from the panel checkout .* the operator's `\.git` never enters the container/,
