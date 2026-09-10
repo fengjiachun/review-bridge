@@ -554,6 +554,23 @@ function reviewLedgerDefect(review, reviewId) {
     const defect = recordDefect(entry, [...HISTORY_COMMON_FIELDS, ...HISTORY_EVENT_FIELDS[entry.event]], { index, review }, label);
     if (defect != null) return defect;
   }
+  // The top-level strategy is the one the latest prepared round recorded:
+  // its mode is that event's mode, and a SUCCESSOR names the parent the
+  // round's proof names. A FULL strategy may still carry the parent the
+  // author asked for -- the writer keeps the requested id beside the fallback
+  // reason -- so its parent is not derivable from the ledger and is left.
+  const latestPrepared = review.history.findLast(
+    (entry) => ["REVIEW_PREPARED", "REREVIEW_PREPARED"].includes(entry.event) && entry.round === review.rounds.length,
+  );
+  if (review.review_strategy != null && latestPrepared?.mode != null) {
+    if (review.review_strategy.mode !== latestPrepared.mode) {
+      return `review_strategy.mode ${JSON.stringify(review.review_strategy.mode)} is not the ${latestPrepared.mode} the latest prepared round recorded`;
+    }
+    const proof = review.rounds.at(-1)?.successor;
+    if (latestPrepared.mode === "SUCCESSOR" && proof != null && review.review_strategy.parent_review_id !== proof.parent_review_id) {
+      return `review_strategy.parent_review_id ${JSON.stringify(review.review_strategy.parent_review_id)} is not the ${JSON.stringify(proof.parent_review_id)} the latest round's successor proof names`;
+    }
+  }
   // A round prepared as SUCCESSOR carries its proof and a round prepared as
   // FULL carries none: the prepared event's mode and the round's successor
   // record are written together and must agree both ways.
@@ -697,6 +714,11 @@ function reviewLedgerDefect(review, reviewId) {
   // author responded -- and compared with the history: exactly that event,
   // and an escalated round has no rereview decision on any of its findings.
   const findingById = new Map(review.findings.map((finding) => [finding.id, finding]));
+  const verdictRounds = new Set(
+    review.history
+      .filter((entry) => ["REREVIEW_UNRESOLVED", "REREVIEW_CONTINUABLE_FINDINGS", "REREVIEW_CLEAN"].includes(entry.event))
+      .map((entry) => entry.round),
+  );
   const responded = new Map();
   for (const resolution of review.resolutions) {
     const round = findingById.get(resolution.finding_id).introduced_round;
@@ -728,17 +750,33 @@ function reviewLedgerDefect(review, reviewId) {
   }
   const resolutionByFinding = new Map(review.resolutions.map((entry) => [entry.finding_id, entry]));
   const decisionByFinding = new Map(review.rereview_decisions.map((entry) => [entry.finding_id, entry]));
+  // The verdict of each rereviewed round is derived the way submitRereview
+  // decides it -- any still_open decision contests the round, else a new
+  // finding leaves it continuable, else it is clean -- and compared with the
+  // verdict event the history records for that round.
+  for (const verdictRound of verdictRounds) {
+    const decided = review.rereview_decisions.filter(
+      (decision) => findingById.get(decision.finding_id)?.introduced_round === verdictRound - 1,
+    );
+    const raised = review.findings.filter((finding) => finding.introduced_round === verdictRound).length;
+    const expected = decided.some((decision) => decision.decision === "still_open")
+      ? "REREVIEW_UNRESOLVED"
+      : raised > 0
+        ? "REREVIEW_CONTINUABLE_FINDINGS"
+        : "REREVIEW_CLEAN";
+    const recorded = review.history.find(
+      (entry) => ["REREVIEW_UNRESOLVED", "REREVIEW_CONTINUABLE_FINDINGS", "REREVIEW_CLEAN"].includes(entry.event) && entry.round === verdictRound,
+    ).event;
+    if (recorded !== expected) {
+      return `round ${verdictRound} rereview derives ${expected} from its decisions and new findings, but the history records ${recorded}`;
+    }
+  }
   // The record sets are complete, the way the writers demand them: an
   // answered round has exactly one resolution for every finding it raised
   // (submitResolutions takes one per open finding), and a rereviewed round
   // has exactly one decision for every fixed or rejected finding of the
   // round before it (submitRereview takes one per author response); a
   // decision with no rereview verdict behind it is refused as well.
-  const verdictRounds = new Set(
-    review.history
-      .filter((entry) => ["REREVIEW_UNRESOLVED", "REREVIEW_CONTINUABLE_FINDINGS", "REREVIEW_CLEAN"].includes(entry.event))
-      .map((entry) => entry.round),
-  );
   for (const finding of review.findings) {
     const round = finding.introduced_round;
     const resolution = resolutionByFinding.get(finding.id);
@@ -844,6 +882,12 @@ export async function loadValidatedReview(storeRoot, reviewId) {
         code: "CONTINUATION_SOURCE_MISMATCH",
         details: { review_id: reviewId, source_review_id: sourceId, path: filePath, reason: what },
       });
+    // The freeze records the continuation on the source as an event, one per
+    // continuation, so a re-continued source still names every continuation;
+    // the mutable top-level marker names only the newest.
+    if (!(source.history ?? []).some((entry) => entry.event === "REVIEW_CONTINUED" && entry.continued_by_review_id === reviewId)) {
+      throw mismatch(`records frozen from a source that never recorded continuation into ${reviewId}`);
+    }
     const frozen = new Map(
       source.findings.filter((finding) => finding.status === "OPEN").map((finding) => [finding.id, finding]),
     );

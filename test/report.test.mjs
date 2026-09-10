@@ -844,7 +844,12 @@ test("the derivation section agrees with the publication summary where a bare de
 
 // A review that carried findings through both rounds, built through the
 // writers, so the validator's derived status table meets real records.
-async function reviewedFixture(t) {
+async function reviewedFixture(t, {
+  decisions = [
+    { finding_id: "F-001", decision: "resolved", rationale: "verified", verification: "read value.js" },
+    { finding_id: "F-002", decision: "rebuttal_accepted", rationale: "agreed", verification: "reread the style" },
+  ],
+} = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-report-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const repository = path.join(root, "repo");
@@ -881,10 +886,7 @@ async function reviewedFixture(t) {
   git(repository, "add", ".");
   git(repository, "commit", "-m", "fix");
   await prepareRereview(store, review.id);
-  await submitRereview(store, review.id, [
-    { finding_id: "F-001", decision: "resolved", rationale: "verified", verification: "read value.js" },
-    { finding_id: "F-002", decision: "rebuttal_accepted", rationale: "agreed", verification: "reread the style" },
-  ], [], "CLAUDE_DESKTOP");
+  await submitRereview(store, review.id, decisions, [], "CLAUDE_DESKTOP");
   return { root, store, reviewId: review.id };
 }
 
@@ -924,6 +926,8 @@ test("finding statuses must equal what their records derive, in both directions"
   // The record sets must be complete per round, as the writers demand them.
   await tamper((review) => { review.resolutions.splice(1, 1); }, /round 1 was answered, but finding "F-002" has no resolution/);
   await tamper((review) => { review.rereview_decisions.splice(1, 1); }, /round 2 was rereviewed, but finding "F-002" \(rejected\) has no decision/);
+  // The top-level strategy is the latest prepared round's.
+  await tamper((review) => { review.review_strategy.mode = "SUCCESSOR"; }, /review_strategy\.mode "SUCCESSOR" is not the FULL the latest prepared round recorded/);
   // The prepared event's mode and the round's successor proof must agree.
   await tamper((review) => { review.history[0].mode = "SUCCESSOR"; }, /round 1 was prepared as SUCCESSOR, but its successor proof is absent/);
   await tamper((review) => {
@@ -1034,6 +1038,34 @@ test("a review that moves after it was read fails the render closed", async (t) 
   // Read again at rest, the passed review renders with its gate.
   const written = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
   assert.equal(written.reused, false);
+});
+
+// The rereview verdict is derived the way submitRereview decides it and
+// compared with the event the history records for that round.
+test("a rereview verdict must be the one its decisions and new findings derive", async (t) => {
+  const state = await reviewedFixture(t, {
+    decisions: [
+      { finding_id: "F-001", decision: "still_open", rationale: "not fixed", verification: "reread value.js" },
+      { finding_id: "F-002", decision: "rebuttal_accepted", rationale: "agreed", verification: "reread the style" },
+    ],
+  });
+  const reviewPath = path.join(reviewDirectory(state), "review.json");
+  const original = await fsp.readFile(reviewPath, "utf8");
+  const genuine = JSON.parse(original);
+  assert.equal(genuine.status, "HUMAN_REQUIRED");
+  assert.equal(genuine.history.at(-1).event, "REREVIEW_UNRESOLVED");
+  assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
+  // The only contesting decision flipped to resolved: the round would have
+  // been recorded clean, but the history says unresolved.
+  const review = JSON.parse(original);
+  review.rereview_decisions[0].decision = "resolved";
+  review.findings[0].status = "RESOLVED";
+  await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+    assert.equal(error.code, "REVIEW_LEDGER_INVALID");
+    assert.match(error.details.reason, /round 2 rereview derives REREVIEW_CLEAN from its decisions and new findings, but the history records REREVIEW_UNRESOLVED/);
+    return true;
+  });
 });
 
 // The ledger and its summary are read under separate locks. A snapshot
@@ -1251,6 +1283,20 @@ test("the continuation marker must be the one the history's REVIEW_CONTINUED eve
   await tamperContinuation((ledger) => { ledger.carried_findings[0].fingerprint_sha256 = "e".repeat(64); }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-002" with fingerprint "e{64}"/);
   await tamperContinuation((ledger) => { ledger.carried_findings[0].title = "reworded"; }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-002" whose carried content does not hash to its fingerprint/);
   await fsp.writeFile(continuationPath, continuationOriginal, { mode: 0o600 });
+  // The source must have recorded the continuation into this review, as an
+  // event; a source whose event names another continuation disagrees.
+  const sourcePath = path.join(state.store, "reviews", state.sourceId, "review.json");
+  const sourceOriginal = await fsp.readFile(sourcePath, "utf8");
+  const source = JSON.parse(sourceOriginal);
+  source.history.at(-1).continued_by_review_id = "rb-2026-09-02T000000-000Z-0000c0de";
+  source.continued_by_review_id = "rb-2026-09-02T000000-000Z-0000c0de";
+  await fsp.writeFile(sourcePath, `${JSON.stringify(source, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.continuationId), (error) => {
+    assert.equal(error.code, "CONTINUATION_SOURCE_MISMATCH");
+    assert.match(error.message, new RegExp(`source that never recorded continuation into ${state.continuationId}`));
+    return true;
+  });
+  await fsp.writeFile(sourcePath, sourceOriginal, { mode: 0o600 });
   // The source itself gone: named apart from a disagreement.
   await fsp.rename(path.join(state.store, "reviews", state.sourceId), path.join(state.store, "reviews", `${state.sourceId}.away`));
   await assert.rejects(writeReviewReport(state.store, state.continuationId), { code: "CONTINUATION_SOURCE_MISSING" });
