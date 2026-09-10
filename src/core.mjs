@@ -230,6 +230,8 @@ const LEDGER_FINDING_STATUSES = [
 ];
 const LEDGER_DISPOSITIONS = ["fixed", "rejected", "human_required"];
 const LEDGER_RESPONSE_EVENTS = ["AUTHOR_RESPONDED", "AUTHOR_ESCALATED"];
+// When preparing a continuation began freezing its source (0.10.0).
+const CONTINUATION_FREEZE_SINCE = Date.parse("2026-09-01T00:00:00Z");
 const LEDGER_DECISIONS = ["resolved", "rebuttal_accepted", "still_open"];
 
 // Field tables. Every record kind the review ledger holds has one, placed
@@ -897,7 +899,18 @@ export async function loadValidatedReview(storeRoot, reviewId) {
     ...(review.carried_findings ?? []).map((carried) => carried.continued_from_review_id),
     ...(review.errata ?? []).filter((erratum) => erratum.continued_from_review_id != null).map((erratum) => erratum.continued_from_review_id),
   ]);
+  // Continuations prepared before this release found their source unfrozen;
+  // the freeze that marks a source landed with 0.10.0 (2026-09-01), and no
+  // continuation prepared since can have an unmarked source.
+  const preparedAt = Date.parse(review.history[0]?.at ?? "");
+  const preparedBeforeFreeze = Number.isFinite(preparedAt) && preparedAt < CONTINUATION_FREEZE_SINCE;
   for (const sourceId of sources) {
+    if (sourceId === reviewId) {
+      throw Object.assign(new Error(`review ${reviewId} carries records from itself: a review cannot continue itself`), {
+        code: "CONTINUATION_SOURCE_MISMATCH",
+        details: { review_id: reviewId, source_review_id: sourceId, path: filePath, reason: "a review cannot continue itself" },
+      });
+    }
     let source;
     try {
       source = await loadReview(storeRoot, sourceId);
@@ -916,12 +929,13 @@ export async function loadValidatedReview(storeRoot, reviewId) {
     // continuation, so a re-continued source still names every continuation;
     // the mutable top-level marker names only the newest. Before the freeze
     // existed a continuation left its source untouched, so a source with no
-    // freeze record of any kind -- no event, no marker -- is that older
-    // writer's and is accepted; a source that was frozen but never into this
-    // review is a disagreement.
+    // freeze record of any kind -- no event, no marker -- is accepted only
+    // when this review itself was prepared before the freeze existed; a
+    // source that was frozen but never into this review, or an unmarked
+    // source behind a continuation prepared since, is a disagreement.
     const continuedEvents = (source.history ?? []).filter((entry) => entry.event === "REVIEW_CONTINUED");
     const everFrozen = continuedEvents.length > 0 || source.continued_by_review_id != null;
-    if (everFrozen && !continuedEvents.some((entry) => entry.continued_by_review_id === reviewId)) {
+    if (!continuedEvents.some((entry) => entry.continued_by_review_id === reviewId) && (everFrozen || !preparedBeforeFreeze)) {
       throw mismatch(`records frozen from a source that never recorded continuation into ${reviewId}`);
     }
     const frozen = new Map(

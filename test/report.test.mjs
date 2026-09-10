@@ -1340,16 +1340,31 @@ test("the continuation marker must be the one the history's REVIEW_CONTINUED eve
     assert.match(error.message, new RegExp(`source that never recorded continuation into ${state.continuationId}`));
     return true;
   });
-  // A source with no freeze record at all is the pre-freeze writer's, and is
-  // accepted; only a source frozen into some other continuation disagrees.
+  // A source with no freeze record at all is accepted only behind a
+  // continuation prepared before the freeze existed; this continuation was
+  // prepared today, so an unmarked source is a disagreement.
   const unfrozen = JSON.parse(sourceOriginal);
   unfrozen.history = unfrozen.history.filter((entry) => entry.event !== "REVIEW_CONTINUED");
   delete unfrozen.continued_by_review_id;
   await fsp.writeFile(sourcePath, `${JSON.stringify(unfrozen, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.continuationId), (error) => {
+    assert.equal(error.code, "CONTINUATION_SOURCE_MISMATCH");
+    assert.match(error.message, /never recorded continuation into/);
+    return true;
+  });
+  // The same pair with the continuation's own prepare backdated before the
+  // freeze existed: the pre-freeze writer's shape, accepted.
+  const backdated = JSON.parse(continuationOriginal);
+  backdated.history[0].at = "2026-08-20T00:00:00.000Z";
+  await fsp.writeFile(continuationPath, `${JSON.stringify(backdated, null, 2)}\n`, { mode: 0o600 });
   const fromUnfrozen = await writeReviewReport(state.store, state.continuationId, { renderedAt: RENDERED_AT });
   assert.equal(fromUnfrozen.reused, false);
   await fsp.rm(fromUnfrozen.path);
+  await fsp.writeFile(continuationPath, continuationOriginal, { mode: 0o600 });
   await fsp.writeFile(sourcePath, sourceOriginal, { mode: 0o600 });
+  // A review cannot continue itself, whatever the dates.
+  await tamperContinuation((ledger) => { ledger.carried_findings[0].continued_from_review_id = ledger.id; }, "CONTINUATION_SOURCE_MISMATCH", /a review cannot continue itself/);
+  await fsp.writeFile(continuationPath, continuationOriginal, { mode: 0o600 });
   // The source itself gone: named apart from a disagreement.
   await fsp.rename(path.join(state.store, "reviews", state.sourceId), path.join(state.store, "reviews", `${state.sourceId}.away`));
   await assert.rejects(writeReviewReport(state.store, state.continuationId), { code: "CONTINUATION_SOURCE_MISSING" });
