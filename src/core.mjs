@@ -209,6 +209,208 @@ export async function loadReview(storeRoot, reviewId) {
   }
 }
 
+const LEDGER_REVIEW_STATUSES = [
+  "WAITING_FOR_REVIEW",
+  "REVIEW_SUBMITTED",
+  "AUTHOR_RESPONDED",
+  "WAITING_FOR_REREVIEW",
+  "CLEAN",
+  "LOCAL_GATE_PASSED",
+  "HUMAN_REQUIRED",
+  "CONTINUABLE_FINDINGS",
+];
+const LEDGER_FINDING_STATUSES = [
+  "OPEN",
+  "AUTHOR_FIXED",
+  "AUTHOR_REJECTED",
+  "HUMAN_REQUIRED",
+  "RESOLVED",
+  "REBUTTAL_ACCEPTED",
+  "STILL_OPEN",
+];
+const LEDGER_DISPOSITIONS = ["fixed", "rejected", "human_required"];
+const LEDGER_DECISIONS = ["resolved", "rebuttal_accepted", "still_open"];
+
+// The structural shape a review ledger this module wrote always has. A field
+// the state machine would never produce is a ledger edited or rolled back by
+// hand, and no reader that combines it with other ledgers may trust it.
+function reviewLedgerDefect(review, reviewId) {
+  if (review == null || typeof review !== "object" || Array.isArray(review)) {
+    return "not a JSON object";
+  }
+  if (review.id !== reviewId) {
+    return `review.json names ${JSON.stringify(review.id ?? null)}, not ${reviewId}`;
+  }
+  if (!LEDGER_REVIEW_STATUSES.includes(review.status)) {
+    return `unknown status ${JSON.stringify(review.status)}`;
+  }
+  if (review.reviewer_provider != null && !REVIEWER_PROVIDERS.includes(review.reviewer_provider)) {
+    return `unknown reviewer_provider ${JSON.stringify(review.reviewer_provider)}`;
+  }
+  for (const key of ["requirement", "implementation_scope", "repository_path", "base_ref", "created_at", "updated_at"]) {
+    if (typeof review[key] !== "string") return `${key} is not a string`;
+  }
+  for (const key of ["rounds", "findings", "resolutions", "rereview_decisions", "history"]) {
+    if (!Array.isArray(review[key])) return `${key} is not an array`;
+  }
+  if (review.errata != null && !Array.isArray(review.errata)) return "errata is not an array";
+  if (review.carried_findings != null && !Array.isArray(review.carried_findings)) {
+    return "carried_findings is not an array";
+  }
+  // Every save increments state_version and every history entry rode on a
+  // save, so the version can never fall below the history; a transition
+  // stamp names a version that has happened.
+  const stateVersion = review.state_version ?? 0;
+  if (!Number.isInteger(stateVersion) || stateVersion < 1) {
+    return "state_version is not a positive integer";
+  }
+  if (stateVersion < review.history.length) {
+    return `state_version ${stateVersion} is below the ${review.history.length} history entries`;
+  }
+  if (
+    review.last_transition_state_version != null &&
+    (!Number.isInteger(review.last_transition_state_version) ||
+      review.last_transition_state_version > stateVersion)
+  ) {
+    return "last_transition_state_version is ahead of state_version";
+  }
+  for (const [index, entry] of review.history.entries()) {
+    if (entry == null || typeof entry.event !== "string" || typeof entry.at !== "string") {
+      return `history entry ${index + 1} is malformed`;
+    }
+  }
+  // Rounds are numbered by position, bounded by the store, and the current
+  // round is the last one.
+  if (review.rounds.length === 0 || review.rounds.length > MAX_ROUNDS) {
+    return `rounds holds ${review.rounds.length} entries`;
+  }
+  for (const [index, round] of review.rounds.entries()) {
+    if (round?.round !== index + 1) return `round ${index + 1} is not numbered by its position`;
+    for (const key of ["base_sha", "head_sha"]) {
+      if (!/^[0-9a-f]{40}$/.test(round[key] ?? "")) return `round ${round.round} ${key} is not a commit`;
+    }
+    if (!/^[0-9a-f]{64}$/.test(round.snapshot_hash ?? "")) {
+      return `round ${round.round} snapshot_hash is not a digest`;
+    }
+  }
+  if (review.current_round !== review.rounds.length) {
+    return `current_round ${review.current_round} does not name the last of ${review.rounds.length} rounds`;
+  }
+  if (
+    review.clean_snapshot_hash != null &&
+    !review.rounds.some((round) => round.snapshot_hash === review.clean_snapshot_hash)
+  ) {
+    return "clean_snapshot_hash names no round";
+  }
+  // Findings and their responses: known enums, unique IDs, and every response
+  // naming a finding that exists.
+  for (const finding of review.findings) {
+    if (!["blocker", "major", "minor", "nit"].includes(finding?.severity)) {
+      return `unknown finding severity ${JSON.stringify(finding?.severity)}`;
+    }
+    if (!LEDGER_FINDING_STATUSES.includes(finding.status)) {
+      return `unknown finding status ${JSON.stringify(finding.status)}`;
+    }
+  }
+  for (const resolution of review.resolutions) {
+    if (!LEDGER_DISPOSITIONS.includes(resolution?.disposition)) {
+      return `unknown disposition ${JSON.stringify(resolution?.disposition)}`;
+    }
+  }
+  for (const decision of review.rereview_decisions) {
+    if (!LEDGER_DECISIONS.includes(decision?.decision)) {
+      return `unknown rereview decision ${JSON.stringify(decision?.decision)}`;
+    }
+  }
+  for (const [key, entries] of [
+    ["finding", review.findings.map((finding) => finding.id)],
+    ["resolution", review.resolutions.map((resolution) => resolution.finding_id)],
+    ["rereview decision", review.rereview_decisions.map((decision) => decision.finding_id)],
+  ]) {
+    if (entries.some((id) => typeof id !== "string" || id === "")) return `a ${key} has no ID`;
+    if (new Set(entries).size !== entries.length) return `${key} IDs are not unique`;
+  }
+  const findingIds = new Set(review.findings.map((finding) => finding.id));
+  for (const resolution of review.resolutions) {
+    if (!findingIds.has(resolution.finding_id)) {
+      return `a resolution names no finding: ${JSON.stringify(resolution.finding_id)}`;
+    }
+  }
+  const answered = new Set(review.resolutions.map((resolution) => resolution.finding_id));
+  for (const decision of review.rereview_decisions) {
+    if (!answered.has(decision.finding_id)) {
+      return `a rereview decision names no resolution: ${JSON.stringify(decision.finding_id)}`;
+    }
+  }
+  return null;
+}
+
+function reviewLedgerInvalid(reviewId, filePath, reason) {
+  return Object.assign(new Error(`review ledger ${reviewId} is invalid: ${reason}`), {
+    code: "REVIEW_LEDGER_INVALID",
+    details: { review_id: reviewId, path: filePath, reason },
+  });
+}
+
+// A review ledger admitted only when it is one this module could have written:
+// the bytes are this module's own serialization, the shape is the state
+// machine's, and every round's snapshot commitment is reproduced from the
+// immutable manifest and patch beside it, the way the gate reproduces the
+// clean round's. For readers that combine the review with other ledgers; the
+// tools' own read path is loadReview and is unchanged.
+export async function loadValidatedReview(storeRoot, reviewId) {
+  assertReviewId(reviewId);
+  const filePath = reviewFile(storeRoot, reviewId);
+  let bytes;
+  try {
+    bytes = await fsp.readFile(filePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw Object.assign(new Error(`review ${reviewId} not found`), {
+        code: "REVIEW_NOT_FOUND",
+        details: { review_id: reviewId, path: filePath },
+      });
+    }
+    throw error;
+  }
+  let review;
+  try {
+    review = JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    throw reviewLedgerInvalid(reviewId, filePath, `not JSON: ${error.message}`);
+  }
+  const defect = reviewLedgerDefect(review, reviewId);
+  if (defect != null) throw reviewLedgerInvalid(reviewId, filePath, defect);
+  if (bytes.toString("utf8") !== `${JSON.stringify(review, null, 2)}\n`) {
+    throw reviewLedgerInvalid(reviewId, filePath, "bytes are not the store's own serialization");
+  }
+  for (const round of review.rounds) {
+    const directory = roundDirectory(storeRoot, reviewId, round.round);
+    let manifest;
+    try {
+      manifest = JSON.parse(await fsp.readFile(path.join(directory, "manifest.json"), "utf8"));
+    } catch (error) {
+      throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} manifest unreadable: ${error.message}`);
+    }
+    for (const key of Object.keys(manifest)) {
+      if (canonicalJson(manifest[key]) !== canonicalJson(round[key])) {
+        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} ${key} differs from its immutable manifest`);
+      }
+    }
+    let reproduced;
+    try {
+      reproduced = await snapshotHashFromReviewRound(storeRoot, reviewId, review, round);
+      await verifySuccessorArtifacts(storeRoot, reviewId, round);
+    } catch (error) {
+      throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round}: ${error.message}`);
+    }
+    if (reproduced !== round.snapshot_hash) {
+      throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} snapshot_hash is not reproduced by its patch`);
+    }
+  }
+  return review;
+}
+
 async function saveReview(storeRoot, review) {
   review.state_version = (review.state_version ?? 0) + 1;
   review.updated_at = now();

@@ -31,8 +31,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   reported as history rather than as the reason the thread is resolved; the
   Codex and checks gates and the derived status come from the same functions
   the publication read surfaces use. Every ledger is admitted by the reader
-  the server itself uses -- the review by its loader with its identity
-  checked, the publication by the canonical, schema-validated reader that
+  the server itself uses -- the review by a new `loadValidatedReview`
+  in `core.mjs` that admits only a ledger the store could have written (its
+  own serialization, the state machine's statuses and shape, `state_version`
+  not below the history, and every round's snapshot commitment reproduced
+  from the immutable manifest and patch beside it, as the gate reproduces the
+  clean round's) and is used by the report alone, the publication by the canonical, schema-validated reader that
   requires the review ID inside to match, and the gate or authorization file
   by the binding check that ties it to the ledger -- so a file copied in from
   another review or edited in place fails the render with that reader's
@@ -57,7 +61,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   a failure there changes no gate and no workflow state.
   `REVIEW_REPORT_CONTRACT` pins both steps in the source and packaged skill.
   The footer states, in the terms the README uses for operator narration,
-  that the report is a projection of the ledger, not evidence.
+  that the report is a projection of the ledger, not evidence, naming the
+  ledgers that were rendered: the review ledger and the publication ledger
+  when present, or the publication ledger and its bound authorization for a
+  remote-only publication.
 
 ### Changed
 

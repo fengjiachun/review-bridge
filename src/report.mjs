@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { loadReview } from "./core.mjs";
+import { loadValidatedReview } from "./core.mjs";
 import {
   canonicalDigest,
   checkRequiredRuns,
@@ -16,8 +16,13 @@ import {
 
 // The footer sentence, stated in the terms README uses for operator narration.
 // A report is read by a person; nothing a person reads here advances a ledger.
+// Which ledger is the source of truth depends on what was rendered: the review
+// ledger (and the publication beside it) when a local review exists, the
+// publication and its bound authorization when the review was skipped.
 export const PROJECTION_NOTICE =
-  "This report is a projection of the ledger, not evidence. The review ledger remains the sole source of truth: nothing in this report advances or proves review state, and citing it as evidence is a misuse. It can be regenerated from the ledger at any time.";
+  "This report is a projection of the ledger, not evidence. The review ledger, and the publication ledger when present, remain the sole source of truth: nothing in this report advances or proves review state, and citing it as evidence is a misuse. It can be regenerated from the ledger at any time.";
+export const PROJECTION_NOTICE_REMOTE_ONLY =
+  "This report is a projection of the ledger, not evidence. The publication ledger and its bound authorization remain the sole source of truth: nothing in this report advances or proves publication state, and citing it as evidence is a misuse. It can be regenerated from the ledger at any time.";
 
 const REVIEW_ID_PATTERN = /^rb-[0-9TZ-]+-[a-f0-9]{8}$/;
 const PREPARED_EVENTS = ["REVIEW_PREPARED", "REREVIEW_PREPARED"];
@@ -613,7 +618,7 @@ export function renderReviewReport(
       `- Rendered at: ${inline(renderedAt)}`,
       `- Ledger: ${ledgers.join(", ")}`,
     ].join("\n"),
-    PROJECTION_NOTICE,
+    review == null ? PROJECTION_NOTICE_REMOTE_ONLY : PROJECTION_NOTICE,
   ];
   return `${sections.join("\n\n")}\n`;
 }
@@ -630,18 +635,12 @@ export async function loadReportLedgers(storeRoot, reviewId) {
   }
   const directory = path.join(storeRoot, "reviews", reviewId);
   const reviewPath = path.join(directory, "review.json");
-  let review = null;
-  if (fs.existsSync(reviewPath)) {
-    review = await loadReview(storeRoot, reviewId);
-    // loadReview reads by directory; the ledger inside has to be that review.
-    if (review?.id !== reviewId) {
-      throw reportError(
-        "REVIEW_LEDGER_INVALID",
-        `review.json names ${JSON.stringify(review?.id ?? null)}, not ${reviewId}`,
-        { review_id: reviewId, path: reviewPath },
-      );
-    }
-  }
+  // The validated loader: the store's own serialization, the state machine's
+  // shape, and every round's snapshot commitment reproduced from its manifest
+  // and patch. A ledger edited or rolled back in place fails here.
+  const review = fs.existsSync(reviewPath)
+    ? await loadValidatedReview(storeRoot, reviewId)
+    : null;
   let publication = null;
   try {
     // Canonical bytes, the stored-ledger schema, and the review_id inside are

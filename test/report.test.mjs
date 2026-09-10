@@ -21,6 +21,7 @@ import {
 } from "../src/publication.mjs";
 import {
   PROJECTION_NOTICE,
+  PROJECTION_NOTICE_REMOTE_ONLY,
   loadReportLedgers,
   renderReviewReport,
   reportRevision,
@@ -324,7 +325,9 @@ test("the footer names the review, both revisions, the render time, the ledger p
   assert.match(markdown, /## Footer\n\n- Review: `rb-2026-09-01T000000-000Z-0badf00d`\n- Review ledger state_version: 6\n- Publication ledger revision: none\n- Report revision: `6`\n- Rendered at: 2026-09-10T12:00:00\.000Z\n- Ledger: `\/store\/reviews\/x\/review\.json`\n/);
   assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE}\n`));
   assert.match(PROJECTION_NOTICE, /projection of the ledger, not evidence/);
-  assert.match(PROJECTION_NOTICE, /sole source of truth/);
+  assert.match(PROJECTION_NOTICE, /The review ledger, and the publication ledger when present, remain the sole source of truth/);
+  assert.match(PROJECTION_NOTICE_REMOTE_ONLY, /projection of the ledger, not evidence/);
+  assert.match(PROJECTION_NOTICE_REMOTE_ONLY, /The publication ledger and its bound authorization remain the sole source of truth/);
   // Without a directory the path is store-relative rather than invented.
   assert.match(render(cleanInTwoRounds()), /- Ledger: `reviews\/rb-2026-09-01T000000-000Z-0badf00d\/review\.json`/);
 });
@@ -509,7 +512,9 @@ test("a remote-only publication renders from its publication and bound authoriza
   assert.equal(markdown.match(/Use the GitHub Codex, CI, and review-thread gates only\./g).length, 1);
   assert.match(markdown, new RegExp(`- Stored status \`MERGE_READY\` at revision ${ready.revision}; derived now: \`MERGE_READY\``));
   assert.match(markdown, new RegExp(`- Review ledger state_version: n/a \\(remote-only: no local review ledger\\)\\n- Publication ledger revision: ${ready.revision}\\n- Report revision: \`p${ready.revision}\`\\n- Rendered at: [^\\n]+\\n- Ledger: \`/store/reviews/x/publication\\.json\`, \`/store/reviews/x/remote-authorization\\.json\``));
-  assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE}\n`));
+  // The remote-only footer names the ledgers that were actually rendered.
+  assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE_REMOTE_ONLY}\n`));
+  assert.ok(!markdown.includes(PROJECTION_NOTICE));
 });
 
 // Before the first snapshot the gates have nothing to judge, and their null
@@ -783,6 +788,46 @@ test("a ledger the store reader rejects fails the render closed", async (t) => {
     return true;
   });
   assert.ok(!(await fsp.readdir(reviewDirectory(third))).some((name) => name.startsWith("report-")));
+});
+
+// The review ledger is admitted only as one core could have written: an edit
+// or rollback that keeps the id but changes the status, the version history,
+// or a round's snapshot commitment is refused before it can be combined with
+// a validated publication into a report that looks authoritative.
+test("a review ledger edited in place is refused as REVIEW_LEDGER_INVALID", async (t) => {
+  const state = await gatedFixture(t);
+  const reviewPath = path.join(reviewDirectory(state), "review.json");
+  const original = await fsp.readFile(reviewPath, "utf8");
+  const tamper = async (mutate) => {
+    const review = JSON.parse(original);
+    mutate(review);
+    // Written the way the store writes it, so the shape check, not the byte
+    // check, is what refuses it.
+    await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
+    await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+      assert.equal(error.code, "REVIEW_LEDGER_INVALID");
+      assert.equal(error.details.path, reviewPath);
+      return true;
+    });
+    return (await fsp.readdir(reviewDirectory(state))).filter((name) => name.startsWith("report-"));
+  };
+  assert.deepEqual(await tamper((review) => { review.status = "MERGED"; }), []);
+  assert.deepEqual(await tamper((review) => { review.state_version = review.history.length - 1; }), []);
+  assert.deepEqual(await tamper((review) => { review.rounds[0].snapshot_hash = "f".repeat(64); }), []);
+  assert.deepEqual(await tamper((review) => { review.rounds[0].head_sha = "0".repeat(40); }), []);
+  assert.deepEqual(await tamper((review) => { review.findings.push({ id: "F-9", severity: "major", status: "OPEN" }); review.resolutions.push({ finding_id: "F-8", disposition: "fixed" }); }), []);
+  // A rewrite that keeps the content but not the store's serialization is
+  // refused too: the ledger was touched by something other than the store.
+  await fsp.writeFile(reviewPath, JSON.stringify(JSON.parse(original)), { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+    assert.equal(error.code, "REVIEW_LEDGER_INVALID");
+    assert.match(error.message, /not the store's own serialization/);
+    return true;
+  });
+  // Restored byte for byte, the ledger renders again.
+  await fsp.writeFile(reviewPath, original, { mode: 0o600 });
+  const written = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
+  assert.equal(written.reused, false);
 });
 
 // Two renderers racing on one revision must leave one file, and each receipt
