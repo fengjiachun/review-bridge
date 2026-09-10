@@ -174,23 +174,31 @@ function remoteOnlySection() {
 // successor proof for the new head, and may fall back to FULL. So the
 // strategy and proof are rendered per round, from that round's prepared event
 // and its own successor record, never from another round's.
+//
+// A successor round's snapshot commitment covers its proof since the
+// commitment existed; a round from before it carries the proof as recorded
+// only, and every item of that proof is marked so the report relays the
+// record without vouching for it.
+const UNCOVERED_PROOF = "(as recorded; not covered by the snapshot commitment — this ledger predates it)";
 function roundStrategySections(review) {
   const history = review.history ?? [];
   return (review.rounds ?? []).flatMap((round) => {
     const prepared = eventFor(history, PREPARED_EVENTS, round.round);
     const mode = prepared?.mode ?? (round.successor == null ? "FULL" : "SUCCESSOR");
     const successor = round.successor;
+    const uncovered = successor != null && round.successor_delta_sha256 == null;
+    const item = (text) => (uncovered ? `- ${UNCOVERED_PROOF} ${text}` : `- ${text}`);
     return [
-      `#### Round ${round.round} strategy: ${code(mode)}`,
+      `#### Round ${round.round} strategy: ${code(mode)}${uncovered ? " (unverified proof)" : ""}`,
       successor == null
         ? `Reviewed as a full diff of ${code(round.base_sha)} → ${code(round.head_sha)}.`
         : [
-            `- Parent review: ${code(successor.parent_review_id)} (${code(successor.parent_reviewer_provider)})`,
-            `- Requirement matches the parent: ${successor.requirement_match === true ? "yes" : "no"}`,
-            `- Parent head → current head: ${code(successor.parent_head_sha)} → ${code(successor.current_head_sha)}`,
-            `- Delta: ${successor.delta_bytes ?? "n/a"} bytes, sha256 ${code(successor.delta_sha256)}`,
-            `- Files in the delta: ${list(successor.changed_files ?? [])}`,
-            `- Files deleted in the delta: ${list(successor.deleted_files ?? [])}`,
+            item(`Parent review: ${code(successor.parent_review_id)} (${code(successor.parent_reviewer_provider)})`),
+            item(`Requirement matches the parent: ${successor.requirement_match === true ? "yes" : "no"}`),
+            item(`Parent head → current head: ${code(successor.parent_head_sha)} → ${code(successor.current_head_sha)}`),
+            item(`Delta: ${successor.delta_bytes ?? "n/a"} bytes, sha256 ${code(successor.delta_sha256)}`),
+            item(`Files in the delta: ${list(successor.changed_files ?? [])}`),
+            item(`Files deleted in the delta: ${list(successor.deleted_files ?? [])}`),
           ].join("\n"),
     ];
   });

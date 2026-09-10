@@ -71,9 +71,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   hash, and the manifest records them -- so the gate's `snapshot_hash`
   vouches for the delta and a delta swapped afterwards makes the round
   unreproducible; a FULL round hashes as before. A successor round prepared
-  before this change carries no such commitment and is refused as
-  `ROUND_SNAPSHOT_UNREPRODUCIBLE`; a successor review still in flight across
-  the upgrade must be prepared again. Every reviewer- or author-supplied string is
+  before this change carries no such commitment: its hash is reproduced over
+  the round alone and the report renders its proof as recorded, the round's
+  strategy heading marked `unverified proof` and every item of the proof
+  marked as not covered by the snapshot commitment, so the report relays the
+  record without vouching for it. A round carrying part of the commitment,
+  or one that disagrees with its proof, is refused. A successor review still
+  in flight across the upgrade must be prepared again. Every reviewer- or author-supplied string is
   rendered as one escaped line or inside a fence longer than any backtick
   run it contains, so no finding title or rationale can open a heading,
   table row, or fence of its own. The

@@ -899,13 +899,6 @@ function successorFilesFromDelta(delta) {
 
 // The round fields snapshotHashFromReviewRound hashes or checks the type of.
 // A round lacking one is older than the function and cannot be reproduced.
-// The proof commitments a successor round's snapshot hash covers; a successor
-// round without them predates the commitment.
-const SUCCESSOR_COMMITMENT_INPUTS = [
-  ["successor_delta_sha256", (value) => typeof value === "string"],
-  ["successor_parent_head_sha", (value) => typeof value === "string"],
-  ["successor_current_head_sha", (value) => typeof value === "string"],
-];
 const SNAPSHOT_HASH_INPUTS = [
   ["changed_files", Array.isArray],
   ["deleted_files", Array.isArray],
@@ -1093,10 +1086,7 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
     // function's inputs existed -- worktree_clean above all -- cannot be
     // reproduced by the store at all, and is named as such rather than as a
     // damaged ledger; no second hash format is kept for it.
-    const unreproducible = [
-      ...SNAPSHOT_HASH_INPUTS,
-      ...(round.successor == null ? [] : SUCCESSOR_COMMITMENT_INPUTS),
-    ].filter(([field, ok]) => !ok(round[field]));
+    const unreproducible = SNAPSHOT_HASH_INPUTS.filter(([field, ok]) => !ok(round[field]));
     if (unreproducible.length > 0) {
       throw Object.assign(
         new Error(
@@ -1771,8 +1761,10 @@ async function snapshotHashFromReviewRound(
     throw new Error("review change size does not match its immutable patch");
   }
   // A successor round's commitment covers its proof. The round carries the
-  // proof's commitments beside the proof; a successor round without them
-  // predates this commitment and the store cannot reproduce it.
+  // proof's commitments beside the proof and they must equal it. A successor
+  // round with none of them predates the commitment: its hash is reproduced
+  // over the round alone, and the proof stays as recorded, uncovered; the
+  // report says so. A round with some of them is neither and is refused.
   let successor = null;
   if (round.successor != null) {
     const commitment = {
@@ -1780,8 +1772,22 @@ async function snapshotHashFromReviewRound(
       parent_head_sha: round.successor_parent_head_sha,
       current_head_sha: round.successor_current_head_sha,
     };
-    if (Object.values(commitment).some((value) => typeof value !== "string")) {
-      throw new Error("review round predates the successor commitment");
+    const recorded = Object.values(commitment).filter((value) => value != null).length;
+    if (recorded === 0) {
+      return snapshotDigest({
+        baseSha: round.base_sha,
+        headSha: round.head_sha,
+        requirement: review.requirement,
+        implementationScope: review.implementation_scope,
+        changedFiles: round.changed_files,
+        deletedFiles: round.deleted_files,
+        overlays: round.overlays,
+        worktreeClean: round.worktree_clean,
+        patch,
+      });
+    }
+    if (recorded < 3) {
+      throw new Error("review round's successor commitment is incomplete");
     }
     if (
       commitment.delta_sha256 !== round.successor.delta_sha256 ||
@@ -1903,7 +1909,8 @@ const ROUND_FIELDS = [
   // Absent on rounds older than successor reviews; null on a FULL round since.
   { field: "successor", describe: "null or a successor proof", optional: true, ok: nullOr((v) => recordDefect(v, SUCCESSOR_FIELDS, {}, "successor") == null) },
   // The proof's commitments the snapshot hash covers, present beside a proof
-  // written since the commitment existed.
+  // written since the commitment existed; a successor round without them
+  // predates it and renders its proof as recorded, uncovered.
   { field: "successor_delta_sha256", describe: "a digest", optional: true, ok: isDigest },
   { field: "successor_parent_head_sha", describe: "a commit", optional: true, ok: isSha },
   { field: "successor_current_head_sha", describe: "a commit", optional: true, ok: isSha },

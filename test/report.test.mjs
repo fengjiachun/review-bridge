@@ -397,7 +397,10 @@ test("a SUCCESSOR review renders its strategy and the delta it was reviewed as",
   const markdown = render(review);
   assert.match(markdown, /- Review strategy: `SUCCESSOR`, parent `rb-2026-08-31T000000-000Z-00parent`/);
   assert.doesNotMatch(markdown, /### Successor delta/);
-  assert.match(markdown, /#### Round 1 strategy: `SUCCESSOR`\n\n- Parent review: `rb-2026-08-31T000000-000Z-00parent` \(`CODEX_TASK`\)\n- Requirement matches the parent: yes\n- Parent head → current head: `b{40}` → `c{40}`\n- Delta: 321 bytes, sha256 `d{64}`\n- Files in the delta: `src\/b\.mjs`\n- Files deleted in the delta: `src\/old\.mjs`/);
+  // Without the commitment fields the round predates the successor
+  // commitment: the proof is relayed as recorded and every item says so.
+  const mark = "\\(as recorded; not covered by the snapshot commitment — this ledger predates it\\)";
+  assert.match(markdown, new RegExp(`#### Round 1 strategy: \`SUCCESSOR\` \\(unverified proof\\)\n\n- ${mark} Parent review: \`rb-2026-08-31T000000-000Z-00parent\` \\(\`CODEX_TASK\`\\)\n- ${mark} Requirement matches the parent: yes\n- ${mark} Parent head → current head: \`b{40}\` → \`c{40}\`\n- ${mark} Delta: 321 bytes, sha256 \`d{64}\`\n- ${mark} Files in the delta: \`src\\/b\\.mjs\`\n- ${mark} Files deleted in the delta: \`src\\/old\\.mjs\``));
   assert.match(markdown, /### Findings\n\nNo findings were recorded\./);
   assert.match(markdown, /\| 1 \| cccccccccccc \| [^|]+\| INITIAL_REVIEW_CLEAN \| [^|]+\| 3m 0s \|/);
   assert.match(markdown, /### Changes between rounds\n\nNo round followed another\./);
@@ -423,6 +426,9 @@ test("each round renders its own strategy and proof, so a successor first round 
           delta_bytes: 10,
           delta_sha256: "d".repeat(64),
         },
+        successor_delta_sha256: "d".repeat(64),
+        successor_parent_head_sha: BASE,
+        successor_current_head_sha: HEAD_ONE,
       }),
       round(2, HEAD_TWO, "2026-09-01T00:20:00.000Z"),
     ],
@@ -439,7 +445,9 @@ test("each round renders its own strategy and proof, so a successor first round 
   const second = markdown.indexOf("#### Round 2 strategy: `FULL`");
   assert.ok(first > 0 && second > first);
   const firstSection = markdown.slice(first, second);
+  assert.match(firstSection, /^#### Round 1 strategy: `SUCCESSOR`\n/);
   assert.match(firstSection, /- Parent head → current head: `a{40}` → `b{40}`\n- Delta: 10 bytes/);
+  assert.doesNotMatch(firstSection, /unverified|as recorded/);
   const secondSection = markdown.slice(second, markdown.indexOf("### Findings"));
   assert.match(secondSection, /^#### Round 2 strategy: `FULL`\n\nReviewed as a full diff of `a{40}` → `c{40}`\.\n\n$/);
   assert.doesNotMatch(secondSection, /Delta|Parent/);
@@ -1792,7 +1800,7 @@ test("a successor proof is bound to its round's head and base and to the parent'
 // manifest records the delta digest and the two heads, the hash is computed
 // over them, and the gate minted on a clean successor vouches for the delta.
 // A delta swapped afterwards, however consistently, leaves the round
-// unreproducible; a successor round without the commitment predates it.
+// unreproducible; a round carrying part of the commitment is refused.
 test("a successor round's snapshot commitment covers its proof, and a swapped delta is unreproducible", async (t) => {
   const state = await successorFixture(t);
   const directory = path.join(state.store, "reviews", state.successorId);
@@ -1839,24 +1847,83 @@ test("a successor round's snapshot commitment covers its proof, and a swapped de
     assert.match(error.details.reason, /round 1 snapshot_hash is not reproduced by its patch/);
     return true;
   });
-  // A successor round stripped of its commitment predates it, and is named
-  // as unreproducible rather than as a hash mismatch.
-  const stripped = JSON.parse(gated);
-  for (const key of ["successor_delta_sha256", "successor_parent_head_sha", "successor_current_head_sha"]) delete stripped.rounds[0][key];
-  const strippedManifest = JSON.parse(manifestOriginal);
-  for (const key of ["successor_delta_sha256", "successor_parent_head_sha", "successor_current_head_sha"]) delete strippedManifest[key];
+  // A round with part of the commitment is neither committed nor older than
+  // the commitment, and is refused.
+  const partial = JSON.parse(gated);
+  delete partial.rounds[0].successor_parent_head_sha;
+  const partialManifest = JSON.parse(manifestOriginal);
+  delete partialManifest.successor_parent_head_sha;
   await fsp.writeFile(deltaPath, deltaOriginal, { mode: 0o600 });
   await fsp.writeFile(proofPath, proofOriginal, { mode: 0o600 });
-  await fsp.writeFile(reviewPath, `${JSON.stringify(stripped, null, 2)}\n`, { mode: 0o600 });
-  await fsp.writeFile(manifestPath, `${JSON.stringify(strippedManifest, null, 2)}\n`, { mode: 0o600 });
+  await fsp.writeFile(reviewPath, `${JSON.stringify(partial, null, 2)}\n`, { mode: 0o600 });
+  await fsp.writeFile(manifestPath, `${JSON.stringify(partialManifest, null, 2)}\n`, { mode: 0o600 });
   await assert.rejects(writeReviewReport(state.store, state.successorId), (error) => {
-    assert.equal(error.code, "ROUND_SNAPSHOT_UNREPRODUCIBLE", error.message);
-    assert.deepEqual(error.details.missing, ["successor_delta_sha256", "successor_parent_head_sha", "successor_current_head_sha"]);
+    assert.equal(error.code, "REVIEW_LEDGER_INVALID", error.message);
+    assert.match(error.details.reason, /round 1: review round's successor commitment is incomplete/);
     return true;
   });
   await fsp.writeFile(reviewPath, gated, { mode: 0o600 });
   await fsp.writeFile(manifestPath, manifestOriginal, { mode: 0o600 });
   assert.equal((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).reused, true);
+});
+
+// A successor round prepared before the commitment existed carries no
+// commitment fields and a hash over the round alone. It still renders: the
+// hash is reproduced the older way, and the proof is relayed as recorded,
+// every item marked as uncovered. Nothing else about the report changes.
+test("a successor round older than the commitment renders with its proof marked as unverified", async (t) => {
+  const state = await successorFixture(t, { extraFile: "older.txt" });
+  const directory = path.join(state.store, "reviews", state.successorId);
+  const reviewPath = path.join(directory, "review.json");
+  const manifestPath = path.join(directory, "rounds", "1", "manifest.json");
+  const committed = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  const round = committed.rounds[0];
+  const patch = await fsp.readFile(path.join(directory, "rounds", "1", "patch.diff"));
+  // The hash the store computed before the commitment: the round's identity
+  // and its patch, no proof.
+  const older = crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        baseSha: round.base_sha,
+        headSha: round.head_sha,
+        requirement: committed.requirement,
+        implementationScope: committed.implementation_scope,
+        changedFiles: round.changed_files,
+        deletedFiles: round.deleted_files,
+        overlays: round.overlays,
+        worktreeClean: round.worktree_clean,
+      }),
+    )
+    .update(patch)
+    .digest("hex");
+  assert.notEqual(older, round.snapshot_hash);
+  const aged = JSON.parse(JSON.stringify(committed));
+  const agedManifest = JSON.parse(await fsp.readFile(manifestPath, "utf8"));
+  for (const target of [aged.rounds[0], agedManifest]) {
+    for (const key of ["successor_delta_sha256", "successor_parent_head_sha", "successor_current_head_sha"]) delete target[key];
+    target.snapshot_hash = older;
+  }
+  await fsp.writeFile(reviewPath, `${JSON.stringify(aged, null, 2)}\n`, { mode: 0o600 });
+  await fsp.writeFile(manifestPath, `${JSON.stringify(agedManifest, null, 2)}\n`, { mode: 0o600 });
+  const receipt = await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT });
+  const markdown = await fsp.readFile(receipt.path, "utf8");
+  const mark = "(as recorded; not covered by the snapshot commitment — this ledger predates it)";
+  assert.match(markdown, /#### Round 1 strategy: `SUCCESSOR` \(unverified proof\)\n/);
+  const section = markdown.slice(markdown.indexOf("#### Round 1 strategy"), markdown.indexOf("### Findings"));
+  const items = section.split("\n").filter((line) => line.startsWith("- "));
+  assert.equal(items.length, 6);
+  for (const line of items) assert.ok(line.startsWith(`- ${mark} `), line);
+  assert.match(section, new RegExp(`Delta: ${round.successor.delta_bytes} bytes, sha256 \`${round.successor.delta_sha256}\``));
+  // The report's identity is the ledger's revision, not the proof's standing.
+  assert.equal(receipt.revision, String(aged.state_version));
+  // The committed ledger renders the same proof without the mark.
+  await fsp.writeFile(reviewPath, `${JSON.stringify(committed, null, 2)}\n`, { mode: 0o600 });
+  await fsp.writeFile(manifestPath, `${JSON.stringify({ ...agedManifest, ...Object.fromEntries(["successor_delta_sha256", "successor_parent_head_sha", "successor_current_head_sha"].map((key) => [key, round[key]])), snapshot_hash: round.snapshot_hash }, null, 2)}\n`, { mode: 0o600 });
+  await fsp.rm(receipt.path);
+  const fresh = await fsp.readFile((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).path, "utf8");
+  assert.match(fresh, /#### Round 1 strategy: `SUCCESSOR`\n/);
+  assert.doesNotMatch(fresh, /unverified proof|as recorded/);
 });
 
 // git quotes a non-ASCII path in a diff header as octal escapes over its
