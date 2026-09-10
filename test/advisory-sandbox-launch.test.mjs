@@ -78,6 +78,9 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", r
   await fsp.writeFile(path.join(pluginSource, "server", "server.mjs"), "");
   if (!realReview) {
     await fsp.mkdir(checkout, { recursive: true });
+    // The ledger's repository_path is always a repository; the credential
+    // precheck reads its configuration.
+    spawnSync("git", ["-C", checkout, "init", "-q"]);
     await fsp.mkdir(path.join(store, "reviews", REVIEW_ID), { recursive: true });
     await fsp.writeFile(
       path.join(store, "reviews", REVIEW_ID, "review.json"),
@@ -111,7 +114,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", r
 // records derived from the probe's own argument, and plays the reviewer by
 // moving the staged ledger with the server's own submit — or, when asked,
 // by also leaving the kind of trace the copy-back must refuse.
-async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "" } = {}) {
+async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", leak = "", exit = "" } = {}) {
   const bin = path.join(f.root, "bin");
   await fsp.mkdir(bin, { recursive: true });
   const runner = path.join(bin, "fake-run.mjs");
@@ -124,10 +127,17 @@ const args = process.argv.slice(2);
 const bind = (dst) => args.map((a) => a.match(new RegExp("^type=bind,src=(.*),dst=" + dst + "(,readonly)?$"))).find(Boolean)?.[1];
 if (!args.includes("codex")) {
   const spec = JSON.parse(args[args.length - 1]);
+  const mounted = spec.mode === "mounted";
   const out = [];
-  for (const p of spec.absent) out.push({ kind: "path", path: p, present: p === process.env.FAKE_PRESENT });
-  const chain = [...spec.ancestors, spec.checkout];
-  spec.ancestors.forEach((p, i) => out.push({ kind: "ancestor", path: p, children: [path.basename(chain[i + 1])] }));
+  // A path the host mount brings in is present only when mounted; a path
+  // the image itself has is present both times.
+  for (const p of spec.absent) out.push({ kind: "path", path: p, present: (mounted && p === process.env.FAKE_PRESENT) || p === process.env.FAKE_IMAGE_PRESENT });
+  // What a real mount adds to an ancestor: the checkout's next segment below
+  // it, home directory or not.
+  const wayDown = (p) => path.relative(p, spec.checkout).split(path.sep)[0];
+  const imageChildren = (process.env.FAKE_BASELINE_CHILDREN || "").split(",").filter(Boolean);
+  spec.ancestors.forEach((p) => out.push({ kind: "ancestor", path: p, children: mounted ? [...imageChildren, wayDown(p), ...(process.env.FAKE_LEAK ? [process.env.FAKE_LEAK] : [])] : imageChildren }));
+  if (!mounted) { process.stdout.write(out.map((r) => JSON.stringify(r)).join("\\n") + "\\n"); process.exit(0); }
   out.push({ kind: "checkout-head", value: spawnSync("git", ["-C", spec.checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim() });
   out.push({ kind: "store-writable", value: true });
   out.push({ kind: "egress", via: "proxy", code: "000", exit: 56 });
@@ -171,6 +181,7 @@ if (!args.includes("codex")) {
   if (tamper === "snapshot") fs.appendFileSync(path.join(reviewDir, "rounds", "1", "manifest.json"), "\\n");
   if (tamper === "id") editLedger((l) => { l.advisory = false; });
   if (tamper === "sibling") { fs.mkdirSync(path.join(staged, "reviews", "rb-2026-01-01T000000-000Z-00000000"), { recursive: true }); fs.writeFileSync(path.join(staged, "reviews", "rb-2026-01-01T000000-000Z-00000000", "review.json"), "{}"); }
+  if (process.env.FAKE_EXIT) process.exit(Number(process.env.FAKE_EXIT));
 }
 `,
   );
@@ -200,6 +211,10 @@ esac
     FAKE_BIG: big ? "1" : "",
     FAKE_SERVER_ERROR: serverError,
     FAKE_PRESENT: present,
+    FAKE_IMAGE_PRESENT: imagePresent,
+    FAKE_BASELINE_CHILDREN: baselineChildren,
+    FAKE_LEAK: leak,
+    FAKE_EXIT: exit,
   };
 }
 
@@ -234,7 +249,7 @@ test("--help states the launch, the mounts, the egress allowlist, and the residu
 
 test("--dry-run prints the mount table and the container launch without Docker", async (t) => {
   const f = await fixture(t);
-  const result = launch(f, ["--review-id", REVIEW_ID, "--dry-run"], { PATH: "" });
+  const result = launch(f, ["--review-id", REVIEW_ID, "--dry-run"]);
   assert.equal(result.status, 0, result.stderr);
   const out = result.stdout;
   // Inputs derived from the ledger and the operator's config, not retyped.
@@ -303,6 +318,14 @@ test("--dry-run prints the mount table and the container launch without Docker",
   // argument: the host home and the credential paths are in it, and so is
   // the egress check.
   assert.match(out, / node -e /);
+  // Two probe runs: a baseline without the checkout mount, then the mounted one.
+  const probeLines = out.split("\n").filter((line) => line.includes("docker run --rm") && line.includes(" node -e "));
+  assert.equal(probeLines.length, 2);
+  assert.match(out, /"mode":"baseline"/);
+  assert.match(out, /"mode":"mounted"/);
+  assert.equal((probeLines[0].match(/ --mount '?type=bind,/g) ?? []).length, 5);
+  assert.doesNotMatch(probeLines[0], new RegExp(`src=${f.checkout},`));
+  assert.equal((probeLines[1].match(/ --mount '?type=bind,/g) ?? []).length, 6);
   const spec = probeSpec(out);
   assert.ok(spec.absent.includes(`${f.home}/.codex/auth.json`));
   assert.ok(spec.absent.includes(`${f.home}/.ssh`));
@@ -323,12 +346,12 @@ test("--dry-run prints the mount table and the container launch without Docker",
 // The probe's JSON argument, as the dry run prints it (single-quoted, after
 // the program text).
 function probeSpec(out) {
-  return JSON.parse(out.match(/'(\{"absent":[^\n]*\})'/)[1]);
+  return JSON.parse(out.match(/'(\{"mode":"mounted","absent":[^\n]*\})'/)[1]);
 }
 
 test("a checkout path with a space stays one path through the mount and the probe", async (t) => {
   const f = await fixture(t, { checkoutName: "My Projects/review bridge" });
-  const result = launch(f, ["--review-id", REVIEW_ID, "--dry-run"], { PATH: "" });
+  const result = launch(f, ["--review-id", REVIEW_ID, "--dry-run"]);
   assert.equal(result.status, 0, result.stderr);
   assert.match(
     result.stdout,
@@ -481,9 +504,87 @@ test("a call the server answered with an error is not a failed call; one nobody 
     /criterion 1 MCP calls completed inside the container: PASS — .*read_snapshot_file 0\/1.*; 1 of 1 failed call\(s\) answered by the server with an error \("git show failed \(128\): fatal: path 'nope\.js' does not exist in 'abc'"\)/,
   );
   const g = await fixture(t, { realReview: true });
+  const hostBefore = await fsp.readFile(path.join(g.store, "reviews", g.reviewId, "review.json"));
   result = launch(g, ["--review-id", g.reviewId], await fakeDocker(g, { serverError: "unexplained" }));
   assert.equal(result.status, 1, result.stdout.slice(-2000));
   assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: FAIL — .*; 1 of 2 failed call\(s\) answered by the server with an error \(.*\), 1 unexplained/);
+  // The reviewer did submit into the staged store, but a run with an
+  // unexplained failure must not advance the host ledger: a REVIEW_SUBMITTED
+  // ledger could not be launched again.
+  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: FAIL — refused — pre-copy criteria failed: 1 unexplained failed MCP call\(s\); host store unwritten/);
+  assert.deepEqual(await fsp.readFile(path.join(g.store, "reviews", g.reviewId, "review.json")), hostBefore);
+  assert.equal((await loadReview(g.store, g.reviewId)).status, "WAITING_FOR_REVIEW");
+});
+
+test("a nonzero codex exit leaves the host ledger untouched even when the staged ledger holds a verdict", async (t) => {
+  const f = await fixture(t, { realReview: true });
+  const hostBefore = await fsp.readFile(path.join(f.store, "reviews", f.reviewId, "review.json"));
+  const result = launch(f, ["--review-id", f.reviewId], await fakeDocker(f, { exit: "3" }));
+  assert.equal(result.status, 3, result.stdout.slice(-2000));
+  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: FAIL — refused — pre-copy criteria failed: codex exited 3; host store unwritten/);
+  assert.deepEqual(await fsp.readFile(path.join(f.store, "reviews", f.reviewId, "review.json")), hostBefore);
+  const scratch = result.stdout.match(/^scratch (.+)$/m)[1];
+  t.after(() => fsp.rm(scratch, { recursive: true, force: true }));
+  assert.equal((await loadReview(path.join(scratch, "store"), f.reviewId)).status, "REVIEW_SUBMITTED");
+});
+
+test("the boundary is judged against the unmounted image: image directories pass, host leaks fail", async (t) => {
+  // An ancestor the image populates (a /usr-shaped one) passes when the mount
+  // adds exactly the next name; a path the image itself has is not a leak.
+  const f = await fixture(t, { realReview: true });
+  let result = launch(f, ["--review-id", f.reviewId], await fakeDocker(f, { baselineChildren: "bin,lib,share", imagePresent: "/root/.ssh" }));
+  assert.equal(result.status, 0, result.stdout.slice(-2500));
+  assert.match(result.stdout, /criterion 2 host filesystem absent: PASS — .*present: \/root\/\.ssh \(in the image\); checkout ancestors against the unmounted baseline: .* over 3 in the image/);
+  // Each ancestor gained exactly the checkout's next segment below it.
+  assert.match(result.stdout, new RegExp(`${path.dirname(f.checkout)}: \\+${path.basename(f.checkout)} over 3 in the image`));
+  // A name the mount added beside the way down is a leak.
+  const g = await fixture(t, { realReview: true });
+  result = launch(g, ["--review-id", g.reviewId], await fakeDocker(g, { leak: "stray" }));
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, /changed by more than the way down to the checkout: added .*stray.*, expected only /);
+  assert.doesNotMatch(result.stdout, /mcp: /);
+});
+
+// A PATH with git on it and nothing else, so a run that reaches Docker fails
+// with the Docker message and one that does not never mentions it.
+async function gitOnlyPath(t) {
+  const bin = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-git-only-"));
+  t.after(() => fsp.rm(bin, { recursive: true, force: true }));
+  const git = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+  await fsp.symlink(git, path.join(bin, "git"));
+  return bin;
+}
+
+test("a checkout whose Git configuration carries a credential is refused before Docker is touched", async (t) => {
+  const PATH = await gitOnlyPath(t);
+  const f = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", f.checkout, "config", "http.https://github.com/.extraheader", "AUTHORIZATION: basic c2VjcmV0"]);
+  let result = launch(f, ["--review-id", f.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /Git configuration carries a credential \(http\.https:\/\/github\.com\/\.extraheader\)/);
+  assert.doesNotMatch(result.stderr, /c2VjcmV0|Docker is not available/);
+  const g = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", g.checkout, "remote", "set-url", "origin", "https://user:t0k3n@example.com/x.git"]);
+  result = launch(g, ["--review-id", g.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /Git configuration carries a credential \(remote\.origin\.url\)/);
+  assert.doesNotMatch(result.stderr, /t0k3n/);
+  // A token standing as the user of an https URL is a credential; the
+  // fixture's own `ssh://git@github.com/…` remote is a username and passes.
+  const h = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", h.checkout, "remote", "set-url", "origin", "https://ghp_t0k3n@github.com/x/y.git"]);
+  result = launch(h, ["--review-id", h.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /carries a credential \(remote\.origin\.url\)/);
+  const i = await fixture(t, { realReview: true });
+  result = launch(i, ["--review-id", i.reviewId, "--dry-run"]);
+  assert.equal(result.status, 0, result.stderr);
+  // git itself unavailable: the check fails closed rather than passing by
+  // not running.
+  const j = await fixture(t, { realReview: true });
+  result = launch(j, ["--review-id", j.reviewId, "--dry-run"], { PATH: "" });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /cannot read the author checkout's Git configuration/);
 });
 
 test("a host credential directory present inside the container fails the boundary before the reviewer starts", async (t) => {
@@ -511,7 +612,7 @@ test("a direct egress answer with any HTTP status fails the boundary before the 
 
 test("the launcher fails closed when Docker is unavailable", async (t) => {
   const f = await fixture(t);
-  const result = launch(f, ["--review-id", REVIEW_ID], { PATH: "" });
+  const result = launch(f, ["--review-id", REVIEW_ID], { PATH: await gitOnlyPath(t) });
   assert.equal(result.status, 2, result.stdout);
   assert.match(result.stderr, /Docker is not available .*; the advisory member has no other launch/);
 });

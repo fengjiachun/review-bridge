@@ -242,6 +242,44 @@ async function marketplaceFromCodexConfig() {
   return source ? source.groups.path : null;
 }
 
+// Keys of the checkout's local and worktree Git configuration whose name ends
+// in `.extraheader` or whose value is a URL carrying a credential. Values are
+// never printed.
+function gitConfigCredentialKeys(repository) {
+  const keys = [];
+  for (const scope of ["--local", "--worktree"]) {
+    const result = spawnSync("git", ["-C", repository, "config", scope, "--list", "--null"], {
+      encoding: "utf8",
+    });
+    // The local scope always reads in a repository; a failure there is git
+    // itself failing, and the check must not pass by not running. The
+    // worktree scope exists only with extensions.worktreeConfig.
+    if (result.error || (result.status !== 0 && scope === "--local")) {
+      fail(
+        `cannot read the author checkout's Git configuration: ${result.error?.message ?? result.stderr.trim()}`,
+      );
+    }
+    if (result.status !== 0) continue;
+    for (const entry of result.stdout.split("\0")) {
+      if (!entry) continue;
+      const newline = entry.indexOf("\n");
+      const key = newline === -1 ? entry : entry.slice(0, newline);
+      const value = newline === -1 ? "" : entry.slice(newline + 1);
+      // Userinfo is a credential when it carries a password in any scheme
+      // (`user:pass@`) or appears at all in an http(s) URL, where a token can
+      // stand as the user; `ssh://git@…` is a username and no secret.
+      if (
+        /\.extraheader$/i.test(key) ||
+        /:\/\/[^/\s@]*:[^/\s@]*@/.test(value) ||
+        /^https?:\/\/[^/\s@]+@/i.test(value)
+      ) {
+        keys.push(key);
+      }
+    }
+  }
+  return [...new Set(keys)];
+}
+
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: "utf8", ...options });
   if (result.error) throw result.error;
@@ -330,6 +368,16 @@ async function resolveInputs(options) {
     if (target.includes(",")) {
       fail(`${target} contains a comma, which docker's --mount syntax cannot carry`);
     }
+  }
+  // The checkout's .git/config rides into the container with the mount, and
+  // two things it commonly carries are host secrets: an
+  // `http.<url>.extraheader` such as actions/checkout writes (a bearer token),
+  // and a remote URL with a user in it. Refused up front, key names only.
+  const credentialKeys = gitConfigCredentialKeys(repository);
+  if (credentialKeys.length > 0) {
+    fail(
+      `the author checkout's Git configuration carries a credential (${credentialKeys.join(", ")}); the checkout is mounted whole, so clear it or use a checkout without it`,
+    );
   }
   // Again on the real paths, so a symlink such as /tmp → /private/tmp cannot
   // slip a refused prefix past the check.
@@ -531,7 +579,7 @@ function bindMount([source, target, mode]) {
   return `type=bind,src=${source},dst=${target}${mode === "ro" ? ",readonly" : ""}`;
 }
 
-function containerArgs({ mounts, volume }, network, extra = []) {
+function containerArgs({ mounts, volume }, network, extra = [], { withoutCheckout = false } = {}) {
   const args = [
     "run",
     "--rm",
@@ -545,6 +593,7 @@ function containerArgs({ mounts, volume }, network, extra = []) {
     `${CONTAINER_WORK}:rw,mode=1777`,
   ];
   for (const mount of mounts) {
+    if (withoutCheckout && mount[0] === mount[1]) continue;
     args.push("--mount", bindMount(mount));
   }
   args.push(
@@ -651,6 +700,7 @@ for (const target of spec.ancestors) {
   try { children = fs.readdirSync(target); } catch {}
   emit({ kind: "ancestor", path: target, children });
 }
+if (spec.mode === "baseline") process.exit(0);
 const head = spawnSync("git", ["-C", spec.checkout, "rev-parse", "HEAD"], { encoding: "utf8" });
 emit({ kind: "checkout-head", value: ((head.stdout || "") + (head.stderr || "")).trim() });
 let writable = false;
@@ -674,35 +724,73 @@ emit({ kind: "codex-version", value: (spawnSync("codex", ["--version"], { encodi
 emit({ kind: "uid", value: process.getuid() });
 `;
 
-function probeArgs(inputs) {
+// mode "baseline" runs in a container without the checkout mount and answers
+// only the path and ancestor records; mode "mounted" runs with it and answers
+// everything. The boundary is judged on the difference between the two.
+function probeArgs(inputs, mode) {
   const { absent, ancestors } = hostPathProbe(inputs);
   return [
     "node",
     "-e",
     PROBE_PROGRAM,
-    JSON.stringify({ absent, ancestors, checkout: inputs.repository, store: CONTAINER_STORE }),
+    JSON.stringify({ mode, absent, ancestors, checkout: inputs.repository, store: CONTAINER_STORE }),
   ];
 }
 
-function evaluateBoundary(output, inputs) {
+function parseProbeRecords(output) {
+  const records = [];
+  for (const line of output.split("\n")) {
+    try {
+      records.push(JSON.parse(line));
+    } catch {
+      // not a record
+    }
+  }
+  return records;
+}
+
+// The image has directories of its own — /root with its dotfiles, /usr with
+// everything under it — so neither "absent" nor "holds exactly one entry" can
+// be judged from the mounted container alone. The baseline container, same
+// image and no checkout mount, says what the image contributes; a sensitive
+// path is a leak when the baseline lacks it and the mounted container has
+// it, and an ancestor is clean when the mount added exactly the one name
+// that leads down to the checkout and removed nothing.
+function evaluateBoundary(baselineOutput, mountedOutput, inputs) {
   const { ancestors } = hostPathProbe(inputs);
+  // The one name an ancestor may gain: the checkout's next path segment below
+  // it (not the next probed ancestor, which skips the home directory).
+  const wayDown = (ancestor) => path.relative(ancestor, inputs.repository).split(path.sep)[0];
+  const baseline = { paths: new Map(), ancestors: new Map() };
+  for (const record of parseProbeRecords(baselineOutput)) {
+    if (record.kind === "path") baseline.paths.set(record.path, record.present);
+    else if (record.kind === "ancestor") baseline.ancestors.set(record.path, record.children);
+  }
   const failures = [];
   const facts = { absent: [], present: [], children: [], egressProxied: null, egressDirect: null };
-  for (const line of output.split("\n")) {
-    let record;
-    try {
-      record = JSON.parse(line);
-    } catch {
-      continue;
-    }
+  if (baseline.paths.size + baseline.ancestors.size === 0) {
+    failures.push("the baseline probe produced no records");
+  }
+  for (const record of parseProbeRecords(mountedOutput)) {
     if (record.kind === "path") {
-      (record.present ? facts.present : facts.absent).push(record.path);
-      if (record.present) failures.push(`host path present inside the container: ${record.path}`);
+      const inImage = baseline.paths.get(record.path) === true;
+      if (!record.present) facts.absent.push(record.path);
+      else if (inImage) facts.present.push(`${record.path} (in the image)`);
+      else {
+        facts.present.push(record.path);
+        failures.push(`host path present inside the container: ${record.path}`);
+      }
     } else if (record.kind === "ancestor") {
-      const names = record.children ?? [];
-      facts.children.push(`${record.path}: ${names.join(", ") || "(unreadable)"}`);
-      if (!(ancestors.includes(record.path) && names.length === 1)) {
-        failures.push(`${record.path} holds more than the way down to the checkout: ${names.join(", ")}`);
+      const before = new Set(baseline.ancestors.get(record.path) ?? []);
+      const after = new Set(record.children ?? []);
+      const added = [...after].filter((name) => !before.has(name)).sort();
+      const removed = [...before].filter((name) => !after.has(name)).sort();
+      const expected = wayDown(record.path);
+      facts.children.push(`${record.path}: +${added.join(",") || "∅"}${removed.length ? ` −${removed.join(",")}` : ""} over ${before.size} in the image`);
+      if (!(ancestors.includes(record.path) && added.length === 1 && added[0] === expected && removed.length === 0)) {
+        failures.push(
+          `${record.path} changed by more than the way down to the checkout: added ${added.join(", ") || "nothing"}${removed.length ? `, removed ${removed.join(", ")}` : ""}, expected only ${expected}`,
+        );
       }
     } else if (record.kind === "egress") {
       const summary = `${record.code} curl-exit=${record.exit}`;
@@ -982,7 +1070,12 @@ async function main() {
     "-c",
     `cp -a ${CONTAINER_CODEX_HOME}/sessions /out/sessions 2>/dev/null; chown -R ${uid ?? "0:0"} /out/sessions 2>/dev/null; true`,
   ];
-  const boundaryRun = [...containerArgs(table, network, user), IMAGE, ...probeArgs(inputs)];
+  const baselineRun = [
+    ...containerArgs(table, network, user, { withoutCheckout: true }),
+    IMAGE,
+    ...probeArgs(inputs, "baseline"),
+  ];
+  const boundaryRun = [...containerArgs(table, network, user), IMAGE, ...probeArgs(inputs, "mounted")];
   const codexRun = [
     ...containerArgs(table, network, [...user, "--name", codexName]),
     IMAGE,
@@ -1008,6 +1101,7 @@ async function main() {
     printCommand("docker", networkCreate);
     printCommand("docker", proxyRun);
     printCommand("docker", proxyConnect);
+    printCommand("docker", baselineRun);
     printCommand("docker", boundaryRun);
     printCommand("docker", codexRun);
     process.stdout.write("  (codex stdin is closed: the container is started with stdin ignored)\n");
@@ -1062,12 +1156,15 @@ async function main() {
       if (Date.now() > proxyDeadline) throw new Error("the egress proxy did not start");
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    // The boundary is measured before the reviewer runs, by a shell with no
-    // model in it, and the launch stops here if it does not hold.
+    // The boundary is measured before the reviewer runs, by a probe with no
+    // model in it: once without the checkout mount for what the image itself
+    // holds, once with it, and the launch stops here if the difference is
+    // more than the checkout.
+    const baselineProbe = run("docker", baselineRun);
     const probe = run("docker", boundaryRun);
-    boundary = evaluateBoundary(probe.stdout, inputs);
-    if (probe.status !== 0 || boundary.failures.length > 0) {
-      process.stderr.write(`${probe.stderr}${probe.stdout}`);
+    boundary = evaluateBoundary(baselineProbe.stdout, probe.stdout, inputs);
+    if (baselineProbe.status !== 0 || probe.status !== 0 || boundary.failures.length > 0) {
+      process.stderr.write(`${baselineProbe.stderr}${probe.stderr}${probe.stdout}`);
       throw new Error(
         `the container boundary did not hold:\n  ${boundary.failures.join("\n  ") || `probe exited ${probe.status}`}`,
       );
@@ -1110,13 +1207,24 @@ async function main() {
   const failedCalls = started - completed;
   const answeredErrors = failedCalls > 0 ? await serverErrorAnswers(path.join(scratch, "sessions")) : [];
   const explained = Math.min(failedCalls, answeredErrors.length);
-  // The copy-back: check what the container left in the staged store at the
-  // file level, then replay the verdict through the host's own submit_review
-  // under the host review's lock and keep the replay only if it equals the
-  // staged ledger; otherwise refuse with the reasons.
-  const inspection = await inspectStagedStore(inputs, stage);
+  // The copy-back happens only after criteria 1 and 2 and the exit code have
+  // passed: a host ledger advanced to REVIEW_SUBMITTED or CLEAN cannot be
+  // launched again, so a run with an unexplained failure or a nonzero exit
+  // must leave it where it was. Then: check what the container left in the
+  // staged store at the file level, replay the verdict through the host's own
+  // submit_review under the host review's lock, and keep the replay only if
+  // it equals the staged ledger; otherwise refuse with the reasons.
+  const mcpOk = started > 0 && completed + explained === started;
+  const preCopyFailures = [
+    ...(codexExit === 0 ? [] : [`codex exited ${codexExit}`]),
+    ...(mcpOk ? [] : [failedCalls > explained ? `${failedCalls - explained} unexplained failed MCP call(s)` : "no reviewer MCP call completed"]),
+    ...(boundary.failures.length === 0 ? [] : ["the boundary did not hold"]),
+  ];
+  const inspection = preCopyFailures.length > 0 ? { reasons: [], ledgerChanged: false } : await inspectStagedStore(inputs, stage);
   let copyBackOutcome;
-  if (inspection.reasons.length > 0) {
+  if (preCopyFailures.length > 0) {
+    copyBackOutcome = { ok: false, detail: `refused — pre-copy criteria failed: ${preCopyFailures.join("; ")}; host store unwritten, staged copy kept at ${stage.staged}` };
+  } else if (inspection.reasons.length > 0) {
     copyBackOutcome = { ok: false, detail: `copy-back refused — ${inspection.reasons.join("; ")}; host store unwritten, staged copy kept at ${stage.staged}` };
   } else if (!inspection.ledgerChanged) {
     copyBackOutcome = { ok: false, detail: "nothing to copy back — the staged ledger is unchanged, so no verdict was recorded" };
@@ -1142,7 +1250,7 @@ async function main() {
   const criteria = [
     [
       "1 MCP calls completed inside the container",
-      started > 0 && completed + explained === started,
+      mcpOk,
       reviewerCalls.length === 0
         ? "no reviewer MCP call in the transcript"
         : reviewerCalls
@@ -1155,7 +1263,7 @@ async function main() {
     [
       "2 host filesystem absent",
       boundary.failures.length === 0,
-      `absent: ${boundary.facts.absent.join(", ")}${boundary.facts.children.length ? `; checkout ancestors hold only the way down: ${boundary.facts.children.join("; ")}` : ""}`,
+      `absent (and not in the image): ${boundary.facts.absent.join(", ")}${boundary.facts.present.length ? `; present: ${boundary.facts.present.join(", ")}` : ""}${boundary.facts.children.length ? `; checkout ancestors against the unmounted baseline: ${boundary.facts.children.join("; ")}` : ""}`,
     ],
     ["3 validated verdict copied back to the host store", copyBackOutcome.ok, copyBackOutcome.detail],
   ];

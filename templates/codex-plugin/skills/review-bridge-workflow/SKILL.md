@@ -818,7 +818,13 @@ for inspection. The host home's sensitive contents are absent rather than
 denied: before the reviewer starts, the launcher's own probe reports `absent`
 for `~/.ssh`, `~/.codex` and its `auth.json`, `~/Library`, `~/.gnupg`,
 `~/.aws`, `/root/.ssh`, and the store, and the launch stops if any of them is
-present. The container is the only sandbox. Inside it the reviewer
+present. Absent is judged against the same image without the checkout mount,
+so a directory the image itself carries is not read as the host's, and each
+ancestor of the checkout may gain exactly the one name that leads down to it.
+The launcher also refuses, before anything is started, a checkout whose Git
+configuration carries a credential — an `http.<url>.extraheader` such as
+`actions/checkout` writes, or a remote URL with a user in it — because the
+checkout's `.git/config` rides into the container with the mount. The container is the only sandbox. Inside it the reviewer
 runs with `--sandbox danger-full-access`, because Codex's nested bubblewrap
 does not start under Docker's default confinement, and relaxing that
 confinement to fit a second sandbox inside would weaken the one boundary that

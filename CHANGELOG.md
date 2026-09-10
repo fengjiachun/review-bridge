@@ -51,10 +51,16 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   contents (`~/.ssh`, `~/.codex` and its `auth.json`, `~/Library`, `~/.gnupg`,
   `~/.aws`, `/root/.ssh`, the store) are absent and stops the launch if not
   (the home directory itself is not probed: `/root` is a directory of the
-  base image); on exit the launcher prints the three criteria it verified (MCP calls
+  base image), judged against the same image run without the checkout mount
+  so that what the image carries is never read as the host's; a checkout
+  whose Git configuration carries a credential (`.extraheader`, a remote URL
+  with a user) is refused before anything starts; on exit the launcher prints the three criteria it verified (MCP calls
   completed inside the container, host filesystem absent, validated verdict
   copied back to the host store), the guardian's verdict per call, and the
-  proxy's egress log, and exits nonzero when a criterion fails. The probe
+  proxy's egress log, and exits nonzero when a criterion fails; the copy-back
+  runs only when the first two criteria and codex's exit code have passed, so
+  a run with an unexplained failure never advances a host ledger it could not
+  launch again. The probe
   answers in JSON records rather than space-split text, so a path with a
   space in it is one path (Codex's round-one P2). It fails closed, exit 2,
   when Docker is unavailable or any mount source is missing, refuses a

@@ -450,6 +450,17 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the host home's sensitive contents are absent rather than denied",
       /host home's sensitive contents are absent rather than denied/,
     ],
+    // Codex round four on #125: "absent" and "exactly one entry" cannot be
+    // judged from the mounted container alone (the image has /root, /usr…),
+    // and the checkout's own .git/config can carry a token.
+    [
+      "absence is judged against the unmounted image",
+      /judged against the same image without the checkout mount/,
+    ],
+    [
+      "a checkout carrying a Git credential is refused before launch",
+      /refuses, before anything is started, a checkout whose Git configuration carries a credential/,
+    ],
     [
       "the credential is a read-only bind mount, never an image layer",
       /`auth\.json` as a read-only bind mount, never copied into an image layer/,
