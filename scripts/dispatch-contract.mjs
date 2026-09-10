@@ -472,9 +472,41 @@ export const HERMES_DISPATCH_CONTRACT = {
       "the reviewer request is the whole handoff, binding included",
       /Independently review Review Bridge task `<review_id>` using the packaged Hermes reviewer skill\. Require `reviewer_provider: HERMES`, follow the review strategy, and submit every actionable finding\./,
     ],
+    ["chat -q answers no prompt itself", /`chat -q` does not auto-approve tool prompts/],
+    // What makes the unattended claim true for this runtime, measured on
+    // 2026-09-10: Hermes gates an MCP call behind its approval prompt only on
+    // a `trust: untrusted` server, and the packaged snippet names `trust:
+    // full`. Losing the key, or the sentence tying the claim to it, leaves
+    // "may run unattended" resting on a default Hermes documents as
+    // backward compatibility.
     [
-      "an unattended launch can stall on an approval prompt",
-      /`chat -q` does not auto-approve tool prompts/,
+      "the unattended launch rests on trust: full in the packaged snippet",
+      /rests on is one key in the packaged reviewer snippet: `trust: full`/,
+    ],
+    [
+      "an MCP call is gated only on an untrusted server",
+      /only on a server configured `trust: untrusted`/,
+    ],
+    [
+      "the gate was shown to fire under the same launch when the server is untrusted",
+      /marked `trust: untrusted` the same call raised the prompt/,
+    ],
+    // The stdin redirect carries its reason: a prompt that fires anyway reads
+    // end-of-file and is denied at once, so the launch runs to its exit.
+    [
+      "stdin is closed on the launch",
+      /Redirect stdin from `\/dev\/null`, as both launch lines here do/,
+    ],
+    [
+      "a prompt on a closed stdin is denied rather than waited on",
+      /reads end-of-file and is denied at once instead of waiting/,
+    ],
+    // A process at a prompt has not exited, so the replacement rule cannot
+    // rescue it, and a replacement meets the same prompt: the approval has
+    // to be settled by configuration, not by a keyboard.
+    [
+      "a launch at a prompt has not exited and is not replaced",
+      /sitting at a prompt has not exited, so the replacement rule does not fire for it/,
     ],
     [
       "the session id round two resumes with is captured",
@@ -514,8 +546,8 @@ export const HERMES_DISPATCH_CONTRACT = {
     // neither hand it the reviewer request nor reach the wait while it blocks.
     [
       "match",
-      /```bash\n *hermes -p <reviewer-profile> chat -q '/,
-      "launch is not the non-interactive single-query form",
+      /```bash\n *hermes -p <reviewer-profile> chat -q '<the reviewer request below>' < \/dev\/null/,
+      "launch is not the non-interactive single-query form with stdin closed",
     ],
     [
       "doesNotMatch",
@@ -525,8 +557,8 @@ export const HERMES_DISPATCH_CONTRACT = {
     // Round two resumes the same instance, and needs a runnable form for it.
     [
       "match",
-      /```bash\n *hermes -p <reviewer-profile> chat --resume <session-id> -q '/,
-      "round-two resume form",
+      /```bash\n *hermes -p <reviewer-profile> chat --resume <session-id> -q '<rereview request>' < \/dev\/null/,
+      "round-two resume form with stdin closed",
     ],
   ],
 };
@@ -575,6 +607,21 @@ export const DEEPSEEK_HARNESS_DISPATCH_CONTRACT = {
     [
       "no flag redirects the workspace root",
       /[Nn]o flag that redirects the workspace root/,
+    ],
+    // What makes the unattended claim true for this runtime: an `ask` with
+    // no answerer fails closed at once, and the MCP client registers none,
+    // so no launch of this form waits at a prompt.
+    [
+      "the headless runner never sits at a prompt",
+      /never sits at an approval prompt/,
+    ],
+    [
+      "an ask with no answerer fails closed at once",
+      /fails closed at once — rejected, not waited on/,
+    ],
+    [
+      "the MCP client registers no approval listener",
+      /registers the seven tools with no such listener/,
     ],
   ],
   structural: [

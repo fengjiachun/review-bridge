@@ -229,8 +229,18 @@ directory.
 
 This launch may run unattended; it needs no operator at the keyboard: the
 headless runner takes its one task from the command line and runs to its
-exit. Review Bridge records the review's `DEEPSEEK_HARNESS` binding; it
-observes nothing about how the session was started, and this section adds no
+exit, and it never sits at an approval prompt. DeepSeek Harness routes a tool
+call to its approval seam only when a pre-execute listener answers `ask`; its
+MCP client registers the seven tools with no such listener, and when a
+listener does answer `ask` under the headless runner the seam fails closed at
+once — rejected, not waited on — because no answerer is composed there (read
+from the source). Measured on 2026-09-10 under this launch:
+`list_pending_reviews` completed, the run exited 0 after 42 s, and stderr
+stayed empty. A launch waiting on an answer would not have exited and would
+not be replaced; this runtime does not wait.
+
+Review Bridge records the review's `DEEPSEEK_HARNESS` binding; it observes
+nothing about how the session was started, and this section adds no
 mechanism that would. Local autonomous task creation still accepts
 `CODEX_TASK` dispatch only. The `CLAUDE_DESKTOP` boundary is unchanged, and
 nothing above narrows it: never launch, script, or otherwise programmatically

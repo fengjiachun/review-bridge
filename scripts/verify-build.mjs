@@ -799,6 +799,7 @@ assert.deepEqual(Object.keys(hermesReviewerServer).sort(), [
   "env",
   "timeout",
   "tools",
+  "trust",
 ]);
 assert.equal(hermesReviewerServer.command, "node");
 assert.deepEqual(hermesReviewerServer.args, [
@@ -814,6 +815,7 @@ assert.deepEqual(hermesReviewerServer.env, {
 assert.equal(hermesReviewerServer.enabled, true);
 assert.equal(hermesReviewerServer.timeout, 300);
 assert.equal(hermesReviewerServer.connect_timeout, 60);
+assert.equal(hermesReviewerServer.trust, "full");
 assert.deepEqual(Object.keys(hermesReviewerServer.tools).sort(), [
   "include",
   "prompts",

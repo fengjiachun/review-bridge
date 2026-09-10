@@ -28,15 +28,32 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   creates exactly the concurrent pair the first bar forbids; a HERMES
   round-one replacement is a fresh instance, whose `session_id:` is the one
   round two resumes. Both launches may run unattended under the 2026-09-04
-  dispatch ruling, each section speaking for its own launch only, and the
-  "operator-present manual flow" framing is gone from both sections and both
-  packaged READMEs. `SHARED_REQUIREMENTS` in `scripts/dispatch-contract.mjs`
-  drops the launch count and the operator-present anchor and pins the two
-  bars, the replacement rule and its exit judge, the unattended clearance,
-  and the unchanged `CLAUDE_DESKTOP` boundary, and both provider contracts
-  refuse the count-style and operator-present wordings on their own
-  sections; the round-two anchors are per provider, because the two
-  runtimes' round two differ. The `CODEX_TASK` section and the
+  dispatch ruling, each section speaking for its own launch only, and each
+  states what its claim rests on, measured on 2026-09-10. For HERMES that is
+  the packaged reviewer snippet's new `trust: full` on the
+  `review-bridge-reviewer` server: Hermes routes an MCP call through its
+  approval prompt only on a `trust: untrusted` server, so none of the seven
+  Review Bridge calls is gated (`list_pending_reviews` completed in 0.4 s
+  under the launch, and with the server marked untrusted the same call raised
+  the prompt and was denied without running); the HERMES launch lines now
+  redirect stdin from `/dev/null`, so a prompt that fires anyway is denied at
+  once rather than waited on, and the section says that a launch sitting at a
+  prompt has not exited and is not replaced, which is why the approval is
+  settled by configuration. For DeepSeek Harness it is the approval seam
+  failing closed at once when no answerer is composed, with the MCP client
+  registering no such listener, and the headless run completing the same
+  call with exit 0 and an empty stderr. The "operator-present manual flow"
+  framing is gone from both sections and both packaged READMEs.
+  `SHARED_REQUIREMENTS` in `scripts/dispatch-contract.mjs` drops the launch
+  count and the operator-present anchor and pins the two bars, the
+  replacement rule and its exit judge, the unattended clearance, and the
+  unchanged `CLAUDE_DESKTOP` boundary; both provider contracts refuse the
+  count-style and operator-present wordings on their own sections, the
+  HERMES contract pins the `trust: full` sentence, the stdin redirect in both
+  fences, and the prompt-not-exited sentence, the DeepSeek Harness contract
+  pins the fail-closed seam, and the round-two anchors are per provider
+  because the two runtimes' round two differ. The Hermes snippet test and the
+  release check require the `trust` key. The `CODEX_TASK` section and the
   `CLAUDE_DESKTOP` boundary are untouched.
 - The unattended `CODEX_TASK` launch drops
   `--dangerously-bypass-approvals-and-sandbox` and runs the reviewer inside

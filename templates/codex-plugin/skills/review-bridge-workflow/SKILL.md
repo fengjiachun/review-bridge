@@ -788,7 +788,7 @@ shell launch between them.
    handing it the reviewer request below as its single query:
 
    ```bash
-   hermes -p <reviewer-profile> chat -q '<the reviewer request below>'
+   hermes -p <reviewer-profile> chat -q '<the reviewer request below>' < /dev/null
    ```
 
    > Independently review Review Bridge task `<review_id>` using the packaged
@@ -797,13 +797,18 @@ shell launch between them.
 
    Single-quote that request: it contains backticks, and a double-quoted
    shell string would execute them instead of passing them through. Pass it as
-   one line with `<review_id>` substituted. Run the launch so it does not
-   block step 3 — background it or use a separate terminal — and capture its
-   stderr, where Hermes prints a `session_id:` line on exit.
+   one line with `<review_id>` substituted. Redirect stdin from `/dev/null`,
+   as both launch lines here do: the launch has no terminal on stdin, and an
+   approval prompt that fires anyway then reads end-of-file and is denied at
+   once instead of waiting — what can raise one is stated below the launch
+   discipline. Run the launch so it does not block step 3 — background it or
+   use a separate terminal — and capture its stderr, where Hermes prints a
+   `session_id:` line on exit.
 3. Wait with `wait_for_review_state` on the recorded `state_version`, treating
    `timed_out` as the expected in-progress result described in Prepare. Unlike
-   the one-shot `-z` mode, `chat -q` does not auto-approve tool prompts, so an
-   unattended launch can stall on one; if the wait keeps timing out, read the
+   the one-shot `-z` mode, `chat -q` does not auto-approve tool prompts; what
+   keeps the seven Review Bridge calls from raising one is the reviewer
+   snippet's `trust: full`, below. If the wait keeps timing out, read the
    launch output before assuming the review is merely slow. When the state
    changes, hand the review to Handle findings, which owns narrating every
    finding from the ledger and, after `submit_resolutions`, every persisted
@@ -821,7 +826,7 @@ A round-two rereview of the same `review_id` resumes the instance that
 produced round one, in the same shape as the launch:
 
 ```bash
-hermes -p <reviewer-profile> chat --resume <session-id> -q '<rereview request>'
+hermes -p <reviewer-profile> chat --resume <session-id> -q '<rereview request>' < /dev/null
 ```
 
 Send it the same review ID and a request to rereview the author's resolutions
@@ -844,6 +849,11 @@ replacement's own `session_id:` line is the one round two resumes. A
 round-two replacement resumes the round-one instance again, as the launch it
 replaces did.
 
+A launch sitting at a prompt has not exited, so the replacement rule does not
+fire for it while it waits, and a replacement started after the denial meets
+the same prompt; that is why the approval is settled by the snippet's
+`trust: full` rather than by anyone at the keyboard.
+
 Launch it outside the repository under review. Hermes injects project context
 from the working directory — the first of `.hermes.md`, `AGENTS.md`,
 `CLAUDE.md`, or `.cursorrules` that it finds wins, and the first two are
@@ -858,16 +868,34 @@ repository by recorded path, never from its own working directory. Its
 `SOUL.md`, memory, and skills come from the reviewer profile's Hermes home,
 which `-p` already separates.
 
-This launch may run unattended; it needs no operator at the keyboard. The
-tool prompt step 3 warns of is the one way it can stall, and the launch output
-is where that shows. Review Bridge records the review's `HERMES` binding; it
-observes nothing about how the instance was started, and this section adds no
-mechanism that would. The autonomous workflow above continues to accept
-`CODEX_TASK` dispatch only. The `CLAUDE_DESKTOP` boundary is unchanged, and
-nothing above narrows it: never launch, script, or otherwise programmatically
-invoke a Claude reviewer from this session — the operator opens that
-conversation themselves, an account-compliance boundary rather than a
-convenience.
+This launch may run unattended; it needs no operator at the keyboard, and
+what that rests on is one key in the packaged reviewer snippet: `trust: full`
+on the `review-bridge-reviewer` server. Hermes routes an MCP call through its
+approval prompt only on a server configured `trust: untrusted`, and there for
+every tool without a `readOnlyHint` annotation, which is all seven here; on a
+`trust: full` server no call of that server's tools is gated, so
+`list_pending_reviews`, `open_review`, and `submit_review` run without a
+prompt. That was measured on 2026-09-10 rather than read: under this launch
+`list_pending_reviews` completed in 0.4 s and the run exited 0, and with the
+same server marked `trust: untrusted` the same call raised the prompt —
+`Server 'review-bridge-reviewer' is configured 'trust: untrusted'` — read
+end-of-file from the closed stdin, and was denied without running. `full` is
+also what Hermes assumes for a server with no `trust` key; the snippet names
+it so the launch rests on packaged configuration rather than on a default.
+One prompt remains outside the snippet's reach: a shell command Hermes classes
+as dangerous, from any built-in toolset the reviewer profile carries beside
+the server. The reviewer skill gives the reviewer no reason to run one, and
+by Hermes' approval code every prompt path is bounded by `approvals.timeout`,
+300 s by default, and denies when it expires — read from the source, not
+measured here — so even that prompt ends in a denial rather than a wait.
+
+Review Bridge records the review's `HERMES` binding; it observes nothing about
+how the instance was started, and this section adds no mechanism that would.
+The autonomous workflow above continues to accept `CODEX_TASK` dispatch only.
+The `CLAUDE_DESKTOP` boundary is unchanged, and nothing above narrows it:
+never launch, script, or otherwise programmatically invoke a Claude reviewer
+from this session — the operator opens that conversation themselves, an
+account-compliance boundary rather than a convenience.
 
 ## Dispatching a DEEPSEEK_HARNESS review
 
@@ -963,8 +991,18 @@ directory.
 
 This launch may run unattended; it needs no operator at the keyboard: the
 headless runner takes its one task from the command line and runs to its
-exit. Review Bridge records the review's `DEEPSEEK_HARNESS` binding; it
-observes nothing about how the session was started, and this section adds no
+exit, and it never sits at an approval prompt. DeepSeek Harness routes a tool
+call to its approval seam only when a pre-execute listener answers `ask`; its
+MCP client registers the seven tools with no such listener, and when a
+listener does answer `ask` under the headless runner the seam fails closed at
+once — rejected, not waited on — because no answerer is composed there (read
+from the source). Measured on 2026-09-10 under this launch:
+`list_pending_reviews` completed, the run exited 0 after 42 s, and stderr
+stayed empty. A launch waiting on an answer would not have exited and would
+not be replaced; this runtime does not wait.
+
+Review Bridge records the review's `DEEPSEEK_HARNESS` binding; it observes
+nothing about how the session was started, and this section adds no
 mechanism that would. The autonomous workflow above continues to accept
 `CODEX_TASK` dispatch only. The `CLAUDE_DESKTOP` boundary is unchanged, and
 nothing above narrows it: never launch, script, or otherwise programmatically
