@@ -890,8 +890,14 @@ export async function loadValidatedReview(storeRoot, reviewId) {
       });
     // The freeze records the continuation on the source as an event, one per
     // continuation, so a re-continued source still names every continuation;
-    // the mutable top-level marker names only the newest.
-    if (!(source.history ?? []).some((entry) => entry.event === "REVIEW_CONTINUED" && entry.continued_by_review_id === reviewId)) {
+    // the mutable top-level marker names only the newest. Before the freeze
+    // existed a continuation left its source untouched, so a source with no
+    // freeze record of any kind -- no event, no marker -- is that older
+    // writer's and is accepted; a source that was frozen but never into this
+    // review is a disagreement.
+    const continuedEvents = (source.history ?? []).filter((entry) => entry.event === "REVIEW_CONTINUED");
+    const everFrozen = continuedEvents.length > 0 || source.continued_by_review_id != null;
+    if (everFrozen && !continuedEvents.some((entry) => entry.continued_by_review_id === reviewId)) {
       throw mismatch(`records frozen from a source that never recorded continuation into ${reviewId}`);
     }
     const frozen = new Map(

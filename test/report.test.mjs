@@ -1334,6 +1334,15 @@ test("the continuation marker must be the one the history's REVIEW_CONTINUED eve
     assert.match(error.message, new RegExp(`source that never recorded continuation into ${state.continuationId}`));
     return true;
   });
+  // A source with no freeze record at all is the pre-freeze writer's, and is
+  // accepted; only a source frozen into some other continuation disagrees.
+  const unfrozen = JSON.parse(sourceOriginal);
+  unfrozen.history = unfrozen.history.filter((entry) => entry.event !== "REVIEW_CONTINUED");
+  delete unfrozen.continued_by_review_id;
+  await fsp.writeFile(sourcePath, `${JSON.stringify(unfrozen, null, 2)}\n`, { mode: 0o600 });
+  const fromUnfrozen = await writeReviewReport(state.store, state.continuationId, { renderedAt: RENDERED_AT });
+  assert.equal(fromUnfrozen.reused, false);
+  await fsp.rm(fromUnfrozen.path);
   await fsp.writeFile(sourcePath, sourceOriginal, { mode: 0o600 });
   // The source itself gone: named apart from a disagreement.
   await fsp.rename(path.join(state.store, "reviews", state.sourceId), path.join(state.store, "reviews", `${state.sourceId}.away`));
