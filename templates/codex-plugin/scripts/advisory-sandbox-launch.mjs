@@ -721,6 +721,22 @@ async function resolveInputs(options) {
       `the author checkout's local Git configuration holds more than a fresh clone writes (${violations.join(", ")}); the checkout is mounted whole, so use a fresh clone of the pull request's repository`,
     );
   }
+  // The ledger is the authority on which commit is under review: the staged
+  // snapshot describes its last round's head_sha, and a panel checkout that
+  // has since been switched or reset would put other bytes under the same
+  // recorded path. The launcher's clone is detached at the recorded head,
+  // and the panel checkout must still be there.
+  const snapshotHead = ledger.rounds?.at(-1)?.head_sha;
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(snapshotHead ?? "")) {
+    fail(`the review records no snapshot head_sha in its last round`);
+  }
+  const panelHead = spawnSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" });
+  if (panelHead.error || panelHead.status !== 0) {
+    fail(`cannot read the author checkout's HEAD: ${panelHead.error?.message ?? panelHead.stderr.trim()}`);
+  }
+  if (panelHead.stdout.trim() !== snapshotHead) {
+    fail(`the panel checkout is at ${panelHead.stdout.trim()}, but the review's snapshot head is ${snapshotHead}`);
+  }
   const layoutViolations = await gitLayoutViolations(repository);
   if (layoutViolations.length > 0) {
     const shown = layoutViolations.slice(0, 10).join(", ");
@@ -750,6 +766,7 @@ async function resolveInputs(options) {
     store,
     ledgerPath,
     ledger,
+    snapshotHead,
     repository,
     marketplace,
     pluginSource,
@@ -794,20 +811,20 @@ function mountTable(inputs, scratch, volume, stagedStore) {
 // not converge). The clone is detached at the panel checkout's HEAD and held
 // to what a --template= clone writes before it is mounted, as a check on the
 // launcher's own work. It is mounted at the recorded path, because the
-// reviewer server reads the repository by that path.
+// reviewer server reads the repository by that path, and detached at the
+// review's recorded snapshot head, which resolveInputs() has already checked
+// the panel checkout is at.
 function stageCheckout(inputs) {
   const git = (args, cwd) => spawnSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const message = (result) => result.error?.message ?? result.stderr.trim().replace(/'[^']*'/g, "'<redacted>'");
-  const head = git(["-C", inputs.repository, "rev-parse", "HEAD"]);
-  if (head.error || head.status !== 0) fail(`cannot read the author checkout's HEAD: ${message(head)}`);
-  const hostHead = head.stdout.trim();
+  const hostHead = inputs.snapshotHead;
   const clone = git(["clone", "--quiet", "--template=", "--no-local", "--no-hardlinks", `file://${inputs.repository}`, inputs.checkout]);
   if (clone.error || clone.status !== 0) fail(`cannot clone the author checkout for the mount: ${message(clone)}`);
   const detach = git(["-C", inputs.checkout, "checkout", "--quiet", "--detach", hostHead]);
   if (detach.error || detach.status !== 0) fail(`cannot check out ${hostHead} in the launcher's clone: ${message(detach)}`);
   const cloned = git(["-C", inputs.checkout, "rev-parse", "HEAD"]);
   if (cloned.error || cloned.status !== 0 || cloned.stdout.trim() !== hostHead) {
-    fail(`the launcher's clone is at ${cloned.stdout?.trim() || "no commit"}, the author checkout at ${hostHead}`);
+    fail(`the launcher's clone is at ${cloned.stdout?.trim() || "no commit"}, the review's snapshot head is ${hostHead}`);
   }
   return hostHead;
 }
@@ -1129,7 +1146,7 @@ function parseProbeRecords(output) {
 // that leads down to the checkout and removed nothing.
 function evaluateBoundary(baselineOutput, mountedOutput, inputs) {
   const { ancestors } = hostPathProbe(inputs);
-  const hostHead = (spawnSync("git", ["-C", inputs.repository, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout || "").trim();
+  const hostHead = inputs.snapshotHead;
   // The one name an ancestor may gain: the checkout's next path segment below
   // it (not the next probed ancestor, which skips the home directory).
   const wayDown = (ancestor) => path.relative(ancestor, inputs.repository).split(path.sep)[0];
@@ -1195,11 +1212,11 @@ function evaluateBoundary(baselineOutput, mountedOutput, inputs) {
     } else if (record.kind === "checkout-head") {
       facts.checkoutHead = record.value;
       // 40 hex for sha1, 64 for sha256 (extensions.objectformat is admitted),
-      // and the same commit the host sees at that path.
+      // and the commit the review's last round recorded.
       if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(record.value)) {
         failures.push(`git cannot read the mounted checkout: ${record.value}`);
       } else if (record.value !== hostHead) {
-        failures.push(`the mounted checkout's HEAD is ${record.value}, the host's is ${hostHead}`);
+        failures.push(`the mounted checkout's HEAD is ${record.value}, the review's snapshot head is ${hostHead}`);
       }
     } else if (record.kind === "store-writable") {
       facts.storeWritable = record.value;
@@ -1513,7 +1530,7 @@ async function main() {
     [
       `review ${inputs.reviewId} (${inputs.ledger.status}, state_version ${inputs.ledger.state_version})`,
       `store ${inputs.store} (never mounted; the review is staged under ${stagedStore})`,
-      `checkout ${inputs.repository} (read-only, at its recorded path; the bytes are a fresh clone the launcher makes at ${inputs.checkout})`,
+      `checkout ${inputs.repository} (read-only, at its recorded path; the bytes are a fresh clone the launcher makes at ${inputs.checkout}, detached at the review's snapshot head ${inputs.snapshotHead})`,
       `marketplace ${inputs.marketplace} (plugin ${inputs.pluginVersion}, read-only)`,
       `auth ${inputs.authJson} (read-only bind mount)`,
       `scratch ${scratch}`,

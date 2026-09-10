@@ -93,6 +93,13 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
     // The ledger's repository_path is always a repository; the credential
     // precheck reads its configuration.
     if (!checkoutPath) spawnSync("git", ["-C", checkout, "init", "-q", "--template="]);
+    // The ledger's last round names the commit under review; the fake
+    // checkout is at it (an empty commit made with -c, so nothing lands in
+    // .git/config), or a placeholder when the checkout cannot answer.
+    if (spawnSync("git", ["-C", checkout, "rev-parse", "HEAD"]).status !== 0) {
+      spawnSync("git", ["-C", checkout, "-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "commit", "-q", "--allow-empty", "-m", "init"]);
+    }
+    const fakeHead = spawnSync("git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim() || "0".repeat(40);
     await fsp.mkdir(path.join(store, "reviews", REVIEW_ID), { recursive: true });
     await fsp.writeFile(
       path.join(store, "reviews", REVIEW_ID, "review.json"),
@@ -103,6 +110,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
         status: "WAITING_FOR_REVIEW",
         state_version: 1,
         repository_path: checkout,
+        rounds: [{ round: 1, base_sha: fakeHead, head_sha: fakeHead }],
         ...ledger,
       }),
     );
@@ -323,7 +331,7 @@ test("--dry-run prints the mount table and the container launch without Docker",
   assert.equal(result.status, 0, result.stderr);
   const out = result.stdout;
   // Inputs derived from the ledger and the operator's config, not retyped.
-  assert.match(out, new RegExp(`checkout ${f.checkout} \\(read-only, at its recorded path; the bytes are a fresh clone the launcher makes at \\S+/checkout\\)`));
+  assert.match(out, new RegExp(`checkout ${f.checkout} \\(read-only, at its recorded path; the bytes are a fresh clone the launcher makes at \\S+/checkout, detached at the review's snapshot head [0-9a-f]{40}\\)`));
   assert.match(out, new RegExp(`marketplace ${f.marketplace} \\(plugin 9\\.9\\.9, read-only\\)`));
   // The mount table: read-only unless the reviewer must write it.
   const bind = (source, target, readonly) =>
@@ -936,7 +944,7 @@ test("the container mounts a clone the launcher makes, never the panel checkout'
   assert.equal(seen.fakeObject, false);
   assert.equal(seen.remoteUrl, `file://${await fsp.realpath(f.checkout)}`);
   const recorded = await fsp.realpath(f.checkout);
-  assert.match(result.stdout, new RegExp(`^checkout ${recorded} \\(read-only, at its recorded path; the bytes are a fresh clone the launcher makes at ${seen.checkout}\\)$`, "m"));
+  assert.match(result.stdout, new RegExp(`^checkout ${recorded} \\(read-only, at its recorded path; the bytes are a fresh clone the launcher makes at ${seen.checkout}, detached at the review's snapshot head [0-9a-f]{40}\\)$`, "m"));
   const calls = await fsp.readFile(env.FAKE_CALLS, "utf8");
   assert.match(calls, new RegExp(`type=bind,src=${seen.checkout},dst=${recorded},readonly`));
   assert.doesNotMatch(calls, new RegExp(`type=bind,src=${recorded},`));
@@ -945,7 +953,30 @@ test("the container mounts a clone the launcher makes, never the panel checkout'
   assert.doesNotMatch(result.stdout, /cleanup steps that failed/);
 });
 
-test("the mounted checkout's HEAD must be the host's, at sha1 or sha256 length", async (t) => {
+test("the ledger's snapshot head is the commit: a panel checkout moved since prepare is refused, the probe compares against the record", async (t) => {
+  // prepare_review recorded head_sha; a commit, switch, or reset after it
+  // would put other bytes under the recorded path.
+  const f = await fixture(t, { realReview: true });
+  const recordedHead = (await loadReview(f.store, f.reviewId)).rounds.at(-1).head_sha;
+  assert.equal(spawnSync("git", ["-C", f.checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim(), recordedHead);
+  await commit(f.checkout, "export const value = 3;\n");
+  const moved = spawnSync("git", ["-C", f.checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  let result = launch(f, ["--review-id", f.reviewId], { PATH: await gitOnlyPath(t) });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, new RegExp(`the panel checkout is at ${moved}, but the review's snapshot head is ${recordedHead}`));
+  // Back at the recorded head, the launcher's clone is detached there and the
+  // probe's HEAD is compared against the record.
+  spawnSync("git", ["-C", f.checkout, "checkout", "-q", "--detach", recordedHead]);
+  const env = await fakeDocker(f);
+  result = launch(f, ["--review-id", f.reviewId], env);
+  assert.equal(result.status, 0, result.stdout.slice(-2500));
+  assert.match(result.stdout, new RegExp(`detached at the review's snapshot head ${recordedHead}\\)`));
+  const probeHead = JSON.parse(await fsp.readFile(env.FAKE_CHECKOUT_LOG, "utf8"));
+  assert.equal(spawnSync("git", ["-C", f.checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim(), recordedHead);
+  assert.ok(probeHead.checkout.endsWith("/checkout"));
+});
+
+test("the mounted checkout's HEAD must be the review's recorded head, at sha1 or sha256 length", async (t) => {
   // A sha256 repository: git writes extensions.objectformat=sha256, which
   // the configuration allowlist admits, and HEAD is 64 hex.
   const previous = process.env.GIT_DEFAULT_HASH;
@@ -974,7 +1005,7 @@ test("the mounted checkout's HEAD must be the host's, at sha1 or sha256 length",
   const other = hostHead.replace(/^./, hostHead[0] === "0" ? "1" : "0");
   result = launch(h, ["--review-id", h.reviewId], await fakeDocker(h, { head: other }));
   assert.equal(result.status, 1, result.stdout);
-  assert.match(result.stderr, new RegExp(`the container boundary did not hold:\\n {2}the mounted checkout's HEAD is ${other}, the host's is ${hostHead}`));
+  assert.match(result.stderr, new RegExp(`the container boundary did not hold:\\n {2}the mounted checkout's HEAD is ${other}, the review's snapshot head is ${hostHead}`));
   assert.doesNotMatch(result.stdout, /mcp: /);
 });
 

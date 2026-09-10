@@ -839,7 +839,9 @@ the `.git` layout is held to a fresh `--template=` clone's. What the
 container mounts at the recorded path is not that `.git` but a fresh clone
 the launcher makes itself from the panel checkout (`git clone --template=
 --no-local --no-hardlinks file://<panel checkout>` into its scratch
-directory, detached at the panel checkout's HEAD, removed at cleanup): the
+directory, detached at the review's recorded snapshot head — which the
+panel checkout must still be at, or the launch is refused before anything
+starts — and removed at cleanup): the
 operator's `.git` never enters the container, only the objects reachable
 from the panel's refs cross, so a hook, a stray file among the objects, or a
 comment in the configuration that a template or a hand left there stays on

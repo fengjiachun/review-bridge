@@ -50,7 +50,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   converge (Codex round twenty-two) — the container no longer gets the panel
   checkout's `.git` at all: the launcher clones the checkout over git's own
   transport (`git clone --template= --no-local --no-hardlinks file://…`) into
-  its scratch directory, detaches that clone at the checkout's HEAD, holds it
+  its scratch directory, detaches that clone at the review's recorded snapshot
+  head (the panel checkout must still be at it, or the launch is refused), holds it
   to the same configuration and layout as a check on its own work, mounts
   only it at the recorded path, and removes it at cleanup, so the operator's
   `.git` never enters the container; the checks stay on the panel checkout
