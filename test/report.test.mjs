@@ -928,6 +928,13 @@ test("finding statuses must equal what their records derive, in both directions"
   // event, which the writer records without one, is not required to carry it.
   await tamper((review) => { delete review.history.find((entry) => entry.event === "FINDINGS_SUBMITTED").round; }, /history entry 2 \(FINDINGS_SUBMITTED\) has no round/);
   await tamper((review) => { review.history.find((entry) => entry.event === "REREVIEW_PREPARED").round = 0; }, /history entry \d+ \(REREVIEW_PREPARED\) round 0 is not a positive integer/);
+  // Cross-field preconditions of the writers, named after the event that
+  // could not have been recorded.
+  // The first gated event in this ledger is the erratum appended before the
+  // author responded; core refuses that on an advisory review too.
+  await tamper((review) => { review.advisory = true; }, /history entry 3 \(ERRATUM_APPENDED\) violates the writer's precondition: advisory review/);
+  await tamper((review) => { review.history.find((entry) => entry.event === "FINDINGS_SUBMITTED").count = 101; }, /history entry 2 \(FINDINGS_SUBMITTED\) violates the writer's precondition: more than 100 findings/);
+  await tamper((review) => { review.max_rounds = 2; review.history.splice(3, 0, { at: review.history[2].at, event: "ROUND_LIMIT_REACHED" }); }, /history entry 4 \(ROUND_LIMIT_REACHED\) violates the writer's precondition: round 1 is below max_rounds 2/);
   // Restored, it renders again.
   await fsp.writeFile(reviewPath, original, { mode: 0o600 });
   assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
@@ -1254,6 +1261,12 @@ test("a review ledger edited in place is refused as REVIEW_LEDGER_INVALID", asyn
   assert.deepEqual(await tamper((review) => { review.history.splice(1, 0, { at: review.history[0].at, event: "FINDINGS_SUBMITTED", round: 1 }, { at: review.history[0].at, event: "AUTHOR_RESPONDED", round: 1 }, { at: review.history[0].at, event: "REREVIEW_PREPARED", round: 2 }, { at: review.history[0].at, event: "REREVIEW_CLEAN", round: 2 }); review.history.splice(5, 1); }), []);
   // A clean verdict over a finding still open.
   assert.deepEqual(await tamper((review) => { review.findings.push({ id: "F-1", introduced_round: 1, severity: "minor", title: "t", explanation: "e", status: "OPEN" }); }), []);
+  // The writers' ledger-level preconditions, which no single field's domain
+  // expresses: core never finalizes an advisory review, never appends an
+  // erratum once the gate has passed, and never prepares a rereview past
+  // max_rounds.
+  assert.deepEqual(await tamper((review) => { review.advisory = true; }), []);
+  assert.deepEqual(await tamper((review) => { review.history.push({ at: review.updated_at, event: "ERRATUM_APPENDED", round: 1, sequence: 1 }); review.errata = [{ sequence: 1, at: review.updated_at, round: 1, text: "late" }]; review.state_version += 1; }), []);
   // A round-bound event that lost its round: the writer always records one,
   // and a reader pairing events by round would find nothing for it.
   assert.deepEqual(await tamper((review) => { delete review.history.find((entry) => entry.event === "INITIAL_REVIEW_CLEAN").round; }), []);

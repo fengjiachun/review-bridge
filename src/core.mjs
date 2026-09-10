@@ -385,26 +385,71 @@ function derivedFindingStatus(resolution, decision) {
   return "OPEN";
 }
 // Every history event this module records, the statuses it is recorded from,
-// the status it leaves the review in, and whether the writer always records
-// the round it happened in (`roundBound`). Read from the writers above and
-// below; a ledger whose history does not replay through this table was not
-// written by them. `null` as a source is the ledger's creation.
+// the status it leaves the review in, whether the writer always records the
+// round it happened in (`roundBound`), and the ledger-level precondition the
+// writer refuses without that `from` and `to` cannot express (`guard`, which
+// returns the violated precondition or null; `state` is the replay's round
+// and status just before the event). Read from the writers above and below;
+// a ledger whose history does not replay through this table was not written
+// by them. `null` as a source is the ledger's creation.
+//
+// The gated writers -- submitResolutions, prepareRereview, submitRereview's
+// verdicts, appendReviewErratum, finalizeLocalGate, and continuation -- all
+// refuse an advisory review (assertNotAdvisory), so every event past the
+// first verdict carries that guard; the round-limit pair carries the bound
+// prepareRereview enforces; the findings writers carry MAX_FINDINGS.
+const notAdvisory = (review) => (review.advisory === true ? "advisory review" : null);
 const LEDGER_TRANSITIONS = {
   REVIEW_PREPARED: { from: [null], to: "WAITING_FOR_REVIEW", opensRound: true, roundBound: true },
   INITIAL_REVIEW_CLEAN: { from: ["WAITING_FOR_REVIEW"], to: "CLEAN", roundBound: true },
-  FINDINGS_SUBMITTED: { from: ["WAITING_FOR_REVIEW"], to: "REVIEW_SUBMITTED", roundBound: true },
-  AUTHOR_RESPONDED: { from: ["REVIEW_SUBMITTED"], to: "AUTHOR_RESPONDED", roundBound: true },
-  AUTHOR_ESCALATED: { from: ["REVIEW_SUBMITTED"], to: "HUMAN_REQUIRED", roundBound: true },
-  ROUND_LIMIT_REACHED: { from: ["AUTHOR_RESPONDED"], to: "HUMAN_REQUIRED" },
-  REREVIEW_PREPARED: { from: ["AUTHOR_RESPONDED"], to: "WAITING_FOR_REREVIEW", opensRound: true, roundBound: true },
-  REREVIEW_UNRESOLVED: { from: ["WAITING_FOR_REREVIEW"], to: "HUMAN_REQUIRED", roundBound: true },
-  REREVIEW_CONTINUABLE_FINDINGS: { from: ["WAITING_FOR_REREVIEW"], to: "CONTINUABLE_FINDINGS", roundBound: true },
-  REREVIEW_CLEAN: { from: ["WAITING_FOR_REREVIEW"], to: "CLEAN", roundBound: true },
-  LOCAL_GATE_PASSED: { from: ["CLEAN"], to: "LOCAL_GATE_PASSED" },
-  REVIEW_CONTINUED: { from: ["CONTINUABLE_FINDINGS"], to: "CONTINUABLE_FINDINGS" },
-  // An erratum changes no state; it is refused only where the writer refuses
-  // it, which the replay does not second-guess.
-  ERRATUM_APPENDED: { from: LEDGER_REVIEW_STATUSES, to: null, roundBound: true },
+  FINDINGS_SUBMITTED: {
+    from: ["WAITING_FOR_REVIEW"],
+    to: "REVIEW_SUBMITTED",
+    roundBound: true,
+    guard: (review, state, entry) =>
+      Number.isInteger(entry.count) && entry.count > MAX_FINDINGS ? `more than ${MAX_FINDINGS} findings` : null,
+  },
+  AUTHOR_RESPONDED: { from: ["REVIEW_SUBMITTED"], to: "AUTHOR_RESPONDED", roundBound: true, guard: notAdvisory },
+  AUTHOR_ESCALATED: { from: ["REVIEW_SUBMITTED"], to: "HUMAN_REQUIRED", roundBound: true, guard: notAdvisory },
+  ROUND_LIMIT_REACHED: {
+    from: ["AUTHOR_RESPONDED"],
+    to: "HUMAN_REQUIRED",
+    guard: (review, state) =>
+      notAdvisory(review) ?? (state.round < review.max_rounds ? `round ${state.round} is below max_rounds ${review.max_rounds}` : null),
+  },
+  REREVIEW_PREPARED: {
+    from: ["AUTHOR_RESPONDED"],
+    to: "WAITING_FOR_REREVIEW",
+    opensRound: true,
+    roundBound: true,
+    guard: (review, state) =>
+      notAdvisory(review) ?? (state.round >= review.max_rounds ? `round ${state.round} already at max_rounds ${review.max_rounds}` : null),
+  },
+  REREVIEW_UNRESOLVED: {
+    from: ["WAITING_FOR_REREVIEW"],
+    to: "HUMAN_REQUIRED",
+    roundBound: true,
+    guard: (review, state, entry) =>
+      notAdvisory(review) ?? (Number.isInteger(entry.new_findings) && entry.new_findings > MAX_FINDINGS ? `more than ${MAX_FINDINGS} new findings` : null),
+  },
+  REREVIEW_CONTINUABLE_FINDINGS: {
+    from: ["WAITING_FOR_REREVIEW"],
+    to: "CONTINUABLE_FINDINGS",
+    roundBound: true,
+    guard: (review, state, entry) =>
+      notAdvisory(review) ?? (Number.isInteger(entry.new_findings) && entry.new_findings > MAX_FINDINGS ? `more than ${MAX_FINDINGS} new findings` : null),
+  },
+  REREVIEW_CLEAN: { from: ["WAITING_FOR_REREVIEW"], to: "CLEAN", roundBound: true, guard: notAdvisory },
+  LOCAL_GATE_PASSED: { from: ["CLEAN"], to: "LOCAL_GATE_PASSED", guard: notAdvisory },
+  REVIEW_CONTINUED: { from: ["CONTINUABLE_FINDINGS"], to: "CONTINUABLE_FINDINGS", guard: notAdvisory },
+  // An erratum changes no state. The writer refuses it on an advisory review
+  // and once the gate has passed; otherwise it is accepted in any state.
+  ERRATUM_APPENDED: {
+    from: LEDGER_REVIEW_STATUSES.filter((status) => status !== "LOCAL_GATE_PASSED"),
+    to: null,
+    roundBound: true,
+    guard: notAdvisory,
+  },
 };
 
 // The round each finding position was raised in, from the history's counts,
@@ -427,7 +472,7 @@ function derivedIntroducedRounds(history) {
 
 // Replays the history through the transition table and returns the status
 // and round it ends at, or the first defect.
-function replayReviewHistory(history) {
+function replayReviewHistory(history, review) {
   let status = null;
   let round = 0;
   for (const [index, entry] of history.entries()) {
@@ -440,6 +485,10 @@ function replayReviewHistory(history) {
     }
     if (!transition.from.includes(status)) {
       return { defect: `history entry ${index + 1} (${entry.event}) is not a transition from ${status ?? "creation"}` };
+    }
+    const violated = transition.guard?.(review, { round, status }, entry) ?? null;
+    if (violated != null) {
+      return { defect: `history entry ${index + 1} (${entry.event}) violates the writer's precondition: ${violated}` };
     }
     if (transition.opensRound) round += 1;
     // A round-bound event always carries its round: a reader that pairs
@@ -503,6 +552,9 @@ function reviewLedgerDefect(review, reviewId) {
     const defect = recordDefect(carried, CARRIED_FINDING_FIELDS, { index, review }, `carried finding ${index + 1}`);
     if (defect != null) return defect;
   }
+  if ((review.errata ?? []).length > MAX_ERRATA) {
+    return `errata holds ${review.errata.length} entries, more than the writer's ${MAX_ERRATA}`;
+  }
   // Every save increments state_version and every history entry rode on a
   // save, so the version can never fall below the history; a transition
   // stamp names a version that has happened. A ledger older than the field
@@ -519,7 +571,7 @@ function reviewLedgerDefect(review, reviewId) {
   }
   // The history must replay to the stored status through the writers' own
   // transitions, and must have opened exactly the rounds the ledger holds.
-  const replay = replayReviewHistory(review.history);
+  const replay = replayReviewHistory(review.history, review);
   if (replay.defect != null) return replay.defect;
   if (replay.status !== review.status) {
     return `history replays to ${replay.status ?? "no status"}, but status is ${review.status}`;
