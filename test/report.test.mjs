@@ -1165,10 +1165,27 @@ test("a LOCAL_GATE_PASSED review without a valid gate.json is refused even befor
     assert.equal(error.details.path, gatePath);
     return true;
   });
-  const tampered = JSON.parse(original);
-  tampered.snapshot_hash = "f".repeat(64);
-  await fsp.writeFile(gatePath, `${JSON.stringify(tampered, null, 2)}\n`, { mode: 0o600 });
-  await assert.rejects(writeReviewReport(state.store, state.reviewId), { code: "LOCAL_GATE_INVALID" });
+  // Every attested field the review also holds is compared, and the error
+  // names the one that differs.
+  for (const [field, value] of [
+    ["snapshot_hash", "f".repeat(64)],
+    ["base_sha", "1".repeat(40)],
+    ["head_sha", "2".repeat(40)],
+    ["reviewer_provider", "CODEX_TASK"],
+  ]) {
+    const tampered = { ...JSON.parse(original), [field]: value };
+    await fsp.writeFile(gatePath, `${JSON.stringify(tampered, null, 2)}\n`, { mode: 0o600 });
+    await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+      assert.equal(error.code, "LOCAL_GATE_INVALID", field);
+      // The provider mismatch is caught by the gate reader itself, the rest
+      // by the field list; either way the render stops before writing.
+      if (error.details?.field != null) {
+        assert.equal(error.details.field, field);
+        assert.equal(error.details.gate, value);
+      }
+      return true;
+    });
+  }
   const foreign = { ...JSON.parse(original), review_id: REVIEW_ID };
   await fsp.writeFile(gatePath, `${JSON.stringify(foreign, null, 2)}\n`, { mode: 0o600 });
   await assert.rejects(writeReviewReport(state.store, state.reviewId), { code: "LOCAL_GATE_INVALID" });

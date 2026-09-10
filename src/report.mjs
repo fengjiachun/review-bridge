@@ -10,6 +10,7 @@ import {
   getPublication,
   getPublicationSummary,
   invalidatedAutomaticResolution,
+  localGateReviewMismatch,
   readBoundPublicationAuthorization,
   readLocalGateAuthorization,
   resolutionFrontier,
@@ -741,14 +742,13 @@ export async function loadReportLedgers(
       );
     }
     authorization = await readLocalGateAuthorization(storeRoot, reviewId);
-    if (
-      authorization.snapshot_hash !== review.clean_snapshot_hash ||
-      authorization.head_sha !== review.rounds.at(-1).head_sha
-    ) {
+    // Every attested field the review also holds, compared in one place.
+    const mismatch = localGateReviewMismatch(authorization, review);
+    if (mismatch != null) {
       throw reportError(
         "LOCAL_GATE_INVALID",
-        `gate.json of ${reviewId} does not attest the review's clean snapshot`,
-        { review_id: reviewId, path: gatePath },
+        `gate.json of ${reviewId} attests ${mismatch.field} ${JSON.stringify(mismatch.gate)}, but the review holds ${JSON.stringify(mismatch.review)}`,
+        { review_id: reviewId, path: gatePath, ...mismatch },
       );
     }
   }

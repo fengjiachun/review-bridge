@@ -3026,6 +3026,31 @@ export async function readLocalGateAuthorization(storeRoot, reviewId) {
   );
 }
 
+// Every field a local gate attests that the review ledger also holds, in one
+// list, so a gate swapped for another review's -- same snapshot, different
+// base; same head, different provider -- is caught whichever field differs.
+// The reader has already matched the gate's review_id and status. Returns
+// the first differing field with both values, or null.
+export function localGateReviewMismatch(gate, review) {
+  const lastRound = review.rounds?.at(-1) ?? {};
+  const expectations = [
+    ["base_sha", gate.base_sha, lastRound.base_sha],
+    ["head_sha", gate.head_sha, lastRound.head_sha],
+    ["snapshot_hash", gate.snapshot_hash, review.clean_snapshot_hash],
+    [
+      "reviewer_provider",
+      gate.reviewer_provider,
+      review.reviewer_provider ?? "CLAUDE_DESKTOP",
+    ],
+  ];
+  for (const [field, attested, held] of expectations) {
+    if (attested !== held) {
+      return { field, gate: attested ?? null, review: held ?? null };
+    }
+  }
+  return null;
+}
+
 async function openAuthorizationFiles(
   paths,
   reviewId,
