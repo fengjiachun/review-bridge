@@ -820,6 +820,60 @@ export async function loadValidatedReview(storeRoot, reviewId) {
   if (bytes.toString("utf8") !== `${JSON.stringify(review, null, 2)}\n`) {
     throw reviewLedgerInvalid(reviewId, filePath, "bytes are not the store's own serialization");
   }
+  // What a continuation carried is what freezeContinuationSource took from
+  // the source ledger in this store: exactly the source's open findings, each
+  // by id and fingerprint, and the source's errata by sequence. The source is
+  // read here to compare; a source that is gone is named apart from one that
+  // disagrees.
+  const sources = new Set([
+    ...(review.carried_findings ?? []).map((carried) => carried.continued_from_review_id),
+    ...(review.errata ?? []).filter((erratum) => erratum.continued_from_review_id != null).map((erratum) => erratum.continued_from_review_id),
+  ]);
+  for (const sourceId of sources) {
+    let source;
+    try {
+      source = await loadReview(storeRoot, sourceId);
+    } catch (error) {
+      throw Object.assign(
+        new Error(`review ${reviewId} carries records from ${sourceId}, which is not in the store: ${error.message}`),
+        { code: "CONTINUATION_SOURCE_MISSING", details: { review_id: reviewId, source_review_id: sourceId, path: filePath } },
+      );
+    }
+    const mismatch = (what) =>
+      Object.assign(new Error(`review ${reviewId} carries ${what}, which its source ${sourceId} does not hold`), {
+        code: "CONTINUATION_SOURCE_MISMATCH",
+        details: { review_id: reviewId, source_review_id: sourceId, path: filePath, reason: what },
+      });
+    const frozen = new Map(
+      source.findings.filter((finding) => finding.status === "OPEN").map((finding) => [finding.id, finding]),
+    );
+    const carriedFromSource = (review.carried_findings ?? []).filter((carried) => carried.continued_from_review_id === sourceId);
+    for (const carried of carriedFromSource) {
+      const finding = frozen.get(carried.finding_id);
+      if (finding == null) throw mismatch(`finding ${JSON.stringify(carried.finding_id)} as open`);
+      if (continuationFindingFingerprint(finding) !== carried.fingerprint_sha256) {
+        throw mismatch(`finding ${JSON.stringify(carried.finding_id)} with fingerprint ${JSON.stringify(carried.fingerprint_sha256)}`);
+      }
+      // The carried copy's own content must hash to that fingerprint too, or
+      // a reworded copy would ride on the source's genuine fingerprint.
+      if (continuationFindingFingerprint(carried) !== carried.fingerprint_sha256) {
+        throw mismatch(`finding ${JSON.stringify(carried.finding_id)} whose carried content does not hash to its fingerprint`);
+      }
+    }
+    if (carriedFromSource.length > 0) {
+      const carriedIds = new Set(carriedFromSource.map((carried) => carried.finding_id));
+      const missing = [...frozen.keys()].find((id) => !carriedIds.has(id));
+      if (missing != null) throw mismatch(`only part of the open findings (source finding ${JSON.stringify(missing)} is not carried)`);
+    }
+    const sourceErrata = source.errata ?? [];
+    for (const [index, erratum] of (review.errata ?? []).entries()) {
+      if (erratum.continued_from_review_id !== sourceId) continue;
+      const original = sourceErrata[index];
+      if (original == null || original.at !== erratum.at || original.round !== erratum.round || original.text !== erratum.text) {
+        throw mismatch(`erratum ${erratum.sequence} as the source's erratum ${index + 1}`);
+      }
+    }
+  }
   for (const round of review.rounds) {
     const directory = roundDirectory(storeRoot, reviewId, round.round);
     let manifest;

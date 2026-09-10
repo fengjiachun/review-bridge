@@ -854,12 +854,19 @@ async function createExclusive(filePath, data) {
   }
 }
 
+// The render time is the one line two renders of the same ledgers legitimately
+// differ in; everything else must agree byte for byte.
+function withoutRenderTime(markdown) {
+  return markdown.replace(/^- Rendered at: .*$/m, "- Rendered at: <render time>");
+}
+
 // Writes `report-r<revision>.md` beside the ledger and returns a receipt. The
-// ledger at a revision is immutable, so the report at that revision is too: an
-// existing file is kept as it is rather than rewritten with a fresh render
-// time, and the receipt always describes the bytes actually at the path. The
-// Markdown itself stays in the file: a report can run to megabytes, and the
-// driver that calls this after a gate needs the path, not the bytes.
+// ledger at a revision is immutable, so the report at that revision is too:
+// the report is always rendered, and a file already at the path is reused
+// only if it is that render, render time aside; any other bytes there are
+// named as a mismatch rather than reused or overwritten. The Markdown itself
+// stays in the file: a report can run to megabytes, and the driver that
+// calls this after a gate needs the path, not the bytes.
 export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}) {
   const { directory, review, publication, authorization, publicationSummary } =
     await loadReportLedgers(storeRoot, reviewId);
@@ -870,18 +877,30 @@ export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}
     directory,
     review == null ? `report-${revision}.md` : `report-r${revision}.md`,
   );
+  const markdown = renderReviewReport(review, {
+    publication,
+    authorization,
+    publicationSummary,
+    renderedAt,
+    ledgerDirectory: directory,
+  });
   let reused = true;
   if (!fs.existsSync(filePath)) {
-    const markdown = renderReviewReport(review, {
-      publication,
-      authorization,
-      publicationSummary,
-      renderedAt,
-      ledgerDirectory: directory,
-    });
     reused = !(await createExclusive(filePath, markdown));
   }
   const bytes = await fsp.readFile(filePath);
+  if (reused && withoutRenderTime(bytes.toString("utf8")) !== withoutRenderTime(markdown)) {
+    throw reportError(
+      "REPORT_FILE_MISMATCH",
+      `${filePath} exists but is not the report rendered from these ledgers`,
+      {
+        review_id: reviewId,
+        path: filePath,
+        existing_sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+        rendered_sha256: crypto.createHash("sha256").update(markdown).digest("hex"),
+      },
+    );
+  }
   return {
     review_id: reviewId,
     review_state_version: review == null ? null : (review.state_version ?? 0),

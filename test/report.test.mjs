@@ -1139,12 +1139,16 @@ test("every rendered record kind is held to its writer's field table", async (t)
   await tamper((r) => { r.carried_findings = [{ ...carried, fingerprint_sha256: "nope" }]; }, /^carried finding 1 fingerprint_sha256 "nope" is not a digest$/);
   await tamper((r) => { r.carried_findings = [(({ title, ...rest }) => rest)(carried)]; }, /^carried finding 1 has no title$/);
   await tamper((r) => { r.carried_findings = [{ ...carried, carried_at: "x" }]; }, /^carried finding 1 carries a field the writer never sets: carried_at$/);
-  // A well-formed carried finding is accepted by the table (the rest of the
-  // ledger is unchanged, so the render then succeeds).
+  // A well-formed carried finding passes the table, and is then held to its
+  // source: this one names a source review the store does not hold.
   const review = JSON.parse(original);
   review.carried_findings = [carried];
   await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
-  assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
+  await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+    assert.equal(error.code, "CONTINUATION_SOURCE_MISSING");
+    assert.equal(error.details.source_review_id, carried.continued_from_review_id);
+    return true;
+  });
   await fsp.writeFile(reviewPath, original, { mode: 0o600 });
 });
 
@@ -1224,6 +1228,34 @@ test("the continuation marker must be the one the history's REVIEW_CONTINUED eve
   // The continuation itself carries the source's open finding and renders too.
   const continuation = await writeReviewReport(state.store, state.continuationId, { renderedAt: RENDERED_AT });
   assert.match(await fsp.readFile(continuation.path, "utf8"), new RegExp(`carried finding\\(s\\): \`F-002\` from \`${state.sourceId}\``));
+  await fsp.rm(continuation.path);
+
+  // What the continuation carries is held to the source ledger in the store:
+  // a record the source's open findings do not hold, a fingerprint the
+  // source's finding does not produce, a carried set that omits an open
+  // finding, and a source that is gone are each named.
+  const continuationPath = path.join(state.store, "reviews", state.continuationId, "review.json");
+  const continuationOriginal = await fsp.readFile(continuationPath, "utf8");
+  const tamperContinuation = async (mutate, code, expected) => {
+    const ledger = JSON.parse(continuationOriginal);
+    mutate(ledger);
+    await fsp.writeFile(continuationPath, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
+    await assert.rejects(writeReviewReport(state.store, state.continuationId), (error) => {
+      assert.equal(error.code, code, error.message);
+      assert.match(error.message, expected);
+      return true;
+    });
+    assert.ok(!(await fsp.readdir(path.dirname(continuationPath))).some((name) => name.startsWith("report-")));
+  };
+  await tamperContinuation((ledger) => { ledger.carried_findings.push({ ...ledger.carried_findings[0], finding_id: "F-003" }); }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-003" as open/);
+  await tamperContinuation((ledger) => { ledger.carried_findings[0].fingerprint_sha256 = "e".repeat(64); }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-002" with fingerprint "e{64}"/);
+  await tamperContinuation((ledger) => { ledger.carried_findings[0].title = "reworded"; }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-002" whose carried content does not hash to its fingerprint/);
+  await fsp.writeFile(continuationPath, continuationOriginal, { mode: 0o600 });
+  // The source itself gone: named apart from a disagreement.
+  await fsp.rename(path.join(state.store, "reviews", state.sourceId), path.join(state.store, "reviews", `${state.sourceId}.away`));
+  await assert.rejects(writeReviewReport(state.store, state.continuationId), { code: "CONTINUATION_SOURCE_MISSING" });
+  await fsp.rename(path.join(state.store, "reviews", `${state.sourceId}.away`), path.join(state.store, "reviews", state.sourceId));
+  assert.equal((await writeReviewReport(state.store, state.continuationId, { renderedAt: RENDERED_AT })).reused, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -1552,6 +1584,30 @@ test("concurrent renders at one revision produce one file that both receipts des
   assert.equal(onDisk.length, first.bytes);
   // No temporary file survives the race.
   assert.ok(!(await fsp.readdir(directory)).some((name) => name.endsWith(".tmp")));
+});
+
+// A file already at the report's path is reused only if it is the report
+// rendered from these ledgers, render time aside; anything else there is a
+// mismatch, neither reused nor overwritten.
+test("a foreign file at the report's path is refused, not reused", async (t) => {
+  const state = await gatedFixture(t);
+  const genuine = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
+  const again = await writeReviewReport(state.store, state.reviewId, { renderedAt: "2026-09-12T00:00:00.000Z" });
+  assert.equal(again.reused, true);
+  assert.equal(again.sha256, genuine.sha256);
+  const original = await fsp.readFile(genuine.path);
+  await fsp.writeFile(genuine.path, "# not a report\n", { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT }), (error) => {
+    assert.equal(error.code, "REPORT_FILE_MISMATCH");
+    assert.equal(error.details.path, genuine.path);
+    assert.equal(error.details.existing_sha256, crypto.createHash("sha256").update("# not a report\n").digest("hex"));
+    assert.equal(error.details.rendered_sha256, genuine.sha256);
+    return true;
+  });
+  // Neither reused nor overwritten.
+  assert.equal(await fsp.readFile(genuine.path, "utf8"), "# not a report\n");
+  await fsp.writeFile(genuine.path, original, { mode: 0o600 });
+  assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, true);
 });
 
 // A write that fails part-way leaves nothing behind: not the temporary file,
