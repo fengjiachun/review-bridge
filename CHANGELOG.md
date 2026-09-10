@@ -66,6 +66,22 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   the bind refuses a snapshot of a head the workflow never recorded. The
   reachability walk takes the continue exit on both arms, with and without
   a commit already made.
+- Declare the head on the ordinary tables a released split returns to,
+  issue #126 (#127). The recording owed whenever the repository HEAD differs
+  from the recorded head lived only in the split-gated tables, which the
+  summary selects while the split is unadmitted. A driver that acknowledged
+  a split, committed the cut without recording it, released the split with
+  `continue`, and then read a fresh summary was handed the ordinary table,
+  which declared no recording: the bind refused the unrecorded cut with
+  `WORKFLOW_REVIEW_MISMATCH`, and among the findings the advance refused the
+  unrecorded fix with `WORKFLOW_HEAD_MISMATCH`. The ordinary
+  `PREPARE_LOCAL_REVIEW` table now declares `record_workflow_head` on that
+  condition ahead of the bind, which re-reads its revision, and the ordinary
+  findings head carries the same condition beside the fixed-resolution one.
+  The reachability walk stops after the `continue` on both arms, refreshes
+  the summary, and completes the round from what it declares. Found by the
+  first advisory `CODEX_TASK` review run inside the container read boundary
+  (#125's acceptance run).
 
 ## 0.12.0 - 2026-09-10
 
