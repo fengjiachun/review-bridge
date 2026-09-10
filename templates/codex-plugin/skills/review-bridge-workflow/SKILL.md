@@ -846,7 +846,12 @@ operator's `.git` never enters the container, only the objects reachable
 from the panel's refs cross, so a hook, a stray file among the objects, or a
 comment in the configuration that a template or a hand left there stays on
 the host, and that clone is held to the same configuration and layout before
-it is mounted, as a check on the launcher's own work. That check reads Git configuration only, includes followed,
+it is mounted, as a check on the launcher's own work. Every git the launcher
+itself runs on the host — those checks and the staging clone — runs in an
+isolated environment (no global or system configuration, an empty `HOME` and
+hooks path, no `GIT_*` from the operator's shell), so a `.gitattributes` in
+the reviewed tree can name no filter that resolves and nothing of the
+checkout runs on the host before the container exists. That check reads Git configuration only, includes followed,
 and not the working tree: a `.env` or `.netrc` in the tree is kept out by the
 panel checkout being a fresh clone, not by the launcher, and a remote or
 branch named after a secret is not detectable; the panel clone is yours to

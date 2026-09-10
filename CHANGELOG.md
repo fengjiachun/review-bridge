@@ -54,7 +54,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   head (the panel checkout must still be at it, or the launch is refused), holds it
   to the same configuration and layout as a check on its own work, mounts
   only it at the recorded path, and removes it at cleanup, so the operator's
-  `.git` never enters the container; the checks stay on the panel checkout
+  `.git` never enters the container — every git the launcher runs on the host
+  for this runs isolated from the operator's global and system configuration,
+  `HOME`, hooks, and `GIT_*` environment, so a `.gitattributes` filter in the
+  reviewed tree resolves to nothing and executes nothing on the host; the checks stay on the panel checkout
   since
   `git clone` copies the operator's `init.templateDir` into it, and the
   packaged skill's panel clone now uses `--template=`; a remote or submodule

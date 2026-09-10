@@ -494,6 +494,13 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the clone is detached at the review's recorded snapshot head, which the panel checkout must still be at",
       /detached at the review's recorded snapshot head — which the panel checkout must still be at, or the launch is refused before anything starts/,
     ],
+    // Codex round twenty-five on #125: the staging clone ran with the
+    // operator's global git configuration, so a .gitattributes filter in the
+    // reviewed tree would have executed on the host.
+    [
+      "the launcher's host git runs isolated from the operator's configuration",
+      /Every git the launcher itself runs on the host — those checks and the staging clone — runs in an isolated environment \(no global or system configuration, an empty `HOME` and hooks path, no `GIT_\*` from the operator's shell\)/,
+    ],
     [
       "the mount is a fresh clone the launcher makes; the operator's .git never enters",
       /not that `\.git` but a fresh clone the launcher makes itself from the panel checkout .* the operator's `\.git` never enters the container/,

@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadReview, prepareReview } from "../src/core.mjs";
-import { commit, fixture as repositoryFixture } from "./helpers/repository-fixture";
+import { commit, fixture as repositoryFixture, git as fixtureGit } from "./helpers/repository-fixture";
 
 // The advisory sandbox launcher is packaged beside the other plugin scripts
 // and imports the server the same way, so it is exercised from a
@@ -29,7 +29,7 @@ const launcherSource = path.join(
 );
 const REVIEW_ID = "rb-2026-09-10T000000-000Z-0badcafe";
 
-async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", checkoutPath = null, realReview = false } = {}) {
+async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", checkoutPath = null, realReview = false, beforePrepare = null } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-advisory-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const plugin = path.join(root, "plugin");
@@ -49,6 +49,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
     const repo = await repositoryFixture();
     t.after(() => fsp.rm(repo.root, { recursive: true, force: true }));
     await commit(repo.repository, "export const value = 2;\n");
+    if (beforePrepare) await beforePrepare(repo.repository);
     const prepared = await prepareReview(repo.store, {
       repositoryPath: repo.repository,
       baseRef: repo.baseSha,
@@ -826,6 +827,19 @@ test("a checkout whose Git configuration carries a credential is refused before 
   await fsp.writeFile(config, clean);
   result = launch(c1, ["--review-id", c1.reviewId, "--dry-run"]);
   assert.equal(result.status, 0, result.stderr);
+  // The line rule follows git's grammar: a `#` or `;` inside a quoted
+  // subsection or value is text (a branch named release#1 is legal and a
+  // clone of it writes exactly this), an escaped quote in a subsection is
+  // text; outside quotes a `#` or `;` is a comment and refused.
+  await fsp.writeFile(config, `${clean}[branch "release#1"]\n\tremote = origin\n\tmerge = "refs/heads/release#1"\n[branch "rel\\"1"]\n\tremote = origin\n`);
+  result = launch(c1, ["--review-id", c1.reviewId, "--dry-run"]);
+  assert.equal(result.status, 0, result.stderr);
+  await fsp.writeFile(config, `${clean}[remote "x"]\n\tfetch = +refs/heads/*:refs/remotes/x/* ; ghp_tra1ling\n`);
+  result = launch(c1, ["--review-id", c1.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /\.git\/config line \d+ \(not a section header or a key = value line\)/);
+  assert.doesNotMatch(result.stderr, /ghp_tra1ling/);
+  await fsp.writeFile(config, clean);
   // core.* is not accepted wholesale: the keys that carry a command or a
   // credential are refused by name.
   for (const [key, value] of [["core.askPass", "/tmp/askpass.sh"], ["core.gitProxy", "/tmp/proxy.sh"], ["core.sshCommand", "ssh -i .git/id"]]) {
@@ -920,6 +934,40 @@ test("a host credential directory present inside the container fails the boundar
   assert.equal(result.status, 1, result.stdout);
   assert.match(result.stderr, new RegExp(`the container boundary did not hold:\\n {2}host path present inside the container: ${f.home}/\\.ssh`));
   assert.doesNotMatch(result.stdout, /mcp: /);
+});
+
+test("the launcher's host git runs isolated: a global smudge filter named by the reviewed tree never executes", async (t) => {
+  // The reviewed tree names a filter; the operator's global configuration
+  // defines it with a command. Inherited, git would run that command on the
+  // host during the staging clone's checkout — the positive control shows
+  // it does — and the launcher's isolated environment resolves the name to
+  // nothing.
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-smudge-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const marker = path.join(root, "smudge-ran");
+  const evil = path.join(root, "gitconfig");
+  // (`&&`, not `;`: in a git config value an unquoted `;` starts a comment.)
+  await fsp.writeFile(evil, `[filter "evil"]\n\tsmudge = sh -c 'touch ${marker} && cat'\n`);
+  const f = await fixture(t, {
+    realReview: true,
+    beforePrepare: async (repository) => {
+      await fsp.writeFile(path.join(repository, ".gitattributes"), "* filter=evil\n");
+      fixtureGit(repository, "add", ".gitattributes");
+      fixtureGit(repository, "commit", "-m", "attributes");
+    },
+  });
+  const control = spawnSync("git", ["clone", "-q", "--template=", "--no-local", `file://${f.checkout}`, path.join(root, "control")], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: root, GIT_CONFIG_GLOBAL: evil },
+  });
+  assert.equal(control.status, 0, control.stderr);
+  await fsp.access(marker);
+  await fsp.rm(marker);
+  const env = await fakeDocker(f);
+  const result = launch(f, ["--review-id", f.reviewId], { ...env, GIT_CONFIG_GLOBAL: evil });
+  assert.equal(result.status, 0, result.stdout.slice(-2500));
+  await assert.rejects(fsp.access(marker), /ENOENT/);
+  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: PASS/);
 });
 
 test("the container mounts a clone the launcher makes, never the panel checkout's own .git", async (t) => {

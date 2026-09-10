@@ -405,12 +405,103 @@ const FRESH_CLONE_CONFIG_KEYS = [
   { pattern: /^submodule\..+\.active$/ },
 ];
 
+// Every git the launcher itself runs on the host — the checks on the panel
+// checkout and the staging clone — runs in an isolated environment: no
+// global or system configuration, an empty HOME and hooks path, no GIT_*
+// from the operator's shell, no terminal prompt. A `.gitattributes` in the
+// reviewed tree can name a filter, and with the operator's global
+// configuration in reach that filter's command would run on the host before
+// the container exists (Codex round twenty-five on #125); with nothing to
+// resolve the name against, git applies nothing. The isolation directory is
+// made on first use and removed at exit.
+let gitIsolation = null;
+function hostGit(args) {
+  if (!gitIsolation) {
+    gitIsolation = fs.mkdtempSync(path.join(os.tmpdir(), "review-bridge-advisory-git-"));
+    fs.mkdirSync(path.join(gitIsolation, "home"));
+    fs.mkdirSync(path.join(gitIsolation, "hooks"));
+  }
+  return spawnSync(
+    "git",
+    ["-c", `core.hooksPath=${path.join(gitIsolation, "hooks")}`, "-c", "filter.lfs.required=false", ...args],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        PATH: process.env.PATH,
+        LANG: process.env.LANG ?? "C.UTF-8",
+        TMPDIR: os.tmpdir(),
+        HOME: path.join(gitIsolation, "home"),
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    },
+  );
+}
+process.on("exit", () => {
+  if (gitIsolation) fs.rmSync(gitIsolation, { recursive: true, force: true });
+});
+
 // What a line of a fresh clone's .git/config can be: blank, a section header,
 // or `key = value`. `git config --list` shows none of a comment, so a
 // template can leave `# <token>` in the file unseen by the key check; the raw
-// bytes are held to these three shapes, and a value may not carry the
-// comment or continuation characters. Reported by line number only.
-const CONFIG_LINE = /^\s*(?:|\[[A-Za-z0-9.-]+(?:\s+"[^"\\]*")?\]\s*|[A-Za-z][A-Za-z0-9-]*\s*=\s*[^#;\\]*)$/;
+// bytes are held to these three shapes by git's own grammar — a subsection
+// name and a value may carry quoted strings with `\"` and `\\` escapes, and a
+// `#` or `;` inside quotes is text (`[branch "release#1"]`,
+// `merge = "refs/heads/release#1"` are what a clone of such a branch writes)
+// — while a `#` or `;` outside quotes, a backslash outside quotes (an escape
+// or a continuation), an unterminated quote, or anything left over after the
+// shape is refused. Reported by line number only.
+function configLineViolation(line) {
+  let i = 0;
+  const n = line.length;
+  const space = () => {
+    while (i < n && (line[i] === " " || line[i] === "\t")) i += 1;
+  };
+  // A quoted string: past the opening quote, up to and including the closing
+  // one, escapes skipped. False when unterminated.
+  const quoted = () => {
+    i += 1;
+    while (i < n && line[i] !== '"') i += line[i] === "\\" ? 2 : 1;
+    if (i >= n) return false;
+    i += 1;
+    return true;
+  };
+  space();
+  if (i === n) return null;
+  if (line[i] === "[") {
+    i += 1;
+    const start = i;
+    while (i < n && /[A-Za-z0-9.-]/.test(line[i])) i += 1;
+    if (i === start) return "section";
+    space();
+    if (line[i] === '"' && !quoted()) return "section";
+    space();
+    if (line[i] !== "]") return "section";
+    i += 1;
+    space();
+    return i === n ? null : "trailing";
+  }
+  const start = i;
+  while (i < n && /[A-Za-z0-9-]/.test(line[i])) i += 1;
+  if (i === start || !/[A-Za-z]/.test(line[start])) return "key";
+  space();
+  if (line[i] !== "=") return "key";
+  i += 1;
+  while (i < n) {
+    const c = line[i];
+    if (c === '"') {
+      if (!quoted()) return "quote";
+    } else if (c === "#" || c === ";" || c === "\\") {
+      return "comment";
+    } else {
+      i += 1;
+    }
+  }
+  return null;
+}
 const CONFIG_LINE_LIMIT = 200;
 
 function gitConfigViolations(repository) {
@@ -424,17 +515,13 @@ function gitConfigViolations(repository) {
   const lines = raw.split("\n");
   if (lines.length > CONFIG_LINE_LIMIT) violations.push(`.git/config (more than ${CONFIG_LINE_LIMIT} lines)`);
   lines.forEach((line, index) => {
-    if (!CONFIG_LINE.test(line)) violations.push(`.git/config line ${index + 1} (not a section header or a key = value line)`);
+    if (configLineViolation(line)) violations.push(`.git/config line ${index + 1} (not a section header or a key = value line)`);
   });
   const urlCredential = (text) =>
     /:\/\/[^/\s@]*:[^/\s@]*@/.test(text) || /(?:^|\.)https?:\/\/[^/\s@]+@/i.test(text);
   const redact = (key) => key.replace(/[^./@\s]*@/g, "<redacted>@");
   for (const scope of ["--local", "--worktree"]) {
-    const result = spawnSync(
-      "git",
-      ["-C", repository, "config", scope, "--includes", "--list", "--null"],
-      { encoding: "utf8" },
-    );
+    const result = hostGit(["-C", repository, "config", scope, "--includes", "--list", "--null"]);
     // The local scope always reads in a repository; a failure there is git
     // itself failing, and the check must not pass by not running. The
     // worktree scope exists only with extensions.worktreeConfig.
@@ -730,7 +817,7 @@ async function resolveInputs(options) {
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(snapshotHead ?? "")) {
     fail(`the review records no snapshot head_sha in its last round`);
   }
-  const panelHead = spawnSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" });
+  const panelHead = hostGit(["-C", repository, "rev-parse", "HEAD"]);
   if (panelHead.error || panelHead.status !== 0) {
     fail(`cannot read the author checkout's HEAD: ${panelHead.error?.message ?? panelHead.stderr.trim()}`);
   }
@@ -815,7 +902,7 @@ function mountTable(inputs, scratch, volume, stagedStore) {
 // review's recorded snapshot head, which resolveInputs() has already checked
 // the panel checkout is at.
 function stageCheckout(inputs) {
-  const git = (args, cwd) => spawnSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const git = (args) => hostGit(args);
   const message = (result) => result.error?.message ?? result.stderr.trim().replace(/'[^']*'/g, "'<redacted>'");
   const hostHead = inputs.snapshotHead;
   const clone = git(["clone", "--quiet", "--template=", "--no-local", "--no-hardlinks", `file://${inputs.repository}`, inputs.checkout]);
