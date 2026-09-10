@@ -707,6 +707,17 @@ test("only a self-contained clone is accepted: a linked worktree and a shared cl
   assert.equal(result.status, 0, result.stderr);
 });
 
+test("a scratch directory with a comma in its path is refused before Docker and before staging", async (t) => {
+  const f = await fixture(t, { realReview: true });
+  const scratch = path.join(f.root, "t,mp");
+  await fsp.mkdir(scratch);
+  const result = launch(f, ["--review-id", f.reviewId], { PATH: await gitOnlyPath(t), TMPDIR: scratch });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /the scratch directory \(TMPDIR\) .*t,mp contains a comma, which docker's --mount syntax cannot carry/);
+  assert.doesNotMatch(result.stderr, /Docker is not available/);
+  assert.deepEqual(await fsp.readdir(scratch), []);
+});
+
 test("the launcher fails closed when Docker is unavailable", async (t) => {
   const f = await fixture(t);
   const result = launch(f, ["--review-id", REVIEW_ID], { PATH: await gitOnlyPath(t) });

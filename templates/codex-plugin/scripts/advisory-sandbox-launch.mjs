@@ -369,9 +369,18 @@ async function resolveInputs(options) {
       fail(`${label} is missing: ${target}`);
     }
   }
-  for (const target of [store, repository, marketplace, authJson]) {
+  // Every --mount source, the scratch directory included: it is the source
+  // of the config, staged-store, and sessions mounts, and a comma there would
+  // otherwise be found by docker only after the review had been staged.
+  for (const [target, label] of [
+    [store, "the review store"],
+    [repository, "the author checkout"],
+    [marketplace, "the marketplace"],
+    [authJson, "the codex auth.json"],
+    [os.tmpdir(), "the scratch directory (TMPDIR)"],
+  ]) {
     if (target.includes(",")) {
-      fail(`${target} contains a comma, which docker's --mount syntax cannot carry`);
+      fail(`${label} ${target} contains a comma, which docker's --mount syntax cannot carry`);
     }
   }
   // The checkout's .git/config rides into the container with the mount, and
