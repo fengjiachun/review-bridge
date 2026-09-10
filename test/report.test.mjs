@@ -1215,14 +1215,14 @@ test("every rendered record kind is held to its writer's field table", async (t)
   await tamper((r) => { r.carried_findings = [{ ...carried, fingerprint_sha256: "nope" }]; }, /^carried finding 1 fingerprint_sha256 "nope" is not a digest$/);
   await tamper((r) => { r.carried_findings = [(({ title, ...rest }) => rest)(carried)]; }, /^carried finding 1 has no title$/);
   await tamper((r) => { r.carried_findings = [{ ...carried, carried_at: "x" }]; }, /^carried finding 1 carries a field the writer never sets: carried_at$/);
-  // A well-formed carried finding passes the table, and is then held to its
-  // source: this one names a source review the store does not hold.
+  // A well-formed carried finding passes the table, and is then held to the
+  // source the prepare event recorded: this ledger recorded none.
   const review = JSON.parse(original);
   review.carried_findings = [carried];
   await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
   await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
-    assert.equal(error.code, "CONTINUATION_SOURCE_MISSING");
-    assert.equal(error.details.source_review_id, carried.continued_from_review_id);
+    assert.equal(error.code, "CONTINUATION_SOURCE_UNRECORDED");
+    assert.match(error.message, /carried records without a recorded source; not renderable/);
     return true;
   });
   await fsp.writeFile(reviewPath, original, { mode: 0o600 });
@@ -1330,6 +1330,12 @@ test("the continuation marker must be the one the history's REVIEW_CONTINUED eve
   // The source is still named through the carried erratum, so an emptied
   // carried set is compared with the source's open findings and refused.
   await tamperContinuation((ledger) => { assert.equal(ledger.errata.filter((e) => e.continued_from_review_id).length, 1); ledger.carried_findings = []; }, "CONTINUATION_SOURCE_MISMATCH", /only part of the open findings \(source finding "F-002" is not carried\)/);
+  // The source is the one the prepare event recorded: without it, carried
+  // records make the ledger unrenderable rather than pointing at a source.
+  await tamperContinuation((ledger) => { assert.equal(ledger.history[0].continued_from_review_id, state.sourceId); delete ledger.history[0].continued_from_review_id; }, "CONTINUATION_SOURCE_UNRECORDED", /carried records without a recorded source; not renderable/);
+  await tamperContinuation((ledger) => { ledger.history[0].continued_from_review_id = "rb-2026-09-02T000000-000Z-0000c0de"; }, "CONTINUATION_SOURCE_MISMATCH", /carries a record from rb-[^,]+, but its prepare event recorded rb-2026-09-02T000000-000Z-0000c0de as the source/);
+  // The carried errata are all of the source's, in order.
+  await tamperContinuation((ledger) => { ledger.errata = ledger.errata.filter((e) => e.continued_from_review_id == null); }, "CONTINUATION_SOURCE_MISMATCH", /0 carried erratum\/errata, where the source holds 1/);
   await tamperContinuation((ledger) => { ledger.carried_findings[0].fingerprint_sha256 = "e".repeat(64); }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-002" with fingerprint "e{64}"/);
   await tamperContinuation((ledger) => { ledger.carried_findings[0].title = "reworded"; }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-002" whose carried content does not hash to its fingerprint/);
   await fsp.writeFile(continuationPath, continuationOriginal, { mode: 0o600 });
@@ -1376,6 +1382,9 @@ test("the continuation marker must be the one the history's REVIEW_CONTINUED eve
   const cyclic = JSON.parse(sourceOriginal);
   const back = JSON.parse(continuationOriginal).carried_findings[0];
   cyclic.carried_findings = [{ ...back, continued_from_review_id: state.continuationId }];
+  // The source's own prepare event names the continuation as its source, so
+  // the source loads the continuation, which is already on the chain.
+  cyclic.history[0].continued_from_review_id = state.continuationId;
   await fsp.writeFile(sourcePath, `${JSON.stringify(cyclic, null, 2)}\n`, { mode: 0o600 });
   await assert.rejects(writeReviewReport(state.store, state.continuationId), (error) => {
     assert.equal(error.code, "CONTINUATION_CHAIN_CYCLE");
@@ -1384,7 +1393,7 @@ test("the continuation marker must be the one the history's REVIEW_CONTINUED eve
   });
   await fsp.writeFile(sourcePath, sourceOriginal, { mode: 0o600 });
   // A review cannot continue itself, whatever the dates.
-  await tamperContinuation((ledger) => { ledger.carried_findings[0].continued_from_review_id = ledger.id; }, "CONTINUATION_SOURCE_MISMATCH", /a review cannot continue itself/);
+  await tamperContinuation((ledger) => { ledger.history[0].continued_from_review_id = ledger.id; ledger.carried_findings[0].continued_from_review_id = ledger.id; ledger.errata = ledger.errata.filter((e) => e.continued_from_review_id == null); }, "CONTINUATION_SOURCE_MISMATCH", /a review cannot continue itself/);
   await fsp.writeFile(continuationPath, continuationOriginal, { mode: 0o600 });
   // The source itself gone: named apart from a disagreement.
   await fsp.rename(path.join(state.store, "reviews", state.sourceId), path.join(state.store, "reviews", `${state.sourceId}.away`));
@@ -1742,6 +1751,23 @@ test("a successor proof is bound to its round's head and base and to the parent'
   await tamper((review) => { review.rounds[0].successor.current_head_sha = "1".repeat(40); }, /round 1 successor proof names current_head_sha 1{40}, but the round's head is [0-9a-f]{40}/);
   await tamper((review) => { review.rounds[0].successor.base_sha = "2".repeat(40); }, /round 1 successor proof names base_sha 2{40}, but the round's base is [0-9a-f]{40}/);
   await tamper((review) => { review.rounds[0].successor.parent_head_sha = "3".repeat(40); }, new RegExp(`round 1 successor proof names parent_head_sha 3{40}, but parent ${state.parentId} ends at [0-9a-f]{40}`));
+  // The proof's file lists are what its stored delta names. The stored
+  // proof artifact is edited alongside the ledger so the artifact comparison
+  // passes and the delta itself is what refuses the extra path.
+  assert.deepEqual(genuine.rounds[0].successor.changed_files, ["value.test.js"]);
+  assert.deepEqual(genuine.rounds[0].successor.deleted_files, []);
+  const proofPath = path.join(state.store, "reviews", state.successorId, "rounds", "1", "successor.json");
+  const proofOriginal = await fsp.readFile(proofPath, "utf8");
+  const edited = JSON.parse(original);
+  edited.rounds[0].successor.changed_files = ["value.test.js", "not-in-the-delta.js"];
+  await fsp.writeFile(reviewPath, `${JSON.stringify(edited, null, 2)}\n`, { mode: 0o600 });
+  await fsp.writeFile(proofPath, `${JSON.stringify(edited.rounds[0].successor, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.successorId), (error) => {
+    assert.equal(error.code, "REVIEW_LEDGER_INVALID", error.message);
+    assert.match(error.details.reason, /round 1 successor proof lists changed_files \["not-in-the-delta\.js","value\.test\.js"\], but its delta changes \["value\.test\.js"\]/);
+    return true;
+  });
+  await fsp.writeFile(proofPath, proofOriginal, { mode: 0o600 });
   await fsp.writeFile(reviewPath, original, { mode: 0o600 });
   assert.equal((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).reused, false);
 });

@@ -56,7 +56,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   store's own snapshot reproduction needs it and no second hash format is
   kept; a continuation is held to its source through the same loader, its
   own sources included and cycles refused, and a continuation prepared before
-  the source freeze, whose source never recorded it, is refused as well. Every reviewer- or author-supplied string is
+  the source freeze, whose source never recorded it, is refused as well.
+  `prepare_review` now records the source a continuation carries from on the
+  ledger's `REVIEW_PREPARED` event as `continued_from_review_id`, and the
+  validator takes the source from there alone: a ledger with carried records
+  and no recorded source is refused as `CONTINUATION_SOURCE_UNRECORDED`, so
+  continuations prepared before this release are not renderable. A
+  successor proof's file lists are compared with the paths its stored delta
+  names. Every reviewer- or author-supplied string is
   rendered as one escaped line or inside a fence longer than any backtick
   run it contains, so no finding title or rationale can open a heading,
   table row, or fence of its own. The

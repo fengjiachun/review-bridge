@@ -290,6 +290,7 @@ const HISTORY_EVENT_FIELDS = {
   REVIEW_PREPARED: [
     { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
     { field: "mode", describe: "FULL or SUCCESSOR", optional: true, ok: oneOf(["FULL", "SUCCESSOR"]) },
+    { field: "continued_from_review_id", describe: "a review ID", optional: true, ok: isReviewIdValue },
   ],
   INITIAL_REVIEW_CLEAN: [
     { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
@@ -839,6 +840,44 @@ function reviewLedgerDefect(review, reviewId) {
   return null;
 }
 
+// The files a successor delta touches, read from its own headers the way the
+// writer's `git diff --name-only` reports them: every `diff --git` block names
+// one path (the new one for a rename), and a block whose file was deleted
+// names a deletion too. A header this cannot read is an error, not a guess.
+function successorFilesFromDelta(delta) {
+  const text = delta.toString("utf8");
+  const changed = new Set();
+  const deleted = new Set();
+  const blocks = text.split(/^(?=diff --git )/m).filter((block) => block.startsWith("diff --git "));
+  if (blocks.length === 0 && text.trim() !== "") {
+    throw new Error("no diff --git header");
+  }
+  const unquote = (raw) =>
+    raw.startsWith('"')
+      ? raw
+          .slice(1, -1)
+          .replace(/\\(\d{3}|[\\"tnr])/g, (_match, escape) =>
+            /^\d{3}$/.test(escape) ? String.fromCharCode(parseInt(escape, 8)) : { "\\": "\\", '"': '"', t: "\t", n: "\n", r: "\r" }[escape],
+          )
+      : raw;
+  for (const block of blocks) {
+    const header = block.split("\n", 1)[0];
+    const match = header.match(/^diff --git (?<a>"a\/(?:[^"\\]|\\.)*"|a\/\S+) (?<b>"b\/(?:[^"\\]|\\.)*"|b\/\S+)$/);
+    if (match == null) {
+      throw new Error(`unreadable header ${JSON.stringify(header)}`);
+    }
+    const before = unquote(match.groups.a).slice(2);
+    const after = unquote(match.groups.b).slice(2);
+    if (/^deleted file mode /m.test(block)) {
+      changed.add(before);
+      deleted.add(before);
+    } else {
+      changed.add(after);
+    }
+  }
+  return { changed: [...changed], deleted: [...deleted] };
+}
+
 // The round fields snapshotHashFromReviewRound hashes or checks the type of.
 // A round lacking one is older than the function and cannot be reproduced.
 const SNAPSHOT_HASH_INPUTS = [
@@ -903,11 +942,29 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
   // by id and fingerprint, and the source's errata by sequence. The source is
   // read here to compare; a source that is gone is named apart from one that
   // disagrees.
-  const sources = new Set([
-    ...(review.carried_findings ?? []).map((carried) => carried.continued_from_review_id),
-    ...(review.errata ?? []).filter((erratum) => erratum.continued_from_review_id != null).map((erratum) => erratum.continued_from_review_id),
-  ]);
-  for (const sourceId of sources) {
+  // The source a continuation carries from is the one its REVIEW_PREPARED
+  // event recorded, and only that: a ledger with carried records and no
+  // recorded source is not renderable, and a carried record naming any other
+  // review is a disagreement. The source is never inferred from the records.
+  const carriedRecords = [
+    ...(review.carried_findings ?? []),
+    ...(review.errata ?? []).filter((erratum) => erratum.continued_from_review_id != null),
+  ];
+  const recordedSource = review.history[0]?.continued_from_review_id ?? null;
+  if (recordedSource == null && carriedRecords.length > 0) {
+    throw Object.assign(
+      new Error(`review ${reviewId} holds carried records without a recorded source; not renderable`),
+      { code: "CONTINUATION_SOURCE_UNRECORDED", details: { review_id: reviewId, path: filePath, reason: "carried records without a recorded source; not renderable" } },
+    );
+  }
+  for (const sourceId of recordedSource == null ? [] : [recordedSource]) {
+    const stray = carriedRecords.find((record) => record.continued_from_review_id !== sourceId);
+    if (stray != null) {
+      throw Object.assign(
+        new Error(`review ${reviewId} carries a record from ${stray.continued_from_review_id}, but its prepare event recorded ${sourceId} as the source`),
+        { code: "CONTINUATION_SOURCE_MISMATCH", details: { review_id: reviewId, source_review_id: sourceId, path: filePath, reason: `a carried record names ${stray.continued_from_review_id}` } },
+      );
+    }
     if (sourceId === reviewId) {
       throw Object.assign(new Error(`review ${reviewId} carries records from itself: a review cannot continue itself`), {
         code: "CONTINUATION_SOURCE_MISMATCH",
@@ -978,11 +1035,16 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
     const carriedIds = new Set(carriedFromSource.map((carried) => carried.finding_id));
     const missing = [...frozen.keys()].find((id) => !carriedIds.has(id));
     if (missing != null) throw mismatch(`only part of the open findings (source finding ${JSON.stringify(missing)} is not carried)`);
+    // The carried errata are the source's errata, all of them, in order: the
+    // freeze copies the whole list and renumbers it from 1.
     const sourceErrata = source.errata ?? [];
-    for (const [index, erratum] of (review.errata ?? []).entries()) {
-      if (erratum.continued_from_review_id !== sourceId) continue;
+    const carriedErrata = (review.errata ?? []).filter((erratum) => erratum.continued_from_review_id === sourceId);
+    if (carriedErrata.length !== sourceErrata.length) {
+      throw mismatch(`${carriedErrata.length} carried erratum/errata, where the source holds ${sourceErrata.length}`);
+    }
+    for (const [index, erratum] of carriedErrata.entries()) {
       const original = sourceErrata[index];
-      if (original == null || original.at !== erratum.at || original.round !== erratum.round || original.text !== erratum.text) {
+      if (original.at !== erratum.at || original.round !== erratum.round || original.text !== erratum.text) {
         throw mismatch(`erratum ${erratum.sequence} as the source's erratum ${index + 1}`);
       }
     }
@@ -1048,11 +1110,30 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
       }
     }
     let reproduced;
+    let artifacts;
     try {
       reproduced = await snapshotHashFromReviewRound(storeRoot, reviewId, review, round);
-      await verifySuccessorArtifacts(storeRoot, reviewId, round);
+      artifacts = await verifySuccessorArtifacts(storeRoot, reviewId, round);
     } catch (error) {
       throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round}: ${error.message}`);
+    }
+    // The proof's file lists are what the stored delta says they are: the
+    // paths its diff headers name, deletions among them by their header.
+    if (artifacts != null) {
+      let fromDelta;
+      try {
+        fromDelta = successorFilesFromDelta(artifacts["successor.diff"]);
+      } catch (error) {
+        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor delta cannot be read for its files: ${error.message}`);
+      }
+      const proof = round.successor;
+      const listed = (values) => JSON.stringify([...values].sort());
+      if (listed(proof.changed_files) !== listed(fromDelta.changed)) {
+        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof lists changed_files ${listed(proof.changed_files)}, but its delta changes ${listed(fromDelta.changed)}`);
+      }
+      if (listed(proof.deleted_files) !== listed(fromDelta.deleted)) {
+        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof lists deleted_files ${listed(proof.deleted_files)}, but its delta deletes ${listed(fromDelta.deleted)}`);
+      }
     }
     if (reproduced !== round.snapshot_hash) {
       throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} snapshot_hash is not reproduced by its patch`);
@@ -2513,6 +2594,9 @@ export async function prepareReview(
           event: "REVIEW_PREPARED",
           round: 1,
           mode: successorResult.strategy.mode,
+          // A continuation names its source here, once, where the ledger
+          // is created; the carried records are then held to this source.
+          ...(continuedFromReviewId == null ? {} : { continued_from_review_id: continuedFromReviewId }),
         },
       ],
     };

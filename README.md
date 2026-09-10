@@ -747,7 +747,11 @@ snapshot reproduction needs it, and the report keeps no second hash format
 (`ROUND_SNAPSHOT_UNREPRODUCIBLE`). Nor can a continuation prepared before the
 source freeze: its source never recorded it, and the report accepts no
 continuation its source does not vouch for (`CONTINUATION_SOURCE_MISMATCH`);
-a source is validated the way the continuation is, its own sources included. Neither changes a ledger, consumes a round, or touches
+a source is validated the way the continuation is, its own sources included.
+A continuation's source is the one its `REVIEW_PREPARED` event records, which
+`prepare_review` writes from this release on; a ledger with carried records
+and no recorded source is not renderable either
+(`CONTINUATION_SOURCE_UNRECORDED`). Neither changes a ledger, consumes a round, or touches
 a gate. The workflow skill renders the report once `LOCAL_GATE_PASSED` is
 recorded and again once a publication reads `MERGE_READY`, and opens it in
 Plannotator when that tool is on PATH; annotations never flow back into the
