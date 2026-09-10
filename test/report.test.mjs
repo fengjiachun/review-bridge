@@ -896,6 +896,17 @@ test("finding statuses must equal what their records derive, in both directions"
   }, /finding "F-003" is "RESOLVED" but its records derive no status \(a decision with no resolution\)/);
   // A status that does not follow from its own records.
   await tamper((review) => { review.findings[1].status = "RESOLVED"; }, /finding "F-002" is "RESOLVED" but its records derive "REBUTTAL_ACCEPTED"/);
+  // Every field the writer sets is held to the writer's own domain and to
+  // the rest of the ledger: a round the ledger does not hold, a non-integer
+  // round, a bad line, an escaping path, an ID out of position, and a field
+  // the writer never sets are each refused by name.
+  await tamper((review) => { review.findings[0].introduced_round = 3; }, /finding "F-001" introduced_round 3 is not a round the ledger holds/);
+  await tamper((review) => { review.findings[0].introduced_round = "1"; }, /finding "F-001" introduced_round "1" is not a round the ledger holds/);
+  await tamper((review) => { review.findings[0].line = 0; }, /finding "F-001" line 0 is not absent, or a positive integer/);
+  await tamper((review) => { review.findings[0].path = "../secret"; }, /finding "F-001" path "\.\.\/secret" is not absent, or a safe relative path/);
+  await tamper((review) => { review.findings[1].id = "F-007"; }, /finding "F-007" id "F-007" is not the position-based finding ID/);
+  await tamper((review) => { review.findings[0].reviewer_note = "x"; }, /finding "F-001" carries a field the writer never sets: reviewer_note/);
+  await tamper((review) => { delete review.findings[0].explanation; }, /finding "F-001" has no explanation/);
   // A FINDINGS_SUBMITTED that lost its round is refused by name; the gate
   // event, which the writer records without one, is not required to carry it.
   await tamper((review) => { delete review.history.find((entry) => entry.event === "FINDINGS_SUBMITTED").round; }, /history entry 2 \(FINDINGS_SUBMITTED\) has no round/);

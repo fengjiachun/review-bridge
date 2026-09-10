@@ -388,15 +388,12 @@ function reviewLedgerDefect(review, reviewId) {
   } else if (review.clean_snapshot_hash != null) {
     return `status is ${review.status} but a clean_snapshot_hash is recorded`;
   }
-  // Findings and their responses: known enums, unique IDs, and every response
+  // Findings: every field the writer sets, checked from the writer's own
+  // table; then their responses: known enums, unique IDs, and every response
   // naming a finding that exists.
-  for (const finding of review.findings) {
-    if (!["blocker", "major", "minor", "nit"].includes(finding?.severity)) {
-      return `unknown finding severity ${JSON.stringify(finding?.severity)}`;
-    }
-    if (!LEDGER_FINDING_STATUSES.includes(finding.status)) {
-      return `unknown finding status ${JSON.stringify(finding.status)}`;
-    }
+  for (const [index, finding] of review.findings.entries()) {
+    const defect = findingDefect(finding, index, review);
+    if (defect != null) return defect;
   }
   for (const resolution of review.resolutions) {
     if (!LEDGER_DISPOSITIONS.includes(resolution?.disposition)) {
@@ -2171,6 +2168,91 @@ export async function waitForReviewState(
     timed_out: false,
     summary: reviewSummary(review),
   };
+}
+
+// What normalizeFinding writes is what the ledger validator checks: one entry
+// per field the writer sets, with its type, its value domain, and its
+// reference into the rest of the ledger. A field added to the writer is added
+// here, or the validator refuses the writer's own output. `status` is also
+// derived and compared against the finding's records by the validator.
+const FINDING_FIELDS = [
+  {
+    field: "id",
+    describe: "the position-based finding ID",
+    ok: (value, { index }) => value === `F-${String(index + 1).padStart(3, "0")}`,
+  },
+  {
+    field: "introduced_round",
+    describe: "a round the ledger holds",
+    ok: (value, { review }) =>
+      Number.isInteger(value) && review.rounds.some((round) => round.round === value),
+  },
+  {
+    field: "severity",
+    describe: "blocker, major, minor, or nit",
+    ok: (value) => ["blocker", "major", "minor", "nit"].includes(value),
+  },
+  {
+    field: "title",
+    describe: "a non-empty string of at most 500 characters",
+    ok: (value) => typeof value === "string" && value !== "" && value.length <= 500,
+  },
+  {
+    field: "explanation",
+    describe: "a non-empty string of at most 20,000 characters",
+    ok: (value) => typeof value === "string" && value !== "" && value.length <= 20_000,
+  },
+  {
+    field: "recommendation",
+    describe: "a string of at most 20,000 characters",
+    ok: (value) => typeof value === "string" && value.length <= 20_000,
+  },
+  {
+    field: "status",
+    describe: "a finding status the writers set",
+    ok: (value) => LEDGER_FINDING_STATUSES.includes(value),
+  },
+  {
+    field: "path",
+    describe: "absent, or a safe relative path",
+    optional: true,
+    ok: (value) => {
+      try {
+        return safeRelativePath(value, "finding.path") === value;
+      } catch {
+        return false;
+      }
+    },
+  },
+  {
+    field: "line",
+    describe: "absent, or a positive integer",
+    optional: true,
+    ok: (value) => Number.isInteger(value) && value >= 1,
+  },
+];
+
+// The first way a stored finding departs from what normalizeFinding writes,
+// or null.
+function findingDefect(finding, index, review) {
+  if (finding == null || typeof finding !== "object" || Array.isArray(finding)) {
+    return `finding ${index + 1} is not an object`;
+  }
+  const known = new Set(FINDING_FIELDS.map((entry) => entry.field));
+  const unknown = Object.keys(finding).find((key) => !known.has(key));
+  if (unknown != null) {
+    return `finding ${JSON.stringify(finding.id ?? index + 1)} carries a field the writer never sets: ${unknown}`;
+  }
+  for (const { field, describe, optional, ok } of FINDING_FIELDS) {
+    if (!(field in finding)) {
+      if (optional) continue;
+      return `finding ${JSON.stringify(finding.id ?? index + 1)} has no ${field}`;
+    }
+    if (!ok(finding[field], { index, review })) {
+      return `finding ${JSON.stringify(finding.id ?? index + 1)} ${field} ${JSON.stringify(finding[field])} is not ${describe}`;
+    }
+  }
+  return null;
 }
 
 function normalizeFinding(input, id, round) {
