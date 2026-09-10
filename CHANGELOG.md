@@ -46,9 +46,15 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `://` or a `user:pass@` (`url.<url>.insteadOf`, `remote.<url>.url`) is
   refused before the allowlist is consulted and printed with its userinfo
   redacted; the `.git` directory is held to what a fresh `--template=` clone writes
-  as well (no file under `hooks`, `info`, or `branches`; `objects`, `refs`,
-  and `logs` holding only objects, packs, refs, and their logs; no other
-  top-level entry), since
+  as well, and — since an enumeration of what can hide in a `.git` does not
+  converge (Codex round twenty-two) — the container no longer gets the panel
+  checkout's `.git` at all: the launcher clones the checkout over git's own
+  transport (`git clone --template= --no-local --no-hardlinks file://…`) into
+  its scratch directory, detaches that clone at the checkout's HEAD, holds it
+  to the same configuration and layout as a check on its own work, mounts
+  only it at the recorded path, and removes it at cleanup, so the operator's
+  `.git` never enters the container; the checks stay on the panel checkout
+  since
   `git clone` copies the operator's `init.templateDir` into it, and the
   packaged skill's panel clone now uses `--template=`; a remote or submodule
   URL carrying a query or a fragment is refused, since a token can ride in

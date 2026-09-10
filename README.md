@@ -451,7 +451,8 @@ A panel's `CODEX_TASK` member reads a third party's diff, so it is launched
 only through the packaged `scripts/advisory-sandbox-launch.mjs` in the Codex
 plugin, which runs the reviewer inside a Linux container that is the
 filesystem read boundary: the operator's `auth.json` bind-mounted read-only,
-the packaged plugin and the author checkout read-only, a staged copy of the
+the packaged plugin read-only, a fresh clone the launcher makes from the author
+checkout read-only at the recorded path (the operator's `.git` never enters), a staged copy of the
 one review read-write (the host store is never mounted; the staged bytes are
 never copied back — the verdict is replayed through the host's own
 `submit_review` under the review's state lock and kept only if the replay

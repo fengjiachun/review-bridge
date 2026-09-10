@@ -832,21 +832,28 @@ to the key check and can carry a token; anything else (an `http.<url>.extraheade
 `actions/checkout` writes, any `credential.*` setting, an `http.cookieFile` or
 `http.sslKey` pointing into the checkout, a `core.askPass`, `core.gitProxy`,
 or `core.sshCommand`, an `include.path`, or any key whose name itself carries
-`://` or a `user:pass@`) is refused by key name, because the checkout's
-`.git/config` rides into the container with the mount and a denylist of
-secret-bearing keys does not converge; a `.git` holding more than a fresh
-`--template=` clone writes (any file under `hooks`, `info`, or `branches`,
-anything under `objects`, `refs`, or `logs` that is not an object, a pack, a
-ref, or its log, any other top-level entry) is refused the same way, and so is
-a remote or submodule URL carrying a query or a fragment. That check reads Git configuration only, includes followed,
+`://` or a `user:pass@`) is refused by key name, because the panel checkout is what the launcher
+clones from and a denylist of secret-bearing keys does not converge; a remote
+or submodule URL carrying a query or a fragment is refused the same way, and
+the `.git` layout is held to a fresh `--template=` clone's. What the
+container mounts at the recorded path is not that `.git` but a fresh clone
+the launcher makes itself from the panel checkout (`git clone --template=
+--no-local --no-hardlinks file://<panel checkout>` into its scratch
+directory, detached at the panel checkout's HEAD, removed at cleanup): the
+operator's `.git` never enters the container, only the objects reachable
+from the panel's refs cross, so a hook, a stray file among the objects, or a
+comment in the configuration that a template or a hand left there stays on
+the host, and that clone is held to the same configuration and layout before
+it is mounted, as a check on the launcher's own work. That check reads Git configuration only, includes followed,
 and not the working tree: a `.env` or `.netrc` in the tree is kept out by the
 panel checkout being a fresh clone, not by the launcher, and a remote or
 branch named after a secret is not detectable; the panel clone is yours to
 keep clean. And it refuses a
 checkout that is not a self-contained clone — a linked worktree, whose
 `.git` is a file pointing into the main repository, or a clone with
-alternates — because inside the container only the checkout itself
-exists and git can follow neither. The container is the only sandbox. Inside it the reviewer
+alternates — because the launcher clones from it over git's own transport,
+and what that transport would pull through a worktree's main repository or
+an alternate is a repository outside the panel's own. The container is the only sandbox. Inside it the reviewer
 runs with `--sandbox danger-full-access`, because Codex's nested bubblewrap
 does not start under Docker's default confinement, and relaxing that
 confinement to fit a second sandbox inside would weaken the one boundary that
@@ -1459,7 +1466,8 @@ attests nothing.
 
    `--template=` clones with an empty template, so no hook or helper from the
    operator's `init.templateDir` rides into the panel's `.git`; the launcher
-   refuses a `.git` holding more than a fresh clone writes. Both refspecs name
+   holds the panel's `.git` to what a fresh clone writes and mounts a fresh
+   clone of its own made from it, never the panel's `.git`. Both refspecs name
    their destination, and the merge base is computed from the refs the fetch
    just wrote, in the clone. A source-only refspec would not be enough: it
    fetches the commit but leaves updating any remote-tracking ref to

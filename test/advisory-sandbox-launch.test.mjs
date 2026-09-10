@@ -154,7 +154,18 @@ if (!args.includes("codex")) {
     out.push({ kind: "ancestor", path: p, children: mounted ? [...new Set([...image, wayDown(p), ...(process.env.FAKE_LEAK ? [process.env.FAKE_LEAK] : [])])] : image });
   });
   if (!mounted) { process.stdout.write(out.map((r) => JSON.stringify(r)).join("\\n") + "\\n"); process.exit(0); }
-  out.push({ kind: "checkout-head", value: process.env.FAKE_HEAD || spawnSync("git", ["-C", spec.checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim() });
+  // What is bound at the recorded path is the launcher's clone; the fake
+  // reads that source, as the real container reads the mount.
+  const mountedCheckout = bind(spec.checkout.replace(/[.*+?^()|[\\]\\\\]/g, "\\\\$&")) || spec.checkout;
+  if (process.env.FAKE_CHECKOUT_LOG) {
+    fs.writeFileSync(process.env.FAKE_CHECKOUT_LOG, JSON.stringify({
+      checkout: mountedCheckout,
+      entries: fs.readdirSync(path.join(mountedCheckout, ".git")).sort(),
+      fakeObject: fs.existsSync(path.join(mountedCheckout, ".git", "objects", "ab", "0".repeat(38))),
+      remoteUrl: spawnSync("git", ["-C", mountedCheckout, "config", "remote.origin.url"], { encoding: "utf8" }).stdout.trim(),
+    }));
+  }
+  out.push({ kind: "checkout-head", value: process.env.FAKE_HEAD || spawnSync("git", ["-C", mountedCheckout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim() });
   out.push({ kind: "store-writable", value: true });
   out.push({ kind: "egress", via: "proxy", code: "000", exit: 56 });
   out.push({ kind: "egress", via: "direct", code: process.env.FAKE_DIRECT_CODE || "000", exit: process.env.FAKE_DIRECT_CODE ? 0 : 6 });
@@ -272,6 +283,7 @@ esac
     FAKE_CALLS: path.join(bin, "calls.log"),
     FAKE_VOLUME_RM_FAIL: volumeRmFail ? "1" : "",
     FAKE_HEAD: head,
+    FAKE_CHECKOUT_LOG: path.join(bin, "checkout.json"),
   };
 }
 
@@ -311,18 +323,18 @@ test("--dry-run prints the mount table and the container launch without Docker",
   assert.equal(result.status, 0, result.stderr);
   const out = result.stdout;
   // Inputs derived from the ledger and the operator's config, not retyped.
-  assert.match(out, new RegExp(`checkout ${f.checkout} \\(read-only, at its recorded path\\)`));
+  assert.match(out, new RegExp(`checkout ${f.checkout} \\(read-only, at its recorded path; the bytes are a fresh clone the launcher makes at \\S+/checkout\\)`));
   assert.match(out, new RegExp(`marketplace ${f.marketplace} \\(plugin 9\\.9\\.9, read-only\\)`));
   // The mount table: read-only unless the reviewer must write it.
   const bind = (source, target, readonly) =>
-    new RegExp(`--mount type=bind,src=${source},dst=${target}${readonly ? ",readonly" : ""}(?: |'? )`);
+    new RegExp(`--mount '?type=bind,src=${source},dst=${target}${readonly ? ",readonly" : ""}(?: |'? )`);
   assert.match(out, bind(f.authJson, "/codex-home/auth\\.json", true));
   assert.match(out, bind(f.marketplace, "/marketplace", true));
   assert.match(
     out,
     bind(f.pluginSource, "/codex-home/plugins/cache/review-bridge-local/review-bridge/9\\.9\\.9", true),
   );
-  assert.match(out, bind(f.checkout, f.checkout, true));
+  assert.match(out, bind("\\S+/checkout", f.checkout, true));
   // The host store is never mounted; a staged copy of the one review is.
   assert.doesNotMatch(out, new RegExp(`src=${f.store}[,/]`));
   assert.match(out, /store,dst=\/store'? /);
@@ -422,7 +434,7 @@ test("a checkout path with a space stays one path through the mount and the prob
   assert.equal(result.status, 0, result.stderr);
   assert.match(
     result.stdout,
-    new RegExp(`--mount 'type=bind,src=${f.checkout},dst=${f.checkout},readonly'`),
+    new RegExp(`--mount 'type=bind,src=\\S+/checkout,dst=${f.checkout},readonly'`),
   );
   const spec = probeSpec(result.stdout);
   assert.equal(spec.checkout, f.checkout);
@@ -900,6 +912,37 @@ test("a host credential directory present inside the container fails the boundar
   assert.equal(result.status, 1, result.stdout);
   assert.match(result.stderr, new RegExp(`the container boundary did not hold:\\n {2}host path present inside the container: ${f.home}/\\.ssh`));
   assert.doesNotMatch(result.stdout, /mcp: /);
+});
+
+test("the container mounts a clone the launcher makes, never the panel checkout's own .git", async (t) => {
+  // What the layout check cannot see — a directory where a file is expected,
+  // an unreachable object among the real ones — never crosses: the mount is
+  // a --no-local clone over file://, and the launcher's clone is gone after
+  // the run.
+  const f = await fixture(t, { realReview: true });
+  await fsp.rm(path.join(f.checkout, ".git", "COMMIT_EDITMSG"), { force: true });
+  await fsp.mkdir(path.join(f.checkout, ".git", "COMMIT_EDITMSG"));
+  await fsp.writeFile(path.join(f.checkout, ".git", "COMMIT_EDITMSG", "secret"), "ghp_d1rectory\n");
+  await fsp.mkdir(path.join(f.checkout, ".git", "objects", "ab"), { recursive: true });
+  await fsp.writeFile(path.join(f.checkout, ".git", "objects", "ab", "0".repeat(38)), "not an object");
+  const env = await fakeDocker(f);
+  const result = launch(f, ["--review-id", f.reviewId], env);
+  assert.equal(result.status, 0, result.stdout.slice(-2500));
+  const seen = JSON.parse(await fsp.readFile(env.FAKE_CHECKOUT_LOG, "utf8"));
+  assert.equal(path.basename(seen.checkout), "checkout");
+  assert.notEqual(seen.checkout, f.checkout);
+  assert.ok(!seen.checkout.startsWith(`${f.checkout}/`), seen.checkout);
+  assert.deepEqual(seen.entries.filter((e) => e === "COMMIT_EDITMSG" || e === "hooks" || e === "info"), []);
+  assert.equal(seen.fakeObject, false);
+  assert.equal(seen.remoteUrl, `file://${await fsp.realpath(f.checkout)}`);
+  const recorded = await fsp.realpath(f.checkout);
+  assert.match(result.stdout, new RegExp(`^checkout ${recorded} \\(read-only, at its recorded path; the bytes are a fresh clone the launcher makes at ${seen.checkout}\\)$`, "m"));
+  const calls = await fsp.readFile(env.FAKE_CALLS, "utf8");
+  assert.match(calls, new RegExp(`type=bind,src=${seen.checkout},dst=${recorded},readonly`));
+  assert.doesNotMatch(calls, new RegExp(`type=bind,src=${recorded},`));
+  await assert.rejects(fsp.access(seen.checkout), /ENOENT/);
+  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: PASS/);
+  assert.doesNotMatch(result.stdout, /cleanup steps that failed/);
 });
 
 test("the mounted checkout's HEAD must be the host's, at sha1 or sha256 length", async (t) => {

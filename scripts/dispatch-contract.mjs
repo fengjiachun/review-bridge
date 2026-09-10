@@ -480,7 +480,17 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     ],
     [
       "the .git layout is held to what a fresh clone writes",
-      /a `\.git` holding more than a fresh `--template=` clone writes \(any file under `hooks`, `info`, or `branches`, anything under `objects`, `refs`, or `logs` that is not an object, a pack, a ref, or its log, any other top-level entry\) is refused the same way, and so is a remote or submodule URL carrying a query or a fragment/,
+      /the `\.git` layout is held to a fresh `--template=` clone's/,
+    ],
+    [
+      "a URL carrying a query or a fragment is refused",
+      /a remote or submodule URL carrying a query or a fragment is refused the same way/,
+    ],
+    // Codex round twenty-two on #125: enumerating what can hide in a .git
+    // does not converge; the container gets a clone the launcher makes.
+    [
+      "the mount is a fresh clone the launcher makes; the operator's .git never enters",
+      /not that `\.git` but a fresh clone the launcher makes itself from the panel checkout .* the operator's `\.git` never enters the container/,
     ],
     [
       "a remote or branch named after a secret is stated as undetectable",
@@ -492,7 +502,7 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     ],
     [
       "anything else is refused by key name",
-      /is refused by key name, because the checkout's `\.git\/config` rides into the container with the mount and a denylist of secret-bearing keys does not converge/,
+      /is refused by key name, because the panel checkout is what the launcher clones from and a denylist of secret-bearing keys does not converge/,
     ],
     // Codex round six on #125: a credential helper is a credential, the
     // check's scope has to be stated, and a linked worktree cannot be read

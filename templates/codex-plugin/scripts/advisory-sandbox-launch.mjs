@@ -100,10 +100,11 @@ const USAGE = `Usage: advisory-sandbox-launch.mjs --review-id <id> [--store <pat
 
   --review-id <id>     The advisory review to run. The ledger must be bound to
                        CODEX_TASK, carry advisory: true, and be waiting for
-                       review; the author checkout is the ledger's own
-                       repository_path and is mounted read-only at that same
-                       path, because the reviewer server reads it by recorded
-                       path and any other tree would be the wrong bytes.
+                       review; what is mounted read-only at the ledger's own
+                       repository_path is a fresh clone the launcher makes
+                       from that checkout (git clone --template= --no-local),
+                       never the operator's .git; the path is the recorded one
+                       because the reviewer server reads it by that path.
   --store <path>       The review store (default: REVIEW_BRIDGE_HOME, else the
                        server's default). The host store is never mounted: the
                        one review's directory is staged into a scratch store
@@ -771,16 +772,44 @@ function mountTable(inputs, scratch, volume, stagedStore) {
   const cache = `${CONTAINER_CODEX_HOME}/plugins/cache/${MARKETPLACE_NAME}/${PLUGIN_NAME}/${inputs.pluginVersion}`;
   return {
     cache,
+    checkout: inputs.repository,
     volume: [volume, CONTAINER_CODEX_HOME],
     mounts: [
       [path.join(scratch, "config.toml"), `${CONTAINER_CODEX_HOME}/config.toml`, "ro"],
       [inputs.authJson, `${CONTAINER_CODEX_HOME}/auth.json`, "ro"],
       [inputs.marketplace, CONTAINER_MARKETPLACE, "ro"],
       [inputs.pluginSource, cache, "ro"],
-      [inputs.repository, inputs.repository, "ro"],
+      [inputs.checkout, inputs.repository, "ro"],
       [stagedStore, CONTAINER_STORE, "rw"],
     ],
   };
+}
+
+// The mount is not the panel checkout but a clone the launcher makes from it
+// over git's own transport: `--no-local` over file:// packs only the objects
+// reachable from the refs, so whatever a template or a hand left in the
+// operator's .git — a hook, a stray file among the objects, a directory named
+// like a file, a comment in the configuration — stays on the host (Codex
+// round twenty-two on #125: an enumeration of what can hide in a .git does
+// not converge). The clone is detached at the panel checkout's HEAD and held
+// to what a --template= clone writes before it is mounted, as a check on the
+// launcher's own work. It is mounted at the recorded path, because the
+// reviewer server reads the repository by that path.
+function stageCheckout(inputs) {
+  const git = (args, cwd) => spawnSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const message = (result) => result.error?.message ?? result.stderr.trim().replace(/'[^']*'/g, "'<redacted>'");
+  const head = git(["-C", inputs.repository, "rev-parse", "HEAD"]);
+  if (head.error || head.status !== 0) fail(`cannot read the author checkout's HEAD: ${message(head)}`);
+  const hostHead = head.stdout.trim();
+  const clone = git(["clone", "--quiet", "--template=", "--no-local", "--no-hardlinks", `file://${inputs.repository}`, inputs.checkout]);
+  if (clone.error || clone.status !== 0) fail(`cannot clone the author checkout for the mount: ${message(clone)}`);
+  const detach = git(["-C", inputs.checkout, "checkout", "--quiet", "--detach", hostHead]);
+  if (detach.error || detach.status !== 0) fail(`cannot check out ${hostHead} in the launcher's clone: ${message(detach)}`);
+  const cloned = git(["-C", inputs.checkout, "rev-parse", "HEAD"]);
+  if (cloned.error || cloned.status !== 0 || cloned.stdout.trim() !== hostHead) {
+    fail(`the launcher's clone is at ${cloned.stdout?.trim() || "no commit"}, the author checkout at ${hostHead}`);
+  }
+  return hostHead;
 }
 
 const LOCK_ARTIFACTS = new Set([".review-state.lock", ".review-state.lock.guard"]);
@@ -921,14 +950,13 @@ async function replayAndCopyBack(inputs, stage, before, scratch, api) {
 // checkout at its recorded path — is present when the container starts and
 // missing moments later (git reads first succeeded, then failed with
 // `Permission denied`, then `No such file or directory`; measured
-// 2026-09-10), while the same mount through `--mount` stays put. The
-// destination path has to equal the source for the checkout, so every mount
+// 2026-09-10), while the same mount through `--mount` stays put. Every mount
 // takes the form that holds.
 function bindMount([source, target, mode]) {
   return `type=bind,src=${source},dst=${target}${mode === "ro" ? ",readonly" : ""}`;
 }
 
-function containerArgs({ mounts, volume }, network, extra = [], { withoutCheckout = false } = {}) {
+function containerArgs({ mounts, volume, checkout }, network, extra = [], { withoutCheckout = false } = {}) {
   const args = [
     "run",
     "--rm",
@@ -942,7 +970,7 @@ function containerArgs({ mounts, volume }, network, extra = [], { withoutCheckou
     `${CONTAINER_WORK}:rw,mode=1777`,
   ];
   for (const mount of mounts) {
-    if (withoutCheckout && mount[0] === mount[1]) continue;
+    if (withoutCheckout && mount[1] === checkout) continue;
     args.push("--mount", bindMount(mount));
   }
   args.push("-e", `CODEX_HOME=${CONTAINER_CODEX_HOME}`);
@@ -1422,6 +1450,7 @@ async function main() {
   const codexName = `${network}-codex`;
   const homeVolume = `${network}-home`;
   const stagedStore = path.join(scratch, "store");
+  inputs.checkout = path.join(scratch, "checkout");
   const table = mountTable(inputs, scratch, homeVolume, stagedStore);
   const { cache } = table;
   const uid = typeof process.getuid === "function" ? `${process.getuid()}:${process.getgid()}` : null;
@@ -1484,7 +1513,7 @@ async function main() {
     [
       `review ${inputs.reviewId} (${inputs.ledger.status}, state_version ${inputs.ledger.state_version})`,
       `store ${inputs.store} (never mounted; the review is staged under ${stagedStore})`,
-      `checkout ${inputs.repository} (read-only, at its recorded path)`,
+      `checkout ${inputs.repository} (read-only, at its recorded path; the bytes are a fresh clone the launcher makes at ${inputs.checkout})`,
       `marketplace ${inputs.marketplace} (plugin ${inputs.pluginVersion}, read-only)`,
       `auth ${inputs.authJson} (read-only bind mount)`,
       `scratch ${scratch}`,
@@ -1514,6 +1543,12 @@ async function main() {
   const transcriptPath = path.join(scratch, "codex.log");
   const before = await ledgerFacts(inputs.ledgerPath);
   const stage = await stageReview(inputs, stagedStore);
+  stageCheckout(inputs);
+  const cloneViolations = [...gitConfigViolations(inputs.checkout), ...(await gitLayoutViolations(inputs.checkout))];
+  if (cloneViolations.length > 0) {
+    await fsp.rm(inputs.checkout, { recursive: true, force: true });
+    fail(`the launcher's own clone holds more than a fresh clone writes (${cloneViolations.slice(0, 10).join(", ")}); not mounting it`);
+  }
   const { loadReview, submitInitialReview } = await import("../server/core.mjs");
   const { withStateLock, atomicWriteFile, canonicalJson } = await import("../server/storage.mjs");
 
@@ -1563,6 +1598,7 @@ async function main() {
     // volume goes.
     step("export sessions", () => spawnSync("docker", sessionsExport, quiet));
     step("remove volume", () => spawnSync("docker", ["volume", "rm", homeVolume], quiet));
+    step("remove staged checkout", () => fs.rmSync(inputs.checkout, { recursive: true, force: true }));
   };
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.on(signal, () => {
