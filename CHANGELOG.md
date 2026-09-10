@@ -49,6 +49,24 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   instructions injected and the memory file searched) and one full unattended
   round under the new fence with neither.
 
+### Fixed
+
+- Declare the second way out of an unexecuted change-size split, issue #91
+  (#119). `WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED` names two remedies, the
+  cut and a `continue` re-acknowledgment, and `required_inputs` named only
+  the cut. Both split arms now declare `acknowledge_change_size_warning`
+  ahead of the head recording, owed only if the split is given up without
+  its cut: the gate accepts the re-acknowledgment while the split is pending
+  and refuses it once a recorded cut has shrunk the change, which the ledger
+  cannot see, so the source text carries the condition rather than the
+  summary recomputing a diff. The recorded-cut arms declare it beside the
+  further cut, conditional on the gate refusing the cut already in. A
+  release ends the cut, not the recording: every cut source says the head
+  is owed whenever the repository HEAD differs from the recorded head, since
+  the bind refuses a snapshot of a head the workflow never recorded. The
+  reachability walk takes the continue exit on both arms, with and without
+  a commit already made.
+
 ## 0.12.0 - 2026-09-10
 
 ### Changed

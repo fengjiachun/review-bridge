@@ -587,39 +587,72 @@ export const WARNING_GATED_INPUTS = {
   },
 };
 
-// The acknowledgment is made, and a split still owes the cut the bind measures.
-// The calls are the gated ones without the acknowledgment that has already
-// happened, and the recording is stated as required until a gate admits the
-// cut, because a ledger cannot see a cut it has not yet measured.
+// The gate's second way out. A split that will not be cut is released by a
+// continue re-acknowledgment, which the gate accepts only while the split is
+// still pending -- a recorded cut that has already shrunk the change refuses
+// it, and the ledger cannot see which -- so the decision is stated as owed
+// only on that route. It is declared ahead of the head recording for the
+// reason the warning arm gives: the decision says what the head carries.
+const releaseSplit = (condition) => [
+  WORKFLOW_ID,
+  WORKFLOW_REVISION,
+  ["decision", `continue, required only if ${condition}`],
+  ["rationale", "the deciding human"],
+  ["operator_label", "the deciding human"],
+];
+
+// The split is acknowledged and still owes the cut the bind measures. The
+// recording is stated as required until a gate admits the cut, because a
+// ledger cannot see a cut it has not yet measured, and the release declared
+// above it is the one other way the cut stops being owed. What the release
+// does not end is the recording of a commit that already exists: the bind
+// refuses a snapshot whose head the workflow never recorded, so every cut
+// source says the head is owed whenever the repository is ahead of the
+// ledger, released or not.
 export const SPLIT_GATED_INPUTS = {
   PREPARE_LOCAL_REVIEW: {
+    acknowledge_change_size_warning: releaseSplit(
+      "the split is given up without its cut",
+    ),
     record_workflow_head: [
       WORKFLOW_ID,
-      WORKFLOW_REVISION,
-      ["head_sha", "the cut you committed, required until a gate admits it"],
+      afterWrite(WORKFLOW_REVISION, "any re-acknowledgment"),
+      [
+        "head_sha",
+        "the cut you committed, required until a gate admits it; a release ends the cut, not the recording, which is required whenever the repository HEAD differs from the recorded head",
+      ],
     ],
     prepare_review: WORKFLOW_ACTION_INPUTS.PREPARE_LOCAL_REVIEW.prepare_review,
     bind_workflow_review: [
       WORKFLOW_ID,
-      afterWrite(WORKFLOW_REVISION, "the recorded cut"),
+      afterWrite(
+        WORKFLOW_REVISION,
+        "the re-acknowledgment or the recorded cut",
+      ),
       ["review_id", "the prepare_review result id"],
     ],
   },
   // The advance that consumes AUTHOR_RESPONDED measures the same promise, so
   // this arm keeps naming the recording the fix head alone does not satisfy.
   ADDRESS_LOCAL_FINDINGS: {
+    acknowledge_change_size_warning: releaseSplit(
+      "the split is given up without its cut",
+    ),
     record_workflow_head: [
       WORKFLOW_ID,
-      WORKFLOW_REVISION,
+      afterWrite(WORKFLOW_REVISION, "any re-acknowledgment"),
       [
         "head_sha",
-        "the cut you committed, carrying any fix, required until a gate admits it",
+        "the cut you committed, carrying any fix, required until a gate admits it; a release ends the cut, not the recording, which is required whenever the repository HEAD differs from the recorded head or any resolution is fixed",
       ],
     ],
     ...SUBMIT_RESOLUTIONS,
     advance_local_workflow: [
       WORKFLOW_ID,
-      afterWrite(WORKFLOW_REVISION, "the recorded cut"),
+      afterWrite(
+        WORKFLOW_REVISION,
+        "the re-acknowledgment or the recorded cut",
+      ),
     ],
   },
 };
@@ -628,34 +661,43 @@ export const SPLIT_GATED_INPUTS = {
 // head measures below the crossing is not ledger-visible, so the recording is
 // no longer demanded -- recording the same head again refuses with
 // WORKFLOW_NO_PROGRESS -- and a further cut is stated as conditional on the
-// gate refusing the one already in.
+// gate refusing the one already in, as is the release that gives it up.
 export const SPLIT_CUT_RECORDED_INPUTS = {
   PREPARE_LOCAL_REVIEW: {
+    acknowledge_change_size_warning: releaseSplit(
+      "the bind refuses the recorded cut and no further cut is made",
+    ),
     record_workflow_head: [
       WORKFLOW_ID,
-      WORKFLOW_REVISION,
-      ["head_sha", "a further cut, required only if the bind refuses the recorded one"],
+      afterWrite(WORKFLOW_REVISION, "any re-acknowledgment"),
+      [
+        "head_sha",
+        "a further cut, required only if the bind refuses the recorded one and the split is not released; the recording is required whenever the repository HEAD differs from the recorded head",
+      ],
     ],
     prepare_review: WORKFLOW_ACTION_INPUTS.PREPARE_LOCAL_REVIEW.prepare_review,
     bind_workflow_review: [
       WORKFLOW_ID,
-      afterWrite(WORKFLOW_REVISION, "any further cut"),
+      afterWrite(WORKFLOW_REVISION, "any re-acknowledgment or further cut"),
       ["review_id", "the prepare_review result id"],
     ],
   },
   ADDRESS_LOCAL_FINDINGS: {
+    acknowledge_change_size_warning: releaseSplit(
+      "the advance refuses the recorded cut and no further cut is made",
+    ),
     record_workflow_head: [
       WORKFLOW_ID,
-      WORKFLOW_REVISION,
+      afterWrite(WORKFLOW_REVISION, "any re-acknowledgment"),
       [
         "head_sha",
-        "a further cut, required only if the advance refuses the recorded one",
+        "a further cut, required only if the advance refuses the recorded one and the split is not released; the recording is required whenever the repository HEAD differs from the recorded head",
       ],
     ],
     ...SUBMIT_RESOLUTIONS,
     advance_local_workflow: [
       WORKFLOW_ID,
-      afterWrite(WORKFLOW_REVISION, "any further cut"),
+      afterWrite(WORKFLOW_REVISION, "any re-acknowledgment or further cut"),
     ],
   },
 };

@@ -674,6 +674,34 @@ test("an acknowledged split keeps declaring the cut it owes", () => {
       }),
       SPLIT_CUT_RECORDED_INPUTS[action],
     );
+    // The gate names a second way out, a continue re-acknowledgment, and both
+    // arms declare it ahead of the head whose contents the decision settles,
+    // owed only on that route: the gate accepts it while the split is pending
+    // and refuses it once a recorded cut has shrunk the change, which the
+    // ledger cannot see.
+    for (const table of [SPLIT_GATED_INPUTS, SPLIT_CUT_RECORDED_INPUTS]) {
+      const [release, recording] = Object.keys(table[action]);
+      assert.equal(release, "acknowledge_change_size_warning");
+      assert.equal(recording, "record_workflow_head");
+      assert.match(
+        table[action].acknowledge_change_size_warning.find(
+          ([field]) => field === "decision",
+        )[1],
+        /^continue, required only if /,
+      );
+      // The cut declared after the release says the release ends it, so a
+      // driver executing the sequence in one turn owes no cut it never made
+      // -- and that the recording of a commit that does exist is owed
+      // regardless, because the bind refuses a head the ledger never saw.
+      const headSource = table[action].record_workflow_head.find(
+        ([field]) => field === "head_sha",
+      )[1];
+      assert.match(headSource, /release/);
+      assert.match(
+        headSource,
+        /whenever the repository HEAD differs from the recorded head/,
+      );
+    }
     // Once a gate has admitted the cut the promise is kept, and the phase goes
     // back to declaring what it declares for every other run.
     const admitted = acknowledged(action, "2026-08-30T00:00:00.000Z");
@@ -695,6 +723,10 @@ test("a call after a write in its own sequence re-reads the revision", () => {
     calls[tool].find(([field]) => field === "expected_revision")[1];
   for (const [calls, tool] of [
     [WORKFLOW_ACTION_INPUTS.ADDRESS_LOCAL_FINDINGS, "advance_local_workflow"],
+    [SPLIT_GATED_INPUTS.PREPARE_LOCAL_REVIEW, "record_workflow_head"],
+    [SPLIT_GATED_INPUTS.ADDRESS_LOCAL_FINDINGS, "record_workflow_head"],
+    [SPLIT_CUT_RECORDED_INPUTS.PREPARE_LOCAL_REVIEW, "record_workflow_head"],
+    [SPLIT_CUT_RECORDED_INPUTS.ADDRESS_LOCAL_FINDINGS, "record_workflow_head"],
     [
       WORKFLOW_ACTION_INPUTS.RECORD_AND_COMPLETE_THREAD_UNRESOLVE,
       "record_github_snapshot",

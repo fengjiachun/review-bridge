@@ -73,7 +73,7 @@ import {
   startInput,
   workflowInput,
 } from "./helpers/publication-chain";
-import { commit, fixture, TOPIC_BRANCH } from "./helpers/repository-fixture";
+import { commit, fixture, git, TOPIC_BRANCH } from "./helpers/repository-fixture";
 
 // The state-rejection family: every code a transition raises because of the
 // ledger state the call was initiated from, enumerated from the fail() sites
@@ -167,14 +167,34 @@ async function publicationRevision(ctx, reviewId) {
 // observation file).
 const PROBES = {
   record_workflow_head: async (ctx, summary, fields, m) => {
+    const source = fields.find(([field]) => field === "head_sha")?.[1] ?? "";
     const content = declaresCut(fields, m) ? m.cutContent : m.content;
-    // A head stated as owed only on a gate's refusal is not owed on the walked
-    // happy path; a turn that supplies no content is the driver reading that
-    // condition as false.
-    const conditional = /required only if/.test(
-      fields.find(([field]) => field === "head_sha")?.[1] ?? "",
-    );
+    // A head stated as owed only on a gate's refusal, or a cut the driver has
+    // released with continue, is not owed on the walked happy path; a turn
+    // that supplies no content is the driver reading that condition as false.
+    const conditional =
+      /required only if/.test(source) ||
+      (/\bcut\b/.test(source) && m.decision === "continue");
     if (conditional && content == null) {
+      // A release ends the cut, not the recording: where the declaration says
+      // the head is owed whenever the repository is ahead of the ledger, the
+      // driver compares the two heads and records the commit that exists.
+      if (!/whenever the repository HEAD differs from the recorded head/.test(source)) {
+        return;
+      }
+      const head = git(ctx.state.repository, "rev-parse", "HEAD");
+      const recorded = (await getAutonomousWorkflow(ctx.store, ctx.workflowId))
+        .current_head_sha;
+      if (head === recorded) {
+        return;
+      }
+      const result = await recordWorkflowHead(
+        ctx.store,
+        ctx.workflowId,
+        declaredRevision(ctx, summary, fields),
+        head,
+      );
+      ctx.revision = result.revision;
       return;
     }
     assert.ok(content, "the turn supplies no commit content");
@@ -223,6 +243,15 @@ const PROBES = {
     ctx.revision = result.revision;
   },
   acknowledge_change_size_warning: async (ctx, summary, fields, m) => {
+    // A release stated as owed only if the split is given up, or only on a
+    // gate's refusal, is not owed on the walked happy path; a turn that
+    // supplies no decision is the driver reading that condition as false.
+    const conditional = /required only if/.test(
+      fields.find(([field]) => field === "decision")?.[1] ?? "",
+    );
+    if (conditional && m.decision == null) {
+      return;
+    }
     assert.ok(m.decision, "the turn supplies no split decision");
     const result = await acknowledgeChangeSizeWarning(
       ctx.store,
@@ -889,12 +918,33 @@ test("a split acknowledged among the findings still walks out", async (t) => {
   assert.equal(after.next_action, "PREPARE_REREVIEW");
 });
 
+// The gate's second way out, declared: a split that will not be cut is
+// released by a continue re-acknowledgment, after which the phase declares
+// what it declares for every other run and the fix alone carries the round.
+test("a split given up among the findings walks out on continue", async (t) => {
+  const ctx = await reachCrossedFindings(t, "walk-split-four");
+  await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "continue" },
+  });
+  const after = await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    materials: { content: SIX_LINE_FIX },
+  });
+  assert.equal(after.next_action, "PREPARE_REREVIEW");
+});
+
 // #82 round nine's arm: a continuation round crosses a larger warning, the
 // continuation head recording moves the phase on its own, and the split is
-// acknowledged where the next round is prepared. The bind measures the
-// candidate, so the declaration has to name the cut before it.
-test("a split acknowledged where the round is prepared still walks out", async (t) => {
-  const ctx = await reachCrossedFindings(t, "walk-split-three");
+// acknowledged where the next round is prepared.
+async function reachCrossedPrepare(t, label) {
+  const ctx = await reachCrossedFindings(t, label);
   await runTurn(ctx, {
     expect: "ADDRESS_LOCAL_FINDINGS",
     use: [
@@ -942,6 +992,13 @@ test("a split acknowledged where the round is prepared still walks out", async (
     materials: { content: `${SIX_LINE_FIX}export const g = 8;\n` },
   });
   assert.equal(prepare.next_action, "PREPARE_LOCAL_REVIEW");
+  return ctx;
+}
+
+// The bind measures the candidate, so the declaration has to name the cut
+// before it.
+test("a split acknowledged where the round is prepared still walks out", async (t) => {
+  const ctx = await reachCrossedPrepare(t, "walk-split-three");
   await runTurn(ctx, {
     expect: "PREPARE_LOCAL_REVIEW",
     use: ["acknowledge_change_size_warning"],
@@ -953,6 +1010,171 @@ test("a split acknowledged where the round is prepared still walks out", async (
     expect: "PREPARE_LOCAL_REVIEW",
     use: ["record_workflow_head"],
     materials: { cutContent: ONE_LINE_CUT },
+  });
+  const bound = await runTurn(ctx, { expect: "PREPARE_LOCAL_REVIEW" });
+  assert.equal(bound.next_action, "PLAN_CODEX_TASK_DISPATCH");
+});
+
+// The same arm released without its cut: the continue re-acknowledgment is
+// the declared exit, and the plain preparation binds the change as it stands.
+test("a split given up where the round is prepared walks out on continue", async (t) => {
+  const ctx = await reachCrossedPrepare(t, "walk-split-five");
+  await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "continue" },
+  });
+  const bound = await runTurn(ctx, { expect: "PREPARE_LOCAL_REVIEW" });
+  assert.equal(bound.next_action, "PLAN_CODEX_TASK_DISPATCH");
+});
+
+// A driver that takes the continue exit and keeps executing the declared
+// sequence in the same turn owes no cut after the release: among the
+// findings the fix head alone, where the round is prepared nothing before
+// the bind. A cut source that kept demanding the cut would send it at a
+// commit it never made.
+test("a split released among the findings walks out in one turn", async (t) => {
+  const ctx = await reachCrossedFindings(t, "walk-split-six");
+  await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  const after = await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    materials: { decision: "continue", content: SIX_LINE_FIX },
+  });
+  assert.equal(after.next_action, "PREPARE_REREVIEW");
+});
+
+test("a split released where the round is prepared walks out in one turn", async (t) => {
+  const ctx = await reachCrossedPrepare(t, "walk-split-seven");
+  await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  const bound = await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    materials: { decision: "continue" },
+  });
+  assert.equal(bound.next_action, "PLAN_CODEX_TASK_DISPATCH");
+});
+
+// A release ends the cut, not the recording. An operator who committed a cut
+// and then gave the split up leaves the repository ahead of the ledger, and
+// the bind refuses a snapshot of a head the workflow never recorded with
+// WORKFLOW_REVIEW_MISMATCH; the declaration keeps requiring the head whenever
+// the two differ, so a driver reading it records the commit that exists
+// before it prepares. The same for a fix committed among the findings, which
+// the advance demands recorded.
+test("a committed cut released where the round is prepared is still recorded", async (t) => {
+  const ctx = await reachCrossedPrepare(t, "walk-split-ten");
+  await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  const committed = await commit(ctx.state.repository, ONE_LINE_CUT);
+  const bound = await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    materials: { decision: "continue" },
+  });
+  assert.equal(bound.next_action, "PLAN_CODEX_TASK_DISPATCH");
+  assert.equal(
+    (await getAutonomousWorkflow(ctx.store, ctx.workflowId)).current_head_sha,
+    committed,
+  );
+});
+
+test("a committed fix released among the findings is still recorded", async (t) => {
+  const ctx = await reachCrossedFindings(t, "walk-split-eleven");
+  await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  const committed = await commit(ctx.state.repository, SIX_LINE_FIX);
+  const after = await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    materials: { decision: "continue" },
+  });
+  assert.equal(after.next_action, "PREPARE_REREVIEW");
+  assert.equal(
+    (await getAutonomousWorkflow(ctx.store, ctx.workflowId)).current_head_sha,
+    committed,
+  );
+});
+
+// The recorded-cut arm's release, taken after the gate has refused the
+// recorded head. A stale cut measures no smaller than the crossing, so the
+// gate refuses it; the declared continue then releases the split, and the
+// plain declaration carries the round on the head already recorded.
+const FIVE_LINE_STALE_CUT = FIVE_LINES.replace("a = 1", "a = 9");
+const SEVEN_LINE_STALE_CUT = `${SIX_LINE_FIX}export const g = 9;\n`;
+
+test("a refused cut among the findings walks out on continue", async (t) => {
+  const ctx = await reachCrossedFindings(t, "walk-split-eight");
+  await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["record_workflow_head", "submit_resolutions"],
+    materials: { cutContent: FIVE_LINE_STALE_CUT },
+  });
+  await assert.rejects(
+    advanceLocalWorkflow(ctx.store, ctx.workflowId, ctx.revision),
+    /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
+  );
+  await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "continue" },
+  });
+  const after = await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["advance_local_workflow"],
+  });
+  assert.equal(after.next_action, "PREPARE_REREVIEW");
+});
+
+test("a refused cut where the round is prepared walks out on continue", async (t) => {
+  const ctx = await reachCrossedPrepare(t, "walk-split-nine");
+  await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    use: ["record_workflow_head"],
+    materials: { cutContent: SEVEN_LINE_STALE_CUT },
+  });
+  // The bind measures the candidate, and the stale cut measures the crossing.
+  const summary = await getAutonomousWorkflowSummary(ctx.store, ctx.workflowId);
+  await PROBES.prepare_review(ctx, summary);
+  await assert.rejects(
+    bindWorkflowReview(
+      ctx.store,
+      ctx.workflowId,
+      summary.revision,
+      ctx.prepared.id,
+    ),
+    /WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED/,
+  );
+  ctx.prepared = null;
+  await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "continue" },
   });
   const bound = await runTurn(ctx, { expect: "PREPARE_LOCAL_REVIEW" });
   assert.equal(bound.next_action, "PLAN_CODEX_TASK_DISPATCH");
