@@ -7,6 +7,29 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Changed
+
+- The `CODEX_TASK` launch refuses shell escalation by configuration,
+  issue #115 (#120). Both launch fences in the packaged workflow skill gain
+  `approval_policy={granular={rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false}}`
+  beside `approvals_reviewer`. Under the 0.12.0 launch the guardian also
+  judged a `require_escalated` shell request the reviewer made, and allowed
+  one: a model-judged gate on the one thing the sandbox exists to refuse,
+  the residual #114 left open. With `sandbox_approval=false` the same request
+  is rejected in Codex's tool router before any guardian thread exists, the
+  transcript carries `rejected by configuration`, the run exits normally, and
+  the file is absent; the guardian now judges MCP calls only, which is not
+  one of the five categories and still reaches `approvals_reviewer`. All five
+  fields are required for the value to parse, all-`false` is the strictest
+  form, and the reviewer needs none of them, so the whole literal is pinned in
+  `CODEX_TASK_DISPATCH_CONTRACT` for both fences, with the escalation and
+  five-field sentences anchored; the header sentence now reads
+  `approval: granular`. The guardian's deadline exposure under host load is
+  unchanged. Measured on 2026-09-10 with a full unattended round under the
+  final launch line.
+
 ## 0.12.0 - 2026-09-10
 
 ### Changed
