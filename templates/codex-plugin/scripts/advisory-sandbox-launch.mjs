@@ -9,6 +9,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isolatedGit as hostGit } from "./isolated-git.mjs";
 
 // The only launch form for an advisory CODEX_TASK review. The container is the
 // read boundary: nothing from the host exists inside it except the mounts
@@ -268,18 +269,22 @@ function runEgressProxy() {
   const upstreamPort = Number(process.env.EGRESS_UPSTREAM_PORT ?? 443);
   const log = (...parts) =>
     process.stdout.write(`${new Date().toISOString()} ${parts.join(" ")}\n`);
+  // Every client-supplied value in the log — the CONNECT authority, the
+  // method, the SNI — is written JSON-quoted and capped at 253 characters,
+  // so a name carrying a newline cannot forge a second log line.
+  const shown = (value) => JSON.stringify(String(value).slice(0, 253));
   const allowed = (host, port) =>
     port === "443" &&
     allowlist.some((domain) => host === domain || host.endsWith(`.${domain}`));
   const server = http.createServer((request, response) => {
-    log("deny", "plain", request.method, request.url);
+    log("deny", "plain", shown(request.method), shown(request.url));
     response.writeHead(403);
     response.end();
   });
   server.on("connect", (request, socket, head) => {
     const [host, port = "443"] = request.url.split(":");
     if (!allowed(host, port)) {
-      log("deny", "connect", request.url);
+      log("deny", "connect", shown(request.url));
       socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
       return;
     }
@@ -287,7 +292,7 @@ function runEgressProxy() {
     // host before a single byte goes upstream.
     let buffered = Buffer.from(head);
     const deny = (name) => {
-      log("deny", "sni-mismatch", request.url, `sni=${name ?? "none"}`);
+      log("deny", "sni-mismatch", shown(request.url), `sni=${shown(name ?? "none")}`);
       socket.destroy();
     };
     const timer = setTimeout(() => deny(null), 15000);
@@ -307,14 +312,14 @@ function runEgressProxy() {
         deny(parsed.name);
         return;
       }
-      log("allow", "connect", request.url);
+      log("allow", "connect", shown(request.url));
       const upstream = net.connect(upstreamPort, host, () => {
         upstream.write(buffered);
         upstream.pipe(socket);
         socket.pipe(upstream);
       });
       upstream.on("error", (error) => {
-        log("error", request.url, error.code ?? error.message);
+        log("error", shown(request.url), error.code ?? error.message);
         socket.destroy();
       });
       socket.on("error", () => upstream.destroy());
@@ -404,45 +409,6 @@ const FRESH_CLONE_CONFIG_KEYS = [
   { pattern: /^submodule\..+\.url$/, url: true },
   { pattern: /^submodule\..+\.active$/ },
 ];
-
-// Every git the launcher itself runs on the host — the checks on the panel
-// checkout and the staging clone — runs in an isolated environment: no
-// global or system configuration, an empty HOME and hooks path, no GIT_*
-// from the operator's shell, no terminal prompt. A `.gitattributes` in the
-// reviewed tree can name a filter, and with the operator's global
-// configuration in reach that filter's command would run on the host before
-// the container exists (Codex round twenty-five on #125); with nothing to
-// resolve the name against, git applies nothing. The isolation directory is
-// made on first use and removed at exit.
-let gitIsolation = null;
-function hostGit(args) {
-  if (!gitIsolation) {
-    gitIsolation = fs.mkdtempSync(path.join(os.tmpdir(), "review-bridge-advisory-git-"));
-    fs.mkdirSync(path.join(gitIsolation, "home"));
-    fs.mkdirSync(path.join(gitIsolation, "hooks"));
-  }
-  return spawnSync(
-    "git",
-    ["-c", `core.hooksPath=${path.join(gitIsolation, "hooks")}`, "-c", "filter.lfs.required=false", ...args],
-    {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        PATH: process.env.PATH,
-        LANG: process.env.LANG ?? "C.UTF-8",
-        TMPDIR: os.tmpdir(),
-        HOME: path.join(gitIsolation, "home"),
-        GIT_CONFIG_GLOBAL: "/dev/null",
-        GIT_CONFIG_SYSTEM: "/dev/null",
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_TERMINAL_PROMPT: "0",
-      },
-    },
-  );
-}
-process.on("exit", () => {
-  if (gitIsolation) fs.rmSync(gitIsolation, { recursive: true, force: true });
-});
 
 // What a line of a fresh clone's .git/config can be: blank, a section header,
 // or `key = value`. `git config --list` shows none of a comment, so a

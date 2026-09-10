@@ -1042,7 +1042,13 @@ export const ADVISORY_PANEL_CONTRACT = {
     ],
     [
       "the panel clone uses an empty template",
-      /`--template=` clones with an empty template, so no hook or helper from the operator's `init\.templateDir` rides into the panel's `\.git`/,
+      /It clones with `--template=`, so no hook or helper from the operator's `init\.templateDir` rides into the panel's `\.git`/,
+    ],
+    // Codex round twenty-seven on #125: the panel's own clone, fetch, and
+    // checkout ran with the operator's global git configuration in reach.
+    [
+      "the panel checkout is made by the packaged script in the isolated git environment",
+      /The script runs git in the same isolated environment as the launcher's own host git \(no global or system configuration, an empty `HOME` and hooks path, no `GIT_\*` from the operator's shell\)/,
     ],
     [
       "the refs and the merge base live in the clone",
@@ -1193,7 +1199,7 @@ export const ADVISORY_PANEL_CONTRACT = {
     ],
     [
       "match",
-      /merge-base refs\/review-bridge\/<pr-number>\/base \\\n *refs\/review-bridge\/<pr-number>\/head/,
+      /merge base computed there/,
       "the merge base is not computed from the fetched destination refs",
     ],
     [
@@ -1205,8 +1211,13 @@ export const ADVISORY_PANEL_CONTRACT = {
     // worktree the container cannot read.
     [
       "match",
-      /```bash\n *git clone --template= <remote-url> <path outside any authoring tree>\n/,
-      "the panel checkout is not a clone in a runnable form",
+      /```bash\n *node \.\.\/\.\.\/scripts\/advisory-panel-checkout\.mjs <remote-url> <pr-number> <target-branch> <path outside any authoring tree>\n/,
+      "the panel checkout is not made by the packaged script",
+    ],
+    [
+      "doesNotMatch",
+      /^\s*git clone /m,
+      "the panel checkout regressed to a bare git clone outside the isolated environment",
     ],
     [
       "doesNotMatch",

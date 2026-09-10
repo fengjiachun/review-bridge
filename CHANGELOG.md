@@ -57,7 +57,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `.git` never enters the container — every git the launcher runs on the host
   for this runs isolated from the operator's global and system configuration,
   `HOME`, hooks, and `GIT_*` environment, so a `.gitattributes` filter in the
-  reviewed tree resolves to nothing and executes nothing on the host, and a
+  reviewed tree resolves to nothing and executes nothing on the host — the
+  panel checkout itself is made by the packaged `advisory-panel-checkout.mjs`
+  in that same isolated environment (shared `isolated-git.mjs`), so the skill
+  no longer spells out bare git commands for it — and a
   review whose last round was prepared over a dirty tree (overlays,
   `worktree_clean` false) is refused since the clone can materialize only
   commits; the checks stay on the panel checkout
@@ -65,7 +68,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `git clone` copies the operator's `init.templateDir` into it, and the
   packaged skill's panel clone now uses `--template=`; a remote or submodule
   URL carrying a query or a fragment is refused, since a token can ride in
-  either; the sidecar's log is collected bounded and every cleanup step runs
+  either; the sidecar's log quotes every client-supplied value (authority, SNI) so a
+  name carrying a newline cannot forge a log line, and the log is collected bounded and every cleanup step runs
   on its own, a spawn error or a nonzero exit recorded in the report rather
   than skipping the rest;
   and the codex `auth.json` path is

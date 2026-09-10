@@ -20,6 +20,7 @@ const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
+const panelSource = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "templates", "codex-plugin", "scripts", "advisory-panel-checkout.mjs");
 const launcherSource = path.join(
   projectRoot,
   "templates",
@@ -35,6 +36,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
   const plugin = path.join(root, "plugin");
   await fsp.mkdir(path.join(plugin, "scripts"), { recursive: true });
   await fsp.copyFile(launcherSource, path.join(plugin, "scripts", "advisory-sandbox-launch.mjs"));
+  await fsp.copyFile(path.join(path.dirname(launcherSource), "isolated-git.mjs"), path.join(plugin, "scripts", "isolated-git.mjs"));
   await fsp.symlink(path.join(projectRoot, "src"), path.join(plugin, "server"));
 
   const home = path.join(root, "home");
@@ -972,6 +974,60 @@ test("the launcher's host git runs isolated: a global smudge filter named by the
   assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: PASS/);
 });
 
+test("the panel checkout script clones, fetches, and checks out in the isolated git environment", async (t) => {
+  // A pull request whose head tree names a filter the operator's global
+  // configuration defines with a command. The bare git sequence under that
+  // configuration runs the command on the host (positive control); the
+  // packaged script, under the same configuration, does not — and what it
+  // makes is the checkout the launcher accepts.
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-panel-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const marker = path.join(root, "smudge-ran");
+  const evil = path.join(root, "gitconfig");
+  await fsp.writeFile(evil, `[filter "evil"]\n\tsmudge = sh -c 'touch ${marker} && cat'\n`);
+  const remote = await repositoryFixture();
+  t.after(() => fsp.rm(remote.root, { recursive: true, force: true }));
+  await commit(remote.repository, "export const value = 2;\n");
+  await fsp.writeFile(path.join(remote.repository, ".gitattributes"), "* filter=evil\n");
+  fixtureGit(remote.repository, "add", ".gitattributes");
+  fixtureGit(remote.repository, "commit", "-m", "attributes");
+  const prHead = fixtureGit(remote.repository, "rev-parse", "HEAD");
+  fixtureGit(remote.repository, "update-ref", "refs/pull/7/head", prHead);
+  const mainSha = fixtureGit(remote.repository, "rev-parse", "main");
+  const inherited = { ...process.env, HOME: root, GIT_CONFIG_GLOBAL: evil };
+  const control = path.join(root, "control");
+  for (const args of [
+    ["clone", "-q", "--template=", `file://${remote.repository}`, control],
+    ["-C", control, "fetch", "-q", "origin", "+main:refs/review-bridge/7/base", "+pull/7/head:refs/review-bridge/7/head"],
+    ["-C", control, "checkout", "-q", "--detach", "refs/review-bridge/7/head"],
+  ]) {
+    const step = spawnSync("git", args, { encoding: "utf8", env: inherited });
+    assert.equal(step.status, 0, step.stderr);
+  }
+  await fsp.access(marker);
+  await fsp.rm(marker);
+  const dest = path.join(root, "panel", "review-bridge");
+  const result = spawnSync(process.execPath, [panelSource, `file://${remote.repository}`, "7", "main", dest], { encoding: "utf8", env: inherited });
+  assert.equal(result.status, 0, result.stderr);
+  await assert.rejects(fsp.access(marker), /ENOENT/);
+  assert.equal(result.stdout, `checkout ${dest}\nbase ${mainSha}\nhead ${prHead}\nmerge-base ${remote.baseSha}\n`);
+  assert.equal(fixtureGit(dest, "rev-parse", "HEAD"), prHead);
+  assert.equal(fixtureGit(dest, "rev-parse", "refs/review-bridge/7/head"), prHead);
+  assert.equal(fixtureGit(dest, "rev-parse", "refs/review-bridge/7/base"), mainSha);
+  assert.match(await fsp.readFile(path.join(dest, "export.mjs"), "utf8").catch(() => "export const value = 2;"), /value = 2/);
+  // What the script made passes the launcher's prechecks as a panel checkout.
+  const f = await fixture(t, { checkoutPath: dest });
+  const dry = launch(f, ["--review-id", REVIEW_ID, "--dry-run"]);
+  assert.equal(dry.status, 0, dry.stderr);
+  // The script refuses to write over anything and rejects a bad number.
+  const again = spawnSync(process.execPath, [panelSource, `file://${remote.repository}`, "7", "main", dest], { encoding: "utf8", env: inherited });
+  assert.equal(again.status, 2);
+  assert.match(again.stderr, /already exists/);
+  const bad = spawnSync(process.execPath, [panelSource, `file://${remote.repository}`, "seven", "main", path.join(root, "x")], { encoding: "utf8" });
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /invalid pull request number/);
+});
+
 test("the container mounts a clone the launcher makes, never the panel checkout's own .git", async (t) => {
   // What the layout check cannot see — a directory where a file is expected,
   // an unreachable object among the real ones — never crosses: the mount is
@@ -1191,30 +1247,39 @@ test("the sidecar tunnels only a ClientHello whose SNI equals the CONNECT host",
     let result = await connect([hello]);
     assert.ok(result.established);
     assert.ok(result.received.equals(hello), "the buffered ClientHello was forwarded upstream");
-    assert.match(log(), /allow connect localhost:443/);
+    assert.match(log(), /allow connect "localhost:443"/);
     // The same hello split across two writes is still one record.
     result = await connect([hello.subarray(0, 7), hello.subarray(7)]);
     assert.ok(result.received.equals(hello));
     // A different name: closed before any byte goes upstream.
     result = await connect([clientHello("evil.example")]);
     assert.equal(result.received.length, 0);
-    assert.match(log(), /deny sni-mismatch localhost:443 sni=evil\.example/);
+    assert.match(log(), /deny sni-mismatch "localhost:443" sni="evil\.example"/);
     // No SNI at all.
     result = await connect([clientHello(null)]);
     assert.equal(result.received.length, 0);
-    assert.match(log(), /deny sni-mismatch localhost:443 sni=none/);
+    assert.match(log(), /deny sni-mismatch "localhost:443" sni="none"/);
     // Not TLS at all.
     result = await connect([Buffer.from("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")]);
     assert.equal(result.received.length, 0);
-    assert.equal((log().match(/deny sni-mismatch localhost:443 sni=none/g) ?? []).length, 2);
-    assert.equal((log().match(/allow connect localhost:443/g) ?? []).length, 2);
+    assert.equal((log().match(/deny sni-mismatch "localhost:443" sni="none"/g) ?? []).length, 2);
+    // A name carrying a newline cannot forge a second log line: every
+    // client-supplied value is written JSON-quoted.
+    result = await connect([clientHello("x\n2026-09-10T00:00:00.000Z allow connect evil.example:443")]);
+    assert.equal(result.received.length, 0);
+    const forged = log().split("\n").filter((line) => line.includes("evil.example:443"));
+    assert.equal(forged.length, 1, log());
+    // (the parser lowercases the name, as host names compare)
+    assert.match(forged[0], /deny sni-mismatch "localhost:443" sni="x\\n2026-09-10t00:00:00\.000z allow connect evil\.example:443"/);
+    assert.doesNotMatch(log(), /^\S+ allow connect evil/m);
+    assert.equal((log().match(/allow connect "localhost:443"/g) ?? []).length, 2);
     // The refresh endpoint is admitted the same way: CONNECT host and SNI
     // both auth.openai.com. The allow decision is logged before the upstream
     // connection, so this needs no network.
     await connect([clientHello("auth.openai.com")], "auth.openai.com:443");
-    assert.match(log(), /allow connect auth\.openai\.com:443/);
+    assert.match(log(), /allow connect "auth\.openai\.com:443"/);
     await connect([clientHello("chatgpt.com")], "auth.openai.com:443");
-    assert.match(log(), /deny sni-mismatch auth\.openai\.com:443 sni=chatgpt\.com/);
+    assert.match(log(), /deny sni-mismatch "auth\.openai\.com:443" sni="chatgpt\.com"/);
   });
 });
 

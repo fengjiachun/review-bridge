@@ -1455,32 +1455,33 @@ must never issue by accident is a `LOCAL_GATE_PASSED` over code the operator
 did not author. An advisory review with zero findings records that fact and
 attests nothing.
 
-1. Clone the pull request's repository into a directory outside every
-   authoring tree, fetch its head and the target branch into refs of this
-   flow's own inside that clone, check the head out there, and compute the
-   merge base there. A reviewer must never read a tree someone is editing and
-   the panel must never dirty one, and the container launcher below reads
-   only a self-contained clone: a linked worktree keeps its `.git` as a file
-   pointing into the main repository, which the container does not hold. The clone is the panel's worktree outside every authoring
+1. Make the panel checkout with the packaged script, in a directory outside
+   every authoring tree: it clones the pull request's repository there,
+   fetches its head and the target branch into refs of this flow's own
+   inside that clone, checks the head out there, and prints the base, the
+   head, and the merge base computed there. A reviewer must never read a tree
+   someone is editing and the panel must never dirty one, and the container
+   launcher below reads only a self-contained clone: a linked worktree keeps
+   its `.git` as a file pointing into the main repository, outside the
+   panel's own tree. The clone is the panel's worktree outside every authoring
    tree:
 
    ```bash
-   git clone --template= <remote-url> <path outside any authoring tree>
-   git -C <path outside any authoring tree> fetch origin \
-     '+<target-branch>:refs/review-bridge/<pr-number>/base' \
-     '+pull/<pr-number>/head:refs/review-bridge/<pr-number>/head'
-   git -C <path outside any authoring tree> checkout --detach \
-     refs/review-bridge/<pr-number>/head
-   git -C <path outside any authoring tree> merge-base refs/review-bridge/<pr-number>/base \
-     refs/review-bridge/<pr-number>/head
+   node ../../scripts/advisory-panel-checkout.mjs <remote-url> <pr-number> <target-branch> <path outside any authoring tree>
    ```
 
-   `--template=` clones with an empty template, so no hook or helper from the
-   operator's `init.templateDir` rides into the panel's `.git`; the launcher
-   holds the panel's `.git` to what a fresh clone writes and mounts a fresh
-   clone of its own made from it, never the panel's `.git`. Both refspecs name
-   their destination, and the merge base is computed from the refs the fetch
-   just wrote, in the clone. A source-only refspec would not be enough: it
+   The script runs git in the same isolated environment as the launcher's own
+   host git (no global or system configuration, an empty `HOME` and hooks
+   path, no `GIT_*` from the operator's shell), so a `.gitattributes` in the
+   pull request's tree can name no filter that resolves while the panel
+   checkout is made. It clones with `--template=`, so no hook or helper from
+   the operator's `init.templateDir` rides into the panel's `.git`; the
+   launcher holds the panel's `.git` to what a fresh clone writes and mounts
+   a fresh clone of its own made from it, never the panel's `.git`. It fetches
+   `+<target-branch>:refs/review-bridge/<pr-number>/base` and
+   `+pull/<pr-number>/head:refs/review-bridge/<pr-number>/head`: both
+   refspecs name their destination, and the merge base is computed from the
+   refs the fetch just wrote, in the clone. A source-only refspec would not be enough: it
    fetches the commit but leaves updating any remote-tracking ref to
    `remote.<name>.fetch`, so under a narrow refmap — a `--single-branch` clone
    whose tracked branch is not this pull request's target —

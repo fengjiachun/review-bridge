@@ -723,6 +723,13 @@ assert.match(advisoryHelp, /Usage: advisory-sandbox-launch\.mjs --review-id <id>
 assert.match(advisoryHelp, /Fails closed, exit 2, when Docker is unavailable/);
 assert.match(advisoryHelp, /bind-mounted read-only and never copied\s+into an image layer/);
 assert.match(advisoryHelp, /admits chatgpt\.com, api\.openai\.com, and auth\.openai\.com/);
+const advisoryPanel = path.join(pluginRoot, "scripts", "advisory-panel-checkout.mjs");
+assert.ok(await fsp.stat(advisoryPanel));
+assert.ok(await fsp.stat(path.join(pluginRoot, "scripts", "isolated-git.mjs")));
+assert.match(workflowSkill, /\.\.\/\.\.\/scripts\/advisory-panel-checkout\.mjs <remote-url> <pr-number> <target-branch> <path outside any authoring tree>/);
+const panelHelp = run(process.execPath, [advisoryPanel, "--help"], pluginRoot);
+assert.match(panelHelp, /Usage: advisory-panel-checkout\.mjs <remote-url> <pr-number> <target-branch> <path>/);
+assert.match(panelHelp, /isolated from the operator's global and system\s+configuration/);
 const advisoryBadId = spawnSync(
   process.execPath,
   [advisoryLauncher, "--review-id", "not-a-review", "--dry-run"],
