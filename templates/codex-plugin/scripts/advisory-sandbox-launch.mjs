@@ -118,7 +118,8 @@ const USAGE = `Usage: advisory-sandbox-launch.mjs --review-id <id> [--store <pat
   plus @openai/codex@${CODEX_VERSION}) is built on first use and reused.
   The operator's ~/.codex/auth.json is bind-mounted read-only and never copied
   into an image layer. Egress from the container goes only through a sidecar
-  proxy that admits ${EGRESS_ALLOW.join(" and ")}; everything else is refused.
+  proxy that admits ${EGRESS_ALLOW.join(" and ")}, allowlisted by CONNECT host
+  and by the TLS SNI the client then presents; everything else is refused.
 
   On exit the launcher prints the three criteria it just verified — the
   reviewer's MCP calls completed inside the container, the host filesystem
@@ -189,12 +190,68 @@ function parseArgs(argv) {
 // refused with 403 and logged. The codex container sits on an internal Docker
 // network with no route out, so this process is its only path to the network
 // and its log is the complete egress record of the run.
+//
+// The CONNECT authority alone is not the allowlist: a client could CONNECT to
+// an allowed host and then present a TLS ClientHello whose server_name points
+// at another tenant of the same front (domain fronting), and the bytes would
+// be piped blind. So after CONNECT is admitted the proxy reads the client's
+// first TLS record, parses the ClientHello's server_name, and starts the
+// tunnel only when it equals the CONNECT host; no SNI, a different SNI, a
+// first record that is not a ClientHello, or a record over 16 KB closes the
+// connection and logs `deny sni-mismatch`. TLS is not terminated: the proxy
+// never sees inside the session, it only reads the name the client announces.
+// EGRESS_ALLOW, EGRESS_LISTEN_PORT, and EGRESS_UPSTREAM_PORT exist for the
+// tests; the launcher starts the sidecar with none of them set.
+const MAX_CLIENT_HELLO_BYTES = 16384 + 5;
+
+function clientHelloServerName(buffer) {
+  // Returns { complete: false } until a whole first record is buffered, then
+  // { complete: true, name } with name null when there is no usable SNI.
+  if (buffer.length < 5) return { complete: false };
+  const recordLength = buffer.readUInt16BE(3);
+  if (buffer[0] !== 0x16 || 5 + recordLength > MAX_CLIENT_HELLO_BYTES) {
+    return { complete: true, name: null };
+  }
+  if (buffer.length < 5 + recordLength) return { complete: false };
+  const hello = buffer.subarray(5, 5 + recordLength);
+  try {
+    if (hello[0] !== 0x01) return { complete: true, name: null };
+    let offset = 4 + 2 + 32; // handshake header, client version, random
+    offset += 1 + hello[offset]; // session id
+    offset += 2 + hello.readUInt16BE(offset); // cipher suites
+    offset += 1 + hello[offset]; // compression methods
+    if (offset + 2 > hello.length) return { complete: true, name: null };
+    const extensionsEnd = offset + 2 + hello.readUInt16BE(offset);
+    offset += 2;
+    while (offset + 4 <= extensionsEnd && extensionsEnd <= hello.length) {
+      const type = hello.readUInt16BE(offset);
+      const length = hello.readUInt16BE(offset + 2);
+      offset += 4;
+      if (type === 0 && length >= 5) {
+        const nameType = hello[offset + 2];
+        const nameLength = hello.readUInt16BE(offset + 3);
+        if (nameType === 0 && offset + 5 + nameLength <= extensionsEnd) {
+          return { complete: true, name: hello.toString("ascii", offset + 5, offset + 5 + nameLength).toLowerCase() };
+        }
+        return { complete: true, name: null };
+      }
+      offset += length;
+    }
+    return { complete: true, name: null };
+  } catch {
+    return { complete: true, name: null };
+  }
+}
+
 function runEgressProxy() {
+  const allowlist = (process.env.EGRESS_ALLOW ?? EGRESS_ALLOW.join(",")).split(",").filter(Boolean);
+  const listenPort = Number(process.env.EGRESS_LISTEN_PORT ?? PROXY_PORT);
+  const upstreamPort = Number(process.env.EGRESS_UPSTREAM_PORT ?? 443);
   const log = (...parts) =>
     process.stdout.write(`${new Date().toISOString()} ${parts.join(" ")}\n`);
   const allowed = (host, port) =>
     port === "443" &&
-    EGRESS_ALLOW.some((domain) => host === domain || host.endsWith(`.${domain}`));
+    allowlist.some((domain) => host === domain || host.endsWith(`.${domain}`));
   const server = http.createServer((request, response) => {
     log("deny", "plain", request.method, request.url);
     response.writeHead(403);
@@ -207,21 +264,49 @@ function runEgressProxy() {
       socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
       return;
     }
-    const upstream = net.connect(443, host, () => {
-      log("allow", "connect", request.url);
-      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-      upstream.write(head);
-      upstream.pipe(socket);
-      socket.pipe(upstream);
-    });
-    upstream.on("error", (error) => {
-      log("error", request.url, error.code ?? error.message);
+    // Admitted by authority; now the client's first record must name the same
+    // host before a single byte goes upstream.
+    let buffered = Buffer.from(head);
+    const deny = (name) => {
+      log("deny", "sni-mismatch", request.url, `sni=${name ?? "none"}`);
       socket.destroy();
-    });
-    socket.on("error", () => upstream.destroy());
+    };
+    const timer = setTimeout(() => deny(null), 15000);
+    const onData = (chunk) => {
+      buffered = Buffer.concat([buffered, chunk]);
+      if (buffered.length > MAX_CLIENT_HELLO_BYTES) {
+        socket.off("data", onData);
+        clearTimeout(timer);
+        deny(null);
+        return;
+      }
+      const parsed = clientHelloServerName(buffered);
+      if (!parsed.complete) return;
+      socket.off("data", onData);
+      clearTimeout(timer);
+      if (parsed.name !== host.toLowerCase()) {
+        deny(parsed.name);
+        return;
+      }
+      const upstream = net.connect(upstreamPort, host, () => {
+        log("allow", "connect", request.url);
+        upstream.write(buffered);
+        upstream.pipe(socket);
+        socket.pipe(upstream);
+      });
+      upstream.on("error", (error) => {
+        log("error", request.url, error.code ?? error.message);
+        socket.destroy();
+      });
+      socket.on("error", () => upstream.destroy());
+    };
+    socket.on("data", onData);
+    socket.on("error", () => clearTimeout(timer));
+    socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+    if (buffered.length > 0) onData(Buffer.alloc(0));
   });
-  server.listen(PROXY_PORT, "0.0.0.0", () =>
-    log("listening", String(PROXY_PORT), "allow", EGRESS_ALLOW.join(",")),
+  server.listen(listenPort, "0.0.0.0", () =>
+    log("listening", String(listenPort), "allow", allowlist.join(",")),
   );
 }
 
@@ -1043,8 +1128,8 @@ function judgeMcpCalls(records, startedLines) {
 
 function summarizeProxyLog(log) {
   const counts = new Map();
-  for (const match of log.matchAll(/^\S+ (allow|deny|error) \S+ (\S+)$/gm)) {
-    const key = `${match[1]} ${match[2]}`;
+  for (const match of log.matchAll(/^\S+ ((?:allow|deny|error) .+)$/gm)) {
+    const key = match[1].trim();
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return [...counts.entries()]

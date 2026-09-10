@@ -53,8 +53,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   Docker's default confinement, and the container's own confinement is kept
   rather than relaxed to fit a second sandbox. Egress goes only through a
   sidecar proxy on an internal Docker network that admits `chatgpt.com` and
-  `api.openai.com`; `https://example.com` fails through the proxy and has no
-  route without it, while the model calls complete. All eight proxy variables
+  `api.openai.com`, allowlisted by CONNECT host and by the TLS SNI the client
+  then presents (a ClientHello naming another host, no SNI, or a first record
+  that is not a ClientHello closes the tunnel before any byte goes upstream,
+  so the allowlist cannot be fronted); `https://example.com` fails through the
+  proxy and has no route without it, while the model calls complete. All eight proxy variables
   are pinned on the container (`HTTP_PROXY`, `HTTPS_PROXY` and their lowercase
   forms at the sidecar; `ALL_PROXY`, `all_proxy`, `NO_PROXY`, `no_proxy`
   explicitly empty), so a Docker CLI proxy configuration cannot inject its own,

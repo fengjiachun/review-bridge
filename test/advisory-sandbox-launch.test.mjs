@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -276,7 +277,7 @@ test("--help states the launch, the mounts, the egress allowlist, and the residu
   assert.match(result.stdout, /under \/private\/tmp\/ or\s+\/Volumes\/, because Docker Desktop stops serving files there/);
   assert.match(result.stdout, /the validated verdict was copied back to the host store/);
   assert.match(result.stdout, /auth\.json is bind-mounted read-only and never copied\s+into an image layer/);
-  assert.match(result.stdout, /admits chatgpt\.com and api\.openai\.com/);
+  assert.match(result.stdout, /admits chatgpt\.com and api\.openai\.com, allowlisted by CONNECT host\s+and by the TLS SNI the client then presents/);
   assert.match(result.stdout, /Residual: the one host secret inside the container is auth\.json/);
 });
 
@@ -418,7 +419,7 @@ test("with a stand-in docker the launcher stages the review, runs, validates, an
     result.stdout,
     /criterion 3 validated verdict copied back to the host store: PASS — copy-back applied — the verdict was replayed through the host's own submit_review against the host ledger under its state lock and matched the staged ledger; status WAITING_FOR_REVIEW → REVIEW_SUBMITTED, state_version 1 → 2, findings 1/,
   );
-  assert.match(result.stdout, /egress: example\.com via proxy → 000 curl-exit=56, without proxy → 000 curl-exit=6; proxy log: allow chatgpt\.com:443 ×1, deny example\.com:443 ×1/);
+  assert.match(result.stdout, /egress: example\.com via proxy → 000 curl-exit=56, without proxy → 000 curl-exit=6; proxy log: allow connect chatgpt\.com:443 ×1, deny connect example\.com:443 ×1/);
   const ledger = await loadReview(f.store, f.reviewId);
   assert.equal(ledger.status, "REVIEW_SUBMITTED");
   assert.equal(ledger.state_version, 2);
@@ -760,4 +761,84 @@ test("the launcher source keeps the container's default confinement and the read
   assert.match(source, /npm install -g @openai\/codex@\$\{CODEX_VERSION\}/);
   assert.match(source, /const CODEX_VERSION = "0\.153\.4"/);
   assert.match(source, /const EGRESS_ALLOW = \["chatgpt\.com", "api\.openai\.com"\]/);
+});
+
+// The sidecar itself, run locally: CONNECT to an allowlisted host is admitted
+// only if the first TLS record is a ClientHello whose server_name equals the
+// CONNECT host; the upstream here is a local echo server standing in for
+// port 443.
+function clientHello(serverName) {
+  const parts = [];
+  parts.push(Buffer.from([0x03, 0x03]), Buffer.alloc(32, 7), Buffer.from([0x00]));
+  parts.push(Buffer.from([0x00, 0x02, 0x13, 0x01]), Buffer.from([0x01, 0x00]));
+  let extensions = Buffer.alloc(0);
+  if (serverName !== null) {
+    const name = Buffer.from(serverName, "ascii");
+    const entry = Buffer.concat([Buffer.from([0x00]), Buffer.from([name.length >> 8, name.length & 0xff]), name]);
+    const list = Buffer.concat([Buffer.from([entry.length >> 8, entry.length & 0xff]), entry]);
+    extensions = Buffer.concat([Buffer.from([0x00, 0x00, list.length >> 8, list.length & 0xff]), list]);
+  }
+  parts.push(Buffer.from([extensions.length >> 8, extensions.length & 0xff]), extensions);
+  const body = Buffer.concat(parts);
+  const handshake = Buffer.concat([Buffer.from([0x01, 0x00, body.length >> 8, body.length & 0xff]), body]);
+  return Buffer.concat([Buffer.from([0x16, 0x03, 0x01, handshake.length >> 8, handshake.length & 0xff]), handshake]);
+}
+
+async function withEgressProxy(t, run) {
+  const upstream = net.createServer((socket) => socket.pipe(socket));
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const listenPort = 20000 + Math.floor(Math.random() * 20000);
+  const proxy = spawn(process.execPath, [launcherSource, "--egress-proxy"], {
+    env: { ...process.env, EGRESS_ALLOW: "localhost", EGRESS_LISTEN_PORT: String(listenPort), EGRESS_UPSTREAM_PORT: String(upstream.address().port) },
+  });
+  let log = "";
+  proxy.stdout.on("data", (chunk) => { log += chunk; });
+  await new Promise((resolve) => { const poll = () => (log.includes("listening") ? resolve() : setTimeout(poll, 50)); poll(); });
+  t.after(() => { proxy.kill(); upstream.close(); });
+  const connect = (firstRecords) =>
+    new Promise((resolve) => {
+      const socket = net.connect(listenPort, "127.0.0.1");
+      let received = Buffer.alloc(0);
+      let established = false;
+      socket.on("data", (chunk) => {
+        if (!established) {
+          established = chunk.toString().includes("200 Connection Established");
+          if (established) for (const record of firstRecords) socket.write(record);
+          return;
+        }
+        received = Buffer.concat([received, chunk]);
+      });
+      socket.on("close", () => resolve({ established, received }));
+      socket.on("error", () => {});
+      socket.write("CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\n\r\n");
+      setTimeout(() => socket.destroy(), 1500);
+    });
+  await run({ connect, log: () => log });
+}
+
+test("the sidecar tunnels only a ClientHello whose SNI equals the CONNECT host", async (t) => {
+  await withEgressProxy(t, async ({ connect, log }) => {
+    // Same name: admitted, and the hello bytes reach the upstream (echoed back).
+    const hello = clientHello("localhost");
+    let result = await connect([hello]);
+    assert.ok(result.established);
+    assert.ok(result.received.equals(hello), "the buffered ClientHello was forwarded upstream");
+    assert.match(log(), /allow connect localhost:443/);
+    // The same hello split across two writes is still one record.
+    result = await connect([hello.subarray(0, 7), hello.subarray(7)]);
+    assert.ok(result.received.equals(hello));
+    // A different name: closed before any byte goes upstream.
+    result = await connect([clientHello("evil.example")]);
+    assert.equal(result.received.length, 0);
+    assert.match(log(), /deny sni-mismatch localhost:443 sni=evil\.example/);
+    // No SNI at all.
+    result = await connect([clientHello(null)]);
+    assert.equal(result.received.length, 0);
+    assert.match(log(), /deny sni-mismatch localhost:443 sni=none/);
+    // Not TLS at all.
+    result = await connect([Buffer.from("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")]);
+    assert.equal(result.received.length, 0);
+    assert.equal((log().match(/deny sni-mismatch localhost:443 sni=none/g) ?? []).length, 2);
+    assert.equal((log().match(/allow connect localhost:443/g) ?? []).length, 2);
+  });
 });
