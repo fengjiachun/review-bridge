@@ -217,7 +217,7 @@ async function remoteFixture(t) {
   return { ...state, reviewId: authorization.review_id, authorization };
 }
 
-async function reachReady(state) {
+async function startOnly(state) {
   const startedAt = Date.now();
   await startPublication(
     state.store,
@@ -237,6 +237,11 @@ async function reachReady(state) {
     },
     { clock: () => startedAt },
   );
+  return startedAt;
+}
+
+async function reachReady(state) {
+  const startedAt = await startOnly(state);
   const requestAt = startedAt + 1_000;
   await recordCodexReviewRequest(
     state.store,
@@ -505,6 +510,26 @@ test("a remote-only publication renders from its publication and bound authoriza
   assert.match(markdown, new RegExp(`- Stored status \`MERGE_READY\` at revision ${ready.revision}; derived now: \`MERGE_READY\``));
   assert.match(markdown, new RegExp(`- Review ledger state_version: n/a \\(remote-only: no local review ledger\\)\\n- Publication ledger revision: ${ready.revision}\\n- Report revision: \`p${ready.revision}\`\\n- Rendered at: [^\\n]+\\n- Ledger: \`/store/reviews/x/publication\\.json\`, \`/store/reviews/x/remote-authorization\\.json\``));
   assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE}\n`));
+});
+
+// Before the first snapshot the gates have nothing to judge, and their null
+// "nothing wrong" must not be printed as passing over an observation that was
+// never recorded: every observation-based section says so instead.
+test("a publication with no observation yet says so in every observation-based section and judges nothing", async (t) => {
+  const state = await gatedFixture(t);
+  await startOnly(state);
+  const { review, publication, authorization } = await loadReportLedgers(state.store, state.reviewId);
+  assert.equal(publication.status, "PR_PENDING");
+  assert.equal(publication.latest_observation, null);
+  const markdown = render(review, { publication, authorization });
+  assert.match(markdown, /### Codex review requests\n\nNo request was recorded\./);
+  for (const heading of ["### Codex results in the latest observation", "### Required checks", "### Review threads"]) {
+    assert.match(markdown, new RegExp(`${heading}\\n\\nNo observation has been recorded yet, so there is nothing here to judge\\.\\n`), heading);
+  }
+  assert.match(markdown, /### Derivation\n\n- Stored status `PR_PENDING` at revision 1; derived now: `PR_PENDING` \(`NO_GITHUB_SNAPSHOT`\)\n- No observation has been recorded yet, so there is nothing here to judge\.\n/);
+  assert.doesNotMatch(markdown, /passing/);
+  assert.doesNotMatch(markdown, /MERGE_READY rests on/);
+  assert.equal(markdown.match(/No observation has been recorded yet/g).length, 4);
 });
 
 // A missing review ledger is explained only by a REMOTE_ONLY authorization.

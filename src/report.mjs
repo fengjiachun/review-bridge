@@ -35,6 +35,12 @@ const HUMAN_REQUIRED_EVENTS = [
   "REREVIEW_UNRESOLVED",
 ];
 const CLEAN_STATUSES = ["CLEAN", "LOCAL_GATE_PASSED"];
+// Every remote section that reads the observation says this instead when
+// there is none. Nothing observation-based is judged: the gates' "nothing
+// wrong" answer is null, and null must not be read as passing over an
+// observation that was never recorded.
+const NO_OBSERVATION =
+  "No observation has been recorded yet, so there is nothing here to judge.";
 
 // Every string the ledger carries from a reviewer, an author, or GitHub passes
 // through one of these two before it reaches the document, so no such text can
@@ -338,11 +344,9 @@ function outcomeSection(review) {
 
 function requestsAndResults(publication) {
   const requests = publication.codex_request_history ?? [];
-  const observed = publication.latest_observation?.codex_review?.results ?? [];
+  const observation = publication.latest_observation;
+  const observed = observation?.codex_review?.results ?? [];
   const recorded = publication.codex_result_history ?? [];
-  // What the gate reads from these results, by the gate's own judge.
-  const judged =
-    publication.latest_observation == null ? null : codexStatus(publication);
   return [
     "### Codex review requests",
     requests.length === 0
@@ -361,6 +365,9 @@ function requestsAndResults(publication) {
           ]),
         ),
     "### Codex results in the latest observation",
+    ...(observation == null
+      ? [NO_OBSERVATION]
+      : [
     observed.length === 0
       ? "The latest observation holds no Codex result."
       : table(
@@ -375,18 +382,19 @@ function requestsAndResults(publication) {
             result.url,
           ]),
         ),
-    `Results recorded in the ledger's own history: ${recorded.length}. Codex gate as the publication derives it: ${judged == null ? "passing" : code(judged)}.`,
+    // The gate's own judge over this observation; null is its "nothing wrong".
+    `Results recorded in the ledger's own history: ${recorded.length}. Codex gate as the publication derives it: ${codexStatus(publication) ?? "passing"}.`,
+        ]),
   ];
 }
 
 function checksSection(observation) {
-  const checks = observation?.required_checks;
-  if (checks == null) return ["### Required checks", "No observation has been recorded."];
+  if (observation == null) return ["### Required checks", NO_OBSERVATION];
+  const checks = observation.required_checks;
   const runs = checks.runs ?? [];
-  const judged = checkRequiredRuns(checks);
   return [
     "### Required checks",
-    `Policy ${code(checks.policy)}; requirements: ${list((checks.requirements ?? []).map((entry) => entry.context ?? entry))}. Checks gate as the publication derives it: ${judged == null ? "passing" : code(judged)}.`,
+    `Policy ${code(checks.policy)}; requirements: ${list((checks.requirements ?? []).map((entry) => entry.context ?? entry))}. Checks gate as the publication derives it: ${checkRequiredRuns(checks) ?? "passing"}.`,
     runs.length === 0
       ? "No check run was observed on the head."
       : table(
@@ -433,8 +441,10 @@ function threadOutcome(thread, records, frontier, invalidated) {
 }
 
 function threadsSection(publication) {
-  const threads = publication.latest_observation?.review_threads?.threads;
-  if (threads == null) return ["### Review threads", "No observation has been recorded."];
+  if (publication.latest_observation == null) {
+    return ["### Review threads", NO_OBSERVATION];
+  }
+  const threads = publication.latest_observation.review_threads.threads;
   const records = publication.automatic_resolutions ?? [];
   const frontier = resolutionFrontier(publication);
   const invalidated = invalidatedAutomaticResolution(publication);
@@ -491,7 +501,9 @@ function derivationSection(publication) {
       `- Terminal: ${code(publication.terminal.status)} at revision ${publication.terminal.revision}, ${inline(publication.terminal.at)}: ${inline(publication.terminal.reason ?? "no reason recorded")}`,
     );
   }
-  if (derived.status === "MERGE_READY" && observation != null) {
+  if (observation == null) {
+    lines.push(`- ${NO_OBSERVATION}`);
+  } else if (derived.status === "MERGE_READY") {
     const event = (publication.history ?? []).findLast(
       (entry) => entry?.status === "MERGE_READY",
     );
