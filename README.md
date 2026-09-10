@@ -459,7 +459,10 @@ validated and copied back under the review's state lock), an isolated
 with `--sandbox danger-full-access`; the container's own default confinement
 is the boundary and is not weakened to fit Codex's nested sandbox. The
 launcher fails closed without Docker and prints the three criteria it
-verified on exit. The residual is the credential it must carry: a narrowly
+verified on exit. On Docker Desktop keep the panel worktree, the runtime
+marketplace, and the store under your home directory: the launcher refuses a
+path under `/private/tmp/` or `/Volumes/`, where Docker Desktop stops serving
+files a few seconds into a container. The residual is the credential it must carry: a narrowly
 scoped API key in place of the ChatGPT token is the operator's option. The
 packaged workflow skill's Dispatching a CODEX_TASK review section states the
 full form.

@@ -48,8 +48,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   proxy's egress log, and exits nonzero when a criterion fails. The probe
   answers in JSON records rather than space-split text, so a path with a
   space in it is one path (Codex's round-one P2). It fails closed, exit 2,
-  when Docker is unavailable or any mount source is missing, and refuses a
-  ledger that is not an advisory `CODEX_TASK` review waiting for review.
+  when Docker is unavailable or any mount source is missing, refuses a
+  ledger that is not an advisory `CODEX_TASK` review waiting for review, and
+  refuses a checkout, marketplace, store, or scratch directory under
+  `/private/tmp/` or `/Volumes/`, where Docker Desktop was measured to stop
+  serving files a few seconds into a container.
   `--dry-run` validates the inputs and prints the docker commands without
   Docker. The residual is stated: the one host secret inside is `auth.json`,
   and a narrowly scoped API key in place of the ChatGPT token is the

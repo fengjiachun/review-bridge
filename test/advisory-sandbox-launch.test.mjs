@@ -201,6 +201,7 @@ test("--help states the launch, the mounts, the egress allowlist, and the residu
   assert.match(result.stdout, /only launch an\s+advisory review takes/);
   assert.match(result.stdout, /Fails closed, exit 2, when Docker is unavailable or any mount source is\s+missing/);
   assert.match(result.stdout, /The host store is never mounted/);
+  assert.match(result.stdout, /under \/private\/tmp\/ or\s+\/Volumes\/, because Docker Desktop stops serving files there/);
   assert.match(result.stdout, /the validated verdict was copied back to the host store/);
   assert.match(result.stdout, /auth\.json is bind-mounted read-only and never copied\s+into an image layer/);
   assert.match(result.stdout, /admits chatgpt\.com and api\.openai\.com/);
@@ -394,6 +395,30 @@ test("the launcher fails closed on a missing mount source, naming it", async (t)
   assert.match(result.stderr, /no --marketplace given and \[marketplaces\.review-bridge-local\] names no source/);
   result = launch(i, ["--review-id", REVIEW_ID, "--marketplace", i.marketplace, "--dry-run"]);
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("the launcher refuses host paths Docker Desktop stops serving, naming the prefix and the fix", async (t) => {
+  const f = await fixture(t, { ledger: { repository_path: "/private/tmp/x/review-bridge" } });
+  let result = launch(f, ["--review-id", REVIEW_ID, "--dry-run"]);
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(
+    result.stderr,
+    /the author checkout the ledger records \/private\/tmp\/x\/review-bridge is under \/private\/tmp\/: Docker Desktop stops serving files under \/private\/tmp\/ a few seconds into a container; place the panel worktree and store under your home directory/,
+  );
+  const g = await fixture(t);
+  result = launch(g, ["--review-id", REVIEW_ID, "--marketplace", "/Volumes/Disk/codex-marketplace", "--dry-run"]);
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /the marketplace \/Volumes\/Disk\/codex-marketplace is under \/Volumes\//);
+  const h = await fixture(t);
+  result = launch(h, ["--review-id", REVIEW_ID, "--dry-run"], { TMPDIR: "/Volumes/Disk/tmp" });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /the scratch directory \(TMPDIR\) \/Volumes\/Disk\/tmp is under \/Volumes\//);
+  // The prefix itself, with no trailing slash, is what a symlink such as
+  // /tmp → /private/tmp resolves to.
+  const i = await fixture(t);
+  result = launch(i, ["--review-id", REVIEW_ID, "--dry-run"], { TMPDIR: "/Volumes" });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /the scratch directory \(TMPDIR\) \/Volumes is under \/Volumes\//);
 });
 
 test("the launcher fails closed when Docker is unavailable", async (t) => {

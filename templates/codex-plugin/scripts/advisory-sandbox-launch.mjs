@@ -35,6 +35,15 @@ const CONTAINER_MARKETPLACE = "/marketplace";
 const CONTAINER_STORE = "/store";
 const CONTAINER_WORK = "/work";
 const CONTAINER_LAUNCHER = "/launcher";
+// Host prefixes Docker Desktop does not keep serving: on macOS, files under an
+// app-sandbox scratch directory (`/private/tmp/<app>-<uid>/…`) and on a
+// removable volume were readable when a container started and returned
+// `Permission denied` to a plain read a few seconds later, while the same
+// files under the home directory stayed readable for whole runs (measured
+// 2026-09-10, Docker Desktop 28.3.2). A checkout, marketplace, store, or
+// scratch directory there is refused up front rather than probed or worked
+// around.
+const UNSERVED_HOST_PREFIXES = ["/private/tmp/", "/Volumes/"];
 
 const scriptPath = fileURLToPath(import.meta.url);
 const pluginRoot = path.resolve(path.dirname(scriptPath), "..");
@@ -85,7 +94,11 @@ const USAGE = `Usage: advisory-sandbox-launch.mjs --review-id <id> [--store <pat
                        without running any of them. Needs no Docker.
 
   Fails closed, exit 2, when Docker is unavailable or any mount source is
-  missing: the advisory member has no other launch. The image (${BASE_IMAGE}
+  missing: the advisory member has no other launch. Also refused, exit 2: a
+  checkout, marketplace, store, or scratch directory under /private/tmp/ or
+  /Volumes/, because Docker Desktop stops serving files there a few seconds
+  into a container; place the panel worktree and store under your home
+  directory. The image (${BASE_IMAGE}
   plus @openai/codex@${CODEX_VERSION}) is built on first use and reused.
   The operator's ~/.codex/auth.json is bind-mounted read-only and never copied
   into an image layer. Egress from the container goes only through a sidecar
@@ -273,6 +286,25 @@ async function resolveInputs(options) {
   }
   const pluginSource = path.join(marketplace, "plugins", PLUGIN_NAME);
   const authJson = path.join(codexHome(), "auth.json");
+  const servedOnly = (candidates) => {
+    for (const [target, label] of candidates) {
+      const prefix = UNSERVED_HOST_PREFIXES.find(
+        (p) => target === p.slice(0, -1) || target.startsWith(p),
+      );
+      if (prefix) {
+        fail(
+          `${label} ${target} is under ${prefix}: Docker Desktop stops serving files under ${prefix} a few seconds into a container; place the panel worktree and store under your home directory`,
+        );
+      }
+    }
+  };
+  const hostPaths = [
+    [store, "the review store"],
+    [repository, "the author checkout the ledger records"],
+    [marketplace, "the marketplace"],
+    [os.tmpdir(), "the scratch directory (TMPDIR)"],
+  ];
+  servedOnly(hostPaths);
   const required = [
     [store, "the review store"],
     [repository, "the author checkout the ledger records"],
@@ -297,6 +329,16 @@ async function resolveInputs(options) {
       fail(`${target} contains a comma, which docker's --mount syntax cannot carry`);
     }
   }
+  // Again on the real paths, so a symlink such as /tmp → /private/tmp cannot
+  // slip a refused prefix past the check.
+  servedOnly(
+    await Promise.all(
+      hostPaths.map(async ([target, label]) => [
+        await fsp.realpath(target).catch(() => target),
+        label,
+      ]),
+    ),
+  );
   const pluginVersion = JSON.parse(
     await fsp.readFile(path.join(pluginSource, ".codex-plugin", "plugin.json"), "utf8"),
   ).version;

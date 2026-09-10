@@ -428,6 +428,12 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "opening the task by hand is not a mitigation",
       /Opening the task by hand is not a mitigation[\s\S]*?before an operator could intervene/,
     ],
+    // Host prefixes Docker Desktop stops serving mid-run are refused up
+    // front, and the operator has to be told where the paths belong.
+    [
+      "paths Docker Desktop stops serving are refused, with the home directory named",
+      /launcher refuses a path under `\/private\/tmp\/` or `\/Volumes\/`, because Docker Desktop stops serving files there a few seconds into a container/,
+    ],
     [
       "without Docker the advisory member is unavailable rather than opened another way",
       /Without Docker the launcher fails closed and the advisory `CODEX_TASK` member is unavailable rather than opened another way/,

@@ -839,7 +839,11 @@ is not a mitigation: the read happens and enters the model's context before
 an operator could intervene, and it leaves through the verdict the same way,
 so a person at the keyboard changes nothing about that chain. Without Docker
 the launcher fails closed and the advisory `CODEX_TASK` member is unavailable
-rather than opened another way. The residual is stated, not closed: the one
+rather than opened another way. On Docker Desktop keep the panel worktree,
+the runtime marketplace, and the store under your home directory: the
+launcher refuses a path under `/private/tmp/` or `/Volumes/`, because Docker
+Desktop stops serving files there a few seconds into a container (measured
+2026-09-10). The residual is stated, not closed: the one
 host secret inside the container is `auth.json`, so the operator's credential
 rides into every advisory review, and what remains of the exfiltration path
 is the two allowed hosts and the verdict text itself, which lands in the
