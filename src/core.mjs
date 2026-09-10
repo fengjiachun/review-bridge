@@ -253,25 +253,26 @@ function derivedFindingStatus(resolution, decision) {
   return "OPEN";
 }
 // Every history event this module records, the statuses it is recorded from,
-// and the status it leaves the review in. Read from the writers above and
+// the status it leaves the review in, and whether the writer always records
+// the round it happened in (`roundBound`). Read from the writers above and
 // below; a ledger whose history does not replay through this table was not
 // written by them. `null` as a source is the ledger's creation.
 const LEDGER_TRANSITIONS = {
-  REVIEW_PREPARED: { from: [null], to: "WAITING_FOR_REVIEW", opensRound: true },
-  INITIAL_REVIEW_CLEAN: { from: ["WAITING_FOR_REVIEW"], to: "CLEAN" },
-  FINDINGS_SUBMITTED: { from: ["WAITING_FOR_REVIEW"], to: "REVIEW_SUBMITTED" },
-  AUTHOR_RESPONDED: { from: ["REVIEW_SUBMITTED"], to: "AUTHOR_RESPONDED" },
-  AUTHOR_ESCALATED: { from: ["REVIEW_SUBMITTED"], to: "HUMAN_REQUIRED" },
+  REVIEW_PREPARED: { from: [null], to: "WAITING_FOR_REVIEW", opensRound: true, roundBound: true },
+  INITIAL_REVIEW_CLEAN: { from: ["WAITING_FOR_REVIEW"], to: "CLEAN", roundBound: true },
+  FINDINGS_SUBMITTED: { from: ["WAITING_FOR_REVIEW"], to: "REVIEW_SUBMITTED", roundBound: true },
+  AUTHOR_RESPONDED: { from: ["REVIEW_SUBMITTED"], to: "AUTHOR_RESPONDED", roundBound: true },
+  AUTHOR_ESCALATED: { from: ["REVIEW_SUBMITTED"], to: "HUMAN_REQUIRED", roundBound: true },
   ROUND_LIMIT_REACHED: { from: ["AUTHOR_RESPONDED"], to: "HUMAN_REQUIRED" },
-  REREVIEW_PREPARED: { from: ["AUTHOR_RESPONDED"], to: "WAITING_FOR_REREVIEW", opensRound: true },
-  REREVIEW_UNRESOLVED: { from: ["WAITING_FOR_REREVIEW"], to: "HUMAN_REQUIRED" },
-  REREVIEW_CONTINUABLE_FINDINGS: { from: ["WAITING_FOR_REREVIEW"], to: "CONTINUABLE_FINDINGS" },
-  REREVIEW_CLEAN: { from: ["WAITING_FOR_REREVIEW"], to: "CLEAN" },
+  REREVIEW_PREPARED: { from: ["AUTHOR_RESPONDED"], to: "WAITING_FOR_REREVIEW", opensRound: true, roundBound: true },
+  REREVIEW_UNRESOLVED: { from: ["WAITING_FOR_REREVIEW"], to: "HUMAN_REQUIRED", roundBound: true },
+  REREVIEW_CONTINUABLE_FINDINGS: { from: ["WAITING_FOR_REREVIEW"], to: "CONTINUABLE_FINDINGS", roundBound: true },
+  REREVIEW_CLEAN: { from: ["WAITING_FOR_REREVIEW"], to: "CLEAN", roundBound: true },
   LOCAL_GATE_PASSED: { from: ["CLEAN"], to: "LOCAL_GATE_PASSED" },
   REVIEW_CONTINUED: { from: ["CONTINUABLE_FINDINGS"], to: "CONTINUABLE_FINDINGS" },
   // An erratum changes no state; it is refused only where the writer refuses
   // it, which the replay does not second-guess.
-  ERRATUM_APPENDED: { from: LEDGER_REVIEW_STATUSES, to: null },
+  ERRATUM_APPENDED: { from: LEDGER_REVIEW_STATUSES, to: null, roundBound: true },
 };
 
 // Replays the history through the transition table and returns the status
@@ -291,6 +292,11 @@ function replayReviewHistory(history) {
       return { defect: `history entry ${index + 1} (${entry.event}) is not a transition from ${status ?? "creation"}` };
     }
     if (transition.opensRound) round += 1;
+    // A round-bound event always carries its round: a reader that pairs
+    // prepared and verdict events by round finds nothing for one that lost it.
+    if (transition.roundBound && !(Number.isInteger(entry.round) && entry.round >= 1)) {
+      return { defect: `history entry ${index + 1} (${entry.event}) has no round` };
+    }
     if (entry.round != null && entry.round !== round) {
       return { defect: `history entry ${index + 1} (${entry.event}) names round ${entry.round} during round ${round}` };
     }

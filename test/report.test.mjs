@@ -819,6 +819,10 @@ test("finding statuses must equal what their records derive, in both directions"
   }, /finding "F-003" is "RESOLVED" but its records derive no status \(a decision with no resolution\)/);
   // A status that does not follow from its own records.
   await tamper((review) => { review.findings[1].status = "RESOLVED"; }, /finding "F-002" is "RESOLVED" but its records derive "REBUTTAL_ACCEPTED"/);
+  // A FINDINGS_SUBMITTED that lost its round is refused by name; the gate
+  // event, which the writer records without one, is not required to carry it.
+  await tamper((review) => { delete review.history.find((entry) => entry.event === "FINDINGS_SUBMITTED").round; }, /history entry 2 \(FINDINGS_SUBMITTED\) has no round/);
+  await tamper((review) => { review.history.find((entry) => entry.event === "REREVIEW_PREPARED").round = 0; }, /history entry \d+ \(REREVIEW_PREPARED\) has no round/);
   // Restored, it renders again.
   await fsp.writeFile(reviewPath, original, { mode: 0o600 });
   assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
@@ -1046,6 +1050,9 @@ test("a review ledger edited in place is refused as REVIEW_LEDGER_INVALID", asyn
   assert.deepEqual(await tamper((review) => { review.history.splice(1, 0, { at: review.history[0].at, event: "FINDINGS_SUBMITTED", round: 1 }, { at: review.history[0].at, event: "AUTHOR_RESPONDED", round: 1 }, { at: review.history[0].at, event: "REREVIEW_PREPARED", round: 2 }, { at: review.history[0].at, event: "REREVIEW_CLEAN", round: 2 }); review.history.splice(5, 1); }), []);
   // A clean verdict over a finding still open.
   assert.deepEqual(await tamper((review) => { review.findings.push({ id: "F-1", introduced_round: 1, severity: "minor", title: "t", explanation: "e", status: "OPEN" }); }), []);
+  // A round-bound event that lost its round: the writer always records one,
+  // and a reader pairing events by round would find nothing for it.
+  assert.deepEqual(await tamper((review) => { delete review.history.find((entry) => entry.event === "INITIAL_REVIEW_CLEAN").round; }), []);
   assert.deepEqual(await tamper((review) => { review.state_version = review.history.length - 1; }), []);
   assert.deepEqual(await tamper((review) => { review.rounds[0].snapshot_hash = "f".repeat(64); }), []);
   assert.deepEqual(await tamper((review) => { review.rounds[0].head_sha = "0".repeat(40); }), []);

@@ -1354,9 +1354,24 @@ try {
     assert.match(packagedReport.stdout, /^# Review report /);
     assert.match(packagedReport.stdout, /## Remote publication/);
     assert.match(packagedReport.stdout, /projection of the ledger, not evidence/);
+    // The JSON envelope names the same identity the Markdown footer prints,
+    // summary digest included.
+    const packagedReportJson = spawnSync(
+      process.execPath,
+      [reportScript, prepared.id, "--json", "--store", store],
+      { cwd: pluginRoot, encoding: "utf8" },
+    );
+    assert.equal(packagedReportJson.status, 0, packagedReportJson.stderr);
+    const reportEnvelope = JSON.parse(packagedReportJson.stdout);
+    assert.match(reportEnvelope.revision, /^\d+-p\d+-s[0-9a-f]{12}$/);
+    assert.match(
+      reportEnvelope.markdown,
+      new RegExp(`- Report revision: \`${reportEnvelope.revision}\`\\n`),
+    );
     const renderedReport = await call(author, "render_review_report", {
       review_id: prepared.id,
     });
+    assert.equal(renderedReport.revision, reportEnvelope.revision);
     // A receipt, never the Markdown: the file is what the driver prints the
     // path of, and the digest lets a reader tie the two together.
     assert.equal(renderedReport.reused, false);

@@ -39,7 +39,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   in `core.mjs` that admits only a ledger the store could have written (its
   own serialization, the state machine's shape with the history replayed
   through the writers' own transitions to the stored status and the rounds
-  the ledger holds, a clean verdict committing to the last round with no
+  the ledger holds, every round-bound event carrying its round, a clean verdict committing to the last round with no
   finding left open, every finding's status equal to the one its resolution
   and rereview decision derive through the writers' own maps, `state_version`
   not below the history, and every round's snapshot commitment reproduced

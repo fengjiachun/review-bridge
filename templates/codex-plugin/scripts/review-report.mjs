@@ -84,7 +84,7 @@ process.stdout.write(
     ? `${JSON.stringify(
         {
           review_id: reviewId,
-          revision: reportRevision(review, publication),
+          revision: reportRevision(review, publication, publicationSummary),
           markdown,
         },
         null,
