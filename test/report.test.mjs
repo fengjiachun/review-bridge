@@ -197,7 +197,7 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
-async function gatedFixture(t, { change = "export const value = 2;\n" } = {}) {
+async function gatedFixture(t, { change = "export const value = 2;\n", finalize = true } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-report-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const repository = path.join(root, "repo");
@@ -223,7 +223,7 @@ async function gatedFixture(t, { change = "export const value = 2;\n" } = {}) {
     reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, review.id, [], "CLAUDE_DESKTOP");
-  await finalizeLocalGate(store, review.id);
+  if (finalize) await finalizeLocalGate(store, review.id);
   return { root, repository, store, reviewId: review.id, baseSha, headSha };
 }
 
@@ -901,7 +901,10 @@ test("finding statuses must equal what their records derive, in both directions"
   await tamper((review) => { review.rereview_decisions.push({ finding_id: "F-009", decision: "resolved", rationale: "x", verification: "", submitted_at: review.updated_at }); }, /a rereview decision names no finding: "F-009"/);
   // A decision with a finding but no resolution behind it.
   await tamper((review) => {
-    review.findings.push({ id: "F-003", introduced_round: 2, severity: "minor", title: "t", explanation: "e", recommendation: "", status: "RESOLVED" });
+    // Counted into round one so the position check passes and the status
+    // derivation is what refuses it.
+    review.history.find((entry) => entry.event === "FINDINGS_SUBMITTED").count = 3;
+    review.findings.push({ id: "F-003", introduced_round: 1, severity: "minor", title: "t", explanation: "e", recommendation: "", status: "RESOLVED" });
     review.rereview_decisions.push({ finding_id: "F-003", decision: "resolved", rationale: "x", verification: "", submitted_at: review.updated_at });
   }, /finding "F-003" is "RESOLVED" but its records derive no status \(a decision with no resolution\)/);
   // A status that does not follow from its own records.
@@ -911,6 +914,10 @@ test("finding statuses must equal what their records derive, in both directions"
   // round, a bad line, an escaping path, an ID out of position, and a field
   // the writer never sets are each refused by name.
   await tamper((review) => { review.findings[0].introduced_round = 3; }, /finding "F-001" introduced_round 3 is not a round the ledger holds/);
+  // A round the ledger does hold, but not the one the history's counts put
+  // this position in.
+  await tamper((review) => { review.findings[0].introduced_round = 2; }, /finding "F-001" introduced_round 2 is not the round its position derives from the history's counts \(1\)/);
+  await tamper((review) => { review.history.find((entry) => entry.event === "FINDINGS_SUBMITTED").count = 1; }, /history counts 1 finding\(s\), but the ledger holds 2/);
   await tamper((review) => { review.findings[0].introduced_round = "1"; }, /finding "F-001" introduced_round "1" is not a round the ledger holds/);
   await tamper((review) => { review.findings[0].line = 0; }, /finding "F-001" line 0 is not absent, or a positive integer/);
   await tamper((review) => { review.findings[0].path = "../secret"; }, /finding "F-001" path "\.\.\/secret" is not absent, or a safe relative path/);
@@ -934,6 +941,31 @@ test("the summary digest covers exactly the fields the report prints", () => {
   for (const change of [{ status: "CHANGES_REQUIRED" }, { blocking_reason: "EVIDENCE_STALE" }, { next_action: "VERIFY_PUBLICATION_GATE" }, { gate_state: "PRESENT" }]) {
     assert.notEqual(summaryDigest(base), summaryDigest({ ...base, ...change }), JSON.stringify(change));
   }
+});
+
+// The review side of the same race: the review is read first, and a gate
+// finalized after that read would leave a CLEAN review beside a passed gate
+// in one report. The file is re-read after every other read.
+test("a review that moves after it was read fails the render closed", async (t) => {
+  const state = await gatedFixture(t, { finalize: false });
+  const finalizeBetweenReads = async (storeRoot, reviewId) => {
+    await finalizeLocalGate(storeRoot, reviewId);
+    return getPublication(storeRoot, reviewId);
+  };
+  await assert.rejects(
+    loadReportLedgers(state.store, state.reviewId, { readPublication: finalizeBetweenReads }),
+    (error) => {
+      assert.equal(error.code, "REVIEW_MOVED_DURING_RENDER");
+      assert.equal(error.details.review_id, state.reviewId);
+      assert.equal(error.details.state_version_now, error.details.state_version_loaded + 1);
+      assert.match(error.message, /\(CLEAN\) to \d+ \(LOCAL_GATE_PASSED\)/);
+      return true;
+    },
+  );
+  assert.ok(!(await fsp.readdir(reviewDirectory(state))).some((name) => name.startsWith("report-")));
+  // Read again at rest, the passed review renders with its gate.
+  const written = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
+  assert.equal(written.reused, false);
 });
 
 // The ledger and its summary are read under separate locks. A snapshot

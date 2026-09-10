@@ -407,6 +407,24 @@ const LEDGER_TRANSITIONS = {
   ERRATUM_APPENDED: { from: LEDGER_REVIEW_STATUSES, to: null, roundBound: true },
 };
 
+// The round each finding position was raised in, from the history's counts,
+// or null when a verdict event that should carry a count does not (a ledger
+// older than the field).
+function derivedIntroducedRounds(history) {
+  const rounds = [];
+  for (const entry of history) {
+    if (entry.event === "INITIAL_REVIEW_CLEAN" || entry.event === "REREVIEW_CLEAN") continue;
+    if (entry.event === "FINDINGS_SUBMITTED") {
+      if (!Number.isInteger(entry.count)) return null;
+      rounds.push(...Array(entry.count).fill(entry.round));
+    } else if (entry.event === "REREVIEW_UNRESOLVED" || entry.event === "REREVIEW_CONTINUABLE_FINDINGS") {
+      if (!Number.isInteger(entry.new_findings)) return null;
+      rounds.push(...Array(entry.new_findings).fill(entry.round));
+    }
+  }
+  return rounds;
+}
+
 // Replays the history through the transition table and returns the status
 // and round it ends at, or the first defect.
 function replayReviewHistory(history) {
@@ -534,6 +552,23 @@ function reviewLedgerDefect(review, reviewId) {
   for (const [index, finding] of review.findings.entries()) {
     const defect = findingDefect(finding, index, review);
     if (defect != null) return defect;
+  }
+  // Which round each finding was raised in is derived from the history's own
+  // counts -- FINDINGS_SUBMITTED.count for round one, new_findings for each
+  // rereview verdict, findings numbered by position -- and the whole column
+  // compared with what is stored. Where an older ledger's history carries no
+  // counts, the table's membership check above (a round the ledger holds) is
+  // all that can be said: that is the degraded path.
+  const introducedRounds = derivedIntroducedRounds(review.history);
+  if (introducedRounds != null) {
+    if (introducedRounds.length !== review.findings.length) {
+      return `history counts ${introducedRounds.length} finding(s), but the ledger holds ${review.findings.length}`;
+    }
+    for (const [index, finding] of review.findings.entries()) {
+      if (finding.introduced_round !== introducedRounds[index]) {
+        return `finding ${JSON.stringify(finding.id)} introduced_round ${finding.introduced_round} is not the round its position derives from the history's counts (${introducedRounds[index]})`;
+      }
+    }
   }
   for (const [key, entries] of [
     ["finding", review.findings.map((finding) => finding.id)],

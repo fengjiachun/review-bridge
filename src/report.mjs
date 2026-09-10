@@ -15,6 +15,7 @@ import {
   readLocalGateAuthorization,
   resolutionFrontier,
 } from "./publication.mjs";
+import { sha256 } from "./storage.mjs";
 
 // The footer sentence, stated in the terms README uses for operator narration.
 // A report is read by a person; nothing a person reads here advances a ledger.
@@ -723,6 +724,10 @@ export async function loadReportLedgers(
       { review_id: reviewId, path: reviewPath },
     );
   }
+  // The review as loaded, in the store's own serialization, so it can be
+  // compared with the file after every other read.
+  const reviewDigestLoaded =
+    review == null ? null : sha256(`${JSON.stringify(review, null, 2)}\n`);
   // The gate file or remote sidecar, admitted by the publication reader's own
   // binding check; a file it rejects, or one that is missing, fails the
   // render rather than lending the report fields the ledger never bound.
@@ -775,6 +780,33 @@ export async function loadReportLedgers(
         summary_revision: publicationSummary.revision,
       },
     );
+  }
+  // The review side of the same race: it was read first, and a gate finalized
+  // or a publication started after that read leaves a review of one state
+  // beside a publication of the next. The file is read again after every
+  // other read and must still be the bytes that were loaded; the publication
+  // ledger binds no review state_version, so there is no second pair.
+  if (review != null) {
+    let now;
+    try {
+      now = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+    } catch (error) {
+      throw reportError("LEDGER_UNREADABLE", `cannot re-read ${reviewPath}: ${error.message}`, {
+        review_id: reviewId,
+        path: reviewPath,
+      });
+    }
+    if (sha256(`${JSON.stringify(now, null, 2)}\n`) !== reviewDigestLoaded) {
+      throw reportError(
+        "REVIEW_MOVED_DURING_RENDER",
+        `review ${reviewId} moved from state_version ${review.state_version ?? "n/a"} (${review.status}) to ${now?.state_version ?? "n/a"} (${now?.status}) while the report was being read`,
+        {
+          review_id: reviewId,
+          state_version_loaded: review.state_version ?? null,
+          state_version_now: now?.state_version ?? null,
+        },
+      );
+    }
   }
   return { directory, review, publication, authorization, publicationSummary };
 }
