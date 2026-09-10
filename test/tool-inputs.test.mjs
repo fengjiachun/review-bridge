@@ -690,12 +690,16 @@ test("an acknowledged split keeps declaring the cut it owes", () => {
         /^continue, required only if /,
       );
       // The cut declared after the release says the release ends it, so a
-      // driver executing the sequence in one turn owes no cut it never made.
+      // driver executing the sequence in one turn owes no cut it never made
+      // -- and that the recording of a commit that does exist is owed
+      // regardless, because the bind refuses a head the ledger never saw.
+      const headSource = table[action].record_workflow_head.find(
+        ([field]) => field === "head_sha",
+      )[1];
+      assert.match(headSource, /release/);
       assert.match(
-        table[action].record_workflow_head.find(
-          ([field]) => field === "head_sha",
-        )[1],
-        /released/,
+        headSource,
+        /whenever the repository HEAD differs from the recorded head/,
       );
     }
     // Once a gate has admitted the cut the promise is kept, and the phase goes

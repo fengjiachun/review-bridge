@@ -73,7 +73,7 @@ import {
   startInput,
   workflowInput,
 } from "./helpers/publication-chain";
-import { commit, fixture, TOPIC_BRANCH } from "./helpers/repository-fixture";
+import { commit, fixture, git, TOPIC_BRANCH } from "./helpers/repository-fixture";
 
 // The state-rejection family: every code a transition raises because of the
 // ledger state the call was initiated from, enumerated from the fail() sites
@@ -176,6 +176,25 @@ const PROBES = {
       /required only if/.test(source) ||
       (/\bcut\b/.test(source) && m.decision === "continue");
     if (conditional && content == null) {
+      // A release ends the cut, not the recording: where the declaration says
+      // the head is owed whenever the repository is ahead of the ledger, the
+      // driver compares the two heads and records the commit that exists.
+      if (!/whenever the repository HEAD differs from the recorded head/.test(source)) {
+        return;
+      }
+      const head = git(ctx.state.repository, "rev-parse", "HEAD");
+      const recorded = (await getAutonomousWorkflow(ctx.store, ctx.workflowId))
+        .current_head_sha;
+      if (head === recorded) {
+        return;
+      }
+      const result = await recordWorkflowHead(
+        ctx.store,
+        ctx.workflowId,
+        declaredRevision(ctx, summary, fields),
+        head,
+      );
+      ctx.revision = result.revision;
       return;
     }
     assert.ok(content, "the turn supplies no commit content");
@@ -1045,6 +1064,51 @@ test("a split released where the round is prepared walks out in one turn", async
     materials: { decision: "continue" },
   });
   assert.equal(bound.next_action, "PLAN_CODEX_TASK_DISPATCH");
+});
+
+// A release ends the cut, not the recording. An operator who committed a cut
+// and then gave the split up leaves the repository ahead of the ledger, and
+// the bind refuses a snapshot of a head the workflow never recorded with
+// WORKFLOW_REVIEW_MISMATCH; the declaration keeps requiring the head whenever
+// the two differ, so a driver reading it records the commit that exists
+// before it prepares. The same for a fix committed among the findings, which
+// the advance demands recorded.
+test("a committed cut released where the round is prepared is still recorded", async (t) => {
+  const ctx = await reachCrossedPrepare(t, "walk-split-ten");
+  await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  const committed = await commit(ctx.state.repository, ONE_LINE_CUT);
+  const bound = await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    materials: { decision: "continue" },
+  });
+  assert.equal(bound.next_action, "PLAN_CODEX_TASK_DISPATCH");
+  assert.equal(
+    (await getAutonomousWorkflow(ctx.store, ctx.workflowId)).current_head_sha,
+    committed,
+  );
+});
+
+test("a committed fix released among the findings is still recorded", async (t) => {
+  const ctx = await reachCrossedFindings(t, "walk-split-eleven");
+  await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  const committed = await commit(ctx.state.repository, SIX_LINE_FIX);
+  const after = await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    materials: { decision: "continue" },
+  });
+  assert.equal(after.next_action, "PREPARE_REREVIEW");
+  assert.equal(
+    (await getAutonomousWorkflow(ctx.store, ctx.workflowId)).current_head_sha,
+    committed,
+  );
 });
 
 // The recorded-cut arm's release, taken after the gate has refused the

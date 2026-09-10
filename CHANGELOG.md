@@ -41,8 +41,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   and refuses it once a recorded cut has shrunk the change, which the ledger
   cannot see, so the source text carries the condition rather than the
   summary recomputing a diff. The recorded-cut arms declare it beside the
-  further cut, conditional on the gate refusing the cut already in. The
-  reachability walk takes the continue exit on both arms.
+  further cut, conditional on the gate refusing the cut already in. A
+  release ends the cut, not the recording: every cut source says the head
+  is owed whenever the repository HEAD differs from the recorded head, since
+  the bind refuses a snapshot of a head the workflow never recorded. The
+  reachability walk takes the continue exit on both arms, with and without
+  a commit already made.
 
 ## 0.12.0 - 2026-09-10
 
