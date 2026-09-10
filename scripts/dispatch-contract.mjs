@@ -54,10 +54,17 @@ const SHARED_REQUIREMENTS = [
   ["no author profile", /[Nn]ever launch the author profile to review/],
   ["no authoring history", /[Nn]ever pass any authoring history/],
   // Without a replacement the round strands: the reviewer is gone, the state
-  // never moves, and the wait can only keep timing out.
+  // never moves, and the wait can only keep timing out. Whether a verdict
+  // exists is the ledger's to say, for a zero and a nonzero exit alike: a
+  // run can submit and then fail on the way out, and a replacement started
+  // on the exit code alone reruns a round the ledger already carries.
   [
-    "a launch that exited without a verdict is replaced",
-    /exited without submitting a verdict[\s\S]*?start a replacement launch in the same shape as the original/,
+    "a launch that exited is judged from the ledger and replaced when it shows no verdict",
+    /[Aa] launch that has exited leaves the round to be judged from the ledger[\s\S]*?start a replacement launch in the same shape as the original/,
+  ],
+  [
+    "the exit status establishes only that the process is gone",
+    /exit status, zero or not, establishes only that the process is gone/,
   ],
   // The distinction the replacement rule stands on. A timeout is not death,
   // and replacing a slow reviewer manufactures the pair the first bar bans.
@@ -98,6 +105,14 @@ const SHARED_REQUIREMENTS = [
 // body so the `CLAUDE_DESKTOP` sentence — which does say the operator opens
 // that conversation — is out of their reach.
 const SHARED_STRUCTURAL = [
+  // The exit code is not the verdict. This form read a nonzero exit as proof
+  // of no verdict, and a run that submitted and then failed on exit would
+  // have been replaced onto a round the ledger already carries.
+  [
+    "doesNotMatch",
+    /a nonzero exit, or a zero exit with nothing recorded in the ledger/,
+    "the replacement rule regressed to reading the exit code as the verdict",
+  ],
   [
     "doesNotMatch",
     /[Oo]ne new (?:instance|session) per (?:`review_id`|review ID)/,
@@ -151,10 +166,15 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       /[Aa] round-two rereview is that review's next round, so its launch is required rather than an exception/,
     ],
     // Without a replacement the round strands: the reviewer is gone, the state
-    // never moves, and the wait can only keep timing out.
+    // never moves, and the wait can only keep timing out. The verdict is the
+    // ledger's to judge, zero or nonzero exit alike (#117 round two).
     [
-      "a launch that exited without a verdict is replaced",
-      /exited without submitting a verdict[\s\S]*?start a replacement launch in the same shape as the original/,
+      "a launch that exited is judged from the ledger and replaced when it shows no verdict",
+      /[Aa] launch that has exited leaves the round to be judged from the ledger[\s\S]*?start a replacement launch in the same shape as the original/,
+    ],
+    [
+      "the exit status establishes only that the process is gone",
+      /exit status, zero or not, establishes only that the process is gone/,
     ],
     // The distinction the replacement rule stands on. A timeout is not death,
     // and replacing a slow reviewer manufactures the pair the first bar bans.
@@ -434,6 +454,11 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "match",
       /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
       "round-two launch form with the git-repo check skipped, the sandbox, network policy, and writable roots named, the guardian named, the author server disabled, and stdin closed",
+    ],
+    [
+      "doesNotMatch",
+      /a nonzero exit, or a zero exit with nothing recorded in the ledger/,
+      "the replacement rule regressed to reading the exit code as the verdict",
     ],
     // The flag this launch dropped. It strips the sandbox that is now the
     // isolation boundary, so it must not come back in any fence — or in the

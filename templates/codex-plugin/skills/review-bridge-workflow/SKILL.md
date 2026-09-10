@@ -622,11 +622,14 @@ never review from the author task: never fork that task, and never pass any
 authoring history — not the diff you wrote, the requirement discussion, your
 reasoning, or this session's transcript. Within those two bars launches are not
 rationed. A round-two rereview is that review's next round, so its launch is
-required rather than an exception. A launch that has exited without submitting
-a verdict — a nonzero exit, or a zero exit with nothing recorded in the
-ledger — leaves that round with no reviewer working it, so start a replacement
-launch in the same shape as the original; that replacement is the same round,
-and both bars still hold, because the reviewer it replaces is gone. Judge that
+required rather than an exception. A launch that has exited leaves the round to
+be judged from the ledger: if the ledger shows no verdict for this round, no
+reviewer is working it, so start a replacement launch in the same shape as the
+original; that replacement is the same round, and both bars still hold, because
+the reviewer it replaces is gone. The exit status, zero or not, establishes
+only that the process is gone — a run can submit its verdict and then fail
+while saving its session or printing its output, and a replacement started on
+that exit code alone would rerun a round the ledger already carries. Judge that
 by the process having exited, never by `wait_for_review_state` timing out: a
 timeout says the round is unfinished, not that the reviewer is gone, and
 replacing a reviewer that is merely slow creates exactly the concurrent pair
@@ -834,20 +837,22 @@ with the packaged reviewer skill. That resume is round two's launch, so it is
 required rather than an exception, and it starts no second reviewer: the
 resumed instance is the one reviewer on that round.
 
-A launch that has exited without submitting a verdict — a nonzero exit, or a
-zero exit with nothing recorded in the ledger — leaves that round with no
-reviewer working it, so start a replacement launch in the same shape as the
-original; that replacement is the same round, and both bars still hold,
-because the reviewer it replaces is gone. Judge that by the process having
-exited, never by `wait_for_review_state` timing out: a timeout says the round
-is unfinished, not that the reviewer is gone, and replacing a reviewer that is
-merely slow creates exactly the concurrent pair the first bar forbids. The
-driver started the process, so it has the exit status to judge by. A
-round-one replacement is a fresh instance, not a resume: the launch it
-replaces produced no round one, so there is nothing to resume, and the
-replacement's own `session_id:` line is the one round two resumes. A
-round-two replacement resumes the round-one instance again, as the launch it
-replaces did.
+A launch that has exited leaves the round to be judged from the ledger: if the
+ledger shows no verdict for this round, no reviewer is working it, so start a
+replacement launch in the same shape as the original; that replacement is the
+same round, and both bars still hold, because the reviewer it replaces is gone.
+The exit status, zero or not, establishes only that the process is gone — a run
+can submit its verdict and then fail while saving its session or printing its
+output, and a replacement started on that exit code alone would rerun a round
+the ledger already carries. Judge that by the process having exited, never by
+`wait_for_review_state` timing out: a timeout says the round is unfinished, not
+that the reviewer is gone, and replacing a reviewer that is merely slow creates
+exactly the concurrent pair the first bar forbids. The driver started the
+process, so it has the exit status to judge by. A round-one replacement is a
+fresh instance, not a resume: the launch it replaces produced no round one, so
+there is nothing to resume, and the replacement's own `session_id:` line is the
+one round two resumes. A round-two replacement resumes the round-one instance
+again, as the launch it replaces did.
 
 A launch sitting at a prompt has not exited, so the replacement rule does not
 fire for it while it waits, and a replacement started after the denial meets
@@ -963,17 +968,20 @@ already requires each `rebuttal_accepted` decision to carry verification the
 reviewer performed itself rather than recalled, so the evidence bar is the one
 a resumed context would have faced.
 
-A launch that has exited without submitting a verdict — a nonzero exit, or a
-zero exit with nothing recorded in the ledger — leaves that round with no
-reviewer working it, so start a replacement launch in the same shape as the
-original; that replacement is the same round, and both bars still hold,
-because the reviewer it replaces is gone. Judge that by the process having
-exited, never by `wait_for_review_state` timing out: a timeout says the round
-is unfinished, not that the reviewer is gone, and replacing a reviewer that is
-merely slow creates exactly the concurrent pair the first bar forbids. The
-driver started the process, so it has the exit status to judge by, and for
-this runtime that is the whole signal: the headless run is silent until it
-ends, so the zero exit that submitted nothing shows only in the ledger.
+A launch that has exited leaves the round to be judged from the ledger: if the
+ledger shows no verdict for this round, no reviewer is working it, so start a
+replacement launch in the same shape as the original; that replacement is the
+same round, and both bars still hold, because the reviewer it replaces is gone.
+The exit status, zero or not, establishes only that the process is gone — a run
+can submit its verdict and then fail while saving its session or printing its
+output, and a replacement started on that exit code alone would rerun a round
+the ledger already carries. Judge that by the process having exited, never by
+`wait_for_review_state` timing out: a timeout says the round is unfinished, not
+that the reviewer is gone, and replacing a reviewer that is merely slow creates
+exactly the concurrent pair the first bar forbids. The driver started the
+process, so it has the exit status to judge by, and for this runtime that is
+the whole signal: the headless run is silent until it ends, so the zero exit
+that submitted nothing shows only in the ledger.
 
 Launch it outside the repository under review. The invoking directory is the
 session's workspace root, and DeepSeek Harness loads `AGENTS.md` and

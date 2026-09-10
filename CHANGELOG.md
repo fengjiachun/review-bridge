@@ -21,11 +21,15 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   launch, is that review's next round rather than the launch the count
   forbade, and a HERMES round two, still a resume of the round-one instance,
   reads as round two's launch rather than as an exception. Both sections gain
-  the replacement rule: a launch that exited without submitting a verdict — a
-  nonzero exit, or a zero exit with nothing in the ledger — is replaced in the
-  same shape, judged by the process having exited and never by
-  `wait_for_review_state` timing out, since replacing a merely slow reviewer
-  creates exactly the concurrent pair the first bar forbids; a HERMES
+  the replacement rule: a launch that has exited is judged from the ledger,
+  and when the ledger shows no verdict for the round it is replaced in the
+  same shape; the exit status, zero or not, establishes only that the process
+  is gone, since a run can submit and then fail on the way out — the same
+  correction applied to the `CODEX_TASK` sentence the rule was copied from,
+  the one touch of that section — and the exit is judged by the process
+  having exited and never by `wait_for_review_state` timing out, since
+  replacing a merely slow reviewer creates exactly the concurrent pair the
+  first bar forbids; a HERMES
   round-one replacement is a fresh instance, whose `session_id:` is the one
   round two resumes. Both launches may run unattended under the 2026-09-04
   dispatch ruling, each section speaking for its own launch only, and each
@@ -54,7 +58,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   pins the fail-closed seam, and the round-two anchors are per provider
   because the two runtimes' round two differ. The Hermes snippet test and the
   release check require the `trust` key. The `CODEX_TASK` section and the
-  `CLAUDE_DESKTOP` boundary are untouched.
+  `CLAUDE_DESKTOP` boundary are otherwise untouched.
 - The unattended `CODEX_TASK` launch drops
   `--dangerously-bypass-approvals-and-sandbox` and runs the reviewer inside
   Codex's own `workspace-write` sandbox, on codex-cli 0.153.4 or newer

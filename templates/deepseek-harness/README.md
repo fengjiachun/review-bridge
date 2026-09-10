@@ -201,17 +201,20 @@ material a resumed context would have been asked to decide against, and the
 reviewer skill already requires each `rebuttal_accepted` decision to carry
 verification the reviewer performed itself rather than recalled.
 
-A launch that has exited without submitting a verdict — a nonzero exit, or a
-zero exit with nothing recorded in the ledger — leaves that round with no
-reviewer working it, so start a replacement launch in the same shape as the
-original; that replacement is the same round, and both bars still hold,
-because the reviewer it replaces is gone. Judge that by the process having
-exited, never by `wait_for_review_state` timing out: a timeout says the round
-is unfinished, not that the reviewer is gone, and replacing a reviewer that is
-merely slow creates exactly the concurrent pair the first bar forbids. The
-driver started the process, so it has the exit status to judge by, and for
-this runtime that is the whole signal: the headless run is silent until it
-ends, so the zero exit that submitted nothing shows only in the ledger.
+A launch that has exited leaves the round to be judged from the ledger: if the
+ledger shows no verdict for this round, no reviewer is working it, so start a
+replacement launch in the same shape as the original; that replacement is the
+same round, and both bars still hold, because the reviewer it replaces is gone.
+The exit status, zero or not, establishes only that the process is gone — a run
+can submit its verdict and then fail while saving its session or printing its
+output, and a replacement started on that exit code alone would rerun a round
+the ledger already carries. Judge that by the process having exited, never by
+`wait_for_review_state` timing out: a timeout says the round is unfinished, not
+that the reviewer is gone, and replacing a reviewer that is merely slow creates
+exactly the concurrent pair the first bar forbids. The driver started the
+process, so it has the exit status to judge by, and for this runtime that is
+the whole signal: the headless run is silent until it ends, so the zero exit
+that submitted nothing shows only in the ledger.
 
 Launch it outside the repository under review. The invoking directory is the
 session's workspace root, and DeepSeek Harness loads `AGENTS.md` and
