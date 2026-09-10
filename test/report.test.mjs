@@ -436,6 +436,59 @@ test("an unresolved thread and a publication without an observation are stated, 
   assert.match(markdown, /### Review threads\n\nNo observation has been recorded\./);
 });
 
+// A REMOTE_ONLY publication has no review ledger: the header comes from the
+// authorization file beside it, and the footer says which ledger is absent.
+function remoteAuthorization() {
+  return {
+    version: 1,
+    review_id: REVIEW_ID,
+    mode: "REMOTE_ONLY",
+    acknowledgement: "LOCAL_REVIEW_SKIPPED",
+    authorized_at: "2026-09-01T00:39:00.000Z",
+    operator_label: "jeremy",
+    rationale: "Standing instruction: remote-only review.",
+    repository_path: "/tmp/repo",
+    base_sha: BASE,
+    head_sha: HEAD_TWO,
+    reviewer_provider: null,
+  };
+}
+
+test("a REMOTE_ONLY publication renders without a review ledger, from its publication and authorization", () => {
+  const publication = mergeReadyPublication();
+  publication.authorization = {
+    mode: "REMOTE_ONLY",
+    acknowledgement: "LOCAL_REVIEW_SKIPPED",
+    base_sha: BASE,
+    head_sha: HEAD_TWO,
+    operator_label: "jeremy",
+    rationale: "Standing instruction: remote-only review.",
+    reviewer_provider: null,
+  };
+  const markdown = render(null, {
+    publication,
+    remoteAuthorization: remoteAuthorization(),
+    ledgerDirectory: "/store/reviews/x",
+  });
+  assert.ok(markdown.startsWith("# Review report rb-2026-09-01T000000-000Z-0badf00d\n"));
+  assert.match(markdown, /## Local review\n\nNone: this publication was authorized `REMOTE_ONLY` with local review skipped, so there is no review ledger, no rounds, and no findings to render\.\n\n- Review: `rb-2026-09-01T000000-000Z-0badf00d`\n- Authorization: `REMOTE_ONLY`, acknowledgement `LOCAL_REVIEW_SKIPPED`, operator jeremy, at 2026-09-01T00:39:00\.000Z\n- Repository: `\/tmp\/repo`\n- Base → head: `a{40}` → `c{40}`\n\n### Authorization rationale\n\n    Standing instruction: remote-only review\./);
+  for (const absent of ["### Rounds", "### Findings", "### Changes between rounds", "### Outcome"]) {
+    assert.ok(!markdown.includes(absent), `${absent} rendered without a review`);
+  }
+  assert.match(markdown, /## Remote publication\n\n- Pull request: owner\/repo#7/);
+  assert.match(markdown, /- Authorization: `REMOTE_ONLY`, acknowledgement `LOCAL_REVIEW_SKIPPED`, operator jeremy\n- Authorization rationale:\n    Standing instruction: remote-only review\.\n- Codex trigger policy/);
+  assert.match(markdown, /- MERGE_READY rests on the observation recorded at revision 5/);
+  assert.match(markdown, /- Review ledger state_version: n\/a \(remote-only: no local review ledger\)\n- Publication ledger revision: 5\n- Report revision: `p5`\n- Rendered at: [^\n]+\n- Ledger: `\/store\/reviews\/x\/publication\.json`, `\/store\/reviews\/x\/remote-authorization\.json`/);
+  assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE}\n`));
+  assert.equal(reportRevision(null, publication), "p5");
+
+  // Without the authorization file the publication's own authorization stands in.
+  const fallback = render(null, { publication });
+  assert.match(fallback, /- Authorization: `REMOTE_ONLY`, acknowledgement `LOCAL_REVIEW_SKIPPED`, operator jeremy\n- Repository: n\/a\n- Base → head: `a{40}` → `c{40}`/);
+  assert.match(fallback, /- Ledger: `reviews\/rb-2026-09-01T000000-000Z-0badf00d\/publication\.json`\n/);
+  assert.throws(() => render(null, {}), /needs a review ledger or a publication ledger/);
+});
+
 test("rendering is a pure function of its inputs", () => {
   const review = cleanInTwoRounds();
   const publication = mergeReadyPublication();
@@ -498,12 +551,33 @@ test("the store writer names the file by the ledger revision and is idempotent a
   assert.deepEqual(JSON.parse(await fsp.readFile(path.join(directory, "review.json"), "utf8")), cleanInTwoRounds());
 });
 
+test("a remote-only publication is written as report-p<revision>.md from the publication and authorization alone", async (t) => {
+  const root = await store(t);
+  const directory = await writeLedger(root, "publication.json", mergeReadyPublication());
+  await writeLedger(root, "remote-authorization.json", remoteAuthorization());
+  const written = await writeReviewReport(root, REVIEW_ID, { renderedAt: RENDERED_AT });
+  assert.equal(written.path, path.join(directory, "report-p5.md"));
+  assert.equal(written.written, true);
+  assert.equal(written.revision, "p5");
+  assert.equal(written.review_state_version, null);
+  assert.equal(written.publication_revision, 5);
+  assert.match(written.markdown, /authorized `REMOTE_ONLY` with local review skipped/);
+  assert.match(written.markdown, /- Authorization: `REMOTE_ONLY`, acknowledgement `LOCAL_REVIEW_SKIPPED`, operator jeremy, at 2026-09-01T00:39:00\.000Z/);
+  assert.match(written.markdown, new RegExp(`- Ledger: \`${directory}/publication\\.json\`, \`${directory}/remote-authorization\\.json\``));
+  assert.equal(await fsp.readFile(written.path, "utf8"), written.markdown);
+  assert.deepEqual(
+    (await fsp.readdir(directory)).sort(),
+    ["publication.json", "remote-authorization.json", "report-p5.md"],
+  );
+});
+
 test("a missing or malformed ledger is a structured error, and an invalid ID never reaches the store", async (t) => {
   const root = await store(t);
   await assert.rejects(writeReviewReport(root, REVIEW_ID), (error) => {
     assert.equal(error.code, "REVIEW_NOT_FOUND");
+    assert.match(error.message, /neither review\.json nor publication\.json/);
     assert.equal(error.details.review_id, REVIEW_ID);
-    assert.equal(error.details.path, path.join(root, "reviews", REVIEW_ID, "review.json"));
+    assert.equal(error.details.path, path.join(root, "reviews", REVIEW_ID));
     return true;
   });
   await assert.rejects(writeReviewReport(root, "../etc/passwd"), (error) => {

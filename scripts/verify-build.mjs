@@ -1427,6 +1427,24 @@ try {
     assert.equal(remoteVerified.valid, true);
     assert.equal(remoteVerified.head_sha, headSha);
     assert.equal(remoteVerified.reviewer_provider, null);
+    // A remote-only publication has no review ledger; the report renders from
+    // the publication and its authorization and is named by the publication
+    // revision alone.
+    const remoteReport = await call(author, "render_review_report", {
+      review_id: remoteAuthorization.review_id,
+    });
+    assert.equal(remoteReport.written, true);
+    assert.equal(remoteReport.review_state_version, null);
+    assert.match(path.basename(remoteReport.path), /^report-p\d+\.md$/);
+    assert.match(remoteReport.markdown, /authorized `REMOTE_ONLY` with local review skipped/);
+    assert.match(remoteReport.markdown, /projection of the ledger, not evidence/);
+    const packagedRemoteReport = spawnSync(
+      process.execPath,
+      [reportScript, remoteAuthorization.review_id, "--store", store],
+      { cwd: pluginRoot, encoding: "utf8" },
+    );
+    assert.equal(packagedRemoteReport.status, 0, packagedRemoteReport.stderr);
+    assert.match(packagedRemoteReport.stdout, /authorized `REMOTE_ONLY` with local review skipped/);
 
     await fsp.writeFile(
       path.join(repository, "value.test.js"),

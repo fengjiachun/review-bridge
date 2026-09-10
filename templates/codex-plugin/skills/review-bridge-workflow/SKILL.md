@@ -1310,7 +1310,9 @@ For either mode:
     `gh pr merge --match-head-commit <head_sha>`. Never reuse a finalize result,
     direct file read, cached verification, or older revision.
 11. Once the ledger reads `MERGE_READY`, call `render_review_report` with the
-    `review_id` and print the returned path. If `command -v plannotator` finds
+    `review_id` — in `REMOTE_ONLY` mode the authorization's, since no local
+    review exists and the report then renders from the publication and its
+    authorization alone — and print the returned path. If `command -v plannotator` finds
     Plannotator on PATH, run `plannotator annotate <path>` so the operator can
     read the report there; otherwise the printed path is the whole step.
     Annotations never flow back into the ledger: whatever the reader decides

@@ -1304,7 +1304,7 @@ if (role === "author") {
     {
       title: "Render review report",
       description:
-        "Render a human-readable Markdown report of a review from its ledger and, when present, its publication ledger, and write it to reviews/<review_id>/report-r<revision>.md beside them. Read-only over the ledgers: it changes no review or publication state, consumes no round, and touches no gate. The report is a projection of the ledger, not evidence.",
+        "Render a human-readable Markdown report of a review from its ledger and, when present, its publication ledger -- or, for a REMOTE_ONLY publication with no review ledger, from the publication and its authorization alone -- and write it to reviews/<review_id>/report-r<revision>.md (report-p<revision>.md when remote-only) beside them. Read-only over the ledgers: it changes no review or publication state, consumes no round, and touches no gate. The report is a projection of the ledger, not evidence.",
       inputSchema: { review_id: z.string() },
     },
     (input) => writeReviewReport(storeRoot, input.review_id),

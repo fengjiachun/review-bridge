@@ -104,6 +104,25 @@ function identitySection(review) {
   ];
 }
 
+// A REMOTE_ONLY publication has no local review: the operator authorized it
+// with LOCAL_REVIEW_SKIPPED, and the authorization file beside the publication
+// is the only local record of what was authorized and why.
+function remoteOnlySection(authorization, publication) {
+  const record = authorization ?? publication?.authorization ?? {};
+  return [
+    "## Local review",
+    "None: this publication was authorized `REMOTE_ONLY` with local review skipped, so there is no review ledger, no rounds, and no findings to render.",
+    [
+      `- Review: ${code(record.review_id ?? publication?.review_id)}`,
+      `- Authorization: ${code(record.mode)}${record.acknowledgement ? `, acknowledgement ${code(record.acknowledgement)}` : ""}${record.operator_label ? `, operator ${record.operator_label}` : ""}${record.authorized_at ? `, at ${record.authorized_at}` : ""}`,
+      `- Repository: ${code(record.repository_path)}`,
+      `- Base → head: ${code(record.base_sha)} → ${code(record.head_sha)}`,
+    ].join("\n"),
+    "### Authorization rationale",
+    literal(record.rationale),
+  ];
+}
+
 function successorSection(review) {
   const successor = (review.rounds ?? [])[0]?.successor;
   if (successor == null) return [];
@@ -451,34 +470,55 @@ function remoteSection(publication) {
 }
 
 export function reportRevision(review, publication) {
+  if (review == null) return `p${publication.revision}`;
   const stateVersion = review.state_version ?? 0;
   return publication == null
     ? String(stateVersion)
     : `${stateVersion}-p${publication.revision}`;
 }
 
+// `review` is null for a REMOTE_ONLY publication, which has no review ledger;
+// the publication is then required and the header comes from the authorization.
 export function renderReviewReport(
   review,
-  { publication = null, renderedAt = new Date().toISOString(), ledgerDirectory = null } = {},
+  {
+    publication = null,
+    remoteAuthorization = null,
+    renderedAt = new Date().toISOString(),
+    ledgerDirectory = null,
+  } = {},
 ) {
-  const directory = ledgerDirectory ?? path.join("reviews", String(review.id));
+  if (review == null && publication == null) {
+    throw new Error("a report needs a review ledger or a publication ledger");
+  }
+  const reviewId = review?.id ?? publication.review_id;
+  const directory = ledgerDirectory ?? path.join("reviews", String(reviewId));
+  const ledgers = [
+    ...(review == null ? [] : ["review.json"]),
+    ...(publication == null ? [] : ["publication.json"]),
+    ...(review == null && remoteAuthorization != null ? ["remote-authorization.json"] : []),
+  ].map((name) => code(path.join(directory, name)));
   const sections = [
-    `# Review report ${review.id}`,
-    ...identitySection(review),
-    ...successorSection(review),
-    ...roundsSection(review),
-    ...findingsSection(review),
-    ...changesSection(review),
-    ...outcomeSection(review),
+    `# Review report ${reviewId}`,
+    ...(review == null
+      ? remoteOnlySection(remoteAuthorization, publication)
+      : [
+          ...identitySection(review),
+          ...successorSection(review),
+          ...roundsSection(review),
+          ...findingsSection(review),
+          ...changesSection(review),
+          ...outcomeSection(review),
+        ]),
     ...remoteSection(publication),
     "## Footer",
     [
-      `- Review: ${code(review.id)}`,
-      `- Review ledger state_version: ${review.state_version ?? 0}`,
+      `- Review: ${code(reviewId)}`,
+      `- Review ledger state_version: ${review == null ? "n/a (remote-only: no local review ledger)" : (review.state_version ?? 0)}`,
       `- Publication ledger revision: ${publication == null ? "none" : publication.revision}`,
       `- Report revision: ${code(reportRevision(review, publication))}`,
       `- Rendered at: ${renderedAt}`,
-      `- Ledger: ${code(path.join(directory, "review.json"))}${publication == null ? "" : `, ${code(path.join(directory, "publication.json"))}`}`,
+      `- Ledger: ${ledgers.join(", ")}`,
     ].join("\n"),
     PROJECTION_NOTICE,
   ];
@@ -489,17 +529,11 @@ function reportError(code, message, details) {
   return Object.assign(new Error(message), { code, details });
 }
 
-async function readLedger(filePath, { required, reviewId }) {
+async function readLedger(filePath, reviewId) {
   try {
     return JSON.parse(await fsp.readFile(filePath, "utf8"));
   } catch (error) {
-    if (error?.code === "ENOENT" && !required) return null;
-    if (error?.code === "ENOENT") {
-      throw reportError("REVIEW_NOT_FOUND", `review ${reviewId} not found`, {
-        review_id: reviewId,
-        path: filePath,
-      });
-    }
+    if (error?.code === "ENOENT") return null;
     throw reportError("LEDGER_UNREADABLE", `cannot read ${filePath}: ${error.message}`, {
       review_id: reviewId,
       path: filePath,
@@ -507,31 +541,42 @@ async function readLedger(filePath, { required, reviewId }) {
   }
 }
 
-// The two ledgers a report is rendered from, read as the bytes on disk. A
-// publication is optional: a review that never published has none.
+// The ledgers a report is rendered from, read as the bytes on disk. Each is
+// optional on its own -- a review that never published has no publication, a
+// REMOTE_ONLY publication has no review -- but one of the two must exist.
 export async function loadReportLedgers(storeRoot, reviewId) {
   if (typeof reviewId !== "string" || !REVIEW_ID_PATTERN.test(reviewId)) {
     throw reportError("INVALID_REVIEW_ID", "invalid review_id", { review_id: reviewId });
   }
   const directory = path.join(storeRoot, "reviews", reviewId);
-  const review = await readLedger(path.join(directory, "review.json"), {
-    required: true,
-    reviewId,
-  });
-  const publication = await readLedger(path.join(directory, "publication.json"), {
-    required: false,
-    reviewId,
-  });
-  return { directory, review, publication };
+  const review = await readLedger(path.join(directory, "review.json"), reviewId);
+  const publication = await readLedger(path.join(directory, "publication.json"), reviewId);
+  if (review == null && publication == null) {
+    throw reportError(
+      "REVIEW_NOT_FOUND",
+      `review ${reviewId} not found: neither review.json nor publication.json exists`,
+      { review_id: reviewId, path: directory },
+    );
+  }
+  const remoteAuthorization =
+    review == null
+      ? await readLedger(path.join(directory, "remote-authorization.json"), reviewId)
+      : null;
+  return { directory, review, publication, remoteAuthorization };
 }
 
 // Writes `report-r<revision>.md` beside the ledger. The ledger at a revision is
 // immutable, so the report at that revision is too: an existing file is
 // returned as it is rather than rewritten with a fresh render time.
 export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}) {
-  const { directory, review, publication } = await loadReportLedgers(storeRoot, reviewId);
+  const { directory, review, publication, remoteAuthorization } =
+    await loadReportLedgers(storeRoot, reviewId);
   const revision = reportRevision(review, publication);
-  const filePath = path.join(directory, `report-r${revision}.md`);
+  // `r<state_version>[-p<revision>]` with a review, `p<revision>` without one.
+  const filePath = path.join(
+    directory,
+    review == null ? `report-${revision}.md` : `report-r${revision}.md`,
+  );
   let markdown;
   let written = false;
   try {
@@ -540,6 +585,7 @@ export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}
     if (error?.code !== "ENOENT") throw error;
     markdown = renderReviewReport(review, {
       publication,
+      remoteAuthorization,
       renderedAt,
       ledgerDirectory: directory,
     });
@@ -548,7 +594,7 @@ export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}
   }
   return {
     review_id: reviewId,
-    review_state_version: review.state_version ?? 0,
+    review_state_version: review == null ? null : (review.state_version ?? 0),
     publication_revision: publication?.revision ?? null,
     revision,
     path: filePath,

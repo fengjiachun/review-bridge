@@ -14,7 +14,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - Render a human-readable Markdown report of a review from its ledger once a
   gate passes, issue #123 (#124). `src/report.mjs` holds
   `renderReviewReport`, a pure renderer over `review.json` and, when present,
-  `publication.json`: requirement and scope, base and head, provider and
+  `publication.json`, or over the publication and its authorization alone for
+  a `REMOTE_ONLY` publication, which has no review ledger: requirement and
+  scope, base and head, provider and
   strategy, each round's findings with the author's disposition and rationale,
   the rereview decision and the verification behind a sustained rebuttal,
   what changed between rounds from the immutable rounds or stated as
@@ -23,7 +25,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   supersessions and acknowledgements, and the observation a `MERGE_READY`
   derivation rests on, by revision and canonical digest. The author tool
   `render_review_report` writes `reviews/<review_id>/report-r<revision>.md`
-  beside the ledger and returns it, unchanged when that revision was already
+  (`report-p<revision>.md` when remote-only) beside the ledger and returns it, unchanged when that revision was already
   rendered; it changes no ledger, consumes no round, and touches no gate, and
   `required_inputs` declares it under the review `PUBLISH` action and the
   publication `FINALIZE_PUBLICATION_GATE` action. The packaged

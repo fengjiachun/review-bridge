@@ -11,7 +11,9 @@ import {
 const USAGE = `Usage: review-report.mjs <review_id> [--json] [--store <path>]
 
   Render one review's human-readable Markdown report from its ledger
-  (review.json) and, when present, its publication ledger (publication.json):
+  (review.json) and, when present, its publication ledger (publication.json);
+  a REMOTE_ONLY publication, which has no review ledger, renders from its
+  publication and authorization alone. The report covers
   requirement and scope, each round's findings with the author's disposition
   and the rereviewer's decision, what changed between rounds, the terminal
   state, and the pull request, Codex results, checks, and threads a
@@ -65,9 +67,10 @@ try {
   process.stderr.write(`${error.code ?? "ERROR"}: ${error.message}\n`);
   process.exit(1);
 }
-const { directory, review, publication } = ledgers;
+const { directory, review, publication, remoteAuthorization } = ledgers;
 const markdown = renderReviewReport(review, {
   publication,
+  remoteAuthorization,
   ledgerDirectory: directory,
 });
 process.stdout.write(
