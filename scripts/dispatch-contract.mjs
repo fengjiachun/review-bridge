@@ -465,6 +465,10 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       /accepts a local Git configuration holding only what a fresh clone writes/,
     ],
     [
+      "core.* is not accepted wholesale",
+      /the `core\.\*` keys a fresh clone writes/,
+    ],
+    [
       "anything else is refused by key name",
       /is refused by key name, because the checkout's `\.git\/config` rides into the container with the mount and a denylist of secret-bearing keys does not converge/,
     ],

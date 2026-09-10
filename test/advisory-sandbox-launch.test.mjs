@@ -696,6 +696,16 @@ test("a checkout whose Git configuration carries a credential is refused before 
     assert.match(result.stderr, new RegExp(`holds more than a fresh clone writes \\(${key.toLowerCase().replace(".", "\\.")}\\)`));
     assert.doesNotMatch(result.stderr, /\.git\/(cookies|client\.key)/);
   }
+  // core.* is not accepted wholesale: the keys that carry a command or a
+  // credential are refused by name.
+  for (const [key, value] of [["core.askPass", "/tmp/askpass.sh"], ["core.gitProxy", "/tmp/proxy.sh"], ["core.sshCommand", "ssh -i .git/id"]]) {
+    const q = await fixture(t, { realReview: true });
+    spawnSync("git", ["-C", q.checkout, "config", key, value]);
+    result = launch(q, ["--review-id", q.reviewId], { PATH });
+    assert.equal(result.status, 2, `${key}: ${result.stdout}`);
+    assert.match(result.stderr, new RegExp(`holds more than a fresh clone writes \\(${key.toLowerCase().replace(".", "\\.")}\\)`));
+    assert.doesNotMatch(result.stderr, /askpass\.sh|proxy\.sh|\.git\/id/);
+  }
   // The configuration a fresh clone plus the skill's fetch and checkout
   // steps actually write passes: a bare origin, cloned, fetched into
   // refs/review-bridge/…, checked out detached.
@@ -709,7 +719,9 @@ test("a checkout whose Git configuration carries a credential is refused before 
   spawnSync("git", ["-C", panel, "checkout", "-q", "--detach", "refs/review-bridge/1/head"]);
   const o = await fixture(t, { checkoutPath: panel });
   result = launch(o, ["--review-id", REVIEW_ID, "--dry-run"]);
-  assert.equal(result.status, 0, result.stderr);
+  // On a failure here, the message names the key git wrote that the
+  // enumeration lacks; add it to FRESH_CLONE_CONFIG_KEYS with the platform.
+  assert.equal(result.status, 0, `${result.stderr}\nclone config:\n${spawnSync("git", ["-C", panel, "config", "--local", "--list"], { encoding: "utf8" }).stdout}`);
   // git itself unavailable: the check fails closed rather than passing by
   // not running.
   const j = await fixture(t, { realReview: true });

@@ -823,12 +823,13 @@ so a directory the image itself carries is not read as the host's, and each
 ancestor of the checkout may gain exactly the one name that leads down to it.
 Before anything is started the launcher reads the checkout's local Git
 configuration and accepts a local Git configuration holding only what a fresh
-clone writes — `core.*`, a remote's `url` and `fetch`, a branch's `remote`,
-`merge`, and `rebase`, `extensions.*`, a submodule's `url` and `active` — with
-a remote URL that carries a credential refused as well; anything else (an
-`http.<url>.extraheader` such as `actions/checkout` writes, any `credential.*`
-setting, an `http.cookieFile` or `http.sslKey` pointing into the checkout, an
-`include.path`) is refused by key name, because the checkout's `.git/config`
+clone writes — the `core.*` keys a fresh clone writes, a remote's `url` and
+`fetch`, a branch's `remote`, `merge`, and `rebase`, `extensions.*`, a
+submodule's `url` and `active` — with a remote URL that carries a credential
+refused as well; anything else (an `http.<url>.extraheader` such as
+`actions/checkout` writes, any `credential.*` setting, an `http.cookieFile` or
+`http.sslKey` pointing into the checkout, a `core.askPass`, `core.gitProxy`,
+or `core.sshCommand`, an `include.path`) is refused by key name, because the checkout's `.git/config`
 rides into the container with the mount and a denylist of secret-bearing keys
 does not converge. That check reads Git configuration only, includes followed,
 and not the working tree: a `.env` or `.netrc` in the tree is kept out by the

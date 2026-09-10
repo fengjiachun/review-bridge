@@ -365,18 +365,26 @@ async function marketplaceFromCodexConfig() {
 }
 
 // The checkout's local and worktree Git configuration (includes followed)
-// is held to what a fresh clone writes, by key: core.*, a remote's url and
-// fetch, a branch's remote, merge, and rebase, extensions.*, and a
-// submodule's url and active. Anything else is refused by key name — an
-// http.<url>.extraheader, a credential.* setting, an http.cookieFile or
-// http.sslKey pointing into the checkout, an include.path — because a
-// denylist of secret-bearing keys does not converge (three were found in as
-// many review rounds) and the panel checkout is a fresh clone, so nothing
-// else belongs there. A remote URL that carries a credential is refused as
-// well. Values are never printed; a key that is itself a URL is printed with
-// its userinfo redacted.
+// is held to what a fresh clone writes, by key: the core.* keys `git clone`
+// writes, a remote's url and fetch, a branch's remote, merge, and rebase,
+// extensions.*, and a submodule's url and active. Anything else is refused by
+// key name — an http.<url>.extraheader, a credential.* setting, an
+// http.cookieFile or http.sslKey pointing into the checkout, a core.askPass,
+// core.gitProxy, or core.sshCommand, an include.path — because a denylist of
+// secret-bearing keys does not converge (three were found in as many review
+// rounds) and the panel checkout is a fresh clone, so nothing else belongs
+// there. A remote URL that carries a credential is refused as well. Values
+// are never printed; a key that is itself a URL is printed with its userinfo
+// redacted.
+//
+// The core keys are what `git clone` writes as observed: on macOS (git
+// 2.54, Apple Git-157) repositoryformatversion, filemode, bare,
+// logallrefupdates, ignorecase, precomposeunicode; Linux writes a subset of
+// those; Windows adds symlinks. core.* as a whole is not accepted, because
+// core.askPass, core.gitProxy, and core.sshCommand carry commands and
+// credentials.
 const FRESH_CLONE_CONFIG_KEYS = [
-  /^core\.[^.]+$/,
+  /^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)$/,
   /^remote\..+\.(url|fetch)$/,
   /^branch\..+\.(remote|merge|rebase)$/,
   /^extensions\.[^.]+$/,

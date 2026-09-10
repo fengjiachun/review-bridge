@@ -71,7 +71,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   base image), judged against the same image run without the checkout mount
   so that what the image carries is never read as the host's; a checkout
   whose local Git configuration holds more than a fresh clone writes (only
-  `core.*`, a remote's `url` and `fetch`, a branch's `remote`, `merge`, and
+  the `core.*` keys a fresh clone writes, a remote's `url` and `fetch`, a branch's `remote`, `merge`, and
   `rebase`, `extensions.*`, and a submodule's `url` and `active` are accepted,
   includes followed, a remote URL carrying a credential refused too; a
   denylist of `.extraheader`, `credential.*`, `http.cookieFile`, and their
