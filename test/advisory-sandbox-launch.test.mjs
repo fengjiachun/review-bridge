@@ -58,6 +58,12 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
       reviewerProvider: "CODEX_TASK",
       advisory: true,
     });
+    // The fixture commits with a local user.name/user.email; a fresh clone
+    // never writes those, and the launcher accepts only what a fresh clone
+    // writes, so drop them once the commits are done.
+    for (const key of ["user.name", "user.email"]) {
+      spawnSync("git", ["-C", repo.repository, "config", "--unset", key]);
+    }
     checkout = repo.repository;
     store = repo.store;
     reviewId = prepared.id;
@@ -640,13 +646,13 @@ test("a checkout whose Git configuration carries a credential is refused before 
   spawnSync("git", ["-C", f.checkout, "config", "http.https://github.com/.extraheader", "AUTHORIZATION: basic c2VjcmV0"]);
   let result = launch(f, ["--review-id", f.reviewId], { PATH });
   assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /Git configuration carries a credential \(http\.https:\/\/github\.com\/\.extraheader\)/);
+  assert.match(result.stderr, /local Git configuration holds more than a fresh clone writes \(http\.https:\/\/github\.com\/\.extraheader\)/);
   assert.doesNotMatch(result.stderr, /c2VjcmV0|Docker is not available/);
   const g = await fixture(t, { realReview: true });
   spawnSync("git", ["-C", g.checkout, "remote", "set-url", "origin", "https://user:t0k3n@example.com/x.git"]);
   result = launch(g, ["--review-id", g.reviewId], { PATH });
   assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /Git configuration carries a credential \(remote\.origin\.url\)/);
+  assert.match(result.stderr, /holds more than a fresh clone writes \(remote\.origin\.url \(credential in the URL\)\)/);
   assert.doesNotMatch(result.stderr, /t0k3n/);
   // A token standing as the user of an https URL is a credential; the
   // fixture's own `ssh://git@github.com/…` remote is a username and passes.
@@ -654,7 +660,7 @@ test("a checkout whose Git configuration carries a credential is refused before 
   spawnSync("git", ["-C", h.checkout, "remote", "set-url", "origin", "https://ghp_t0k3n@github.com/x/y.git"]);
   result = launch(h, ["--review-id", h.reviewId], { PATH });
   assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /carries a credential \(remote\.origin\.url\)/);
+  assert.match(result.stderr, /holds more than a fresh clone writes \(remote\.origin\.url \(credential in the URL\)\)/);
   const i = await fixture(t, { realReview: true });
   result = launch(i, ["--review-id", i.reviewId, "--dry-run"]);
   assert.equal(result.status, 0, result.stderr);
@@ -664,7 +670,7 @@ test("a checkout whose Git configuration carries a credential is refused before 
   result = launch(m, ["--review-id", m.reviewId], { PATH });
   assert.equal(result.status, 2, result.stdout);
   // git lowercases the variable part of the key on output.
-  assert.match(result.stderr, /carries a credential \(url\.https:\/\/<redacted>@github\.com\/\.insteadof\)/i);
+  assert.match(result.stderr, /holds more than a fresh clone writes \(url\.https:\/\/<redacted>@github\.com\/\.insteadof\)/i);
   assert.doesNotMatch(result.stderr, /ghp_s3cr3t/);
   // An included file is read too; a credential helper is a credential.
   const k = await fixture(t, { realReview: true });
@@ -672,13 +678,38 @@ test("a checkout whose Git configuration carries a credential is refused before 
   spawnSync("git", ["-C", k.checkout, "config", "include.path", "cred.inc"]);
   result = launch(k, ["--review-id", k.reviewId], { PATH });
   assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /carries a credential \(http\.https:\/\/github\.com\/\.extraheader\)/);
+  // include.path is itself outside the allowlist, so both keys are named.
+  assert.match(result.stderr, /holds more than a fresh clone writes \(include\.path, http\.https:\/\/github\.com\/\.extraheader\)/);
   const l = await fixture(t, { realReview: true });
   spawnSync("git", ["-C", l.checkout, "config", "credential.helper", "store --file=.git/credentials"]);
   result = launch(l, ["--review-id", l.reviewId], { PATH });
   assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /carries a credential \(credential\.helper\)/);
+  assert.match(result.stderr, /holds more than a fresh clone writes \(credential\.helper\)/);
   assert.doesNotMatch(result.stderr, /\.git\/credentials/);
+  // The keys that slipped a denylist: a cookie file and a client key inside
+  // the checkout are refused by name, values unread.
+  for (const [key, value] of [["http.cookieFile", ".git/cookies"], ["http.sslKey", ".git/client.key"]]) {
+    const n = await fixture(t, { realReview: true });
+    spawnSync("git", ["-C", n.checkout, "config", key, value]);
+    result = launch(n, ["--review-id", n.reviewId], { PATH });
+    assert.equal(result.status, 2, `${key}: ${result.stdout}`);
+    assert.match(result.stderr, new RegExp(`holds more than a fresh clone writes \\(${key.toLowerCase().replace(".", "\\.")}\\)`));
+    assert.doesNotMatch(result.stderr, /\.git\/(cookies|client\.key)/);
+  }
+  // The configuration a fresh clone plus the skill's fetch and checkout
+  // steps actually write passes: a bare origin, cloned, fetched into
+  // refs/review-bridge/…, checked out detached.
+  const origin = await repositoryFixture();
+  t.after(() => fsp.rm(origin.root, { recursive: true, force: true }));
+  const bare = path.join(origin.root, "origin.git");
+  spawnSync("git", ["clone", "-q", "--bare", origin.repository, bare]);
+  const panel = path.join(origin.root, "panel-clone");
+  spawnSync("git", ["clone", "-q", bare, panel]);
+  spawnSync("git", ["-C", panel, "fetch", "-q", "origin", "+main:refs/review-bridge/1/base", "+agent/workflow-core:refs/review-bridge/1/head"]);
+  spawnSync("git", ["-C", panel, "checkout", "-q", "--detach", "refs/review-bridge/1/head"]);
+  const o = await fixture(t, { checkoutPath: panel });
+  result = launch(o, ["--review-id", REVIEW_ID, "--dry-run"]);
+  assert.equal(result.status, 0, result.stderr);
   // git itself unavailable: the check fails closed rather than passing by
   // not running.
   const j = await fixture(t, { realReview: true });

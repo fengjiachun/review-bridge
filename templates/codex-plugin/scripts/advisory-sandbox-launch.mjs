@@ -364,11 +364,30 @@ async function marketplaceFromCodexConfig() {
   return source ? source.groups.path : null;
 }
 
-// Keys of the checkout's local and worktree Git configuration (includes
-// followed) whose name ends in `.extraheader`, starts with `credential.`, or
-// whose value is a URL carrying a credential. Values are never printed.
-function gitConfigCredentialKeys(repository) {
-  const keys = [];
+// The checkout's local and worktree Git configuration (includes followed)
+// is held to what a fresh clone writes, by key: core.*, a remote's url and
+// fetch, a branch's remote, merge, and rebase, extensions.*, and a
+// submodule's url and active. Anything else is refused by key name — an
+// http.<url>.extraheader, a credential.* setting, an http.cookieFile or
+// http.sslKey pointing into the checkout, an include.path — because a
+// denylist of secret-bearing keys does not converge (three were found in as
+// many review rounds) and the panel checkout is a fresh clone, so nothing
+// else belongs there. A remote URL that carries a credential is refused as
+// well. Values are never printed; a key that is itself a URL is printed with
+// its userinfo redacted.
+const FRESH_CLONE_CONFIG_KEYS = [
+  /^core\.[^.]+$/,
+  /^remote\..+\.(url|fetch)$/,
+  /^branch\..+\.(remote|merge|rebase)$/,
+  /^extensions\.[^.]+$/,
+  /^submodule\..+\.(url|active)$/,
+];
+
+function gitConfigViolations(repository) {
+  const violations = [];
+  const urlCredential = (text) =>
+    /:\/\/[^/\s@]*:[^/\s@]*@/.test(text) || /(?:^|\.)https?:\/\/[^/\s@]+@/i.test(text);
+  const redact = (key) => key.replace(/:\/\/[^/\s@]*@/g, "://<redacted>@");
   for (const scope of ["--local", "--worktree"]) {
     const result = spawnSync(
       "git",
@@ -389,27 +408,14 @@ function gitConfigCredentialKeys(repository) {
       const newline = entry.indexOf("\n");
       const key = newline === -1 ? entry : entry.slice(0, newline);
       const value = newline === -1 ? "" : entry.slice(newline + 1);
-      // Userinfo is a credential when it carries a password in any scheme
-      // (`user:pass@`) or appears at all in an http(s) URL, where a token can
-      // stand as the user; `ssh://git@…` is a username and no secret. Any
-      // `credential.*` setting is refused without reading its value: a
-      // helper can point at a credentials file inside the checkout.
-      // A URL can sit in the key name too (`url.<url>.insteadOf`), so the
-      // same two tests run on a key that carries one. A key that is itself
-      // the secret is printed with its userinfo redacted.
-      const urlCredential = (text) =>
-        /:\/\/[^/\s@]*:[^/\s@]*@/.test(text) || /(?:^|\.)https?:\/\/[^/\s@]+@/i.test(text);
-      if (
-        /\.extraheader$/i.test(key) ||
-        /^credential\./i.test(key) ||
-        urlCredential(value) ||
-        (key.includes("://") && urlCredential(key))
-      ) {
-        keys.push(key.replace(/:\/\/[^/\s@]*@/g, "://<redacted>@"));
+      if (!FRESH_CLONE_CONFIG_KEYS.some((pattern) => pattern.test(key))) {
+        violations.push(redact(key));
+      } else if (/^remote\..+\.url$/.test(key) && urlCredential(value)) {
+        violations.push(`${key} (credential in the URL)`);
       }
     }
   }
-  return [...new Set(keys)];
+  return [...new Set(violations)];
 }
 
 function run(command, args, options = {}) {
@@ -511,10 +517,6 @@ async function resolveInputs(options) {
       fail(`${label} ${target} contains a comma, which docker's --mount syntax cannot carry`);
     }
   }
-  // The checkout's .git/config rides into the container with the mount, and
-  // two things it commonly carries are host secrets: an
-  // `http.<url>.extraheader` such as actions/checkout writes (a bearer token),
-  // and a remote URL with a user in it. Refused up front, key names only.
   // Inside the container only the checkout itself exists. A linked worktree
   // keeps its `.git` as a file pointing into the main repository, and a
   // clone made with `--shared` reads objects through
@@ -532,10 +534,13 @@ async function resolveInputs(options) {
       `the author checkout ${repository} is not a self-contained clone: it reads objects through .git/objects/info/alternates; use a self-contained clone (git clone <remote-url> <path>)`,
     );
   }
-  const credentialKeys = gitConfigCredentialKeys(repository);
-  if (credentialKeys.length > 0) {
+  // The checkout's .git/config rides into the container with the mount, so
+  // it may hold only what a fresh clone writes. Refused up front, key names
+  // only.
+  const violations = gitConfigViolations(repository);
+  if (violations.length > 0) {
     fail(
-      `the author checkout's Git configuration carries a credential (${credentialKeys.join(", ")}); the checkout is mounted whole, so clear it or use a checkout without it`,
+      `the author checkout's local Git configuration holds more than a fresh clone writes (${violations.join(", ")}); the checkout is mounted whole, so use a fresh clone of the pull request's repository`,
     );
   }
   // Again on the real paths, so a symlink such as /tmp → /private/tmp cannot

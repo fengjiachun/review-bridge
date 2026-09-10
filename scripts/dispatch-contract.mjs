@@ -457,9 +457,16 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "absence is judged against the unmounted image",
       /judged against the same image without the checkout mount/,
     ],
+    // Codex round thirteen on #125: the denylist of secret-bearing keys was
+    // bypassed three times; the panel checkout is a fresh clone, so the
+    // configuration is held to what a fresh clone writes.
     [
-      "a checkout carrying a Git credential is refused before launch",
-      /refuses, before anything is started, a checkout whose Git configuration carries a credential/,
+      "the Git configuration is held to what a fresh clone writes",
+      /accepts a local Git configuration holding only what a fresh clone writes/,
+    ],
+    [
+      "anything else is refused by key name",
+      /is refused by key name, because the checkout's `\.git\/config` rides into the container with the mount and a denylist of secret-bearing keys does not converge/,
     ],
     // Codex round six on #125: a credential helper is a credential, the
     // check's scope has to be stated, and a linked worktree cannot be read

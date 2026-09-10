@@ -41,9 +41,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   with an error by the server — with the transcript's `mcp:` lines kept only
   as a cross-check that fails on a mismatch. That criterion is run-health evidence recorded inside the
   container and forgeable by a reviewer with shell access, and the copy-back's
-  integrity rests on the host replay, not on it. A credential URL in a Git
-  configuration key name (`url.<url>.insteadOf`) is refused like one in a
-  value, printed with its userinfo redacted, and the codex `auth.json` path is
+  integrity rests on the host replay, not on it. A key that is itself a
+  credential URL (`url.<url>.insteadOf`) is printed with its userinfo
+  redacted, and the codex `auth.json` path is
   held to the same host-prefix check as the other mounts. The
   isolated `CODEX_HOME` is a Docker volume and the working directory a tmpfs
   rather than host directories — nothing Codex keeps there needs to be on the
@@ -70,9 +70,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   (the home directory itself is not probed: `/root` is a directory of the
   base image), judged against the same image run without the checkout mount
   so that what the image carries is never read as the host's; a checkout
-  whose Git configuration carries a credential (`.extraheader`, any
-  `credential.*` setting, a remote URL with a user; includes followed) or that
-  is not a self-contained clone (a linked worktree, a clone with alternates —
+  whose local Git configuration holds more than a fresh clone writes (only
+  `core.*`, a remote's `url` and `fetch`, a branch's `remote`, `merge`, and
+  `rebase`, `extensions.*`, and a submodule's `url` and `active` are accepted,
+  includes followed, a remote URL carrying a credential refused too; a
+  denylist of `.extraheader`, `credential.*`, `http.cookieFile`, and their
+  kind was bypassed three times in review) or that is not a self-contained
+  clone (a linked worktree, a clone with alternates —
   neither readable inside the container) is refused before anything starts,
   and the packaged skill's advisory panel now clones the pull request's
   repository instead of adding a linked worktree; on exit the launcher prints the three criteria it verified (MCP calls
