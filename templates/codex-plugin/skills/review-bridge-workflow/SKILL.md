@@ -814,11 +814,11 @@ payload does not reach, a snapshot hash or a history the host never wrote — is
 refused, as is a staged store that changed or added any other file, or is not
 the one review, and a host ledger that moved since launch; any failed check
 leaves the host store unwritten and the staged copy in the scratch directory
-for inspection. The host home is absent rather than denied:
-before the reviewer
-starts, the launcher's own shell probe reports `absent` for the operator's
-home, `~/.ssh`, `~/.codex`, and `/root/.ssh`, and the launch stops if any of
-them is present. The container is the only sandbox. Inside it the reviewer
+for inspection. The host home's sensitive contents are absent rather than
+denied: before the reviewer starts, the launcher's own probe reports `absent`
+for `~/.ssh`, `~/.codex` and its `auth.json`, `~/Library`, `~/.gnupg`,
+`~/.aws`, `/root/.ssh`, and the store, and the launch stops if any of them is
+present. The container is the only sandbox. Inside it the reviewer
 runs with `--sandbox danger-full-access`, because Codex's nested bubblewrap
 does not start under Docker's default confinement, and relaxing that
 confinement to fit a second sandbox inside would weaken the one boundary that

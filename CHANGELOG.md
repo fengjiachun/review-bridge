@@ -47,9 +47,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   sidecar proxy on an internal Docker network that admits `chatgpt.com` and
   `api.openai.com`; `https://example.com` fails through the proxy and has no
   route without it, while the model calls complete. Before the reviewer
-  starts, a shell probe in the same container confirms the host home,
-  `~/.ssh`, `~/.codex`, and `/root/.ssh` are absent and stops the launch if
-  not; on exit the launcher prints the three criteria it verified (MCP calls
+  starts, a probe in the same container confirms the host home's sensitive
+  contents (`~/.ssh`, `~/.codex` and its `auth.json`, `~/Library`, `~/.gnupg`,
+  `~/.aws`, `/root/.ssh`, the store) are absent and stops the launch if not
+  (the home directory itself is not probed: `/root` is a directory of the
+  base image); on exit the launcher prints the three criteria it verified (MCP calls
   completed inside the container, host filesystem absent, validated verdict
   copied back to the host store), the guardian's verdict per call, and the
   proxy's egress log, and exits nonzero when a criterion fails. The probe

@@ -111,7 +111,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", r
 // records derived from the probe's own argument, and plays the reviewer by
 // moving the staged ledger with the server's own submit — or, when asked,
 // by also leaving the kind of trace the copy-back must refuse.
-async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "" } = {}) {
+async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "" } = {}) {
   const bin = path.join(f.root, "bin");
   await fsp.mkdir(bin, { recursive: true });
   const runner = path.join(bin, "fake-run.mjs");
@@ -125,7 +125,7 @@ const bind = (dst) => args.map((a) => a.match(new RegExp("^type=bind,src=(.*),ds
 if (!args.includes("codex")) {
   const spec = JSON.parse(args[args.length - 1]);
   const out = [];
-  for (const p of spec.absent) out.push({ kind: "path", path: p, present: false });
+  for (const p of spec.absent) out.push({ kind: "path", path: p, present: p === process.env.FAKE_PRESENT });
   const chain = [...spec.ancestors, spec.checkout];
   spec.ancestors.forEach((p, i) => out.push({ kind: "ancestor", path: p, children: [path.basename(chain[i + 1])] }));
   out.push({ kind: "checkout-head", value: spawnSync("git", ["-C", spec.checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim() });
@@ -199,6 +199,7 @@ esac
     FAKE_DIRECT_CODE: directCode,
     FAKE_BIG: big ? "1" : "",
     FAKE_SERVER_ERROR: serverError,
+    FAKE_PRESENT: present,
   };
 }
 
@@ -304,8 +305,15 @@ test("--dry-run prints the mount table and the container launch without Docker",
   assert.match(out, / node -e /);
   const spec = probeSpec(out);
   assert.ok(spec.absent.includes(`${f.home}/.codex/auth.json`));
+  assert.ok(spec.absent.includes(`${f.home}/.ssh`));
+  assert.ok(spec.absent.includes(`${f.home}/Library`));
   assert.ok(spec.absent.includes("/root/.ssh"));
   assert.ok(spec.absent.includes(f.store));
+  // The home directory itself is neither probed nor an ancestor to check:
+  // /root exists in the base image, dotfiles and all.
+  assert.ok(!spec.absent.includes(f.home));
+  assert.ok(!spec.ancestors.includes(f.home));
+  assert.ok(spec.ancestors.includes(path.join(f.home, "panel")));
   assert.equal(spec.checkout, f.checkout);
   assert.equal(spec.store, "/store");
   assert.match(out, /https:\/\/example\.com/);
@@ -476,6 +484,15 @@ test("a call the server answered with an error is not a failed call; one nobody 
   result = launch(g, ["--review-id", g.reviewId], await fakeDocker(g, { serverError: "unexplained" }));
   assert.equal(result.status, 1, result.stdout.slice(-2000));
   assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: FAIL — .*; 1 of 2 failed call\(s\) answered by the server with an error \(.*\), 1 unexplained/);
+});
+
+test("a host credential directory present inside the container fails the boundary before the reviewer starts", async (t) => {
+  const f = await fixture(t, { realReview: true });
+  const env = await fakeDocker(f, { present: `${f.home}/.ssh` });
+  const result = launch(f, ["--review-id", f.reviewId], env);
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, new RegExp(`the container boundary did not hold:\\n {2}host path present inside the container: ${f.home}/\\.ssh`));
+  assert.doesNotMatch(result.stdout, /mcp: /);
 });
 
 test("a direct egress answer with any HTTP status fails the boundary before the reviewer starts", async (t) => {

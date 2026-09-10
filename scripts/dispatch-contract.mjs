@@ -446,7 +446,10 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the container is the read boundary",
       /inside a Linux container that is the read boundary/,
     ],
-    ["the host is absent rather than denied", /host home is absent rather than denied/],
+    [
+      "the host home's sensitive contents are absent rather than denied",
+      /host home's sensitive contents are absent rather than denied/,
+    ],
     [
       "the credential is a read-only bind mount, never an image layer",
       /`auth\.json` as a read-only bind mount, never copied into an image layer/,

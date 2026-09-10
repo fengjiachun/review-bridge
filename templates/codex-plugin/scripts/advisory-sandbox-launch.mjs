@@ -604,29 +604,35 @@ function codexArgs(inputs, cache) {
   ];
 }
 
-// Paths that must be absent inside the container: the host home and its
-// credential directories, plus the macOS roots a host home and volumes live
-// under (`/home` itself is a directory of the Debian base image, so the host
-// home is probed by its own path rather than by that root). An ancestor of
-// the mounted checkout is present by construction, so for those the check is
-// that they hold nothing but the way down to the mount.
+// Paths that must be absent inside the container: the host home's sensitive
+// contents — credential directories, the codex home, the macOS Library, the
+// store — plus the macOS roots a host home and volumes live under. The home
+// directory itself is not probed: `/home` and `/root` are directories of the
+// Debian base image (with its own dotfiles under `/root`), so a host home at
+// `/root` would read as present, and what the boundary is about is the
+// contents anyway. An ancestor of the mounted checkout is present by
+// construction, so for those the check is that they hold nothing but the way
+// down to the mount — except the home directory itself, again because the
+// image's own dotfiles may sit beside the mount there.
 function hostPathProbe(inputs) {
   const home = os.homedir();
   const ancestors = [];
   for (let dir = path.dirname(inputs.repository); ; dir = path.dirname(dir)) {
     if (dir === path.dirname(dir)) break;
-    ancestors.unshift(dir);
+    if (dir !== home) ancestors.unshift(dir);
   }
   const absent = [
-    home,
     path.join(home, ".ssh"),
     path.join(home, ".codex"),
     inputs.authJson,
+    path.join(home, "Library"),
+    path.join(home, ".gnupg"),
+    path.join(home, ".aws"),
     "/root/.ssh",
     "/Users",
     "/Volumes",
     inputs.store,
-  ].filter((candidate) => !ancestors.includes(candidate));
+  ].filter((candidate) => candidate !== home && !ancestors.includes(candidate));
   return { absent: [...new Set(absent)], ancestors };
 }
 
