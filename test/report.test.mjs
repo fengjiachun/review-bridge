@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -399,13 +400,17 @@ test("a rebuttal sustained before the verification obligation says the verificat
 
 test("a MERGE_READY publication renders the pull request, Codex results, checks, threads, acknowledgements, and the derivation it rests on", () => {
   const publication = mergeReadyPublication();
+  Object.assign(publication.automatic_resolutions[0], {
+    thread_watermark: "1".repeat(64),
+    recorded_revision: 4,
+  });
   const markdown = render(cleanInTwoRounds({ status: "LOCAL_GATE_PASSED" }), { publication });
   assert.match(markdown, /## Remote publication\n\n- Pull request: owner\/repo#7, `feat\/thing` into `main`\n- Authorized head: `c{40}` over base `a{40}`\n- Authorization: `LOCAL_GATE`\n- Codex trigger policy: `EXPLICIT_ONLY`/);
   assert.match(markdown, /### Codex review requests\n\n\| # \| Request \| Requested head \| Posted at \| Classification \| URL \|\n\| --- [^\n]+\n\| 1 \| rbreq-1 \| cccccccccccc \| 2026-09-01T00:41:00\.000Z \| RECOGNIZED \| https:\/\/example\.test\/pr\/7#issuecomment-1 \|/);
   assert.match(markdown, /### Codex results in the latest observation\n\n[^\n]+\n[^\n]+\n\| 1 \| CLEAN \| SINGLE_OPEN_REQUEST \| rbreq-1 \| cccccccccccc \| 2026-09-01T00:45:00\.000Z \| https:\/\/example\.test\/pr\/7#issuecomment-2 \|\n\nResults recorded in the ledger's own history: 1\./);
   assert.match(markdown, /### Required checks\n\nPolicy `BRANCH_PROTECTION`; requirements: `ci`\.\n\n[^\n]+\n[^\n]+\n\| ci \| CHECK_RUN \| COMPLETED \| SUCCESS \| 2026-09-01T00:50:00\.000Z \|/);
   assert.match(markdown, /\| PRRT_1 \| src\/a\.mjs:9 \| 2 by codex\[bot\], author \| resolved by record 1 \(action act-1, reply comment 55, head cccccccccccc\) \|/);
-  assert.match(markdown, /\| PRRT_2 \| src\/b\.mjs:1 \| 1 by reviewer \| resolved on GitHub; no automatic-resolution record \|/);
+  assert.match(markdown, /\| PRRT_2 \| src\/b\.mjs:1 \| 1 by reviewer \| resolved on GitHub; no active automatic-resolution record \|/);
   assert.match(markdown, /\| SUPERSEDED_BY_LATER_OWN_REQUEST \| cccccccccccc \| 1 \| 0 \| server-derived \| 2026-09-01T00:41:00\.000Z \|/);
   assert.match(
     markdown,
@@ -424,7 +429,7 @@ test("an unresolved thread and a publication without an observation are stated, 
   publication.latest_observation.review_threads.threads[1].is_resolved = false;
   publication.automatic_resolutions = [];
   let markdown = render(cleanInTwoRounds(), { publication });
-  assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| resolved on GitHub; no automatic-resolution record \|/);
+  assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| resolved on GitHub; no active automatic-resolution record \|/);
   assert.match(markdown, /\| PRRT_2 \| [^|]+\| [^|]+\| unresolved; left for a human \|/);
   assert.match(markdown, /- Publication status: `CHANGES_REQUIRED` at revision 5\n- No MERGE_READY derivation is rendered for this status\./);
 
@@ -471,12 +476,16 @@ test("a REMOTE_ONLY publication renders without a review ledger, from its public
     ledgerDirectory: "/store/reviews/x",
   });
   assert.ok(markdown.startsWith("# Review report rb-2026-09-01T000000-000Z-0badf00d\n"));
-  assert.match(markdown, /## Local review\n\nNone: this publication was authorized `REMOTE_ONLY` with local review skipped, so there is no review ledger, no rounds, and no findings to render\.\n\n- Review: `rb-2026-09-01T000000-000Z-0badf00d`\n- Authorization: `REMOTE_ONLY`, acknowledgement `LOCAL_REVIEW_SKIPPED`, operator jeremy, at 2026-09-01T00:39:00\.000Z\n- Repository: `\/tmp\/repo`\n- Base → head: `a{40}` → `c{40}`\n\n### Authorization rationale\n\n    Standing instruction: remote-only review\./);
+  assert.match(markdown, /## Local review\n\nNone: this publication was authorized `REMOTE_ONLY` with local review skipped, so there is no review ledger, no rounds, and no findings to render\. The authorization is under Remote publication\.\n\n## Remote publication\n/);
+  // The authorization file's repository and time are printed once, under
+  // Remote publication, not repeated in the local section.
+  assert.match(markdown, /- Authorization: `REMOTE_ONLY`, acknowledgement `LOCAL_REVIEW_SKIPPED`, operator jeremy, at 2026-09-01T00:39:00\.000Z\n- Authorized repository: `\/tmp\/repo`\n- Authorization rationale:\n    Standing instruction: remote-only review\.\n- Codex trigger policy/);
+  assert.equal(markdown.match(/Standing instruction: remote-only review\./g).length, 1);
+  assert.equal(markdown.match(/acknowledgement `LOCAL_REVIEW_SKIPPED`/g).length, 1);
   for (const absent of ["### Rounds", "### Findings", "### Changes between rounds", "### Outcome"]) {
     assert.ok(!markdown.includes(absent), `${absent} rendered without a review`);
   }
   assert.match(markdown, /## Remote publication\n\n- Pull request: owner\/repo#7/);
-  assert.match(markdown, /- Authorization: `REMOTE_ONLY`, acknowledgement `LOCAL_REVIEW_SKIPPED`, operator jeremy\n- Authorization rationale:\n    Standing instruction: remote-only review\.\n- Codex trigger policy/);
   assert.match(markdown, /- MERGE_READY rests on the observation recorded at revision 5/);
   assert.match(markdown, /- Review ledger state_version: n\/a \(remote-only: no local review ledger\)\n- Publication ledger revision: 5\n- Report revision: `p5`\n- Rendered at: [^\n]+\n- Ledger: `\/store\/reviews\/x\/publication\.json`, `\/store\/reviews\/x\/remote-authorization\.json`/);
   assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE}\n`));
@@ -484,9 +493,81 @@ test("a REMOTE_ONLY publication renders without a review ledger, from its public
 
   // Without the authorization file the publication's own authorization stands in.
   const fallback = render(null, { publication });
-  assert.match(fallback, /- Authorization: `REMOTE_ONLY`, acknowledgement `LOCAL_REVIEW_SKIPPED`, operator jeremy\n- Repository: n\/a\n- Base → head: `a{40}` → `c{40}`/);
+  assert.match(fallback, /- Authorization: `REMOTE_ONLY`, acknowledgement `LOCAL_REVIEW_SKIPPED`, operator jeremy\n- Authorization rationale:/);
+  assert.doesNotMatch(fallback, /Authorized repository/);
   assert.match(fallback, /- Ledger: `reviews\/rb-2026-09-01T000000-000Z-0badf00d\/publication\.json`\n/);
   assert.throws(() => render(null, {}), /needs a review ledger or a publication ledger/);
+});
+
+// A missing review ledger is explained only by a REMOTE_ONLY authorization.
+// Under any other authorization the store is incomplete, and rendering "local
+// review skipped" over it would be a false report.
+test("a LOCAL_GATE publication without its review ledger is refused, not rendered as skipped", () => {
+  const publication = mergeReadyPublication();
+  assert.throws(() => render(null, { publication }), (error) => {
+    assert.equal(error.code, "REVIEW_LEDGER_MISSING");
+    assert.match(error.message, /review ledger missing for a LOCAL_GATE publication/);
+    return true;
+  });
+  // A version-1 publication has no authorization record and was always local-gate.
+  delete publication.authorization;
+  assert.throws(() => render(null, { publication }), { code: "REVIEW_LEDGER_MISSING" });
+});
+
+// The observation's resolved flag is read against the replay of the records
+// and their lifecycle, so a retired record never explains a resolved thread
+// and an unresolve after an automatic resolution is reported as history.
+test("a thread's outcome follows the lifecycle replay, not the presence of a record", () => {
+  const publication = mergeReadyPublication();
+  const [record] = publication.automatic_resolutions;
+  // The replay needs the fields the writer records; the frontier compares them.
+  Object.assign(record, {
+    thread_watermark: "1".repeat(64),
+    recorded_revision: 4,
+  });
+  publication.latest_observation.pull_request.head_sha = HEAD_TWO;
+  // Active record and a resolved thread: attributed to the record.
+  let markdown = render(cleanInTwoRounds(), { publication });
+  assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| resolved by record 1 \(action act-1, reply comment 55, head cccccccccccc\) \|/);
+
+  // The record was invalidated and unresolved for repair; the observation now
+  // shows the thread unresolved. That is a legitimate state, reported as such.
+  publication.resolution_lifecycle = [
+    {
+      number: 1,
+      kind: "INVALIDATED",
+      thread_id: "PRRT_1",
+      record_id: "act-1",
+      prior_watermark: "1".repeat(64),
+      new_watermark: "3".repeat(64),
+      follow_up_comments: [],
+      reason: "NEW_COMMENTS",
+      at: "2026-09-01T01:05:00.000Z",
+    },
+    {
+      number: 2,
+      kind: "UNRESOLVED_FOR_REPAIR",
+      thread_id: "PRRT_1",
+      record_id: "act-1",
+      action_id: "act-2",
+      at: "2026-09-01T01:06:00.000Z",
+    },
+  ];
+  publication.latest_observation.review_threads.threads[0].is_resolved = false;
+  markdown = render(cleanInTwoRounds(), { publication });
+  assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| unresolved; left for a human; record 1 resolved it automatically and is no longer active \(THREAD_RESOLUTION_INVALIDATED\) \|/);
+
+  // A retired record does not explain a thread GitHub shows resolved either.
+  publication.latest_observation.review_threads.threads[0].is_resolved = true;
+  markdown = render(cleanInTwoRounds(), { publication });
+  assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| resolved on GitHub; no active automatic-resolution record; record 1 resolved it automatically and is no longer active \(THREAD_RESOLUTION_INVALIDATED\) \|/);
+
+  // An active record with an observation that shows the thread unresolved is
+  // a disagreement the report states rather than resolves.
+  publication.resolution_lifecycle = [];
+  publication.latest_observation.review_threads.threads[0].is_resolved = false;
+  markdown = render(cleanInTwoRounds(), { publication });
+  assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| unresolved; left for a human; record 1 is active in the ledger but the observation shows the thread unresolved \|/);
 });
 
 test("rendering is a pure function of its inputs", () => {
@@ -518,20 +599,31 @@ test("the store writer names the file by the ledger revision and is idempotent a
 
   const first = await writeReviewReport(root, REVIEW_ID, { renderedAt: RENDERED_AT });
   assert.equal(first.path, path.join(directory, "report-r6.md"));
-  assert.equal(first.written, true);
+  assert.equal(first.reused, false);
   assert.equal(first.revision, "6");
   assert.equal(first.review_state_version, 6);
   assert.equal(first.publication_revision, null);
-  assert.equal(await fsp.readFile(first.path, "utf8"), first.markdown);
+  // A receipt, never the Markdown: the file holds the report, the receipt
+  // holds what identifies it.
+  assert.equal(first.markdown, undefined);
+  const written = await fsp.readFile(first.path);
+  assert.equal(written.length, first.bytes);
+  assert.equal(crypto.createHash("sha256").update(written).digest("hex"), first.sha256);
+  assert.equal(
+    written.toString("utf8"),
+    renderReviewReport(cleanInTwoRounds(), { renderedAt: RENDERED_AT, ledgerDirectory: directory }),
+  );
   assert.equal((await fsp.stat(first.path)).mode & 0o777, 0o600);
 
-  // A second render at the same revision returns the same bytes, render time
+  // A second render at the same revision keeps the same bytes, render time
   // included, and rewrites nothing.
   const second = await writeReviewReport(root, REVIEW_ID, {
     renderedAt: "2026-09-11T00:00:00.000Z",
   });
-  assert.equal(second.written, false);
-  assert.equal(second.markdown, first.markdown);
+  assert.equal(second.reused, true);
+  assert.equal(second.sha256, first.sha256);
+  assert.equal(second.bytes, first.bytes);
+  assert.equal(await fsp.readFile(first.path, "utf8"), written.toString("utf8"));
   assert.deepEqual(
     (await fsp.readdir(directory)).sort(),
     ["report-r6.md", "review.json"],
@@ -543,28 +635,32 @@ test("the store writer names the file by the ledger revision and is idempotent a
     renderedAt: RENDERED_AT,
   });
   assert.equal(withPublication.path, path.join(directory, "report-r6-p5.md"));
-  assert.equal(withPublication.written, true);
+  assert.equal(withPublication.reused, false);
   assert.equal(withPublication.publication_revision, 5);
-  assert.match(withPublication.markdown, /- Pull request: owner\/repo#7/);
-  assert.match(withPublication.markdown, new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/publication\\.json\``));
+  const withPublicationText = await fsp.readFile(withPublication.path, "utf8");
+  assert.match(withPublicationText, /- Pull request: owner\/repo#7/);
+  assert.match(withPublicationText, new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/publication\\.json\``));
   // The ledgers themselves are untouched.
   assert.deepEqual(JSON.parse(await fsp.readFile(path.join(directory, "review.json"), "utf8")), cleanInTwoRounds());
 });
 
 test("a remote-only publication is written as report-p<revision>.md from the publication and authorization alone", async (t) => {
   const root = await store(t);
-  const directory = await writeLedger(root, "publication.json", mergeReadyPublication());
-  await writeLedger(root, "remote-authorization.json", remoteAuthorization());
+  const directory = await writeLedger(root, "remote-authorization.json", remoteAuthorization());
+  const publication = mergeReadyPublication();
+  publication.authorization = { ...publication.authorization, mode: "REMOTE_ONLY", acknowledgement: "LOCAL_REVIEW_SKIPPED", operator_label: "jeremy" };
+  await writeLedger(root, "publication.json", publication);
   const written = await writeReviewReport(root, REVIEW_ID, { renderedAt: RENDERED_AT });
   assert.equal(written.path, path.join(directory, "report-p5.md"));
-  assert.equal(written.written, true);
+  assert.equal(written.reused, false);
   assert.equal(written.revision, "p5");
   assert.equal(written.review_state_version, null);
   assert.equal(written.publication_revision, 5);
-  assert.match(written.markdown, /authorized `REMOTE_ONLY` with local review skipped/);
-  assert.match(written.markdown, /- Authorization: `REMOTE_ONLY`, acknowledgement `LOCAL_REVIEW_SKIPPED`, operator jeremy, at 2026-09-01T00:39:00\.000Z/);
-  assert.match(written.markdown, new RegExp(`- Ledger: \`${directory}/publication\\.json\`, \`${directory}/remote-authorization\\.json\``));
-  assert.equal(await fsp.readFile(written.path, "utf8"), written.markdown);
+  const text = await fsp.readFile(written.path, "utf8");
+  assert.match(text, /authorized `REMOTE_ONLY` with local review skipped/);
+  assert.match(text, /- Authorization: `REMOTE_ONLY`, acknowledgement `LOCAL_REVIEW_SKIPPED`, operator jeremy, at 2026-09-01T00:39:00\.000Z\n- Authorized repository: `\/tmp\/repo`/);
+  assert.match(text, new RegExp(`- Ledger: \`${directory}/publication\\.json\`, \`${directory}/remote-authorization\\.json\``));
+  assert.equal(crypto.createHash("sha256").update(text).digest("hex"), written.sha256);
   assert.deepEqual(
     (await fsp.readdir(directory)).sort(),
     ["publication.json", "remote-authorization.json", "report-p5.md"],
@@ -584,6 +680,15 @@ test("a missing or malformed ledger is a structured error, and an invalid ID nev
     assert.equal(error.code, "INVALID_REVIEW_ID");
     return true;
   });
+  // A local-gate publication beside no review ledger is an incomplete store.
+  await writeLedger(root, "publication.json", mergeReadyPublication());
+  await assert.rejects(writeReviewReport(root, REVIEW_ID), (error) => {
+    assert.equal(error.code, "REVIEW_LEDGER_MISSING");
+    assert.equal(error.details.path, path.join(root, "reviews", REVIEW_ID, "review.json"));
+    return true;
+  });
+  assert.deepEqual(await fsp.readdir(path.join(root, "reviews", REVIEW_ID)), ["publication.json"]);
+  await fsp.rm(path.join(root, "reviews", REVIEW_ID, "publication.json"));
   const directory = await writeLedger(root, "review.json", cleanInTwoRounds());
   await fsp.writeFile(path.join(directory, "publication.json"), "{not json");
   await assert.rejects(writeReviewReport(root, REVIEW_ID), (error) => {

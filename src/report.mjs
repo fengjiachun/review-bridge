@@ -1,6 +1,7 @@
+import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { canonicalDigest } from "./publication.mjs";
+import { canonicalDigest, resolutionFrontier } from "./publication.mjs";
 import { atomicWriteFile } from "./storage.mjs";
 
 // The footer sentence, stated in the terms README uses for operator narration.
@@ -107,19 +108,10 @@ function identitySection(review) {
 // A REMOTE_ONLY publication has no local review: the operator authorized it
 // with LOCAL_REVIEW_SKIPPED, and the authorization file beside the publication
 // is the only local record of what was authorized and why.
-function remoteOnlySection(authorization, publication) {
-  const record = authorization ?? publication?.authorization ?? {};
+function remoteOnlySection() {
   return [
     "## Local review",
-    "None: this publication was authorized `REMOTE_ONLY` with local review skipped, so there is no review ledger, no rounds, and no findings to render.",
-    [
-      `- Review: ${code(record.review_id ?? publication?.review_id)}`,
-      `- Authorization: ${code(record.mode)}${record.acknowledgement ? `, acknowledgement ${code(record.acknowledgement)}` : ""}${record.operator_label ? `, operator ${record.operator_label}` : ""}${record.authorized_at ? `, at ${record.authorized_at}` : ""}`,
-      `- Repository: ${code(record.repository_path)}`,
-      `- Base → head: ${code(record.base_sha)} → ${code(record.head_sha)}`,
-    ].join("\n"),
-    "### Authorization rationale",
-    literal(record.rationale),
+    "None: this publication was authorized `REMOTE_ONLY` with local review skipped, so there is no review ledger, no rounds, and no findings to render. The authorization is under Remote publication.",
   ];
 }
 
@@ -375,20 +367,38 @@ function checksSection(observation) {
   ];
 }
 
+// A thread's outcome is the observation's resolved flag read against the
+// server's own replay of the resolution records and their lifecycle: a record
+// counts only while the replay holds it active, so a resolution later
+// invalidated, unresolved for repair, or superseded is reported as history,
+// never as the reason the thread is resolved.
+function threadOutcome(thread, records, frontier) {
+  const own = records.filter((entry) => entry.thread_id === thread.id);
+  const active = frontier.active.get(thread.id);
+  const blocker = frontier.blockers.find((entry) => entry.thread_id === thread.id);
+  const history =
+    own.length === 0
+      ? ""
+      : `; record${own.length === 1 ? "" : "s"} ${own.map((entry) => entry.number).join(", ")} resolved it automatically and ${own.length === 1 ? "is" : "are"} no longer active (${blocker?.reason ?? "not in the active frontier"})`;
+  if (thread.is_resolved && active != null) {
+    return `resolved by record ${active.number} (action ${active.action_id}, reply comment ${active.reply_comment_id}, head ${shortSha(active.head_sha)})`;
+  }
+  if (thread.is_resolved) {
+    return `resolved on GitHub; no active automatic-resolution record${history}`;
+  }
+  return `unresolved; left for a human${active == null ? history : `; record ${active.number} is active in the ledger but the observation shows the thread unresolved`}`;
+}
+
 function threadsSection(publication) {
   const threads = publication.latest_observation?.review_threads?.threads;
   if (threads == null) return ["### Review threads", "No observation has been recorded."];
   const records = publication.automatic_resolutions ?? [];
+  const frontier = resolutionFrontier(publication);
   const rows = threads.map((thread) => {
-    const record = records.findLast((entry) => entry.thread_id === thread.id);
     const commenters = [
       ...new Set((thread.comments ?? []).map((comment) => comment.actor?.login ?? comment.actor?.id)),
     ];
-    const outcome = record
-      ? `resolved by record ${record.number} (action ${record.action_id}, reply comment ${record.reply_comment_id}, head ${shortSha(record.head_sha)})`
-      : thread.is_resolved
-        ? "resolved on GitHub; no automatic-resolution record"
-        : "unresolved; left for a human";
+    const outcome = threadOutcome(thread, records, frontier);
     return [
       thread.id,
       thread.path == null ? "n/a" : `${thread.path}${thread.line == null ? "" : `:${thread.line}`}`,
@@ -445,19 +455,22 @@ function derivationSection(publication) {
   return ["### Derivation", lines.join("\n")];
 }
 
-function remoteSection(publication) {
+function remoteSection(publication, remoteAuthorization) {
   if (publication == null) {
     return ["## Remote publication", "No publication ledger was rendered."];
   }
   const target = publication.target ?? {};
-  const authorization = publication.authorization ?? {};
+  // The authorization file beside a remote-only publication carries the
+  // repository and time the publication's own copy does not.
+  const authorization = remoteAuthorization ?? publication.authorization ?? {};
   const observation = publication.latest_observation;
   return [
     "## Remote publication",
     [
       `- Pull request: ${target.owner ?? "n/a"}/${target.repo ?? "n/a"}#${target.pr_number ?? "n/a"}, ${code(target.head_branch)} into ${code(target.base_branch)}`,
       `- Authorized head: ${code(authorization.head_sha)} over base ${code(authorization.base_sha)}`,
-      `- Authorization: ${code(authorization.mode)}${authorization.acknowledgement ? `, acknowledgement ${code(authorization.acknowledgement)}` : ""}${authorization.operator_label ? `, operator ${authorization.operator_label}` : ""}`,
+      `- Authorization: ${code(authorization.mode)}${authorization.acknowledgement ? `, acknowledgement ${code(authorization.acknowledgement)}` : ""}${authorization.operator_label ? `, operator ${authorization.operator_label}` : ""}${authorization.authorized_at ? `, at ${authorization.authorized_at}` : ""}`,
+      ...(authorization.repository_path ? [`- Authorized repository: ${code(authorization.repository_path)}`] : []),
       ...(authorization.rationale ? ["- Authorization rationale:", literal(authorization.rationale)] : []),
       `- Codex trigger policy: ${code(target.codex_trigger_policy?.mode)}`,
     ].join("\n"),
@@ -467,6 +480,16 @@ function remoteSection(publication) {
     ...acknowledgementsSection(publication),
     ...derivationSection(publication),
   ];
+}
+
+// Only a REMOTE_ONLY authorization explains a missing review ledger. A
+// version-1 publication has no authorization record and was always local-gate.
+function isRemoteOnly(publication) {
+  return publication?.authorization?.mode === "REMOTE_ONLY";
+}
+
+function reportError(code, message, details) {
+  return Object.assign(new Error(message), { code, details });
 }
 
 export function reportRevision(review, publication) {
@@ -491,6 +514,13 @@ export function renderReviewReport(
   if (review == null && publication == null) {
     throw new Error("a report needs a review ledger or a publication ledger");
   }
+  if (review == null && !isRemoteOnly(publication)) {
+    throw reportError(
+      "REVIEW_LEDGER_MISSING",
+      "review ledger missing for a LOCAL_GATE publication",
+      { review_id: publication.review_id ?? null },
+    );
+  }
   const reviewId = review?.id ?? publication.review_id;
   const directory = ledgerDirectory ?? path.join("reviews", String(reviewId));
   const ledgers = [
@@ -501,7 +531,7 @@ export function renderReviewReport(
   const sections = [
     `# Review report ${reviewId}`,
     ...(review == null
-      ? remoteOnlySection(remoteAuthorization, publication)
+      ? remoteOnlySection()
       : [
           ...identitySection(review),
           ...successorSection(review),
@@ -510,7 +540,7 @@ export function renderReviewReport(
           ...changesSection(review),
           ...outcomeSection(review),
         ]),
-    ...remoteSection(publication),
+    ...remoteSection(publication, review == null ? remoteAuthorization : null),
     "## Footer",
     [
       `- Review: ${code(reviewId)}`,
@@ -523,10 +553,6 @@ export function renderReviewReport(
     PROJECTION_NOTICE,
   ];
   return `${sections.join("\n\n")}\n`;
-}
-
-function reportError(code, message, details) {
-  return Object.assign(new Error(message), { code, details });
 }
 
 async function readLedger(filePath, reviewId) {
@@ -558,6 +584,15 @@ export async function loadReportLedgers(storeRoot, reviewId) {
       { review_id: reviewId, path: directory },
     );
   }
+  // A local-gate publication always has a review ledger beside it; one that is
+  // missing is an incomplete store, not a review that was skipped.
+  if (review == null && !isRemoteOnly(publication)) {
+    throw reportError(
+      "REVIEW_LEDGER_MISSING",
+      `review ledger missing for a LOCAL_GATE publication: ${path.join(directory, "review.json")}`,
+      { review_id: reviewId, path: path.join(directory, "review.json") },
+    );
+  }
   const remoteAuthorization =
     review == null
       ? await readLedger(path.join(directory, "remote-authorization.json"), reviewId)
@@ -565,9 +600,11 @@ export async function loadReportLedgers(storeRoot, reviewId) {
   return { directory, review, publication, remoteAuthorization };
 }
 
-// Writes `report-r<revision>.md` beside the ledger. The ledger at a revision is
-// immutable, so the report at that revision is too: an existing file is
-// returned as it is rather than rewritten with a fresh render time.
+// Writes `report-r<revision>.md` beside the ledger and returns a receipt. The
+// ledger at a revision is immutable, so the report at that revision is too: an
+// existing file is kept as it is rather than rewritten with a fresh render
+// time. The Markdown itself stays in the file: a report can run to megabytes,
+// and the driver that calls this after a gate needs the path, not the bytes.
 export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}) {
   const { directory, review, publication, remoteAuthorization } =
     await loadReportLedgers(storeRoot, reviewId);
@@ -577,20 +614,21 @@ export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}
     directory,
     review == null ? `report-${revision}.md` : `report-r${revision}.md`,
   );
-  let markdown;
-  let written = false;
+  let bytes;
+  let reused = true;
   try {
-    markdown = await fsp.readFile(filePath, "utf8");
+    bytes = await fsp.readFile(filePath);
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
-    markdown = renderReviewReport(review, {
+    const markdown = renderReviewReport(review, {
       publication,
       remoteAuthorization,
       renderedAt,
       ledgerDirectory: directory,
     });
     await atomicWriteFile(filePath, markdown);
-    written = true;
+    bytes = Buffer.from(markdown, "utf8");
+    reused = false;
   }
   return {
     review_id: reviewId,
@@ -598,7 +636,8 @@ export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}
     publication_revision: publication?.revision ?? null,
     revision,
     path: filePath,
-    written,
-    markdown,
+    bytes: bytes.length,
+    sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+    reused,
   };
 }

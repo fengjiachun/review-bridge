@@ -1357,12 +1357,18 @@ try {
     const renderedReport = await call(author, "render_review_report", {
       review_id: prepared.id,
     });
-    assert.equal(renderedReport.written, true);
+    // A receipt, never the Markdown: the file is what the driver prints the
+    // path of, and the digest lets a reader tie the two together.
+    assert.equal(renderedReport.reused, false);
+    assert.equal(renderedReport.markdown, undefined);
     assert.match(path.basename(renderedReport.path), /^report-r\d+-p\d+\.md$/);
+    const renderedBytes = await fsp.readFile(renderedReport.path);
+    assert.equal(renderedBytes.length, renderedReport.bytes);
     assert.equal(
-      await fsp.readFile(renderedReport.path, "utf8"),
-      renderedReport.markdown,
+      crypto.createHash("sha256").update(renderedBytes).digest("hex"),
+      renderedReport.sha256,
     );
+    assert.equal(renderedBytes.toString("utf8"), packagedReport.stdout.replace(/- Rendered at: [^\n]+/, renderedBytes.toString("utf8").match(/- Rendered at: [^\n]+/)[0]));
 
     const remoteAuthorization = await call(
       author,
@@ -1433,11 +1439,12 @@ try {
     const remoteReport = await call(author, "render_review_report", {
       review_id: remoteAuthorization.review_id,
     });
-    assert.equal(remoteReport.written, true);
+    assert.equal(remoteReport.reused, false);
     assert.equal(remoteReport.review_state_version, null);
     assert.match(path.basename(remoteReport.path), /^report-p\d+\.md$/);
-    assert.match(remoteReport.markdown, /authorized `REMOTE_ONLY` with local review skipped/);
-    assert.match(remoteReport.markdown, /projection of the ledger, not evidence/);
+    const remoteReportText = await fsp.readFile(remoteReport.path, "utf8");
+    assert.match(remoteReportText, /authorized `REMOTE_ONLY` with local review skipped/);
+    assert.match(remoteReportText, /projection of the ledger, not evidence/);
     const packagedRemoteReport = spawnSync(
       process.execPath,
       [reportScript, remoteAuthorization.review_id, "--store", store],

@@ -732,8 +732,9 @@ with the author's disposition and the rereviewer's decision, what changed
 between rounds, the terminal state, and the pull request, Codex results,
 checks, and threads a publication recorded. The tool writes
 `reviews/<review_id>/report-r<revision>.md` (`report-p<revision>.md` when
-remote-only) beside the ledger and returns it;
-the script only prints. Neither changes a ledger, consumes a round, or touches
+remote-only) beside the ledger and returns a receipt -- path, byte count,
+sha256, the ledger revisions rendered -- rather than the Markdown, which can
+run to megabytes; the script only prints. Neither changes a ledger, consumes a round, or touches
 a gate. The workflow skill renders the report once `LOCAL_GATE_PASSED` is
 recorded and again once a publication reads `MERGE_READY`, and opens it in
 Plannotator when that tool is on PATH; annotations never flow back into the

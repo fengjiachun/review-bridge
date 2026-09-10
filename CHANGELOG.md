@@ -15,20 +15,29 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   gate passes, issue #123 (#124). `src/report.mjs` holds
   `renderReviewReport`, a pure renderer over `review.json` and, when present,
   `publication.json`, or over the publication and its authorization alone for
-  a `REMOTE_ONLY` publication, which has no review ledger: requirement and
-  scope, base and head, provider and
-  strategy, each round's findings with the author's disposition and rationale,
-  the rereview decision and the verification behind a sustained rebuttal,
-  what changed between rounds from the immutable rounds or stated as
-  unavailable, the terminal state, and the pull request, Codex results and
-  their correlation, required checks, threads and their outcome,
-  supersessions and acknowledgements, and the observation a `MERGE_READY`
-  derivation rests on, by revision and canonical digest. The author tool
-  `render_review_report` writes `reviews/<review_id>/report-r<revision>.md`
-  (`report-p<revision>.md` when remote-only) beside the ledger and returns it, unchanged when that revision was already
-  rendered; it changes no ledger, consumes no round, and touches no gate, and
-  `required_inputs` declares it under the review `PUBLISH` action and the
-  publication `FINALIZE_PUBLICATION_GATE` action. The packaged
+  a `REMOTE_ONLY` publication, which has no review ledger (a local-gate
+  publication whose review ledger is missing is refused as an incomplete
+  store, not rendered as a skipped review): requirement and scope, base and
+  head, provider and strategy, each round's findings with the author's
+  disposition and rationale, the rereview decision and the verification
+  behind a sustained rebuttal, what changed between rounds from the immutable
+  rounds or stated as unavailable, the terminal state, and the pull request,
+  Codex results and their correlation, required checks, threads and their
+  outcome, supersessions and acknowledgements, and the observation a
+  `MERGE_READY` derivation rests on, by revision and canonical digest. A
+  thread's outcome is the observation's resolved flag read against the
+  server's own replay of the resolution records and their lifecycle, so a
+  resolution later invalidated, unresolved for repair, or superseded is
+  reported as history rather than as the reason the thread is resolved. The
+  author tool `render_review_report` writes
+  `reviews/<review_id>/report-r<revision>.md` (`report-p<revision>.md` when
+  remote-only) beside the ledger and returns a receipt -- path, byte count,
+  sha256, the ledger revisions rendered, and whether the file at that
+  revision already existed -- never the Markdown, which can run to megabytes
+  and would land in the driver's context after every gate; it changes no
+  ledger, consumes no round, and touches no gate, and `required_inputs`
+  declares it under the review `PUBLISH` action and the publication
+  `FINALIZE_PUBLICATION_GATE` action. The packaged
   `scripts/review-report.mjs <review_id> [--json] [--store <path>]` prints
   the same render and writes nothing. The workflow skill's Finish step renders
   it once `LOCAL_GATE_PASSED` is recorded and the Publish step once the ledger

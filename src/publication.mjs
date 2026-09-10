@@ -4549,7 +4549,7 @@ function invalidatedAutomaticResolution(ledger) {
  * projection for the post-ready evaluation), so the two share exactly one
  * notion of what is active and cannot disagree about it.
  */
-function resolutionFrontier(ledger) {
+export function resolutionFrontier(ledger) {
   const records = ledger.automatic_resolutions ?? [];
   const events = ledger.resolution_lifecycle ?? [];
   const active = new Map();
