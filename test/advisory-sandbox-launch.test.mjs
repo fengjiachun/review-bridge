@@ -412,6 +412,7 @@ test("with a stand-in docker the launcher stages the review, runs, validates, an
   const result = launch(f, ["--review-id", f.reviewId], env);
   assert.equal(result.status, 0, `${result.stdout.slice(-3000)}\n${result.stderr}`);
   assert.match(result.stdout, /criterion 1 MCP calls completed inside the container: PASS — list_pending_reviews 1\/1, open_review 1\/1, submit_review 1\/1$/m);
+  assert.match(result.stdout, /^ {2}\(run-health evidence recorded inside the container and forgeable by a reviewer with shell access; the copy-back's integrity rests on the host replay, not on it\)$/m);
   assert.match(result.stdout, /criterion 2 host filesystem absent: PASS/);
   assert.match(
     result.stdout,
@@ -535,6 +536,12 @@ test("the launcher refuses host paths Docker Desktop stops serving, naming the p
   result = launch(i, ["--review-id", REVIEW_ID, "--dry-run"], { TMPDIR: "/Volumes" });
   assert.equal(result.status, 2, result.stdout);
   assert.match(result.stderr, /the scratch directory \(TMPDIR\) \/Volumes is under \/Volumes\//);
+  // The codex home (and so auth.json) is held to the same check.
+  const j = await fixture(t);
+  result = launch(j, ["--review-id", REVIEW_ID, "--marketplace", j.marketplace], { CODEX_HOME: "/private/tmp/codex-home", PATH: await gitOnlyPath(t) });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /the codex auth\.json \/private\/tmp\/codex-home\/auth\.json is under \/private\/tmp\//);
+  assert.doesNotMatch(result.stderr, /Docker is not available/);
 });
 
 test("a call the server answered with an error is not a failed call; one nobody answered is", async (t) => {
@@ -649,6 +656,14 @@ test("a checkout whose Git configuration carries a credential is refused before 
   const i = await fixture(t, { realReview: true });
   result = launch(i, ["--review-id", i.reviewId, "--dry-run"]);
   assert.equal(result.status, 0, result.stderr);
+  // A credential URL in a key name is refused too, and printed redacted.
+  const m = await fixture(t, { realReview: true });
+  spawnSync("git", ["-C", m.checkout, "config", "url.https://ghp_s3cr3t@github.com/.insteadOf", "https://github.com/"]);
+  result = launch(m, ["--review-id", m.reviewId], { PATH });
+  assert.equal(result.status, 2, result.stdout);
+  // git lowercases the variable part of the key on output.
+  assert.match(result.stderr, /carries a credential \(url\.https:\/\/<redacted>@github\.com\/\.insteadof\)/i);
+  assert.doesNotMatch(result.stderr, /ghp_s3cr3t/);
   // An included file is read too; a credential helper is a credential.
   const k = await fixture(t, { realReview: true });
   await fsp.writeFile(path.join(k.checkout, ".git", "cred.inc"), '[http "https://github.com/"]\n\textraheader = AUTHORIZATION: basic c2VjcmV0\n');

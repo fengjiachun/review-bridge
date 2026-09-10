@@ -39,7 +39,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   it (round-two P2), and the first criterion is derived from the main rollout's own
   `McpToolCall` records alone — every reviewer call completed or was answered
   with an error by the server — with the transcript's `mcp:` lines kept only
-  as a cross-check that fails on a mismatch. The
+  as a cross-check that fails on a mismatch. That criterion is run-health evidence recorded inside the
+  container and forgeable by a reviewer with shell access, and the copy-back's
+  integrity rests on the host replay, not on it. A credential URL in a Git
+  configuration key name (`url.<url>.insteadOf`) is refused like one in a
+  value, printed with its userinfo redacted, and the codex `auth.json` path is
+  held to the same host-prefix check as the other mounts. The
   isolated `CODEX_HOME` is a Docker volume and the working directory a tmpfs
   rather than host directories — nothing Codex keeps there needs to be on the
   host during the run — and the sessions are copied out of the volume

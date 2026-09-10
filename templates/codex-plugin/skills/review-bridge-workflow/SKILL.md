@@ -850,7 +850,10 @@ three criteria it verified — the reviewer's MCP calls completed inside the
 container, the host filesystem was absent, the validated verdict was copied
 back to the host store — with the guardian's verdict per call and the proxy's
 egress log, and
-exits nonzero when any of the three does not hold. Opening the task by hand
+exits nonzero when any of the three does not hold. The first criterion is
+run-health evidence recorded inside the container and forgeable by a reviewer
+with shell access; the copy-back's integrity rests on the host replay, not on
+it. Opening the task by hand
 is not a mitigation: the read happens and enters the model's context before
 an operator could intervene, and it leaves through the verdict the same way,
 so a person at the keyboard changes nothing about that chain. Without Docker

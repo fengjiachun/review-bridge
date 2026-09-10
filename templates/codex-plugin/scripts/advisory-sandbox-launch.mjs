@@ -123,7 +123,10 @@ const USAGE = `Usage: advisory-sandbox-launch.mjs --review-id <id> [--store <pat
   On exit the launcher prints the three criteria it just verified — the
   reviewer's MCP calls completed inside the container, the host filesystem
   was absent, the validated verdict was copied back to the host store — with
-  the guardian's verdict per call and the proxy's egress log. The staged
+  the guardian's verdict per call and the proxy's egress log. The first
+  criterion is run-health evidence recorded inside the container and
+  forgeable by a reviewer with shell access; the copy-back's integrity rests
+  on the host replay, not on it. The staged
   bytes are never copied: the verdict is replayed through the host's own
   submit_review against the host ledger, under that review's own state lock,
   with the findings the staged ledger records as the payload, and the host
@@ -288,13 +291,18 @@ function gitConfigCredentialKeys(repository) {
       // stand as the user; `ssh://git@…` is a username and no secret. Any
       // `credential.*` setting is refused without reading its value: a
       // helper can point at a credentials file inside the checkout.
+      // A URL can sit in the key name too (`url.<url>.insteadOf`), so the
+      // same two tests run on a key that carries one. A key that is itself
+      // the secret is printed with its userinfo redacted.
+      const urlCredential = (text) =>
+        /:\/\/[^/\s@]*:[^/\s@]*@/.test(text) || /(?:^|\.)https?:\/\/[^/\s@]+@/i.test(text);
       if (
         /\.extraheader$/i.test(key) ||
         /^credential\./i.test(key) ||
-        /:\/\/[^/\s@]*:[^/\s@]*@/.test(value) ||
-        /^https?:\/\/[^/\s@]+@/i.test(value)
+        urlCredential(value) ||
+        (key.includes("://") && urlCredential(key))
       ) {
-        keys.push(key);
+        keys.push(key.replace(/:\/\/[^/\s@]*@/g, "://<redacted>@"));
       }
     }
   }
@@ -363,6 +371,7 @@ async function resolveInputs(options) {
     [store, "the review store"],
     [repository, "the author checkout the ledger records"],
     [marketplace, "the marketplace"],
+    [authJson, "the codex auth.json"],
     [os.tmpdir(), "the scratch directory (TMPDIR)"],
   ];
   servedOnly(hostPaths);
@@ -1353,7 +1362,12 @@ async function main() {
     `review ${inputs.reviewId}  store ${inputs.store} (staged, never mounted)  scratch ${scratch}`,
     `docker ${dockerVersion}  image ${IMAGE} (${imageState})  ${boundary.facts.codexVersion ?? ""}  uid ${boundary.facts.uid ?? "?"}`,
     `codex exit ${codexExit}, ${elapsed?.toFixed(1)} s (header at +${headerAt?.toFixed(1) ?? "?"} s); transcript ${transcriptPath}`,
-    ...criteria.map(([name, ok, detail]) => `criterion ${name}: ${ok ? "PASS" : "FAIL"} — ${detail}`),
+    ...criteria.flatMap(([name, ok, detail]) => [
+      `criterion ${name}: ${ok ? "PASS" : "FAIL"} — ${detail}`,
+      ...(name.startsWith("1 ")
+        ? ["  (run-health evidence recorded inside the container and forgeable by a reviewer with shell access; the copy-back's integrity rests on the host replay, not on it)"]
+        : []),
+    ]),
     `egress: example.com via proxy → ${boundary.facts.egressProxied}, without proxy → ${boundary.facts.egressDirect}; proxy log: ${summarizeProxyLog(proxyLog) || "(empty)"}`,
     `guardian verdicts (${verdicts.length}):`,
     ...(verdicts.length

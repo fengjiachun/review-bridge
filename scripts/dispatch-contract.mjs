@@ -529,6 +529,11 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the egress block was measured with and without the proxy",
       /`curl https:\/\/example\.com` from inside fails through the proxy and has no route without it/,
     ],
+    // Codex round ten on #125: what the first criterion is and is not.
+    [
+      "the first criterion is run-health evidence, not what the copy-back rests on",
+      /first criterion is run-health evidence recorded inside the container and forgeable by a reviewer with shell access; the copy-back's integrity rests on the host replay, not on it/,
+    ],
     [
       "the launcher prints the three criteria it verified",
       /three criteria it verified — the reviewer's MCP calls completed inside the container, the host filesystem was absent, the validated verdict was copied back to the host store/,
