@@ -298,6 +298,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `render_review_report` receipt, the `--json` envelope, and the footer's
   Report revision all carry it.
 
+### Internal
+
+- (#133) The 0.13.0 release pull request, whose merge carries the v0.13.0 tag
+  and which therefore names itself so that no later entry inherits the line.
+
 ## 0.12.0 - 2026-09-10
 
 ### Changed
