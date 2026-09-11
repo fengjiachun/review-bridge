@@ -984,10 +984,14 @@ test("the isolated environment pins ssh itself: no operator configuration, no ke
     t.diagnostic("no local sshd: the agent authentication control did not run");
     return;
   }
-  const agent = spawnSync("ssh-agent", ["-s"], { encoding: "utf8" }).stdout;
-  const socket = /SSH_AUTH_SOCK=([^;]+);/.exec(agent)?.[1];
-  const agentPid = /SSH_AGENT_PID=(\d+);/.exec(agent)?.[1];
-  assert.ok(socket, agent);
+  // The socket path is given, not left to the agent to choose: where it puts
+  // one by default depends on the operator's home, which this test moves.
+  const agentDir = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-agent-"));
+  t.after(() => fsp.rm(agentDir, { recursive: true, force: true }));
+  const socket = path.join(agentDir, "s");
+  const agent = spawnSync("ssh-agent", ["-a", socket], { encoding: "utf8" });
+  const agentPid = /SSH_AGENT_PID=(\d+);/.exec(agent.stdout ?? "")?.[1];
+  assert.ok(agentPid, `${agent.stdout}${agent.stderr}`);
   t.after(() => spawnSync("ssh-agent", ["-k"], { env: { ...process.env, SSH_AGENT_PID: agentPid } }));
   assert.equal(spawnSync("ssh-add", ["-q", server.key], { env: { ...process.env, SSH_AUTH_SOCK: socket }, encoding: "utf8" }).status, 0);
   const pinned = [
