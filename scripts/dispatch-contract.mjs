@@ -452,6 +452,12 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     ],
     // Codex round thirty-two on #125: --tail bounded only what the launcher
     // read back, not the log Docker keeps on the host.
+    // Codex round thirty-three on #125: a read-write host bind and
+    // unlimited containers are the same exhaustion in two places.
+    [
+      "the staged store is a measured volume and every container is bounded",
+      /the staged review is copied into a Docker volume, measured inside the container when the run ends, and copied out only if it is within 64 MB — past that the volume is kept unread and named in the report\. Every container runs under memory, swap, process, and CPU limits/,
+    ],
     [
       "container logs are bounded on the host and repeats are collapsed",
       /Every container the launcher starts writes through a bounded json-file log driver \(16 MB, two files\) and the sidecar collapses a record that repeats into a counted line/,

@@ -91,6 +91,22 @@ const IMAGE = `review-bridge-advisory-codex:${CODEX_VERSION}-${crypto
   .digest("hex")
   .slice(0, 8)}`;
 
+// No container the launcher starts may exhaust the host: memory is capped
+// with swap pinned to the same figure (so the cap is real rather than pushed
+// into swap), processes and CPU are capped too. The reviewer's container gets
+// the headroom a review needs and the operator can raise it; the helpers —
+// the probes, the sidecar, the copies in and out — need very little.
+const DEFAULT_MEMORY = "4g";
+const DEFAULT_CPUS = "2";
+const HELPER_LIMITS = ["--memory", "512m", "--memory-swap", "512m", "--pids-limit", "128", "--cpus", "1"];
+const codexLimits = (memory, cpus) => ["--memory", memory, "--memory-swap", memory, "--pids-limit", "512", "--cpus", cpus];
+
+// The staged store is a Docker volume, so a reviewer writing without bound
+// fills the volume rather than the host's partition; what comes back out is
+// measured inside the container first. A review's ledger, findings, and
+// artifacts are far below this.
+const STAGED_STORE_LIMIT_MB = 64;
+
 const USAGE = `Usage: advisory-sandbox-launch.mjs --review-id <id> [--store <path>]
        [--marketplace <path>] [--dry-run]
 
@@ -107,13 +123,24 @@ const USAGE = `Usage: advisory-sandbox-launch.mjs --review-id <id> [--store <pat
                        never the operator's .git; the path is the recorded one
                        because the reviewer server reads it by that path.
   --store <path>       The review store (default: REVIEW_BRIDGE_HOME, else the
-                       server's default). The host store is never mounted: the
-                       one review's directory is staged into a scratch store
-                       that is mounted read-write at ${CONTAINER_STORE}, and the
-                       verdict is copied back only after validation.
+                       server's default). The host store is never mounted, and
+                       neither is any host directory the reviewer can write:
+                       the one review is copied into a Docker volume mounted
+                       read-write at ${CONTAINER_STORE}, measured there after the
+                       run, and copied out only if it is within
+                       ${STAGED_STORE_LIMIT_MB} MB — past that the volume is kept
+                       unread and named in the report. The verdict is copied
+                       back only after validation.
   --marketplace <path> The packaged codex-marketplace directory (default: the
                        source of [marketplaces.${MARKETPLACE_NAME}] in the
                        operator's codex config.toml). Mounted read-only.
+  --memory <size>      Memory for the reviewer's container, swap pinned to it
+                       (default ${DEFAULT_MEMORY}; a smaller figure is refused).
+  --cpus <count>       CPUs for the reviewer's container (default
+                       ${DEFAULT_CPUS}; a smaller figure is refused). Every
+                       container also runs under a process limit, and the
+                       helpers — probes, sidecar, the copies in and out — get
+                       512m and one CPU.
   --dry-run            Validate every input and print the docker commands
                        without running any of them. Needs no Docker.
 
@@ -185,6 +212,8 @@ function parseArgs(argv) {
     dryRun: false,
     egressProxy: false,
     help: false,
+    memory: DEFAULT_MEMORY,
+    cpus: DEFAULT_CPUS,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -197,10 +226,21 @@ function parseArgs(argv) {
     if (arg === "--review-id") options.reviewId = value();
     else if (arg === "--store") options.store = path.resolve(value());
     else if (arg === "--marketplace") options.marketplace = path.resolve(value());
+    else if (arg === "--memory") options.memory = value();
+    else if (arg === "--cpus") options.cpus = value();
     else if (arg === "--dry-run") options.dryRun = true;
     else if (arg === "--egress-proxy") options.egressProxy = true;
     else if (arg === "--help") options.help = true;
     else fail(`unknown argument ${arg}\n${USAGE}`);
+  }
+  // The defaults are a floor: the operator may give the reviewer more, never
+  // less, since below them a review does not finish and the failure looks
+  // like the reviewer's.
+  const memory = /^([1-9][0-9]*)(m|g)$/.exec(options.memory);
+  if (!memory) fail(`--memory takes a figure such as 4g or 6144m, not ${options.memory}`);
+  if (Number(memory[1]) * (memory[2] === "g" ? 1024 : 1) < 4096) fail(`--memory ${options.memory} is below the ${DEFAULT_MEMORY} a review needs`);
+  if (!/^[1-9][0-9]*(\.[0-9]+)?$/.test(options.cpus) || Number(options.cpus) < Number(DEFAULT_CPUS)) {
+    fail(`--cpus ${options.cpus} is below the ${DEFAULT_CPUS} a review needs`);
   }
   return options;
 }
@@ -887,19 +927,21 @@ async function resolveInputs(options) {
 // with write-ahead logs, rollouts, caches — needs to be on the host during
 // the run, and a host bind would put that churn on the shared filesystem
 // beside the checkout. The sessions are copied out afterwards.
-function mountTable(inputs, scratch, volume, stagedStore) {
+function mountTable(inputs, scratch, volumes) {
   const cache = `${CONTAINER_CODEX_HOME}/plugins/cache/${MARKETPLACE_NAME}/${PLUGIN_NAME}/${inputs.pluginVersion}`;
   return {
     cache,
     checkout: inputs.repository,
-    volume: [volume, CONTAINER_CODEX_HOME],
+    volumes: [
+      [volumes.home, CONTAINER_CODEX_HOME],
+      [volumes.store, CONTAINER_STORE],
+    ],
     mounts: [
       [path.join(scratch, "config.toml"), `${CONTAINER_CODEX_HOME}/config.toml`, "ro"],
       [inputs.authJson, `${CONTAINER_CODEX_HOME}/auth.json`, "ro"],
       [inputs.marketplace, CONTAINER_MARKETPLACE, "ro"],
       [inputs.pluginSource, cache, "ro"],
       [inputs.checkout, inputs.repository, "ro"],
-      [stagedStore, CONTAINER_STORE, "rw"],
     ],
   };
 }
@@ -938,6 +980,7 @@ function stageCheckout(inputs) {
 // only what the launcher reads back). Every container the launcher starts
 // gets a bounded json-file log; the sidecar also collapses repeated records.
 const LOG_LIMITS = ["--log-driver", "json-file", "--log-opt", "max-size=16m", "--log-opt", "max-file=2"];
+
 
 const LOCK_ARTIFACTS = new Set([".review-state.lock", ".review-state.lock.guard"]);
 
@@ -1083,20 +1126,19 @@ function bindMount([source, target, mode]) {
   return `type=bind,src=${source},dst=${target}${mode === "ro" ? ",readonly" : ""}`;
 }
 
-function containerArgs({ mounts, volume, checkout }, network, extra = [], { withoutCheckout = false } = {}) {
+function containerArgs({ mounts, volumes, checkout }, network, extra = [], { withoutCheckout = false, limits = HELPER_LIMITS } = {}) {
   const args = [
     "run",
     "--rm",
     ...LOG_LIMITS,
+    ...limits,
     "--network",
     network,
     "-w",
     CONTAINER_WORK,
-    "--mount",
-    `type=volume,src=${volume[0]},dst=${volume[1]}`,
-    "--tmpfs",
-    `${CONTAINER_WORK}:rw,mode=1777`,
   ];
+  for (const [source, target] of volumes) args.push("--mount", `type=volume,src=${source},dst=${target}`);
+  args.push("--tmpfs", `${CONTAINER_WORK}:rw,mode=1777`);
   for (const mount of mounts) {
     if (withoutCheckout && mount[1] === checkout) continue;
     args.push("--mount", bindMount(mount));
@@ -1580,9 +1622,10 @@ async function main() {
   const proxyName = `${network}-egress`;
   const codexName = `${network}-codex`;
   const homeVolume = `${network}-home`;
+  const storeVolume = `${network}-store`;
   const stagedStore = path.join(scratch, "store");
   inputs.checkout = path.join(scratch, "checkout");
-  const table = mountTable(inputs, scratch, homeVolume, stagedStore);
+  const table = mountTable(inputs, scratch, { home: homeVolume, store: storeVolume });
   const { cache } = table;
   const uid = typeof process.getuid === "function" ? `${process.getuid()}:${process.getgid()}` : null;
   const user = uid ? ["--user", uid, "-e", `HOME=${CONTAINER_WORK}`] : [];
@@ -1601,6 +1644,7 @@ async function main() {
     "run",
     "-d",
     ...LOG_LIMITS,
+    ...HELPER_LIMITS,
     "--name",
     proxyName,
     "--network",
@@ -1615,10 +1659,33 @@ async function main() {
     "--egress-proxy",
   ];
   const proxyConnect = ["network", "connect", "bridge", proxyName];
+  // The staged store travels in a volume: copied in before the run, measured
+  // and copied out after it, never a host directory the reviewer can write
+  // into without bound.
+  const storeHelper = (mode, command) => [
+    "run",
+    "--rm",
+    ...LOG_LIMITS,
+    ...HELPER_LIMITS,
+    "--network",
+    "none",
+    "--mount",
+    `type=volume,src=${storeVolume},dst=${CONTAINER_STORE}${mode === "ro" ? ",readonly" : ""}`,
+    ...(mode === "ro" ? [] : ["--mount", bindMount([scratch, "/in", "ro"])]),
+    ...(mode === "ro" ? ["--mount", bindMount([scratch, "/out", "rw"])] : []),
+    IMAGE,
+    "sh",
+    "-c",
+    command,
+  ];
+  const storeImport = storeHelper("rw", `cp -a /in/store/. ${CONTAINER_STORE}/ && chown -R ${uid ?? "0:0"} ${CONTAINER_STORE}`);
+  const storeSize = storeHelper("ro", `du -sk ${CONTAINER_STORE} | cut -f1`);
+  const storeExport = storeHelper("ro", `rm -rf /out/store && cp -a ${CONTAINER_STORE} /out/store && chown -R ${uid ?? "0:0"} /out/store`);
   const sessionsExport = [
     "run",
     "--rm",
     ...LOG_LIMITS,
+    ...HELPER_LIMITS,
     "--network",
     "none",
     "--mount",
@@ -1640,7 +1707,7 @@ async function main() {
   ];
   const boundaryRun = [...containerArgs(table, network, user), IMAGE, ...probeArgs(inputs, "mounted")];
   const codexRun = [
-    ...containerArgs(table, network, [...user, "--name", codexName]),
+    ...containerArgs(table, network, [...user, "--name", codexName], { limits: codexLimits(options.memory, options.cpus) }),
     IMAGE,
     ...codexArgs(inputs, cache),
   ];
@@ -1648,7 +1715,7 @@ async function main() {
   process.stdout.write(
     [
       `review ${inputs.reviewId} (${inputs.ledger.status}, state_version ${inputs.ledger.state_version})`,
-      `store ${inputs.store} (never mounted; the review is staged under ${stagedStore})`,
+      `store ${inputs.store} (never mounted; the review is staged in the Docker volume ${storeVolume}, bounded at ${STAGED_STORE_LIMIT_MB} MB, and copied out to ${stagedStore})`,
       `checkout ${inputs.repository} (read-only, at its recorded path; the bytes are a fresh clone the launcher makes at ${inputs.checkout}, detached at the review's snapshot head ${inputs.snapshotHead})`,
       `marketplace ${inputs.marketplace} (plugin ${inputs.pluginVersion}, read-only)`,
       `auth ${inputs.authJson} (read-only bind mount)`,
@@ -1664,12 +1731,15 @@ async function main() {
     printCommand("docker", networkCreate);
     printCommand("docker", proxyRun);
     printCommand("docker", proxyConnect);
+    printCommand("docker", storeImport);
     printCommand("docker", baselineRun);
     printCommand("docker", boundaryRun);
     printCommand("docker", codexRun);
     process.stdout.write("  (codex stdin is closed: the container is started with stdin ignored)\n");
+    printCommand("docker", storeSize);
+    printCommand("docker", storeExport);
     printCommand("docker", sessionsExport);
-    process.stdout.write(`docker volume rm ${homeVolume}\n`);
+    process.stdout.write(`docker volume rm ${homeVolume}\ndocker volume rm ${storeVolume}\n`);
     return;
   }
 
@@ -1699,6 +1769,9 @@ async function main() {
   const cleanupFailures = [];
   let sessionsNote = null;
   let sessionsKept = null;
+  let storeKept = null;
+  let storeWithinBound = false;
+  const storeFailures = [];
   let cleaned = false;
   // A step fails on a spawn error or a nonzero exit alike; stderr's first
   // 200 characters go into the report.
@@ -1750,7 +1823,42 @@ async function main() {
     });
     // The rollouts are the only copy of the guardian evidence; if the export
     // failed they are still in the volume, so the volume stays.
+    // What the reviewer wrote is measured inside the container before any of
+    // it comes out, and copied out only within the bound; past it nothing
+    // reaches the host and the volume stays for the operator to look at.
+    step("measure staged store", () => {
+      const result = spawnSync("docker", storeSize, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      if (result.error || result.status !== 0) {
+        storeFailures.push("the staged store could not be measured");
+        storeKept = storeVolume;
+        return result;
+      }
+      const kilobytes = Number((result.stdout || "").trim().split(/\s+/).pop());
+      if (!Number.isFinite(kilobytes)) {
+        storeFailures.push("the staged store could not be measured");
+        storeKept = storeVolume;
+      } else if (kilobytes > STAGED_STORE_LIMIT_MB * 1024) {
+        storeFailures.push(`staged store is ${(kilobytes / 1024).toFixed(1)} MB, over the ${STAGED_STORE_LIMIT_MB} MB bound`);
+        storeKept = storeVolume;
+      } else {
+        storeWithinBound = true;
+      }
+      return result;
+    });
+    if (storeWithinBound) {
+      step("copy the staged store out", () => {
+        const result = spawnSync("docker", storeExport, quiet);
+        if (result.error || result.status !== 0) {
+          storeFailures.push("the staged store could not be copied out");
+          storeKept = storeVolume;
+        }
+        return result;
+      });
+    }
     if (!sessionsKept) step("remove volume", () => spawnSync("docker", ["volume", "rm", homeVolume], quiet));
+    // A store past the bound stays where it is; nothing of it reached the
+    // host, and the operator may want to look at what filled it.
+    if (!storeKept) step("remove store volume", () => spawnSync("docker", ["volume", "rm", storeVolume], quiet));
     step("remove staged checkout", () => fs.rmSync(inputs.checkout, { recursive: true, force: true }));
   };
   for (const signal of ["SIGINT", "SIGTERM"]) {
@@ -1787,6 +1895,9 @@ async function main() {
       if (Date.now() > proxyDeadline) throw new Error("the egress proxy did not start");
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
+    // The staged review goes into the volume the reviewer will write to.
+    const imported = run("docker", storeImport);
+    if (imported.status !== 0) throw new Error(`the staged review could not be copied into the store volume: ${(imported.stderr || "").trim().slice(0, 200)}`);
     // The boundary is measured before the reviewer runs, by a probe with no
     // model in it: once without the checkout mount for what the image itself
     // holds, once with it, and the launch stops here if the difference is
@@ -1851,6 +1962,7 @@ async function main() {
     ...(codexExit === 0 ? [] : [`codex exited ${codexExit}`]),
     ...(mcpOk ? [] : mcpJudgement.reasons),
     ...(boundary.failures.length === 0 ? [] : ["the boundary did not hold"]),
+    ...storeFailures,
   ];
   const inspection = preCopyFailures.length > 0 ? { reasons: [], ledgerChanged: false } : await inspectStagedStore(inputs, stage);
   let copyBackOutcome;
@@ -1916,7 +2028,7 @@ async function main() {
             `  ${turn.tool ?? "?"}: ${turn.outcome ?? "?"} (risk ${turn.risk ?? "?"}, authorization ${turn.authorization ?? "?"}, ${turn.seconds?.toFixed(1)} s)`,
         )
       : ["  none found in the sessions copied out of the isolated CODEX_HOME"]),
-    `residual: the one host secret inside was ${inputs.authJson}, egress limited to ${EGRESS_ALLOW.join(", ")} by the sidecar${cleanupFailures.length ? `; cleanup steps that failed: ${cleanupFailures.join("; ")}` : ""}${sessionsKept ? `; the CODEX_HOME volume ${sessionsKept} was kept for the failed export` : ""}`,
+    `residual: the one host secret inside was ${inputs.authJson}, egress limited to ${EGRESS_ALLOW.join(", ")} by the sidecar${cleanupFailures.length ? `; cleanup steps that failed: ${cleanupFailures.join("; ")}` : ""}${sessionsKept ? `; the CODEX_HOME volume ${sessionsKept} was kept for the failed export` : ""}${storeKept ? `; the staged store volume ${storeKept} was kept, unread` : ""}`,
     "",
   ];
   process.stdout.write(lines.join("\n"));

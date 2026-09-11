@@ -74,7 +74,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `git clone` copies the operator's `init.templateDir` into it, and the
   packaged skill's panel clone now uses `--template=`; a remote or submodule
   URL carrying a query or a fragment is refused, since a token can ride in
-  either; every container the launcher starts writes through a bounded json-file log
+  either; the staged review rides in a Docker volume rather than a host directory the
+  reviewer could fill, measured inside the container after the run and copied
+  out only within a 64 MB bound (past it the volume is kept unread and named
+  in the report); every container runs under memory, swap, process, and CPU
+  limits, the reviewer's raisable with `--memory` and `--cpus`;
+  every container the launcher starts writes through a bounded json-file log
   driver and the sidecar collapses a repeated record into a counted line
   (flushed every five seconds and on the `SIGTERM` that `docker stop` sends
   before the log is read), so a reviewer looping on a refused host cannot fill

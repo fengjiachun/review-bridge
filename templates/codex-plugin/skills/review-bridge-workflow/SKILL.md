@@ -885,7 +885,13 @@ model calls complete (measured 2026-09-10). Every container the launcher
 starts writes through a bounded json-file log driver (16 MB, two files) and
 the sidecar collapses a record that repeats into a counted line, so a
 reviewer looping on a refused host cannot fill the host's disk and the
-egress summary still totals every refusal. On exit the launcher prints the
+egress summary still totals every refusal. Nothing the reviewer can write
+touches the host while it runs: the staged review is copied into a Docker
+volume, measured inside the container when the run ends, and copied out only
+if it is within 64 MB — past that the volume is kept unread and named in the
+report. Every container runs under memory, swap, process, and CPU limits
+(the reviewer's 4 GB and 2 CPUs by default, raisable with `--memory` and
+`--cpus`; the helpers far less). On exit the launcher prints the
 three criteria it verified — the reviewer's MCP calls completed inside the
 container, the host filesystem was absent, the validated verdict was copied
 back to the host store — with the guardian's verdict per call and the proxy's

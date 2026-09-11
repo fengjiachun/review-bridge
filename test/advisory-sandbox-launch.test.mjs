@@ -138,7 +138,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
 // records derived from the probe's own argument, and plays the reviewer by
 // moving the staged ledger with the server's own submit — or, when asked,
 // by also leaving the kind of trace the copy-back must refuse.
-async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "", volumeRmFail = false, head = "", rmFail = "", sessions = "" } = {}) {
+async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "", volumeRmFail = false, head = "", rmFail = "", sessions = "", storeKb = "" } = {}) {
   const bin = path.join(f.root, "bin");
   await fsp.mkdir(bin, { recursive: true });
   const runner = path.join(bin, "fake-run.mjs");
@@ -149,9 +149,16 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
 if (args.includes("sh")) {
+  const command = args[args.length - 1];
+  // The store volume stands in for itself: the fake reviewer writes straight
+  // into the scratch copy the launcher copies out to, so the copies in and
+  // out are no-ops and only the measurement has to answer.
+  if (command.includes("du -sk")) { process.stdout.write((process.env.FAKE_STORE_KB || "8") + "\\n"); process.exit(0); }
   const mode = process.env.FAKE_SESSIONS || "";
-  if (mode === "fail") { process.stderr.write("cp: cannot create /out/sessions"); process.exit(1); }
-  if (mode === "none") { process.stdout.write("no-sessions-recorded\\n"); process.exit(0); }
+  if (command.includes("/sessions")) {
+    if (mode === "fail") { process.stderr.write("cp: cannot create /out/sessions"); process.exit(1); }
+    if (mode === "none") { process.stdout.write("no-sessions-recorded\\n"); process.exit(0); }
+  }
   process.exit(0);
 }
 const bind = (dst) => args.map((a) => a.match(new RegExp("^type=bind,src=(.*),dst=" + dst + "(,readonly)?$"))).find(Boolean)?.[1];
@@ -190,7 +197,9 @@ if (!args.includes("codex")) {
   out.push({ kind: "uid", value: process.getuid() });
   process.stdout.write(out.map((r) => JSON.stringify(r)).join("\\n") + "\\n");
 } else {
-  const staged = bind("/store");
+  // The staged store is a volume now; the fake writes where the launcher
+  // copies it out to, which is the scratch store directory.
+  const staged = path.join(path.dirname(bind("/codex-home/config.toml")), "store");
   const reviewId = args[args.length - 1].match(/rb-[0-9TZ-]+-[a-f0-9]{8}/)[0];
   const { submitInitialReview } = await import(process.env.FAKE_CORE);
   process.stdout.write("OpenAI Codex v0.153.4\\napproval: granular\\nsandbox: danger-full-access\\nsession id: 00000000-0000-0000-0000-000000000000\\n");
@@ -305,6 +314,7 @@ esac
     FAKE_VOLUME_RM_FAIL: volumeRmFail ? "1" : "",
     FAKE_RM_FAIL: rmFail,
     FAKE_SESSIONS: sessions,
+    FAKE_STORE_KB: storeKb,
     FAKE_HEAD: head,
     FAKE_CHECKOUT_LOG: path.join(bin, "checkout.json"),
   };
@@ -360,18 +370,28 @@ test("--dry-run prints the mount table and the container launch without Docker",
   assert.match(out, bind("\\S+/checkout", f.checkout, true));
   // The host store is never mounted; a staged copy of the one review is.
   assert.doesNotMatch(out, new RegExp(`src=${f.store}[,/]`));
-  assert.match(out, /store,dst=\/store'? /);
-  assert.match(out, new RegExp(`store ${f.store} \\(never mounted; the review is staged under`));
+  assert.match(out, /--mount type=volume,src=review-bridge-advisory-\S+-store,dst=\/store /);
+  assert.doesNotMatch(out, /type=bind,src=\S+\/store,dst=\/store/);
+  assert.match(out, new RegExp(`store ${f.store} \\(never mounted; the review is staged in the Docker volume review-bridge-advisory-\\S+-store, bounded at 64 MB, and copied out to`));
   assert.match(out, /config\.toml,dst=\/codex-home\/config\.toml,readonly'? /);
-  // CODEX_HOME is a volume and the working directory a tmpfs, not host
-  // directories; the six binds above are the whole of the host inside.
+  // CODEX_HOME and the staged store are volumes and the working directory a
+  // tmpfs, not host directories; the five binds above are the whole of the
+  // host inside, and none of them is writable.
   assert.match(out, /--mount type=volume,src=review-bridge-advisory-\S+-home,dst=\/codex-home /);
   assert.match(out, /--tmpfs \/work:rw,mode=1777/);
   const codexLine = out.split("\n").filter((line) => line.includes(" codex exec ")).pop();
-  assert.equal((codexLine.match(/ --mount '?type=bind,/g) ?? []).length, 6);
+  assert.equal((codexLine.match(/ --mount '?type=bind,/g) ?? []).length, 5);
+  assert.equal((codexLine.match(/ --mount '?type=bind,(?!.*,readonly)/g) ?? []).length, 0);
   assert.doesNotMatch(codexLine, / -v /);
   assert.match(out, /cp -a \/codex-home\/sessions \/out\/sessions/);
   assert.match(out, /docker volume rm review-bridge-advisory-\S+-home/);
+  assert.match(out, /docker volume rm review-bridge-advisory-\S+-store/);
+  // No container may exhaust the host: the reviewer's gets the documented
+  // headroom, the helpers far less, and every one a process cap.
+  for (const line of out.split("\n").filter((entry) => entry.startsWith("docker run"))) {
+    assert.match(line, /--memory (4g|512m) --memory-swap \1 --pids-limit (?:512|128) --cpus [12]/, line.slice(0, 140));
+  }
+  assert.match(out.split("\n").find((line) => line.includes(`--name ${"review-bridge-advisory"}`) && line.includes(" codex ")) ?? "", /--memory 4g --memory-swap 4g --pids-limit 512 --cpus 2/);
   // Every container the launcher starts keeps a bounded log on the host.
   for (const line of out.split("\n").filter((entry) => entry.startsWith("docker run"))) {
     assert.match(line, /--log-driver json-file --log-opt max-size=16m --log-opt max-file=2/, line.slice(0, 120));
@@ -429,9 +449,9 @@ test("--dry-run prints the mount table and the container launch without Docker",
   assert.equal(probeLines.length, 2);
   assert.match(out, /"mode":"baseline"/);
   assert.match(out, /"mode":"mounted"/);
-  assert.equal((probeLines[0].match(/ --mount '?type=bind,/g) ?? []).length, 5);
+  assert.equal((probeLines[0].match(/ --mount '?type=bind,/g) ?? []).length, 4);
   assert.doesNotMatch(probeLines[0], new RegExp(`src=${f.checkout},`));
-  assert.equal((probeLines[1].match(/ --mount '?type=bind,/g) ?? []).length, 6);
+  assert.equal((probeLines[1].match(/ --mount '?type=bind,/g) ?? []).length, 5);
   const spec = probeSpec(out);
   assert.ok(spec.absent.includes(`${f.home}/.codex/auth.json`));
   assert.ok(spec.absent.includes(`${f.home}/.ssh`));
@@ -1250,6 +1270,25 @@ test("the report's egress summary counts the records the sidecar collapsed", asy
   assert.match(result.stdout, /proxy log: deny connect example\.com:443 ×1, deny connect looped\.example:443 ×5000 \(repeated records collapsed; up to 5s of trailing counts may be unflushed if the proxy was killed\)$/m);
 });
 
+test("a staged store past the bound is never copied to the host, and its volume is kept", async (t) => {
+  // The reviewer can fill the volume; it cannot fill the host. What the
+  // volume holds is measured inside the container, and past the bound
+  // nothing of it comes out.
+  const f = await fixture(t, { realReview: true });
+  const env = await fakeDocker(f, { storeKb: "70000" });
+  const result = launch(f, ["--review-id", f.reviewId], env);
+  assert.equal(result.status, 1, result.stdout.slice(-2000));
+  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: FAIL — refused — pre-copy criteria failed: staged store is 68\.4 MB, over the 64 MB bound/);
+  assert.match(result.stdout, /the staged store volume review-bridge-advisory-\S+-store was kept, unread/);
+  const calls = await fsp.readFile(env.FAKE_CALLS, "utf8");
+  assert.doesNotMatch(calls, /^volume rm review-bridge-advisory-\S+-store$/m);
+  assert.match(calls, /^volume rm review-bridge-advisory-\S+-home$/m);
+  // The host ledger is where it was.
+  const ledger = await loadReview(f.store, f.reviewId);
+  assert.equal(ledger.status, "WAITING_FOR_REVIEW");
+  assert.equal(ledger.state_version, 1);
+});
+
 test("the container mounts a clone the launcher makes, never the panel checkout's own .git", async (t) => {
   // What the layout check cannot see — a directory where a file is expected,
   // an unreachable object among the real ones — never crosses: the mount is
@@ -1620,7 +1659,7 @@ test("a huge or failing docker logs leaves the report, the criteria, and every c
   assert.equal(result.status, 0, result.stdout.slice(-2000));
   assert.match(result.stdout, /cleanup steps that failed: export sessions: cp: cannot create \/out\/sessions/);
   assert.match(result.stdout, /the CODEX_HOME volume review-bridge-advisory-\S+-home was kept for the failed export/);
-  assert.doesNotMatch(await fsp.readFile(kEnv.FAKE_CALLS, "utf8"), /^volume rm/m);
+  assert.doesNotMatch(await fsp.readFile(kEnv.FAKE_CALLS, "utf8"), /^volume rm review-bridge-advisory-\S+-home$/m);
   // No sessions directory at all is the one answer that is not a failure.
   const l = await fixture(t, { realReview: true });
   const lEnv = await fakeDocker(l, { sessions: "none" });
