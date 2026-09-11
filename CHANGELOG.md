@@ -17,15 +17,15 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `publication.json`, or over the publication and its authorization alone for
   a `REMOTE_ONLY` publication, which has no review ledger (a local-gate
   publication whose review ledger is missing is refused as an incomplete
-  store, not rendered as a skipped review): requirement and
-  scope, base and head, provider, each round's own strategy and successor
-  proof, each round's findings with the author's
-  disposition and rationale, the rereview decision and the verification
-  behind a sustained rebuttal, what changed between rounds from the immutable
-  rounds or stated as unavailable, the terminal state, and the pull request,
-  Codex results and their correlation, required checks, threads and their
-  outcome, supersessions and acknowledgements, and the observation a
-  `MERGE_READY` derivation rests on, by revision and canonical digest. A
+  store, not rendered as a skipped review): requirement and scope, base and
+  head, provider, each round's own strategy and successor proof, each round's
+  findings with the author's disposition and rationale, the rereview decision
+  and the verification behind a sustained rebuttal, the findings a
+  continuation carries with the review that raised each, each round's
+  snapshot and the head relation between rounds, the terminal state, and the
+  pull request, Codex results and their correlation, required checks, threads
+  and their outcome, supersessions and acknowledgements, and the observation
+  a `MERGE_READY` derivation rests on, by revision and canonical digest. A
   thread's outcome is the observation's resolved flag read against the
   server's own replay of the resolution records and their lifecycle, so a
   resolution later invalidated, unresolved for repair, or superseded is
@@ -35,82 +35,28 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   workflow binding and terminal replay included, never a bare derivation over
   the ledger alone; a publication that moves between the ledger read and the
   summary read fails the render with `PUBLICATION_MOVED_DURING_RENDER`
-  rather than filing one revision's report with the next revision's verdict. Every ledger is admitted by the reader
-  the server itself uses -- the review by a new `loadValidatedReview`
-  in `core.mjs` that admits only a ledger the store could have written (its
-  own serialization, the state machine's shape with the history replayed
-  through the writers' own transitions to the stored status and the rounds
-  the ledger holds, every round-bound event carrying its round, a clean verdict committing to the last round with no
-  finding left open, every finding's status equal to the one its resolution
-  and rereview decision derive through the writers' own maps, `state_version`
-  not below the history, and every round's snapshot commitment reproduced
-  from the immutable manifest and patch beside it, as the gate reproduces the
-  clean round's) and is used by the report alone, the publication by the canonical, schema-validated reader that
-  requires the review ID inside to match, and the gate or authorization file
-  by the binding check that ties it to the ledger, a `LOCAL_GATE_PASSED`
-  review requiring its gate even before any publication exists -- so a file
-  copied in from
-  another review or edited in place fails the render with that reader's
-  error and nothing is written, and a review created before `worktree_clean`
-  was recorded is refused as `ROUND_SNAPSHOT_UNREPRODUCIBLE`, since the
-  store's own snapshot reproduction needs it and no second hash format is
-  kept; a continuation is held to its source through the same loader, its
-  own sources included and cycles refused, and a continuation prepared before
-  the source freeze, whose source never recorded it, is refused as well.
-  `prepare_review` now records the source a continuation carries from on the
-  ledger's `REVIEW_PREPARED` event as `continued_from_review_id`, and the
-  validator takes the source from there alone: a ledger with carried records
-  and no recorded source is refused as `CONTINUATION_SOURCE_UNRECORDED`, so
-  continuations prepared before this release are not renderable, whether or
-  not their source was frozen -- no exception by date, marker, or carried
-  record, each of which proved unbindable -- which in the operator's store
-  at the time of writing is 34 ledgers. A
-  successor proof's file lists are compared with the paths its stored delta
-  names, each taken from the lines of its block that state one unambiguously
-  -- the rename lines, else the `---`/`+++` lines -- so a path containing
-  spaces reads as one path, with the `diff --git` header read only for the
-  binary block that has neither. The snapshot commitment of a round reviewed as a successor now
-  covers the proof -- the delta's digest and the two heads it spans enter the
-  hash, and the manifest records them -- so the gate's `snapshot_hash`
-  vouches for the delta and a delta swapped afterwards makes the round
-  unreproducible; a FULL round hashes as before. A successor round prepared
-  before this change carries no such commitment: its hash is reproduced over
-  the round alone and the report renders its proof as recorded, the round's
-  strategy heading marked `unverified proof` and every item of the proof
-  marked as not covered by the snapshot commitment, so the report relays the
-  record without vouching for it. A round carrying part of the commitment,
-  or one that disagrees with its proof, is refused. A successor review still
-  in flight across the upgrade must be prepared again. A successor's parent
-  that is in the store is validated as the review is, its gate must be
-  present, admitted by the local gate reader and bound to the parent, and be
-  the file the proof digested, or the review is refused
-  (`SUCCESSOR_PARENT_INVALID`); a parent not in the store leaves the
-  parent-derived fields as recorded and the report marks the round and each
-  such field as unverified. A field an older proof does not record at all,
-  such as `requirement_match`, is printed as the parent gives it, or as `not
-  recorded` when no parent can give it, rather than read as a value. Every
-  commit and tree id the store records is admitted at either width, so a
-  SHA-256 repository's reviews render; one review may not mix the two widths.
-  A continuation's report renders the findings it carries in full, under
-  `Carried findings`, each naming the review that raised it. The "Changes between rounds" section lists each
-  round's own snapshot and cumulative file table and states only the head
-  relation between rounds -- unchanged after a rebuttal, or old head to new
-  head -- since the ledger keeps no delta between rounds. Every reviewer- or author-supplied string is
-  rendered as one escaped line or inside a fence longer than any backtick
-  run it contains, so no finding title or rationale can open a heading,
-  table row, or fence of its own. The
-  author tool `render_review_report` writes
+  rather than filing one revision's report with the next revision's verdict.
+  Every ledger is admitted by the reader the server itself uses: the
+  publication by the canonical, schema-validated reader that requires the
+  review ID inside to match, and the gate or authorization file by the
+  binding check that ties it to the ledger, a `LOCAL_GATE_PASSED` review
+  requiring its gate even before any publication exists, so a file copied in
+  from another review fails the render with that reader's error and nothing
+  is written. Every string the ledger holds is escaped to the shape it
+  occupies -- one line, or a fence longer than any run it contains -- so no
+  finding title or rationale can open a heading, table row, or fence of its
+  own. The author tool `render_review_report` writes
   `reviews/<review_id>/report-r<state_version>[-p<revision>-s<summary digest>].md`
   (`report-p<revision>-s<summary digest>.md` when remote-only) beside the
   ledger -- the digest covers the summary fields the report prints, so a gate
   appearing or evidence expiring, which move no ledger revision, write a new
-  report instead of reusing one that says otherwise -- and returns a receipt -- path, byte count,
-  sha256, the ledger revisions rendered, and whether the file at that
-  revision already existed -- never the Markdown, which can run to megabytes
-  and would land in the driver's context after every gate; it changes no
-  ledger, consumes no round, and touches no gate, and `required_inputs`
-  declares it under the review `PUBLISH` action and the publication
-  `FINALIZE_PUBLICATION_GATE` action. The packaged
+  report instead of reusing one that says otherwise -- and returns a receipt
+  -- path, byte count, sha256, the ledger revisions rendered, and whether the
+  file at that revision already existed -- never the Markdown, which can run
+  to megabytes and would land in the driver's context after every gate; it
+  changes no ledger, consumes no round, and touches no gate, and
+  `required_inputs` declares it under the review `PUBLISH` action and the
+  publication `FINALIZE_PUBLICATION_GATE` action. The packaged
   `scripts/review-report.mjs <review_id> [--json] [--store <path>]` prints
   the same render and writes nothing. The workflow skill's Finish step renders
   it once `LOCAL_GATE_PASSED` is recorded and the Publish step once the ledger
@@ -120,14 +66,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `REVIEW_REPORT_CONTRACT` pins both steps in the source and packaged skill.
   The footer states, in the terms the README uses for operator narration,
   that the report is a projection of the ledger, not evidence, naming only
-  what the report itself read and what it recomputed from: the ledger files
-  it rendered (the review ledger, the publication ledger and its gate or
-  authorization file), the publication summary the server computed over its
-  own inputs, by digest, and any parent ledger a round's fields were
-  recomputed from, by path, `state_version`, and the digest of the parent
-  gate the proof names -- or, when the store has no ledger for it, named as
-  absent. A parent whose proof records everything is not named, since the
-  render did not use it.
+  what the report itself read: the ledger files it rendered (the review
+  ledger, the publication ledger and its gate or authorization file) and the
+  publication summary the server computed over its own inputs, by digest.
 
 ### Changed
 

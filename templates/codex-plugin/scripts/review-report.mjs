@@ -17,8 +17,7 @@ const USAGE = `Usage: review-report.mjs <review_id> [--json] [--store <path>]
   requirement and scope, each round's findings with the author's disposition
   and the rereviewer's decision, what changed between rounds, the terminal
   state, and the pull request, Codex results, checks, and threads a
-  publication recorded. The footer names the ledger revisions rendered, and
-  any parent ledger this render recomputed a round's fields from.
+  publication recorded. The footer names the ledger revisions rendered.
 
   --json          Emit {review_id, revision, markdown} as JSON instead of the
                   Markdown itself.
@@ -73,13 +72,12 @@ try {
   process.stderr.write(`${error.code ?? "ERROR"}: ${error.message}\n`);
   process.exit(1);
 }
-const { directory, review, publication, authorization, publicationSummary, parentContext } = ledgers;
+const { directory, review, publication, authorization, publicationSummary } = ledgers;
 const markdown = renderReviewReport(review, {
   publication,
   authorization,
   publicationSummary,
   ledgerDirectory: directory,
-  parentContext,
 });
 process.stdout.write(
   json

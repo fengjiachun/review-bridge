@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { loadValidatedReview } from "./core.mjs";
+import { loadReview } from "./core.mjs";
 import {
   canonicalDigest,
   checkRequiredRuns,
@@ -22,7 +22,7 @@ import { sha256 } from "./storage.mjs";
 // The footer names only what the report itself read: the ledger files listed
 // there and the publication summary the server computed over its own inputs.
 export const PROJECTION_NOTICE =
-  "This report is a projection of the ledger, not evidence. It was rendered from the review ledger and, when present, the publication ledger and its gate listed above, from any parent ledger listed there whose fields this render recomputed, and from the publication summary the server computed: nothing in this report advances or proves review state, and citing it as evidence is a misuse. It can be regenerated from them at any time.";
+  "This report is a projection of the ledger, not evidence. It was rendered from the review ledger and, when present, the publication ledger and its gate listed above, and from the publication summary the server computed: nothing in this report advances or proves review state, and citing it as evidence is a misuse. It can be regenerated from them at any time.";
 export const PROJECTION_NOTICE_REMOTE_ONLY =
   "This report is a projection of the ledger, not evidence. It was rendered from the publication ledger and its bound authorization listed above, and from the publication summary the server computed: nothing in this report advances or proves publication state, and citing it as evidence is a misuse. It can be regenerated from them at any time.";
 
@@ -180,42 +180,32 @@ function remoteOnlySection() {
 // only, and every item of that proof is marked so the report relays the
 // record without vouching for it.
 //
-// The fields a proof took from its parent are recomputed from the parent when
-// the store holds it; when it does not, they stand as recorded, and the round
-// and each parent-derived item are marked the same way. A field an older
-// proof does not record at all is printed as the parent gives it, or as not
-// recorded when no parent can give it -- never guessed from its absence.
-const UNCOVERED_PROOF = "(as recorded; not covered by the snapshot commitment — this ledger predates it)";
-const PARENT_ABSENT = "(parent review not in this store; parent-derived fields unverified)";
-function roundStrategySections(review, parentContext) {
+// Each item is the proof as the round recorded it. A field an older proof
+// does not record at all reads as not recorded, never as a value.
+function roundStrategySections(review) {
   const history = review.history ?? [];
   return (review.rounds ?? []).flatMap((round) => {
     const prepared = eventFor(history, PREPARED_EVENTS, round.round);
     const mode = prepared?.mode ?? (round.successor == null ? "FULL" : "SUCCESSOR");
     const successor = round.successor;
-    const uncovered = successor != null && round.successor_delta_sha256 == null;
-    const parent = parentContext.get(round.round) ?? {};
-    const parentAbsent = successor != null && parent.absent === true;
-    const requirementMatch = successor?.requirement_match ?? parent.derived?.requirement_match;
-    const item = (text, parentDerived = false) =>
-      `- ${[uncovered ? UNCOVERED_PROOF : null, parentDerived && parentAbsent ? PARENT_ABSENT : null, text].filter(Boolean).join(" ")}`;
+    const match = successor?.requirement_match;
     return [
-      `#### Round ${round.round} strategy: ${code(mode)}${uncovered ? " (unverified proof)" : ""}${parentAbsent ? ` ${PARENT_ABSENT}` : ""}`,
+      `#### Round ${round.round} strategy: ${code(mode)}`,
       successor == null
         ? `Reviewed as a full diff of ${code(round.base_sha)} → ${code(round.head_sha)}.`
         : [
-            item(`Parent review: ${code(successor.parent_review_id)} (${code(successor.parent_reviewer_provider)})`, true),
-            item(`Requirement matches the parent: ${requirementMatch == null ? "not recorded" : requirementMatch ? "yes" : "no"}`, true),
-            item(`Parent head → current head: ${code(successor.parent_head_sha)} → ${code(successor.current_head_sha)}`, true),
-            item(`Delta: ${successor.delta_bytes ?? "n/a"} bytes, sha256 ${code(successor.delta_sha256)}`),
-            item(`Files in the delta: ${list(successor.changed_files ?? [])}`),
-            item(`Files deleted in the delta: ${list(successor.deleted_files ?? [])}`),
+            `- Parent review: ${code(successor.parent_review_id)} (${code(successor.parent_reviewer_provider)})`,
+            `- Requirement matches the parent: ${match == null ? "not recorded" : match ? "yes" : "no"}`,
+            `- Parent head → current head: ${code(successor.parent_head_sha)} → ${code(successor.current_head_sha)}`,
+            `- Delta: ${successor.delta_bytes ?? "n/a"} bytes, sha256 ${code(successor.delta_sha256)}`,
+            `- Files in the delta: ${list(successor.changed_files ?? [])}`,
+            `- Files deleted in the delta: ${list(successor.deleted_files ?? [])}`,
           ].join("\n"),
     ];
   });
 }
 
-function roundsSection(review, parentContext) {
+function roundsSection(review) {
   const history = review.history ?? [];
   const rows = (review.rounds ?? []).map((round) => {
     const prepared = eventFor(history, PREPARED_EVENTS, round.round);
@@ -247,7 +237,7 @@ function roundsSection(review, parentContext) {
       ],
       rows,
     ),
-    ...roundStrategySections(review, parentContext),
+    ...roundStrategySections(review),
   ];
 }
 
@@ -698,7 +688,6 @@ export function renderReviewReport(
     publicationSummary = null,
     renderedAt = new Date().toISOString(),
     ledgerDirectory = null,
-    parentContext = new Map(),
   } = {},
 ) {
   if (review == null && publication == null) {
@@ -713,15 +702,6 @@ export function renderReviewReport(
   }
   const reviewId = review?.id ?? publication.review_id;
   const directory = ledgerDirectory ?? path.join("reviews", String(reviewId));
-  // A parent ledger this render actually used: it supplied a field the proof
-  // does not record, or its absence is what the round is marked with. A proof
-  // that records everything needs no parent, and none is named. One parent
-  // can serve several rounds, so it is named once.
-  const parents = new Map();
-  for (const entry of parentContext.values()) {
-    if (entry.absent !== true && Object.keys(entry.derived ?? {}).length === 0) continue;
-    if (!parents.has(entry.review_id)) parents.set(entry.review_id, entry);
-  }
   // Every file that was read and rendered, so the footer names exactly what
   // the projection was made from: the bound authorization is gate.json for a
   // local gate and the remote sidecar otherwise.
@@ -738,7 +718,7 @@ export function renderReviewReport(
       ? remoteOnlySection()
       : [
           ...identitySection(review),
-          ...roundsSection(review, parentContext),
+          ...roundsSection(review),
           ...carriedSection(review),
           ...findingsSection(review),
           ...changesSection(review),
@@ -753,11 +733,6 @@ export function renderReviewReport(
       `- Report revision: ${code(reportRevision(review, publication, publicationSummary))}`,
       `- Rendered at: ${inline(renderedAt)}`,
       `- Ledger: ${ledgers.join(", ")}`,
-      ...[...parents.values()].map((entry) =>
-        entry.absent === true
-          ? `- Parent review: ${code(entry.review_id)} — not in this store (parent-derived fields unverified)`
-          : `- Parent review: ${code(entry.review_id)} (${code(entry.path)}, state_version ${entry.state_version}; gate.json sha256 ${code(entry.gate_sha256.slice(0, 12))})`,
-      ),
       ...(publication == null
         ? []
         : [
@@ -792,14 +767,16 @@ export async function loadReportLedgers(
   // The validated loader: the store's own serialization, the state machine's
   // shape, and every round's snapshot commitment reproduced from its manifest
   // and patch. A ledger edited or rolled back in place fails here.
-  // What the validated loader learned from each round's parent: that the
-  // store has no ledger for it, so the report marks that round's
-  // parent-derived fields as unverified, or the fields the proof itself does
-  // not record, which the report prints as the parent gives them.
-  const parentContext = new Map();
-  const review = fs.existsSync(reviewPath)
-    ? await loadValidatedReview(storeRoot, reviewId, { parentContext })
-    : null;
+  const review = fs.existsSync(reviewPath) ? await loadReview(storeRoot, reviewId) : null;
+  // The report is filed under the review id, so the ledger found there must
+  // be that review's; a ledger naming another is not this review's projection.
+  if (review != null && review.id !== reviewId) {
+    throw reportError("REVIEW_LEDGER_INVALID", `review ledger ${reviewId} names ${review.id}`, {
+      review_id: reviewId,
+      path: reviewPath,
+      names: review.id ?? null,
+    });
+  }
   let publication = null;
   try {
     // Canonical bytes, the stored-ledger schema, and the review_id inside are
@@ -908,7 +885,7 @@ export async function loadReportLedgers(
       );
     }
   }
-  return { directory, review, publication, authorization, publicationSummary, parentContext };
+  return { directory, review, publication, authorization, publicationSummary };
 }
 
 // Publishes fully written bytes at `filePath` only if nothing is there yet: the
@@ -963,7 +940,7 @@ function withoutRenderTime(markdown) {
 // stays in the file: a report can run to megabytes, and the driver that
 // calls this after a gate needs the path, not the bytes.
 export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}) {
-  const { directory, review, publication, authorization, publicationSummary, parentContext } =
+  const { directory, review, publication, authorization, publicationSummary } =
     await loadReportLedgers(storeRoot, reviewId);
   const revision = reportRevision(review, publication, publicationSummary);
   // A file exists per (state_version, publication revision, summary digest):
@@ -978,7 +955,6 @@ export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}
     publicationSummary,
     renderedAt,
     ledgerDirectory: directory,
-    parentContext,
   });
   let reused = true;
   if (!fs.existsSync(filePath)) {

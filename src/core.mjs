@@ -10,10 +10,6 @@ import {
   withStateLock,
 } from "./storage.mjs";
 import { reviewRequiredInputs } from "./tool-inputs.mjs";
-// The local gate reader and its binding judge live with the publication
-// readers; the validated loader below applies them to a successor's parent
-// so the parent gate is admitted the way the report admits its own.
-import { localGateReviewMismatch, readLocalGateAuthorization } from "./publication.mjs";
 
 export const MAX_ROUNDS = 2;
 export const DEFAULT_CHANGE_SIZE_BUDGET = 2000;
@@ -211,1144 +207,6 @@ export async function loadReview(storeRoot, reviewId) {
     }
     throw error;
   }
-}
-
-const LEDGER_REVIEW_STATUSES = [
-  "WAITING_FOR_REVIEW",
-  "REVIEW_SUBMITTED",
-  "AUTHOR_RESPONDED",
-  "WAITING_FOR_REREVIEW",
-  "CLEAN",
-  "LOCAL_GATE_PASSED",
-  "HUMAN_REQUIRED",
-  "CONTINUABLE_FINDINGS",
-];
-const LEDGER_FINDING_STATUSES = [
-  "OPEN",
-  "AUTHOR_FIXED",
-  "AUTHOR_REJECTED",
-  "HUMAN_REQUIRED",
-  "RESOLVED",
-  "REBUTTAL_ACCEPTED",
-  "STILL_OPEN",
-];
-const LEDGER_DISPOSITIONS = ["fixed", "rejected", "human_required"];
-const LEDGER_RESPONSE_EVENTS = ["AUTHOR_RESPONDED", "AUTHOR_ESCALATED"];
-const LEDGER_DECISIONS = ["resolved", "rebuttal_accepted", "still_open"];
-
-// Field tables. Every record kind the review ledger holds has one, placed
-// beside the writer that produces it: one entry per field the writer sets,
-// with the type, value domain, length bound, timestamp format, or reference
-// into the ledger the writer guarantees. The validator checks a record from
-// its table and nowhere else, so what the writer sets is what the validator
-// checks: a field the writer never sets is refused, a required field that is
-// missing is refused, and a field outside its domain is refused by name.
-// A repository hashes its objects as SHA-1 or as SHA-256, so an object id is
-// 40 or 64 lowercase hex characters. One judge for every commit and tree id
-// the store records, whichever repository wrote it.
-const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
-const REVIEW_ID_LEDGER_PATTERN = /^rb-[0-9TZ-]+-[a-f0-9]{8}$/;
-// Every timestamp the store writes is `new Date().toISOString()`: UTC, with
-// milliseconds. A value is one only if it round-trips through that, which
-// refuses what Date.parse takes loosely -- "0", a day that does not exist, a
-// string without milliseconds -- and the defect names what it normalizes to.
-const normalizedTimestamp = (value) => {
-  if (typeof value !== "string") return null;
-  const at = new Date(value);
-  return Number.isFinite(at.getTime()) ? at.toISOString() : null;
-};
-const isTimestamp = (value) => normalizedTimestamp(value) === value;
-const describeTimestamp = (value) => {
-  const normalized = normalizedTimestamp(value);
-  return normalized == null
-    ? "a timestamp"
-    : `the timestamp the store would write (${normalized})`;
-};
-const isText = (max, { allowEmpty = false } = {}) => (value) =>
-  typeof value === "string" && (allowEmpty || value !== "") && value.length <= max;
-const isStringList = (value) => Array.isArray(value) && value.every((item) => typeof item === "string");
-const isCount = (value) => Number.isInteger(value) && value >= 0;
-export const isObjectId = (value) => SHA_PATTERN.test(value ?? "");
-const isSha = isObjectId;
-const isDigest = (value) => DIGEST_PATTERN.test(value ?? "");
-const isReviewIdValue = (value) => typeof value === "string" && REVIEW_ID_LEDGER_PATTERN.test(value);
-const nullOr = (ok) => (value, context) => value === null || ok(value, context);
-const oneOf = (values) => (value) => values.includes(value);
-
-// The first way `record` departs from `fields`, named after `label`, or null.
-function recordDefect(record, fields, context, label) {
-  if (record == null || typeof record !== "object" || Array.isArray(record)) {
-    return `${label} is not an object`;
-  }
-  const known = new Set(fields.map((entry) => entry.field));
-  const unknown = Object.keys(record).find((key) => !known.has(key));
-  if (unknown != null) {
-    return `${label} carries a field the writer never sets: ${unknown}`;
-  }
-  for (const { field, describe, optional, ok } of fields) {
-    if (!(field in record)) {
-      if (optional) continue;
-      return `${label} has no ${field}`;
-    }
-    if (!ok(record[field], { ...context, record })) {
-      // A description may depend on the value, to say what it should have
-      // been beside what it is.
-      const expected = typeof describe === "function" ? describe(record[field]) : describe;
-      return `${label} ${field} ${JSON.stringify(record[field])} is not ${expected}`;
-    }
-  }
-  return null;
-}
-
-// The review strategy prepareReview and prepareRereview record.
-const STRATEGY_FIELDS = [
-  { field: "mode", describe: "FULL or SUCCESSOR", ok: oneOf(["FULL", "SUCCESSOR"]) },
-  { field: "parent_review_id", describe: "null or a review ID", ok: nullOr(isReviewIdValue) },
-  { field: "fallback_reason", describe: "null or a string", ok: nullOr((value) => typeof value === "string") },
-  { field: "parent_selection", describe: "NONE, EXPLICIT, or AUTOMATIC", optional: true, ok: oneOf(["NONE", "EXPLICIT", "AUTOMATIC"]) },
-];
-
-// The history events the writers push, keyed by event: the fields each
-// writer records beyond `at` and `event`. Fields that arrived with a later
-// release are optional, so a ledger written before them still validates.
-const HISTORY_EVENT_FIELDS = {
-  REVIEW_PREPARED: [
-    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
-    { field: "mode", describe: "FULL or SUCCESSOR", optional: true, ok: oneOf(["FULL", "SUCCESSOR"]) },
-    { field: "continued_from_review_id", describe: "a review ID", optional: true, ok: isReviewIdValue },
-  ],
-  INITIAL_REVIEW_CLEAN: [
-    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
-    { field: "errata_watermark", describe: "a non-negative integer", optional: true, ok: isCount },
-  ],
-  FINDINGS_SUBMITTED: [
-    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
-    { field: "count", describe: "a non-negative integer", optional: true, ok: isCount },
-    { field: "errata_watermark", describe: "a non-negative integer", optional: true, ok: isCount },
-  ],
-  AUTHOR_RESPONDED: [{ field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 }],
-  AUTHOR_ESCALATED: [{ field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 }],
-  ERRATUM_APPENDED: [
-    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
-    { field: "sequence", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
-  ],
-  ROUND_LIMIT_REACHED: [],
-  REREVIEW_PREPARED: [
-    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
-    { field: "mode", describe: "FULL or SUCCESSOR", optional: true, ok: oneOf(["FULL", "SUCCESSOR"]) },
-  ],
-  REREVIEW_UNRESOLVED: [
-    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
-    { field: "new_findings", describe: "a non-negative integer", optional: true, ok: isCount },
-    { field: "errata_watermark", describe: "a non-negative integer", optional: true, ok: isCount },
-  ],
-  REREVIEW_CONTINUABLE_FINDINGS: [
-    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
-    { field: "new_findings", describe: "a non-negative integer", optional: true, ok: isCount },
-    { field: "errata_watermark", describe: "a non-negative integer", optional: true, ok: isCount },
-  ],
-  REREVIEW_CLEAN: [
-    { field: "round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
-    { field: "errata_watermark", describe: "a non-negative integer", optional: true, ok: isCount },
-  ],
-  LOCAL_GATE_PASSED: [],
-  REVIEW_CONTINUED: [{ field: "continued_by_review_id", describe: "a review ID", ok: isReviewIdValue }],
-};
-const HISTORY_COMMON_FIELDS = [
-  { field: "at", describe: describeTimestamp, ok: isTimestamp },
-  { field: "event", describe: "a history event the writers record", ok: (v) => v in HISTORY_EVENT_FIELDS },
-];
-
-// The top-level ledger prepareReview writes and the later writers update.
-// Fields that arrived with a later release are optional.
-const REVIEW_LEDGER_FIELDS = [
-  { field: "version", describe: "1", ok: (v) => v === 1 },
-  { field: "id", describe: "a review ID", ok: isReviewIdValue },
-  { field: "created_at", describe: describeTimestamp, ok: isTimestamp },
-  { field: "updated_at", describe: describeTimestamp, ok: isTimestamp },
-  { field: "state_version", describe: "a positive integer", optional: true, ok: (v) => Number.isInteger(v) && v >= 1 },
-  { field: "last_transition_state_version", describe: "a positive integer", optional: true, ok: (v) => Number.isInteger(v) && v >= 1 },
-  { field: "repository_path", describe: "a non-empty absolute path", ok: (v) => typeof v === "string" && path.isAbsolute(v) },
-  { field: "base_ref", describe: "a non-empty string", ok: isText(4096) },
-  { field: "requirement", describe: `a non-empty string of at most ${MAX_TEXT_FIELD} characters`, ok: isText(MAX_TEXT_FIELD) },
-  { field: "implementation_scope", describe: `a non-empty string of at most ${MAX_TEXT_FIELD} characters`, ok: isText(MAX_TEXT_FIELD) },
-  { field: "reviewer_provider", describe: "a reviewer provider", optional: true, ok: (v) => REVIEWER_PROVIDERS.includes(v) },
-  { field: "advisory", describe: "a boolean", optional: true, ok: (v) => typeof v === "boolean" },
-  { field: "review_strategy", describe: "a review strategy", optional: true, ok: (v) => recordDefect(v, STRATEGY_FIELDS, {}, "review_strategy") == null },
-  { field: "status", describe: "a review status", ok: oneOf(LEDGER_REVIEW_STATUSES) },
-  { field: "current_round", describe: "a positive integer", ok: (v) => Number.isInteger(v) && v >= 1 },
-  { field: "max_rounds", describe: String(MAX_ROUNDS), ok: (v) => v === MAX_ROUNDS },
-  { field: "rounds", describe: "an array", ok: Array.isArray },
-  { field: "findings", describe: "an array", ok: Array.isArray },
-  { field: "resolutions", describe: "an array", ok: Array.isArray },
-  { field: "rereview_decisions", describe: "an array", ok: Array.isArray },
-  { field: "errata", describe: "an array", optional: true, ok: Array.isArray },
-  { field: "carried_findings", describe: "an array", optional: true, ok: Array.isArray },
-  { field: "history", describe: "an array", ok: Array.isArray },
-  { field: "last_opened_errata_watermark", describe: "a non-negative integer", optional: true, ok: isCount },
-  { field: "clean_snapshot_hash", describe: "null or a digest", optional: true, ok: nullOr(isDigest) },
-  { field: "continued_by_review_id", describe: "null or a review ID", optional: true, ok: nullOr(isReviewIdValue) },
-];
-
-// The finding status each author disposition and each rereview decision
-// leaves behind. The writers below set statuses through these, and the
-// validator derives the status every finding should have from the same two
-// maps, so the two cannot disagree.
-function dispositionStatus(disposition) {
-  return { fixed: "AUTHOR_FIXED", rejected: "AUTHOR_REJECTED", human_required: "HUMAN_REQUIRED" }[disposition];
-}
-
-function decisionStatus(decision) {
-  return { resolved: "RESOLVED", rebuttal_accepted: "REBUTTAL_ACCEPTED", still_open: "STILL_OPEN" }[decision];
-}
-
-// The status a finding must carry given the records that name it: OPEN with
-// no response, the disposition's status once the author responded, the
-// decision's status once the rereviewer decided. A decision with no
-// resolution behind it derives to nothing, since no writer produces one.
-function derivedFindingStatus(resolution, decision) {
-  if (decision != null) {
-    // No writer decides a finding the author escalated: the escalation stops
-    // the review before any rereview.
-    if (resolution == null || resolution.disposition === "human_required") return null;
-    return decisionStatus(decision.decision);
-  }
-  if (resolution != null) return dispositionStatus(resolution.disposition);
-  return "OPEN";
-}
-// Every history event this module records, the statuses it is recorded from,
-// the status it leaves the review in, whether the writer always records the
-// round it happened in (`roundBound`), and the ledger-level precondition the
-// writer refuses without that `from` and `to` cannot express (`guard`, which
-// returns the violated precondition or null; `state` is the replay's round
-// and status just before the event). Read from the writers above and below;
-// a ledger whose history does not replay through this table was not written
-// by them. `null` as a source is the ledger's creation.
-//
-// The gated writers -- submitResolutions, prepareRereview, submitRereview's
-// verdicts, appendReviewErratum, finalizeLocalGate, and continuation -- all
-// refuse an advisory review (assertNotAdvisory), so every event past the
-// first verdict carries that guard; the round-limit pair carries the bound
-// prepareRereview enforces; the findings writers carry MAX_FINDINGS.
-const notAdvisory = (review) => (review.advisory === true ? "advisory review" : null);
-const LEDGER_TRANSITIONS = {
-  REVIEW_PREPARED: { from: [null], to: "WAITING_FOR_REVIEW", opensRound: true, roundBound: true },
-  INITIAL_REVIEW_CLEAN: { from: ["WAITING_FOR_REVIEW"], to: "CLEAN", roundBound: true },
-  // Zero findings is recorded as INITIAL_REVIEW_CLEAN, never as a submission.
-  FINDINGS_SUBMITTED: {
-    from: ["WAITING_FOR_REVIEW"],
-    to: "REVIEW_SUBMITTED",
-    roundBound: true,
-    guard: (review, state, entry) =>
-      !Number.isInteger(entry.count)
-        ? null
-        : entry.count < 1
-          ? "fewer than 1 finding"
-          : entry.count > MAX_FINDINGS
-            ? `more than ${MAX_FINDINGS} findings`
-            : null,
-  },
-  AUTHOR_RESPONDED: { from: ["REVIEW_SUBMITTED"], to: "AUTHOR_RESPONDED", roundBound: true, guard: notAdvisory },
-  AUTHOR_ESCALATED: { from: ["REVIEW_SUBMITTED"], to: "HUMAN_REQUIRED", roundBound: true, guard: notAdvisory },
-  ROUND_LIMIT_REACHED: {
-    from: ["AUTHOR_RESPONDED"],
-    to: "HUMAN_REQUIRED",
-    guard: (review, state) =>
-      notAdvisory(review) ?? (state.round < review.max_rounds ? `round ${state.round} is below max_rounds ${review.max_rounds}` : null),
-  },
-  REREVIEW_PREPARED: {
-    from: ["AUTHOR_RESPONDED"],
-    to: "WAITING_FOR_REREVIEW",
-    opensRound: true,
-    roundBound: true,
-    guard: (review, state) =>
-      notAdvisory(review) ?? (state.round >= review.max_rounds ? `round ${state.round} already at max_rounds ${review.max_rounds}` : null),
-  },
-  REREVIEW_UNRESOLVED: {
-    from: ["WAITING_FOR_REREVIEW"],
-    to: "HUMAN_REQUIRED",
-    roundBound: true,
-    guard: (review, state, entry) =>
-      notAdvisory(review) ?? (Number.isInteger(entry.new_findings) && entry.new_findings > MAX_FINDINGS ? `more than ${MAX_FINDINGS} new findings` : null),
-  },
-  // The writer takes this branch only when the rereview raised at least one
-  // new finding; an unresolved verdict may raise none.
-  REREVIEW_CONTINUABLE_FINDINGS: {
-    from: ["WAITING_FOR_REREVIEW"],
-    to: "CONTINUABLE_FINDINGS",
-    roundBound: true,
-    guard: (review, state, entry) =>
-      notAdvisory(review) ??
-      (!Number.isInteger(entry.new_findings)
-        ? null
-        : entry.new_findings < 1
-          ? "fewer than 1 new finding"
-          : entry.new_findings > MAX_FINDINGS
-            ? `more than ${MAX_FINDINGS} new findings`
-            : null),
-  },
-  REREVIEW_CLEAN: { from: ["WAITING_FOR_REREVIEW"], to: "CLEAN", roundBound: true, guard: notAdvisory },
-  LOCAL_GATE_PASSED: { from: ["CLEAN"], to: "LOCAL_GATE_PASSED", guard: notAdvisory },
-  REVIEW_CONTINUED: { from: ["CONTINUABLE_FINDINGS"], to: "CONTINUABLE_FINDINGS", guard: notAdvisory },
-  // An erratum changes no state. The writer refuses it on an advisory review
-  // and once the gate has passed; otherwise it is accepted in any state.
-  ERRATUM_APPENDED: {
-    from: LEDGER_REVIEW_STATUSES.filter((status) => status !== "LOCAL_GATE_PASSED"),
-    to: null,
-    roundBound: true,
-    guard: notAdvisory,
-  },
-};
-
-// The round each finding position was raised in, from the history's counts,
-// or null when a verdict event that should carry a count does not (a ledger
-// older than the field).
-function derivedIntroducedRounds(history) {
-  const rounds = [];
-  for (const entry of history) {
-    if (entry.event === "INITIAL_REVIEW_CLEAN" || entry.event === "REREVIEW_CLEAN") continue;
-    if (entry.event === "FINDINGS_SUBMITTED") {
-      if (!Number.isInteger(entry.count)) return null;
-      rounds.push(...Array(entry.count).fill(entry.round));
-    } else if (entry.event === "REREVIEW_UNRESOLVED" || entry.event === "REREVIEW_CONTINUABLE_FINDINGS") {
-      if (!Number.isInteger(entry.new_findings)) return null;
-      rounds.push(...Array(entry.new_findings).fill(entry.round));
-    }
-  }
-  return rounds;
-}
-
-// Replays the history through the transition table and returns the status
-// and round it ends at, or the first defect.
-function replayReviewHistory(history, review) {
-  let status = null;
-  let round = 0;
-  for (const [index, entry] of history.entries()) {
-    const transition = LEDGER_TRANSITIONS[entry?.event];
-    if (transition == null) {
-      return { defect: `history entry ${index + 1} has unknown event ${JSON.stringify(entry?.event)}` };
-    }
-    if (typeof entry.at !== "string") {
-      return { defect: `history entry ${index + 1} has no timestamp` };
-    }
-    if (!transition.from.includes(status)) {
-      return { defect: `history entry ${index + 1} (${entry.event}) is not a transition from ${status ?? "creation"}` };
-    }
-    const violated = transition.guard?.(review, { round, status }, entry) ?? null;
-    if (violated != null) {
-      return { defect: `history entry ${index + 1} (${entry.event}) violates the writer's precondition: ${violated}` };
-    }
-    if (transition.opensRound) round += 1;
-    // A round-bound event always carries its round: a reader that pairs
-    // prepared and verdict events by round finds nothing for one that lost it.
-    if (transition.roundBound && !(Number.isInteger(entry.round) && entry.round >= 1)) {
-      return { defect: `history entry ${index + 1} (${entry.event}) has no round` };
-    }
-    if (entry.round != null && entry.round !== round) {
-      return { defect: `history entry ${index + 1} (${entry.event}) names round ${entry.round} during round ${round}` };
-    }
-    if (transition.to != null) status = transition.to;
-  }
-  return { status, round };
-}
-
-// The structural shape a review ledger this module wrote always has. A field
-// the state machine would never produce is a ledger edited or rolled back by
-// hand, and no reader that combines it with other ledgers may trust it.
-function reviewLedgerDefect(review, reviewId) {
-  if (review == null || typeof review !== "object" || Array.isArray(review)) {
-    return "not a JSON object";
-  }
-  if (review.id !== reviewId) {
-    return `review.json names ${JSON.stringify(review.id ?? null)}, not ${reviewId}`;
-  }
-  // The top level, then every record kind it holds, each from its writer's
-  // own table.
-  const top = recordDefect(review, REVIEW_LEDGER_FIELDS, {}, "review ledger");
-  if (top != null) return top;
-  // The strategy field and the prepared events' mode arrived together, so a
-  // ledger whose prepared events record a mode always has the field; only a
-  // ledger with no mode anywhere may lack it.
-  const recordsMode = review.history.some(
-    (entry) => ["REVIEW_PREPARED", "REREVIEW_PREPARED"].includes(entry?.event) && entry.mode != null,
-  );
-  if (review.review_strategy == null && recordsMode) {
-    return "review_strategy is missing, though the prepared events record a mode";
-  }
-  if (review.review_strategy != null) {
-    const defect = recordDefect(review.review_strategy, STRATEGY_FIELDS, {}, "review_strategy");
-    if (defect != null) return defect;
-  }
-  for (const [index, entry] of review.history.entries()) {
-    const label = `history entry ${index + 1}${typeof entry?.event === "string" ? ` (${entry.event})` : ""}`;
-    // The event picks the table, so an unknown event is named as such rather
-    // than as a stray field of an empty table.
-    if (entry == null || typeof entry !== "object" || !(entry.event in HISTORY_EVENT_FIELDS)) {
-      return `${label} event ${JSON.stringify(entry?.event ?? null)} is not a history event the writers record`;
-    }
-    const defect = recordDefect(entry, [...HISTORY_COMMON_FIELDS, ...HISTORY_EVENT_FIELDS[entry.event]], { index, review }, label);
-    if (defect != null) return defect;
-  }
-  // The top-level strategy is the one the latest prepared round recorded:
-  // its mode is that event's mode, and a SUCCESSOR names the parent the
-  // round's proof names. A FULL strategy may still carry the parent the
-  // author asked for -- the writer keeps the requested id beside the fallback
-  // reason -- so its parent is not derivable from the ledger and is left.
-  const latestPrepared = review.history.findLast(
-    (entry) => ["REVIEW_PREPARED", "REREVIEW_PREPARED"].includes(entry.event) && entry.round === review.rounds.length,
-  );
-  if (review.review_strategy != null && latestPrepared?.mode != null) {
-    if (review.review_strategy.mode !== latestPrepared.mode) {
-      return `review_strategy.mode ${JSON.stringify(review.review_strategy.mode)} is not the ${latestPrepared.mode} the latest prepared round recorded`;
-    }
-    const proof = review.rounds.at(-1)?.successor;
-    if (latestPrepared.mode === "SUCCESSOR" && proof != null && review.review_strategy.parent_review_id !== proof.parent_review_id) {
-      return `review_strategy.parent_review_id ${JSON.stringify(review.review_strategy.parent_review_id)} is not the ${JSON.stringify(proof.parent_review_id)} the latest round's successor proof names`;
-    }
-  }
-  // A round prepared as SUCCESSOR carries its proof and a round prepared as
-  // FULL carries none: the prepared event's mode and the round's successor
-  // record are written together and must agree both ways.
-  for (const round of review.rounds) {
-    if (round == null || typeof round !== "object") continue;
-    const prepared = review.history.find(
-      (entry) => ["REVIEW_PREPARED", "REREVIEW_PREPARED"].includes(entry.event) && entry.round === round.round,
-    );
-    if (prepared?.mode == null) continue;
-    const hasProof = round.successor != null;
-    if ((prepared.mode === "SUCCESSOR") !== hasProof) {
-      return `round ${round.round} was prepared as ${prepared.mode}, but its successor proof is ${hasProof ? "present" : "absent"}`;
-    }
-  }
-  for (const [index, round] of review.rounds.entries()) {
-    const defect = recordDefect(round, ROUND_FIELDS, { index, review }, `round ${round?.round ?? index + 1}`);
-    if (defect != null) return defect;
-  }
-  // One repository hashes its objects one way, so every commit and tree id in
-  // one review is the same width. A ledger that mixes the two is not one
-  // repository's.
-  let first = null;
-  for (const round of review.rounds) {
-    const ids = [
-      ["base_sha", round.base_sha],
-      ["head_sha", round.head_sha],
-      ["successor_parent_head_sha", round.successor_parent_head_sha],
-      ["successor_current_head_sha", round.successor_current_head_sha],
-      ...["base_sha", "parent_head_sha", "current_head_sha", "parent_tree_sha", "current_tree_sha"].map(
-        (field) => [`successor.${field}`, round.successor?.[field]],
-      ),
-    ];
-    for (const [field, value] of ids) {
-      if (typeof value !== "string") continue;
-      if (first == null) {
-        first = { where: `round ${round.round} ${field}`, width: value.length };
-        continue;
-      }
-      if (value.length !== first.width) {
-        return `round ${round.round} ${field} is ${value.length} hex characters, but ${first.where} is ${first.width}`;
-      }
-    }
-  }
-
-  for (const [index, resolution] of review.resolutions.entries()) {
-    const defect = recordDefect(resolution, RESOLUTION_FIELDS, { index, review }, `resolution ${index + 1}`);
-    if (defect != null) return defect;
-  }
-  for (const [index, decision] of review.rereview_decisions.entries()) {
-    const defect = recordDefect(decision, REREVIEW_DECISION_FIELDS, { index, review }, `rereview decision ${index + 1}`);
-    if (defect != null) return defect;
-  }
-  for (const [index, erratum] of (review.errata ?? []).entries()) {
-    const defect = recordDefect(erratum, ERRATUM_FIELDS, { index, review }, `erratum ${index + 1}`);
-    if (defect != null) return defect;
-  }
-  for (const [index, carried] of (review.carried_findings ?? []).entries()) {
-    const defect = recordDefect(carried, CARRIED_FINDING_FIELDS, { index, review }, `carried finding ${index + 1}`);
-    if (defect != null) return defect;
-  }
-  // The continuation marker is derived from the newest REVIEW_CONTINUED event
-  // -- a source may be re-continued, and the writer tracks the newest -- and
-  // compared with the stored field, so the two cannot name different reviews
-  // or exist without each other.
-  const continuedBy =
-    review.history.findLast((entry) => entry.event === "REVIEW_CONTINUED")?.continued_by_review_id ?? null;
-  if ((review.continued_by_review_id ?? null) !== continuedBy) {
-    return continuedBy == null
-      ? `continued_by_review_id ${JSON.stringify(review.continued_by_review_id)} is recorded, but the history holds no REVIEW_CONTINUED event`
-      : `continued_by_review_id ${JSON.stringify(review.continued_by_review_id ?? null)} is not the ${JSON.stringify(continuedBy)} the history's REVIEW_CONTINUED event names`;
-  }
-  if ((review.errata ?? []).length > MAX_ERRATA) {
-    return `errata holds ${review.errata.length} entries, more than the writer's ${MAX_ERRATA}`;
-  }
-  // Every erratum this review appended rode on an ERRATUM_APPENDED event
-  // carrying the same sequence, round, and time, in order; an erratum carried
-  // in from a continued source was appended there, not here, and has no
-  // event in this history.
-  const ownErrata = (review.errata ?? []).filter((erratum) => erratum.continued_from_review_id == null);
-  const appended = review.history.filter((entry) => entry.event === "ERRATUM_APPENDED");
-  if (ownErrata.length !== appended.length) {
-    return `errata holds ${ownErrata.length} of this review's own entries, but the history records ${appended.length} ERRATUM_APPENDED event(s)`;
-  }
-  for (const [index, erratum] of ownErrata.entries()) {
-    const event = appended[index];
-    if (event.sequence !== erratum.sequence || event.round !== erratum.round || event.at !== erratum.at) {
-      return `erratum ${erratum.sequence} (round ${erratum.round}, ${erratum.at}) does not match ERRATUM_APPENDED event ${index + 1} (sequence ${event.sequence}, round ${event.round}, ${event.at})`;
-    }
-  }
-  // Every save increments state_version and every history entry rode on a
-  // save, so the version can never fall below the history; a transition
-  // stamp names a version that has happened. A ledger older than the field
-  // has neither to compare.
-  const stateVersion = review.state_version ?? review.history.length;
-  if (stateVersion < review.history.length) {
-    return `state_version ${stateVersion} is below the ${review.history.length} history entries`;
-  }
-  if (
-    review.last_transition_state_version != null &&
-    review.last_transition_state_version > stateVersion
-  ) {
-    return "last_transition_state_version is ahead of state_version";
-  }
-  // The history must replay to the stored status through the writers' own
-  // transitions, and must have opened exactly the rounds the ledger holds.
-  const replay = replayReviewHistory(review.history, review);
-  if (replay.defect != null) return replay.defect;
-  if (replay.status !== review.status) {
-    return `history replays to ${replay.status ?? "no status"}, but status is ${review.status}`;
-  }
-  if (replay.round !== review.rounds.length) {
-    return `history opened ${replay.round} round(s), but the ledger holds ${review.rounds.length}`;
-  }
-  // Rounds are bounded by the store, and the current round is the last one.
-  if (review.rounds.length === 0 || review.rounds.length > MAX_ROUNDS) {
-    return `rounds holds ${review.rounds.length} entries`;
-  }
-  if (review.current_round !== review.rounds.length) {
-    return `current_round ${review.current_round} does not name the last of ${review.rounds.length} rounds`;
-  }
-  // A clean verdict commits to the round it was given on, and only a review
-  // with no finding left open can carry one.
-  if (["CLEAN", "LOCAL_GATE_PASSED"].includes(review.status)) {
-    if (review.clean_snapshot_hash !== review.rounds.at(-1).snapshot_hash) {
-      return "clean_snapshot_hash is not the last round's snapshot";
-    }
-    const open = review.findings.find((finding) => !RESOLVED_FINDING_STATUSES.has(finding?.status));
-    if (open != null) {
-      return `status is ${review.status} but finding ${JSON.stringify(open.id)} is ${JSON.stringify(open.status)}`;
-    }
-  } else if (review.clean_snapshot_hash != null) {
-    return `status is ${review.status} but a clean_snapshot_hash is recorded`;
-  }
-  // Findings from the writer's table; then the responses' identities: unique
-  // IDs, and every response naming a finding that exists.
-  for (const [index, finding] of review.findings.entries()) {
-    const defect = findingDefect(finding, index, review);
-    if (defect != null) return defect;
-  }
-  // Which round each finding was raised in is derived from the history's own
-  // counts -- FINDINGS_SUBMITTED.count for round one, new_findings for each
-  // rereview verdict, findings numbered by position -- and the whole column
-  // compared with what is stored. Where an older ledger's history carries no
-  // counts, the table's membership check above (a round the ledger holds) is
-  // all that can be said: that is the degraded path.
-  const introducedRounds = derivedIntroducedRounds(review.history);
-  if (introducedRounds != null) {
-    if (introducedRounds.length !== review.findings.length) {
-      return `history counts ${introducedRounds.length} finding(s), but the ledger holds ${review.findings.length}`;
-    }
-    for (const [index, finding] of review.findings.entries()) {
-      if (finding.introduced_round !== introducedRounds[index]) {
-        return `finding ${JSON.stringify(finding.id)} introduced_round ${finding.introduced_round} is not the round its position derives from the history's counts (${introducedRounds[index]})`;
-      }
-    }
-  }
-  for (const [key, entries] of [
-    ["finding", review.findings.map((finding) => finding.id)],
-    ["resolution", review.resolutions.map((resolution) => resolution.finding_id)],
-    ["rereview decision", review.rereview_decisions.map((decision) => decision.finding_id)],
-  ]) {
-    if (entries.some((id) => typeof id !== "string" || id === "")) return `a ${key} has no ID`;
-    if (new Set(entries).size !== entries.length) return `${key} IDs are not unique`;
-  }
-  // Every finding's status is derived from the records that name it and the
-  // whole table compared with what is stored, so a record without a finding,
-  // a finding whose records were removed, and a status that does not follow
-  // from its records are one and the same defect.
-  const findingIds = new Set(review.findings.map((finding) => finding.id));
-  for (const [key, entries] of [
-    ["resolution", review.resolutions],
-    ["rereview decision", review.rereview_decisions],
-  ]) {
-    const orphan = entries.find((entry) => !findingIds.has(entry.finding_id));
-    if (orphan != null) {
-      return `a ${key} names no finding: ${JSON.stringify(orphan.finding_id)}`;
-    }
-  }
-  // The author's response to each round is derived from the dispositions
-  // answering that round's findings -- any human_required escalates, else the
-  // author responded -- and compared with the history: exactly that event,
-  // and an escalated round has no rereview decision on any of its findings.
-  const findingById = new Map(review.findings.map((finding) => [finding.id, finding]));
-  const verdictRounds = new Set(
-    review.history
-      .filter((entry) => ["REREVIEW_UNRESOLVED", "REREVIEW_CONTINUABLE_FINDINGS", "REREVIEW_CLEAN"].includes(entry.event))
-      .map((entry) => entry.round),
-  );
-  const responded = new Map();
-  for (const resolution of review.resolutions) {
-    const round = findingById.get(resolution.finding_id).introduced_round;
-    const info = responded.get(round) ?? { escalated: false };
-    info.escalated ||= resolution.disposition === "human_required";
-    responded.set(round, info);
-  }
-  for (const [round, info] of responded) {
-    const expected = info.escalated ? "AUTHOR_ESCALATED" : "AUTHOR_RESPONDED";
-    const recorded = review.history
-      .filter((entry) => LEDGER_RESPONSE_EVENTS.includes(entry.event) && entry.round === round)
-      .map((entry) => entry.event);
-    if (recorded.length !== 1 || recorded[0] !== expected) {
-      return `round ${round} author response derives ${expected} from its dispositions, but the history records ${recorded.length === 0 ? "none" : recorded.join(", ")}`;
-    }
-    if (info.escalated) {
-      const decided = review.rereview_decisions.find(
-        (decision) => findingById.get(decision.finding_id)?.introduced_round === round,
-      );
-      if (decided != null) {
-        return `round ${round} was escalated, but a rereview decision names ${JSON.stringify(decided.finding_id)}`;
-      }
-    }
-  }
-  for (const entry of review.history) {
-    if (LEDGER_RESPONSE_EVENTS.includes(entry.event) && !responded.has(entry.round)) {
-      return `history records ${entry.event} for round ${entry.round}, but no resolution answers a round-${entry.round} finding`;
-    }
-  }
-  const resolutionByFinding = new Map(review.resolutions.map((entry) => [entry.finding_id, entry]));
-  const decisionByFinding = new Map(review.rereview_decisions.map((entry) => [entry.finding_id, entry]));
-  // The verdict of each rereviewed round is derived the way submitRereview
-  // decides it -- any still_open decision contests the round, else a new
-  // finding leaves it continuable, else it is clean -- and compared with the
-  // verdict event the history records for that round.
-  for (const verdictRound of verdictRounds) {
-    const decided = review.rereview_decisions.filter(
-      (decision) => findingById.get(decision.finding_id)?.introduced_round === verdictRound - 1,
-    );
-    const raised = review.findings.filter((finding) => finding.introduced_round === verdictRound).length;
-    const expected = decided.some((decision) => decision.decision === "still_open")
-      ? "REREVIEW_UNRESOLVED"
-      : raised > 0
-        ? "REREVIEW_CONTINUABLE_FINDINGS"
-        : "REREVIEW_CLEAN";
-    const recorded = review.history.find(
-      (entry) => ["REREVIEW_UNRESOLVED", "REREVIEW_CONTINUABLE_FINDINGS", "REREVIEW_CLEAN"].includes(entry.event) && entry.round === verdictRound,
-    ).event;
-    // Before CONTINUABLE_FINDINGS existed, the writer recorded a rereview
-    // that raised new findings without contesting any as REREVIEW_UNRESOLVED
-    // and stopped for a human. Ledgers written then carry no writer version,
-    // so that encoding of this one case is accepted alongside the current
-    // one; it replays consistently to HUMAN_REQUIRED either way.
-    const olderEncoding = expected === "REREVIEW_CONTINUABLE_FINDINGS" && recorded === "REREVIEW_UNRESOLVED";
-    if (recorded !== expected && !olderEncoding) {
-      return `round ${verdictRound} rereview derives ${expected} from its decisions and new findings, but the history records ${recorded}`;
-    }
-  }
-  // The record sets are complete, the way the writers demand them: an
-  // answered round has exactly one resolution for every finding it raised
-  // (submitResolutions takes one per open finding), and a rereviewed round
-  // has exactly one decision for every fixed or rejected finding of the
-  // round before it (submitRereview takes one per author response); a
-  // decision with no rereview verdict behind it is refused as well.
-  for (const finding of review.findings) {
-    const round = finding.introduced_round;
-    const resolution = resolutionByFinding.get(finding.id);
-    if (responded.has(round) && resolution == null) {
-      return `round ${round} was answered, but finding ${JSON.stringify(finding.id)} has no resolution`;
-    }
-    if (resolution == null || !["fixed", "rejected"].includes(resolution.disposition)) continue;
-    const decided = decisionByFinding.has(finding.id);
-    if (verdictRounds.has(round + 1) && !decided) {
-      return `round ${round + 1} was rereviewed, but finding ${JSON.stringify(finding.id)} (${resolution.disposition}) has no decision`;
-    }
-    if (!verdictRounds.has(round + 1) && decided) {
-      return `finding ${JSON.stringify(finding.id)} has a rereview decision, but no rereview verdict for round ${round + 1} is recorded`;
-    }
-  }
-  for (const finding of review.findings) {
-    const resolution = resolutionByFinding.get(finding.id);
-    const decision = decisionByFinding.get(finding.id);
-    const derived = derivedFindingStatus(resolution, decision);
-    if (derived !== finding.status) {
-      const why =
-        derived != null
-          ? JSON.stringify(derived)
-          : resolution == null
-            ? "no status (a decision with no resolution)"
-            : "no status (a decision on a human_required finding)";
-      return `finding ${JSON.stringify(finding.id)} is ${JSON.stringify(finding.status)} but its records derive ${why}`;
-    }
-  }
-  return null;
-}
-
-// The files a successor delta touches, read from its own blocks the way the
-// writer's `git diff --name-only` reports them: every block names one path
-// (the new one for a rename), and a block whose file was deleted names a
-// deletion too.
-//
-// The path is taken from the lines that state one unambiguously, each running
-// to the end of its line: the extended header lines that name a path, else
-// `---`/`+++`, where `/dev/null` stands for the side that does not exist.
-// Only the preamble before the first hunk is read, since a hunk's own lines
-// can look like either. The `diff --git` header is the last resort, for a
-// block that has neither -- what `--binary` writes for a binary file, and
-// what a rename or copy git found identical writes: its two operands can
-// only be told apart where they are the same path, which is every header but
-// a rename's or a copy's. A block this cannot read is an error, not a guess.
-function successorFilesFromDelta(delta) {
-  const text = delta.toString("utf8");
-  const changed = new Set();
-  const deleted = new Set();
-  const blocks = text.split(/^(?=diff --git )/m).filter((block) => block.startsWith("diff --git "));
-  if (blocks.length === 0 && text.trim() !== "") {
-    throw new Error("no diff --git header");
-  }
-  // git quotes a path with core.quotepath as C-style escapes over its UTF-8
-  // bytes, so the escapes are collected as bytes and decoded once, whole;
-  // decoding each octal escape as a character would split a multibyte
-  // character into several.
-  const unquote = (raw) => {
-    if (!raw.startsWith('"')) return raw;
-    const bytes = [];
-    const inner = raw.slice(1, -1);
-    for (let index = 0; index < inner.length; index += 1) {
-      const char = inner[index];
-      if (char !== "\\") {
-        bytes.push(...Buffer.from(char, "utf8"));
-        continue;
-      }
-      const next = inner[index + 1];
-      if (/[0-7]/.test(next ?? "") && /^[0-7]{3}$/.test(inner.slice(index + 1, index + 4))) {
-        bytes.push(parseInt(inner.slice(index + 1, index + 4), 8));
-        index += 3;
-        continue;
-      }
-      const simple = { "\\": 0x5c, '"': 0x22, t: 0x09, n: 0x0a, r: 0x0d, a: 0x07, b: 0x08, f: 0x0c, v: 0x0b }[next];
-      if (simple == null) throw new Error(`unreadable escape in ${JSON.stringify(raw)}`);
-      bytes.push(simple);
-      index += 1;
-    }
-    return Buffer.from(bytes).toString("utf8");
-  };
-  const headerPath = (header) => {
-    const operands = header.slice("diff --git ".length);
-    const quoted = operands.match(/^(?<a>"(?:[^"\\]|\\.)*") (?<b>"(?:[^"\\]|\\.)*")$/);
-    let left;
-    let right;
-    if (quoted == null) {
-      // `a/<path> b/<path>`: one path twice, so each operand is half of what
-      // remains once the separating space is taken out.
-      const half = (operands.length - 1) / 2;
-      if (!Number.isInteger(half)) throw new Error(`unreadable header ${JSON.stringify(header)}`);
-      left = operands.slice(0, half);
-      right = operands.slice(half + 1);
-    } else {
-      left = unquote(quoted.groups.a);
-      right = unquote(quoted.groups.b);
-    }
-    if (!left.startsWith("a/") || !right.startsWith("b/") || left.slice(2) !== right.slice(2)) {
-      throw new Error(`unreadable header ${JSON.stringify(header)}`);
-    }
-    return left.slice(2);
-  };
-  for (const block of blocks) {
-    const [header, ...body] = block.split("\n");
-    const hunk = body.findIndex((line) => line.startsWith("@@ "));
-    const preamble = hunk === -1 ? body : body.slice(0, hunk);
-    const stated = (prefix) => {
-      const line = preamble.find((entry) => entry.startsWith(prefix));
-      return line == null ? null : line.slice(prefix.length);
-    };
-    const sidePath = (stated, prefix) => {
-      // git ends a `---`/`+++` path that contains a space with a tab, quoted
-      // or not; a path that itself ends in a tab is quoted, so one trailing
-      // tab is git's and not the path's.
-      const raw = stated.endsWith("\t") ? stated.slice(0, -1) : stated;
-      if (raw === "/dev/null") return null;
-      const unquoted = unquote(raw);
-      if (!unquoted.startsWith(prefix)) throw new Error(`unreadable path ${JSON.stringify(raw)}`);
-      return unquoted.slice(2);
-    };
-    // git's extended header states a path on exactly four lines: `rename
-    // from`/`rename to`, and, where the diff was taken with copy detection
-    // (`-C`, or `diff.renames = copies` in the repository's own config),
-    // `copy from`/`copy to`. Every other extended line names none: `old
-    // mode`, `new mode`, `new file mode`, `deleted file mode`, `similarity
-    // index`, `dissimilarity index`, `index`. That is git's header syntax as
-    // `git help diff-generate-patch` gives it, not an inference from samples.
-    // A copy is read like a rename: the writer's `--name-only` reports the
-    // new path, and the source, if it changed at all, has its own block.
-    const from = stated("rename from ") ?? stated("copy from ");
-    const to = stated("rename to ") ?? stated("copy to ");
-    const minus = stated("--- ");
-    const plus = stated("+++ ");
-    let before;
-    let after;
-    if (from != null && to != null) {
-      before = unquote(from);
-      after = unquote(to);
-    } else if (minus != null && plus != null) {
-      before = sidePath(minus, "a/");
-      after = sidePath(plus, "b/");
-    } else {
-      before = headerPath(header);
-      after = before;
-    }
-    const removed = preamble.some((line) => line.startsWith("deleted file mode "));
-    const file = removed ? before : (after ?? before);
-    if (file == null) throw new Error(`unreadable header ${JSON.stringify(header)}`);
-    changed.add(file);
-    if (removed) deleted.add(file);
-  }
-  return { changed: [...changed], deleted: [...deleted] };
-}
-
-// The round fields snapshotHashFromReviewRound hashes or checks the type of.
-// A round lacking one is older than the function and cannot be reproduced.
-const SNAPSHOT_HASH_INPUTS = [
-  ["changed_files", Array.isArray],
-  ["deleted_files", Array.isArray],
-  ["overlays", Array.isArray],
-  ["worktree_clean", (value) => typeof value === "boolean"],
-  ["patch_bytes", Number.isInteger],
-];
-
-function successorParentInvalid(reviewId, filePath, round, parentReviewId, reason) {
-  return Object.assign(
-    new Error(`review ${reviewId} round ${round} successor parent ${parentReviewId}: ${reason}`),
-    {
-      code: "SUCCESSOR_PARENT_INVALID",
-      details: { review_id: reviewId, path: filePath, round, parent_review_id: parentReviewId, reason },
-    },
-  );
-}
-
-function reviewLedgerInvalid(reviewId, filePath, reason) {
-  return Object.assign(new Error(`review ledger ${reviewId} is invalid: ${reason}`), {
-    code: "REVIEW_LEDGER_INVALID",
-    details: { review_id: reviewId, path: filePath, reason },
-  });
-}
-
-// A review ledger admitted only when it is one this module could have written:
-// the bytes are this module's own serialization, the shape is the state
-// machine's, and every round's snapshot commitment is reproduced from the
-// immutable manifest and patch beside it, the way the gate reproduces the
-// clean round's. For readers that combine the review with other ledgers; the
-// tools' own read path is loadReview and is unchanged.
-export async function loadValidatedReview(storeRoot, reviewId, { visited = new Set(), parentContext = new Map() } = {}) {
-  assertReviewId(reviewId);
-  const filePath = reviewFile(storeRoot, reviewId);
-  // A continuation's source is validated the same way, and its source in
-  // turn; the chain is a line back to a first review, so a review met twice
-  // is a cycle, not a longer chain.
-  if (visited.has(reviewId)) {
-    throw Object.assign(new Error(`continuation chain cycles at ${reviewId}`), {
-      code: "CONTINUATION_CHAIN_CYCLE",
-      details: { review_id: reviewId, path: filePath, chain: [...visited] },
-    });
-  }
-  visited.add(reviewId);
-  let bytes;
-  try {
-    bytes = await fsp.readFile(filePath);
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      throw Object.assign(new Error(`review ${reviewId} not found`), {
-        code: "REVIEW_NOT_FOUND",
-        details: { review_id: reviewId, path: filePath },
-      });
-    }
-    throw error;
-  }
-  let review;
-  try {
-    review = JSON.parse(bytes.toString("utf8"));
-  } catch (error) {
-    throw reviewLedgerInvalid(reviewId, filePath, `not JSON: ${error.message}`);
-  }
-  const defect = reviewLedgerDefect(review, reviewId);
-  if (defect != null) throw reviewLedgerInvalid(reviewId, filePath, defect);
-  if (bytes.toString("utf8") !== `${JSON.stringify(review, null, 2)}\n`) {
-    throw reviewLedgerInvalid(reviewId, filePath, "bytes are not the store's own serialization");
-  }
-  // What a continuation carried is what freezeContinuationSource took from
-  // the source ledger in this store: exactly the source's open findings, each
-  // by id and fingerprint, and the source's errata by sequence. The source is
-  // read here to compare; a source that is gone is named apart from one that
-  // disagrees.
-  // The source a continuation carries from is the one its REVIEW_PREPARED
-  // event recorded, and only that: a ledger with carried records and no
-  // recorded source is not renderable, and a carried record naming any other
-  // review is a disagreement. The source is never inferred from the records.
-  const carriedRecords = [
-    ...(review.carried_findings ?? []),
-    ...(review.errata ?? []).filter((erratum) => erratum.continued_from_review_id != null),
-  ];
-  const recordedSource = review.history[0]?.continued_from_review_id ?? null;
-  if (recordedSource == null && carriedRecords.length > 0) {
-    throw Object.assign(
-      new Error(`review ${reviewId} holds carried records without a recorded source; not renderable`),
-      { code: "CONTINUATION_SOURCE_UNRECORDED", details: { review_id: reviewId, path: filePath, reason: "carried records without a recorded source; not renderable" } },
-    );
-  }
-  for (const sourceId of recordedSource == null ? [] : [recordedSource]) {
-    const stray = carriedRecords.find((record) => record.continued_from_review_id !== sourceId);
-    if (stray != null) {
-      throw Object.assign(
-        new Error(`review ${reviewId} carries a record from ${stray.continued_from_review_id}, but its prepare event recorded ${sourceId} as the source`),
-        { code: "CONTINUATION_SOURCE_MISMATCH", details: { review_id: reviewId, source_review_id: sourceId, path: filePath, reason: `a carried record names ${stray.continued_from_review_id}` } },
-      );
-    }
-    if (sourceId === reviewId) {
-      throw Object.assign(new Error(`review ${reviewId} carries records from itself: a review cannot continue itself`), {
-        code: "CONTINUATION_SOURCE_MISMATCH",
-        details: { review_id: reviewId, source_review_id: sourceId, path: filePath, reason: "a review cannot continue itself" },
-      });
-    }
-    // The source is held to everything this review is held to, through the
-    // same loader, its own sources included.
-    let source;
-    try {
-      source = await loadValidatedReview(storeRoot, sourceId, { visited });
-    } catch (error) {
-      if (error?.code === "CONTINUATION_CHAIN_CYCLE") throw error;
-      if (error?.code === "REVIEW_NOT_FOUND") {
-        throw Object.assign(
-          new Error(`review ${reviewId} carries records from ${sourceId}, which is not in the store: ${error.message}`),
-          { code: "CONTINUATION_SOURCE_MISSING", details: { review_id: reviewId, source_review_id: sourceId, path: filePath } },
-        );
-      }
-      throw Object.assign(
-        new Error(`review ${reviewId} carries records from ${sourceId}, which does not validate: ${error.message}`),
-        {
-          code: "CONTINUATION_SOURCE_INVALID",
-          details: { review_id: reviewId, source_review_id: sourceId, path: filePath, source_code: error?.code ?? null, source_reason: error?.details?.reason ?? error?.message },
-        },
-      );
-    }
-    const mismatch = (what) =>
-      Object.assign(new Error(`review ${reviewId} carries ${what}, which its source ${sourceId} does not hold`), {
-        code: "CONTINUATION_SOURCE_MISMATCH",
-        details: { review_id: reviewId, source_review_id: sourceId, path: filePath, reason: what },
-      });
-    // The freeze records the continuation on the source as an event, one per
-    // continuation, so a re-continued source still names every continuation;
-    // the mutable top-level marker names only the newest. A source with no
-    // such event for this review is refused: either it was frozen into some
-    // other continuation, or the continuation predates the source freeze
-    // (0.10.0) and, like a round the store cannot reproduce, is not
-    // renderable. No exception by date or marker: neither can be bound.
-    const continuedEvents = (source.history ?? []).filter((entry) => entry.event === "REVIEW_CONTINUED");
-    if (!continuedEvents.some((entry) => entry.continued_by_review_id === reviewId)) {
-      const everFrozen = continuedEvents.length > 0 || source.continued_by_review_id != null;
-      throw mismatch(
-        everFrozen
-          ? `records frozen from a source that never recorded continuation into ${reviewId}`
-          : `records from a source that was never frozen: the continuation predates the source freeze; not renderable`,
-      );
-    }
-    const frozen = new Map(
-      source.findings.filter((finding) => finding.status === "OPEN").map((finding) => [finding.id, finding]),
-    );
-    const carriedFromSource = (review.carried_findings ?? []).filter((carried) => carried.continued_from_review_id === sourceId);
-    for (const carried of carriedFromSource) {
-      const finding = frozen.get(carried.finding_id);
-      if (finding == null) throw mismatch(`finding ${JSON.stringify(carried.finding_id)} as open`);
-      if (continuationFindingFingerprint(finding) !== carried.fingerprint_sha256) {
-        throw mismatch(`finding ${JSON.stringify(carried.finding_id)} with fingerprint ${JSON.stringify(carried.fingerprint_sha256)}`);
-      }
-      // The carried copy's own content must hash to that fingerprint too, or
-      // a reworded copy would ride on the source's genuine fingerprint.
-      if (continuationFindingFingerprint(carried) !== carried.fingerprint_sha256) {
-        throw mismatch(`finding ${JSON.stringify(carried.finding_id)} whose carried content does not hash to its fingerprint`);
-      }
-    }
-    // The carried set corresponds one to one with the source's open set, the
-    // empty set included: a review that names a source through any carried
-    // record -- a finding or an erratum -- carries each of that source's open
-    // findings exactly once. The loop above holds every carried record to an
-    // open finding of the source, so with no repeated id and none of the
-    // source's left out, the two sets are the same size as well.
-    const carriedById = new Map();
-    for (const carried of carriedFromSource) {
-      if (carriedById.has(carried.finding_id)) {
-        throw mismatch(`finding ${JSON.stringify(carried.finding_id)} more than once`);
-      }
-      carriedById.set(carried.finding_id, carried);
-    }
-    const missing = [...frozen.keys()].find((id) => !carriedById.has(id));
-    if (missing != null) throw mismatch(`only part of the open findings (source finding ${JSON.stringify(missing)} is not carried)`);
-    // The carried errata are the source's errata, all of them, in order: the
-    // freeze copies the whole list and renumbers it from 1.
-    const sourceErrata = source.errata ?? [];
-    const carriedErrata = (review.errata ?? []).filter((erratum) => erratum.continued_from_review_id === sourceId);
-    if (carriedErrata.length !== sourceErrata.length) {
-      throw mismatch(`${carriedErrata.length} carried erratum/errata, where the source holds ${sourceErrata.length}`);
-    }
-    for (const [index, erratum] of carriedErrata.entries()) {
-      const original = sourceErrata[index];
-      if (original.at !== erratum.at || original.round !== erratum.round || original.text !== erratum.text) {
-        throw mismatch(`erratum ${erratum.sequence} as the source's erratum ${index + 1}`);
-      }
-    }
-  }
-  for (const round of review.rounds) {
-    const directory = roundDirectory(storeRoot, reviewId, round.round);
-    let manifest;
-    try {
-      manifest = JSON.parse(await fsp.readFile(path.join(directory, "manifest.json"), "utf8"));
-    } catch (error) {
-      throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} manifest unreadable: ${error.message}`);
-    }
-    for (const key of Object.keys(manifest)) {
-      if (!(key in round) || canonicalJson(manifest[key]) !== canonicalJson(round[key])) {
-        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} ${key} differs from its immutable manifest`);
-      }
-    }
-    // The snapshot commitment is reproduced by the store's own function, the
-    // one finalize, rereview, and the gate use. A round written before that
-    // function's inputs existed -- worktree_clean above all -- cannot be
-    // reproduced by the store at all, and is named as such rather than as a
-    // damaged ledger; no second hash format is kept for it.
-    const unreproducible = SNAPSHOT_HASH_INPUTS.filter(([field, ok]) => !ok(round[field]));
-    if (unreproducible.length > 0) {
-      throw Object.assign(
-        new Error(
-          `review ${reviewId} round ${round.round} predates ${unreproducible.map(([field]) => field).join(", ")}: the store cannot reproduce this round's snapshot hash`,
-        ),
-        {
-          code: "ROUND_SNAPSHOT_UNREPRODUCIBLE",
-          details: {
-            review_id: reviewId,
-            path: filePath,
-            round: round.round,
-            missing: unreproducible.map(([field]) => field),
-            reason: "the store cannot reproduce this round's snapshot hash",
-          },
-        },
-      );
-    }
-    // A successor proof is bound to the round it proves -- its current head
-    // and base are the round's -- and to its parent when the parent is in
-    // the store: parent_head_sha is the parent's last round's head. A parent
-    // that is not in the store leaves parent_head_sha to the field table's
-    // format check alone.
-    if (round.successor != null) {
-      const proof = round.successor;
-      if (proof.current_head_sha !== round.head_sha) {
-        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof names current_head_sha ${proof.current_head_sha}, but the round's head is ${round.head_sha}`);
-      }
-      if (proof.base_sha != null && proof.base_sha !== round.base_sha) {
-        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof names base_sha ${proof.base_sha}, but the round's base is ${round.base_sha}`);
-      }
-      // A parent in the store is validated the way this review is, its own
-      // sources and parents included; only a store with no ledger for it
-      // leaves the parent absent, and the report marks the parent-derived
-      // fields of such a round as unverified. Each parent is validated along
-      // its own path, so a review whose source and parent coincide is not a
-      // cycle, while a parent chain that returns to this review is. What the
-      // parent says about this round -- absent, or the fields the proof
-      // itself does not record -- is collected for the report; a recursive
-      // validation collects its own and discards it.
-      let parent = null;
-      try {
-        parent = await loadValidatedReview(storeRoot, proof.parent_review_id, { visited: new Set(visited) });
-      } catch (error) {
-        if (error?.code !== "REVIEW_NOT_FOUND") {
-          throw successorParentInvalid(reviewId, filePath, round.round, proof.parent_review_id, error.message);
-        }
-        parentContext.set(round.round, { absent: true, review_id: proof.parent_review_id });
-      }
-      if (parent != null) {
-        // The parent's gate must be present, admitted by the local gate
-        // reader, bound to the parent ledger by the same judge the report
-        // applies to its own gate, and be the file the proof digested.
-        let gate;
-        try {
-          gate = await readLocalGateAuthorization(storeRoot, proof.parent_review_id);
-        } catch (error) {
-          throw successorParentInvalid(reviewId, filePath, round.round, proof.parent_review_id, `parent gate: ${error.message}`);
-        }
-        const mismatch = localGateReviewMismatch(gate, parent);
-        if (mismatch != null) {
-          throw successorParentInvalid(reviewId, filePath, round.round, proof.parent_review_id, `parent gate ${mismatch.field} ${JSON.stringify(mismatch.gate)} differs from the parent ledger's ${JSON.stringify(mismatch.review)}`);
-        }
-        if (proof.parent_gate_sha256 !== gate.source_sha256) {
-          throw successorParentInvalid(reviewId, filePath, round.round, proof.parent_review_id, `proof names parent_gate_sha256 ${proof.parent_gate_sha256}, but the parent gate's bytes digest to ${gate.source_sha256}`);
-        }
-        // Every field the proof took from the parent is recomputed the way
-        // buildSuccessorArtifacts computed it and compared.
-        const expectations = [
-          ["parent_head_sha", parent.rounds?.at(-1)?.head_sha],
-          ["parent_snapshot_hash", parent.clean_snapshot_hash ?? null],
-          ["parent_reviewer_provider", parent.reviewer_provider ?? "CLAUDE_DESKTOP"],
-          ["parent_requirement", parent.requirement],
-          ["requirement_match", parent.requirement === review.requirement],
-        ];
-        // A field an older release's proof does not record is taken from the
-        // parent instead, so the report prints what the parent says rather
-        // than reading an absent field as a value.
-        const derived = {};
-        for (const [field, expected] of expectations) {
-          if (!(field in proof)) {
-            derived[field] = expected;
-            continue;
-          }
-          if (proof[field] !== expected) {
-            throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof names ${field} ${JSON.stringify(proof[field])}, but parent ${proof.parent_review_id} gives ${JSON.stringify(expected)}`);
-          }
-        }
-        parentContext.set(round.round, {
-          derived,
-          review_id: proof.parent_review_id,
-          path: path.join(reviewDirectory(storeRoot, proof.parent_review_id), "review.json"),
-          state_version: parent.state_version ?? 0,
-          gate_sha256: gate.source_sha256,
-        });
-      }
-    }
-    let reproduced;
-    let artifacts;
-    try {
-      reproduced = await snapshotHashFromReviewRound(storeRoot, reviewId, review, round);
-      artifacts = await verifySuccessorArtifacts(storeRoot, reviewId, round);
-    } catch (error) {
-      throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round}: ${error.message}`);
-    }
-    // The proof's file lists are what the stored delta says they are: the
-    // paths its diff headers name, deletions among them by their header.
-    if (artifacts != null) {
-      let fromDelta;
-      try {
-        fromDelta = successorFilesFromDelta(artifacts["successor.diff"]);
-      } catch (error) {
-        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor delta cannot be read for its files: ${error.message}`);
-      }
-      const proof = round.successor;
-      const listed = (values) => JSON.stringify([...values].sort());
-      if (listed(proof.changed_files) !== listed(fromDelta.changed)) {
-        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof lists changed_files ${listed(proof.changed_files)}, but its delta changes ${listed(fromDelta.changed)}`);
-      }
-      if (listed(proof.deleted_files) !== listed(fromDelta.deleted)) {
-        throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof lists deleted_files ${listed(proof.deleted_files)}, but its delta deletes ${listed(fromDelta.deleted)}`);
-      }
-    }
-    if (reproduced !== round.snapshot_hash) {
-      throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} snapshot_hash is not reproduced by its patch`);
-    }
-  }
-  return review;
 }
 
 async function saveReview(storeRoot, review) {
@@ -1778,17 +636,21 @@ async function buildSnapshot({
   const deletedFiles = [...deletedFromBase]
     .filter((relativePath) => !untrackedPaths.has(relativePath))
     .sort();
-  const snapshotHash = snapshotDigest({
-    baseSha,
-    headSha,
-    requirement,
-    implementationScope,
-    changedFiles,
-    deletedFiles,
-    overlays,
-    worktreeClean,
-    patch,
-  });
+  const hash = crypto.createHash("sha256");
+  hash.update(
+    JSON.stringify({
+      baseSha,
+      headSha,
+      requirement,
+      implementationScope,
+      changedFiles,
+      deletedFiles,
+      overlays,
+      worktreeClean,
+    }),
+  );
+  hash.update(patch);
+  const snapshotHash = hash.digest("hex");
 
   const manifest = {
     version: 1,
@@ -1815,79 +677,6 @@ async function buildSnapshot({
 
 function sha256(content) {
   return crypto.createHash("sha256").update(content).digest("hex");
-}
-
-// The snapshot commitment: the round's identity and its patch, and, for a
-// round reviewed as a successor, the proof's own commitments -- the delta's
-// digest and the two heads it spans -- so the gate's snapshot hash covers the
-// proof and a delta swapped afterwards makes the round unreproducible. A
-// FULL round hashes exactly as before.
-function snapshotDigest({
-  baseSha,
-  headSha,
-  requirement,
-  implementationScope,
-  changedFiles,
-  deletedFiles,
-  overlays,
-  worktreeClean,
-  patch,
-  successor = null,
-}) {
-  const hash = crypto.createHash("sha256");
-  hash.update(
-    JSON.stringify({
-      baseSha,
-      headSha,
-      requirement,
-      implementationScope,
-      changedFiles,
-      deletedFiles,
-      overlays,
-      worktreeClean,
-      ...(successor == null
-        ? {}
-        : {
-            successor: {
-              deltaSha256: successor.delta_sha256,
-              parentHeadSha: successor.parent_head_sha,
-              currentHeadSha: successor.current_head_sha,
-            },
-          }),
-    }),
-  );
-  hash.update(patch);
-  return hash.digest("hex");
-}
-
-// Folds a successor proof into the round's manifest after the proof exists:
-// the manifest gains the proof's commitments and its snapshot hash is
-// recomputed over them, and the stored manifest is rewritten so the round and
-// the file agree. Without a proof the manifest is returned untouched.
-async function foldSuccessorIntoManifest({ roundRoot, manifest, patch, successor, requirement, implementationScope, write }) {
-  if (successor == null) return manifest;
-  const folded = {
-    ...manifest,
-    successor_delta_sha256: successor.delta_sha256,
-    successor_parent_head_sha: successor.parent_head_sha,
-    successor_current_head_sha: successor.current_head_sha,
-  };
-  folded.snapshot_hash = snapshotDigest({
-    baseSha: manifest.base_sha,
-    headSha: manifest.head_sha,
-    requirement,
-    implementationScope,
-    changedFiles: manifest.changed_files,
-    deletedFiles: manifest.deleted_files,
-    overlays: manifest.overlays,
-    worktreeClean: manifest.worktree_clean,
-    patch,
-    successor,
-  });
-  if (write) {
-    await atomicWriteJson(path.join(roundRoot, "manifest.json"), folded);
-  }
-  return folded;
 }
 
 async function snapshotHashFromReviewRound(
@@ -1928,56 +717,21 @@ async function snapshotHashFromReviewRound(
   ) {
     throw new Error("review change size does not match its immutable patch");
   }
-  // A successor round's commitment covers its proof. The round carries the
-  // proof's commitments beside the proof and they must equal it. A successor
-  // round with none of them predates the commitment: its hash is reproduced
-  // over the round alone, and the proof stays as recorded, uncovered; the
-  // report says so. A round with some of them is neither and is refused.
-  let successor = null;
-  if (round.successor != null) {
-    const commitment = {
-      delta_sha256: round.successor_delta_sha256,
-      parent_head_sha: round.successor_parent_head_sha,
-      current_head_sha: round.successor_current_head_sha,
-    };
-    const recorded = Object.values(commitment).filter((value) => value != null).length;
-    if (recorded === 0) {
-      return snapshotDigest({
-        baseSha: round.base_sha,
-        headSha: round.head_sha,
-        requirement: review.requirement,
-        implementationScope: review.implementation_scope,
-        changedFiles: round.changed_files,
-        deletedFiles: round.deleted_files,
-        overlays: round.overlays,
-        worktreeClean: round.worktree_clean,
-        patch,
-      });
-    }
-    if (recorded < 3) {
-      throw new Error("review round's successor commitment is incomplete");
-    }
-    if (
-      commitment.delta_sha256 !== round.successor.delta_sha256 ||
-      commitment.parent_head_sha !== round.successor.parent_head_sha ||
-      commitment.current_head_sha !== round.successor.current_head_sha
-    ) {
-      throw new Error("review round's successor commitment does not match its proof");
-    }
-    successor = commitment;
-  }
-  return snapshotDigest({
-    baseSha: round.base_sha,
-    headSha: round.head_sha,
-    requirement: review.requirement,
-    implementationScope: review.implementation_scope,
-    changedFiles: round.changed_files,
-    deletedFiles: round.deleted_files,
-    overlays: round.overlays,
-    worktreeClean: round.worktree_clean,
-    patch,
-    successor,
-  });
+  const hash = crypto.createHash("sha256");
+  hash.update(
+    JSON.stringify({
+      baseSha: round.base_sha,
+      headSha: round.head_sha,
+      requirement: review.requirement,
+      implementationScope: review.implementation_scope,
+      changedFiles: round.changed_files,
+      deletedFiles: round.deleted_files,
+      overlays: round.overlays,
+      worktreeClean: round.worktree_clean,
+    }),
+  );
+  hash.update(patch);
+  return hash.digest("hex");
 }
 
 async function repositoryIdentity(repositoryPath) {
@@ -2025,64 +779,6 @@ async function verifySuccessorArtifacts(
     throw new Error("successor artifact integrity check failed");
   }
 }
-
-// The successor proof buildSuccessorArtifacts writes to successor.json and
-// into the round. The validator also requires the stored artifact to equal
-// the round's copy byte for byte, through verifySuccessorArtifacts.
-const SUCCESSOR_FIELDS = [
-  { field: "version", describe: "1", ok: (v) => v === 1 },
-  { field: "parent_review_id", describe: "a review ID", ok: isReviewIdValue },
-  { field: "parent_reviewer_provider", describe: "a reviewer provider", ok: (v) => REVIEWER_PROVIDERS.includes(v) },
-  { field: "parent_requirement", describe: "a string", optional: true, ok: (v) => typeof v === "string" },
-  { field: "requirement_match", describe: "a boolean", optional: true, ok: (v) => typeof v === "boolean" },
-  { field: "parent_snapshot_hash", describe: "a digest", ok: isDigest },
-  { field: "parent_gate_sha256", describe: "a digest", ok: isDigest },
-  { field: "base_sha", describe: "a commit", ok: isSha },
-  { field: "parent_head_sha", describe: "a commit", ok: isSha },
-  { field: "current_head_sha", describe: "a commit", ok: isSha },
-  { field: "parent_tree_sha", describe: "a tree", ok: isSha },
-  { field: "current_tree_sha", describe: "a tree", ok: isSha },
-  { field: "changed_files", describe: "a list of paths", ok: isStringList },
-  { field: "deleted_files", describe: "a list of paths", ok: isStringList },
-  { field: "delta_bytes", describe: "a non-negative integer", ok: isCount },
-  { field: "delta_sha256", describe: "a digest", ok: isDigest },
-];
-
-// The round buildSnapshot writes to manifest.json plus its position and its
-// successor proof. Every manifest key is also compared with manifest.json by
-// the validator. change_size arrived with a later release, so it is optional.
-const ROUND_FIELDS = [
-  { field: "round", describe: "the round's position", ok: (v, { index }) => v === index + 1 },
-  { field: "version", describe: "1", ok: (v) => v === 1 },
-  { field: "captured_at", describe: describeTimestamp, ok: isTimestamp },
-  { field: "repository_path", describe: "the review's repository_path", ok: (v, { review }) => v === review.repository_path },
-  { field: "base_ref", describe: "the review's base_ref", ok: (v, { review }) => v === review.base_ref },
-  { field: "base_sha", describe: "a commit", ok: isSha },
-  { field: "head_sha", describe: "a commit", ok: isSha },
-  { field: "snapshot_hash", describe: "a digest", ok: isDigest },
-  { field: "changed_files", describe: "a list of paths", ok: isStringList },
-  { field: "deleted_files", describe: "a list of paths", ok: isStringList },
-  { field: "overlays", describe: "a list of overlay records", ok: (v) => Array.isArray(v) && v.every((o) => o != null && typeof o === "object" && typeof o.path === "string") },
-  { field: "worktree_clean", describe: "a boolean", optional: true, ok: (v) => typeof v === "boolean" },
-  { field: "patch_bytes", describe: "a non-negative integer", ok: isCount },
-  {
-    field: "change_size",
-    describe: "null or {added_lines, deleted_lines, total_lines} that add up",
-    optional: true,
-    ok: nullOr((v) =>
-      v != null && typeof v === "object" && !Array.isArray(v) &&
-      Object.keys(v).every((key) => ["added_lines", "deleted_lines", "total_lines"].includes(key)) &&
-      isCount(v.added_lines) && isCount(v.deleted_lines) && v.total_lines === v.added_lines + v.deleted_lines),
-  },
-  // Absent on rounds older than successor reviews; null on a FULL round since.
-  { field: "successor", describe: "null or a successor proof", optional: true, ok: nullOr((v) => recordDefect(v, SUCCESSOR_FIELDS, {}, "successor") == null) },
-  // The proof's commitments the snapshot hash covers, present beside a proof
-  // written since the commitment existed; a successor round without them
-  // predates it and renders its proof as recorded, uncovered.
-  { field: "successor_delta_sha256", describe: "a digest", optional: true, ok: isDigest },
-  { field: "successor_parent_head_sha", describe: "a commit", optional: true, ok: isSha },
-  { field: "successor_current_head_sha", describe: "a commit", optional: true, ok: isSha },
-];
 
 async function buildSuccessorArtifacts({
   storeRoot,
@@ -2143,9 +839,13 @@ async function buildSuccessorArtifacts({
       "parent clean snapshot is not present in its review ledger",
     );
   }
+  const validObjectId = (value) =>
+    typeof value === "string" &&
+    (value.length === 40 || value.length === 64) &&
+    /^[0-9a-f]+$/.test(value);
   if (
-    !isObjectId(parentRound.base_sha) ||
-    !isObjectId(parentRound.head_sha) ||
+    !validObjectId(parentRound.base_sha) ||
+    !validObjectId(parentRound.head_sha) ||
     typeof parentRound.snapshot_hash !== "string"
   ) {
     return fullStrategy("parent review ledger is malformed");
@@ -2401,36 +1101,6 @@ export function continuationFindingFingerprint(finding) {
     }),
   );
 }
-
-// The carried finding continuationFindings freezes into a continuation.
-const CARRIED_FINDING_FIELDS = [
-  { field: "continued_from_review_id", describe: "a review ID", ok: isReviewIdValue },
-  { field: "finding_id", describe: "a finding ID", ok: (v) => /^F-\d{3,}$/.test(v ?? "") },
-  { field: "fingerprint_sha256", describe: "a digest", ok: isDigest },
-  { field: "severity", describe: "blocker, major, minor, or nit", ok: oneOf(["blocker", "major", "minor", "nit"]) },
-  { field: "title", describe: "a non-empty string of at most 500 characters", ok: isText(500) },
-  { field: "explanation", describe: "a non-empty string of at most 20,000 characters", ok: isText(20_000) },
-  { field: "recommendation", describe: "a string of at most 20,000 characters", ok: isText(20_000, { allowEmpty: true }) },
-  { field: "path", describe: "absent, or a safe relative path", optional: true, ok: (v) => { try { return safeRelativePath(v, "finding.path") === v; } catch { return false; } } },
-  { field: "line", describe: "absent, or a positive integer", optional: true, ok: (v) => Number.isInteger(v) && v >= 1 },
-];
-
-// The erratum appendReviewErratum records, and the copy continuationErrata
-// carries into a continuation with the source it came from.
-const ERRATUM_FIELDS = [
-  { field: "sequence", describe: "the erratum's position", ok: (v, { index }) => v === index + 1 },
-  { field: "at", describe: describeTimestamp, ok: isTimestamp },
-  {
-    field: "round",
-    describe: "a round the ledger holds, or a positive integer for an erratum carried from a source review",
-    ok: (v, { review, record }) =>
-      record.continued_from_review_id != null
-        ? Number.isInteger(v) && v >= 1
-        : review.rounds.some((round) => round.round === v),
-  },
-  { field: "text", describe: `a non-empty string of at most ${MAX_ERRATUM_TEXT} characters`, ok: isText(MAX_ERRATUM_TEXT) },
-  { field: "continued_from_review_id", describe: "a review ID", optional: true, ok: isReviewIdValue },
-];
 
 function continuationFindings(review) {
   return review.findings
@@ -2831,7 +1501,7 @@ export async function prepareReview(
   await fsp.mkdir(root, { recursive: true, mode: 0o700 });
   return withReviewMutationLock(storeRoot, id, async () => {
     const roundRoot = roundDirectory(storeRoot, id, 1);
-    const { manifest, patch } = await buildSnapshot({
+    const { manifest } = await buildSnapshot({
       repositoryPath,
       baseRef,
       requirement,
@@ -2875,15 +1545,6 @@ export async function prepareReview(
       manifest,
       roundRoot,
     });
-    const committed = await foldSuccessorIntoManifest({
-      roundRoot,
-      manifest,
-      patch,
-      successor: successorResult.successor,
-      requirement,
-      implementationScope,
-      write: true,
-    });
     const carried =
       continuedReview == null
         ? { carriedFindings: [], carriedErrata: [] }
@@ -2906,7 +1567,7 @@ export async function prepareReview(
       status: "WAITING_FOR_REVIEW",
       current_round: 1,
       max_rounds: MAX_ROUNDS,
-      rounds: [{ round: 1, ...committed, successor: successorResult.successor }],
+      rounds: [{ round: 1, ...manifest, successor: successorResult.successor }],
       findings: [],
       resolutions: [],
       rereview_decisions: [],
@@ -2918,9 +1579,6 @@ export async function prepareReview(
           event: "REVIEW_PREPARED",
           round: 1,
           mode: successorResult.strategy.mode,
-          // A continuation names its source here, once, where the ledger
-          // is created; the carried records are then held to this source.
-          ...(continuedFromReviewId == null ? {} : { continued_from_review_id: continuedFromReviewId }),
         },
       ],
     };
@@ -3214,72 +1872,6 @@ export async function waitForReviewState(
   };
 }
 
-// What normalizeFinding writes is what the ledger validator checks: one entry
-// per field the writer sets, with its type, its value domain, and its
-// reference into the rest of the ledger. A field added to the writer is added
-// here, or the validator refuses the writer's own output. `status` is also
-// derived and compared against the finding's records by the validator.
-const FINDING_FIELDS = [
-  {
-    field: "id",
-    describe: "the position-based finding ID",
-    ok: (value, { index }) => value === `F-${String(index + 1).padStart(3, "0")}`,
-  },
-  {
-    field: "introduced_round",
-    describe: "a round the ledger holds",
-    ok: (value, { review }) =>
-      Number.isInteger(value) && review.rounds.some((round) => round.round === value),
-  },
-  {
-    field: "severity",
-    describe: "blocker, major, minor, or nit",
-    ok: (value) => ["blocker", "major", "minor", "nit"].includes(value),
-  },
-  {
-    field: "title",
-    describe: "a non-empty string of at most 500 characters",
-    ok: (value) => typeof value === "string" && value !== "" && value.length <= 500,
-  },
-  {
-    field: "explanation",
-    describe: "a non-empty string of at most 20,000 characters",
-    ok: (value) => typeof value === "string" && value !== "" && value.length <= 20_000,
-  },
-  {
-    field: "recommendation",
-    describe: "a string of at most 20,000 characters",
-    ok: (value) => typeof value === "string" && value.length <= 20_000,
-  },
-  {
-    field: "status",
-    describe: "a finding status the writers set",
-    ok: (value) => LEDGER_FINDING_STATUSES.includes(value),
-  },
-  {
-    field: "path",
-    describe: "absent, or a safe relative path",
-    optional: true,
-    ok: (value) => {
-      try {
-        return safeRelativePath(value, "finding.path") === value;
-      } catch {
-        return false;
-      }
-    },
-  },
-  {
-    field: "line",
-    describe: "absent, or a positive integer",
-    optional: true,
-    ok: (value) => Number.isInteger(value) && value >= 1,
-  },
-];
-
-function findingDefect(finding, index, review) {
-  return recordDefect(finding, FINDING_FIELDS, { index, review }, `finding ${JSON.stringify(finding?.id ?? index + 1)}`);
-}
-
 function normalizeFinding(input, id, round) {
   if (!input || typeof input !== "object") {
     throw new Error("each finding must be an object");
@@ -3384,15 +1976,6 @@ async function submitInitialReviewWhileLocked(
   return publicReview(review);
 }
 
-// The author response submitResolutions records per open finding.
-const RESOLUTION_FIELDS = [
-  { field: "finding_id", describe: "a finding ID", ok: (v) => /^F-\d{3,}$/.test(v ?? "") },
-  { field: "disposition", describe: "fixed, rejected, or human_required", ok: oneOf(LEDGER_DISPOSITIONS) },
-  { field: "rationale", describe: "a non-empty string of at most 20,000 characters", ok: isText(20_000) },
-  { field: "evidence", describe: "a string of at most 20,000 characters", ok: isText(20_000, { allowEmpty: true }) },
-  { field: "submitted_at", describe: describeTimestamp, ok: isTimestamp },
-];
-
 export async function submitResolutions(storeRoot, reviewId, inputs) {
   return withReviewMutationLock(storeRoot, reviewId, () =>
     submitResolutionsWhileLocked(storeRoot, reviewId, inputs),
@@ -3452,8 +2035,12 @@ async function submitResolutionsWhileLocked(storeRoot, reviewId, inputs) {
       submitted_at: now(),
     };
     resolutions.push(resolution);
-    finding.status = dispositionStatus(disposition);
-    if (disposition === "human_required") {
+    if (disposition === "fixed") {
+      finding.status = "AUTHOR_FIXED";
+    } else if (disposition === "rejected") {
+      finding.status = "AUTHOR_REJECTED";
+    } else {
+      finding.status = "HUMAN_REQUIRED";
       humanRequired = true;
     }
   }
@@ -3552,7 +2139,7 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
   }
   const round = review.current_round + 1;
   const roundRoot = roundDirectory(storeRoot, review.id, round);
-  const { manifest, patch } = await buildSnapshot({
+  const { manifest } = await buildSnapshot({
     repositoryPath: review.repository_path,
     baseRef: review.base_ref,
     requirement: review.requirement,
@@ -3597,18 +2184,9 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
   // a fresh context that submits without opening — its verdict then records
   // zero rather than inheriting round one's open.
   review.last_opened_errata_watermark = 0;
-  const committed = await foldSuccessorIntoManifest({
-    roundRoot,
-    manifest,
-    patch,
-    successor: successorResult.successor,
-    requirement: review.requirement,
-    implementationScope: review.implementation_scope,
-    write: true,
-  });
   review.rounds.push({
     round,
-    ...committed,
+    ...manifest,
     successor: successorResult.successor,
   });
   review.review_strategy = successorResult.strategy;
@@ -3622,23 +2200,6 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
   await saveReviewTransition(storeRoot, review);
   return publicReview(review);
 }
-
-// The decision submitRereview records per author response. A sustained
-// rebuttal carries the verification the obligation requires; the other
-// decisions carry one only when the rereviewer gave it.
-const REREVIEW_DECISION_FIELDS = [
-  { field: "finding_id", describe: "a finding ID", ok: (v) => /^F-\d{3,}$/.test(v ?? "") },
-  { field: "decision", describe: "resolved, rebuttal_accepted, or still_open", ok: oneOf(LEDGER_DECISIONS) },
-  { field: "rationale", describe: "a non-empty string of at most 20,000 characters", ok: isText(20_000) },
-  {
-    field: "verification",
-    describe: "a string of at most 20,000 characters, non-empty for rebuttal_accepted",
-    // Older decisions predate the field; the report says so where it matters.
-    optional: true,
-    ok: (v, { record }) => isText(20_000, { allowEmpty: record.decision !== "rebuttal_accepted" })(v),
-  },
-  { field: "submitted_at", describe: describeTimestamp, ok: isTimestamp },
-];
 
 export async function submitRereview(
   storeRoot,
@@ -3716,8 +2277,12 @@ async function submitRereviewWhileLocked(
       submitted_at: now(),
     };
     review.rereview_decisions.push(record);
-    finding.status = decisionStatus(decision);
-    if (decision === "still_open") {
+    if (decision === "resolved") {
+      finding.status = "RESOLVED";
+    } else if (decision === "rebuttal_accepted") {
+      finding.status = "REBUTTAL_ACCEPTED";
+    } else {
+      finding.status = "STILL_OPEN";
       contested = true;
     }
   }
@@ -3807,24 +2372,13 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
       "stored review patch does not match its snapshot commitment",
     );
   }
-  const fresh = await buildSnapshot({
+  const { manifest } = await buildSnapshot({
     repositoryPath: review.repository_path,
     baseRef: review.base_ref,
     requirement: review.requirement,
     implementationScope: review.implementation_scope,
     roundRoot: "",
     writeFiles: false,
-  });
-  // The clean round's proof is part of its commitment, so the fresh
-  // snapshot is committed the same way before the two are compared.
-  const manifest = await foldSuccessorIntoManifest({
-    roundRoot: "",
-    manifest: fresh.manifest,
-    patch: fresh.patch,
-    successor: cleanRound.successor,
-    requirement: review.requirement,
-    implementationScope: review.implementation_scope,
-    write: false,
   });
   if (manifest.snapshot_hash !== review.clean_snapshot_hash) {
     throw new Error(

@@ -67,11 +67,6 @@ both.
 
 Node.js 18 or newer is required. CI verifies each change on macOS and Ubuntu
 with Node 20.
-
-A repository hashing its objects as SHA-256 can be reviewed locally: the
-ledger, the local gate, and the report all admit its 64-character object ids.
-The remote publication path does not yet accept them, so such a repository
-cannot run the autonomous workflow or the GitHub publication gate.
 The GitHub publication collector also requires an authenticated
 [GitHub CLI](https://cli.github.com/) (`gh auth status`).
 
@@ -745,36 +740,8 @@ summary fields the report prints, so a gate appearing or evidence expiring
 writes a new report rather than reusing one that says otherwise. Both read every ledger through the reader the server
 itself uses, so a publication that is not canonical, names another review, or
 is not bound to the gate or authorization file beside it fails the render with
-that reader's error, and a review ledger whose bytes, shape, or round snapshot
-commitments are not what the store wrote is refused as well. A review created
-before `worktree_clean` was recorded cannot be rendered: the store's own
-snapshot reproduction needs it, and the report keeps no second hash format
-(`ROUND_SNAPSHOT_UNREPRODUCIBLE`). From this release the manifest of a round
-reviewed as a successor records the delta's digest and the two heads it
-spans, and the snapshot hash is computed over them, so the gate's
-`snapshot_hash` vouches for the delta. A successor round prepared before that
-still renders: its hash is reproduced over the round alone, and its proof is
-rendered as recorded, the strategy heading marked `unverified proof` and each
-item marked as not covered by the snapshot commitment, so the report relays
-the record without vouching for it. A successor's parent that is in the store
-is validated the way the review is, its gate must be present, admitted by the
-local gate reader and bound to the parent ledger, and the proof's digest of
-that gate must be the file's, or the review is refused
-(`SUCCESSOR_PARENT_INVALID`); a parent not in the store leaves the
-parent-derived fields to their format checks, and the report marks the round
-and each such field as unverified. Nor can a continuation prepared before the
-source freeze: its source never recorded it, and the report accepts no
-continuation its source does not vouch for (`CONTINUATION_SOURCE_MISMATCH`);
-a source is validated the way the continuation is, its own sources included.
-A continuation's source is the one its `REVIEW_PREPARED` event records as
-`continued_from_review_id`, which `prepare_review` writes from this release
-on; a continuation prepared before that field existed is not renderable
-(`CONTINUATION_SOURCE_UNRECORDED`), whether or not its source was frozen.
-No exception is made by date, marker, or carried record: every such opening
-for older ledgers proved unbindable, and the recorded source is the one form
-that depends on nothing mutable. In the operator's store at the time of
-writing that is 34 continuation ledgers. Neither changes a ledger, consumes a round, or touches
-a gate. The workflow skill renders the report once `LOCAL_GATE_PASSED` is
+that reader's error, and a review ledger filed under another review's id is
+refused. Neither changes a ledger, consumes a round, or touches a gate. The workflow skill renders the report once `LOCAL_GATE_PASSED` is
 recorded and again once a publication reads `MERGE_READY`, and opens it in
 Plannotator when that tool is on PATH; annotations never flow back into the
 ledger. Like operator narration, the report is a projection of the ledger, not
