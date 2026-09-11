@@ -2122,6 +2122,64 @@ test("a SHA-256 repository's review is prepared, gated, and rendered, and a ledg
   });
 });
 
+// A repository with copy detection on (`diff.renames = copies`) makes git
+// write `copy from`/`copy to` blocks, and a copy git found identical has no
+// `---`/`+++` and a header whose operands differ. The copy lines state the
+// paths, so the block reads like a rename's.
+test("a delta with a copy block is read as the writer's file lists", async (t) => {
+  const state = await successorFixture(t, {
+    seed: { "src.txt": "alpha\nbeta\ngamma\ndelta\nepsilon\n" },
+    edit: async (repository) => {
+      git(repository, "config", "diff.renames", "copies");
+      // A copy of the source as it stands, and the source changed, which is
+      // what lets git pair them as a copy at all.
+      await fsp.copyFile(path.join(repository, "src.txt"), path.join(repository, "copy of src.txt"));
+      await fsp.writeFile(path.join(repository, "src.txt"), "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\n");
+    },
+  });
+  const directory = path.join(state.store, "reviews", state.successorId);
+  const delta = await fsp.readFile(path.join(directory, "rounds", "1", "successor.diff"), "utf8");
+  // The block git wrote: a copy, identical, so it states its paths and
+  // nothing else does.
+  assert.match(delta, /^diff --git a\/src\.txt b\/copy of src\.txt\nsimilarity index 100%\ncopy from src\.txt\ncopy to copy of src\.txt\n/m);
+  const review = JSON.parse(await fsp.readFile(path.join(directory, "review.json"), "utf8"));
+  assert.deepEqual(review.rounds[0].successor.changed_files, ["copy of src.txt", "src.txt", "value.test.js"]);
+  assert.equal((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).reused, false);
+});
+
+// A timestamp is what the store writes: UTC with milliseconds. Anything
+// Date.parse merely tolerates is refused, and the defect says what the value
+// normalizes to.
+test("a timestamp that is not the one the store would write is refused", async (t) => {
+  const state = await gatedFixture(t);
+  const reviewPath = path.join(state.store, "reviews", state.reviewId, "review.json");
+  const original = await fsp.readFile(reviewPath, "utf8");
+  assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, false);
+  for (const [written, normalized] of [
+    // Date.parse takes a bare "0" as a year in local time, so the instant it
+    // names depends on the machine; that it is not what the store writes
+    // does not.
+    ["0", new Date("0").toISOString()],
+    ["2026-02-30T00:00:00.000Z", "2026-03-02T00:00:00.000Z"],
+    ["2026-09-01T00:00:00Z", "2026-09-01T00:00:00.000Z"],
+  ]) {
+    const review = JSON.parse(original);
+    review.history[0].at = written;
+    await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
+    await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+      assert.equal(error.code, "REVIEW_LEDGER_INVALID", error.message);
+      assert.equal(
+        error.details.reason,
+        `history entry 1 (REVIEW_PREPARED) at ${JSON.stringify(written)} is not the timestamp the store would write (${normalized})`,
+      );
+      assert.notEqual(normalized, written);
+      return true;
+    });
+  }
+  await fsp.writeFile(reviewPath, original, { mode: 0o600 });
+  assert.equal((await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT })).reused, true);
+});
+
 // A path with a space cannot be told from the `diff --git` header alone, so
 // the paths come from the lines of the block that state one: the rename
 // lines, the `---`/`+++` lines, and, only for the binary block that has

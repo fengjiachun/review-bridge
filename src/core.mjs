@@ -249,7 +249,22 @@ const LEDGER_DECISIONS = ["resolved", "rebuttal_accepted", "still_open"];
 const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 const REVIEW_ID_LEDGER_PATTERN = /^rb-[0-9TZ-]+-[a-f0-9]{8}$/;
-const isTimestamp = (value) => typeof value === "string" && Number.isFinite(Date.parse(value));
+// Every timestamp the store writes is `new Date().toISOString()`: UTC, with
+// milliseconds. A value is one only if it round-trips through that, which
+// refuses what Date.parse takes loosely -- "0", a day that does not exist, a
+// string without milliseconds -- and the defect names what it normalizes to.
+const normalizedTimestamp = (value) => {
+  if (typeof value !== "string") return null;
+  const at = new Date(value);
+  return Number.isFinite(at.getTime()) ? at.toISOString() : null;
+};
+const isTimestamp = (value) => normalizedTimestamp(value) === value;
+const describeTimestamp = (value) => {
+  const normalized = normalizedTimestamp(value);
+  return normalized == null
+    ? "a timestamp"
+    : `the timestamp the store would write (${normalized})`;
+};
 const isText = (max, { allowEmpty = false } = {}) => (value) =>
   typeof value === "string" && (allowEmpty || value !== "") && value.length <= max;
 const isStringList = (value) => Array.isArray(value) && value.every((item) => typeof item === "string");
@@ -277,7 +292,10 @@ function recordDefect(record, fields, context, label) {
       return `${label} has no ${field}`;
     }
     if (!ok(record[field], { ...context, record })) {
-      return `${label} ${field} ${JSON.stringify(record[field])} is not ${describe}`;
+      // A description may depend on the value, to say what it should have
+      // been beside what it is.
+      const expected = typeof describe === "function" ? describe(record[field]) : describe;
+      return `${label} ${field} ${JSON.stringify(record[field])} is not ${expected}`;
     }
   }
   return null;
@@ -338,7 +356,7 @@ const HISTORY_EVENT_FIELDS = {
   REVIEW_CONTINUED: [{ field: "continued_by_review_id", describe: "a review ID", ok: isReviewIdValue }],
 };
 const HISTORY_COMMON_FIELDS = [
-  { field: "at", describe: "a timestamp", ok: isTimestamp },
+  { field: "at", describe: describeTimestamp, ok: isTimestamp },
   { field: "event", describe: "a history event the writers record", ok: (v) => v in HISTORY_EVENT_FIELDS },
 ];
 
@@ -347,8 +365,8 @@ const HISTORY_COMMON_FIELDS = [
 const REVIEW_LEDGER_FIELDS = [
   { field: "version", describe: "1", ok: (v) => v === 1 },
   { field: "id", describe: "a review ID", ok: isReviewIdValue },
-  { field: "created_at", describe: "a timestamp", ok: isTimestamp },
-  { field: "updated_at", describe: "a timestamp", ok: isTimestamp },
+  { field: "created_at", describe: describeTimestamp, ok: isTimestamp },
+  { field: "updated_at", describe: describeTimestamp, ok: isTimestamp },
   { field: "state_version", describe: "a positive integer", optional: true, ok: (v) => Number.isInteger(v) && v >= 1 },
   { field: "last_transition_state_version", describe: "a positive integer", optional: true, ok: (v) => Number.isInteger(v) && v >= 1 },
   { field: "repository_path", describe: "a non-empty absolute path", ok: (v) => typeof v === "string" && path.isAbsolute(v) },
@@ -879,13 +897,14 @@ function reviewLedgerDefect(review, reviewId) {
 // deletion too.
 //
 // The path is taken from the lines that state one unambiguously, each running
-// to the end of its line: `rename from`/`rename to`, else `---`/`+++`, where
-// `/dev/null` stands for the side that does not exist. Only the preamble
-// before the first hunk is read, since a hunk's own lines can look like
-// either. The `diff --git` header is the last resort, for the block
-// `--binary` writes for a binary file, which has neither: its two operands
-// can only be told apart where they are the same path, which is every header
-// but a rename's. A block this cannot read is an error, not a guess.
+// to the end of its line: the extended header lines that name a path, else
+// `---`/`+++`, where `/dev/null` stands for the side that does not exist.
+// Only the preamble before the first hunk is read, since a hunk's own lines
+// can look like either. The `diff --git` header is the last resort, for a
+// block that has neither -- what `--binary` writes for a binary file, and
+// what a rename or copy git found identical writes: its two operands can
+// only be told apart where they are the same path, which is every header but
+// a rename's or a copy's. A block this cannot read is an error, not a guess.
 function successorFilesFromDelta(delta) {
   const text = delta.toString("utf8");
   const changed = new Set();
@@ -960,15 +979,24 @@ function successorFilesFromDelta(delta) {
       if (!unquoted.startsWith(prefix)) throw new Error(`unreadable path ${JSON.stringify(raw)}`);
       return unquoted.slice(2);
     };
-    const renameFrom = stated("rename from ");
-    const renameTo = stated("rename to ");
+    // git's extended header states a path on exactly four lines: `rename
+    // from`/`rename to`, and, where the diff was taken with copy detection
+    // (`-C`, or `diff.renames = copies` in the repository's own config),
+    // `copy from`/`copy to`. Every other extended line names none: `old
+    // mode`, `new mode`, `new file mode`, `deleted file mode`, `similarity
+    // index`, `dissimilarity index`, `index`. That is git's header syntax as
+    // `git help diff-generate-patch` gives it, not an inference from samples.
+    // A copy is read like a rename: the writer's `--name-only` reports the
+    // new path, and the source, if it changed at all, has its own block.
+    const from = stated("rename from ") ?? stated("copy from ");
+    const to = stated("rename to ") ?? stated("copy to ");
     const minus = stated("--- ");
     const plus = stated("+++ ");
     let before;
     let after;
-    if (renameFrom != null && renameTo != null) {
-      before = unquote(renameFrom);
-      after = unquote(renameTo);
+    if (from != null && to != null) {
+      before = unquote(from);
+      after = unquote(to);
     } else if (minus != null && plus != null) {
       before = sidePath(minus, "a/");
       after = sidePath(plus, "b/");
@@ -2026,7 +2054,7 @@ const SUCCESSOR_FIELDS = [
 const ROUND_FIELDS = [
   { field: "round", describe: "the round's position", ok: (v, { index }) => v === index + 1 },
   { field: "version", describe: "1", ok: (v) => v === 1 },
-  { field: "captured_at", describe: "a timestamp", ok: isTimestamp },
+  { field: "captured_at", describe: describeTimestamp, ok: isTimestamp },
   { field: "repository_path", describe: "the review's repository_path", ok: (v, { review }) => v === review.repository_path },
   { field: "base_ref", describe: "the review's base_ref", ok: (v, { review }) => v === review.base_ref },
   { field: "base_sha", describe: "a commit", ok: isSha },
@@ -2391,7 +2419,7 @@ const CARRIED_FINDING_FIELDS = [
 // carries into a continuation with the source it came from.
 const ERRATUM_FIELDS = [
   { field: "sequence", describe: "the erratum's position", ok: (v, { index }) => v === index + 1 },
-  { field: "at", describe: "a timestamp", ok: isTimestamp },
+  { field: "at", describe: describeTimestamp, ok: isTimestamp },
   {
     field: "round",
     describe: "a round the ledger holds, or a positive integer for an erratum carried from a source review",
@@ -3362,7 +3390,7 @@ const RESOLUTION_FIELDS = [
   { field: "disposition", describe: "fixed, rejected, or human_required", ok: oneOf(LEDGER_DISPOSITIONS) },
   { field: "rationale", describe: "a non-empty string of at most 20,000 characters", ok: isText(20_000) },
   { field: "evidence", describe: "a string of at most 20,000 characters", ok: isText(20_000, { allowEmpty: true }) },
-  { field: "submitted_at", describe: "a timestamp", ok: isTimestamp },
+  { field: "submitted_at", describe: describeTimestamp, ok: isTimestamp },
 ];
 
 export async function submitResolutions(storeRoot, reviewId, inputs) {
@@ -3609,7 +3637,7 @@ const REREVIEW_DECISION_FIELDS = [
     optional: true,
     ok: (v, { record }) => isText(20_000, { allowEmpty: record.decision !== "rebuttal_accepted" })(v),
   },
-  { field: "submitted_at", describe: "a timestamp", ok: isTimestamp },
+  { field: "submitted_at", describe: describeTimestamp, ok: isTimestamp },
 ];
 
 export async function submitRereview(
