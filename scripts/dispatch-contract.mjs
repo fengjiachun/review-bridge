@@ -450,6 +450,12 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the host home's sensitive contents are absent rather than denied",
       /host home's sensitive contents are absent rather than denied/,
     ],
+    // Codex round thirty-two on #125: --tail bounded only what the launcher
+    // read back, not the log Docker keeps on the host.
+    [
+      "container logs are bounded on the host and repeats are collapsed",
+      /Every container the launcher starts writes through a bounded json-file log driver \(16 MB, two files\) and the sidecar collapses a record that repeats into a counted line/,
+    ],
     // Codex round four on #125: "absent" and "exactly one entry" cannot be
     // judged from the mounted container alone (the image has /root, /usr…),
     // and the checkout's own .git/config can carry a token.

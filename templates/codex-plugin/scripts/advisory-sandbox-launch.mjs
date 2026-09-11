@@ -267,8 +267,27 @@ function runEgressProxy() {
   const allowlist = (process.env.EGRESS_ALLOW ?? EGRESS_ALLOW.join(",")).split(",").filter(Boolean);
   const listenPort = Number(process.env.EGRESS_LISTEN_PORT ?? PROXY_PORT);
   const upstreamPort = Number(process.env.EGRESS_UPSTREAM_PORT ?? 443);
-  const log = (...parts) =>
-    process.stdout.write(`${new Date().toISOString()} ${parts.join(" ")}\n`);
+  // A record that repeats is written at most REPEAT_LIMIT times; after that
+  // the proxy counts it and writes one `… ×N suppressed` line per further
+  // REPEAT_LIMIT, so a loop of refused CONNECTs cannot grow the log without
+  // bound and the summary still totals every event that was flushed. (The
+  // sidecar is killed, not stopped, so there is no exit flush; the remainder
+  // below one REPEAT_LIMIT is the price of the bound.)
+  const repeatLimit = Number(process.env.EGRESS_LOG_REPEAT ?? 1000);
+  const records = new Map();
+  const write = (text) => process.stdout.write(`${new Date().toISOString()} ${text}\n`);
+  const log = (...parts) => {
+    const record = parts.join(" ");
+    const state = records.get(record) ?? { written: 0, suppressed: 0 };
+    records.set(record, state);
+    if (state.written < repeatLimit) {
+      state.written += 1;
+      write(record);
+      return;
+    }
+    state.suppressed += 1;
+    if (state.suppressed % repeatLimit === 0) write(`${record} ×${repeatLimit} suppressed`);
+  };
   // Every client-supplied value in the log — the CONNECT authority, the
   // method, the SNI — is written JSON-quoted and capped at 253 characters,
   // so a name carrying a newline cannot forge a second log line.
@@ -894,6 +913,12 @@ function stageCheckout(inputs) {
   return hostHead;
 }
 
+// Docker keeps a container's log on the host, and a reviewer that hammers a
+// refused host would otherwise write without bound there (`--tail` limits
+// only what the launcher reads back). Every container the launcher starts
+// gets a bounded json-file log; the sidecar also collapses repeated records.
+const LOG_LIMITS = ["--log-driver", "json-file", "--log-opt", "max-size=16m", "--log-opt", "max-file=2"];
+
 const LOCK_ARTIFACTS = new Set([".review-state.lock", ".review-state.lock.guard"]);
 
 async function sha256File(file) {
@@ -1042,6 +1067,7 @@ function containerArgs({ mounts, volume, checkout }, network, extra = [], { with
   const args = [
     "run",
     "--rm",
+    ...LOG_LIMITS,
     "--network",
     network,
     "-w",
@@ -1450,11 +1476,14 @@ function judgeMcpCalls(records, startedLines) {
   return { ok: reasons.length === 0, reasons, detail: detail || reasons.join("; ") };
 }
 
+// Counts every record the log holds, a `… ×N suppressed` line counting as the
+// N records the sidecar collapsed into it.
 function summarizeProxyLog(log) {
   const counts = new Map();
   for (const match of log.matchAll(/^\S+ ((?:allow|deny|error) .+)$/gm)) {
-    const key = match[1].trim();
-    counts.set(key, (counts.get(key) ?? 0) + 1);
+    const suppressed = /^(.*) ×(\d+) suppressed$/.exec(match[1].trim());
+    const key = suppressed ? suppressed[1] : match[1].trim();
+    counts.set(key, (counts.get(key) ?? 0) + (suppressed ? Number(suppressed[2]) : 1));
   }
   return [...counts.entries()]
     .sort()
@@ -1551,6 +1580,7 @@ async function main() {
   const proxyRun = [
     "run",
     "-d",
+    ...LOG_LIMITS,
     "--name",
     proxyName,
     "--network",
@@ -1568,6 +1598,7 @@ async function main() {
   const sessionsExport = [
     "run",
     "--rm",
+    ...LOG_LIMITS,
     "--network",
     "none",
     "--mount",

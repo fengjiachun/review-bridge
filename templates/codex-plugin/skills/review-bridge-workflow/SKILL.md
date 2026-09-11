@@ -881,7 +881,11 @@ tokens are not persisted back, since `auth.json` is read-only in the
 container), allowlisted by CONNECT host and by the TLS SNI the client then
 presents, and refuses every other host: `curl https://example.com`
 from inside fails through the proxy and has no route without it, while the
-model calls complete (measured 2026-09-10). On exit the launcher prints the
+model calls complete (measured 2026-09-10). Every container the launcher
+starts writes through a bounded json-file log driver (16 MB, two files) and
+the sidecar collapses a record that repeats into a counted line, so a
+reviewer looping on a refused host cannot fill the host's disk and the
+egress summary still totals every refusal. On exit the launcher prints the
 three criteria it verified — the reviewer's MCP calls completed inside the
 container, the host filesystem was absent, the validated verdict was copied
 back to the host store — with the guardian's verdict per call and the proxy's

@@ -273,7 +273,9 @@ case "$1 $2" in
     case "$*" in *"--tail 200000"*) collecting=1 ;; *) collecting= ;; esac
     if [ -n "$collecting" ] && [ -n "\${FAKE_LOGS_FAIL}" ]; then echo "Error response from daemon: log driver failed" >&2; exit 1; fi
     echo "2026-09-10T00:00:00.000Z listening 3128 allow chatgpt.com,api.openai.com"; echo "2026-09-10T00:00:01.000Z deny connect example.com:443"
-    if [ -n "$collecting" ] && [ -n "\${FAKE_LOGS_BIG}" ]; then i=0; while [ $i -lt 30000 ]; do echo "2026-09-10T00:00:02.000Z allow connect chatgpt.com:443 filler-padding-to-exceed-the-default-buffer-xxxxxxxxxxxxxxxxxxxxxxxxxx"; i=$((i+1)); done; else echo "2026-09-10T00:00:02.000Z allow connect chatgpt.com:443"; fi ;;
+    if [ -n "$collecting" ] && [ -n "\${FAKE_LOGS_BIG}" ]; then i=0; while [ $i -lt 30000 ]; do echo "2026-09-10T00:00:02.000Z allow connect chatgpt.com:443 filler-padding-to-exceed-the-default-buffer-xxxxxxxxxxxxxxxxxxxxxxxxxx"; i=$((i+1)); done
+    elif [ -n "$collecting" ] && [ -n "\${FAKE_LOGS_SUPPRESSED}" ]; then i=0; while [ $i -lt 1000 ]; do echo "2026-09-10T00:00:02.000Z deny connect looped.example:443"; i=$((i+1)); done; i=0; while [ $i -lt 4 ]; do echo "2026-09-10T00:00:03.000Z deny connect looped.example:443 ×1000 suppressed"; i=$((i+1)); done
+    else echo "2026-09-10T00:00:02.000Z allow connect chatgpt.com:443"; fi ;;
   "run -d") echo 0123456789ab ;;
   "run --rm") exec "\${FAKE_NODE}" "\${FAKE_RUN}" "$@" ;;
   *) echo "fake docker: unexpected $*" >&2; exit 9 ;;
@@ -297,6 +299,7 @@ esac
     FAKE_LEAK: leak,
     FAKE_EXIT: exit,
     FAKE_LOGS_BIG: logs === "big" ? "1" : "",
+    FAKE_LOGS_SUPPRESSED: logs === "suppressed" ? "1" : "",
     FAKE_LOGS_FAIL: logs === "fail" ? "1" : "",
     FAKE_CALLS: path.join(bin, "calls.log"),
     FAKE_VOLUME_RM_FAIL: volumeRmFail ? "1" : "",
@@ -369,6 +372,10 @@ test("--dry-run prints the mount table and the container launch without Docker",
   assert.doesNotMatch(codexLine, / -v /);
   assert.match(out, /cp -a \/codex-home\/sessions \/out\/sessions/);
   assert.match(out, /docker volume rm review-bridge-advisory-\S+-home/);
+  // Every container the launcher starts keeps a bounded log on the host.
+  for (const line of out.split("\n").filter((entry) => entry.startsWith("docker run"))) {
+    assert.match(line, /--log-driver json-file --log-opt max-size=16m --log-opt max-file=2/, line.slice(0, 120));
+  }
   // The container is the sandbox: danger-full-access inside, default
   // confinement outside, isolated CODEX_HOME, egress through the sidecar.
   assert.match(out, /codex exec --skip-git-repo-check --sandbox danger-full-access/);
@@ -1234,6 +1241,15 @@ test("without an operator known_hosts, one run shares one known_hosts and says w
   assert.doesNotMatch(refused.stdout, /accepted host key/);
 });
 
+test("the report's egress summary counts the records the sidecar collapsed", async (t) => {
+  // 1000 written plus four ×1000 suppressed lines is 5000 refusals in a log
+  // of 1004 lines.
+  const f = await fixture(t, { realReview: true });
+  const result = launch(f, ["--review-id", f.reviewId], await fakeDocker(f, { logs: "suppressed" }));
+  assert.equal(result.status, 0, result.stdout.slice(-2000));
+  assert.match(result.stdout, /proxy log: deny connect example\.com:443 ×1, deny connect looped\.example:443 ×5000$/m);
+});
+
 test("the container mounts a clone the launcher makes, never the panel checkout's own .git", async (t) => {
   // What the layout check cannot see — a directory where a file is expected,
   // an unreachable object among the real ones — never crosses: the mount is
@@ -1414,12 +1430,12 @@ function clientHello(serverName) {
   return Buffer.concat([Buffer.from([0x16, 0x03, 0x01, handshake.length >> 8, handshake.length & 0xff]), handshake]);
 }
 
-async function withEgressProxy(t, run) {
+async function withEgressProxy(t, run, extraEnv = {}) {
   const upstream = net.createServer((socket) => socket.pipe(socket));
   await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
   const listenPort = 20000 + Math.floor(Math.random() * 20000);
   const proxy = spawn(process.execPath, [launcherSource, "--egress-proxy"], {
-    env: { ...process.env, EGRESS_ALLOW: "localhost,auth.openai.com", EGRESS_LISTEN_PORT: String(listenPort), EGRESS_UPSTREAM_PORT: String(upstream.address().port) },
+    env: { ...process.env, EGRESS_ALLOW: "localhost,auth.openai.com", EGRESS_LISTEN_PORT: String(listenPort), EGRESS_UPSTREAM_PORT: String(upstream.address().port), ...extraEnv },
   });
   let log = "";
   proxy.stdout.on("data", (chunk) => { log += chunk; });
@@ -1445,6 +1461,23 @@ async function withEgressProxy(t, run) {
     });
   await run({ connect, log: () => log });
 }
+
+test("a record that repeats is written boundedly and the summary still counts every one", async (t) => {
+  // A reviewer looping on a refused host would otherwise write a line per
+  // attempt into the log Docker keeps on the host.
+  await withEgressProxy(
+    t,
+    async ({ connect, log }) => {
+      for (let i = 0; i < 25; i += 1) await connect([], "example.com:443");
+      const lines = log().split("\n").filter((line) => line.includes('deny connect "example.com:443"'));
+      assert.equal(lines.filter((line) => !line.includes("suppressed")).length, 5);
+      assert.equal(lines.filter((line) => line.includes("×5 suppressed")).length, 4);
+      // An allowed host's records are counted on their own key.
+      assert.doesNotMatch(log(), /allow connect "example\.com/);
+    },
+    { EGRESS_LOG_REPEAT: "5" },
+  );
+});
 
 test("the sidecar tunnels only a ClientHello whose SNI equals the CONNECT host", async (t) => {
   await withEgressProxy(t, async ({ connect, log }) => {
@@ -1529,7 +1562,7 @@ test("a huge or failing docker logs leaves the report, the criteria, and every c
   assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: PASS/);
   assert.match(result.stdout, /cleanup steps that failed: collect proxy log: Error response from daemon: log driver failed/);
   const calls = await fsp.readFile(env2.FAKE_CALLS, "utf8");
-  for (const pattern of [/^rm -f review-bridge-advisory-\S+-codex$/m, /^rm -f review-bridge-advisory-\S+-egress$/m, /^network rm review-bridge-advisory-/m, /^run --rm --network none .*cp -a \/codex-home\/sessions/m, /^volume rm review-bridge-advisory-\S+-home$/m]) {
+  for (const pattern of [/^rm -f review-bridge-advisory-\S+-codex$/m, /^rm -f review-bridge-advisory-\S+-egress$/m, /^network rm review-bridge-advisory-/m, /^run --rm .*--network none .*cp -a \/codex-home\/sessions/m, /^volume rm review-bridge-advisory-\S+-home$/m]) {
     assert.match(calls, pattern);
   }
   assert.equal((await loadReview(g.store, g.reviewId)).status, "REVIEW_SUBMITTED");
