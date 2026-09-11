@@ -815,6 +815,22 @@ test("a thread's outcome follows the frontier replay and the gate's invalidation
   markdown = render(cleanInTwoRounds(), { publication });
   assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| resolved on GitHub; record 1 resolved it automatically and is no longer active \(THREAD_RESOLUTION_INVALIDATED\) \|/);
 
+  // A second thread with its own active record, while the first is
+  // invalidated: the gate's invalidation is whole-frontier, so the second
+  // thread's record is uncredited too. Its line must say that, and must not
+  // read as though this thread were the one to repair.
+  publication.resolution_lifecycle = [];
+  const other = observedThread("PRRT_2", headSha);
+  threads.threads = [commented, other];
+  threads.total_count = 2;
+  publication.automatic_resolutions = [resolutionRecord(thread, headSha), resolutionRecord(other, headSha, 2)];
+  markdown = render(cleanInTwoRounds(), { publication });
+  const row = markdown.split("\n").find((line) => line.startsWith("| PRRT_2 "));
+  assert.match(row, /resolved on GitHub; the gate credits no automatic resolution while thread PRRT_1 invalidates the frontier, so record 2 stays active but uncredited \|/);
+  assert.doesNotMatch(row, /no longer explains it|THREAD_RESOLUTION_INVALIDATED|no longer active/);
+  threads.threads = [thread];
+  threads.total_count = 1;
+
   // No record at all: the observed state, nothing more.
   publication.resolution_lifecycle = [];
   publication.automatic_resolutions = [];

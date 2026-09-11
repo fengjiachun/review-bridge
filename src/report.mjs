@@ -523,7 +523,10 @@ function threadOutcome(thread, records, frontier, invalidated) {
     return `${observed}; record ${active.number} no longer explains it: the gate judges THREAD_RESOLUTION_INVALIDATED (${invalidated.reason ?? "the thread's provenance, resolved flag, or watermark changed since the record"})`;
   }
   if (active != null) {
-    return `${observed}; record ${active.number} is active but the gate does not credit it while thread ${invalidated?.thread_id ?? "?"} invalidates the frontier`;
+    // The gate's invalidation is whole-frontier, not per thread: one
+    // invalidated record withholds credit from every automatic resolution.
+    // So this thread is not the one to repair, and the line says so.
+    return `${observed}; the gate credits no automatic resolution while thread ${invalidated?.thread_id ?? "?"} invalidates the frontier, so record ${active.number} stays active but uncredited`;
   }
   if (own.length > 0) {
     const blocker = frontier.blockers.find((entry) => entry.thread_id === thread.id);
