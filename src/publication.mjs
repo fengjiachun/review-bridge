@@ -7,7 +7,7 @@ import {
   codexRequestBody,
   isCodexRequestId,
 } from "./codex-request.mjs";
-import { loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
+import { isObjectId, loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
 // One derivation of the App's notice markers, shared with the adapter that
 // records them. A notice is only non-blocking because its body carries a
 // marker, so the claim has to be checked here against that body.
@@ -67,7 +67,6 @@ const HISTORICAL_ANCESTOR_LOCK_WAIT_MS = 1_000;
 const BODY_REQUEST = "@codex review";
 const REQUEST_BODY_SHA256 = sha256(Buffer.from(BODY_REQUEST, "utf8"));
 
-const SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 const RESOURCE_KINDS = new Set([
   "ISSUE_COMMENT",
@@ -294,8 +293,8 @@ function assertRevision(value) {
 }
 
 function assertSha(value, name) {
-  if (typeof value !== "string" || !SHA_RE.test(value)) {
-    fail("INVALID_INPUT", `${name} must be a 40-character lowercase Git SHA`);
+  if (typeof value !== "string" || !isObjectId(value)) {
+    fail("INVALID_INPUT", `${name} must be a 40- or 64-character lowercase Git object id`);
   }
   return value;
 }
@@ -2893,10 +2892,10 @@ function validateOpenedRemoteAuthorization(
       "remote authorization repository_path must be a non-empty absolute path",
     );
   }
-  if (!SHA_RE.test(authorization.base_sha ?? "")) {
+  if (!isObjectId(authorization.base_sha)) {
     fail("REMOTE_AUTHORIZATION_INVALID", "remote authorization base_sha is invalid");
   }
-  if (!SHA_RE.test(authorization.head_sha ?? "")) {
+  if (!isObjectId(authorization.head_sha)) {
     fail("REMOTE_AUTHORIZATION_INVALID", "remote authorization head_sha is invalid");
   }
   if ((authorization.reviewer_provider ?? null) !== null) {
@@ -5653,7 +5652,7 @@ function validateAuditEvent(event, reviewId, head) {
       event.publication_revision > 0);
   const validHead =
     event.head_sha === null ||
-    (typeof event.head_sha === "string" && SHA_RE.test(event.head_sha));
+    (typeof event.head_sha === "string" && isObjectId(event.head_sha));
   const validObservationDigest =
     event.github_observation_sha256 === null ||
     (typeof event.github_observation_sha256 === "string" &&
@@ -7683,7 +7682,7 @@ function invalidatedResolutionPlan(ledger, binding) {
     const rootReview = thread.comments[0]?.review;
     if (
       !Number.isSafeInteger(rootReview?.database_id) ||
-      !SHA_RE.test(rootReview?.reviewed_head_sha ?? "")
+      !isObjectId(rootReview?.reviewed_head_sha)
     ) {
       return {
         review_id: ledger.review_id,
@@ -8677,7 +8676,7 @@ export async function verifyPublicationGate(
                   : null,
               head_sha: result.valid
                 ? result.head_sha
-                : SHA_RE.test(gate?.head_sha ?? "")
+                : isObjectId(gate?.head_sha)
                   ? gate.head_sha
                   : null,
               github_observation_sha256:

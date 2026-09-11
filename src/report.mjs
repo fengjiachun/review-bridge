@@ -298,10 +298,46 @@ function findingSections(finding, resolution, decision) {
   return sections;
 }
 
+// A continuation freezes the findings it inherits, each with the review that
+// raised it. They are the material this review carries, so they are rendered
+// as recorded rather than named in passing; the validator has already
+// compared the whole carried set with the source ledger, so this is a
+// faithful relay and carries no mark.
+function carriedSection(review) {
+  const carried = review.carried_findings ?? [];
+  if (carried.length === 0) return [];
+  return [
+    "### Carried findings",
+    ...carried.flatMap((entry) => {
+      const location =
+        entry.path == null
+          ? "no location"
+          : inline(`${entry.path}${entry.line == null ? "" : `:${entry.line}`}`);
+      const sections = [
+        `#### ${inline(entry.finding_id)} carried from ${inline(entry.continued_from_review_id)} · ${inline(entry.severity)} · ${location}`,
+        `- Title: ${inline(entry.title)}`,
+        "Explanation:",
+        block(entry.explanation),
+      ];
+      if (entry.recommendation) {
+        sections.push("Recommendation:", block(entry.recommendation));
+      }
+      return sections;
+    }),
+  ];
+}
+
 function findingsSection(review) {
   const findings = review.findings ?? [];
+  const carried = review.carried_findings ?? [];
   if (findings.length === 0) {
-    return ["### Findings", "No findings were recorded."];
+    const sources = [...new Set(carried.map((entry) => entry.continued_from_review_id))];
+    return [
+      "### Findings",
+      carried.length === 0
+        ? "No findings were recorded."
+        : `No findings were raised in this review; ${carried.length} carried from ${sources.map((id) => code(id)).join(", ")}.`,
+    ];
   }
   const resolutionByFinding = new Map(
     (review.resolutions ?? []).map((entry) => [entry.finding_id, entry]),
@@ -694,6 +730,7 @@ export function renderReviewReport(
       : [
           ...identitySection(review),
           ...roundsSection(review, parentContext),
+          ...carriedSection(review),
           ...findingsSection(review),
           ...changesSection(review),
           ...outcomeSection(review),

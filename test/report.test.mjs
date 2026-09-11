@@ -197,13 +197,13 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
-async function gatedFixture(t, { change = "export const value = 2;\n", finalize = true, seed = {} } = {}) {
+async function gatedFixture(t, { change = "export const value = 2;\n", finalize = true, seed = {}, objectFormat = null } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-report-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const repository = path.join(root, "repo");
   const store = path.join(root, "store");
   await fsp.mkdir(repository);
-  git(repository, "init", "-b", "main");
+  git(repository, "init", "-b", "main", ...(objectFormat == null ? [] : [`--object-format=${objectFormat}`]));
   git(repository, "config", "user.name", "Review Bridge Test");
   git(repository, "config", "user.email", "review-bridge@example.invalid");
   await fsp.writeFile(path.join(repository, "value.js"), "export const value = 1;\n");
@@ -1296,6 +1296,7 @@ async function continuedFixture(t) {
     { finding_id: "F-001", decision: "resolved", rationale: "verified", verification: "read value.js" },
   ], [
     { severity: "minor", title: "new concern", explanation: "raised on rereview", recommendation: "" },
+    { severity: "blocker", title: "second concern", explanation: "also raised on rereview", recommendation: "guard the caller", path: "value.js", line: 1 },
   ], "CLAUDE_DESKTOP");
   // A continuation reviews a new head that addresses the carried finding.
   await fsp.writeFile(path.join(repository, "value.js"), "export const value = 4;\n");
@@ -1304,6 +1305,30 @@ async function continuedFixture(t) {
   const continuation = await prepareReview(store, { ...input, continuedFromReviewId: source.id, forceFullReview: true });
   return { root, store, sourceId: source.id, continuationId: continuation.id };
 }
+
+// A continuation's own ledger raises nothing yet; what it carries is the
+// material under review, so the report renders each carried finding as the
+// source recorded it.
+test("a continuation renders the findings it carries, with the review that raised each", async (t) => {
+  const state = await continuedFixture(t);
+  const receipt = await writeReviewReport(state.store, state.continuationId, { renderedAt: RENDERED_AT });
+  const markdown = await fsp.readFile(receipt.path, "utf8");
+  const review = JSON.parse(await fsp.readFile(path.join(state.store, "reviews", state.continuationId, "review.json"), "utf8"));
+  assert.deepEqual(review.carried_findings.map((entry) => entry.finding_id), ["F-002", "F-003"]);
+  assert.equal(review.findings.length, 0);
+  const section = markdown.slice(markdown.indexOf("### Carried findings"), markdown.indexOf("### Findings"));
+  assert.match(
+    section,
+    new RegExp(`^### Carried findings\n\n#### F-002 carried from ${state.sourceId} · minor · no location\n\n- Title: new concern\n\nExplanation:\n\n\`\`\`text\nraised on rereview\n\`\`\`\n\n#### F-003 carried from ${state.sourceId} · blocker · value\.js:1\n\n- Title: second concern\n\nExplanation:\n\n\`\`\`text\nalso raised on rereview\n\`\`\`\n\nRecommendation:\n\n\`\`\`text\nguard the caller\n\`\`\`\n\n$`),
+    section,
+  );
+  // The findings section says what this review raised, and where the rest came from.
+  assert.match(markdown, new RegExp(`### Findings\n\nNo findings were raised in this review; 2 carried from \`${state.sourceId}\`\.`));
+  await fsp.rm(receipt.path);
+  // The source itself carries nothing and keeps the plain wording.
+  const source = await fsp.readFile((await writeReviewReport(state.store, state.sourceId, { renderedAt: RENDERED_AT })).path, "utf8");
+  assert.doesNotMatch(source, /### Carried findings/);
+});
 
 test("the continuation marker must be the one the history's REVIEW_CONTINUED event names", async (t) => {
   const state = await continuedFixture(t);
@@ -1353,7 +1378,7 @@ test("the continuation marker must be the one the history's REVIEW_CONTINUED eve
     });
     assert.ok(!(await fsp.readdir(path.dirname(continuationPath))).some((name) => name.startsWith("report-")));
   };
-  await tamperContinuation((ledger) => { ledger.carried_findings.push({ ...ledger.carried_findings[0], finding_id: "F-003" }); }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-003" as open/);
+  await tamperContinuation((ledger) => { ledger.carried_findings.push({ ...ledger.carried_findings[0], finding_id: "F-004" }); }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-004" as open/);
   // The source is still named through the carried erratum, so an emptied
   // carried set is compared with the source's open findings and refused.
   await tamperContinuation((ledger) => { assert.equal(ledger.errata.filter((e) => e.continued_from_review_id).length, 1); ledger.carried_findings = []; }, "CONTINUATION_SOURCE_MISMATCH", /only part of the open findings \(source finding "F-002" is not carried\)/);
@@ -1420,7 +1445,7 @@ test("the continuation marker must be the one the history's REVIEW_CONTINUED eve
   });
   await fsp.writeFile(sourcePath, sourceOriginal, { mode: 0o600 });
   // A review cannot continue itself, whatever the dates.
-  await tamperContinuation((ledger) => { ledger.history[0].continued_from_review_id = ledger.id; ledger.carried_findings[0].continued_from_review_id = ledger.id; ledger.errata = ledger.errata.filter((e) => e.continued_from_review_id == null); }, "CONTINUATION_SOURCE_MISMATCH", /a review cannot continue itself/);
+  await tamperContinuation((ledger) => { ledger.history[0].continued_from_review_id = ledger.id; for (const carried of ledger.carried_findings) carried.continued_from_review_id = ledger.id; ledger.errata = ledger.errata.filter((e) => e.continued_from_review_id == null); }, "CONTINUATION_SOURCE_MISMATCH", /a review cannot continue itself/);
   await fsp.writeFile(continuationPath, continuationOriginal, { mode: 0o600 });
   // The source itself gone: named apart from a disagreement.
   await fsp.rename(path.join(state.store, "reviews", state.sourceId), path.join(state.store, "reviews", `${state.sourceId}.away`));
@@ -2023,6 +2048,34 @@ test("a successor round older than the commitment renders with its proof marked 
   const fresh = await fsp.readFile((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).path, "utf8");
   assert.match(fresh, /#### Round 1 strategy: `SUCCESSOR`\n/);
   assert.doesNotMatch(fresh, /unverified proof|as recorded/);
+});
+
+// A SHA-256 repository writes 64-character object ids, and the store records
+// what the repository gives it. One review is one repository, so one review
+// holds one width.
+test("a SHA-256 repository's review is prepared, gated, and rendered, and a ledger mixing widths is refused", async (t) => {
+  const state = await gatedFixture(t, { objectFormat: "sha256" });
+  assert.equal(state.headSha.length, 64);
+  const directory = path.join(state.store, "reviews", state.reviewId);
+  const reviewPath = path.join(directory, "review.json");
+  const review = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  assert.equal(review.status, "LOCAL_GATE_PASSED");
+  assert.equal(review.rounds[0].head_sha, state.headSha);
+  const gate = JSON.parse(await fsp.readFile(path.join(directory, "gate.json"), "utf8"));
+  assert.equal(gate.head_sha, state.headSha);
+  const receipt = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
+  const markdown = await fsp.readFile(receipt.path, "utf8");
+  assert.match(markdown, new RegExp(`- Round 1 snapshot: \`${state.baseSha}\` → \`${state.headSha}\``));
+  await fsp.rm(receipt.path);
+  // A ledger holding both widths is not one repository's.
+  const mixed = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  mixed.rounds[0].head_sha = "a".repeat(40);
+  await fsp.writeFile(reviewPath, `${JSON.stringify(mixed, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+    assert.equal(error.code, "REVIEW_LEDGER_INVALID", error.message);
+    assert.match(error.details.reason, /round 1 head_sha is 40 hex characters, but round 1 base_sha is 64/);
+    return true;
+  });
 });
 
 // A path with a space cannot be told from the `diff --git` header alone, so

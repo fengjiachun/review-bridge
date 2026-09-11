@@ -88,7 +88,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   parent-derived fields as recorded and the report marks the round and each
   such field as unverified. A field an older proof does not record at all,
   such as `requirement_match`, is printed as the parent gives it, or as `not
-  recorded` when no parent can give it, rather than read as a value. The "Changes between rounds" section lists each
+  recorded` when no parent can give it, rather than read as a value. Every
+  commit and tree id the store records is admitted at either width, so a
+  SHA-256 repository's reviews render; one review may not mix the two widths.
+  A continuation's report renders the findings it carries in full, under
+  `Carried findings`, each naming the review that raised it. The "Changes between rounds" section lists each
   round's own snapshot and cumulative file table and states only the head
   relation between rounds -- unchanged after a rebuttal, or old head to new
   head -- since the ledger keeps no delta between rounds. Every reviewer- or author-supplied string is

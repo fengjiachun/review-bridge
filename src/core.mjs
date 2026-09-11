@@ -243,7 +243,10 @@ const LEDGER_DECISIONS = ["resolved", "rebuttal_accepted", "still_open"];
 // its table and nowhere else, so what the writer sets is what the validator
 // checks: a field the writer never sets is refused, a required field that is
 // missing is refused, and a field outside its domain is refused by name.
-const SHA_PATTERN = /^[0-9a-f]{40}$/;
+// A repository hashes its objects as SHA-1 or as SHA-256, so an object id is
+// 40 or 64 lowercase hex characters. One judge for every commit and tree id
+// the store records, whichever repository wrote it.
+const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 const REVIEW_ID_LEDGER_PATTERN = /^rb-[0-9TZ-]+-[a-f0-9]{8}$/;
 const isTimestamp = (value) => typeof value === "string" && Number.isFinite(Date.parse(value));
@@ -251,7 +254,8 @@ const isText = (max, { allowEmpty = false } = {}) => (value) =>
   typeof value === "string" && (allowEmpty || value !== "") && value.length <= max;
 const isStringList = (value) => Array.isArray(value) && value.every((item) => typeof item === "string");
 const isCount = (value) => Number.isInteger(value) && value >= 0;
-const isSha = (value) => SHA_PATTERN.test(value ?? "");
+export const isObjectId = (value) => SHA_PATTERN.test(value ?? "");
+const isSha = isObjectId;
 const isDigest = (value) => DIGEST_PATTERN.test(value ?? "");
 const isReviewIdValue = (value) => typeof value === "string" && REVIEW_ID_LEDGER_PATTERN.test(value);
 const nullOr = (ok) => (value, context) => value === null || ok(value, context);
@@ -602,6 +606,31 @@ function reviewLedgerDefect(review, reviewId) {
   for (const [index, round] of review.rounds.entries()) {
     const defect = recordDefect(round, ROUND_FIELDS, { index, review }, `round ${round?.round ?? index + 1}`);
     if (defect != null) return defect;
+  }
+  // One repository hashes its objects one way, so every commit and tree id in
+  // one review is the same width. A ledger that mixes the two is not one
+  // repository's.
+  let first = null;
+  for (const round of review.rounds) {
+    const ids = [
+      ["base_sha", round.base_sha],
+      ["head_sha", round.head_sha],
+      ["successor_parent_head_sha", round.successor_parent_head_sha],
+      ["successor_current_head_sha", round.successor_current_head_sha],
+      ...["base_sha", "parent_head_sha", "current_head_sha", "parent_tree_sha", "current_tree_sha"].map(
+        (field) => [`successor.${field}`, round.successor?.[field]],
+      ),
+    ];
+    for (const [field, value] of ids) {
+      if (typeof value !== "string") continue;
+      if (first == null) {
+        first = { where: `round ${round.round} ${field}`, width: value.length };
+        continue;
+      }
+      if (value.length !== first.width) {
+        return `round ${round.round} ${field} is ${value.length} hex characters, but ${first.where} is ${first.width}`;
+      }
+    }
   }
 
   for (const [index, resolution] of review.resolutions.entries()) {
@@ -2071,13 +2100,9 @@ async function buildSuccessorArtifacts({
       "parent clean snapshot is not present in its review ledger",
     );
   }
-  const validObjectId = (value) =>
-    typeof value === "string" &&
-    (value.length === 40 || value.length === 64) &&
-    /^[0-9a-f]+$/.test(value);
   if (
-    !validObjectId(parentRound.base_sha) ||
-    !validObjectId(parentRound.head_sha) ||
+    !isObjectId(parentRound.base_sha) ||
+    !isObjectId(parentRound.head_sha) ||
     typeof parentRound.snapshot_hash !== "string"
   ) {
     return fullStrategy("parent review ledger is malformed");
