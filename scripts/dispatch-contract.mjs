@@ -416,17 +416,176 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // enters the model's context and leaves through the verdict before an
     // operator could act. So the requirement is the read boundary alone,
     // and the section has to say why the hand-opened path was withdrawn.
+    // Issue #109 phase three supplies that boundary as the packaged
+    // container launcher, and the section has to name it as the only
+    // advisory launch, or the member reads as still unavailable — or as
+    // launchable some other way.
     [
-      "an advisory CODEX_TASK member needs an external sandbox with a read boundary",
-      /launched only inside a real external sandbox with a filesystem read boundary/,
+      "an advisory CODEX_TASK member is launched only through the packaged launcher",
+      /launched only through the packaged `\.\.\/\.\.\/scripts\/advisory-sandbox-launch\.mjs`/,
     ],
     [
       "opening the task by hand is not a mitigation",
       /Opening the task by hand is not a mitigation[\s\S]*?before an operator could intervene/,
     ],
+    // Host prefixes Docker Desktop stops serving mid-run are refused up
+    // front, and the operator has to be told where the paths belong.
     [
-      "the advisory member is unavailable until a read boundary exists",
-      /Until such a read boundary exists[\s\S]*?advisory `CODEX_TASK` member is not available/,
+      "paths Docker Desktop stops serving are refused, with the home directory named",
+      /launcher refuses a path under `\/private\/tmp\/` or `\/Volumes\/`, because Docker Desktop stops serving files there a few seconds into a container/,
+    ],
+    [
+      "without Docker the advisory member is unavailable rather than opened another way",
+      /Without Docker the launcher fails closed and the advisory `CODEX_TASK` member is unavailable rather than opened another way/,
+    ],
+    // What makes the container a read boundary: the host is absent, not
+    // denied, and the section has to say which mounts are the whole of what
+    // exists inside, with the mode each one needs — or the table drifts to
+    // whatever is convenient (a read-write checkout, a copied credential).
+    [
+      "the container is the read boundary",
+      /inside a Linux container that is the read boundary/,
+    ],
+    [
+      "the host home's sensitive contents are absent rather than denied",
+      /host home's sensitive contents are absent rather than denied/,
+    ],
+    // Codex round thirty-two on #125: --tail bounded only what the launcher
+    // read back, not the log Docker keeps on the host.
+    // Codex round thirty-three on #125: a read-write host bind and
+    // unlimited containers are the same exhaustion in two places.
+    [
+      "the staged store is a measured volume and every container is bounded",
+      /the staged review is copied into a tmpfs-backed Docker volume capped at 64 MB and the isolated `CODEX_HOME` into one capped at 1 GB, so a write past the cap fails inside the container rather than on the host's disk; afterwards the store's apparent size is measured inside the container and copied out only within 64 MB overall and 8 MB for any one file/,
+    ],
+    [
+      "no name resolves inside the container but the sidecar's",
+      /The container also resolves no name but the sidecar's: `--internal` cuts routing, not resolution, and a name would carry data out on its own/,
+    ],
+    [
+      "the reviewer's output to the host is bounded and read before the copy-back",
+      /the transcript keeps its first 64 MB and records how much it dropped, a rollout past 8 MB is named and left unread rather than parsed, and every piece of that evidence is read before anything is copied back/,
+    ],
+    [
+      "container logs are bounded on the host and repeats are collapsed",
+      /Every container the launcher starts writes through a bounded json-file log driver \(16 MB, two files\) and the sidecar collapses a record that repeats into a counted line/,
+    ],
+    // Codex round four on #125: "absent" and "exactly one entry" cannot be
+    // judged from the mounted container alone (the image has /root, /usr…),
+    // and the checkout's own .git/config can carry a token.
+    [
+      "absence is judged against the unmounted image",
+      /judged against the same image without the checkout mount/,
+    ],
+    // Codex round twenty-three on #125: the clone was pinned to the panel
+    // checkout's current HEAD, not the ledger's recorded snapshot head.
+    [
+      "the clone is detached at the review's recorded snapshot head, which the panel checkout must still be at",
+      /detached at the review's recorded snapshot head — which the panel checkout must still be at, or the launch is refused before anything starts/,
+    ],
+    // Codex round twenty-five on #125: the staging clone ran with the
+    // operator's global git configuration, so a .gitattributes filter in the
+    // reviewed tree would have executed on the host.
+    [
+      "the launcher's host git runs isolated from the operator's configuration",
+      /Every git the launcher itself runs on the host — those checks and the staging clone — runs in an isolated environment \(no global or system configuration, an empty `HOME` and hooks path, no `GIT_\*` from the operator's shell\)/,
+    ],
+    // Codex round twenty-six on #125: a snapshot prepared over a dirty tree
+    // carries overlays the clone cannot materialize.
+    [
+      "a snapshot with worktree overlays is refused",
+      /The review's last round must be a clean commit — `worktree_clean` true and no overlays — since the clone can materialize only commits; a snapshot prepared over a dirty tree is refused before anything starts/,
+    ],
+    [
+      "the mount is a fresh clone the launcher makes; the operator's .git never enters",
+      /not the panel checkout's `\.git` but a fresh clone the launcher makes itself from it .* the operator's `\.git` never enters the container/,
+    ],
+    [
+      "the credential is a read-only bind mount, never an image layer",
+      /`auth\.json` as a read-only bind mount, never copied into an image layer/,
+    ],
+    [
+      "the checkout is mounted read-only at its recorded path",
+      /author checkout, read-only at the path the ledger records, because the reviewer server reads it by recorded path/,
+    ],
+    // Codex round one on #125: a read-write host store inside a
+    // danger-full-access container hands an injected reviewer every other
+    // ledger and lock. What goes in is one staged review; what comes back is
+    // validated before the host store is written.
+    [
+      "the host store is never mounted; one staged review goes in and is validated on the way back",
+      /host store is never mounted; one staged review is copied in and validated on the way back/,
+    ],
+    // Codex round two on #125: a field comparison of the staged ledger is
+    // forgeable from inside the container; the host must compute the result
+    // itself. The staged bytes are never written.
+    [
+      "the verdict is replayed through the host's own submit_review; the staged bytes are never copied",
+      /staged bytes are never copied: the verdict is replayed through the host's own `submit_review` against the host ledger, under that review's own state lock/,
+    ],
+    [
+      "a ledger the replay cannot produce is refused",
+      /[Aa] staged ledger the replay cannot produce — a status the payload does not reach, a snapshot hash or a history the host never wrote — is refused/,
+    ],
+    [
+      "a failed check leaves the host store unwritten",
+      /any failed check leaves the host store unwritten and the staged copy in the scratch directory for inspection/,
+    ],
+    // The 2026-09-10 ruling: danger-full-access inside, and the container's
+    // own confinement untouched. Losing the reason lets the next reader
+    // "fix" the inner sandbox by weakening the outer one.
+    [
+      "the inner sandbox is danger-full-access because the nested one cannot start",
+      /`--sandbox danger-full-access`, because Codex's nested bubblewrap does not start under Docker's default confinement/,
+    ],
+    [
+      "the container's own confinement is not relaxed to fit a second sandbox",
+      /relaxing that confinement to fit a second sandbox inside would weaken the one boundary that matters/,
+    ],
+    [
+      "the isolated CODEX_HOME empties the host's MCP set",
+      /isolated `CODEX_HOME`[\s\S]*?host's other MCP servers are absent by construction/,
+    ],
+    // The egress residual the ruling required closed or stated: closed, by
+    // an allowlist the section names, measured both ways.
+    [
+      "egress is an allowlist through a sidecar",
+      /sidecar proxy on an internal Docker network that admits `chatgpt\.com`, `api\.openai\.com`, and `auth\.openai\.com`[^:]*allowlisted by CONNECT host and by the TLS SNI the client then presents, and refuses every other host/,
+    ],
+    // Codex round eleven on #125: the CONNECT authority alone can be fronted;
+    // the name the client then announces has to match it.
+    // Codex round twelve on #125: the refresh endpoint is on the list and the
+    // refreshed token stays in the container.
+    [
+      "refreshed tokens are not persisted back",
+      /refreshed tokens are not persisted back, since `auth\.json` is read-only in the container/,
+    ],
+    [
+      "the allowlist binds the TLS SNI to the CONNECT host",
+      /allowlisted by CONNECT host and by the TLS SNI the client then presents/,
+    ],
+    [
+      "the egress block was measured with and without the proxy",
+      /`curl https:\/\/example\.com` from inside fails through the proxy and has no route without it/,
+    ],
+    // Codex round ten on #125: what the first criterion is and is not.
+    [
+      "the first criterion is run-health evidence, not what the copy-back rests on",
+      /first criterion is run-health evidence recorded inside the container and forgeable by a reviewer with shell access; the copy-back's integrity rests on the host replay, not on it/,
+    ],
+    [
+      "the launcher prints the three criteria it verified",
+      /three criteria it verified — the reviewer's MCP calls completed inside the container, the host filesystem was absent, the validated verdict was copied back to the host store/,
+    ],
+    // The credential residual is stated rather than closed, with the
+    // operator's narrower option named.
+    [
+      "the one host secret inside is named",
+      /the one host secret inside the container is `auth\.json`/,
+    ],
+    [
+      "a narrower credential is the operator's option",
+      /narrowly scoped API key in place of the ChatGPT token is the operator's option/,
     ],
     [
       "the advisory fence does not depend on the launch",
@@ -532,6 +691,35 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "doesNotMatch",
       /`CODEX_TASK` member is opened by the operator by hand/,
       "the advisory CODEX_TASK member regressed to a hand-opened launch option",
+    ],
+    // The advisory launch is the packaged launcher, in a runnable form.
+    [
+      "match",
+      /```bash\n *node \.\.\/\.\.\/scripts\/advisory-sandbox-launch\.mjs --review-id <review_id>\n```/,
+      "the advisory launch is not the packaged container launcher in a runnable form",
+    ],
+    // The container's default confinement is the boundary. A weakened
+    // container that lets Codex's nested sandbox start must not appear, in
+    // the fence or in the prose as an alternative.
+    [
+      "doesNotMatch",
+      /seccomp=unconfined|apparmor=unconfined|--security-opt|--privileged/,
+      "the advisory launch regressed to a weakened container",
+    ],
+    // The host store mounted read-write into the container: the form Codex's
+    // round one on #125 refused, and the one a "simpler" mount table drifts
+    // back to.
+    [
+      "doesNotMatch",
+      /the store, read-write, since the verdict is written through it/,
+      "the host store regressed to a read-write mount inside the container",
+    ],
+    // The pre-launcher form: the member was unavailable until a boundary
+    // existed. The boundary exists now, and the sentence must not come back.
+    [
+      "doesNotMatch",
+      /advisory `CODEX_TASK` member is not available/,
+      "the advisory CODEX_TASK member regressed to unavailable",
     ],
     // The prose names `codex exec resume` to say the flow declines it, so the
     // guard is against a runnable resume form, not the mention.
@@ -806,10 +994,20 @@ export const ADVISORY_PANEL_CONTRACT = {
       /zero findings records that fact and attests nothing/,
     ],
     // A reviewer must never read a tree someone is editing, and the panel must
-    // never dirty one.
+    // never dirty one, so the panel checkout is a clone of its own.
     [
       "the head goes to a worktree outside every authoring tree",
       /worktree outside every authoring tree/,
+    ],
+    // Codex round twenty-seven on #125: the panel's own clone, fetch, and
+    // checkout ran with the operator's global git configuration in reach.
+    [
+      "the panel checkout is made by the packaged script in the isolated git environment",
+      /The script runs git in the same isolated environment as the launcher's own host git \(no global or system configuration, an empty `HOME` and hooks path, no `GIT_\*` from the operator's shell, and ssh pinned by an explicit command to `-F \/dev\/null` with no key from disk, the agent as its one credential source, and no `ProxyCommand`, since ssh takes its home from the passwd entry rather than the environment\)/,
+    ],
+    [
+      "the refs and the merge base live in the clone",
+      /merge base is computed from the refs the fetch just wrote, in the clone/,
     ],
     [
       "the base is the merge base, not the target branch tip",
@@ -874,15 +1072,24 @@ export const ADVISORY_PANEL_CONTRACT = {
     ],
     // The #108 bar, upheld by the #114 Codex P1-3 for a new reason: the
     // unattended launch's sandbox bounds writes and network, not reads, so
-    // the CODEX_TASK member is manual or externally sandboxed like the Claude
-    // one, not the headless launch the dispatch section gives.
+    // the CODEX_TASK member never takes the headless launch the dispatch
+    // section gives. Issue #109 phase three supplies the read boundary as
+    // the packaged container launcher, the member's only launch.
     [
-      "the Codex member is externally sandboxed with a read boundary",
-      /`CODEX_TASK` — \*\*launched only inside a real external sandbox with a filesystem read boundary\.\*\*/,
+      "the Codex member is launched only through the packaged launcher",
+      /`CODEX_TASK` — \*\*launched only through the packaged advisory sandbox launcher\*\*, `node \.\.\/\.\.\/scripts\/advisory-sandbox-launch\.mjs --review-id <review_id>`/,
+    ],
+    [
+      "the launcher's container is the read boundary",
+      /inside a Linux container that is the filesystem read boundary/,
     ],
     [
       "hand-opening the Codex member is no substitute",
       /Opening the task by hand is not a substitute/,
+    ],
+    [
+      "without Docker the Codex member is unavailable rather than opened another way",
+      /without Docker this member is unavailable rather than opened another way/,
     ],
     [
       "the panel never takes the unattended launch",
@@ -937,7 +1144,7 @@ export const ADVISORY_PANEL_CONTRACT = {
     // matters is that the three lines agree, not their prose around them.
     [
       "match",
-      /\+<target-branch>:refs\/review-bridge\/<pr-number>\/base/,
+      /\+refs\/heads\/<target-branch>:refs\/review-bridge\/<pr-number>\/base/,
       "the target branch is not fetched into an explicit destination ref",
     ],
     [
@@ -947,13 +1154,30 @@ export const ADVISORY_PANEL_CONTRACT = {
     ],
     [
       "match",
-      /merge-base refs\/review-bridge\/<pr-number>\/base \\\n *refs\/review-bridge\/<pr-number>\/head/,
+      /merge base computed there/,
       "the merge base is not computed from the fetched destination refs",
     ],
     [
       "doesNotMatch",
       /merge-base <remote>\/<target-branch>/,
       "the merge base regressed to a remote-tracking ref the fetch may not update",
+    ],
+    // The panel checkout is a clone, in a runnable form, and never a linked
+    // worktree the container cannot read.
+    [
+      "match",
+      /```bash\n *node \.\.\/\.\.\/scripts\/advisory-panel-checkout\.mjs <remote-url> <pr-number> <target-branch> <path outside any authoring tree>\n/,
+      "the panel checkout is not made by the packaged script",
+    ],
+    [
+      "doesNotMatch",
+      /^\s*git clone /m,
+      "the panel checkout regressed to a bare git clone outside the isolated environment",
+    ],
+    [
+      "doesNotMatch",
+      /git worktree add/,
+      "the panel checkout regressed to a linked worktree",
     ],
     // The Claude member is still opened by the operator, for the compliance
     // reason; the guard names the Codex task so it cannot catch that line.

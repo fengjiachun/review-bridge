@@ -10,7 +10,18 @@ export function git(cwd, ...args) {
   const result = spawnSync("git", args, {
     cwd,
     encoding: "utf8",
-    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" },
+    // The identity rides in the environment, not in the repository's local
+    // config: a test may unset that config (the container launcher refuses
+    // a checkout whose config holds more than a fresh clone writes), and a
+    // runner without a domain name cannot guess one.
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_AUTHOR_NAME: "Review Bridge Test",
+      GIT_AUTHOR_EMAIL: "review-bridge@example.invalid",
+      GIT_COMMITTER_NAME: "Review Bridge Test",
+      GIT_COMMITTER_EMAIL: "review-bridge@example.invalid",
+    },
   });
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();

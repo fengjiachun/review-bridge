@@ -69,6 +69,147 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   what the report itself read: the ledger files it rendered (the review
   ledger, the publication ledger and its gate or authorization file) and the
   publication summary the server computed over its own inputs, by digest.
+- The advisory `CODEX_TASK` member is launchable again, through a container
+  that is the filesystem read boundary, issue #109 (#125). The packaged
+  Codex plugin gains `scripts/advisory-sandbox-launch.mjs`, the only launch
+  an advisory review takes. It builds or reuses a `node:22.22.0-bookworm`
+  image with `@openai/codex@0.153.4`, and runs the reviewer under an isolated
+  `CODEX_HOME` with exactly these mounts: the operator's `auth.json` as a
+  read-only bind mount, never copied into an image layer; the packaged
+  marketplace and plugin, read-only; the author checkout, read-only at the
+  path the ledger records; and a staged copy of the one review, read-write.
+  The host store is never mounted: the review's directory is copied into a
+  scratch store, and after the run the staged bytes are never copied back —
+  the verdict is replayed through the host's own `submit_review` against the
+  host ledger, under that review's own state lock, with the findings the
+  staged ledger records as the payload, and the host keeps the replay's
+  result only when it equals the staged ledger field for field, timestamps
+  aside; a staged ledger the replay cannot produce (a forged `CLEAN`, findings
+  the server never normalized, a snapshot hash the host never wrote), a staged
+  store that changed or added any other file, or a host ledger that moved
+  since launch is refused, leaving the host store unwritten and the staged
+  copy for inspection (Codex's round-one P1: a read-write host store under
+  `danger-full-access` would have handed an injected reviewer every other
+  ledger and lock; its round-two P1: a field comparison of the staged ledger
+  is forgeable from inside the container). The boundary probe treats any
+  HTTP status on the direct egress check as traffic that left the container
+  (round-two P1) and requires the mounted checkout's HEAD, sha1 or sha256
+  length, to be the commit the host sees at that path, the codex transcript is flushed before the launcher reads
+  it (round-two P2), and the first criterion is derived from the main rollout's own
+  `McpToolCall` records alone — every reviewer call completed or was answered
+  with an error by the server — with the transcript's `mcp:` lines kept only
+  as a cross-check that fails on a mismatch. That criterion is run-health evidence recorded inside the
+  container and forgeable by a reviewer with shell access, and the copy-back's
+  integrity rests on the host replay, not on it. The container never gets the
+  panel checkout's `.git`: the launcher clones the checkout over git's own
+  transport (`git clone --template= --no-local --no-hardlinks file://…`) into
+  its scratch directory, detaches that clone at the review's recorded snapshot
+  head (the panel checkout must still be at it, or the launch is refused),
+  mounts only it at the recorded path, and removes it at cleanup, so nothing a
+  template or a hand left in that `.git` can cross. Every git the launcher runs
+  on the host runs isolated from the operator's global and system
+  configuration, `HOME`, hooks, and `GIT_*` environment, so a `.gitattributes`
+  filter in the reviewed tree resolves to nothing and executes nothing on the
+  host; the panel checkout itself is made by the packaged
+  `advisory-panel-checkout.mjs` in that same isolated environment (shared
+  `isolated-git.mjs`), so the skill no longer spells out bare git commands for
+  it. ssh is pinned there by an
+  explicit command rather than by `HOME`, which it takes from the passwd
+  entry — no ssh configuration read, no key from disk, the agent as the one
+  credential source, no `ProxyCommand`, host keys still checked against the
+  operator's `known_hosts`, or, when there is none, against one file for the
+  run whose accepted fingerprints the script prints — and an ssh remote
+  without an agent is refused. A
+  review whose last round was prepared over a dirty tree (overlays,
+  `worktree_clean` false) is refused since the clone can materialize only
+  commits. The staged review rides in a tmpfs-backed Docker volume capped at 64 MB
+  (the isolated `CODEX_HOME` in one capped at 1 GB) rather than a host
+  directory the reviewer could fill, so a write past the cap fails inside the
+  container; the store's apparent size is measured there afterwards and
+  copied out only within 64 MB overall and 8 MB for one file (past either the
+  volume is kept unread and named in the report), and the host streams every
+  hash rather than reading a staged file whole; the reviewer's container and
+  the probes resolve no name but the sidecar's alias, since `--internal` cuts
+  routing but not resolution and a name carries data on its own; the
+  transcript keeps its first 64 MB and says how much it dropped, a rollout
+  past 8 MB is named rather than read, rollouts are parsed a line at a time,
+  and the evidence is gathered before the copy-back so a moved ledger always
+  has a report; every container runs under memory, swap, process, and CPU
+  limits, the reviewer's raisable with `--memory` and `--cpus`;
+  every container the launcher starts writes through a bounded json-file log
+  driver and the sidecar collapses a repeated record into a counted line
+  (flushed every five seconds and on the `SIGTERM` that `docker stop` sends
+  before the log is read), so a reviewer looping on a refused host cannot fill
+  the host's disk and the counts still reach the report;
+  a failed export of the rollouts keeps the CODEX_HOME volume, and a kept
+  volume keeps the container that holds its tmpfs alive with it, both named in
+  the report along with the commands to look and to clear; a consumer that
+  stops reading the launcher's output costs the report, not the cleanup;
+  the sidecar's log quotes every client-supplied value (authority, SNI) so a
+  name carrying a newline cannot forge a log line, and the log is collected bounded and every cleanup step runs
+  on its own, a spawn error or a nonzero exit recorded in the report rather
+  than skipping the rest;
+  and the codex `auth.json` path is
+  held to the same host-prefix check as the other mounts. The
+  isolated `CODEX_HOME` is a Docker volume and the working directory a tmpfs
+  rather than host directories — nothing Codex keeps there needs to be on the
+  host during the run — and the sessions are copied out of the volume
+  afterwards. Inside the
+  container the launch is `--sandbox danger-full-access`: Codex's nested bubblewrap does not start under
+  Docker's default confinement, and the container's own confinement is kept
+  rather than relaxed to fit a second sandbox. Egress goes only through a
+  sidecar proxy on an internal Docker network that admits `chatgpt.com`,
+  `api.openai.com`, and `auth.openai.com` (the token refresh endpoint;
+  refreshed tokens are not persisted back, since `auth.json` is read-only in
+  the container), allowlisted by CONNECT host and by the TLS SNI the client
+  then presents (a ClientHello naming another host, no SNI, or a first record
+  that is not a ClientHello closes the tunnel before any byte goes upstream,
+  so the allowlist cannot be fronted); `https://example.com` fails through the
+  proxy and has no route without it, while the model calls complete. All eight proxy variables
+  are pinned on the container (`HTTP_PROXY`, `HTTPS_PROXY` and their lowercase
+  forms at the sidecar; `ALL_PROXY`, `all_proxy`, `NO_PROXY`, `no_proxy`
+  explicitly empty), so a Docker CLI proxy configuration cannot inject its own,
+  and the probe's direct check empties all eight. Before the reviewer
+  starts, a probe in the same container confirms the host home's sensitive
+  contents (`~/.ssh`, `~/.codex` and its `auth.json`, `~/Library`, `~/.gnupg`,
+  `~/.aws`, `/root/.ssh`, the store) are absent and stops the launch if not
+  (the home directory itself is not probed: `/root` is a directory of the
+  base image), judged against the same image run without the checkout mount
+  so that what the image carries is never read as the host's, and the container
+  resolves no name but the sidecar's alias, since `--internal` cuts routing
+  but not resolution and a name carries data on its own; the packaged skill's
+  advisory panel clones the pull request's
+  repository with the packaged `advisory-panel-checkout.mjs` instead of adding
+  a linked worktree; on exit the launcher prints the three criteria it verified (MCP calls
+  completed inside the container, host filesystem absent, validated verdict
+  copied back to the host store), the guardian's verdict per call, and the
+  proxy's egress log, and exits nonzero when a criterion fails; the copy-back
+  runs only when the first two criteria and codex's exit code have passed, so
+  a run with an unexplained failure never advances a host ledger it could not
+  launch again. The probe
+  answers in JSON records rather than space-split text, so a path with a
+  space in it is one path (Codex's round-one P2). It fails closed, exit 2,
+  when Docker is unavailable or any mount source is missing, refuses a
+  ledger that is not an advisory `CODEX_TASK` review waiting for review, and
+  refuses a checkout, marketplace, store, or scratch directory under
+  `/private/tmp/` or `/Volumes/`, where Docker Desktop was measured to stop
+  serving files a few seconds into a container.
+  `--dry-run` validates the inputs and prints the docker commands without
+  Docker. The residual is stated: the one host secret inside is `auth.json`,
+  and a narrowly scoped API key in place of the ChatGPT token is the
+  operator's option. The packaged workflow skill's advisory sentences now
+  name the launcher as the required form in both the `CODEX_TASK` dispatch
+  section and the advisory panel table, with the "unavailable until a read
+  boundary exists" logic replaced by "unavailable without Docker rather than
+  opened another way"; `CODEX_TASK_DISPATCH_CONTRACT` and
+  `ADVISORY_PANEL_CONTRACT` anchor the launcher, the mount table and its
+  modes, the inner-sandbox reason, the egress allowlist, the three criteria,
+  and the residual, and refuse a weakened container or the pre-launcher
+  "not available" sentence. Hand-opening stays no mitigation; the advisory
+  fence (`finalize_local_gate` refuses, terminal state a report) is
+  unchanged; the HERMES, DeepSeek Harness, and `CLAUDE_DESKTOP` sections are
+  untouched. Verified on 2026-09-10 with one full advisory review of PR #119
+  run inside the container.
 
 ### Changed
 
