@@ -946,6 +946,10 @@ test("the isolated environment pins ssh itself: no operator configuration, no ke
   assert.equal(settings.has("proxyjump"), false);
   assert.deepEqual(settings.get("controlmaster"), ["false"]);
   assert.deepEqual(settings.get("identityagent"), [process.env.SSH_AUTH_SOCK ?? "none"]);
+  // IdentitiesOnly stays off: with it on, ssh offers only the file it was
+  // given and the agent's keys are never presented, which would make every
+  // private remote fail.
+  assert.deepEqual(settings.get("identitiesonly"), ["no"]);
   assert.deepEqual(settings.get("userknownhostsfile"), [operator.knownHostsPath]);
   assert.deepEqual(settings.get("stricthostkeychecking"), ["true"]);
   // With no known_hosts of the operator's, the run's own file and accept-new
@@ -969,7 +973,77 @@ test("the isolated environment pins ssh itself: no operator configuration, no ke
   await fsp.rm(marker);
   spawnSync("sh", ["-c", `${operator.command} -o BatchMode=yes -o ConnectTimeout=2 -p 1 127.0.0.1 true`], { encoding: "utf8" });
   await assert.rejects(fsp.access(marker), /ENOENT/);
+  // And the claim that the agent is a usable credential source is tested
+  // against a real server: a local sshd that accepts one key, which lives only
+  // in an agent. The same command with IdentitiesOnly=yes is the negative
+  // control. Where sshd cannot be started (a runner without it, or one that
+  // refuses to run it unprivileged) the test says so rather than passing
+  // quietly.
+  const server = await localSshd(t, operator.root);
+  if (!server) {
+    t.diagnostic("no local sshd: the agent authentication control did not run");
+    return;
+  }
+  const agent = spawnSync("ssh-agent", ["-s"], { encoding: "utf8" }).stdout;
+  const socket = /SSH_AUTH_SOCK=([^;]+);/.exec(agent)?.[1];
+  const agentPid = /SSH_AGENT_PID=(\d+);/.exec(agent)?.[1];
+  assert.ok(socket, agent);
+  t.after(() => spawnSync("ssh-agent", ["-k"], { env: { ...process.env, SSH_AGENT_PID: agentPid } }));
+  assert.equal(spawnSync("ssh-add", ["-q", server.key], { env: { ...process.env, SSH_AUTH_SOCK: socket }, encoding: "utf8" }).status, 0);
+  const pinned = [
+    "ssh -F /dev/null -o IdentityFile=/dev/null",
+    `-o IdentityAgent='${socket}'`,
+    "-o ProxyCommand=none -o ProxyJump=none -o ControlMaster=no -o ControlPath=none",
+    `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile='${server.knownHosts}'`,
+    "-o BatchMode=yes -o ConnectTimeout=5",
+  ].join(" ");
+  const connect = (extra) =>
+    spawnSync("sh", ["-c", `${pinned} ${extra} -p ${server.port} ${os.userInfo().username}@127.0.0.1 true`], { encoding: "utf8" });
+  const allowed = connect("");
+  assert.equal(allowed.status, 0, `${allowed.stderr}\n${server.log()}`);
+  const refused = connect("-o IdentitiesOnly=yes");
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /Permission denied \(publickey\)/);
+  t.diagnostic(`agent authentication control ran against a local sshd on port ${server.port}`);
 });
+
+// A local sshd for the agent control: its own host key, one authorized key,
+// no password auth, run unprivileged on a free port. Null when it will not
+// start here.
+async function localSshd(t, root) {
+  const sshd = "/usr/sbin/sshd";
+  if (!fs.existsSync(sshd)) return null;
+  const dir = path.join(root, "sshd");
+  await fsp.mkdir(dir);
+  const hostKey = path.join(dir, "host");
+  const key = path.join(dir, "user");
+  for (const file of [hostKey, key]) {
+    assert.equal(spawnSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", file], { encoding: "utf8" }).status, 0);
+  }
+  const authorized = path.join(dir, "authorized_keys");
+  await fsp.copyFile(`${key}.pub`, authorized);
+  await fsp.chmod(authorized, 0o600);
+  await fsp.chmod(hostKey, 0o600);
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const config = path.join(dir, "sshd_config");
+  await fsp.writeFile(
+    config,
+    `HostKey ${hostKey}\nAuthorizedKeysFile ${authorized}\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nStrictModes no\nPidFile ${dir}/pid\nLogLevel DEBUG1\n`,
+  );
+  const logPath = path.join(dir, "sshd.log");
+  const log = fs.openSync(logPath, "w");
+  const child = spawn(sshd, ["-f", config, "-p", String(port), "-D", "-e"], { stdio: ["ignore", log, log] });
+  t.after(() => child.kill("SIGKILL"));
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const text = await fsp.readFile(logPath, "utf8").catch(() => "");
+    if (/Server listening on/.test(text)) {
+      return { port, key, knownHosts: path.join(dir, "known_hosts"), log: () => text };
+    }
+    if (child.exitCode !== null) return null;
+  }
+  return null;
+}
 
 test("without an operator known_hosts, one run shares one known_hosts and says what it accepted", async (t) => {
   // accept-new against /dev/null would discard the key and let every call of

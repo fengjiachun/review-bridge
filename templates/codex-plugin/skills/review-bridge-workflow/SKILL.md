@@ -1468,7 +1468,7 @@ attests nothing.
    The script runs git in the same isolated environment as the launcher's own
    host git (no global or system configuration, an empty `HOME` and hooks
    path, no `GIT_*` from the operator's shell, and ssh pinned by an explicit
-   command to `-F /dev/null` with `IdentitiesOnly`, the agent as its one
+   command to `-F /dev/null` with no key from disk, the agent as its one
    credential source, and no `ProxyCommand`, since ssh takes its home from
    the passwd entry rather than the environment), so a `.gitattributes` in the
    pull request's tree can name no filter that resolves while the panel

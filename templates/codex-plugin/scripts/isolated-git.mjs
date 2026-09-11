@@ -13,10 +13,11 @@
 // ~/.ssh/config, the default identity files, and the default known_hosts
 // from the passwd entry, not from the environment (Codex round twenty-nine
 // on #125). So ssh is pinned by an explicit GIT_SSH_COMMAND rather than by
-// HOME: `-F /dev/null` reads no ssh configuration at all, `IdentitiesOnly`
-// with `IdentityFile=/dev/null` uses no key from disk, `IdentityAgent` names
-// the operator's agent socket as the one credential source (`none` when
-// there is no agent), and `ProxyCommand`/`ProxyJump`/`ControlMaster`/
+// HOME: `-F /dev/null` reads no ssh configuration at all, a lone
+// `IdentityFile=/dev/null` replaces the default `~/.ssh/id_*` list so no key
+// on disk is offered, `IdentityAgent` names the operator's agent socket as
+// the one credential source (`none` when there is no agent), and
+// `ProxyCommand`/`ProxyJump`/`ControlMaster`/
 // `ControlPath` are off, so a configuration cannot make ssh run a command or
 // reuse a multiplexed connection. Host keys are still checked: the
 // operator's ~/.ssh/known_hosts is read (a host public key is not a secret,
@@ -26,6 +27,15 @@
 // run checks the key the first one accepted and the caller can print what
 // was accepted — the file goes with the isolation directory at exit, so the
 // trust lasts the run and no longer.
+//
+// `IdentitiesOnly` is deliberately absent: with it on, ssh offers only the
+// keys named by IdentityFile, so the agent's identities are never presented
+// and every private remote fails — measured against a local sshd on
+// 2026-09-11, where the same command authenticated through the agent with the
+// option off and was refused with `Permission denied (publickey)` with it on
+// (Codex round thirty-eight on #125). Dropping it costs nothing: naming an
+// IdentityFile already replaces the default `~/.ssh/id_*` list, so a key on
+// disk is still never offered.
 //
 // The isolation directory is made on first use and removed at exit.
 import { spawnSync } from "node:child_process";
@@ -65,8 +75,6 @@ function sshCommand() {
     "ssh",
     "-F",
     "/dev/null",
-    "-o",
-    "IdentitiesOnly=yes",
     "-o",
     "IdentityFile=/dev/null",
     "-o",

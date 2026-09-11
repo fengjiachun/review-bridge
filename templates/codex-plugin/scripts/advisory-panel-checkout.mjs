@@ -23,9 +23,10 @@ const USAGE = `Usage: advisory-panel-checkout.mjs <remote-url> <pr-number> <targ
   Every git call runs isolated from the operator's global and system
   configuration, HOME, hooks, and GIT_* environment. ssh is pinned the same
   way and does not follow the operator's home: no ssh configuration is read
-  (-F /dev/null), no key on disk is used (IdentitiesOnly with
-  IdentityFile=/dev/null), the agent named by SSH_AUTH_SOCK is the one
-  credential source (IdentityAgent), and ProxyCommand and ProxyJump are off,
+  (-F /dev/null), no key on disk is offered (a lone IdentityFile=/dev/null
+  replaces the default ~/.ssh/id_* list), the agent named by SSH_AUTH_SOCK is
+  the one credential source (IdentityAgent, with IdentitiesOnly left off so
+  the agent's keys are actually presented), and ProxyCommand and ProxyJump are off,
   so no configuration can make ssh run a command. Host keys are checked
   against the operator's ~/.ssh/known_hosts, or taken on first use when that
   file does not exist, which is stated in the output. No credential helper is

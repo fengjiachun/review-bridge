@@ -1003,7 +1003,7 @@ export const ADVISORY_PANEL_CONTRACT = {
     // checkout ran with the operator's global git configuration in reach.
     [
       "the panel checkout is made by the packaged script in the isolated git environment",
-      /The script runs git in the same isolated environment as the launcher's own host git \(no global or system configuration, an empty `HOME` and hooks path, no `GIT_\*` from the operator's shell, and ssh pinned by an explicit command to `-F \/dev\/null` with `IdentitiesOnly`, the agent as its one credential source, and no `ProxyCommand`, since ssh takes its home from the passwd entry rather than the environment\)/,
+      /The script runs git in the same isolated environment as the launcher's own host git \(no global or system configuration, an empty `HOME` and hooks path, no `GIT_\*` from the operator's shell, and ssh pinned by an explicit command to `-F \/dev\/null` with no key from disk, the agent as its one credential source, and no `ProxyCommand`, since ssh takes its home from the passwd entry rather than the environment\)/,
     ],
     [
       "the refs and the merge base live in the clone",
