@@ -562,6 +562,39 @@ test("a review still in progress is rendered with its current status, not a term
   assert.match(render(cleanInTwoRounds()), /- Terminal state: `CLEAN`/);
 });
 
+// An advisory review has no author loop and no rereview: once its findings
+// are submitted it is as finished as the store will let it be, and the line
+// says why it stops there.
+test("an advisory review that reported findings is terminal, and says why", () => {
+  const submitted = {
+    advisory: true,
+    status: "REVIEW_SUBMITTED",
+    current_round: 1,
+    state_version: 2,
+    rounds: [round(1, HEAD_ONE, "2026-09-01T00:00:00.000Z")],
+    findings: [finding("F-001", "major", "OPEN", { introduced_round: 1 })],
+    resolutions: [],
+    rereview_decisions: [],
+    history: [
+      { at: "2026-09-01T00:00:00.000Z", event: "REVIEW_PREPARED", round: 1, mode: "FULL" },
+      { at: "2026-09-01T00:06:00.000Z", event: "FINDINGS_SUBMITTED", round: 1, count: 1 },
+    ],
+    clean_snapshot_hash: null,
+  };
+  const advisory = render(cleanInTwoRounds(submitted));
+  assert.match(advisory, /### Outcome\n\n- Terminal state: `REVIEW_SUBMITTED` \(advisory: findings reported, no author loop\)\n/);
+  assert.doesNotMatch(advisory, /not terminal/);
+  // The same ledger without the advisory flag is an ordinary review waiting
+  // for the author.
+  const gated = render(cleanInTwoRounds({ ...submitted, advisory: undefined }));
+  assert.match(gated, /- Current status: `REVIEW_SUBMITTED` \(not terminal: the review is still in progress\)\n/);
+  assert.doesNotMatch(gated, /Terminal state/);
+  // An advisory review that found nothing reaches CLEAN and reads as before.
+  const clean = render(cleanInTwoRounds({ advisory: true }));
+  assert.match(clean, /- Terminal state: `CLEAN`\n- Rounds to CLEAN: 2/);
+  assert.doesNotMatch(clean, /advisory: findings reported/);
+});
+
 test("a rebuttal sustained before the verification obligation says the verification is not recorded", () => {
   const review = cleanInTwoRounds();
   delete review.rereview_decisions[1].verification;

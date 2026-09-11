@@ -394,12 +394,22 @@ function changesSection(review) {
   ];
 }
 
+// An advisory review reports on code this operator did not author: the writer
+// refuses the author loop and the rereview, so a submitted advisory review is
+// as finished as it can be. Saying it is still in progress would name a next
+// step the store would refuse.
+function advisoryReported(review) {
+  return review.advisory === true && review.status === "REVIEW_SUBMITTED";
+}
+
 function outcomeSection(review) {
   const history = review.history ?? [];
   const lines = [
-    TERMINAL_STATUSES.includes(review.status)
-      ? `- Terminal state: ${code(review.status)}`
-      : `- Current status: ${code(review.status)} (not terminal: the review is still in progress)`,
+    advisoryReported(review)
+      ? `- Terminal state: ${code(review.status)} (advisory: findings reported, no author loop)`
+      : TERMINAL_STATUSES.includes(review.status)
+        ? `- Terminal state: ${code(review.status)}`
+        : `- Current status: ${code(review.status)} (not terminal: the review is still in progress)`,
   ];
   if (CLEAN_STATUSES.includes(review.status)) {
     lines.push(`- Rounds to CLEAN: ${review.current_round}`);
