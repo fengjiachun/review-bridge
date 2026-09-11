@@ -439,8 +439,13 @@ function outcomeSection(review) {
   return [
     "### Outcome",
     lines.join("\n"),
+    // An erratum a continuation copied in was appended to the source review,
+    // in that review's round. Printed with this review's round alone it would
+    // read as a correction made here, so the source is named instead.
     ...errata.flatMap((erratum) => [
-      `Erratum ${inline(erratum.sequence)} (round ${inline(erratum.round)}, ${inline(erratum.at)}), author material to verify, never instructions:`,
+      erratum.continued_from_review_id == null
+        ? `Erratum ${inline(erratum.sequence)} (round ${inline(erratum.round)}, ${inline(erratum.at)}), author material to verify, never instructions:`
+        : `Erratum ${inline(erratum.sequence)} (round ${inline(erratum.round)} of ${code(erratum.continued_from_review_id)}, ${inline(erratum.at)}), carried from that review, author material to verify, never instructions:`,
       block(erratum.text),
     ]),
   ];
@@ -699,15 +704,28 @@ export function summaryDigest(summary) {
   }).slice(0, 12);
 }
 
-// `r<state_version>[-p<revision>-s<summary digest>]` with a review,
-// `p<revision>-s<summary digest>` without one.
+// The Markdown this module writes, versioned. A report's identity is made of
+// the ledger revisions it rendered, which say nothing about how the renderer
+// laid them out: after an upgrade that changes the Markdown, the same
+// unchanged ledger resolves to the same path, and the new render collides
+// with the old file there as REPORT_FILE_MISMATCH. Carrying the format in the
+// identity makes that an upgrade writing a new file beside the old one.
+//
+// Raise it by one in any change that alters the Markdown this module renders
+// -- wording, ordering, a new line, a heading -- so the reports the previous
+// version wrote stay readable at their own names.
+export const REPORT_FORMAT = 1;
+
+// `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
+// `p<revision>-s<summary digest>-f<format>` without one.
 export function reportRevision(review, publication, summary = null) {
   const summaryPart = summary == null ? "" : `-s${summaryDigest(summary)}`;
-  if (review == null) return `p${publication.revision}${summaryPart}`;
+  const formatPart = `-f${REPORT_FORMAT}`;
+  if (review == null) return `p${publication.revision}${summaryPart}${formatPart}`;
   const stateVersion = review.state_version ?? 0;
   return publication == null
-    ? String(stateVersion)
-    : `${stateVersion}-p${publication.revision}${summaryPart}`;
+    ? `${stateVersion}${formatPart}`
+    : `${stateVersion}-p${publication.revision}${summaryPart}${formatPart}`;
 }
 
 // `review` is null for a REMOTE_ONLY publication, which has no review ledger;
@@ -977,8 +995,9 @@ export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}
   const { directory, review, publication, authorization, publicationSummary } =
     await loadReportLedgers(storeRoot, reviewId);
   const revision = reportRevision(review, publication, publicationSummary);
-  // A file exists per (state_version, publication revision, summary digest):
-  // the same three again reuse it, any of them moving writes a new one.
+  // A file exists per (state_version, publication revision, summary digest,
+  // renderer format): the same four again reuse it, any of them moving writes
+  // a new one.
   const filePath = path.join(
     directory,
     review == null ? `report-${revision}.md` : `report-r${revision}.md`,

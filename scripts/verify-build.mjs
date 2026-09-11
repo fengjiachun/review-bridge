@@ -1393,7 +1393,7 @@ try {
     );
     assert.equal(packagedReportJson.status, 0, packagedReportJson.stderr);
     const reportEnvelope = JSON.parse(packagedReportJson.stdout);
-    assert.match(reportEnvelope.revision, /^\d+-p\d+-s[0-9a-f]{12}$/);
+    assert.match(reportEnvelope.revision, /^\d+-p\d+-s[0-9a-f]{12}-f\d+$/);
     assert.match(
       reportEnvelope.markdown,
       new RegExp(`- Report revision: \`${reportEnvelope.revision}\`\\n`),
@@ -1406,7 +1406,7 @@ try {
     // path of, and the digest lets a reader tie the two together.
     assert.equal(renderedReport.reused, false);
     assert.equal(renderedReport.markdown, undefined);
-    assert.match(path.basename(renderedReport.path), /^report-r\d+-p\d+-s[0-9a-f]{12}\.md$/);
+    assert.match(path.basename(renderedReport.path), /^report-r\d+-p\d+-s[0-9a-f]{12}-f\d+\.md$/);
     assert.match(renderedReport.summary_digest, /^[0-9a-f]{12}$/);
     const renderedBytes = await fsp.readFile(renderedReport.path);
     assert.equal(renderedBytes.length, renderedReport.bytes);
@@ -1487,7 +1487,7 @@ try {
     });
     assert.equal(remoteReport.reused, false);
     assert.equal(remoteReport.review_state_version, null);
-    assert.match(path.basename(remoteReport.path), /^report-p\d+-s[0-9a-f]{12}\.md$/);
+    assert.match(path.basename(remoteReport.path), /^report-p\d+-s[0-9a-f]{12}-f\d+\.md$/);
     const remoteReportText = await fsp.readFile(remoteReport.path, "utf8");
     assert.match(remoteReportText, /authorized `REMOTE_ONLY` with local review skipped/);
     assert.match(remoteReportText, /projection of the ledger, not evidence/);
