@@ -463,6 +463,10 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       /The container also resolves no name but the sidecar's: `--internal` cuts routing, not resolution, and a name would carry data out on its own/,
     ],
     [
+      "the reviewer's output to the host is bounded and read before the copy-back",
+      /the transcript keeps its first 64 MB and records how much it dropped, a rollout past 8 MB is named and left unread rather than parsed, and every piece of that evidence is read before anything is copied back/,
+    ],
+    [
       "container logs are bounded on the host and repeats are collapsed",
       /Every container the launcher starts writes through a bounded json-file log driver \(16 MB, two files\) and the sidecar collapses a record that repeats into a counted line/,
     ],

@@ -138,7 +138,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
 // records derived from the probe's own argument, and plays the reviewer by
 // moving the staged ledger with the server's own submit — or, when asked,
 // by also leaving the kind of trace the copy-back must refuse.
-async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "", volumeRmFail = false, head = "", rmFail = "", sessions = "", storeKb = "", storeLargest = "", dns = "", volumeUnbounded = false } = {}) {
+async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "", volumeRmFail = false, head = "", rmFail = "", sessions = "", storeKb = "", storeLargest = "", dns = "", volumeUnbounded = false, huge = false, fatRollout = false, sessionsFile = false } = {}) {
   const bin = path.join(f.root, "bin");
   await fsp.mkdir(bin, { recursive: true });
   const runner = path.join(bin, "fake-run.mjs");
@@ -233,11 +233,17 @@ if (!args.includes("codex")) {
   if (tamper !== "no-verdict") {
     await submitInitialReview(staged, reviewId, [{ severity: "major", title: "one", explanation: "first", path: "app.js", line: 1 }], "CODEX_TASK");
     if (process.env.FAKE_BIG) for (let i = 0; i < 40000; i += 1) process.stdout.write("codex\\nfiller line " + i + " ".repeat(60) + "\\n");
+    // A reviewer that never stops writing: 70 MB, past the transcript's bound.
+    if (process.env.FAKE_HUGE) { const megabyte = "x".repeat(1024 * 1024 - 1) + "\\n"; for (let i = 0; i < 70; i += 1) process.stdout.write(megabyte); }
     call("submit_review");
   }
   if (variant === "extra-line") process.stdout.write("mcp: review-bridge-reviewer/list_pending_reviews started\\nmcp: review-bridge-reviewer/list_pending_reviews (completed)\\n");
-  fs.mkdirSync(path.join(scratch, "sessions"), { recursive: true });
+  if (process.env.FAKE_SESSIONS_FILE) { fs.writeFileSync(path.join(scratch, "sessions"), "not a directory"); }
+  else fs.mkdirSync(path.join(scratch, "sessions"), { recursive: true });
   const event = (item) => JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item } });
+  // A rollout larger than the launcher will read, and a sessions path that is
+  // not a directory at all.
+  if (process.env.FAKE_FAT_ROLLOUT) fs.writeFileSync(path.join(scratch, "sessions", "rollout-fat.jsonl"), "x".repeat(9 * 1024 * 1024));
   fs.writeFileSync(path.join(scratch, "sessions", "rollout-main.jsonl"), [
     JSON.stringify({ type: "session_meta", payload: { id: "00000000-0000-0000-0000-000000000000" } }),
     ...records.map(event),
@@ -324,16 +330,19 @@ esac
     FAKE_STORE_KB: storeKb,
     FAKE_STORE_LARGEST: storeLargest,
     FAKE_DNS: dns,
+    FAKE_HUGE: huge ? "1" : "",
+    FAKE_FAT_ROLLOUT: fatRollout ? "1" : "",
+    FAKE_SESSIONS_FILE: sessionsFile ? "1" : "",
     FAKE_VOLUME_UNBOUNDED: volumeUnbounded ? "1" : "",
     FAKE_HEAD: head,
     FAKE_CHECKOUT_LOG: path.join(bin, "checkout.json"),
   };
 }
 
-function launch(f, args, env = {}) {
+function launch(f, args, env = {}, { maxBuffer = 64 * 1024 * 1024 } = {}) {
   return spawnSync(process.execPath, [f.launcher, ...args], {
     encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
+    maxBuffer,
     env: {
       ...process.env,
       HOME: f.home,
@@ -1350,6 +1359,38 @@ test("a Docker that cannot bound the volumes stops the launch rather than runnin
   assert.equal(result.status, 1, result.stdout);
   assert.match(result.stderr, /was created without the tmpfs size option .*this Docker cannot bound the reviewer's writes, so the launch stops rather than running unbounded/s);
   assert.doesNotMatch(result.stdout, /mcp: /);
+});
+
+test("the reviewer's own output cannot fill the host: the transcript keeps its head and a fat rollout is left unread", async (t) => {
+  // 70 MB of chatter: the transcript keeps 64 MB, says what it dropped, and
+  // the run still reports.
+  const f = await fixture(t, { realReview: true });
+  let result = launch(f, ["--review-id", f.reviewId], await fakeDocker(f, { huge: true }), { maxBuffer: 192 * 1024 * 1024 });
+  assert.equal(result.status, 0, result.stdout.slice(-2000));
+  const transcript = result.stdout.match(/^codex exit \d+.*transcript (\S+)$/m)[1];
+  const { size } = await fsp.stat(transcript);
+  assert.ok(size > 64 * 1024 * 1024 && size < 64 * 1024 * 1024 + 200, `transcript is ${size} bytes`);
+  const tail = await fsp.readFile(transcript, "utf8").then((text) => text.slice(-120));
+  assert.match(tail, /\[transcript truncated after 64 MB; \d+ more bytes discarded\]/);
+  assert.match(result.stdout, /criterion 1 .*: PASS — .*transcript truncated after 64 MB, \d+ bytes discarded/);
+  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: PASS/);
+  assert.match(result.stdout, /^residual: /m);
+  // A rollout past its bound is named and never parsed, and the copy-back
+  // does not happen.
+  const g = await fixture(t, { realReview: true });
+  result = launch(g, ["--review-id", g.reviewId], await fakeDocker(g, { fatRollout: true }));
+  assert.equal(result.status, 1, result.stdout.slice(-2000));
+  assert.match(result.stdout, /criterion 1 .*: FAIL — .*rollout rollout-fat\.jsonl is 9\.0 MB, over the 8 MB bound/);
+  assert.match(result.stdout, /refused — pre-copy criteria failed: .*rollout rollout-fat\.jsonl is 9\.0 MB/);
+  assert.equal((await loadReview(g.store, g.reviewId)).state_version, 1);
+  // Evidence that cannot be read at all is a criterion, not an exception: the
+  // report still arrives and the host ledger stays where it was.
+  const h = await fixture(t, { realReview: true });
+  result = launch(h, ["--review-id", h.reviewId], await fakeDocker(h, { sessionsFile: true }));
+  assert.equal(result.status, 1, result.stdout.slice(-2000));
+  assert.match(result.stdout, /criterion 1 .*: FAIL — .*(could not be read|no main rollout found)/);
+  assert.match(result.stdout, /^residual: /m);
+  assert.equal((await loadReview(h.store, h.reviewId)).state_version, 1);
 });
 
 test("the container mounts a clone the launcher makes, never the panel checkout's own .git", async (t) => {

@@ -894,7 +894,12 @@ inside the container and copied out only within 64 MB overall and 8 MB for
 any one file — past either the volume is kept unread and named in the report,
 and the host hashes what does come out a stream at a time. The container also
 resolves no name but the sidecar's: `--internal` cuts routing, not
-resolution, and a name would carry data out on its own. Every container runs under memory, swap, process, and CPU limits
+resolution, and a name would carry data out on its own. What the reviewer
+writes to the host is bounded the same way: the transcript keeps its first
+64 MB and records how much it dropped, a rollout past 8 MB is named and left
+unread rather than parsed, and every piece of that evidence is read before
+anything is copied back, so a host ledger that moves always has a report
+beside it. Every container runs under memory, swap, process, and CPU limits
 (the reviewer's 4 GB and 2 CPUs by default, raisable with `--memory` and
 `--cpus`; the helpers far less). On exit the launcher prints the
 three criteria it verified — the reviewer's MCP calls completed inside the

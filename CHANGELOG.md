@@ -82,7 +82,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   volume is kept unread and named in the report), and the host streams every
   hash rather than reading a staged file whole; the reviewer's container and
   the probes resolve no name but the sidecar's alias, since `--internal` cuts
-  routing but not resolution and a name carries data on its own; every container runs under memory, swap, process, and CPU
+  routing but not resolution and a name carries data on its own; the
+  transcript keeps its first 64 MB and says how much it dropped, a rollout
+  past 8 MB is named rather than read, rollouts are parsed a line at a time,
+  and the evidence is gathered before the copy-back so a moved ledger always
+  has a report; every container runs under memory, swap, process, and CPU
   limits, the reviewer's raisable with `--memory` and `--cpus`;
   every container the launcher starts writes through a bounded json-file log
   driver and the sidecar collapses a repeated record into a counted line

@@ -8,6 +8,7 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import readline from "node:readline";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isolatedGit as hostGit } from "./isolated-git.mjs";
@@ -108,6 +109,11 @@ const codexLimits = (memory, cpus) => ["--memory", memory, "--memory-swap", memo
 // artifacts are far below this.
 const STAGED_STORE_LIMIT_MB = 64;
 const STAGED_FILE_LIMIT_MB = 8;
+// The reviewer's own output: the transcript keeps its head, where the session
+// id and the mcp lines are, and stops there; a rollout larger than one review
+// ever needs is evidence the launcher will not read into memory.
+const TRANSCRIPT_LIMIT_MB = 64;
+const ROLLOUT_LIMIT_MB = 8;
 const CODEX_HOME_LIMIT = "1g";
 
 const USAGE = `Usage: advisory-sandbox-launch.mjs --review-id <id> [--store <path>]
@@ -1458,15 +1464,35 @@ async function* walkFiles(directory) {
 // The guardian's own rollouts under the isolated CODEX_HOME: one thread per
 // codex session, one turn per approval, the verdict as the turn's agent
 // message and the tool it judged in the approval request that opened it.
-async function guardianVerdicts(sessionsRoot) {
+// A rollout is read a line at a time and never if it is larger than a review
+// writes: the container wrote it, so its size is the reviewer's to choose
+// (Codex round thirty-six on #125). `problems` collects what was refused.
+async function* rolloutLines(file, problems) {
+  const { size } = await fsp.stat(file);
+  if (size > ROLLOUT_LIMIT_MB * 1024 * 1024) {
+    problems.push(`rollout ${path.basename(file)} is ${(size / (1024 * 1024)).toFixed(1)} MB, over the ${ROLLOUT_LIMIT_MB} MB bound`);
+    return;
+  }
+  const input = fs.createReadStream(file, { encoding: "utf8" });
+  try {
+    for await (const line of readline.createInterface({ input, crlfDelay: Infinity })) yield line;
+  } finally {
+    input.destroy();
+  }
+}
+
+async function guardianVerdicts(sessionsRoot, problems) {
   const verdicts = [];
   for await (const file of walkFiles(sessionsRoot)) {
     if (!file.endsWith(".jsonl")) continue;
-    const text = await fsp.readFile(file, "utf8");
-    if (!text.includes('"thread_source":"guardian_review"')) continue;
+    // Whether this is a guardian rollout shows in its lines, so the turns are
+    // collected as they stream and kept only if the marker appeared.
+    const collected = [];
+    let isGuardian = false;
     let turn = null;
-    for (const line of text.split("\n")) {
+    for await (const line of rolloutLines(file, problems)) {
       if (!line) continue;
+      if (line.includes('"thread_source":"guardian_review"')) isGuardian = true;
       let event;
       try {
         event = JSON.parse(line);
@@ -1493,15 +1519,16 @@ async function guardianVerdicts(sessionsRoot) {
         }
       } else if (payload.type === "task_complete" && turn) {
         turn.seconds = (Date.parse(event.timestamp) - Date.parse(turn.startedAt)) / 1000;
-        verdicts.push(turn);
+        collected.push(turn);
         turn = null;
       } else if (payload.type === "turn_aborted" && turn) {
         turn.outcome = `aborted (${payload.reason ?? "unknown"})`;
         turn.seconds = (Date.parse(event.timestamp) - Date.parse(turn.startedAt)) / 1000;
-        verdicts.push(turn);
+        collected.push(turn);
         turn = null;
       }
     }
+    if (isGuardian) verdicts.push(...collected);
   }
   return verdicts;
 }
@@ -1515,20 +1542,23 @@ async function guardianVerdicts(sessionsRoot) {
 // call with a transport error, or with no result, fails it. The transcript's
 // `mcp:` lines are kept only as a cross-check: a started count that differs
 // from the record count is a mismatch and fails it too.
-async function mainRolloutRecords(sessionsRoot, sessionId) {
+async function mainRolloutRecords(sessionsRoot, sessionId, problems) {
   for await (const file of walkFiles(sessionsRoot)) {
     if (!file.endsWith(".jsonl")) continue;
-    const text = await fsp.readFile(file, "utf8");
-    const firstLine = text.slice(0, text.indexOf("\n"));
-    let meta;
-    try {
-      meta = JSON.parse(firstLine);
-    } catch {
-      continue;
-    }
-    if (meta?.type !== "session_meta" || meta.payload?.id !== sessionId) continue;
-    const records = [];
-    for (const line of text.split("\n")) {
+    let records = null;
+    for await (const line of rolloutLines(file, problems)) {
+      if (records === null) {
+        // The first line names the session; anything else is another rollout.
+        let meta;
+        try {
+          meta = JSON.parse(line);
+        } catch {
+          break;
+        }
+        if (meta?.type !== "session_meta" || meta.payload?.id !== sessionId) break;
+        records = [];
+        continue;
+      }
       if (!line.includes('"McpToolCall"')) continue;
       let event;
       try {
@@ -1549,11 +1579,13 @@ async function mainRolloutRecords(sessionsRoot, sessionId) {
       }
       records.push({ id: item.id, tool: item.tool, completed, answered, message });
     }
-    return records;
+    if (records !== null) return records;
   }
   return null;
 }
 
+// `startedLines` is null when the transcript was truncated: it can then only
+// undercount, so the cross-check is skipped rather than failed.
 function judgeMcpCalls(records, startedLines) {
   const reasons = [];
   if (records == null) reasons.push("no main rollout found under the isolated CODEX_HOME");
@@ -1563,7 +1595,7 @@ function judgeMcpCalls(records, startedLines) {
   if (unexplained.length > 0) {
     reasons.push(`${unexplained.length} call(s) failed without a server answer: ${unexplained.map((record) => record.tool).join(", ")}`);
   }
-  if (records != null && startedLines !== list.length) {
+  if (records != null && startedLines !== null && startedLines !== list.length) {
     reasons.push(`transcript/rollout mismatch: ${startedLines} started line(s) in the transcript, ${list.length} record(s) in the main rollout`);
   }
   const perTool = new Map();
@@ -1866,6 +1898,9 @@ async function main() {
   let storeKept = null;
   let storeWithinBound = false;
   let keeperStarted = false;
+  let transcriptBytes = 0;
+  let transcriptDropped = 0;
+  let transcriptNote = null;
   const storeFailures = [];
   let cleaned = false;
   // A step fails on a spawn error or a nonzero exit alike; stderr's first
@@ -2032,6 +2067,12 @@ async function main() {
 
     const started = Date.now();
     const transcript = fs.createWriteStream(transcriptPath);
+    // A write that fails is a note in the report, never a throw: the ledger
+    // may already be about to move, and a run without a report is worse than
+    // a run without a transcript.
+    transcript.on("error", (error) => {
+      transcriptNote = transcriptNote ?? `the transcript could not be written: ${error.message}`;
+    });
     codexExit = await new Promise((resolve, reject) => {
       const child = spawn("docker", codexRun, { stdio: ["ignore", "pipe", "pipe"] });
       const forward = (stream) => {
@@ -2039,8 +2080,17 @@ async function main() {
           if (headerAt === null && chunk.toString().includes("session id:")) {
             headerAt = (Date.now() - started) / 1000;
           }
-          process.stdout.write(chunk);
-          transcript.write(chunk);
+          // The head is what carries the session id and the mcp lines, so the
+          // head is what is kept; past the bound the bytes are counted and
+          // dropped, on this stream and in the file alike.
+          const room = TRANSCRIPT_LIMIT_MB * 1024 * 1024 - transcriptBytes;
+          const kept = room <= 0 ? null : chunk.length <= room ? chunk : chunk.subarray(0, room);
+          if (kept) {
+            transcriptBytes += kept.length;
+            process.stdout.write(kept);
+            transcript.write(kept);
+          }
+          if (!kept || kept.length < chunk.length) transcriptDropped += chunk.length - (kept?.length ?? 0);
         });
       };
       forward(child.stdout);
@@ -2050,6 +2100,9 @@ async function main() {
     });
     // The last mcp: line is often the last bytes the child wrote; read the
     // transcript only once the stream has flushed them.
+    if (transcriptDropped > 0) {
+      transcript.write(`\n[transcript truncated after ${TRANSCRIPT_LIMIT_MB} MB; ${transcriptDropped} more bytes discarded]\n`);
+    }
     await new Promise((resolve) => transcript.end(resolve));
     elapsed = (Date.now() - started) / 1000;
   } catch (error) {
@@ -2059,15 +2112,38 @@ async function main() {
     cleanup();
   }
 
-  const transcriptText = await fsp.readFile(transcriptPath, "utf8");
-  const mcp = parseMcpLines(transcriptText);
-  const reviewerCalls = [...mcp.entries()].filter(([key]) => key.startsWith(`${REVIEWER_SERVER}/`));
-  const started = reviewerCalls.reduce((sum, [, entry]) => sum + entry.started, 0);
-  const sessionId = transcriptText.match(/^session id: (\S+)$/m)?.[1] ?? null;
-  const mcpJudgement = judgeMcpCalls(
-    sessionId ? await mainRolloutRecords(path.join(scratch, "sessions"), sessionId) : null,
-    started,
-  );
+  // Every piece of evidence is read before anything is copied back, and any
+  // failure of that reading is a criterion, not an exception: once the host
+  // ledger moves there must be a report saying so.
+  const evidenceProblems = [];
+  let mcpJudgement = { ok: false, reasons: ["the rollout evidence was not read"], detail: "the rollout evidence was not read" };
+  let verdicts = [];
+  try {
+    const transcriptText = await fsp.readFile(transcriptPath, "utf8");
+    const mcp = parseMcpLines(transcriptText);
+    const reviewerCalls = [...mcp.entries()].filter(([key]) => key.startsWith(`${REVIEWER_SERVER}/`));
+    const started = reviewerCalls.reduce((sum, [, entry]) => sum + entry.started, 0);
+    const sessionId = transcriptText.match(/^session id: (\S+)$/m)?.[1] ?? null;
+    const sessionsRoot = path.join(scratch, "sessions");
+    const records = sessionId ? await mainRolloutRecords(sessionsRoot, sessionId, evidenceProblems) : null;
+    verdicts = await guardianVerdicts(sessionsRoot, evidenceProblems);
+    mcpJudgement = judgeMcpCalls(records, transcriptDropped > 0 ? null : started);
+  } catch (error) {
+    evidenceProblems.push(`the run's evidence could not be read: ${error.message}`);
+  }
+  if (evidenceProblems.length > 0) {
+    mcpJudgement = {
+      ok: false,
+      reasons: [...mcpJudgement.reasons, ...evidenceProblems],
+      detail: `${mcpJudgement.detail}; ${evidenceProblems.join("; ")}`,
+    };
+  }
+  if (transcriptDropped > 0) {
+    mcpJudgement = {
+      ...mcpJudgement,
+      detail: `${mcpJudgement.detail}; transcript truncated after ${TRANSCRIPT_LIMIT_MB} MB, ${transcriptDropped} bytes discarded, so its started lines were not counted against the rollout`,
+    };
+  }
   // The copy-back happens only after criteria 1 and 2 and the exit code have
   // passed: a host ledger advanced to REVIEW_SUBMITTED or CLEAN cannot be
   // launched again, so a run with an unexplained failure or a nonzero exit
@@ -2108,7 +2184,6 @@ async function main() {
   if (copyBackOutcome.ok) {
     copyBackOutcome.detail = `copy-back applied — the verdict was replayed through the host's own submit_review against the host ledger under its state lock and matched the staged ledger; status ${before.status} → ${after.status}, state_version ${before.stateVersion} → ${after.stateVersion}, findings ${after.findings}, review.json mtime ${before.mtime} → ${after.mtime}`;
   }
-  const verdicts = await guardianVerdicts(path.join(scratch, "sessions"));
   const criteria = [
     ["1 MCP calls completed inside the container", mcpOk, mcpJudgement.detail],
     [
@@ -2146,7 +2221,7 @@ async function main() {
             `  ${turn.tool ?? "?"}: ${turn.outcome ?? "?"} (risk ${turn.risk ?? "?"}, authorization ${turn.authorization ?? "?"}, ${turn.seconds?.toFixed(1)} s)`,
         )
       : ["  none found in the sessions copied out of the isolated CODEX_HOME"]),
-    `residual: the one host secret inside was ${inputs.authJson}, egress limited to ${EGRESS_ALLOW.join(", ")} by the sidecar${cleanupFailures.length ? `; cleanup steps that failed: ${cleanupFailures.join("; ")}` : ""}${sessionsKept ? `; the CODEX_HOME volume ${sessionsKept} was kept for the failed export` : ""}${storeKept ? `; the staged store volume ${storeKept} was kept, unread` : ""}`,
+    `residual: the one host secret inside was ${inputs.authJson}, egress limited to ${EGRESS_ALLOW.join(", ")} by the sidecar${cleanupFailures.length ? `; cleanup steps that failed: ${cleanupFailures.join("; ")}` : ""}${sessionsKept ? `; the CODEX_HOME volume ${sessionsKept} was kept for the failed export` : ""}${storeKept ? `; the staged store volume ${storeKept} was kept, unread` : ""}${transcriptNote ? `; ${transcriptNote}` : ""}`,
     "",
   ];
   process.stdout.write(lines.join("\n"));
