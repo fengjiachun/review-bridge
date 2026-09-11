@@ -67,6 +67,11 @@ both.
 
 Node.js 18 or newer is required. CI verifies each change on macOS and Ubuntu
 with Node 20.
+
+A repository hashing its objects as SHA-256 can be reviewed locally: the
+ledger, the local gate, and the report all admit its 64-character object ids.
+The remote publication path does not yet accept them, so such a repository
+cannot run the autonomous workflow or the GitHub publication gate.
 The GitHub publication collector also requires an authenticated
 [GitHub CLI](https://cli.github.com/) (`gh auth status`).
 
