@@ -66,7 +66,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   record, each of which proved unbindable -- which in the operator's store
   at the time of writing is 34 ledgers. A
   successor proof's file lists are compared with the paths its stored delta
-  names. The snapshot commitment of a round reviewed as a successor now
+  names, each taken from the lines of its block that state one unambiguously
+  -- the rename lines, else the `---`/`+++` lines -- so a path containing
+  spaces reads as one path, with the `diff --git` header read only for the
+  binary block that has neither. The snapshot commitment of a round reviewed as a successor now
   covers the proof -- the delta's digest and the two heads it spans enter the
   hash, and the manifest records them -- so the gate's `snapshot_hash`
   vouches for the delta and a delta swapped afterwards makes the round

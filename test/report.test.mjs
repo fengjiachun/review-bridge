@@ -197,7 +197,7 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
-async function gatedFixture(t, { change = "export const value = 2;\n", finalize = true } = {}) {
+async function gatedFixture(t, { change = "export const value = 2;\n", finalize = true, seed = {} } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-report-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const repository = path.join(root, "repo");
@@ -207,6 +207,10 @@ async function gatedFixture(t, { change = "export const value = 2;\n", finalize 
   git(repository, "config", "user.name", "Review Bridge Test");
   git(repository, "config", "user.email", "review-bridge@example.invalid");
   await fsp.writeFile(path.join(repository, "value.js"), "export const value = 1;\n");
+  // Files a successor's delta can rename or delete exist from the base.
+  for (const [file, content] of Object.entries(seed)) {
+    await fsp.writeFile(path.join(repository, file), content);
+  }
   git(repository, "add", ".");
   git(repository, "commit", "-m", "base");
   const baseSha = git(repository, "rev-parse", "HEAD");
@@ -1734,10 +1738,11 @@ test("a local-gate publication's gate is held to the review ledger beside it", a
 
 // A successor review, prepared against a passed parent through the writer,
 // so its proof is bound to its round and to the parent in the store.
-async function successorFixture(t, { extraFile = null } = {}) {
-  const parent = await gatedFixture(t);
+async function successorFixture(t, { extraFile = null, seed = {}, edit = null } = {}) {
+  const parent = await gatedFixture(t, { seed });
   await fsp.writeFile(path.join(parent.repository, "value.test.js"), "export const checked = true;\n");
   if (extraFile != null) await fsp.writeFile(path.join(parent.repository, extraFile), "non-ascii path\n");
+  if (edit != null) await edit(parent.repository);
   git(parent.repository, "add", ".");
   git(parent.repository, "commit", "-m", "add a test");
   const successor = await prepareReview(parent.store, {
@@ -1985,6 +1990,108 @@ test("a successor round older than the commitment renders with its proof marked 
   const fresh = await fsp.readFile((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).path, "utf8");
   assert.match(fresh, /#### Round 1 strategy: `SUCCESSOR`\n/);
   assert.doesNotMatch(fresh, /unverified proof|as recorded/);
+});
+
+// A path with a space cannot be told from the `diff --git` header alone, so
+// the paths come from the lines of the block that state one: the rename
+// lines, the `---`/`+++` lines, and, only for the binary block that has
+// neither, the header itself.
+test("a delta naming spaced, renamed, deleted, and binary paths is read as the writer's file lists", async (t) => {
+  const state = await successorFixture(t, {
+    seed: {
+      "doomed with space.txt": "gone\n",
+      "old name with space.txt": "renamed unchanged\n",
+      "binary with space.dat": Buffer.from([0x00, 0x01, 0x02, 0x00, 0x03]),
+    },
+    edit: async (repository) => {
+      await fsp.writeFile(path.join(repository, "added with space.txt"), "added\n");
+      // Quoted and spaced at once: git quotes the path and still ends the
+      // line with its tab.
+      await fsp.writeFile(path.join(repository, "café with space.txt"), "added\n");
+      await fsp.writeFile(path.join(repository, "binary with space.dat"), Buffer.from([0x00, 0x01, 0x02, 0x00, 0x03, 0x04, 0x05]));
+      git(repository, "rm", "-q", "doomed with space.txt");
+      git(repository, "mv", "old name with space.txt", "new name with space.txt");
+    },
+  });
+  const directory = path.join(state.store, "reviews", state.successorId);
+  const delta = await fsp.readFile(path.join(directory, "rounds", "1", "successor.diff"), "utf8");
+  // The delta carries each shape the parser must read, unquoted.
+  assert.match(delta, /^diff --git a\/added with space\.txt b\/added with space\.txt$/m);
+  assert.match(delta, /^\+\+\+ "b\/caf\\303\\251 with space\.txt"\t$/m);
+  assert.match(delta, /^rename to new name with space\.txt$/m);
+  assert.match(delta, /^diff --git a\/binary with space\.dat b\/binary with space\.dat\nindex [^\n]+\nGIT binary patch$/m);
+  // The ledger renders, which means the paths read from the delta are the
+  // ones the writer's own `--name-only` recorded.
+  const review = JSON.parse(await fsp.readFile(path.join(directory, "review.json"), "utf8"));
+  assert.deepEqual(review.rounds[0].successor.changed_files, [
+    "added with space.txt",
+    "binary with space.dat",
+    "café with space.txt",
+    "doomed with space.txt",
+    "new name with space.txt",
+    "value.test.js",
+  ]);
+  assert.deepEqual(review.rounds[0].successor.deleted_files, ["doomed with space.txt"]);
+  assert.equal((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).reused, false);
+});
+
+// A block with no rename and no `---`/`+++` is read from its header, whose
+// two operands are one path twice; operands that differ cannot be split and
+// are refused rather than guessed.
+test("a delta block whose header names two different paths and states neither is refused", async (t) => {
+  const state = await successorFixture(t);
+  const directory = path.join(state.store, "reviews", state.successorId);
+  const reviewPath = path.join(directory, "review.json");
+  const manifestPath = path.join(directory, "rounds", "1", "manifest.json");
+  const review = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  const round = review.rounds[0];
+  const patch = await fsp.readFile(path.join(directory, "rounds", "1", "patch.diff"));
+  // The round is aged out of the successor commitment so the delta can be
+  // swapped at all; its hash is then the one the store computed before it.
+  const manifest = JSON.parse(await fsp.readFile(manifestPath, "utf8"));
+  const older = crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        baseSha: round.base_sha,
+        headSha: round.head_sha,
+        requirement: review.requirement,
+        implementationScope: review.implementation_scope,
+        changedFiles: round.changed_files,
+        deletedFiles: round.deleted_files,
+        overlays: round.overlays,
+        worktreeClean: round.worktree_clean,
+      }),
+    )
+    .update(patch)
+    .digest("hex");
+  for (const target of [round, manifest]) {
+    for (const key of ["successor_delta_sha256", "successor_parent_head_sha", "successor_current_head_sha"]) delete target[key];
+    target.snapshot_hash = older;
+  }
+  const crafted = Buffer.from(
+    [
+      "diff --git a/left name.txt b/right name.txt",
+      "index 0000000000000000000000000000000000000000..1111111111111111111111111111111111111111 100644",
+      "GIT binary patch",
+      "literal 0",
+      "HcmV?d00001",
+      "",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  round.successor.delta_bytes = crafted.length;
+  round.successor.delta_sha256 = crypto.createHash("sha256").update(crafted).digest("hex");
+  await fsp.writeFile(path.join(directory, "rounds", "1", "successor.diff"), crafted, { mode: 0o600 });
+  await fsp.writeFile(path.join(directory, "rounds", "1", "successor.json"), `${JSON.stringify(round.successor, null, 2)}\n`, { mode: 0o600 });
+  await fsp.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.successorId), (error) => {
+    assert.equal(error.code, "REVIEW_LEDGER_INVALID", error.message);
+    assert.match(error.details.reason, /round 1 successor delta cannot be read for its files: unreadable header "diff --git a\/left name\.txt b\/right name\.txt"/);
+    return true;
+  });
 });
 
 // git quotes a non-ASCII path in a diff header as octal escapes over its

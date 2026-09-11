@@ -844,10 +844,19 @@ function reviewLedgerDefect(review, reviewId) {
   return null;
 }
 
-// The files a successor delta touches, read from its own headers the way the
-// writer's `git diff --name-only` reports them: every `diff --git` block names
-// one path (the new one for a rename), and a block whose file was deleted
-// names a deletion too. A header this cannot read is an error, not a guess.
+// The files a successor delta touches, read from its own blocks the way the
+// writer's `git diff --name-only` reports them: every block names one path
+// (the new one for a rename), and a block whose file was deleted names a
+// deletion too.
+//
+// The path is taken from the lines that state one unambiguously, each running
+// to the end of its line: `rename from`/`rename to`, else `---`/`+++`, where
+// `/dev/null` stands for the side that does not exist. Only the preamble
+// before the first hunk is read, since a hunk's own lines can look like
+// either. The `diff --git` header is the last resort, for the block
+// `--binary` writes for a binary file, which has neither: its two operands
+// can only be told apart where they are the same path, which is every header
+// but a rename's. A block this cannot read is an error, not a guess.
 function successorFilesFromDelta(delta) {
   const text = delta.toString("utf8");
   const changed = new Set();
@@ -883,20 +892,66 @@ function successorFilesFromDelta(delta) {
     }
     return Buffer.from(bytes).toString("utf8");
   };
-  for (const block of blocks) {
-    const header = block.split("\n", 1)[0];
-    const match = header.match(/^diff --git (?<a>"a\/(?:[^"\\]|\\.)*"|a\/\S+) (?<b>"b\/(?:[^"\\]|\\.)*"|b\/\S+)$/);
-    if (match == null) {
+  const headerPath = (header) => {
+    const operands = header.slice("diff --git ".length);
+    const quoted = operands.match(/^(?<a>"(?:[^"\\]|\\.)*") (?<b>"(?:[^"\\]|\\.)*")$/);
+    let left;
+    let right;
+    if (quoted == null) {
+      // `a/<path> b/<path>`: one path twice, so each operand is half of what
+      // remains once the separating space is taken out.
+      const half = (operands.length - 1) / 2;
+      if (!Number.isInteger(half)) throw new Error(`unreadable header ${JSON.stringify(header)}`);
+      left = operands.slice(0, half);
+      right = operands.slice(half + 1);
+    } else {
+      left = unquote(quoted.groups.a);
+      right = unquote(quoted.groups.b);
+    }
+    if (!left.startsWith("a/") || !right.startsWith("b/") || left.slice(2) !== right.slice(2)) {
       throw new Error(`unreadable header ${JSON.stringify(header)}`);
     }
-    const before = unquote(match.groups.a).slice(2);
-    const after = unquote(match.groups.b).slice(2);
-    if (/^deleted file mode /m.test(block)) {
-      changed.add(before);
-      deleted.add(before);
+    return left.slice(2);
+  };
+  for (const block of blocks) {
+    const [header, ...body] = block.split("\n");
+    const hunk = body.findIndex((line) => line.startsWith("@@ "));
+    const preamble = hunk === -1 ? body : body.slice(0, hunk);
+    const stated = (prefix) => {
+      const line = preamble.find((entry) => entry.startsWith(prefix));
+      return line == null ? null : line.slice(prefix.length);
+    };
+    const sidePath = (stated, prefix) => {
+      // git ends a `---`/`+++` path that contains a space with a tab, quoted
+      // or not; a path that itself ends in a tab is quoted, so one trailing
+      // tab is git's and not the path's.
+      const raw = stated.endsWith("\t") ? stated.slice(0, -1) : stated;
+      if (raw === "/dev/null") return null;
+      const unquoted = unquote(raw);
+      if (!unquoted.startsWith(prefix)) throw new Error(`unreadable path ${JSON.stringify(raw)}`);
+      return unquoted.slice(2);
+    };
+    const renameFrom = stated("rename from ");
+    const renameTo = stated("rename to ");
+    const minus = stated("--- ");
+    const plus = stated("+++ ");
+    let before;
+    let after;
+    if (renameFrom != null && renameTo != null) {
+      before = unquote(renameFrom);
+      after = unquote(renameTo);
+    } else if (minus != null && plus != null) {
+      before = sidePath(minus, "a/");
+      after = sidePath(plus, "b/");
     } else {
-      changed.add(after);
+      before = headerPath(header);
+      after = before;
     }
+    const removed = preamble.some((line) => line.startsWith("deleted file mode "));
+    const file = removed ? before : (after ?? before);
+    if (file == null) throw new Error(`unreadable header ${JSON.stringify(header)}`);
+    changed.add(file);
+    if (removed) deleted.add(file);
   }
   return { changed: [...changed], deleted: [...deleted] };
 }
