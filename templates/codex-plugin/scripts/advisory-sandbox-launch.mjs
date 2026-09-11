@@ -464,285 +464,6 @@ async function marketplaceFromCodexConfig() {
   return source ? source.groups.path : null;
 }
 
-// The checkout's local and worktree Git configuration (includes followed)
-// is held to what a fresh clone writes, by key: the core.* keys `git clone`
-// writes, a remote's url and fetch, a branch's remote, merge, and rebase,
-// extensions.*, and a submodule's url and active. Anything else is refused by
-// key name — an http.<url>.extraheader, a credential.* setting, an
-// http.cookieFile or http.sslKey pointing into the checkout, a core.askPass,
-// core.gitProxy, or core.sshCommand, an include.path — because a denylist of
-// secret-bearing keys does not converge (three were found in as many review
-// rounds) and the panel checkout is a fresh clone, so nothing else belongs
-// there. A URL-valued key — a remote's or a submodule's url — whose value
-// carries a credential, a query, or a fragment is refused as well. Values are never printed; a key that is itself a URL is printed with its userinfo
-// redacted, and a key whose name carries `://` or a `user:pass@` is refused
-// before the allowlist is consulted.
-//
-// The core keys are what `git clone` writes as observed: on macOS (git
-// 2.54, Apple Git-157) repositoryformatversion, filemode, bare,
-// logallrefupdates, ignorecase, precomposeunicode; Linux writes a subset of
-// those; Windows adds symlinks. core.* as a whole is not accepted, because
-// core.askPass, core.gitProxy, and core.sshCommand carry commands and
-// credentials.
-// An entry marked `url` holds a URL as its value, and every such value is
-// held to the credential test below — remote and submodule URLs alike, and
-// whatever URL-valued key joins this list later — rather than the test being
-// tied to one key name.
-const FRESH_CLONE_CONFIG_KEYS = [
-  { pattern: /^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)$/ },
-  { pattern: /^remote\..+\.url$/, url: true },
-  { pattern: /^remote\..+\.fetch$/ },
-  { pattern: /^branch\..+\.(remote|merge|rebase)$/ },
-  // extensions.* is not accepted wholesale (a value can be anything, a
-  // token included). git writes extensions.objectformat only for
-  // --object-format=sha256; it is enumerated with the values git itself
-  // writes. extensions.refstorage (reftable) is not accepted: the skill's
-  // clone carries no --ref-format, and the layout check knows no
-  // .git/reftable.
-  { pattern: /^extensions\.objectformat$/, values: ["sha1", "sha256"] },
-  { pattern: /^submodule\..+\.url$/, url: true },
-  { pattern: /^submodule\..+\.active$/ },
-];
-
-// What a line of a fresh clone's .git/config can be: blank, a section header,
-// or `key = value`. `git config --list` shows none of a comment, so a
-// template can leave `# <token>` in the file unseen by the key check; the raw
-// bytes are held to these three shapes by git's own grammar — a subsection
-// name and a value may carry quoted strings with `\"` and `\\` escapes, and a
-// `#` or `;` inside quotes is text (`[branch "release#1"]`,
-// `merge = "refs/heads/release#1"` are what a clone of such a branch writes)
-// — while a `#` or `;` outside quotes, a backslash outside quotes (an escape
-// or a continuation), an unterminated quote, or anything left over after the
-// shape is refused. Reported by line number only.
-function configLineViolation(line) {
-  let i = 0;
-  const n = line.length;
-  const space = () => {
-    while (i < n && (line[i] === " " || line[i] === "\t")) i += 1;
-  };
-  // A quoted string: past the opening quote, up to and including the closing
-  // one, escapes skipped. False when unterminated.
-  const quoted = () => {
-    i += 1;
-    while (i < n && line[i] !== '"') i += line[i] === "\\" ? 2 : 1;
-    if (i >= n) return false;
-    i += 1;
-    return true;
-  };
-  space();
-  if (i === n) return null;
-  if (line[i] === "[") {
-    i += 1;
-    const start = i;
-    while (i < n && /[A-Za-z0-9.-]/.test(line[i])) i += 1;
-    if (i === start) return "section";
-    space();
-    if (line[i] === '"' && !quoted()) return "section";
-    space();
-    if (line[i] !== "]") return "section";
-    i += 1;
-    space();
-    return i === n ? null : "trailing";
-  }
-  const start = i;
-  while (i < n && /[A-Za-z0-9-]/.test(line[i])) i += 1;
-  if (i === start || !/[A-Za-z]/.test(line[start])) return "key";
-  space();
-  if (line[i] !== "=") return "key";
-  i += 1;
-  while (i < n) {
-    const c = line[i];
-    if (c === '"') {
-      if (!quoted()) return "quote";
-    } else if (c === "#" || c === ";" || c === "\\") {
-      return "comment";
-    } else {
-      i += 1;
-    }
-  }
-  return null;
-}
-const CONFIG_LINE_LIMIT = 200;
-
-function gitConfigViolations(repository) {
-  const violations = [];
-  let raw;
-  try {
-    raw = fs.readFileSync(path.join(repository, ".git", "config"), "utf8");
-  } catch (error) {
-    fail(`cannot read the author checkout's .git/config: ${error.message}`);
-  }
-  const lines = raw.split("\n");
-  if (lines.length > CONFIG_LINE_LIMIT) violations.push(`.git/config (more than ${CONFIG_LINE_LIMIT} lines)`);
-  lines.forEach((line, index) => {
-    if (configLineViolation(line)) violations.push(`.git/config line ${index + 1} (not a section header or a key = value line)`);
-  });
-  const urlCredential = (text) =>
-    /:\/\/[^/\s@]*:[^/\s@]*@/.test(text) || /(?:^|\.)https?:\/\/[^/\s@]+@/i.test(text);
-  const redact = (key) => key.replace(/[^./@\s]*@/g, "<redacted>@");
-  for (const scope of ["--local", "--worktree"]) {
-    const result = hostGit(["-C", repository, "config", scope, "--includes", "--list", "--null"]);
-    // The local scope always reads in a repository; a failure there is git
-    // itself failing, and the check must not pass by not running. The
-    // worktree scope exists only with extensions.worktreeConfig.
-    if (result.error || (result.status !== 0 && scope === "--local")) {
-      // git quotes the offending value in some of its errors (`invalid value
-      // for 'extensions.objectformat': '…'`); the quoted text is dropped.
-      fail(
-        `cannot read the author checkout's Git configuration: ${result.error?.message ?? result.stderr.trim().replace(/'[^']*'/g, "'<redacted>'")}`,
-      );
-    }
-    if (result.status !== 0) continue;
-    for (const entry of result.stdout.split("\0")) {
-      if (!entry) continue;
-      const newline = entry.indexOf("\n");
-      const key = newline === -1 ? entry : entry.slice(0, newline);
-      const value = newline === -1 ? "" : entry.slice(newline + 1);
-      // A subsection name can itself be a URL (`remote.<url>.url`) or a
-      // `user:pass@host`; such a key is refused before the allowlist is
-      // consulted, without relying on the URL test's shape. A bare `@` is
-      // allowed — `release@v1` is a legitimate branch name the panel flow
-      // writes as `branch.release@v1.remote`. A remote or branch named after
-      // a secret with neither marker is not detectable here.
-      if (key.includes("://") || /[^./@\s]*:[^./@\s]*@/.test(key)) {
-        violations.push(redact(key));
-        continue;
-      }
-      const allowed = FRESH_CLONE_CONFIG_KEYS.find((entry) => entry.pattern.test(key));
-      if (!allowed) {
-        violations.push(redact(key));
-      } else if (allowed.url && urlCredential(value)) {
-        violations.push(`${key} (credential in the URL)`);
-      } else if (allowed.url && /[?#]/.test(value)) {
-        // A git remote URL never needs a query or a fragment, and a token
-        // can ride in either (`?access_token=…`); refused without reading
-        // further.
-        violations.push(`${key} (query or fragment in the URL)`);
-      } else if (allowed.values && !allowed.values.includes(value)) {
-        violations.push(`${key} (unexpected value)`);
-      }
-    }
-  }
-  return [...new Set(violations)];
-}
-
-// The .git directory of a fresh clone, by entry and by structure. `git clone`
-// copies the operator's init.templateDir into a new .git — hooks, helpers,
-// anything — and the configuration check cannot see those, so the skill
-// clones with `--template=` and the launcher accepts only the layout such a
-// clone plus the skill's fetch and checkout write; the default template gets
-// no allowance, since a helper can hide behind a *.sample name, and a file
-// can equally hide under objects/, refs/, or logs/, so those are held to
-// their structure too. Observed on macOS (git 2.54, Apple Git-157) after a
-// `--template=` clone of a GitHub repository, the skill's fetch into
-// refs/review-bridge/<n>/…, and a detached checkout: top level FETCH_HEAD,
-// HEAD, config, index, logs, objects, packed-refs, refs; objects/ holding
-// pack/ (pack-<hex>.idx/.pack/.rev) and info/commit-graphs/
-// (commit-graph-chain, graph-<hex>.graph), loose objects in <2 hex>/<38 or 62
-// hex> once anything is written; refs/{heads,tags,remotes,review-bridge}/…;
-// logs/HEAD and logs/refs/{heads,remotes}/…. ORIG_HEAD, shallow, and
-// COMMIT_EDITMSG are what other ordinary git operations on such a clone
-// write; objects/info/packs and objects/info/commit-graph are what
-// repacking writes; pack .keep/.promisor/.mtimes are pack sidecars git
-// itself makes. hooks, info, and branches may exist only as empty
-// directories (Linux git 2.43's `init --template=` creates an empty
-// branches/). Anything else, anywhere in .git, is refused by name. The
-// working tree itself is the repository's own content and is not
-// inspected.
-const FRESH_CLONE_GIT_ENTRIES = new Set([
-  "HEAD",
-  "config",
-  "hooks",
-  "info",
-  "branches",
-  "objects",
-  "refs",
-  "logs",
-  "index",
-  "packed-refs",
-  "FETCH_HEAD",
-  "ORIG_HEAD",
-  "shallow",
-  "COMMIT_EDITMSG",
-]);
-const EMPTY_ONLY_GIT_DIRECTORIES = new Set(["hooks", "info", "branches"]);
-const REF_ROOTS = new Set(["heads", "tags", "remotes", "review-bridge"]);
-
-async function gitLayoutViolations(repository) {
-  const gitDir = path.join(repository, ".git");
-  const violations = [];
-  const add = (relative) => violations.push(`.git/${relative}`);
-  const entries = async (directory) => {
-    try {
-      return await fsp.readdir(directory, { withFileTypes: true });
-    } catch {
-      return [];
-    }
-  };
-  // A ref subtree: directories and plain files named as refs; git itself
-  // never allows ':' in a ref name, so one there is not a ref.
-  const refTree = async (directory, relative) => {
-    for (const entry of await entries(directory)) {
-      const here = `${relative}/${entry.name}`;
-      if (entry.name.includes(":")) add(here);
-      else if (entry.isDirectory()) await refTree(path.join(directory, entry.name), here);
-      else if (!entry.isFile()) add(here);
-    }
-  };
-  for (const entry of await entries(gitDir)) {
-    const name = entry.name;
-    if (!FRESH_CLONE_GIT_ENTRIES.has(name)) {
-      add(name);
-    } else if (EMPTY_ONLY_GIT_DIRECTORIES.has(name)) {
-      for (const child of await entries(path.join(gitDir, name))) add(`${name}/${child.name}`);
-    }
-  }
-  const objects = path.join(gitDir, "objects");
-  for (const entry of await entries(objects)) {
-    const name = entry.name;
-    if (/^[0-9a-f]{2}$/.test(name) && entry.isDirectory()) {
-      for (const object of await entries(path.join(objects, name))) {
-        if (!(object.isFile() && /^(?:[0-9a-f]{38}|[0-9a-f]{62})$/.test(object.name))) add(`objects/${name}/${object.name}`);
-      }
-    } else if (name === "pack" && entry.isDirectory()) {
-      for (const file of await entries(path.join(objects, "pack"))) {
-        if (!(file.isFile() && /^pack-[0-9a-f]+\.(?:pack|idx|rev|keep|promisor|mtimes)$/.test(file.name))) add(`objects/pack/${file.name}`);
-      }
-    } else if (name === "info" && entry.isDirectory()) {
-      for (const file of await entries(path.join(objects, "info"))) {
-        if ((file.name === "packs" || file.name === "commit-graph") && file.isFile()) continue;
-        if (file.name === "commit-graphs" && file.isDirectory()) {
-          for (const graph of await entries(path.join(objects, "info", "commit-graphs"))) {
-            if (!(graph.isFile() && (graph.name === "commit-graph-chain" || /^graph-[0-9a-f]+\.graph$/.test(graph.name)))) {
-              add(`objects/info/commit-graphs/${graph.name}`);
-            }
-          }
-          continue;
-        }
-        add(`objects/info/${file.name}`);
-      }
-    } else {
-      add(`objects/${name}`);
-    }
-  }
-  for (const entry of await entries(path.join(gitDir, "refs"))) {
-    if (REF_ROOTS.has(entry.name) && entry.isDirectory()) await refTree(path.join(gitDir, "refs", entry.name), `refs/${entry.name}`);
-    else add(`refs/${entry.name}`);
-  }
-  for (const entry of await entries(path.join(gitDir, "logs"))) {
-    if (entry.name === "HEAD" && entry.isFile()) continue;
-    if (entry.name === "refs" && entry.isDirectory()) {
-      for (const sub of await entries(path.join(gitDir, "logs", "refs"))) {
-        if (REF_ROOTS.has(sub.name) && sub.isDirectory()) await refTree(path.join(gitDir, "logs", "refs", sub.name), `logs/refs/${sub.name}`);
-        else add(`logs/refs/${sub.name}`);
-      }
-      continue;
-    }
-    add(`logs/${entry.name}`);
-  }
-  return [...new Set(violations)].sort();
-}
-
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: "utf8", ...options });
   if (result.error) throw result.error;
@@ -842,32 +563,6 @@ async function resolveInputs(options) {
       fail(`${label} ${target} contains a comma, which docker's --mount syntax cannot carry`);
     }
   }
-  // Inside the container only the checkout itself exists. A linked worktree
-  // keeps its `.git` as a file pointing into the main repository, and a
-  // clone made with `--shared` reads objects through
-  // `.git/objects/info/alternates`; git can follow neither there, so only a
-  // self-contained clone is accepted.
-  const gitDir = path.join(repository, ".git");
-  const gitDirStat = await fsp.lstat(gitDir).catch(() => null);
-  if (!gitDirStat?.isDirectory()) {
-    fail(
-      `the author checkout ${repository} is not a self-contained clone: .git is ${gitDirStat ? "a file (a linked worktree or a separate git dir)" : "missing"}; use a self-contained clone (git clone <remote-url> <path>)`,
-    );
-  }
-  if (await exists(path.join(gitDir, "objects", "info", "alternates"))) {
-    fail(
-      `the author checkout ${repository} is not a self-contained clone: it reads objects through .git/objects/info/alternates; use a self-contained clone (git clone <remote-url> <path>)`,
-    );
-  }
-  // The checkout's .git/config rides into the container with the mount, so
-  // it may hold only what a fresh clone writes. Refused up front, key names
-  // only.
-  const violations = gitConfigViolations(repository);
-  if (violations.length > 0) {
-    fail(
-      `the author checkout's local Git configuration holds more than a fresh clone writes (${violations.join(", ")}); the checkout is mounted whole, so use a fresh clone of the pull request's repository`,
-    );
-  }
   // The ledger is the authority on which commit is under review: the staged
   // snapshot describes its last round's head_sha, and a panel checkout that
   // has since been switched or reset would put other bytes under the same
@@ -893,14 +588,6 @@ async function resolveInputs(options) {
   }
   if (panelHead.stdout.trim() !== snapshotHead) {
     fail(`the panel checkout is at ${panelHead.stdout.trim()}, but the review's snapshot head is ${snapshotHead}`);
-  }
-  const layoutViolations = await gitLayoutViolations(repository);
-  if (layoutViolations.length > 0) {
-    const shown = layoutViolations.slice(0, 10).join(", ");
-    const more = layoutViolations.length > 10 ? `, and ${layoutViolations.length - 10} more` : "";
-    fail(
-      `the author checkout's .git holds more than a fresh clone writes (${shown}${more}); the checkout is mounted whole, so use a fresh clone made with --template= of the pull request's repository`,
-    );
   }
   // Again on the real paths, so a symlink such as /tmp → /private/tmp cannot
   // slip a refused prefix past the check.
@@ -969,12 +656,22 @@ function mountTable(inputs, scratch, volumes) {
 // operator's .git — a hook, a stray file among the objects, a directory named
 // like a file, a comment in the configuration — stays on the host (Codex
 // round twenty-two on #125: an enumeration of what can hide in a .git does
-// not converge). The clone is detached at the panel checkout's HEAD and held
-// to what a --template= clone writes before it is mounted, as a check on the
-// launcher's own work. It is mounted at the recorded path, because the
-// reviewer server reads the repository by that path, and detached at the
-// review's recorded snapshot head, which resolveInputs() has already checked
-// the panel checkout is at.
+// not converge). It is mounted at the recorded path, because the reviewer
+// server reads the repository by that path, and detached at the review's
+// recorded snapshot head, which resolveInputs() has already checked the panel
+// checkout is at.
+//
+// Because of that, the panel checkout's own configuration and .git layout are
+// no longer inspected at all. They cannot reach the container, and the one
+// path that would still read them — git-upload-pack serving this clone —
+// executes nothing from a repository-level configuration: measured on git
+// 2.54 (Apple Git-157), `uploadpack.packObjectsHook`,
+// `core.alternateRefsCommand`, and `core.fsmonitor` set in the served
+// repository all went unused during this very clone, since git honours them
+// only from system or global scope. A `.gitattributes` filter in the tree is
+// held off by the isolated environment every host git runs in, which has its
+// own positive control. If the mount source is ever changed back to the panel
+// checkout, that whole layer has to come back with it.
 function stageCheckout(inputs) {
   const git = (args) => hostGit(args);
   const message = (result) => result.error?.message ?? result.stderr.trim().replace(/'[^']*'/g, "'<redacted>'");
@@ -1882,11 +1579,6 @@ async function main() {
   const before = await ledgerFacts(inputs.ledgerPath);
   const stage = await stageReview(inputs, stagedStore);
   stageCheckout(inputs);
-  const cloneViolations = [...gitConfigViolations(inputs.checkout), ...(await gitLayoutViolations(inputs.checkout))];
-  if (cloneViolations.length > 0) {
-    await fsp.rm(inputs.checkout, { recursive: true, force: true });
-    fail(`the launcher's own clone holds more than a fresh clone writes (${cloneViolations.slice(0, 10).join(", ")}); not mounting it`);
-  }
   const { loadReview, submitInitialReview } = await import("../server/core.mjs");
   const { withStateLock, atomicWriteFile, canonicalJson } = await import("../server/storage.mjs");
 
@@ -1907,6 +1599,24 @@ async function main() {
   let transcriptBytes = 0;
   let transcriptDropped = 0;
   let transcriptNote = null;
+  // A consumer that reads a line and leaves (`| head`) makes every later write
+  // raise EPIPE, and an unhandled one of those kills the process outside the
+  // promise and the finally — with the containers, the proxy, the keeper, the
+  // network, and the volumes all still up. So stdout's errors are swallowed
+  // into a note and every write goes through here; the run still cleans up and
+  // still reaches its exit code, it just has nowhere to print.
+  let stdoutNote = null;
+  process.stdout.on("error", (error) => {
+    stdoutNote = stdoutNote ?? `the report could not be printed: ${error.code ?? error.message}`;
+  });
+  const say = (text) => {
+    if (stdoutNote) return;
+    try {
+      process.stdout.write(text);
+    } catch (error) {
+      stdoutNote = `the report could not be printed: ${error.code ?? error.message}`;
+    }
+  };
   const storeFailures = [];
   let cleaned = false;
   // A step fails on a spawn error or a nonzero exit alike; stderr's first
@@ -1996,7 +1706,11 @@ async function main() {
     }
     // The keeper holds both tmpfs volumes; it goes once nothing else needs
     // to read them.
-    if (keeperStarted) step("remove volume keeper", () => spawnSync("docker", ["rm", "-f", keeperName], quiet), { tolerate: /No such container/ });
+    // A tmpfs volume holds nothing once no container mounts it, so a volume
+    // kept for the operator to look at needs the keeper kept with it.
+    if (keeperStarted && !sessionsKept && !storeKept) {
+      step("remove volume keeper", () => spawnSync("docker", ["rm", "-f", keeperName], quiet), { tolerate: /No such container/ });
+    }
     if (!sessionsKept) step("remove volume", () => spawnSync("docker", ["volume", "rm", homeVolume], quiet));
     // A store past the bound stays where it is; nothing of it reached the
     // host, and the operator may want to look at what filled it.
@@ -2093,7 +1807,7 @@ async function main() {
           const kept = room <= 0 ? null : chunk.length <= room ? chunk : chunk.subarray(0, room);
           if (kept) {
             transcriptBytes += kept.length;
-            process.stdout.write(kept);
+            say(kept);
             transcript.write(kept);
           }
           if (!kept || kept.length < chunk.length) transcriptDropped += chunk.length - (kept?.length ?? 0);
@@ -2227,10 +1941,14 @@ async function main() {
             `  ${turn.tool ?? "?"}: ${turn.outcome ?? "?"} (risk ${turn.risk ?? "?"}, authorization ${turn.authorization ?? "?"}, ${turn.seconds?.toFixed(1)} s)`,
         )
       : ["  none found in the sessions copied out of the isolated CODEX_HOME"]),
-    `residual: the one host secret inside was ${inputs.authJson}, egress limited to ${EGRESS_ALLOW.join(", ")} by the sidecar${cleanupFailures.length ? `; cleanup steps that failed: ${cleanupFailures.join("; ")}` : ""}${sessionsKept ? `; the CODEX_HOME volume ${sessionsKept} was kept for the failed export` : ""}${storeKept ? `; the staged store volume ${storeKept} was kept, unread` : ""}${transcriptNote ? `; ${transcriptNote}` : ""}`,
+    `residual: the one host secret inside was ${inputs.authJson}, egress limited to ${EGRESS_ALLOW.join(", ")} by the sidecar${cleanupFailures.length ? `; cleanup steps that failed: ${cleanupFailures.join("; ")}` : ""}${sessionsKept ? `; the CODEX_HOME volume ${sessionsKept} was kept for the failed export` : ""}${storeKept ? `; the staged store volume ${storeKept} was kept, unread` : ""}${
+      sessionsKept || storeKept
+        ? `; the volume keeper ${keeperName} is still running to hold ${[sessionsKept, storeKept].filter(Boolean).join(" and ")} (a tmpfs volume empties when nothing mounts it), so it goes on using memory until you clear it: look with \`docker run --rm -v ${storeKept ?? sessionsKept}:/v alpine ls -la /v\`, then \`docker rm -f ${keeperName} && ${[sessionsKept, storeKept].filter(Boolean).map((volume) => `docker volume rm ${volume}`).join(" && ")}\``
+        : ""
+    }${transcriptNote ? `; ${transcriptNote}` : ""}`,
     "",
   ];
-  process.stdout.write(lines.join("\n"));
+  say(lines.join("\n"));
   const failed = criteria.some(([, ok]) => !ok);
   process.exitCode = codexExit !== 0 ? codexExit || 1 : failed ? 1 : 0;
 }

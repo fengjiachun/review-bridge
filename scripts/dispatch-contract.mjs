@@ -477,37 +477,6 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "absence is judged against the unmounted image",
       /judged against the same image without the checkout mount/,
     ],
-    // Codex round thirteen on #125: the denylist of secret-bearing keys was
-    // bypassed three times; the panel checkout is a fresh clone, so the
-    // configuration is held to what a fresh clone writes.
-    [
-      "the Git configuration is held to what a fresh clone writes",
-      /accepts a local Git configuration holding only what a fresh clone writes/,
-    ],
-    [
-      "every URL-valued key on the allowlist gets the credential test",
-      /with any of those URL values that carries a credential refused as well/,
-    ],
-    // Codex round twenty-one on #125: `git config --list` shows no comment,
-    // so a template can leave a token in one.
-    [
-      "the raw .git/config is held to blank, header, and key = value lines",
-      /the raw file held to blank, section-header, and `key = value` lines/,
-    ],
-    [
-      "a key whose name carries a URL or a user is refused outright",
-      /any key whose name itself carries `:\/\/` or a `user:pass@`/,
-    ],
-    [
-      "the .git layout is held to what a fresh clone writes",
-      /the `\.git` layout is held to a fresh `--template=` clone's/,
-    ],
-    [
-      "a URL carrying a query or a fragment is refused",
-      /a remote or submodule URL carrying a query or a fragment is refused the same way/,
-    ],
-    // Codex round twenty-two on #125: enumerating what can hide in a .git
-    // does not converge; the container gets a clone the launcher makes.
     // Codex round twenty-three on #125: the clone was pinned to the panel
     // checkout's current HEAD, not the ledger's recorded snapshot head.
     [
@@ -529,31 +498,7 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     ],
     [
       "the mount is a fresh clone the launcher makes; the operator's .git never enters",
-      /not that `\.git` but a fresh clone the launcher makes itself from the panel checkout .* the operator's `\.git` never enters the container/,
-    ],
-    [
-      "a remote or branch named after a secret is stated as undetectable",
-      /a remote or branch named after a secret is not detectable; the panel clone is yours to keep clean/,
-    ],
-    [
-      "core.* is not accepted wholesale",
-      /the `core\.\*` keys a fresh clone writes/,
-    ],
-    [
-      "anything else is refused by key name",
-      /is refused by key name, because the panel checkout is what the launcher clones from and a denylist of secret-bearing keys does not converge/,
-    ],
-    // Codex round six on #125: a credential helper is a credential, the
-    // check's scope has to be stated, and a linked worktree cannot be read
-    // inside the container at all.
-    ["any credential.* setting is refused", /any `credential\.\*` setting/],
-    [
-      "the credential check's scope is stated",
-      /reads Git configuration only, includes followed, and not the working tree/,
-    ],
-    [
-      "a checkout that is not a self-contained clone is refused",
-      /refuses a checkout that is not a self-contained clone/,
+      /not the panel checkout's `\.git` but a fresh clone the launcher makes itself from it .* the operator's `\.git` never enters the container/,
     ],
     [
       "the credential is a read-only bind mount, never an image layer",
@@ -1049,20 +994,10 @@ export const ADVISORY_PANEL_CONTRACT = {
       /zero findings records that fact and attests nothing/,
     ],
     // A reviewer must never read a tree someone is editing, and the panel must
-    // never dirty one. Codex round six on #125: the container launcher can
-    // only read a self-contained clone, so the panel checkout is a clone of
-    // its own, never a linked worktree of the authoring repository.
+    // never dirty one, so the panel checkout is a clone of its own.
     [
       "the head goes to a worktree outside every authoring tree",
       /worktree outside every authoring tree/,
-    ],
-    [
-      "the panel checkout is a self-contained clone",
-      /container launcher below reads only a self-contained clone/,
-    ],
-    [
-      "the panel clone uses an empty template",
-      /It clones with `--template=`, so no hook or helper from the operator's `init\.templateDir` rides into the panel's `\.git`/,
     ],
     // Codex round twenty-seven on #125: the panel's own clone, fetch, and
     // checkout ran with the operator's global git configuration in reach.

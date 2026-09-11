@@ -42,39 +42,29 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   with an error by the server — with the transcript's `mcp:` lines kept only
   as a cross-check that fails on a mismatch. That criterion is run-health evidence recorded inside the
   container and forgeable by a reviewer with shell access, and the copy-back's
-  integrity rests on the host replay, not on it. A key whose name carries
-  `://` or a `user:pass@` (`url.<url>.insteadOf`, `remote.<url>.url`) is
-  refused before the allowlist is consulted and printed with its userinfo
-  redacted; the `.git` directory is held to what a fresh `--template=` clone writes
-  as well, and — since an enumeration of what can hide in a `.git` does not
-  converge (Codex round twenty-two) — the container no longer gets the panel
-  checkout's `.git` at all: the launcher clones the checkout over git's own
+  integrity rests on the host replay, not on it. The container never gets the
+  panel checkout's `.git`: the launcher clones the checkout over git's own
   transport (`git clone --template= --no-local --no-hardlinks file://…`) into
   its scratch directory, detaches that clone at the review's recorded snapshot
-  head (the panel checkout must still be at it, or the launch is refused), holds it
-  to the same configuration and layout as a check on its own work, mounts
-  only it at the recorded path, and removes it at cleanup, so the operator's
-  `.git` never enters the container — every git the launcher runs on the host
-  for this runs isolated from the operator's global and system configuration,
-  `HOME`, hooks, and `GIT_*` environment, so a `.gitattributes` filter in the
-  reviewed tree resolves to nothing and executes nothing on the host — the
-  panel checkout itself is made by the packaged `advisory-panel-checkout.mjs`
-  in that same isolated environment (shared `isolated-git.mjs`), so the skill
-  no longer spells out bare git commands for it; ssh is pinned there by an
+  head (the panel checkout must still be at it, or the launch is refused),
+  mounts only it at the recorded path, and removes it at cleanup, so nothing a
+  template or a hand left in that `.git` can cross. Every git the launcher runs
+  on the host runs isolated from the operator's global and system
+  configuration, `HOME`, hooks, and `GIT_*` environment, so a `.gitattributes`
+  filter in the reviewed tree resolves to nothing and executes nothing on the
+  host; the panel checkout itself is made by the packaged
+  `advisory-panel-checkout.mjs` in that same isolated environment (shared
+  `isolated-git.mjs`), so the skill no longer spells out bare git commands for
+  it. ssh is pinned there by an
   explicit command rather than by `HOME`, which it takes from the passwd
   entry — no ssh configuration read, no key from disk, the agent as the one
   credential source, no `ProxyCommand`, host keys still checked against the
   operator's `known_hosts`, or, when there is none, against one file for the
   run whose accepted fingerprints the script prints — and an ssh remote
-  without an agent is refused — and a
+  without an agent is refused. A
   review whose last round was prepared over a dirty tree (overlays,
   `worktree_clean` false) is refused since the clone can materialize only
-  commits; the checks stay on the panel checkout
-  since
-  `git clone` copies the operator's `init.templateDir` into it, and the
-  packaged skill's panel clone now uses `--template=`; a remote or submodule
-  URL carrying a query or a fragment is refused, since a token can ride in
-  either; the staged review rides in a tmpfs-backed Docker volume capped at 64 MB
+  commits. The staged review rides in a tmpfs-backed Docker volume capped at 64 MB
   (the isolated `CODEX_HOME` in one capped at 1 GB) rather than a host
   directory the reviewer could fill, so a write past the cap fails inside the
   container; the store's apparent size is measured there afterwards and
@@ -93,7 +83,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   (flushed every five seconds and on the `SIGTERM` that `docker stop` sends
   before the log is read), so a reviewer looping on a refused host cannot fill
   the host's disk and the counts still reach the report;
-  a failed export of the rollouts keeps the CODEX_HOME volume and says so,
+  a failed export of the rollouts keeps the CODEX_HOME volume, and a kept
+  volume keeps the container that holds its tmpfs alive with it, both named in
+  the report along with the commands to look and to clear; a consumer that
+  stops reading the launcher's output costs the report, not the cleanup;
   the sidecar's log quotes every client-supplied value (authority, SNI) so a
   name carrying a newline cannot forge a log line, and the log is collected bounded and every cleanup step runs
   on its own, a spawn error or a nonzero exit recorded in the report rather
@@ -124,19 +117,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `~/.aws`, `/root/.ssh`, the store) are absent and stops the launch if not
   (the home directory itself is not probed: `/root` is a directory of the
   base image), judged against the same image run without the checkout mount
-  so that what the image carries is never read as the host's; a checkout
-  whose local Git configuration holds more than a fresh clone writes (only
-  the `core.*` keys a fresh clone writes, `extensions.objectformat` as `sha1`
-  or `sha256`, a remote's `url` and `fetch`, a branch's `remote`, `merge`, and
-  `rebase`, and a submodule's `url` and `active` are accepted, includes
-  followed, the raw file held to blank, section-header, and `key = value`
-  lines so a comment cannot carry a token past the key check, any remote or submodule URL carrying a credential refused too; a
-  denylist of `.extraheader`, `credential.*`, `http.cookieFile`, and their
-  kind was bypassed three times in review) or that is not a self-contained
-  clone (a linked worktree, a clone with alternates —
-  neither readable inside the container) is refused before anything starts,
-  and the packaged skill's advisory panel now clones the pull request's
-  repository instead of adding a linked worktree; on exit the launcher prints the three criteria it verified (MCP calls
+  so that what the image carries is never read as the host's, and the container
+  resolves no name but the sidecar's alias, since `--internal` cuts routing
+  but not resolution and a name carries data on its own; the packaged skill's
+  advisory panel clones the pull request's
+  repository with the packaged `advisory-panel-checkout.mjs` instead of adding
+  a linked worktree; on exit the launcher prints the three criteria it verified (MCP calls
   completed inside the container, host filesystem absent, validated verdict
   copied back to the host store), the guardian's verdict per call, and the
   proxy's egress log, and exits nonzero when a criterion fails; the copy-back

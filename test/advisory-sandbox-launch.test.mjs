@@ -62,17 +62,6 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
       reviewerProvider: "CODEX_TASK",
       advisory: true,
     });
-    // The fixture commits with a local user.name/user.email; a fresh clone
-    // never writes those, and the launcher accepts only what a fresh clone
-    // writes, so drop them once the commits are done.
-    for (const key of ["user.name", "user.email"]) {
-      spawnSync("git", ["-C", repo.repository, "config", "--unset", key]);
-    }
-    // ...and git init's default template (hooks/*.sample, info/exclude,
-    // description), which a --template= clone does not have.
-    for (const entry of ["hooks", "info", "description"]) {
-      await fsp.rm(path.join(repo.repository, ".git", entry), { recursive: true, force: true });
-    }
     checkout = repo.repository;
     store = repo.store;
     reviewId = prepared.id;
@@ -749,255 +738,6 @@ async function gitOnlyPath(t) {
   return bin;
 }
 
-test("a checkout whose Git configuration carries a credential is refused before Docker is touched", async (t) => {
-  const PATH = await gitOnlyPath(t);
-  const f = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", f.checkout, "config", "http.https://github.com/.extraheader", "AUTHORIZATION: basic c2VjcmV0"]);
-  let result = launch(f, ["--review-id", f.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /local Git configuration holds more than a fresh clone writes \(http\.https:\/\/github\.com\/\.extraheader\)/);
-  assert.doesNotMatch(result.stderr, /c2VjcmV0|Docker is not available/);
-  const g = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", g.checkout, "remote", "set-url", "origin", "https://user:t0k3n@example.com/x.git"]);
-  result = launch(g, ["--review-id", g.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /holds more than a fresh clone writes \(remote\.origin\.url \(credential in the URL\)\)/);
-  assert.doesNotMatch(result.stderr, /t0k3n/);
-  // A token standing as the user of an https URL is a credential; the
-  // fixture's own `ssh://git@github.com/…` remote is a username and passes.
-  const h = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", h.checkout, "remote", "set-url", "origin", "https://ghp_t0k3n@github.com/x/y.git"]);
-  result = launch(h, ["--review-id", h.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /holds more than a fresh clone writes \(remote\.origin\.url \(credential in the URL\)\)/);
-  const i = await fixture(t, { realReview: true });
-  result = launch(i, ["--review-id", i.reviewId, "--dry-run"]);
-  assert.equal(result.status, 0, result.stderr);
-  // A credential URL in a key name is refused too, and printed redacted.
-  const m = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", m.checkout, "config", "url.https://ghp_s3cr3t@github.com/.insteadOf", "https://github.com/"]);
-  result = launch(m, ["--review-id", m.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  // git lowercases the variable part of the key on output.
-  assert.match(result.stderr, /holds more than a fresh clone writes \(url\.https:\/\/<redacted>@github\.com\/\.insteadof\)/i);
-  assert.doesNotMatch(result.stderr, /ghp_s3cr3t/);
-  // An included file is read too; a credential helper is a credential.
-  const k = await fixture(t, { realReview: true });
-  await fsp.writeFile(path.join(k.checkout, ".git", "cred.inc"), '[http "https://github.com/"]\n\textraheader = AUTHORIZATION: basic c2VjcmV0\n');
-  spawnSync("git", ["-C", k.checkout, "config", "include.path", "cred.inc"]);
-  result = launch(k, ["--review-id", k.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  // include.path is itself outside the allowlist, so both keys are named.
-  assert.match(result.stderr, /holds more than a fresh clone writes \(include\.path, http\.https:\/\/github\.com\/\.extraheader\)/);
-  const l = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", l.checkout, "config", "credential.helper", "store --file=.git/credentials"]);
-  result = launch(l, ["--review-id", l.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /holds more than a fresh clone writes \(credential\.helper\)/);
-  assert.doesNotMatch(result.stderr, /\.git\/credentials/);
-  // The keys that slipped a denylist: a cookie file and a client key inside
-  // the checkout are refused by name, values unread.
-  for (const [key, value] of [["http.cookieFile", ".git/cookies"], ["http.sslKey", ".git/client.key"]]) {
-    const n = await fixture(t, { realReview: true });
-    spawnSync("git", ["-C", n.checkout, "config", key, value]);
-    result = launch(n, ["--review-id", n.reviewId], { PATH });
-    assert.equal(result.status, 2, `${key}: ${result.stdout}`);
-    assert.match(result.stderr, new RegExp(`holds more than a fresh clone writes \\(${key.toLowerCase().replace(".", "\\.")}\\)`));
-    assert.doesNotMatch(result.stderr, /\.git\/(cookies|client\.key)/);
-  }
-  // A subsection name that is itself a URL, or carries a user, is refused
-  // before the allowlist is consulted, however clean the value.
-  const u = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", u.checkout, "config", "remote.https://ghp_n4me@github.com/.url", "https://github.com/public/repo.git"]);
-  result = launch(u, ["--review-id", u.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /holds more than a fresh clone writes \(remote\.https:\/\/<redacted>@github\.com\/\.url\)/);
-  assert.doesNotMatch(result.stderr, /ghp_n4me/);
-  // A bare `@` in a branch name is legitimate (`release@v1`); a `user:pass@`
-  // in a subsection name is not.
-  const v = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", v.checkout, "config", "branch.release@v1.remote", "origin"]);
-  spawnSync("git", ["-C", v.checkout, "config", "branch.release@v1.merge", "refs/heads/release@v1"]);
-  result = launch(v, ["--review-id", v.reviewId, "--dry-run"]);
-  assert.equal(result.status, 0, result.stderr);
-  const w = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", w.checkout, "config", "remote.user:pass@host.url", "https://github.com/x/y.git"]);
-  result = launch(w, ["--review-id", w.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /holds more than a fresh clone writes \(remote\.<redacted>@host\.url\)/);
-  assert.doesNotMatch(result.stderr, /user:pass/);
-  // Every URL-valued key on the allowlist gets the credential test, a
-  // submodule's url as much as a remote's; a clean submodule url passes.
-  const r = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", r.checkout, "config", "submodule.private.url", "https://ghp_subm0dule@github.com/x/private.git"]);
-  result = launch(r, ["--review-id", r.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /holds more than a fresh clone writes \(submodule\.private\.url \(credential in the URL\)\)/);
-  assert.doesNotMatch(result.stderr, /ghp_subm0dule/);
-  const s2 = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", s2.checkout, "config", "submodule.public.url", "https://github.com/x/public.git"]);
-  spawnSync("git", ["-C", s2.checkout, "config", "submodule.public.active", "true"]);
-  result = launch(s2, ["--review-id", s2.reviewId, "--dry-run"]);
-  assert.equal(result.status, 0, result.stderr);
-  // extensions.* is not accepted wholesale either: the two keys git writes,
-  // with the values git writes; anything else refused by name or value. An
-  // unknown extension is one git itself (2.54 here) refuses to open the
-  // repository with, so that refusal arrives as the configuration read
-  // failing; the value stays out of the message either way.
-  const e1 = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", e1.checkout, "config", "core.repositoryformatversion", "1"]);
-  spawnSync("git", ["-C", e1.checkout, "config", "extensions.reviewToken", "ghp_ext3nsion"]);
-  result = launch(e1, ["--review-id", e1.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /holds more than a fresh clone writes \(extensions\.reviewtoken\)|cannot read the author checkout's Git configuration: .*unknown repository extension/s);
-  assert.doesNotMatch(result.stderr, /ghp_ext3nsion/);
-  const e2 = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", e2.checkout, "config", "core.repositoryformatversion", "1"]);
-  spawnSync("git", ["-C", e2.checkout, "config", "extensions.objectFormat", "sha1"]);
-  result = launch(e2, ["--review-id", e2.reviewId, "--dry-run"]);
-  assert.equal(result.status, 0, result.stderr);
-  // A value git itself does not accept is refused by git before the launcher
-  // sees it, and git's error quotes the value; the launcher drops the quoted
-  // text. The launcher's own value check is what remains for a git that
-  // accepts more than these two values.
-  const e3 = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", e3.checkout, "config", "core.repositoryformatversion", "1"]);
-  spawnSync("git", ["-C", e3.checkout, "config", "extensions.objectFormat", "ghp_v4lue"]);
-  result = launch(e3, ["--review-id", e3.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /holds more than a fresh clone writes \(extensions\.objectformat \(unexpected value\)\)|cannot read the author checkout's Git configuration: .*'<redacted>'/s);
-  assert.doesNotMatch(result.stderr, /ghp_v4lue/);
-  // extensions.refstorage is not accepted at all.
-  const e4 = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", e4.checkout, "config", "core.repositoryformatversion", "1"]);
-  spawnSync("git", ["-C", e4.checkout, "config", "extensions.refStorage", "reftable"]);
-  result = launch(e4, ["--review-id", e4.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /holds more than a fresh clone writes \(extensions\.refstorage\)|cannot read the author checkout's Git configuration/);
-  // A comment is invisible to `git config --list`; the raw file is held to
-  // blank, header, and key = value lines, and a comment line is refused by
-  // its line number, its text unprinted. A continuation and a line count over
-  // the cap are refused the same way.
-  const c1 = await fixture(t, { realReview: true });
-  const config = path.join(c1.checkout, ".git", "config");
-  const clean = await fsp.readFile(config, "utf8");
-  await fsp.writeFile(config, `${clean}# ghp_c0mment\n`);
-  result = launch(c1, ["--review-id", c1.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, new RegExp(`holds more than a fresh clone writes \\(\\.git/config line ${clean.split("\n").length} \\(not a section header or a key = value line\\)\\)`));
-  assert.doesNotMatch(result.stderr, /ghp_c0mment/);
-  await fsp.writeFile(config, `${clean}[remote "extra"]\n\turl = https://example.com/a.git \\\n ghp_c0ntinued\n`);
-  result = launch(c1, ["--review-id", c1.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /\.git\/config line \d+ \(not a section header or a key = value line\)/);
-  assert.doesNotMatch(result.stderr, /ghp_c0ntinued/);
-  await fsp.writeFile(config, `${clean}${"\n".repeat(200)}`);
-  result = launch(c1, ["--review-id", c1.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /\.git\/config \(more than 200 lines\)/);
-  await fsp.writeFile(config, clean);
-  result = launch(c1, ["--review-id", c1.reviewId, "--dry-run"]);
-  assert.equal(result.status, 0, result.stderr);
-  // The line rule follows git's grammar: a `#` or `;` inside a quoted
-  // subsection or value is text (a branch named release#1 is legal and a
-  // clone of it writes exactly this), an escaped quote in a subsection is
-  // text; outside quotes a `#` or `;` is a comment and refused.
-  await fsp.writeFile(config, `${clean}[branch "release#1"]\n\tremote = origin\n\tmerge = "refs/heads/release#1"\n[branch "rel\\"1"]\n\tremote = origin\n`);
-  result = launch(c1, ["--review-id", c1.reviewId, "--dry-run"]);
-  assert.equal(result.status, 0, result.stderr);
-  await fsp.writeFile(config, `${clean}[remote "x"]\n\tfetch = +refs/heads/*:refs/remotes/x/* ; ghp_tra1ling\n`);
-  result = launch(c1, ["--review-id", c1.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /\.git\/config line \d+ \(not a section header or a key = value line\)/);
-  assert.doesNotMatch(result.stderr, /ghp_tra1ling/);
-  await fsp.writeFile(config, clean);
-  // core.* is not accepted wholesale: the keys that carry a command or a
-  // credential are refused by name.
-  for (const [key, value] of [["core.askPass", "/tmp/askpass.sh"], ["core.gitProxy", "/tmp/proxy.sh"], ["core.sshCommand", "ssh -i .git/id"]]) {
-    const q = await fixture(t, { realReview: true });
-    spawnSync("git", ["-C", q.checkout, "config", key, value]);
-    result = launch(q, ["--review-id", q.reviewId], { PATH });
-    assert.equal(result.status, 2, `${key}: ${result.stdout}`);
-    assert.match(result.stderr, new RegExp(`holds more than a fresh clone writes \\(${key.toLowerCase().replace(".", "\\.")}\\)`));
-    assert.doesNotMatch(result.stderr, /askpass\.sh|proxy\.sh|\.git\/id/);
-  }
-  // The configuration a fresh clone plus the skill's fetch and checkout
-  // steps actually write passes: a bare origin, cloned, fetched into
-  // refs/review-bridge/…, checked out detached.
-  const origin = await repositoryFixture();
-  t.after(() => fsp.rm(origin.root, { recursive: true, force: true }));
-  const bare = path.join(origin.root, "origin.git");
-  spawnSync("git", ["clone", "-q", "--bare", origin.repository, bare]);
-  const panel = path.join(origin.root, "panel-clone");
-  spawnSync("git", ["clone", "-q", "--template=", bare, panel]);
-  spawnSync("git", ["-C", panel, "fetch", "-q", "origin", "+main:refs/review-bridge/1/base", "+agent/workflow-core:refs/review-bridge/1/head"]);
-  spawnSync("git", ["-C", panel, "checkout", "-q", "--detach", "refs/review-bridge/1/head"]);
-  const o = await fixture(t, { checkoutPath: panel });
-  result = launch(o, ["--review-id", REVIEW_ID, "--dry-run"]);
-  // On a failure here, the message names the key git wrote that the
-  // enumeration lacks; add it to FRESH_CLONE_CONFIG_KEYS with the platform.
-  assert.equal(result.status, 0, `${result.stderr}\nclone config:\n${spawnSync("git", ["-C", panel, "config", "--local", "--list"], { encoding: "utf8" }).stdout}\n.git entries: ${(await fsp.readdir(path.join(panel, ".git"))).join(" ")}`);
-  // The .git layout is held to what a --template= clone writes: any file
-  // under hooks or info (a *.sample included), the default template's
-  // description, or a stray top-level entry is refused by name; empty hooks
-  // and info directories pass.
-  const x = await fixture(t, { realReview: true });
-  await fsp.mkdir(path.join(x.checkout, ".git", "hooks"), { recursive: true });
-  await fsp.writeFile(path.join(x.checkout, ".git", "hooks", "pre-commit.sample"), "#!/bin/sh\ncurl https://evil.example\n");
-  result = launch(x, ["--review-id", x.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /\.git holds more than a fresh clone writes \(\.git\/hooks\/pre-commit\.sample\)/);
-  const y = await fixture(t, { realReview: true });
-  await fsp.writeFile(path.join(y.checkout, ".git", "secrets"), "token\n");
-  await fsp.mkdir(path.join(y.checkout, ".git", "info"), { recursive: true });
-  await fsp.writeFile(path.join(y.checkout, ".git", "info", "exclude"), "*.log\n");
-  await fsp.writeFile(path.join(y.checkout, ".git", "description"), "Unnamed repository\n");
-  result = launch(y, ["--review-id", y.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /\.git holds more than a fresh clone writes \(\.git\/description, \.git\/info\/exclude, \.git\/secrets\)/);
-  const z = await fixture(t, { realReview: true });
-  await fsp.mkdir(path.join(z.checkout, ".git", "hooks"), { recursive: true });
-  await fsp.mkdir(path.join(z.checkout, ".git", "info"), { recursive: true });
-  // Linux git 2.43's init --template= leaves an empty branches/ too.
-  await fsp.mkdir(path.join(z.checkout, ".git", "branches"), { recursive: true });
-  result = launch(z, ["--review-id", z.reviewId, "--dry-run"]);
-  assert.equal(result.status, 0, result.stderr);
-  // objects/, refs/, and logs/ are held to their structure: a file hidden
-  // among the objects, a stray ref root, or a stray log is refused by name,
-  // ten shown and the rest counted.
-  const d = await fixture(t, { realReview: true });
-  await fsp.writeFile(path.join(d.checkout, ".git", "objects", "helper"), "#!/bin/sh\n");
-  await fsp.mkdir(path.join(d.checkout, ".git", "objects", "pack"), { recursive: true });
-  await fsp.writeFile(path.join(d.checkout, ".git", "objects", "pack", "evil.sh"), "x");
-  await fsp.mkdir(path.join(d.checkout, ".git", "objects", "ab"), { recursive: true });
-  await fsp.writeFile(path.join(d.checkout, ".git", "objects", "ab", "notanobject"), "x");
-  await fsp.writeFile(path.join(d.checkout, ".git", "refs", "x"), "x");
-  await fsp.writeFile(path.join(d.checkout, ".git", "logs", "x"), "x");
-  await fsp.mkdir(path.join(d.checkout, ".git", "branches"), { recursive: true });
-  await fsp.writeFile(path.join(d.checkout, ".git", "branches", "b"), "x");
-  result = launch(d, ["--review-id", d.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /\.git holds more than a fresh clone writes \(\.git\/branches\/b, \.git\/logs\/x, \.git\/objects\/ab\/notanobject, \.git\/objects\/helper, \.git\/objects\/pack\/evil\.sh, \.git\/refs\/x\)/);
-  const many = await fixture(t, { realReview: true });
-  for (let i = 0; i < 13; i += 1) await fsp.writeFile(path.join(many.checkout, ".git", `stray-${String(i).padStart(2, "0")}`), "x");
-  result = launch(many, ["--review-id", many.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /\(\.git\/stray-00, .*\.git\/stray-09, and 3 more\)/);
-  // A query or fragment in a remote URL is refused, whatever it carries.
-  const q = await fixture(t, { realReview: true });
-  spawnSync("git", ["-C", q.checkout, "remote", "set-url", "origin", "https://example.com/repo.git?access_token=t0k3n"]);
-  result = launch(q, ["--review-id", q.reviewId], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /holds more than a fresh clone writes \(remote\.origin\.url \(query or fragment in the URL\)\)/);
-  assert.doesNotMatch(result.stderr, /t0k3n/);
-  // git itself unavailable: the check fails closed rather than passing by
-  // not running.
-  const j = await fixture(t, { realReview: true });
-  result = launch(j, ["--review-id", j.reviewId, "--dry-run"], { PATH: "" });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /cannot read the author checkout's Git configuration/);
-});
-
 test("a host credential directory present inside the container fails the boundary before the reviewer starts", async (t) => {
   const f = await fixture(t, { realReview: true });
   const env = await fakeDocker(f, { present: `${f.home}/.ssh` });
@@ -1316,6 +1056,13 @@ test("a staged store past the bound is never copied to the host, and its volume 
   const calls = await fsp.readFile(env.FAKE_CALLS, "utf8");
   assert.doesNotMatch(calls, /^volume rm review-bridge-advisory-\S+-store$/m);
   assert.match(calls, /^volume rm review-bridge-advisory-\S+-home$/m);
+  // A kept tmpfs volume is empty unless something mounts it, so the keeper
+  // stays up with it, and the report says what it costs and how to clear it.
+  assert.doesNotMatch(calls, /^rm -f review-bridge-advisory-\S+-keeper$/m);
+  assert.match(
+    result.stdout,
+    /the volume keeper review-bridge-advisory-\S+-keeper is still running to hold review-bridge-advisory-\S+-store \(a tmpfs volume empties when nothing mounts it\), so it goes on using memory until you clear it: look with `docker run --rm -v review-bridge-advisory-\S+-store:\/v alpine ls -la \/v`, then `docker rm -f review-bridge-advisory-\S+-keeper && docker volume rm review-bridge-advisory-\S+-store`/,
+  );
   // The host ledger is where it was.
   const ledger = await loadReview(f.store, f.reviewId);
   assert.equal(ledger.status, "WAITING_FOR_REVIEW");
@@ -1492,29 +1239,6 @@ test("a direct egress answer with any HTTP status fails the boundary before the 
   assert.doesNotMatch(result.stdout, /mcp: /);
   const ledger = await loadReview(f.store, f.reviewId);
   assert.equal(ledger.state_version, 1);
-});
-
-test("only a self-contained clone is accepted: a linked worktree and a shared clone are refused before Docker", async (t) => {
-  const PATH = await gitOnlyPath(t);
-  const repo = await repositoryFixture();
-  t.after(() => fsp.rm(repo.root, { recursive: true, force: true }));
-  const worktree = path.join(repo.root, "linked");
-  spawnSync("git", ["-C", repo.repository, "worktree", "add", "-q", worktree, "-b", "panel"]);
-  const f = await fixture(t, { checkoutPath: worktree });
-  let result = launch(f, ["--review-id", REVIEW_ID], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /is not a self-contained clone: \.git is a file \(a linked worktree or a separate git dir\); use a self-contained clone \(git clone <remote-url> <path>\)/);
-  const shared = path.join(repo.root, "shared");
-  spawnSync("git", ["clone", "-q", "-s", repo.repository, shared]);
-  const g = await fixture(t, { checkoutPath: shared });
-  result = launch(g, ["--review-id", REVIEW_ID], { PATH });
-  assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stderr, /is not a self-contained clone: it reads objects through \.git\/objects\/info\/alternates/);
-  const plain = path.join(repo.root, "plain");
-  spawnSync("git", ["clone", "-q", "--template=", repo.repository, plain]);
-  const h = await fixture(t, { checkoutPath: plain });
-  result = launch(h, ["--review-id", REVIEW_ID, "--dry-run"]);
-  assert.equal(result.status, 0, result.stderr);
 });
 
 test("a scratch directory with a comma in its path is refused before Docker and before staging", async (t) => {
@@ -1763,7 +1487,11 @@ test("a huge or failing docker logs leaves the report, the criteria, and every c
   assert.equal(result.status, 0, result.stdout.slice(-2000));
   assert.match(result.stdout, /cleanup steps that failed: export sessions: cp: cannot create \/out\/sessions/);
   assert.match(result.stdout, /the CODEX_HOME volume review-bridge-advisory-\S+-home was kept for the failed export/);
-  assert.doesNotMatch(await fsp.readFile(kEnv.FAKE_CALLS, "utf8"), /^volume rm review-bridge-advisory-\S+-home$/m);
+  const kCalls = await fsp.readFile(kEnv.FAKE_CALLS, "utf8");
+  assert.doesNotMatch(kCalls, /^volume rm review-bridge-advisory-\S+-home$/m);
+  // The keeper holds that volume's tmpfs, so it stays up with it.
+  assert.doesNotMatch(kCalls, /^rm -f review-bridge-advisory-\S+-keeper$/m);
+  assert.match(result.stdout, /the volume keeper review-bridge-advisory-\S+-keeper is still running to hold review-bridge-advisory-\S+-home/);
   // No sessions directory at all is the one answer that is not a failure.
   const l = await fixture(t, { realReview: true });
   const lEnv = await fakeDocker(l, { sessions: "none" });
@@ -1771,7 +1499,43 @@ test("a huge or failing docker logs leaves the report, the criteria, and every c
   assert.equal(result.status, 0, result.stdout.slice(-2000));
   assert.doesNotMatch(result.stdout, /cleanup steps that failed/);
   assert.match(result.stdout, /guardian verdicts \(\d+\) — no sessions recorded:/);
-  assert.match(await fsp.readFile(lEnv.FAKE_CALLS, "utf8"), /^volume rm/m);
+  const lCalls = await fsp.readFile(lEnv.FAKE_CALLS, "utf8");
+  assert.match(lCalls, /^volume rm/m);
+  // Nothing kept, so the keeper goes with the volumes.
+  assert.match(lCalls, /^rm -f review-bridge-advisory-\S+-keeper$/m);
+  assert.doesNotMatch(result.stdout, /the volume keeper/);
+});
+
+test("a consumer that stops reading does not kill the run: cleanup and the exit code stand", async (t) => {
+  // `… | head` closes the pipe; an unhandled EPIPE would take the process
+  // down outside the promise and the finally, leaving containers, the proxy,
+  // the keeper, the network, and the volumes up.
+  const f = await fixture(t, { realReview: true });
+  const env = await fakeDocker(f);
+  const child = spawn(process.execPath, [f.launcher, "--review-id", f.reviewId], {
+    env: { ...process.env, HOME: f.home, CODEX_HOME: undefined, REVIEW_BRIDGE_HOME: f.store, ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  child.stdout.once("data", () => child.stdout.destroy());
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(code, 0, stderr.slice(-2000));
+  assert.doesNotMatch(stderr, /EPIPE/);
+  const calls = await fsp.readFile(env.FAKE_CALLS, "utf8");
+  for (const pattern of [
+    /^rm -f review-bridge-advisory-\S+-codex$/m,
+    /^stop -t 2 review-bridge-advisory-\S+-egress$/m,
+    /^rm -f review-bridge-advisory-\S+-egress$/m,
+    /^network rm review-bridge-advisory-/m,
+    /^rm -f review-bridge-advisory-\S+-keeper$/m,
+    /^volume rm review-bridge-advisory-\S+-home$/m,
+    /^volume rm review-bridge-advisory-\S+-store$/m,
+  ]) {
+    assert.match(calls, pattern, calls);
+  }
+  // The verdict still reached the host ledger, printable or not.
+  assert.equal((await loadReview(f.store, f.reviewId)).status, "REVIEW_SUBMITTED");
 });
 
 test("a snapshot prepared over a dirty tree is refused before Docker: the clone can materialize only commits", async (t) => {

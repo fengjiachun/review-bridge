@@ -821,23 +821,9 @@ for `~/.ssh`, `~/.codex` and its `auth.json`, `~/Library`, `~/.gnupg`,
 present. Absent is judged against the same image without the checkout mount,
 so a directory the image itself carries is not read as the host's, and each
 ancestor of the checkout may gain exactly the one name that leads down to it.
-Before anything is started the launcher reads the checkout's local Git
-configuration and accepts a local Git configuration holding only what a fresh
-clone writes — the `core.*` keys a fresh clone writes, a remote's `url` and
-`fetch`, a branch's `remote`, `merge`, and `rebase`, `extensions.objectformat`
-as `sha1` or `sha256`, a submodule's `url` and `active` — with any of those
-URL values that carries a credential refused as well, and the raw file held to
-blank, section-header, and `key = value` lines, since a comment is invisible
-to the key check and can carry a token; anything else (an `http.<url>.extraheader` such as
-`actions/checkout` writes, any `credential.*` setting, an `http.cookieFile` or
-`http.sslKey` pointing into the checkout, a `core.askPass`, `core.gitProxy`,
-or `core.sshCommand`, an `include.path`, or any key whose name itself carries
-`://` or a `user:pass@`) is refused by key name, because the panel checkout is what the launcher
-clones from and a denylist of secret-bearing keys does not converge; a remote
-or submodule URL carrying a query or a fragment is refused the same way, and
-the `.git` layout is held to a fresh `--template=` clone's. What the
-container mounts at the recorded path is not that `.git` but a fresh clone
-the launcher makes itself from the panel checkout (`git clone --template=
+What the
+container mounts at the recorded path is not the panel checkout's `.git` but a
+fresh clone the launcher makes itself from it (`git clone --template=
 --no-local --no-hardlinks file://<panel checkout>` into its scratch
 directory, detached at the review's recorded snapshot head — which the
 panel checkout must still be at, or the launch is refused before anything
@@ -845,8 +831,7 @@ starts — and removed at cleanup): the
 operator's `.git` never enters the container, only the objects reachable
 from the panel's refs cross, so a hook, a stray file among the objects, or a
 comment in the configuration that a template or a hand left there stays on
-the host, and that clone is held to the same configuration and layout before
-it is mounted, as a check on the launcher's own work. Every git the launcher
+the host. Every git the launcher
 itself runs on the host — those checks and the staging clone — runs in an
 isolated environment (no global or system configuration, an empty `HOME` and
 hooks path, no `GIT_*` from the operator's shell), so a `.gitattributes` in
@@ -855,16 +840,9 @@ checkout runs on the host before the container exists. The review's last
 round must be a clean commit — `worktree_clean` true and no overlays — since
 the clone can materialize only commits; a snapshot prepared over a dirty
 tree is refused before anything starts, and the panel clone, being fresh, is
-clean by construction. That check reads Git configuration only, includes followed,
-and not the working tree: a `.env` or `.netrc` in the tree is kept out by the
-panel checkout being a fresh clone, not by the launcher, and a remote or
-branch named after a secret is not detectable; the panel clone is yours to
-keep clean. And it refuses a
-checkout that is not a self-contained clone — a linked worktree, whose
-`.git` is a file pointing into the main repository, or a clone with
-alternates — because the launcher clones from it over git's own transport,
-and what that transport would pull through a worktree's main repository or
-an alternate is a repository outside the panel's own. The container is the only sandbox. Inside it the reviewer
+clean by construction. What the reviewer reads is the panel clone's own
+content: a `.env` or `.netrc` in that tree crosses with it, so the panel
+clone is yours to keep clean. The container is the only sandbox. Inside it the reviewer
 runs with `--sandbox danger-full-access`, because Codex's nested bubblewrap
 does not start under Docker's default confinement, and relaxing that
 confinement to fit a second sandbox inside would weaken the one boundary that
@@ -1480,11 +1458,8 @@ attests nothing.
    fetches its head and the target branch into refs of this flow's own
    inside that clone, checks the head out there, and prints the base, the
    head, and the merge base computed there. A reviewer must never read a tree
-   someone is editing and the panel must never dirty one, and the container
-   launcher below reads only a self-contained clone: a linked worktree keeps
-   its `.git` as a file pointing into the main repository, outside the
-   panel's own tree. The clone is the panel's worktree outside every authoring
-   tree:
+   someone is editing and the panel must never dirty one, so the clone is the
+   panel's worktree outside every authoring tree:
 
    ```bash
    node ../../scripts/advisory-panel-checkout.mjs <remote-url> <pr-number> <target-branch> <path outside any authoring tree>
@@ -1497,10 +1472,7 @@ attests nothing.
    credential source, and no `ProxyCommand`, since ssh takes its home from
    the passwd entry rather than the environment), so a `.gitattributes` in the
    pull request's tree can name no filter that resolves while the panel
-   checkout is made, and no ssh configuration can make a command run. It clones with `--template=`, so no hook or helper from
-   the operator's `init.templateDir` rides into the panel's `.git`; the
-   launcher holds the panel's `.git` to what a fresh clone writes and mounts
-   a fresh clone of its own made from it, never the panel's `.git`. It fetches
+   checkout is made, and no ssh configuration can make a command run. It fetches
    `+refs/heads/<target-branch>:refs/review-bridge/<pr-number>/base` and
    `+pull/<pr-number>/head:refs/review-bridge/<pr-number>/head`: both
    refspecs name their destination, and the merge base is computed from the
