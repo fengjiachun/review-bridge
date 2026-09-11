@@ -120,9 +120,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `REVIEW_REPORT_CONTRACT` pins both steps in the source and packaged skill.
   The footer states, in the terms the README uses for operator narration,
   that the report is a projection of the ledger, not evidence, naming only
-  what the report itself read: the ledger files it rendered (the review
-  ledger, the publication ledger and its gate or authorization file) and the
-  publication summary the server computed over its own inputs, by digest.
+  what the report itself read and what it recomputed from: the ledger files
+  it rendered (the review ledger, the publication ledger and its gate or
+  authorization file), the publication summary the server computed over its
+  own inputs, by digest, and any parent ledger a round's fields were
+  recomputed from, by path, `state_version`, and the digest of the parent
+  gate the proof names -- or, when the store has no ledger for it, named as
+  absent. A parent whose proof records everything is not named, since the
+  render did not use it.
 
 ### Changed
 

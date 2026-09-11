@@ -1231,7 +1231,7 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
         if (error?.code !== "REVIEW_NOT_FOUND") {
           throw successorParentInvalid(reviewId, filePath, round.round, proof.parent_review_id, error.message);
         }
-        parentContext.set(round.round, { absent: true });
+        parentContext.set(round.round, { absent: true, review_id: proof.parent_review_id });
       }
       if (parent != null) {
         // The parent's gate must be present, admitted by the local gate
@@ -1272,7 +1272,13 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
             throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof names ${field} ${JSON.stringify(proof[field])}, but parent ${proof.parent_review_id} gives ${JSON.stringify(expected)}`);
           }
         }
-        parentContext.set(round.round, { derived });
+        parentContext.set(round.round, {
+          derived,
+          review_id: proof.parent_review_id,
+          path: path.join(reviewDirectory(storeRoot, proof.parent_review_id), "review.json"),
+          state_version: parent.state_version ?? 0,
+          gate_sha256: gate.source_sha256,
+        });
       }
     }
     let reproduced;

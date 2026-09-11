@@ -354,7 +354,7 @@ test("the footer names the review, both revisions, the render time, the ledger p
   assert.match(markdown, /## Footer\n\n- Review: `rb-2026-09-01T000000-000Z-0badf00d`\n- Review ledger state_version: 6\n- Publication ledger revision: none\n- Report revision: `6`\n- Rendered at: 2026-09-10T12:00:00\.000Z\n- Ledger: `\/store\/reviews\/x\/review\.json`\n/);
   assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE}\n`));
   assert.match(PROJECTION_NOTICE, /projection of the ledger, not evidence/);
-  assert.match(PROJECTION_NOTICE, /rendered from the review ledger and, when present, the publication ledger and its gate listed above, and from the publication summary the server computed/);
+  assert.match(PROJECTION_NOTICE, /rendered from the review ledger and, when present, the publication ledger and its gate listed above, from any parent ledger listed there whose fields this render recomputed, and from the publication summary the server computed/);
   assert.match(PROJECTION_NOTICE_REMOTE_ONLY, /projection of the ledger, not evidence/);
   assert.match(PROJECTION_NOTICE_REMOTE_ONLY, /rendered from the publication ledger and its bound authorization listed above, and from the publication summary the server computed/);
   for (const notice of [PROJECTION_NOTICE, PROJECTION_NOTICE_REMOTE_ONLY]) {
@@ -1943,6 +1943,44 @@ test("a proof with no recorded requirement match is printed from the parent, or 
   const absent = await strategy();
   assert.match(absent, /\n- \(parent review not in this store; parent-derived fields unverified\) Requirement matches the parent: not recorded\n/);
   assert.doesNotMatch(absent, /Requirement matches the parent: (yes|no)\n/);
+});
+
+// A parent ledger the render actually used is a source of the rendered
+// facts, so the footer names it: the proof that records everything needs no
+// parent and names none.
+test("the footer names a parent ledger this render recomputed a field from, and no other", async (t) => {
+  const state = await successorFixture(t, { extraFile: "footer.txt" });
+  const directory = path.join(state.store, "reviews", state.successorId);
+  const parentDirectory = path.join(state.store, "reviews", state.parentId);
+  const reviewPath = path.join(directory, "review.json");
+  const complete = await fsp.readFile(reviewPath, "utf8");
+  const footer = async () => {
+    const receipt = await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT });
+    const markdown = await fsp.readFile(receipt.path, "utf8");
+    await fsp.rm(receipt.path);
+    return markdown.slice(markdown.indexOf("## Footer"));
+  };
+  // A proof that records everything: the render read no parent field.
+  assert.doesNotMatch(await footer(), /Parent review:/);
+  // The same ledger without the fields an older release omitted: the parent
+  // supplied them, so the parent's ledger and the gate its proof names are
+  // part of what was rendered.
+  const review = JSON.parse(complete);
+  const proof = review.rounds[0].successor;
+  delete proof.requirement_match;
+  delete proof.parent_requirement;
+  await fsp.writeFile(path.join(directory, "rounds", "1", "successor.json"), `${JSON.stringify(proof, null, 2)}\n`, { mode: 0o600 });
+  await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
+  const parent = JSON.parse(await fsp.readFile(path.join(parentDirectory, "review.json"), "utf8"));
+  const gateSha = crypto.createHash("sha256").update(await fsp.readFile(path.join(parentDirectory, "gate.json"))).digest("hex");
+  assert.equal(proof.parent_gate_sha256, gateSha);
+  assert.match(
+    await footer(),
+    new RegExp(`\n- Parent review: \`${state.parentId}\` \\(\`${path.join(parentDirectory, "review.json")}\`, state_version ${parent.state_version}; gate\\.json sha256 \`${gateSha.slice(0, 12)}\`\\)\n`),
+  );
+  // With the parent gone, what the render used is its absence.
+  await fsp.rename(parentDirectory, path.join(state.store, "parent-aside"));
+  assert.match(await footer(), new RegExp(`\n- Parent review: \`${state.parentId}\` — not in this store \\(parent-derived fields unverified\\)\n`));
 });
 
 // A successor's parent in the store is validated as the review is and its

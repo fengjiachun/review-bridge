@@ -22,7 +22,7 @@ import { sha256 } from "./storage.mjs";
 // The footer names only what the report itself read: the ledger files listed
 // there and the publication summary the server computed over its own inputs.
 export const PROJECTION_NOTICE =
-  "This report is a projection of the ledger, not evidence. It was rendered from the review ledger and, when present, the publication ledger and its gate listed above, and from the publication summary the server computed: nothing in this report advances or proves review state, and citing it as evidence is a misuse. It can be regenerated from them at any time.";
+  "This report is a projection of the ledger, not evidence. It was rendered from the review ledger and, when present, the publication ledger and its gate listed above, from any parent ledger listed there whose fields this render recomputed, and from the publication summary the server computed: nothing in this report advances or proves review state, and citing it as evidence is a misuse. It can be regenerated from them at any time.";
 export const PROJECTION_NOTICE_REMOTE_ONLY =
   "This report is a projection of the ledger, not evidence. It was rendered from the publication ledger and its bound authorization listed above, and from the publication summary the server computed: nothing in this report advances or proves publication state, and citing it as evidence is a misuse. It can be regenerated from them at any time.";
 
@@ -713,6 +713,15 @@ export function renderReviewReport(
   }
   const reviewId = review?.id ?? publication.review_id;
   const directory = ledgerDirectory ?? path.join("reviews", String(reviewId));
+  // A parent ledger this render actually used: it supplied a field the proof
+  // does not record, or its absence is what the round is marked with. A proof
+  // that records everything needs no parent, and none is named. One parent
+  // can serve several rounds, so it is named once.
+  const parents = new Map();
+  for (const entry of parentContext.values()) {
+    if (entry.absent !== true && Object.keys(entry.derived ?? {}).length === 0) continue;
+    if (!parents.has(entry.review_id)) parents.set(entry.review_id, entry);
+  }
   // Every file that was read and rendered, so the footer names exactly what
   // the projection was made from: the bound authorization is gate.json for a
   // local gate and the remote sidecar otherwise.
@@ -744,6 +753,11 @@ export function renderReviewReport(
       `- Report revision: ${code(reportRevision(review, publication, publicationSummary))}`,
       `- Rendered at: ${inline(renderedAt)}`,
       `- Ledger: ${ledgers.join(", ")}`,
+      ...[...parents.values()].map((entry) =>
+        entry.absent === true
+          ? `- Parent review: ${code(entry.review_id)} — not in this store (parent-derived fields unverified)`
+          : `- Parent review: ${code(entry.review_id)} (${code(entry.path)}, state_version ${entry.state_version}; gate.json sha256 ${code(entry.gate_sha256.slice(0, 12))})`,
+      ),
       ...(publication == null
         ? []
         : [

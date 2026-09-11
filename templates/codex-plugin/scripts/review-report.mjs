@@ -17,7 +17,8 @@ const USAGE = `Usage: review-report.mjs <review_id> [--json] [--store <path>]
   requirement and scope, each round's findings with the author's disposition
   and the rereviewer's decision, what changed between rounds, the terminal
   state, and the pull request, Codex results, checks, and threads a
-  publication recorded. The footer names the ledger revisions rendered.
+  publication recorded. The footer names the ledger revisions rendered, and
+  any parent ledger this render recomputed a round's fields from.
 
   --json          Emit {review_id, revision, markdown} as JSON instead of the
                   Markdown itself.
