@@ -1577,7 +1577,10 @@ async function main() {
     IMAGE,
     "sh",
     "-c",
-    `cp -a ${CONTAINER_CODEX_HOME}/sessions /out/sessions 2>/dev/null; chown -R ${uid ?? "0:0"} /out/sessions 2>/dev/null; true`,
+    // Only one outcome is not a failure: no sessions directory at all (the
+    // reviewer never started). Otherwise the copy's and the chown's exit
+    // codes are the step's, and a failed export keeps the volume.
+    `if [ ! -d ${CONTAINER_CODEX_HOME}/sessions ]; then echo no-sessions-recorded; exit 0; fi; cp -a ${CONTAINER_CODEX_HOME}/sessions /out/sessions && chown -R ${uid ?? "0:0"} /out/sessions`,
   ];
   const baselineRun = [
     ...containerArgs(table, network, user, { withoutCheckout: true }),
@@ -1643,6 +1646,8 @@ async function main() {
   let proxyLog = "";
   let proxyLogNote = null;
   const cleanupFailures = [];
+  let sessionsNote = null;
+  let sessionsKept = null;
   let cleaned = false;
   // A step fails on a spawn error or a nonzero exit alike; stderr's first
   // 200 characters go into the report.
@@ -1683,8 +1688,15 @@ async function main() {
     step("remove network", () => spawnSync("docker", ["network", "rm", network], quiet));
     // The rollouts are the guardian evidence; copy them out before the
     // volume goes.
-    step("export sessions", () => spawnSync("docker", sessionsExport, quiet));
-    step("remove volume", () => spawnSync("docker", ["volume", "rm", homeVolume], quiet));
+    step("export sessions", () => {
+      const result = spawnSync("docker", sessionsExport, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      if (result.error || result.status !== 0) sessionsKept = homeVolume;
+      else if (result.stdout.includes("no-sessions-recorded")) sessionsNote = "no sessions recorded";
+      return result;
+    });
+    // The rollouts are the only copy of the guardian evidence; if the export
+    // failed they are still in the volume, so the volume stays.
+    if (!sessionsKept) step("remove volume", () => spawnSync("docker", ["volume", "rm", homeVolume], quiet));
     step("remove staged checkout", () => fs.rmSync(inputs.checkout, { recursive: true, force: true }));
   };
   for (const signal of ["SIGINT", "SIGTERM"]) {
@@ -1839,14 +1851,14 @@ async function main() {
         ? `unavailable: ${cleanupFailures.find((failure) => failure.startsWith("collect proxy log")).slice("collect proxy log: ".length)}`
         : `${summarizeProxyLog(proxyLog) || "(empty)"}${proxyLogNote ? ` (${proxyLogNote})` : ""}`
     }`,
-    `guardian verdicts (${verdicts.length}):`,
+    `guardian verdicts (${verdicts.length})${sessionsNote ? ` — ${sessionsNote}` : ""}:`,
     ...(verdicts.length
       ? verdicts.map(
           (turn) =>
             `  ${turn.tool ?? "?"}: ${turn.outcome ?? "?"} (risk ${turn.risk ?? "?"}, authorization ${turn.authorization ?? "?"}, ${turn.seconds?.toFixed(1)} s)`,
         )
       : ["  none found in the sessions copied out of the isolated CODEX_HOME"]),
-    `residual: the one host secret inside was ${inputs.authJson}, egress limited to ${EGRESS_ALLOW.join(", ")} by the sidecar${cleanupFailures.length ? `; cleanup steps that failed: ${cleanupFailures.join("; ")}` : ""}`,
+    `residual: the one host secret inside was ${inputs.authJson}, egress limited to ${EGRESS_ALLOW.join(", ")} by the sidecar${cleanupFailures.length ? `; cleanup steps that failed: ${cleanupFailures.join("; ")}` : ""}${sessionsKept ? `; the CODEX_HOME volume ${sessionsKept} was kept for the failed export` : ""}`,
     "",
   ];
   process.stdout.write(lines.join("\n"));

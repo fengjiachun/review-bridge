@@ -138,7 +138,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
 // records derived from the probe's own argument, and plays the reviewer by
 // moving the staged ledger with the server's own submit — or, when asked,
 // by also leaving the kind of trace the copy-back must refuse.
-async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "", volumeRmFail = false, head = "", rmFail = "" } = {}) {
+async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "", volumeRmFail = false, head = "", rmFail = "", sessions = "" } = {}) {
   const bin = path.join(f.root, "bin");
   await fsp.mkdir(bin, { recursive: true });
   const runner = path.join(bin, "fake-run.mjs");
@@ -148,7 +148,12 @@ async function fakeDocker(f, { tamper = "", directCode = "", big = false, server
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
-if (args.includes("sh")) process.exit(0);
+if (args.includes("sh")) {
+  const mode = process.env.FAKE_SESSIONS || "";
+  if (mode === "fail") { process.stderr.write("cp: cannot create /out/sessions"); process.exit(1); }
+  if (mode === "none") { process.stdout.write("no-sessions-recorded\\n"); process.exit(0); }
+  process.exit(0);
+}
 const bind = (dst) => args.map((a) => a.match(new RegExp("^type=bind,src=(.*),dst=" + dst + "(,readonly)?$"))).find(Boolean)?.[1];
 if (!args.includes("codex")) {
   const spec = JSON.parse(args[args.length - 1]);
@@ -296,6 +301,7 @@ esac
     FAKE_CALLS: path.join(bin, "calls.log"),
     FAKE_VOLUME_RM_FAIL: volumeRmFail ? "1" : "",
     FAKE_RM_FAIL: rmFail,
+    FAKE_SESSIONS: sessions,
     FAKE_HEAD: head,
     FAKE_CHECKOUT_LOG: path.join(bin, "checkout.json"),
   };
@@ -1117,6 +1123,69 @@ test("the isolated environment pins ssh itself: no operator configuration, no ke
   await assert.rejects(fsp.access(marker), /ENOENT/);
 });
 
+test("without an operator known_hosts, one run shares one known_hosts and says what it accepted", async (t) => {
+  // accept-new against /dev/null would discard the key and let every call of
+  // one checkout trust a new one; the run keeps its own file instead, and it
+  // goes with the isolation directory.
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-tofu-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const home = path.join(root, "home");
+  await fsp.mkdir(home);
+  const repo = path.join(root, "repo");
+  await fsp.mkdir(repo);
+  spawnSync("git", ["-C", repo, "init", "-q"]);
+  const key = path.join(root, "host-key");
+  assert.equal(spawnSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key], { encoding: "utf8" }).status, 0);
+  // A known_hosts entry carries no comment, so ssh-keygen -l shows the host
+  // where a comment would be.
+  const publicKey = (await fsp.readFile(`${key}.pub`, "utf8")).trim().split(" ").slice(0, 2).join(" ");
+  const child = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `import fs from "node:fs";
+       const m = await import(${JSON.stringify(pathToFileURL(path.join(path.dirname(launcherSource), "isolated-git.mjs")).href)});
+       const show = () => m.isolatedGit(["-C", process.argv[1], "-c", 'alias.showssh=!printf %s "$GIT_SSH_COMMAND"', "showssh"]).stdout.trim();
+       const first = show();
+       const file = /UserKnownHostsFile='([^']*)'/.exec(first)[1];
+       fs.writeFileSync(file, process.argv[2] + "\\n");
+       const second = show();
+       console.log(JSON.stringify({
+         file,
+         same: file === /UserKnownHostsFile='([^']*)'/.exec(second)[1],
+         strict: /StrictHostKeyChecking=(\\S+)/.exec(second)[1],
+         lines: fs.readFileSync(file, "utf8").split("\\n").filter(Boolean).length,
+         accepted: m.sshAcceptedHostKeys(),
+       }));`,
+      repo,
+      `127.0.0.1 ${publicKey}`,
+    ],
+    { encoding: "utf8", env: { ...process.env, HOME: home } },
+  );
+  assert.equal(child.status, 0, child.stderr);
+  const seen = JSON.parse(child.stdout);
+  assert.equal(seen.same, true);
+  assert.equal(seen.strict, "accept-new");
+  assert.equal(seen.lines, 1, "the second call reused the accepted key instead of writing another");
+  assert.ok(seen.file.includes("review-bridge-advisory-git-"), seen.file);
+  assert.equal(seen.accepted.length, 1);
+  assert.match(seen.accepted[0], /SHA256:/);
+  assert.ok(seen.accepted[0].includes("127.0.0.1"), seen.accepted[0]);
+  // The file is the run's: it is gone with the isolation directory.
+  await assert.rejects(fsp.access(seen.file), /ENOENT/);
+  // The panel script states the trust before it starts, and reports no key
+  // when none was accepted.
+  const refused = spawnSync(
+    process.execPath,
+    [panelSource, "ssh://git@127.0.0.1:1/owner/repo.git", "7", "main", path.join(root, "never")],
+    { encoding: "utf8", env: { ...process.env, HOME: home, SSH_AUTH_SOCK: path.join(root, "agent.sock") } },
+  );
+  assert.equal(refused.status, 2, refused.stdout + refused.stderr);
+  assert.match(refused.stdout, /host key trusted on first use \(no ~\/\.ssh\/known_hosts\): accepted for this run only, not kept — create ~\/\.ssh\/known_hosts to verify the host across runs/);
+  assert.doesNotMatch(refused.stdout, /accepted host key/);
+});
+
 test("the container mounts a clone the launcher makes, never the panel checkout's own .git", async (t) => {
   // What the layout check cannot see — a directory where a file is expected,
   // an unreachable object among the real ones — never crosses: the mount is
@@ -1433,6 +1502,23 @@ test("a huge or failing docker logs leaves the report, the criteria, and every c
   result = launch(j, ["--review-id", j.reviewId], await fakeDocker(j, { rmFail: "other" }));
   assert.equal(result.status, 0, result.stdout.slice(-2000));
   assert.match(result.stdout, /cleanup steps that failed: remove codex container: Error response from daemon: boom/);
+  // The rollouts are the only copy of the guardian evidence: a failed export
+  // is a failure and the volume stays, named in the report.
+  const k = await fixture(t, { realReview: true });
+  const kEnv = await fakeDocker(k, { sessions: "fail" });
+  result = launch(k, ["--review-id", k.reviewId], kEnv);
+  assert.equal(result.status, 0, result.stdout.slice(-2000));
+  assert.match(result.stdout, /cleanup steps that failed: export sessions: cp: cannot create \/out\/sessions/);
+  assert.match(result.stdout, /the CODEX_HOME volume review-bridge-advisory-\S+-home was kept for the failed export/);
+  assert.doesNotMatch(await fsp.readFile(kEnv.FAKE_CALLS, "utf8"), /^volume rm/m);
+  // No sessions directory at all is the one answer that is not a failure.
+  const l = await fixture(t, { realReview: true });
+  const lEnv = await fakeDocker(l, { sessions: "none" });
+  result = launch(l, ["--review-id", l.reviewId], lEnv);
+  assert.equal(result.status, 0, result.stdout.slice(-2000));
+  assert.doesNotMatch(result.stdout, /cleanup steps that failed/);
+  assert.match(result.stdout, /guardian verdicts \(\d+\) — no sessions recorded:/);
+  assert.match(await fsp.readFile(lEnv.FAKE_CALLS, "utf8"), /^volume rm/m);
 });
 
 test("a snapshot prepared over a dirty tree is refused before Docker: the clone can materialize only commits", async (t) => {

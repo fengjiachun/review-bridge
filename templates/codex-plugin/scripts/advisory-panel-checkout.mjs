@@ -9,7 +9,7 @@
 // anything on the host while the checkout is made.
 import fs from "node:fs";
 import path from "node:path";
-import { isolatedGit, isSshRemote, sshTrustsOnFirstUse } from "./isolated-git.mjs";
+import { isolatedGit, isSshRemote, sshAcceptedHostKeys, sshTrustsOnFirstUse } from "./isolated-git.mjs";
 
 const USAGE = `Usage: advisory-panel-checkout.mjs <remote-url> <pr-number> <target-branch> <path>
 
@@ -30,8 +30,10 @@ const USAGE = `Usage: advisory-panel-checkout.mjs <remote-url> <pr-number> <targ
   against the operator's ~/.ssh/known_hosts, or taken on first use when that
   file does not exist, which is stated in the output. No credential helper is
   consulted, so an https remote must be reachable without one, and an ssh
-  remote without an agent is refused. Fails closed, exit 2, on any git
-  failure.
+  remote without an agent is refused. A host key taken on first use is kept
+  for the run, so every call of one checkout checks the same key, and the
+  fingerprint is printed; it is not kept across runs.  Fails closed, exit 2,
+  on any git failure.
 `;
 
 function fail(message) {
@@ -64,7 +66,11 @@ function main() {
     if (!process.env.SSH_AUTH_SOCK) {
       return fail(`${remote} is an ssh remote and no ssh agent is available; the agent is the only credential source this script supports`);
     }
-    if (sshTrustsOnFirstUse()) process.stdout.write("host key trusted on first use (no ~/.ssh/known_hosts)\n");
+    if (sshTrustsOnFirstUse()) {
+      process.stdout.write(
+        "host key trusted on first use (no ~/.ssh/known_hosts): accepted for this run only, not kept — create ~/.ssh/known_hosts to verify the host across runs\n",
+      );
+    }
   }
   const base = `refs/review-bridge/${prNumber}/base`;
   const head = `refs/review-bridge/${prNumber}/head`;
@@ -83,6 +89,7 @@ function main() {
   const headSha = git("rev-parse", ["-C", checkout, "rev-parse", "--verify", `${head}^{commit}`]);
   const mergeBase = git("merge-base", ["-C", checkout, "merge-base", base, head]);
   if (baseSha === null || headSha === null || mergeBase === null) return;
+  for (const fingerprint of sshAcceptedHostKeys()) process.stdout.write(`accepted host key ${fingerprint}\n`);
   process.stdout.write(`checkout ${checkout}\nbase ${baseSha}\nhead ${headSha}\nmerge-base ${mergeBase}\n`);
 }
 

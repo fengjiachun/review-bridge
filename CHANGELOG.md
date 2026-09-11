@@ -64,7 +64,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   explicit command rather than by `HOME`, which it takes from the passwd
   entry — no ssh configuration read, no key from disk, the agent as the one
   credential source, no `ProxyCommand`, host keys still checked against the
-  operator's `known_hosts` — and an ssh remote without an agent is refused — and a
+  operator's `known_hosts`, or, when there is none, against one file for the
+  run whose accepted fingerprints the script prints — and an ssh remote
+  without an agent is refused — and a
   review whose last round was prepared over a dirty tree (overlays,
   `worktree_clean` false) is refused since the clone can materialize only
   commits; the checks stay on the panel checkout
@@ -72,7 +74,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `git clone` copies the operator's `init.templateDir` into it, and the
   packaged skill's panel clone now uses `--template=`; a remote or submodule
   URL carrying a query or a fragment is refused, since a token can ride in
-  either; the sidecar's log quotes every client-supplied value (authority, SNI) so a
+  either; a failed export of the rollouts keeps the CODEX_HOME volume and says so,
+  the sidecar's log quotes every client-supplied value (authority, SNI) so a
   name carrying a newline cannot forge a log line, and the log is collected bounded and every cleanup step runs
   on its own, a spawn error or a nonzero exit recorded in the report rather
   than skipping the rest;
