@@ -1033,6 +1033,14 @@ test("the panel checkout script clones, fetches, and checks out in the isolated 
   const bad = spawnSync(process.execPath, [panelSource, `file://${remote.repository}`, "seven", "main", path.join(root, "x")], { encoding: "utf8" });
   assert.equal(bad.status, 2);
   assert.match(bad.stderr, /invalid pull request number/);
+  // The target's ref is named in full, so a branch legitimately named
+  // `refs/heads/main` is fetched instead of the ordinary `main`.
+  fixtureGit(remote.repository, "branch", "refs/heads/main", prHead);
+  const oddBase = fixtureGit(remote.repository, "rev-parse", "refs/heads/refs/heads/main");
+  assert.notEqual(oddBase, mainSha);
+  const odd = spawnSync(process.execPath, [panelSource, `file://${remote.repository}`, "7", "refs/heads/main", path.join(root, "odd-branch")], { encoding: "utf8", env: inherited });
+  assert.equal(odd.status, 0, odd.stderr);
+  assert.match(odd.stdout, new RegExp(`^base ${oddBase}$`, "m"));
   // Branch legality is git's: names git accepts pass, names it refuses or
   // that would break the refspec are refused by name before any clone.
   for (const name of ["release@v1", "release+1"]) {
@@ -1080,20 +1088,40 @@ test("a checkout path carrying %20, a space, or a # is cloned from that path its
   assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: PASS/);
 });
 
-test("the isolated environment pins ssh itself: no operator configuration, no key on disk, the agent as the only credential source", async (t) => {
-  // OpenSSH takes its home from the passwd entry, so the isolated HOME does
-  // not reach ~/.ssh; the environment sets GIT_SSH_COMMAND instead.
-  const { isolatedGit } = await import(pathToFileURL(path.join(path.dirname(launcherSource), "isolated-git.mjs")).href);
+// The GIT_SSH_COMMAND the isolated environment sets, read back through git
+// itself, for a home directory the test controls: the module's known_hosts
+// lookup follows HOME, so both states — an operator who has a known_hosts and
+// one who has none — are reachable on any machine.
+async function isolatedSshCommand(t, { knownHosts }) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-ssh-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
-  spawnSync("git", ["-C", root, "init", "-q"]);
-  const shown = isolatedGit(["-C", root, "-c", 'alias.showssh=!printf %s "$GIT_SSH_COMMAND"', "showssh"]);
-  assert.equal(shown.status, 0, shown.stderr);
-  const sshCommand = shown.stdout.trim();
-  assert.match(sshCommand, /^ssh -F \/dev\/null /);
-  // What ssh itself resolves under that command: one identity file, that one
-  // a null device; the agent (or none); no proxy command at all.
-  const resolved = spawnSync("sh", ["-c", `${sshCommand} -G -o BatchMode=yes 127.0.0.1`], { encoding: "utf8" });
+  const home = path.join(root, "home");
+  await fsp.mkdir(path.join(home, ".ssh"), { recursive: true });
+  const knownHostsPath = path.join(home, ".ssh", "known_hosts");
+  if (knownHosts) await fsp.writeFile(knownHostsPath, "");
+  const repo = path.join(root, "repo");
+  await fsp.mkdir(repo);
+  spawnSync("git", ["-C", repo, "init", "-q"]);
+  const child = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `const m = await import(${JSON.stringify(pathToFileURL(path.join(path.dirname(launcherSource), "isolated-git.mjs")).href)});
+       const shown = m.isolatedGit(["-C", process.argv[1], "-c", 'alias.showssh=!printf %s "$GIT_SSH_COMMAND"', "showssh"]);
+       if (shown.status !== 0) { process.stderr.write(shown.stderr); process.exit(1); }
+       process.stdout.write(shown.stdout.trim());`,
+      repo,
+    ],
+    { encoding: "utf8", env: { ...process.env, HOME: home } },
+  );
+  assert.equal(child.status, 0, child.stderr);
+  return { command: child.stdout, root, knownHostsPath };
+}
+
+// What ssh itself resolves under a command, as `ssh -G` reports it.
+function sshSettings(command) {
+  const resolved = spawnSync("sh", ["-c", `${command} -G -o BatchMode=yes 127.0.0.1`], { encoding: "utf8" });
   assert.equal(resolved.status, 0, resolved.stderr);
   const settings = new Map();
   for (const line of resolved.stdout.split("\n")) {
@@ -1101,25 +1129,45 @@ test("the isolated environment pins ssh itself: no operator configuration, no ke
     if (!key) continue;
     settings.set(key, [...(settings.get(key) ?? []), rest.join(" ")]);
   }
+  return settings;
+}
+
+test("the isolated environment pins ssh itself: no operator configuration, no key on disk, the agent as the only credential source", async (t) => {
+  // OpenSSH takes its home from the passwd entry, so the isolated HOME does
+  // not reach ~/.ssh; the environment sets GIT_SSH_COMMAND instead.
+  const operator = await isolatedSshCommand(t, { knownHosts: true });
+  assert.match(operator.command, /^ssh -F \/dev\/null /);
+  // What ssh resolves under it: one identity file, that one a null device;
+  // the agent (or none); no proxy command at all; and the operator's own
+  // known_hosts, strictly checked.
+  const settings = sshSettings(operator.command);
   assert.deepEqual(settings.get("identityfile"), ["/dev/null"]);
-  assert.equal(settings.has("proxycommand"), false, resolved.stdout);
-  assert.equal(settings.has("proxyjump"), false, resolved.stdout);
+  assert.equal(settings.has("proxycommand"), false);
+  assert.equal(settings.has("proxyjump"), false);
   assert.deepEqual(settings.get("controlmaster"), ["false"]);
   assert.deepEqual(settings.get("identityagent"), [process.env.SSH_AUTH_SOCK ?? "none"]);
-  const knownHosts = path.join(os.homedir(), ".ssh", "known_hosts");
-  const trustOnFirstUse = !fs.existsSync(knownHosts);
-  assert.deepEqual(settings.get("userknownhostsfile"), [trustOnFirstUse ? "/dev/null" : knownHosts]);
-  assert.deepEqual(settings.get("stricthostkeychecking"), [trustOnFirstUse ? "accept-new" : "true"]);
+  assert.deepEqual(settings.get("userknownhostsfile"), [operator.knownHostsPath]);
+  assert.deepEqual(settings.get("stricthostkeychecking"), ["true"]);
+  // With no known_hosts of the operator's, the run's own file and accept-new
+  // — never /dev/null, which would discard the key it accepted.
+  const fresh = await isolatedSshCommand(t, { knownHosts: false });
+  const freshSettings = sshSettings(fresh.command);
+  const [freshKnownHosts] = freshSettings.get("userknownhostsfile");
+  assert.equal(path.basename(freshKnownHosts), "known_hosts");
+  assert.match(freshKnownHosts, /review-bridge-advisory-git-/);
+  assert.notEqual(freshKnownHosts, "/dev/null");
+  assert.deepEqual(freshSettings.get("stricthostkeychecking"), ["accept-new"]);
+  assert.deepEqual(freshSettings.get("identityfile"), ["/dev/null"]);
   // Positive control: an ssh configuration whose ProxyCommand runs a command.
   // Read (with -F) it fires; the pinned command reads no configuration, so it
   // cannot.
-  const marker = path.join(root, "proxy-ran");
-  const evil = path.join(root, "config");
+  const marker = path.join(operator.root, "proxy-ran");
+  const evil = path.join(operator.root, "config");
   await fsp.writeFile(evil, `Host *\n  ProxyCommand sh -c "touch ${marker}; exit 1"\n`);
   spawnSync("sh", ["-c", `ssh -F ${evil} -o BatchMode=yes -o ConnectTimeout=2 -p 1 127.0.0.1 true`], { encoding: "utf8" });
   await fsp.access(marker);
   await fsp.rm(marker);
-  spawnSync("sh", ["-c", `${sshCommand} -o BatchMode=yes -o ConnectTimeout=2 -p 1 127.0.0.1 true`], { encoding: "utf8" });
+  spawnSync("sh", ["-c", `${operator.command} -o BatchMode=yes -o ConnectTimeout=2 -p 1 127.0.0.1 true`], { encoding: "utf8" });
   await assert.rejects(fsp.access(marker), /ENOENT/);
 });
 

@@ -15,7 +15,7 @@ const USAGE = `Usage: advisory-panel-checkout.mjs <remote-url> <pr-number> <targ
 
   Clones <remote-url> with --template= and --no-checkout into <path>, which
   must not exist yet and should lie outside every authoring tree; fetches
-  '+<target-branch>:refs/review-bridge/<pr-number>/base' and
+  '+refs/heads/<target-branch>:refs/review-bridge/<pr-number>/base' and
   '+pull/<pr-number>/head:refs/review-bridge/<pr-number>/head'; checks out
   refs/review-bridge/<pr-number>/head detached; prints the checkout path, the
   base, the head, and the merge base as full SHAs.
@@ -83,7 +83,10 @@ function main() {
     return result.stdout.trim();
   };
   if (git("clone", ["clone", "--quiet", "--template=", "--no-checkout", "--", remote, checkout]) === null) return;
-  if (git("fetch", ["-C", checkout, "fetch", "--quiet", "origin", `+${target}:${base}`, `+pull/${prNumber}/head:${head}`]) === null) return;
+  // The source is written out in full: a bare `<target>` would resolve by
+  // git's ref search, and a branch legitimately named `refs/heads/main` would
+  // then lose to the ordinary `main`.
+  if (git("fetch", ["-C", checkout, "fetch", "--quiet", "origin", `+refs/heads/${target}:${base}`, `+pull/${prNumber}/head:${head}`]) === null) return;
   if (git("checkout", ["-C", checkout, "checkout", "--quiet", "--detach", head]) === null) return;
   const baseSha = git("rev-parse", ["-C", checkout, "rev-parse", "--verify", `${base}^{commit}`]);
   const headSha = git("rev-parse", ["-C", checkout, "rev-parse", "--verify", `${head}^{commit}`]);

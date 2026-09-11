@@ -1481,7 +1481,7 @@ attests nothing.
    the operator's `init.templateDir` rides into the panel's `.git`; the
    launcher holds the panel's `.git` to what a fresh clone writes and mounts
    a fresh clone of its own made from it, never the panel's `.git`. It fetches
-   `+<target-branch>:refs/review-bridge/<pr-number>/base` and
+   `+refs/heads/<target-branch>:refs/review-bridge/<pr-number>/base` and
    `+pull/<pr-number>/head:refs/review-bridge/<pr-number>/head`: both
    refspecs name their destination, and the merge base is computed from the
    refs the fetch just wrote, in the clone. A source-only refspec would not be enough: it

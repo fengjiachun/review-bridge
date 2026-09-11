@@ -1189,7 +1189,7 @@ export const ADVISORY_PANEL_CONTRACT = {
     // matters is that the three lines agree, not their prose around them.
     [
       "match",
-      /\+<target-branch>:refs\/review-bridge\/<pr-number>\/base/,
+      /\+refs\/heads\/<target-branch>:refs\/review-bridge\/<pr-number>\/base/,
       "the target branch is not fetched into an explicit destination ref",
     ],
     [
