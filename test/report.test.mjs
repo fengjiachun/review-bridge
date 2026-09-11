@@ -1887,6 +1887,39 @@ test("a successor round's snapshot commitment covers its proof, and a swapped de
   assert.equal((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).reused, true);
 });
 
+// An older proof records no requirement match at all. The parent in the
+// store gives it, and the report prints that; with no parent to give it, the
+// report says it is not recorded rather than reading the absence as "no".
+test("a proof with no recorded requirement match is printed from the parent, or as not recorded", async (t) => {
+  const state = await successorFixture(t, { extraFile: "match.txt" });
+  const directory = path.join(state.store, "reviews", state.successorId);
+  const parentDirectory = path.join(state.store, "reviews", state.parentId);
+  const reviewPath = path.join(directory, "review.json");
+  const review = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  // The proof of an older release: no requirement_match, no parent
+  // requirement. Neither is in the snapshot commitment, so the round still
+  // reproduces.
+  const proof = review.rounds[0].successor;
+  assert.equal(proof.requirement_match, true);
+  delete proof.requirement_match;
+  delete proof.parent_requirement;
+  await fsp.writeFile(path.join(directory, "rounds", "1", "successor.json"), `${JSON.stringify(proof, null, 2)}\n`, { mode: 0o600 });
+  await fsp.writeFile(reviewPath, `${JSON.stringify(review, null, 2)}\n`, { mode: 0o600 });
+  const strategy = async () => {
+    const receipt = await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT });
+    const markdown = await fsp.readFile(receipt.path, "utf8");
+    await fsp.rm(receipt.path);
+    return markdown.slice(markdown.indexOf("#### Round 1 strategy"), markdown.indexOf("### Findings"));
+  };
+  // The parent holds the same requirement, so the parent gives "yes".
+  assert.match(await strategy(), /\n- Requirement matches the parent: yes\n/);
+  // With the parent gone nothing gives it, and the round is already marked.
+  await fsp.rename(parentDirectory, path.join(state.store, "parent-aside"));
+  const absent = await strategy();
+  assert.match(absent, /\n- \(parent review not in this store; parent-derived fields unverified\) Requirement matches the parent: not recorded\n/);
+  assert.doesNotMatch(absent, /Requirement matches the parent: (yes|no)\n/);
+});
+
 // A successor's parent in the store is validated as the review is and its
 // gate is required and bound to it; a parent the store has no ledger for
 // leaves the parent-derived fields as recorded, and the report says so.

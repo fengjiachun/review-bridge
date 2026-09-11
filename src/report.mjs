@@ -182,17 +182,21 @@ function remoteOnlySection() {
 //
 // The fields a proof took from its parent are recomputed from the parent when
 // the store holds it; when it does not, they stand as recorded, and the round
-// and each parent-derived item are marked the same way.
+// and each parent-derived item are marked the same way. A field an older
+// proof does not record at all is printed as the parent gives it, or as not
+// recorded when no parent can give it -- never guessed from its absence.
 const UNCOVERED_PROOF = "(as recorded; not covered by the snapshot commitment — this ledger predates it)";
 const PARENT_ABSENT = "(parent review not in this store; parent-derived fields unverified)";
-function roundStrategySections(review, absentParents) {
+function roundStrategySections(review, parentContext) {
   const history = review.history ?? [];
   return (review.rounds ?? []).flatMap((round) => {
     const prepared = eventFor(history, PREPARED_EVENTS, round.round);
     const mode = prepared?.mode ?? (round.successor == null ? "FULL" : "SUCCESSOR");
     const successor = round.successor;
     const uncovered = successor != null && round.successor_delta_sha256 == null;
-    const parentAbsent = successor != null && absentParents.has(successor.parent_review_id);
+    const parent = parentContext.get(round.round) ?? {};
+    const parentAbsent = successor != null && parent.absent === true;
+    const requirementMatch = successor?.requirement_match ?? parent.derived?.requirement_match;
     const item = (text, parentDerived = false) =>
       `- ${[uncovered ? UNCOVERED_PROOF : null, parentDerived && parentAbsent ? PARENT_ABSENT : null, text].filter(Boolean).join(" ")}`;
     return [
@@ -201,7 +205,7 @@ function roundStrategySections(review, absentParents) {
         ? `Reviewed as a full diff of ${code(round.base_sha)} → ${code(round.head_sha)}.`
         : [
             item(`Parent review: ${code(successor.parent_review_id)} (${code(successor.parent_reviewer_provider)})`, true),
-            item(`Requirement matches the parent: ${successor.requirement_match === true ? "yes" : "no"}`, true),
+            item(`Requirement matches the parent: ${requirementMatch == null ? "not recorded" : requirementMatch ? "yes" : "no"}`, true),
             item(`Parent head → current head: ${code(successor.parent_head_sha)} → ${code(successor.current_head_sha)}`, true),
             item(`Delta: ${successor.delta_bytes ?? "n/a"} bytes, sha256 ${code(successor.delta_sha256)}`),
             item(`Files in the delta: ${list(successor.changed_files ?? [])}`),
@@ -211,7 +215,7 @@ function roundStrategySections(review, absentParents) {
   });
 }
 
-function roundsSection(review, absentParents) {
+function roundsSection(review, parentContext) {
   const history = review.history ?? [];
   const rows = (review.rounds ?? []).map((round) => {
     const prepared = eventFor(history, PREPARED_EVENTS, round.round);
@@ -243,7 +247,7 @@ function roundsSection(review, absentParents) {
       ],
       rows,
     ),
-    ...roundStrategySections(review, absentParents),
+    ...roundStrategySections(review, parentContext),
   ];
 }
 
@@ -658,7 +662,7 @@ export function renderReviewReport(
     publicationSummary = null,
     renderedAt = new Date().toISOString(),
     ledgerDirectory = null,
-    absentParents = new Set(),
+    parentContext = new Map(),
   } = {},
 ) {
   if (review == null && publication == null) {
@@ -689,7 +693,7 @@ export function renderReviewReport(
       ? remoteOnlySection()
       : [
           ...identitySection(review),
-          ...roundsSection(review, absentParents),
+          ...roundsSection(review, parentContext),
           ...findingsSection(review),
           ...changesSection(review),
           ...outcomeSection(review),
@@ -737,11 +741,13 @@ export async function loadReportLedgers(
   // The validated loader: the store's own serialization, the state machine's
   // shape, and every round's snapshot commitment reproduced from its manifest
   // and patch. A ledger edited or rolled back in place fails here.
-  // The parents the validated loader found no ledger for; the report marks
-  // their rounds' parent-derived fields as unverified.
-  const absentParents = new Set();
+  // What the validated loader learned from each round's parent: that the
+  // store has no ledger for it, so the report marks that round's
+  // parent-derived fields as unverified, or the fields the proof itself does
+  // not record, which the report prints as the parent gives them.
+  const parentContext = new Map();
   const review = fs.existsSync(reviewPath)
-    ? await loadValidatedReview(storeRoot, reviewId, { absentParents })
+    ? await loadValidatedReview(storeRoot, reviewId, { parentContext })
     : null;
   let publication = null;
   try {
@@ -851,7 +857,7 @@ export async function loadReportLedgers(
       );
     }
   }
-  return { directory, review, publication, authorization, publicationSummary, absentParents };
+  return { directory, review, publication, authorization, publicationSummary, parentContext };
 }
 
 // Publishes fully written bytes at `filePath` only if nothing is there yet: the
@@ -906,7 +912,7 @@ function withoutRenderTime(markdown) {
 // stays in the file: a report can run to megabytes, and the driver that
 // calls this after a gate needs the path, not the bytes.
 export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}) {
-  const { directory, review, publication, authorization, publicationSummary, absentParents } =
+  const { directory, review, publication, authorization, publicationSummary, parentContext } =
     await loadReportLedgers(storeRoot, reviewId);
   const revision = reportRevision(review, publication, publicationSummary);
   // A file exists per (state_version, publication revision, summary digest):
@@ -921,7 +927,7 @@ export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}
     publicationSummary,
     renderedAt,
     ledgerDirectory: directory,
-    absentParents,
+    parentContext,
   });
   let reused = true;
   if (!fs.existsSync(filePath)) {

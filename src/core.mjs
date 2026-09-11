@@ -989,7 +989,7 @@ function reviewLedgerInvalid(reviewId, filePath, reason) {
 // immutable manifest and patch beside it, the way the gate reproduces the
 // clean round's. For readers that combine the review with other ledgers; the
 // tools' own read path is loadReview and is unchanged.
-export async function loadValidatedReview(storeRoot, reviewId, { visited = new Set(), absentParents = new Set() } = {}) {
+export async function loadValidatedReview(storeRoot, reviewId, { visited = new Set(), parentContext = new Map() } = {}) {
   assertReviewId(reviewId);
   const filePath = reviewFile(storeRoot, reviewId);
   // A continuation's source is validated the same way, and its source in
@@ -1063,7 +1063,7 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
     // same loader, its own sources included.
     let source;
     try {
-      source = await loadValidatedReview(storeRoot, sourceId, { visited, absentParents });
+      source = await loadValidatedReview(storeRoot, sourceId, { visited });
     } catch (error) {
       if (error?.code === "CONTINUATION_CHAIN_CYCLE") throw error;
       if (error?.code === "REVIEW_NOT_FOUND") {
@@ -1191,15 +1191,18 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
       // leaves the parent absent, and the report marks the parent-derived
       // fields of such a round as unverified. Each parent is validated along
       // its own path, so a review whose source and parent coincide is not a
-      // cycle, while a parent chain that returns to this review is.
+      // cycle, while a parent chain that returns to this review is. What the
+      // parent says about this round -- absent, or the fields the proof
+      // itself does not record -- is collected for the report; a recursive
+      // validation collects its own and discards it.
       let parent = null;
       try {
-        parent = await loadValidatedReview(storeRoot, proof.parent_review_id, { visited: new Set(visited), absentParents });
+        parent = await loadValidatedReview(storeRoot, proof.parent_review_id, { visited: new Set(visited) });
       } catch (error) {
         if (error?.code !== "REVIEW_NOT_FOUND") {
           throw successorParentInvalid(reviewId, filePath, round.round, proof.parent_review_id, error.message);
         }
-        absentParents.add(proof.parent_review_id);
+        parentContext.set(round.round, { absent: true });
       }
       if (parent != null) {
         // The parent's gate must be present, admitted by the local gate
@@ -1227,12 +1230,20 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
           ["parent_requirement", parent.requirement],
           ["requirement_match", parent.requirement === review.requirement],
         ];
+        // A field an older release's proof does not record is taken from the
+        // parent instead, so the report prints what the parent says rather
+        // than reading an absent field as a value.
+        const derived = {};
         for (const [field, expected] of expectations) {
-          if (!(field in proof)) continue;
+          if (!(field in proof)) {
+            derived[field] = expected;
+            continue;
+          }
           if (proof[field] !== expected) {
             throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof names ${field} ${JSON.stringify(proof[field])}, but parent ${proof.parent_review_id} gives ${JSON.stringify(expected)}`);
           }
         }
+        parentContext.set(round.round, { derived });
       }
     }
     let reproduced;

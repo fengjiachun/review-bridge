@@ -86,7 +86,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   the file the proof digested, or the review is refused
   (`SUCCESSOR_PARENT_INVALID`); a parent not in the store leaves the
   parent-derived fields as recorded and the report marks the round and each
-  such field as unverified. The "Changes between rounds" section lists each
+  such field as unverified. A field an older proof does not record at all,
+  such as `requirement_match`, is printed as the parent gives it, or as `not
+  recorded` when no parent can give it, rather than read as a value. The "Changes between rounds" section lists each
   round's own snapshot and cumulative file table and states only the head
   relation between rounds -- unchanged after a rebuttal, or old head to new
   head -- since the ledger keeps no delta between rounds. Every reviewer- or author-supplied string is
