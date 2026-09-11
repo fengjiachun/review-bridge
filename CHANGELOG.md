@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.13.0 - 2026-09-11
 
 ### Added
 
@@ -288,15 +288,20 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - An erratum a continuation carried in from its source review is rendered as
   coming from there -- `round <R> of <source review id>`, `carried from that
   review` -- rather than as a correction the continuation made in its own
-  round <R>, issue #129. The review's own errata are unchanged.
+  round <R>, issue #129 (#131). The review's own errata are unchanged.
 
 - The report's identity now ends in `-f<N>`, the renderer's own format
-  version, raised whenever the Markdown changes, issue #130. An upgrade that
+  version, raised whenever the Markdown changes, issue #130 (#131). An upgrade that
   changes the rendering therefore writes a new report beside the ones earlier
   versions wrote instead of resolving to the same path and failing as
   `REPORT_FILE_MISMATCH`. The file name, `reportRevision`, the
   `render_review_report` receipt, the `--json` envelope, and the footer's
   Report revision all carry it.
+
+### Internal
+
+- (#133) The 0.13.0 release pull request, whose merge carries the v0.13.0 tag
+  and which therefore names itself so that no later entry inherits the line.
 
 ## 0.12.0 - 2026-09-10
 
