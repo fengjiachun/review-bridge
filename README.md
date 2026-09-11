@@ -755,13 +755,16 @@ review ledger, renders from its publication and authorization alone): requiremen
 with the author's disposition and the rereviewer's decision, what changed
 between rounds, the terminal state, and the pull request, Codex results,
 checks, and threads a publication recorded. The tool writes
-`reviews/<review_id>/report-r<state_version>[-p<revision>-s<summary digest>].md`
-(`report-p<revision>-s<summary digest>.md` when remote-only) beside the ledger
+`reviews/<review_id>/report-r<state_version>[-p<revision>-s<summary digest>]-f<renderer format>.md`
+(`report-p<revision>-s<summary digest>-f<renderer format>.md` when remote-only) beside the ledger
 and returns a receipt -- path, byte count, sha256, the ledger revisions and
 the summary digest rendered -- rather than the Markdown, which can run to
 megabytes; the script only prints. The summary digest covers the publication
 summary fields the report prints, so a gate appearing or evidence expiring
-writes a new report rather than reusing one that says otherwise. Both read every ledger through the reader the server
+writes a new report rather than reusing one that says otherwise. The `f<N>` is
+the renderer's own format version, raised whenever the Markdown changes, so an
+upgrade writes its report beside the ones earlier versions wrote instead of
+colliding with them. Both read every ledger through the reader the server
 itself uses, so a publication that is not canonical, names another review, or
 is not bound to the gate or authorization file beside it fails the render with
 that reader's error, and a review ledger filed under another review's id is

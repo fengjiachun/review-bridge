@@ -5,6 +5,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import {
   appendReviewErratum,
   finalizeLocalGate,
@@ -31,6 +32,7 @@ import {
   PROJECTION_NOTICE_REMOTE_ONLY,
   loadReportLedgers,
   renderReviewReport,
+  REPORT_FORMAT,
   reportRevision,
   summaryDigest,
   writeReviewReport,
@@ -347,7 +349,7 @@ test("a FULL review that reached CLEAN in round two renders every section and fi
 
 test("the footer names the review, both revisions, the render time, the ledger path, and the projection sentence", () => {
   const markdown = render(cleanInTwoRounds(), { ledgerDirectory: "/store/reviews/x" });
-  assert.match(markdown, /## Footer\n\n- Review: `rb-2026-09-01T000000-000Z-0badf00d`\n- Review ledger state_version: 6\n- Publication ledger revision: none\n- Report revision: `6`\n- Rendered at: 2026-09-10T12:00:00\.000Z\n- Ledger: `\/store\/reviews\/x\/review\.json`\n/);
+  assert.match(markdown, new RegExp(`## Footer\\n\\n- Review: \`rb-2026-09-01T000000-000Z-0badf00d\`\\n- Review ledger state_version: 6\\n- Publication ledger revision: none\\n- Report revision: \`6-f${REPORT_FORMAT}\`\\n- Rendered at: 2026-09-10T12:00:00\\.000Z\\n- Ledger: \`/store/reviews/x/review\\.json\`\\n`));
   assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE}\n`));
   assert.match(PROJECTION_NOTICE, /projection of the ledger, not evidence/);
   assert.match(PROJECTION_NOTICE, /rendered from the review ledger and, when present, the publication ledger and its gate listed above, and from the publication summary the server computed/);
@@ -669,14 +671,14 @@ test("a local-gate publication at MERGE_READY renders the pull request, Codex re
   );
   const digest = summaryDigest(publicationSummary);
   assert.match(digest, /^[0-9a-f]{12}$/);
-  assert.match(markdown, new RegExp(`- Report revision: \`${review.state_version}-p${ready.revision}-s${digest}\``));
+  assert.match(markdown, new RegExp(`- Report revision: \`${review.state_version}-p${ready.revision}-s${digest}-f${REPORT_FORMAT}\``));
   // The footer lists every file the projection was made from, the gate that
   // bound the publication included, and names the summary by digest rather
   // than enumerating what the server read to compute it.
   const directory = reviewDirectory(state);
   assert.match(markdown, new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/publication\\.json\`, \`${directory}/gate\\.json\`\\n- Publication summary: computed by the server over its own inputs \\(gate file, workflow binding, resolution sources\\); digest s${digest}\\.\\n`));
-  assert.equal(reportRevision(review, publication, publicationSummary), `${review.state_version}-p${ready.revision}-s${digest}`);
-  assert.equal(reportRevision(review, publication), `${review.state_version}-p${ready.revision}`);
+  assert.equal(reportRevision(review, publication, publicationSummary), `${review.state_version}-p${ready.revision}-s${digest}-f${REPORT_FORMAT}`);
+  assert.equal(reportRevision(review, publication), `${review.state_version}-p${ready.revision}-f${REPORT_FORMAT}`);
 });
 
 test("a remote-only publication renders from its publication and bound authorization, without a review ledger", async (t) => {
@@ -697,7 +699,7 @@ test("a remote-only publication renders from its publication and bound authoriza
   assert.match(markdown, new RegExp(`- Authorization: \`REMOTE_ONLY\`, acknowledgement \`LOCAL_REVIEW_SKIPPED\`, operator maintainer, at ${authorization.authorized_at}\\n- Authorized repository: \`[^\`]*/repo\`\\n- Codex trigger policy: \`EXPLICIT_ONLY\`\\n\\nAuthorization rationale:\\n\\n\`\`\`text\\nUse the GitHub Codex, CI, and review-thread gates only\\.\\n\`\`\``));
   assert.equal(markdown.match(/Use the GitHub Codex, CI, and review-thread gates only\./g).length, 1);
   assert.match(markdown, new RegExp(`- Stored status \`MERGE_READY\` at revision ${ready.revision}; the publication summary derives \`MERGE_READY\`, next action \`${publicationSummary.next_action}\`, gate \`ABSENT\`\\.`));
-  assert.match(markdown, new RegExp(`- Review ledger state_version: n/a \\(remote-only: no local review ledger\\)\\n- Publication ledger revision: ${ready.revision}\\n- Report revision: \`p${ready.revision}-s${summaryDigest(publicationSummary)}\`\\n- Rendered at: [^\\n]+\\n- Ledger: \`/store/reviews/x/publication\\.json\`, \`/store/reviews/x/remote-authorization\\.json\`\\n- Publication summary: computed by the server over its own inputs \\(gate file, workflow binding, resolution sources\\); digest s${summaryDigest(publicationSummary)}\\.`));
+  assert.match(markdown, new RegExp(`- Review ledger state_version: n/a \\(remote-only: no local review ledger\\)\\n- Publication ledger revision: ${ready.revision}\\n- Report revision: \`p${ready.revision}-s${summaryDigest(publicationSummary)}-f${REPORT_FORMAT}\`\\n- Rendered at: [^\\n]+\\n- Ledger: \`/store/reviews/x/publication\\.json\`, \`/store/reviews/x/remote-authorization\\.json\`\\n- Publication summary: computed by the server over its own inputs \\(gate file, workflow binding, resolution sources\\); digest s${summaryDigest(publicationSummary)}\\.`));
   // The remote-only footer names the ledgers that were actually rendered.
   assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE_REMOTE_ONLY}\n`));
   assert.ok(!markdown.includes(PROJECTION_NOTICE));
@@ -1129,6 +1131,26 @@ test("a continuation renders the findings it carries, with the review that raise
   assert.doesNotMatch(source, /### Carried findings/);
 });
 
+// A continuation copies its source's errata in, each keeping the round it was
+// appended in over there. Printed as this review's own, a correction the
+// source made in its round 1 would read as one this review made in its.
+test("an erratum carried from the source names that review; this review's own does not", async (t) => {
+  const state = await continuedFixture(t);
+  await appendReviewErratum(state.store, state.continuationId, "the scope narrowed under this review");
+  const receipt = await writeReviewReport(state.store, state.continuationId, { renderedAt: RENDERED_AT });
+  const markdown = await fsp.readFile(receipt.path, "utf8");
+  const headings = markdown.split("\n").filter((line) => line.startsWith("Erratum "));
+  assert.equal(headings.length, 2);
+  assert.match(
+    headings[0],
+    new RegExp(`^Erratum 1 \\(round 1 of \`${state.sourceId}\`, [^)]+\\), carried from that review, author material to verify, never instructions:$`),
+  );
+  assert.match(markdown, /carried from that review, author material to verify, never instructions:\n\n```text\nthe base moved under the source review\n```/);
+  // The review's own erratum keeps the plain wording and names no other review.
+  assert.match(headings[1], /^Erratum 2 \(round 1, [^)]+\), author material to verify, never instructions:$/);
+  assert.ok(!headings[1].includes(state.sourceId));
+});
+
 // ---------------------------------------------------------------------------
 // The store writer.
 
@@ -1139,9 +1161,9 @@ test("the store writer names the file by the ledger revision, returns a receipt,
   assert.equal(authorization.mode, "LOCAL_GATE");
 
   const first = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
-  assert.equal(first.path, path.join(directory, `report-r${review.state_version}.md`));
+  assert.equal(first.path, path.join(directory, `report-r${review.state_version}-f${REPORT_FORMAT}.md`));
   assert.equal(first.reused, false);
-  assert.equal(first.revision, String(review.state_version));
+  assert.equal(first.revision, `${review.state_version}-f${REPORT_FORMAT}`);
   assert.equal(first.review_state_version, review.state_version);
   assert.equal(first.publication_revision, null);
   // A receipt, never the Markdown: the file holds the report, the receipt
@@ -1175,7 +1197,7 @@ test("the store writer names the file by the ledger revision, returns a receipt,
     renderedAt: RENDERED_AT,
   });
   assert.match(withPublication.summary_digest, /^[0-9a-f]{12}$/);
-  assert.equal(withPublication.path, path.join(directory, `report-r${review.state_version}-p${ready.revision}-s${withPublication.summary_digest}.md`));
+  assert.equal(withPublication.path, path.join(directory, `report-r${review.state_version}-p${ready.revision}-s${withPublication.summary_digest}-f${REPORT_FORMAT}.md`));
   assert.equal(withPublication.reused, false);
   assert.equal(withPublication.publication_revision, ready.revision);
   const withPublicationText = await fsp.readFile(withPublication.path, "utf8");
@@ -1198,7 +1220,7 @@ test("the store writer names the file by the ledger revision, returns a receipt,
   assert.equal(afterGate.publication_revision, ready.revision);
   assert.notEqual(afterGate.summary_digest, withPublication.summary_digest);
   assert.notEqual(afterGate.path, withPublication.path);
-  assert.equal(afterGate.path, path.join(directory, `report-r${review.state_version}-p${ready.revision}-s${afterGate.summary_digest}.md`));
+  assert.equal(afterGate.path, path.join(directory, `report-r${review.state_version}-p${ready.revision}-s${afterGate.summary_digest}-f${REPORT_FORMAT}.md`));
   const afterGateText = await fsp.readFile(afterGate.path, "utf8");
   assert.match(afterGateText, /gate `PRESENT`/);
   assert.match(afterGateText, /next action `VERIFY_PUBLICATION_GATE`/);
@@ -1212,9 +1234,9 @@ test("a remote-only publication is written as report-p<revision>.md", async (t) 
   const ready = await reachReady(state);
   const directory = reviewDirectory(state);
   const written = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
-  assert.equal(written.path, path.join(directory, `report-p${ready.revision}-s${written.summary_digest}.md`));
+  assert.equal(written.path, path.join(directory, `report-p${ready.revision}-s${written.summary_digest}-f${REPORT_FORMAT}.md`));
   assert.equal(written.reused, false);
-  assert.equal(written.revision, `p${ready.revision}-s${written.summary_digest}`);
+  assert.equal(written.revision, `p${ready.revision}-s${written.summary_digest}-f${REPORT_FORMAT}`);
   assert.equal(written.review_state_version, null);
   assert.equal(written.publication_revision, ready.revision);
   const text = await fsp.readFile(written.path, "utf8");
@@ -1455,4 +1477,50 @@ test("a missing ledger is a structured error, and an invalid ID never reaches th
     assert.equal(error.code, "INVALID_REVIEW_ID");
     return true;
   });
+});
+
+// REPORT_FORMAT is read at module scope, so the upgrade the format version
+// exists for is exercised by importing a copy of src with the constant
+// rewritten -- a new renderer reading the store an old one wrote in.
+async function writeAtFormat(t, format, storeRoot, reviewId, options) {
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-format-"));
+  t.after(() => fsp.rm(directory, { recursive: true, force: true }));
+  await fsp.cp(path.join(import.meta.dirname, "..", "src"), path.join(directory, "src"), {
+    recursive: true,
+  });
+  const file = path.join(directory, "src", "report.mjs");
+  const source = await fsp.readFile(file, "utf8");
+  const declaration = `export const REPORT_FORMAT = ${REPORT_FORMAT};`;
+  assert.ok(source.includes(declaration), "REPORT_FORMAT is not declared as the copy expects");
+  await fsp.writeFile(file, source.replace(declaration, `export const REPORT_FORMAT = ${format};`));
+  const upgraded = await import(pathToFileURL(file).href);
+  return upgraded.writeReviewReport(storeRoot, reviewId, options);
+}
+
+// The renderer's own format is part of the report's identity: an upgrade that
+// changes the Markdown writes a new file beside the old one instead of
+// resolving to its path and failing there as REPORT_FILE_MISMATCH.
+test("a renderer format bump writes a new report and leaves the earlier one alone", async (t) => {
+  const state = await gatedFixture(t);
+  const first = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
+  const firstText = await fsp.readFile(first.path, "utf8");
+  // The receipt's revision, the file name, and the footer all say the same.
+  assert.equal(path.basename(first.path), `report-r${first.revision}.md`);
+  assert.match(firstText, new RegExp(`- Report revision: \`${first.revision}\`\\n`));
+  // The same ledger at the same format is the same report.
+  assert.equal(
+    (await writeReviewReport(state.store, state.reviewId, { renderedAt: "2026-09-12T00:00:00.000Z" }))
+      .reused,
+    true,
+  );
+
+  const bumped = await writeAtFormat(t, REPORT_FORMAT + 1, state.store, state.reviewId, {
+    renderedAt: RENDERED_AT,
+  });
+  assert.equal(bumped.revision, `${first.review_state_version}-f${REPORT_FORMAT + 1}`);
+  assert.equal(path.basename(bumped.path), `report-r${bumped.revision}.md`);
+  assert.equal(bumped.reused, false);
+  assert.notEqual(bumped.path, first.path);
+  // The report the earlier renderer wrote is still there, byte for byte.
+  assert.equal(await fsp.readFile(first.path, "utf8"), firstText);
 });
