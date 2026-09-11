@@ -9,7 +9,7 @@
 // anything on the host while the checkout is made.
 import fs from "node:fs";
 import path from "node:path";
-import { isolatedGit } from "./isolated-git.mjs";
+import { isolatedGit, isSshRemote, sshTrustsOnFirstUse } from "./isolated-git.mjs";
 
 const USAGE = `Usage: advisory-panel-checkout.mjs <remote-url> <pr-number> <target-branch> <path>
 
@@ -21,9 +21,17 @@ const USAGE = `Usage: advisory-panel-checkout.mjs <remote-url> <pr-number> <targ
   base, the head, and the merge base as full SHAs.
 
   Every git call runs isolated from the operator's global and system
-  configuration, HOME, hooks, and GIT_* environment (the ssh agent socket is
-  passed through; no credential helper is consulted). Fails closed, exit 2,
-  on any git failure.
+  configuration, HOME, hooks, and GIT_* environment. ssh is pinned the same
+  way and does not follow the operator's home: no ssh configuration is read
+  (-F /dev/null), no key on disk is used (IdentitiesOnly with
+  IdentityFile=/dev/null), the agent named by SSH_AUTH_SOCK is the one
+  credential source (IdentityAgent), and ProxyCommand and ProxyJump are off,
+  so no configuration can make ssh run a command. Host keys are checked
+  against the operator's ~/.ssh/known_hosts, or taken on first use when that
+  file does not exist, which is stated in the output. No credential helper is
+  consulted, so an https remote must be reachable without one, and an ssh
+  remote without an agent is refused. Fails closed, exit 2, on any git
+  failure.
 `;
 
 function fail(message) {
@@ -52,6 +60,12 @@ function main() {
   if (legal.error || legal.status !== 0) return fail(`invalid target branch name: ${target}`);
   const checkout = path.resolve(given);
   if (fs.existsSync(checkout)) return fail(`${checkout} already exists; the panel checkout must be a fresh clone`);
+  if (isSshRemote(remote)) {
+    if (!process.env.SSH_AUTH_SOCK) {
+      return fail(`${remote} is an ssh remote and no ssh agent is available; the agent is the only credential source this script supports`);
+    }
+    if (sshTrustsOnFirstUse()) process.stdout.write("host key trusted on first use (no ~/.ssh/known_hosts)\n");
+  }
   const base = `refs/review-bridge/${prNumber}/base`;
   const head = `refs/review-bridge/${prNumber}/head`;
   const git = (label, cmd) => {

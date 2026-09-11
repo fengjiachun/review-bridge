@@ -8,7 +8,7 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { isolatedGit as hostGit } from "./isolated-git.mjs";
 
 // The only launch form for an advisory CODEX_TASK review. The container is the
@@ -866,7 +866,9 @@ function mountTable(inputs, scratch, volume, stagedStore) {
 }
 
 // The mount is not the panel checkout but a clone the launcher makes from it
-// over git's own transport: `--no-local` over file:// packs only the objects
+// over git's own transport: `--no-local` over a file:// URL (built by
+// pathToFileURL, since a literal `%20` or `#` in the path would otherwise be
+// read as an escape or a fragment) packs only the objects
 // reachable from the refs, so whatever a template or a hand left in the
 // operator's .git — a hook, a stray file among the objects, a directory named
 // like a file, a comment in the configuration — stays on the host (Codex
@@ -881,7 +883,7 @@ function stageCheckout(inputs) {
   const git = (args) => hostGit(args);
   const message = (result) => result.error?.message ?? result.stderr.trim().replace(/'[^']*'/g, "'<redacted>'");
   const hostHead = inputs.snapshotHead;
-  const clone = git(["clone", "--quiet", "--template=", "--no-local", "--no-hardlinks", `file://${inputs.repository}`, inputs.checkout]);
+  const clone = git(["clone", "--quiet", "--template=", "--no-local", "--no-hardlinks", pathToFileURL(inputs.repository).href, inputs.checkout]);
   if (clone.error || clone.status !== 0) fail(`cannot clone the author checkout for the mount: ${message(clone)}`);
   const detach = git(["-C", inputs.checkout, "checkout", "--quiet", "--detach", hostHead]);
   if (detach.error || detach.status !== 0) fail(`cannot check out ${hostHead} in the launcher's clone: ${message(detach)}`);

@@ -6,17 +6,73 @@
 // tree can name a filter, and with the operator's global configuration in
 // reach that filter's command would run on the host before the container
 // exists (Codex rounds twenty-five and twenty-seven on #125); with nothing to
-// resolve the name against, git applies nothing. The ssh agent socket is the
-// one thing passed through, so a remote can be reached over ssh; no
-// credential helper is consulted, so an https remote must be reachable
-// without one. The isolation directory is made on first use and removed at
-// exit.
+// resolve the name against, git applies nothing. No credential helper is
+// consulted, so an https remote must be reachable without one.
+//
+// Changing HOME does not isolate OpenSSH: it takes the home directory for
+// ~/.ssh/config, the default identity files, and the default known_hosts
+// from the passwd entry, not from the environment (Codex round twenty-nine
+// on #125). So ssh is pinned by an explicit GIT_SSH_COMMAND rather than by
+// HOME: `-F /dev/null` reads no ssh configuration at all, `IdentitiesOnly`
+// with `IdentityFile=/dev/null` uses no key from disk, `IdentityAgent` names
+// the operator's agent socket as the one credential source (`none` when
+// there is no agent), and `ProxyCommand`/`ProxyJump`/`ControlMaster`/
+// `ControlPath` are off, so a configuration cannot make ssh run a command or
+// reuse a multiplexed connection. Host keys are still checked: the
+// operator's ~/.ssh/known_hosts is read (a host public key is not a secret,
+// and reading it buys real host verification) with StrictHostKeyChecking
+// yes; when that file does not exist the policy falls back to accept-new
+// against /dev/null and the caller says so in its output.
+//
+// The isolation directory is made on first use and removed at exit.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 let isolation = null;
+
+const KNOWN_HOSTS = path.join(os.homedir(), ".ssh", "known_hosts");
+
+// True when the operator has no known_hosts for ssh to check against, so the
+// first host key of a remote is taken on trust. The caller states it.
+export function sshTrustsOnFirstUse() {
+  return !fs.existsSync(KNOWN_HOSTS);
+}
+
+// An ssh-shaped remote: a scheme git carries over ssh, or scp syntax
+// (`user@host:path`, which a Windows drive letter cannot be).
+export function isSshRemote(remote) {
+  return /^(?:ssh|git\+ssh):\/\//i.test(remote) || /^[^/]+@[^/:]+:/.test(remote);
+}
+
+function sshCommand() {
+  const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
+  const trustOnFirstUse = sshTrustsOnFirstUse();
+  return [
+    "ssh",
+    "-F",
+    "/dev/null",
+    "-o",
+    "IdentitiesOnly=yes",
+    "-o",
+    "IdentityFile=/dev/null",
+    "-o",
+    `IdentityAgent=${quote(process.env.SSH_AUTH_SOCK ?? "none")}`,
+    "-o",
+    "ProxyCommand=none",
+    "-o",
+    "ProxyJump=none",
+    "-o",
+    "ControlMaster=no",
+    "-o",
+    "ControlPath=none",
+    "-o",
+    `StrictHostKeyChecking=${trustOnFirstUse ? "accept-new" : "yes"}`,
+    "-o",
+    `UserKnownHostsFile=${trustOnFirstUse ? "/dev/null" : quote(KNOWN_HOSTS)}`,
+  ].join(" ");
+}
 
 export function isolatedGit(args) {
   if (!isolation) {
@@ -34,7 +90,7 @@ export function isolatedGit(args) {
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_TERMINAL_PROMPT: "0",
   };
-  if (process.env.SSH_AUTH_SOCK) env.SSH_AUTH_SOCK = process.env.SSH_AUTH_SOCK;
+  env.GIT_SSH_COMMAND = sshCommand();
   return spawnSync(
     "git",
     ["-c", `core.hooksPath=${path.join(isolation, "hooks")}`, "-c", "filter.lfs.required=false", ...args],

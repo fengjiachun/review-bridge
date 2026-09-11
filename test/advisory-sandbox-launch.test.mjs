@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadReview, prepareReview } from "../src/core.mjs";
 import { commit, fixture as repositoryFixture, git as fixtureGit } from "./helpers/repository-fixture";
 
@@ -1034,12 +1035,86 @@ test("the panel checkout script clones, fetches, and checks out in the isolated 
     assert.equal(ok.status, 0, ok.stderr);
     assert.match(ok.stdout, new RegExp(`^base ${mainSha}$`, "m"));
   }
+  // An ssh remote with no agent is refused before any clone: the agent is
+  // the only credential source the isolated environment offers.
+  const noAgent = { ...process.env };
+  delete noAgent.SSH_AUTH_SOCK;
+  const sshRemote = spawnSync(process.execPath, [panelSource, "git@github.com:owner/repo.git", "7", "main", path.join(root, "never-ssh")], { encoding: "utf8", env: noAgent });
+  assert.equal(sshRemote.status, 2);
+  assert.match(sshRemote.stderr, /is an ssh remote and no ssh agent is available; the agent is the only credential source this script supports/);
+  await assert.rejects(fsp.access(path.join(root, "never-ssh")), /ENOENT/);
   for (const name of ["bad..name", "-x", "a:b", "a b"]) {
     const refused = spawnSync(process.execPath, [panelSource, `file://${remote.repository}`, "7", name, path.join(root, "never")], { encoding: "utf8" });
     assert.equal(refused.status, 2, name);
     assert.match(refused.stderr, /invalid target branch name: /);
     await assert.rejects(fsp.access(path.join(root, "never")), /ENOENT/);
   }
+});
+
+test("a checkout path carrying %20, a space, or a # is cloned from that path itself", async (t) => {
+  // The staging clone's URL is built with pathToFileURL: a literal `%20`
+  // would otherwise be decoded to a space and a `#` read as a fragment, and
+  // the clone would be of another path or of nothing.
+  const f = await fixture(t, { realReview: true });
+  const odd = path.join(path.dirname(f.checkout), "pct%20 space #hash");
+  await fsp.rename(f.checkout, odd);
+  const reviewDir = path.join(f.store, "reviews", f.reviewId);
+  for (const name of await fsp.readdir(reviewDir)) {
+    if (!name.endsWith(".json")) continue;
+    const file = path.join(reviewDir, name);
+    const text = await fsp.readFile(file, "utf8");
+    await fsp.writeFile(file, text.replaceAll(JSON.stringify(f.checkout).slice(1, -1), JSON.stringify(odd).slice(1, -1)));
+  }
+  const env = await fakeDocker({ ...f, checkout: odd });
+  const result = launch({ ...f, checkout: odd }, ["--review-id", f.reviewId], env);
+  assert.equal(result.status, 0, result.stdout.slice(-2500));
+  const seen = JSON.parse(await fsp.readFile(env.FAKE_CHECKOUT_LOG, "utf8"));
+  assert.equal(seen.remoteUrl, pathToFileURL(await fsp.realpath(odd)).href);
+  assert.match(seen.remoteUrl, /pct%2520%20space%20%23hash$/);
+  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: PASS/);
+});
+
+test("the isolated environment pins ssh itself: no operator configuration, no key on disk, the agent as the only credential source", async (t) => {
+  // OpenSSH takes its home from the passwd entry, so the isolated HOME does
+  // not reach ~/.ssh; the environment sets GIT_SSH_COMMAND instead.
+  const { isolatedGit } = await import(pathToFileURL(path.join(path.dirname(launcherSource), "isolated-git.mjs")).href);
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-ssh-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  spawnSync("git", ["-C", root, "init", "-q"]);
+  const shown = isolatedGit(["-C", root, "-c", 'alias.showssh=!printf %s "$GIT_SSH_COMMAND"', "showssh"]);
+  assert.equal(shown.status, 0, shown.stderr);
+  const sshCommand = shown.stdout.trim();
+  assert.match(sshCommand, /^ssh -F \/dev\/null /);
+  // What ssh itself resolves under that command: one identity file, that one
+  // a null device; the agent (or none); no proxy command at all.
+  const resolved = spawnSync("sh", ["-c", `${sshCommand} -G -o BatchMode=yes 127.0.0.1`], { encoding: "utf8" });
+  assert.equal(resolved.status, 0, resolved.stderr);
+  const settings = new Map();
+  for (const line of resolved.stdout.split("\n")) {
+    const [key, ...rest] = line.split(" ");
+    if (!key) continue;
+    settings.set(key, [...(settings.get(key) ?? []), rest.join(" ")]);
+  }
+  assert.deepEqual(settings.get("identityfile"), ["/dev/null"]);
+  assert.equal(settings.has("proxycommand"), false, resolved.stdout);
+  assert.equal(settings.has("proxyjump"), false, resolved.stdout);
+  assert.deepEqual(settings.get("controlmaster"), ["false"]);
+  assert.deepEqual(settings.get("identityagent"), [process.env.SSH_AUTH_SOCK ?? "none"]);
+  const knownHosts = path.join(os.homedir(), ".ssh", "known_hosts");
+  const trustOnFirstUse = !fs.existsSync(knownHosts);
+  assert.deepEqual(settings.get("userknownhostsfile"), [trustOnFirstUse ? "/dev/null" : knownHosts]);
+  assert.deepEqual(settings.get("stricthostkeychecking"), [trustOnFirstUse ? "accept-new" : "true"]);
+  // Positive control: an ssh configuration whose ProxyCommand runs a command.
+  // Read (with -F) it fires; the pinned command reads no configuration, so it
+  // cannot.
+  const marker = path.join(root, "proxy-ran");
+  const evil = path.join(root, "config");
+  await fsp.writeFile(evil, `Host *\n  ProxyCommand sh -c "touch ${marker}; exit 1"\n`);
+  spawnSync("sh", ["-c", `ssh -F ${evil} -o BatchMode=yes -o ConnectTimeout=2 -p 1 127.0.0.1 true`], { encoding: "utf8" });
+  await fsp.access(marker);
+  await fsp.rm(marker);
+  spawnSync("sh", ["-c", `${sshCommand} -o BatchMode=yes -o ConnectTimeout=2 -p 1 127.0.0.1 true`], { encoding: "utf8" });
+  await assert.rejects(fsp.access(marker), /ENOENT/);
 });
 
 test("the container mounts a clone the launcher makes, never the panel checkout's own .git", async (t) => {

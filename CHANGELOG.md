@@ -60,7 +60,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   reviewed tree resolves to nothing and executes nothing on the host — the
   panel checkout itself is made by the packaged `advisory-panel-checkout.mjs`
   in that same isolated environment (shared `isolated-git.mjs`), so the skill
-  no longer spells out bare git commands for it — and a
+  no longer spells out bare git commands for it; ssh is pinned there by an
+  explicit command rather than by `HOME`, which it takes from the passwd
+  entry — no ssh configuration read, no key from disk, the agent as the one
+  credential source, no `ProxyCommand`, host keys still checked against the
+  operator's `known_hosts` — and an ssh remote without an agent is refused — and a
   review whose last round was prepared over a dirty tree (overlays,
   `worktree_clean` false) is refused since the clone can materialize only
   commits; the checks stay on the panel checkout

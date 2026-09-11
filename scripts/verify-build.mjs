@@ -730,6 +730,7 @@ assert.match(workflowSkill, /\.\.\/\.\.\/scripts\/advisory-panel-checkout\.mjs <
 const panelHelp = run(process.execPath, [advisoryPanel, "--help"], pluginRoot);
 assert.match(panelHelp, /Usage: advisory-panel-checkout\.mjs <remote-url> <pr-number> <target-branch> <path>/);
 assert.match(panelHelp, /isolated from the operator's global and system\s+configuration/);
+assert.match(panelHelp, /no ssh configuration is read\s+\(-F \/dev\/null\)/);
 const advisoryBadId = spawnSync(
   process.execPath,
   [advisoryLauncher, "--review-id", "not-a-review", "--dry-run"],
