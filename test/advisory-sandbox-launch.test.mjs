@@ -1026,6 +1026,20 @@ test("the panel checkout script clones, fetches, and checks out in the isolated 
   const bad = spawnSync(process.execPath, [panelSource, `file://${remote.repository}`, "seven", "main", path.join(root, "x")], { encoding: "utf8" });
   assert.equal(bad.status, 2);
   assert.match(bad.stderr, /invalid pull request number/);
+  // Branch legality is git's: names git accepts pass, names it refuses or
+  // that would break the refspec are refused by name before any clone.
+  for (const name of ["release@v1", "release+1"]) {
+    fixtureGit(remote.repository, "branch", name, "main");
+    const ok = spawnSync(process.execPath, [panelSource, `file://${remote.repository}`, "7", name, path.join(root, `ok-${name}`)], { encoding: "utf8" });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(ok.stdout, new RegExp(`^base ${mainSha}$`, "m"));
+  }
+  for (const name of ["bad..name", "-x", "a:b", "a b"]) {
+    const refused = spawnSync(process.execPath, [panelSource, `file://${remote.repository}`, "7", name, path.join(root, "never")], { encoding: "utf8" });
+    assert.equal(refused.status, 2, name);
+    assert.match(refused.stderr, /invalid target branch name: /);
+    await assert.rejects(fsp.access(path.join(root, "never")), /ENOENT/);
+  }
 });
 
 test("the container mounts a clone the launcher makes, never the panel checkout's own .git", async (t) => {

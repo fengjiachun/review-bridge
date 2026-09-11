@@ -43,7 +43,13 @@ function main() {
   }
   const [remote, prNumber, target, given] = args;
   if (!/^[1-9][0-9]*$/.test(prNumber)) return fail(`invalid pull request number: ${prNumber}`);
-  if (!/^[A-Za-z0-9._\/-]+$/.test(target) || target.startsWith("-")) return fail(`invalid target branch name: ${target}`);
+  // Branch-name legality is git's to decide (`release@v1` and `release+1`
+  // are legal); the script refuses only what git's own check would or what
+  // would break the refspec: a leading '-' (an option), a ':', whitespace, or
+  // a control character.
+  if (target.startsWith("-") || /[:\s\x00-\x1f\x7f]/.test(target)) return fail(`invalid target branch name: ${target}`);
+  const legal = isolatedGit(["check-ref-format", "--branch", target]);
+  if (legal.error || legal.status !== 0) return fail(`invalid target branch name: ${target}`);
   const checkout = path.resolve(given);
   if (fs.existsSync(checkout)) return fail(`${checkout} already exists; the panel checkout must be a fresh clone`);
   const base = `refs/review-bridge/${prNumber}/base`;
