@@ -9,6 +9,67 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Added
+
+- Render a human-readable Markdown report of a review from its ledger once a
+  gate passes, issue #123 (#124). `src/report.mjs` holds
+  `renderReviewReport`, a pure renderer over `review.json` and, when present,
+  `publication.json`, or over the publication and its authorization alone for
+  a `REMOTE_ONLY` publication, which has no review ledger (a local-gate
+  publication whose review ledger is missing is refused as an incomplete
+  store, not rendered as a skipped review): requirement and scope, base and
+  head, provider, each round's own strategy and successor proof, each round's
+  findings with the author's disposition and rationale, the rereview decision
+  and the verification behind a sustained rebuttal, the findings a
+  continuation carries with the review that raised each, each round's
+  snapshot and the head relation between rounds, the terminal state, and the
+  pull request, Codex results and their correlation, required checks, threads
+  and their outcome, supersessions and acknowledgements, and the observation
+  a `MERGE_READY` derivation rests on, by revision and canonical digest. A
+  thread's outcome is the observation's resolved flag read against the
+  server's own replay of the resolution records and their lifecycle, so a
+  resolution later invalidated, unresolved for repair, or superseded is
+  reported as history rather than as the reason the thread is resolved; the
+  Codex and checks gates come from the same functions the publication read
+  surfaces use, and the gate's verdict is the publication summary's own,
+  workflow binding and terminal replay included, never a bare derivation over
+  the ledger alone; a publication that moves between the ledger read and the
+  summary read fails the render with `PUBLICATION_MOVED_DURING_RENDER`
+  rather than filing one revision's report with the next revision's verdict.
+  Every ledger is admitted by the reader the server itself uses: the
+  publication by the canonical, schema-validated reader that requires the
+  review ID inside to match, and the gate or authorization file by the
+  binding check that ties it to the ledger, a `LOCAL_GATE_PASSED` review
+  requiring its gate even before any publication exists, so a file copied in
+  from another review fails the render with that reader's error and nothing
+  is written. Every string the ledger holds is escaped to the shape it
+  occupies -- one line, or a fence longer than any run it contains -- so no
+  finding title or rationale can open a heading, table row, or fence of its
+  own. The author tool `render_review_report` writes
+  `reviews/<review_id>/report-r<state_version>[-p<revision>-s<summary digest>].md`
+  (`report-p<revision>-s<summary digest>.md` when remote-only) beside the
+  ledger -- the digest covers the summary fields the report prints, so a gate
+  appearing or evidence expiring, which move no ledger revision, write a new
+  report instead of reusing one that says otherwise -- and returns a receipt
+  -- path, byte count, sha256, the ledger revisions rendered, and whether the
+  file at that revision already existed -- never the Markdown, which can run
+  to megabytes and would land in the driver's context after every gate; it
+  changes no ledger, consumes no round, and touches no gate, and
+  `required_inputs` declares it under the review `PUBLISH` action and the
+  publication `FINALIZE_PUBLICATION_GATE` action. The packaged
+  `scripts/review-report.mjs <review_id> [--json] [--store <path>]` prints
+  the same render and writes nothing. The workflow skill's Finish step renders
+  it once `LOCAL_GATE_PASSED` is recorded and the Publish step once the ledger
+  reads `MERGE_READY`, prints the path, and runs `plannotator annotate` when
+  `plannotator` is on PATH; annotations never flow back into the ledger, and
+  a failure there changes no gate and no workflow state.
+  `REVIEW_REPORT_CONTRACT` pins both steps in the source and packaged skill.
+  The footer states, in the terms the README uses for operator narration,
+  that the report is a projection of the ledger, not evidence, naming only
+  what the report itself read: the ledger files it rendered (the review
+  ledger, the publication ledger and its gate or authorization file) and the
+  publication summary the server computed over its own inputs, by digest.
+
 ### Changed
 
 - The `CODEX_TASK` launch refuses shell escalation by configuration,

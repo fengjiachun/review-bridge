@@ -24,6 +24,7 @@ import {
   submitResolutions,
   waitForReviewState,
 } from "./core.mjs";
+import { writeReviewReport } from "./report.mjs";
 import {
   acknowledgeCodexReviewAmbiguity,
   authorizeRemotePublication,
@@ -1296,6 +1297,17 @@ if (role === "author") {
         input.review_id,
         input.expected_state_version,
       ),
+  );
+
+  register(
+    "render_review_report",
+    {
+      title: "Render review report",
+      description:
+        "Render a human-readable Markdown report of a review from its ledger and, when present, its publication ledger -- or, for a REMOTE_ONLY publication with no review ledger, from the publication and its authorization alone -- and write it to reviews/<review_id>/report-r<state_version>[-p<revision>-s<summary digest>].md (report-p<revision>-s<summary digest>.md when remote-only) beside them; the summary digest covers the publication summary fields the report prints, so a gate appearing or evidence expiring writes a new report. Returns a receipt -- path, byte count, sha256, the ledger revisions rendered, and whether an existing file at that revision was reused -- never the Markdown itself, which can run to megabytes; read the file, or print the path for the operator. Read-only over the ledgers: it changes no review or publication state, consumes no round, and touches no gate. The report is a projection of the ledger, not evidence.",
+      inputSchema: { review_id: z.string() },
+    },
+    (input) => writeReviewReport(storeRoot, input.review_id),
   );
 
   register(
