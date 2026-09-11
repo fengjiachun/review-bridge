@@ -1704,17 +1704,17 @@ async function main() {
         return result;
       });
     }
-    // The keeper holds both tmpfs volumes; it goes once nothing else needs
-    // to read them.
     // A tmpfs volume holds nothing once no container mounts it, so a volume
-    // kept for the operator to look at needs the keeper kept with it.
-    if (keeperStarted && !sessionsKept && !storeKept) {
-      step("remove volume keeper", () => spawnSync("docker", ["rm", "-f", keeperName], quiet), { tolerate: /No such container/ });
+    // kept for the operator to look at needs the keeper kept with it — and
+    // the keeper holds both volumes, so Docker would refuse to remove the
+    // other one anyway. Either kept, both stay, and the report names both.
+    if (!sessionsKept && !storeKept) {
+      if (keeperStarted) {
+        step("remove volume keeper", () => spawnSync("docker", ["rm", "-f", keeperName], quiet), { tolerate: /No such container/ });
+      }
+      step("remove volume", () => spawnSync("docker", ["volume", "rm", homeVolume], quiet));
+      step("remove store volume", () => spawnSync("docker", ["volume", "rm", storeVolume], quiet));
     }
-    if (!sessionsKept) step("remove volume", () => spawnSync("docker", ["volume", "rm", homeVolume], quiet));
-    // A store past the bound stays where it is; nothing of it reached the
-    // host, and the operator may want to look at what filled it.
-    if (!storeKept) step("remove store volume", () => spawnSync("docker", ["volume", "rm", storeVolume], quiet));
     step("remove staged checkout", () => fs.rmSync(inputs.checkout, { recursive: true, force: true }));
   };
   for (const signal of ["SIGINT", "SIGTERM"]) {
@@ -1878,7 +1878,18 @@ async function main() {
     ...(boundary.failures.length === 0 ? [] : ["the boundary did not hold"]),
     ...storeFailures,
   ];
-  const inspection = preCopyFailures.length > 0 ? { reasons: [], ledgerChanged: false } : await inspectStagedStore(inputs, stage);
+  // Reading the staged store can fail on what the reviewer left there — a
+  // file with no read permission, which the root helper copies out happily —
+  // and that failure belongs in the report, not in a stack trace that takes
+  // the three criteria with it.
+  let inspection = { reasons: [], ledgerChanged: false };
+  if (preCopyFailures.length === 0) {
+    try {
+      inspection = await inspectStagedStore(inputs, stage);
+    } catch (error) {
+      inspection = { reasons: [`cannot inspect the staged store: ${error.message}`], ledgerChanged: false };
+    }
+  }
   let copyBackOutcome;
   if (preCopyFailures.length > 0) {
     copyBackOutcome = { ok: false, detail: `refused — pre-copy criteria failed: ${preCopyFailures.join("; ")}; host store unwritten, staged copy kept at ${stage.staged}` };
@@ -1943,7 +1954,7 @@ async function main() {
       : ["  none found in the sessions copied out of the isolated CODEX_HOME"]),
     `residual: the one host secret inside was ${inputs.authJson}, egress limited to ${EGRESS_ALLOW.join(", ")} by the sidecar${cleanupFailures.length ? `; cleanup steps that failed: ${cleanupFailures.join("; ")}` : ""}${sessionsKept ? `; the CODEX_HOME volume ${sessionsKept} was kept for the failed export` : ""}${storeKept ? `; the staged store volume ${storeKept} was kept, unread` : ""}${
       sessionsKept || storeKept
-        ? `; the volume keeper ${keeperName} is still running to hold ${[sessionsKept, storeKept].filter(Boolean).join(" and ")} (a tmpfs volume empties when nothing mounts it), so it goes on using memory until you clear it: look with \`docker run --rm -v ${storeKept ?? sessionsKept}:/v alpine ls -la /v\`, then \`docker rm -f ${keeperName} && ${[sessionsKept, storeKept].filter(Boolean).map((volume) => `docker volume rm ${volume}`).join(" && ")}\``
+        ? `; the volume keeper ${keeperName} is still running to hold ${storeKept ?? sessionsKept} (a tmpfs volume empties when nothing mounts it), and ${sessionsKept && storeKept ? "both volumes stay" : `the keeper holds ${sessionsKept ? storeVolume : homeVolume} too, so that one stays as well`}; it goes on using memory until you clear it: look with \`docker run --rm -v ${storeKept ?? sessionsKept}:/v alpine ls -la /v\`, then \`docker rm -f ${keeperName} && docker volume rm ${homeVolume} ${storeVolume}\``
         : ""
     }${transcriptNote ? `; ${transcriptNote}` : ""}`,
     "",

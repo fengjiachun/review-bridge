@@ -87,6 +87,11 @@ function sshCommand() {
     "ControlMaster=no",
     "-o",
     "ControlPath=none",
+    // Nothing here has a terminal to answer a prompt: a remote that falls
+    // back to a password or a keyboard-interactive round would otherwise hang
+    // the run instead of failing it.
+    "-o",
+    "BatchMode=yes",
     "-o",
     `StrictHostKeyChecking=${trustOnFirstUse ? "accept-new" : "yes"}`,
     "-o",

@@ -259,6 +259,8 @@ if (!args.includes("codex")) {
   // A sparse file: the container's block count says nothing, the apparent
   // size is what the host would read.
   if (tamper === "big-file") { const fd = fs.openSync(path.join(reviewDir, "snapshot.bin"), "w"); fs.ftruncateSync(fd, 9 * 1024 * 1024); fs.closeSync(fd); }
+  // A file the host cannot read: the root helper copies it out all the same.
+  if (tamper === "unreadable") { fs.writeFileSync(path.join(reviewDir, "locked.bin"), "x"); fs.chmodSync(path.join(reviewDir, "locked.bin"), 0o000); }
   if (tamper === "extra") fs.writeFileSync(path.join(reviewDir, "notes.txt"), "x");
   if (tamper === "snapshot") fs.appendFileSync(path.join(reviewDir, "rounds", "1", "manifest.json"), "\\n");
   if (tamper === "id") editLedger((l) => { l.advisory = false; });
@@ -950,6 +952,9 @@ test("the isolated environment pins ssh itself: no operator configuration, no ke
   // given and the agent's keys are never presented, which would make every
   // private remote fail.
   assert.deepEqual(settings.get("identitiesonly"), ["no"]);
+  // Nothing here can answer a prompt, so a remote that asks for one must fail
+  // rather than wait.
+  assert.deepEqual(settings.get("batchmode"), ["yes"]);
   assert.deepEqual(settings.get("userknownhostsfile"), [operator.knownHostsPath]);
   assert.deepEqual(settings.get("stricthostkeychecking"), ["true"]);
   // With no known_hosts of the operator's, the run's own file and accept-new
@@ -1132,14 +1137,14 @@ test("a staged store past the bound is never copied to the host, and its volume 
   assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: FAIL — refused — pre-copy criteria failed: staged store is 68\.4 MB, over the 64 MB bound/);
   assert.match(result.stdout, /the staged store volume review-bridge-advisory-\S+-store was kept, unread/);
   const calls = await fsp.readFile(env.FAKE_CALLS, "utf8");
-  assert.doesNotMatch(calls, /^volume rm review-bridge-advisory-\S+-store$/m);
-  assert.match(calls, /^volume rm review-bridge-advisory-\S+-home$/m);
   // A kept tmpfs volume is empty unless something mounts it, so the keeper
-  // stays up with it, and the report says what it costs and how to clear it.
+  // stays up with it — and since the keeper holds both volumes, neither is
+  // removed and the report names both with one command to clear them.
+  assert.doesNotMatch(calls, /^volume rm /m);
   assert.doesNotMatch(calls, /^rm -f review-bridge-advisory-\S+-keeper$/m);
   assert.match(
     result.stdout,
-    /the volume keeper review-bridge-advisory-\S+-keeper is still running to hold review-bridge-advisory-\S+-store \(a tmpfs volume empties when nothing mounts it\), so it goes on using memory until you clear it: look with `docker run --rm -v review-bridge-advisory-\S+-store:\/v alpine ls -la \/v`, then `docker rm -f review-bridge-advisory-\S+-keeper && docker volume rm review-bridge-advisory-\S+-store`/,
+    /the volume keeper review-bridge-advisory-\S+-keeper is still running to hold review-bridge-advisory-\S+-store \(a tmpfs volume empties when nothing mounts it\), and the keeper holds review-bridge-advisory-\S+-home too, so that one stays as well; it goes on using memory until you clear it: look with `docker run --rm -v review-bridge-advisory-\S+-store:\/v alpine ls -la \/v`, then `docker rm -f review-bridge-advisory-\S+-keeper && docker volume rm review-bridge-advisory-\S+-home review-bridge-advisory-\S+-store`/,
   );
   // The host ledger is where it was.
   const ledger = await loadReview(f.store, f.reviewId);
@@ -1162,6 +1167,19 @@ test("a single staged file past its own bound is refused, in the container and a
   assert.match(result.stdout, /copy-back refused — the staged file snapshot\.bin is 9\.0 MB, over the 8 MB bound for one file/);
   const ledger = await loadReview(g.store, g.reviewId);
   assert.equal(ledger.state_version, 1);
+});
+
+test("a staged file the host cannot read is a refusal with a report, not a stack trace", async (t) => {
+  // The reviewer can leave a file with no read permission; the root helper
+  // copies it out, and the host's own hash of it fails. That failure belongs
+  // in criterion 3, with the ledger left alone and the report printed.
+  const f = await fixture(t, { realReview: true });
+  const result = launch(f, ["--review-id", f.reviewId], await fakeDocker(f, { tamper: "unreadable" }));
+  assert.equal(result.status, 1, result.stdout.slice(-2000));
+  assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: FAIL — copy-back refused — cannot inspect the staged store: .*(EACCES|permission denied)/i);
+  assert.match(result.stdout, /^residual: /m);
+  assert.doesNotMatch(result.stderr, /at Object\.|at async/);
+  assert.equal((await loadReview(f.store, f.reviewId)).state_version, 1);
 });
 
 test("a name is a channel: the container must resolve the sidecar's alias and nothing else", async (t) => {
@@ -1566,10 +1584,12 @@ test("a huge or failing docker logs leaves the report, the criteria, and every c
   assert.match(result.stdout, /cleanup steps that failed: export sessions: cp: cannot create \/out\/sessions/);
   assert.match(result.stdout, /the CODEX_HOME volume review-bridge-advisory-\S+-home was kept for the failed export/);
   const kCalls = await fsp.readFile(kEnv.FAKE_CALLS, "utf8");
-  assert.doesNotMatch(kCalls, /^volume rm review-bridge-advisory-\S+-home$/m);
-  // The keeper holds that volume's tmpfs, so it stays up with it.
+  // The keeper holds that volume's tmpfs, so it stays up with it, and the
+  // store volume it also holds stays with them.
+  assert.doesNotMatch(kCalls, /^volume rm /m);
   assert.doesNotMatch(kCalls, /^rm -f review-bridge-advisory-\S+-keeper$/m);
   assert.match(result.stdout, /the volume keeper review-bridge-advisory-\S+-keeper is still running to hold review-bridge-advisory-\S+-home/);
+  assert.match(result.stdout, /docker volume rm review-bridge-advisory-\S+-home review-bridge-advisory-\S+-store/);
   // No sessions directory at all is the one answer that is not a failure.
   const l = await fixture(t, { realReview: true });
   const lEnv = await fakeDocker(l, { sessions: "none" });
