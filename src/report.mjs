@@ -179,23 +179,30 @@ function remoteOnlySection() {
 // commitment existed; a round from before it carries the proof as recorded
 // only, and every item of that proof is marked so the report relays the
 // record without vouching for it.
+//
+// The fields a proof took from its parent are recomputed from the parent when
+// the store holds it; when it does not, they stand as recorded, and the round
+// and each parent-derived item are marked the same way.
 const UNCOVERED_PROOF = "(as recorded; not covered by the snapshot commitment — this ledger predates it)";
-function roundStrategySections(review) {
+const PARENT_ABSENT = "(parent review not in this store; parent-derived fields unverified)";
+function roundStrategySections(review, absentParents) {
   const history = review.history ?? [];
   return (review.rounds ?? []).flatMap((round) => {
     const prepared = eventFor(history, PREPARED_EVENTS, round.round);
     const mode = prepared?.mode ?? (round.successor == null ? "FULL" : "SUCCESSOR");
     const successor = round.successor;
     const uncovered = successor != null && round.successor_delta_sha256 == null;
-    const item = (text) => (uncovered ? `- ${UNCOVERED_PROOF} ${text}` : `- ${text}`);
+    const parentAbsent = successor != null && absentParents.has(successor.parent_review_id);
+    const item = (text, parentDerived = false) =>
+      `- ${[uncovered ? UNCOVERED_PROOF : null, parentDerived && parentAbsent ? PARENT_ABSENT : null, text].filter(Boolean).join(" ")}`;
     return [
-      `#### Round ${round.round} strategy: ${code(mode)}${uncovered ? " (unverified proof)" : ""}`,
+      `#### Round ${round.round} strategy: ${code(mode)}${uncovered ? " (unverified proof)" : ""}${parentAbsent ? ` ${PARENT_ABSENT}` : ""}`,
       successor == null
         ? `Reviewed as a full diff of ${code(round.base_sha)} → ${code(round.head_sha)}.`
         : [
-            item(`Parent review: ${code(successor.parent_review_id)} (${code(successor.parent_reviewer_provider)})`),
-            item(`Requirement matches the parent: ${successor.requirement_match === true ? "yes" : "no"}`),
-            item(`Parent head → current head: ${code(successor.parent_head_sha)} → ${code(successor.current_head_sha)}`),
+            item(`Parent review: ${code(successor.parent_review_id)} (${code(successor.parent_reviewer_provider)})`, true),
+            item(`Requirement matches the parent: ${successor.requirement_match === true ? "yes" : "no"}`, true),
+            item(`Parent head → current head: ${code(successor.parent_head_sha)} → ${code(successor.current_head_sha)}`, true),
             item(`Delta: ${successor.delta_bytes ?? "n/a"} bytes, sha256 ${code(successor.delta_sha256)}`),
             item(`Files in the delta: ${list(successor.changed_files ?? [])}`),
             item(`Files deleted in the delta: ${list(successor.deleted_files ?? [])}`),
@@ -204,7 +211,7 @@ function roundStrategySections(review) {
   });
 }
 
-function roundsSection(review) {
+function roundsSection(review, absentParents) {
   const history = review.history ?? [];
   const rows = (review.rounds ?? []).map((round) => {
     const prepared = eventFor(history, PREPARED_EVENTS, round.round);
@@ -236,7 +243,7 @@ function roundsSection(review) {
       ],
       rows,
     ),
-    ...roundStrategySections(review),
+    ...roundStrategySections(review, absentParents),
   ];
 }
 
@@ -310,20 +317,28 @@ function findingsSection(review) {
   ];
 }
 
-// What changed between rounds is read from the immutable rounds, the way the
-// operator narration derives it. A fix the author reports without a following
-// round has no round binding its commit or files, and is said to be
-// unavailable rather than inferred.
+// Each round is an immutable snapshot of base → head with its own cumulative
+// file table; the ledger keeps no delta between rounds, so none is presented.
+// Between rounds only the head relation is stated -- a rereview after a
+// rebuttal reviews the same head again. A fix the author reports without a
+// following round has no round binding its commit or files, and is said to
+// be unavailable rather than inferred.
 function changesSection(review) {
   const rounds = review.rounds ?? [];
   const lines = [];
-  for (let index = 1; index < rounds.length; index += 1) {
-    const previous = rounds[index - 1];
-    const current = rounds[index];
+  rounds.forEach((round, index) => {
+    if (index > 0) {
+      const previous = rounds[index - 1];
+      lines.push(
+        previous.head_sha === round.head_sha
+          ? `- Round ${previous.round} → ${round.round}: head unchanged since round ${previous.round}`
+          : `- Round ${previous.round} → ${round.round}: head ${code(previous.head_sha)} → ${code(round.head_sha)}`,
+      );
+    }
     lines.push(
-      `- Round ${previous.round} → ${current.round}: fix head ${code(previous.head_sha)} → ${code(current.head_sha)}; files in the reviewed diff: ${list(current.changed_files ?? [])}${(current.deleted_files ?? []).length > 0 ? `; deleted: ${list(current.deleted_files)}` : ""}`,
+      `- Round ${round.round} snapshot: ${code(round.base_sha)} → ${code(round.head_sha)}; files: ${list(round.changed_files ?? [])}${(round.deleted_files ?? []).length > 0 ? `; deleted: ${list(round.deleted_files)}` : ""}`,
     );
-  }
+  });
   const lastRound = rounds.at(-1)?.round;
   const respondedLast = (review.history ?? []).some(
     (entry) => RESPONSE_EVENTS.includes(entry?.event) && entry.round === lastRound,
@@ -345,7 +360,7 @@ function changesSection(review) {
   }
   return [
     "### Changes between rounds",
-    lines.length === 0 ? "No round followed another." : lines.join("\n"),
+    lines.length === 0 ? "No round was recorded." : lines.join("\n"),
   ];
 }
 
@@ -643,6 +658,7 @@ export function renderReviewReport(
     publicationSummary = null,
     renderedAt = new Date().toISOString(),
     ledgerDirectory = null,
+    absentParents = new Set(),
   } = {},
 ) {
   if (review == null && publication == null) {
@@ -673,7 +689,7 @@ export function renderReviewReport(
       ? remoteOnlySection()
       : [
           ...identitySection(review),
-          ...roundsSection(review),
+          ...roundsSection(review, absentParents),
           ...findingsSection(review),
           ...changesSection(review),
           ...outcomeSection(review),
@@ -721,8 +737,11 @@ export async function loadReportLedgers(
   // The validated loader: the store's own serialization, the state machine's
   // shape, and every round's snapshot commitment reproduced from its manifest
   // and patch. A ledger edited or rolled back in place fails here.
+  // The parents the validated loader found no ledger for; the report marks
+  // their rounds' parent-derived fields as unverified.
+  const absentParents = new Set();
   const review = fs.existsSync(reviewPath)
-    ? await loadValidatedReview(storeRoot, reviewId)
+    ? await loadValidatedReview(storeRoot, reviewId, { absentParents })
     : null;
   let publication = null;
   try {
@@ -832,7 +851,7 @@ export async function loadReportLedgers(
       );
     }
   }
-  return { directory, review, publication, authorization, publicationSummary };
+  return { directory, review, publication, authorization, publicationSummary, absentParents };
 }
 
 // Publishes fully written bytes at `filePath` only if nothing is there yet: the
@@ -887,7 +906,7 @@ function withoutRenderTime(markdown) {
 // stays in the file: a report can run to megabytes, and the driver that
 // calls this after a gate needs the path, not the bytes.
 export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}) {
-  const { directory, review, publication, authorization, publicationSummary } =
+  const { directory, review, publication, authorization, publicationSummary, absentParents } =
     await loadReportLedgers(storeRoot, reviewId);
   const revision = reportRevision(review, publication, publicationSummary);
   // A file exists per (state_version, publication revision, summary digest):
@@ -902,6 +921,7 @@ export async function writeReviewReport(storeRoot, reviewId, { renderedAt } = {}
     publicationSummary,
     renderedAt,
     ledgerDirectory: directory,
+    absentParents,
   });
   let reused = true;
   if (!fs.existsSync(filePath)) {

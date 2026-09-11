@@ -337,8 +337,10 @@ test("a FULL review that reached CLEAN in round two renders every section and fi
   // A sustained rebuttal prints the verification the rereviewer performed.
   assert.match(markdown, /#### F-002 · minor · src\/b\.mjs:3/);
   assert.match(markdown, /- Rereview decision: `rebuttal_accepted` at [^\n]+\n[\s\S]*?Rereview rationale:\n\n```text\nsustained rationale\n```\n\nRereviewer verification:\n\n```text\nreran the probe against the snapshot\n```/);
-  // What changed between rounds comes from the two immutable rounds.
-  assert.match(markdown, /- Round 1 → 2: fix head `b{40}` → `c{40}`; files in the reviewed diff: `src\/a\.mjs`, `src\/b\.mjs`, `test\/a\.test\.mjs`/);
+  // Each round is its own snapshot with its cumulative file table; between
+  // rounds only the head relation is stated, never a delta the ledger lacks.
+  assert.match(markdown, /### Changes between rounds\n\n- Round 1 snapshot: `a{40}` → `b{40}`; files: `src\/a\.mjs`, `test\/a\.test\.mjs`\n- Round 1 → 2: head `b{40}` → `c{40}`\n- Round 2 snapshot: `a{40}` → `c{40}`; files: `src\/a\.mjs`, `src\/b\.mjs`, `test\/a\.test\.mjs`\n/);
+  assert.doesNotMatch(markdown, /fix head|files in the reviewed diff/);
   assert.match(markdown, /- Terminal state: `CLEAN`\n- Rounds to CLEAN: 2\n- Clean snapshot: `2{64}`/);
   assert.match(markdown, /## Remote publication\n\nNo publication ledger was rendered\./);
 });
@@ -403,7 +405,7 @@ test("a SUCCESSOR review renders its strategy and the delta it was reviewed as",
   assert.match(markdown, new RegExp(`#### Round 1 strategy: \`SUCCESSOR\` \\(unverified proof\\)\n\n- ${mark} Parent review: \`rb-2026-08-31T000000-000Z-00parent\` \\(\`CODEX_TASK\`\\)\n- ${mark} Requirement matches the parent: yes\n- ${mark} Parent head → current head: \`b{40}\` → \`c{40}\`\n- ${mark} Delta: 321 bytes, sha256 \`d{64}\`\n- ${mark} Files in the delta: \`src\\/b\\.mjs\`\n- ${mark} Files deleted in the delta: \`src\\/old\\.mjs\``));
   assert.match(markdown, /### Findings\n\nNo findings were recorded\./);
   assert.match(markdown, /\| 1 \| cccccccccccc \| [^|]+\| INITIAL_REVIEW_CLEAN \| [^|]+\| 3m 0s \|/);
-  assert.match(markdown, /### Changes between rounds\n\nNo round followed another\./);
+  assert.match(markdown, /### Changes between rounds\n\n- Round 1 snapshot: `a{40}` → `c{40}`; files: /);
   assert.match(markdown, /- Rounds to CLEAN: 1/);
 });
 
@@ -452,6 +454,19 @@ test("each round renders its own strategy and proof, so a successor first round 
   assert.match(secondSection, /^#### Round 2 strategy: `FULL`\n\nReviewed as a full diff of `a{40}` → `c{40}`\.\n\n$/);
   assert.doesNotMatch(secondSection, /Delta|Parent/);
   assert.doesNotMatch(markdown, /### Successor delta/);
+});
+
+// A rereview after a rebuttal reviews the same head again: the ledger has no
+// delta between the rounds, so the section states the unchanged head and
+// calls nothing a fix.
+test("a rereview at the same head prints the head as unchanged and names no fix", () => {
+  const review = cleanInTwoRounds({
+    rounds: [round(1, HEAD_ONE, "2026-09-01T00:00:00.000Z"), round(2, HEAD_ONE, "2026-09-01T00:20:00.000Z")],
+  });
+  const markdown = render(review);
+  const section = markdown.slice(markdown.indexOf("### Changes between rounds"), markdown.indexOf("### Outcome"));
+  assert.match(section, /\n- Round 1 → 2: head unchanged since round 1\n- Round 2 snapshot: `a{40}` → `b{40}`; files: /);
+  assert.doesNotMatch(section, /fix/i);
 });
 
 // The "unavailable" line is about a fix the last round itself raised and no
@@ -1780,7 +1795,7 @@ test("a successor proof is bound to its round's head and base and to the parent'
   // Every field the proof took from the parent is recomputed from the parent
   // in the store; the artifact is edited alongside so the field is what is
   // named.
-  for (const [field, value] of [["requirement_match", false], ["parent_reviewer_provider", "CODEX_TASK"], ["parent_requirement", "something else"], ["parent_snapshot_hash", "9".repeat(64)], ["parent_gate_sha256", "8".repeat(64)]]) {
+  for (const [field, value] of [["requirement_match", false], ["parent_reviewer_provider", "CODEX_TASK"], ["parent_requirement", "something else"], ["parent_snapshot_hash", "9".repeat(64)]]) {
     const changed = JSON.parse(original);
     changed.rounds[0].successor[field] = value;
     await fsp.writeFile(reviewPath, `${JSON.stringify(changed, null, 2)}\n`, { mode: 0o600 });
@@ -1865,6 +1880,52 @@ test("a successor round's snapshot commitment covers its proof, and a swapped de
   await fsp.writeFile(reviewPath, gated, { mode: 0o600 });
   await fsp.writeFile(manifestPath, manifestOriginal, { mode: 0o600 });
   assert.equal((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).reused, true);
+});
+
+// A successor's parent in the store is validated as the review is and its
+// gate is required and bound to it; a parent the store has no ledger for
+// leaves the parent-derived fields as recorded, and the report says so.
+test("a successor's parent in the store must validate with its gate, and a parent not in the store is marked", async (t) => {
+  const state = await successorFixture(t, { extraFile: "parent.txt" });
+  const parentDirectory = path.join(state.store, "reviews", state.parentId);
+  const gatePath = path.join(parentDirectory, "gate.json");
+  const gateBytes = await fsp.readFile(gatePath);
+  const refused = async (reason) => {
+    await assert.rejects(writeReviewReport(state.store, state.successorId), (error) => {
+      assert.equal(error.code, "SUCCESSOR_PARENT_INVALID", error.message);
+      assert.equal(error.details.parent_review_id, state.parentId);
+      assert.equal(error.details.round, 1);
+      assert.match(error.details.reason, reason);
+      return true;
+    });
+  };
+  // The parent's gate removed.
+  await fsp.rm(gatePath);
+  await refused(/^parent gate: /);
+  // The parent's gate re-serialized: the same gate, not the file the proof digested.
+  await fsp.writeFile(gatePath, `${JSON.stringify(JSON.parse(gateBytes.toString("utf8")))}\n`, { mode: 0o600 });
+  await refused(/proof names parent_gate_sha256 [0-9a-f]{64}, but the parent gate's bytes digest to [0-9a-f]{64}/);
+  await fsp.writeFile(gatePath, gateBytes, { mode: 0o600 });
+  // The parent's rounds moved away: the parent no longer validates.
+  await fsp.rename(path.join(parentDirectory, "rounds"), path.join(state.store, "rounds-aside"));
+  await refused(/round 1/);
+  await fsp.rename(path.join(state.store, "rounds-aside"), path.join(parentDirectory, "rounds"));
+  // The parent not in the store at all: the round renders, marked.
+  await fsp.rename(parentDirectory, path.join(state.store, "parent-aside"));
+  const receipt = await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT });
+  const markdown = await fsp.readFile(receipt.path, "utf8");
+  const mark = "(parent review not in this store; parent-derived fields unverified)";
+  assert.match(markdown, new RegExp(`#### Round 1 strategy: \`SUCCESSOR\` ${mark.replace(/[()]/g, "\\$&")}\n`));
+  const section = markdown.slice(markdown.indexOf("#### Round 1 strategy"), markdown.indexOf("### Findings"));
+  const items = section.split("\n").filter((line) => line.startsWith("- "));
+  assert.deepEqual(items.map((line) => line.startsWith(`- ${mark} `)), [true, true, true, false, false, false]);
+  assert.match(items[0], new RegExp(`Parent review: \`${state.parentId}\``));
+  assert.doesNotMatch(markdown, /unverified proof/);
+  // The parent back: the same round renders without the mark.
+  await fsp.rename(path.join(state.store, "parent-aside"), parentDirectory);
+  await fsp.rm(receipt.path);
+  const fresh = await fsp.readFile((await writeReviewReport(state.store, state.successorId, { renderedAt: RENDERED_AT })).path, "utf8");
+  assert.doesNotMatch(fresh, /parent review not in this store/);
 });
 
 // A successor round prepared before the commitment existed carries no

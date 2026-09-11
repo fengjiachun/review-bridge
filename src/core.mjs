@@ -10,6 +10,10 @@ import {
   withStateLock,
 } from "./storage.mjs";
 import { reviewRequiredInputs } from "./tool-inputs.mjs";
+// The local gate reader and its binding judge live with the publication
+// readers; the validated loader below applies them to a successor's parent
+// so the parent gate is admitted the way the report admits its own.
+import { localGateReviewMismatch, readLocalGateAuthorization } from "./publication.mjs";
 
 export const MAX_ROUNDS = 2;
 export const DEFAULT_CHANGE_SIZE_BUDGET = 2000;
@@ -907,6 +911,16 @@ const SNAPSHOT_HASH_INPUTS = [
   ["patch_bytes", Number.isInteger],
 ];
 
+function successorParentInvalid(reviewId, filePath, round, parentReviewId, reason) {
+  return Object.assign(
+    new Error(`review ${reviewId} round ${round} successor parent ${parentReviewId}: ${reason}`),
+    {
+      code: "SUCCESSOR_PARENT_INVALID",
+      details: { review_id: reviewId, path: filePath, round, parent_review_id: parentReviewId, reason },
+    },
+  );
+}
+
 function reviewLedgerInvalid(reviewId, filePath, reason) {
   return Object.assign(new Error(`review ledger ${reviewId} is invalid: ${reason}`), {
     code: "REVIEW_LEDGER_INVALID",
@@ -920,7 +934,7 @@ function reviewLedgerInvalid(reviewId, filePath, reason) {
 // immutable manifest and patch beside it, the way the gate reproduces the
 // clean round's. For readers that combine the review with other ledgers; the
 // tools' own read path is loadReview and is unchanged.
-export async function loadValidatedReview(storeRoot, reviewId, { visited = new Set() } = {}) {
+export async function loadValidatedReview(storeRoot, reviewId, { visited = new Set(), absentParents = new Set() } = {}) {
   assertReviewId(reviewId);
   const filePath = reviewFile(storeRoot, reviewId);
   // A continuation's source is validated the same way, and its source in
@@ -994,7 +1008,7 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
     // same loader, its own sources included.
     let source;
     try {
-      source = await loadValidatedReview(storeRoot, sourceId, { visited });
+      source = await loadValidatedReview(storeRoot, sourceId, { visited, absentParents });
     } catch (error) {
       if (error?.code === "CONTINUATION_CHAIN_CYCLE") throw error;
       if (error?.code === "REVIEW_NOT_FOUND") {
@@ -1117,30 +1131,46 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
       if (proof.base_sha != null && proof.base_sha !== round.base_sha) {
         throw reviewLedgerInvalid(reviewId, filePath, `round ${round.round} successor proof names base_sha ${proof.base_sha}, but the round's base is ${round.base_sha}`);
       }
-      // With the parent in the store, every field the proof took from the
-      // parent is recomputed the way buildSuccessorArtifacts computed it and
-      // compared; a parent not in the store leaves those fields to the field
-      // table's format checks.
+      // A parent in the store is validated the way this review is, its own
+      // sources and parents included; only a store with no ledger for it
+      // leaves the parent absent, and the report marks the parent-derived
+      // fields of such a round as unverified. Each parent is validated along
+      // its own path, so a review whose source and parent coincide is not a
+      // cycle, while a parent chain that returns to this review is.
       let parent = null;
       try {
-        parent = await loadReview(storeRoot, proof.parent_review_id);
-      } catch {
-        parent = null;
+        parent = await loadValidatedReview(storeRoot, proof.parent_review_id, { visited: new Set(visited), absentParents });
+      } catch (error) {
+        if (error?.code !== "REVIEW_NOT_FOUND") {
+          throw successorParentInvalid(reviewId, filePath, round.round, proof.parent_review_id, error.message);
+        }
+        absentParents.add(proof.parent_review_id);
       }
       if (parent != null) {
-        let gateBytes = null;
+        // The parent's gate must be present, admitted by the local gate
+        // reader, bound to the parent ledger by the same judge the report
+        // applies to its own gate, and be the file the proof digested.
+        let gate;
         try {
-          gateBytes = await fsp.readFile(path.join(reviewDirectory(storeRoot, proof.parent_review_id), "gate.json"));
-        } catch {
-          gateBytes = null;
+          gate = await readLocalGateAuthorization(storeRoot, proof.parent_review_id);
+        } catch (error) {
+          throw successorParentInvalid(reviewId, filePath, round.round, proof.parent_review_id, `parent gate: ${error.message}`);
         }
+        const mismatch = localGateReviewMismatch(gate, parent);
+        if (mismatch != null) {
+          throw successorParentInvalid(reviewId, filePath, round.round, proof.parent_review_id, `parent gate ${mismatch.field} ${JSON.stringify(mismatch.gate)} differs from the parent ledger's ${JSON.stringify(mismatch.review)}`);
+        }
+        if (proof.parent_gate_sha256 !== gate.source_sha256) {
+          throw successorParentInvalid(reviewId, filePath, round.round, proof.parent_review_id, `proof names parent_gate_sha256 ${proof.parent_gate_sha256}, but the parent gate's bytes digest to ${gate.source_sha256}`);
+        }
+        // Every field the proof took from the parent is recomputed the way
+        // buildSuccessorArtifacts computed it and compared.
         const expectations = [
           ["parent_head_sha", parent.rounds?.at(-1)?.head_sha],
           ["parent_snapshot_hash", parent.clean_snapshot_hash ?? null],
           ["parent_reviewer_provider", parent.reviewer_provider ?? "CLAUDE_DESKTOP"],
           ["parent_requirement", parent.requirement],
           ["requirement_match", parent.requirement === review.requirement],
-          ...(gateBytes == null ? [] : [["parent_gate_sha256", sha256(gateBytes)]]),
         ];
         for (const [field, expected] of expectations) {
           if (!(field in proof)) continue;

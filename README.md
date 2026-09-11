@@ -751,7 +751,13 @@ spans, and the snapshot hash is computed over them, so the gate's
 still renders: its hash is reproduced over the round alone, and its proof is
 rendered as recorded, the strategy heading marked `unverified proof` and each
 item marked as not covered by the snapshot commitment, so the report relays
-the record without vouching for it. Nor can a continuation prepared before the
+the record without vouching for it. A successor's parent that is in the store
+is validated the way the review is, its gate must be present, admitted by the
+local gate reader and bound to the parent ledger, and the proof's digest of
+that gate must be the file's, or the review is refused
+(`SUCCESSOR_PARENT_INVALID`); a parent not in the store leaves the
+parent-derived fields to their format checks, and the report marks the round
+and each such field as unverified. Nor can a continuation prepared before the
 source freeze: its source never recorded it, and the report accepts no
 continuation its source does not vouch for (`CONTINUATION_SOURCE_MISMATCH`);
 a source is validated the way the continuation is, its own sources included.

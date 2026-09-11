@@ -77,7 +77,16 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   marked as not covered by the snapshot commitment, so the report relays the
   record without vouching for it. A round carrying part of the commitment,
   or one that disagrees with its proof, is refused. A successor review still
-  in flight across the upgrade must be prepared again. Every reviewer- or author-supplied string is
+  in flight across the upgrade must be prepared again. A successor's parent
+  that is in the store is validated as the review is, its gate must be
+  present, admitted by the local gate reader and bound to the parent, and be
+  the file the proof digested, or the review is refused
+  (`SUCCESSOR_PARENT_INVALID`); a parent not in the store leaves the
+  parent-derived fields as recorded and the report marks the round and each
+  such field as unverified. The "Changes between rounds" section lists each
+  round's own snapshot and cumulative file table and states only the head
+  relation between rounds -- unchanged after a rebuttal, or old head to new
+  head -- since the ledger keeps no delta between rounds. Every reviewer- or author-supplied string is
   rendered as one escaped line or inside a fence longer than any backtick
   run it contains, so no finding title or rationale can open a heading,
   table row, or fence of its own. The
