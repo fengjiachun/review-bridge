@@ -268,26 +268,39 @@ function runEgressProxy() {
   const listenPort = Number(process.env.EGRESS_LISTEN_PORT ?? PROXY_PORT);
   const upstreamPort = Number(process.env.EGRESS_UPSTREAM_PORT ?? 443);
   // A record that repeats is written at most REPEAT_LIMIT times; after that
-  // the proxy counts it and writes one `… ×N suppressed` line per further
-  // REPEAT_LIMIT, so a loop of refused CONNECTs cannot grow the log without
-  // bound and the summary still totals every event that was flushed. (The
-  // sidecar is killed, not stopped, so there is no exit flush; the remainder
-  // below one REPEAT_LIMIT is the price of the bound.)
+  // the proxy counts it and writes one `… ×N suppressed` line whenever the
+  // count reaches REPEAT_LIMIT, and every FLUSH_MS regardless, so a loop of
+  // refused CONNECTs cannot grow the log without bound while what is missing
+  // from the total is at most the last FLUSH_MS of activity — and nothing at
+  // all when the proxy is stopped rather than killed, since SIGTERM flushes
+  // before the server closes.
   const repeatLimit = Number(process.env.EGRESS_LOG_REPEAT ?? 1000);
+  const flushMs = Number(process.env.EGRESS_LOG_FLUSH_MS ?? 5000);
   const records = new Map();
   const write = (text) => process.stdout.write(`${new Date().toISOString()} ${text}\n`);
+  const flush = () => {
+    for (const [record, state] of records) {
+      if (state.pending === 0) continue;
+      write(`${record} ×${state.pending} suppressed`);
+      state.pending = 0;
+    }
+  };
   const log = (...parts) => {
     const record = parts.join(" ");
-    const state = records.get(record) ?? { written: 0, suppressed: 0 };
+    const state = records.get(record) ?? { written: 0, pending: 0 };
     records.set(record, state);
     if (state.written < repeatLimit) {
       state.written += 1;
       write(record);
       return;
     }
-    state.suppressed += 1;
-    if (state.suppressed % repeatLimit === 0) write(`${record} ×${repeatLimit} suppressed`);
+    state.pending += 1;
+    if (state.pending >= repeatLimit) {
+      write(`${record} ×${state.pending} suppressed`);
+      state.pending = 0;
+    }
   };
+  setInterval(flush, flushMs).unref();
   // Every client-supplied value in the log — the CONNECT authority, the
   // method, the SNI — is written JSON-quoted and capped at 253 characters,
   // so a name carrying a newline cannot forge a second log line.
@@ -347,6 +360,13 @@ function runEgressProxy() {
     socket.on("error", () => clearTimeout(timer));
     socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
     if (buffered.length > 0) onData(Buffer.alloc(0));
+  });
+  // Stopped, not killed: flush what is counted and stop accepting. The
+  // process then leaves on its own once its sockets are done, and docker's
+  // stop timeout is the backstop.
+  process.on("SIGTERM", () => {
+    flush();
+    server.close();
   });
   server.listen(listenPort, "0.0.0.0", () =>
     log("listening", String(listenPort), "allow", allowlist.join(",")),
@@ -1703,6 +1723,9 @@ async function main() {
     if (cleaned) return;
     cleaned = true;
     step("remove codex container", () => spawnSync("docker", ["rm", "-f", codexName], quiet), { tolerate: /No such container/ });
+    // Stop the sidecar before reading its log, so the counts it is holding
+    // are flushed into the log rather than killed with it.
+    step("stop proxy container", () => spawnSync("docker", ["stop", "-t", "2", proxyName], quiet), { tolerate: /No such container/ });
     step("collect proxy log", () => {
       const result = spawnSync("docker", ["logs", "--tail", String(PROXY_LOG_LINES), proxyName], {
         encoding: "utf8",
@@ -1715,7 +1738,7 @@ async function main() {
         proxyLogNote = `proxy log truncated to last ${PROXY_LOG_LINES} lines`;
       }
     });
-    step("remove proxy container", () => spawnSync("docker", ["rm", "-f", proxyName], quiet));
+    step("remove proxy container", () => spawnSync("docker", ["rm", "-f", proxyName], quiet), { tolerate: /No such container/ });
     step("remove network", () => spawnSync("docker", ["network", "rm", network], quiet));
     // The rollouts are the guardian evidence; copy them out before the
     // volume goes.
@@ -1880,7 +1903,11 @@ async function main() {
     `egress: example.com via proxy → ${boundary.facts.egressProxied}, without proxy → ${boundary.facts.egressDirect}; proxy log: ${
       cleanupFailures.find((failure) => failure.startsWith("collect proxy log"))
         ? `unavailable: ${cleanupFailures.find((failure) => failure.startsWith("collect proxy log")).slice("collect proxy log: ".length)}`
-        : `${summarizeProxyLog(proxyLog) || "(empty)"}${proxyLogNote ? ` (${proxyLogNote})` : ""}`
+        : `${summarizeProxyLog(proxyLog) || "(empty)"}${proxyLogNote ? ` (${proxyLogNote})` : ""}${
+            / ×\d+ suppressed$/m.test(proxyLog)
+              ? " (repeated records collapsed; up to 5s of trailing counts may be unflushed if the proxy was killed)"
+              : ""
+          }`
     }`,
     `guardian verdicts (${verdicts.length})${sessionsNote ? ` — ${sessionsNote}` : ""}:`,
     ...(verdicts.length

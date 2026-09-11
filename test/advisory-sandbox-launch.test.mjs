@@ -268,7 +268,7 @@ case "$1 $2" in
   "image inspect") exit 0 ;;
   "volume rm") [ -n "\${FAKE_VOLUME_RM_FAIL}" ] && { echo "Error response from daemon: volume is in use" >&2; exit 1; }; exit 0 ;;
   "rm -f") case "\${FAKE_RM_FAIL}:$3" in nosuch:*-codex) echo "Error response from daemon: No such container: $3" >&2; exit 1 ;; other:*-codex) echo "Error response from daemon: boom" >&2; exit 1 ;; esac; exit 0 ;;
-  "network create"|"network connect"|"network rm") exit 0 ;;
+  "network create"|"network connect"|"network rm"|"stop -t") exit 0 ;;
   "logs "*) # the readiness poll (--tail 20000) sees a short log; the final collection (--tail 200000) is where the variants bite
     case "$*" in *"--tail 200000"*) collecting=1 ;; *) collecting= ;; esac
     if [ -n "$collecting" ] && [ -n "\${FAKE_LOGS_FAIL}" ]; then echo "Error response from daemon: log driver failed" >&2; exit 1; fi
@@ -1247,7 +1247,7 @@ test("the report's egress summary counts the records the sidecar collapsed", asy
   const f = await fixture(t, { realReview: true });
   const result = launch(f, ["--review-id", f.reviewId], await fakeDocker(f, { logs: "suppressed" }));
   assert.equal(result.status, 0, result.stdout.slice(-2000));
-  assert.match(result.stdout, /proxy log: deny connect example\.com:443 ×1, deny connect looped\.example:443 ×5000$/m);
+  assert.match(result.stdout, /proxy log: deny connect example\.com:443 ×1, deny connect looped\.example:443 ×5000 \(repeated records collapsed; up to 5s of trailing counts may be unflushed if the proxy was killed\)$/m);
 });
 
 test("the container mounts a clone the launcher makes, never the panel checkout's own .git", async (t) => {
@@ -1459,7 +1459,7 @@ async function withEgressProxy(t, run, extraEnv = {}) {
       socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
       setTimeout(() => socket.destroy(), 1500);
     });
-  await run({ connect, log: () => log });
+  await run({ connect, log: () => log, signal: (name) => proxy.kill(name), exited: () => new Promise((resolve) => proxy.on("exit", resolve)) });
 }
 
 test("a record that repeats is written boundedly and the summary still counts every one", async (t) => {
@@ -1476,6 +1476,34 @@ test("a record that repeats is written boundedly and the summary still counts ev
       assert.doesNotMatch(log(), /allow connect "example\.com/);
     },
     { EGRESS_LOG_REPEAT: "5" },
+  );
+});
+
+test("counts below the threshold reach the log on their own, by the timer and by SIGTERM", async (t) => {
+  // The remainder is not lost: the proxy flushes what it is holding every
+  // flush interval, and once more when it is stopped rather than killed.
+  await withEgressProxy(
+    t,
+    async ({ connect, log }) => {
+      for (let i = 0; i < 7; i += 1) await connect([], "example.com:443");
+      assert.doesNotMatch(log(), /suppressed/);
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      assert.match(log(), /deny connect "example\.com:443" ×2 suppressed/);
+    },
+    { EGRESS_LOG_REPEAT: "5", EGRESS_LOG_FLUSH_MS: "600" },
+  );
+  // The same remainder, flushed by the SIGTERM `docker stop` sends, with no
+  // timer to do it (the interval is longer than the test).
+  await withEgressProxy(
+    t,
+    async ({ connect, log, signal, exited }) => {
+      for (let i = 0; i < 8; i += 1) await connect([], "example.com:443");
+      assert.doesNotMatch(log(), /suppressed/);
+      signal("SIGTERM");
+      await exited();
+      assert.match(log(), /deny connect "example\.com:443" ×3 suppressed/);
+    },
+    { EGRESS_LOG_REPEAT: "5", EGRESS_LOG_FLUSH_MS: "600000" },
   );
 });
 
@@ -1562,7 +1590,8 @@ test("a huge or failing docker logs leaves the report, the criteria, and every c
   assert.match(result.stdout, /criterion 3 validated verdict copied back to the host store: PASS/);
   assert.match(result.stdout, /cleanup steps that failed: collect proxy log: Error response from daemon: log driver failed/);
   const calls = await fsp.readFile(env2.FAKE_CALLS, "utf8");
-  for (const pattern of [/^rm -f review-bridge-advisory-\S+-codex$/m, /^rm -f review-bridge-advisory-\S+-egress$/m, /^network rm review-bridge-advisory-/m, /^run --rm .*--network none .*cp -a \/codex-home\/sessions/m, /^volume rm review-bridge-advisory-\S+-home$/m]) {
+  assert.ok(calls.indexOf("stop -t 2 ") < calls.indexOf("rm -f review-bridge-advisory") || /stop -t 2 review-bridge-advisory-\S+-egress[\s\S]*rm -f review-bridge-advisory-\S+-egress/.test(calls), calls);
+  for (const pattern of [/^stop -t 2 review-bridge-advisory-\S+-egress$/m, /^rm -f review-bridge-advisory-\S+-codex$/m, /^rm -f review-bridge-advisory-\S+-egress$/m, /^network rm review-bridge-advisory-/m, /^run --rm .*--network none .*cp -a \/codex-home\/sessions/m, /^volume rm review-bridge-advisory-\S+-home$/m]) {
     assert.match(calls, pattern);
   }
   assert.equal((await loadReview(g.store, g.reviewId)).status, "REVIEW_SUBMITTED");

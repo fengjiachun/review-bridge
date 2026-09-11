@@ -75,8 +75,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   packaged skill's panel clone now uses `--template=`; a remote or submodule
   URL carrying a query or a fragment is refused, since a token can ride in
   either; every container the launcher starts writes through a bounded json-file log
-  driver and the sidecar collapses a repeated record into a counted line, so a
-  reviewer looping on a refused host cannot fill the host's disk;
+  driver and the sidecar collapses a repeated record into a counted line
+  (flushed every five seconds and on the `SIGTERM` that `docker stop` sends
+  before the log is read), so a reviewer looping on a refused host cannot fill
+  the host's disk and the counts still reach the report;
   a failed export of the rollouts keeps the CODEX_HOME volume and says so,
   the sidecar's log quotes every client-supplied value (authority, SNI) so a
   name carrying a newline cannot forge a log line, and the log is collected bounded and every cleanup step runs
