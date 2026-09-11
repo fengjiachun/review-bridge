@@ -747,6 +747,30 @@ itself so a number can be replayed against the ledgers it came from. It reads
 one store, writes nothing, sends nothing anywhere, and lists a ledger it cannot
 parse as skipped rather than repairing it.
 
+The author tool `render_review_report` and the packaged
+`scripts/review-report.mjs <review_id> [--json] [--store <path>]` render one
+review's ledger, and its publication ledger when present, as a Markdown report
+a person can read in one sitting (a `REMOTE_ONLY` publication, which has no
+review ledger, renders from its publication and authorization alone): requirement and scope, each round's findings
+with the author's disposition and the rereviewer's decision, what changed
+between rounds, the terminal state, and the pull request, Codex results,
+checks, and threads a publication recorded. The tool writes
+`reviews/<review_id>/report-r<state_version>[-p<revision>-s<summary digest>].md`
+(`report-p<revision>-s<summary digest>.md` when remote-only) beside the ledger
+and returns a receipt -- path, byte count, sha256, the ledger revisions and
+the summary digest rendered -- rather than the Markdown, which can run to
+megabytes; the script only prints. The summary digest covers the publication
+summary fields the report prints, so a gate appearing or evidence expiring
+writes a new report rather than reusing one that says otherwise. Both read every ledger through the reader the server
+itself uses, so a publication that is not canonical, names another review, or
+is not bound to the gate or authorization file beside it fails the render with
+that reader's error, and a review ledger filed under another review's id is
+refused. Neither changes a ledger, consumes a round, or touches a gate. The workflow skill renders the report once `LOCAL_GATE_PASSED` is
+recorded and again once a publication reads `MERGE_READY`, and opens it in
+Plannotator when that tool is on PATH; annotations never flow back into the
+ledger. Like operator narration, the report is a projection of the ledger, not
+evidence.
+
 ### Head-SHA discipline
 
 Before requesting GitHub review, both the local branch head and PR head must

@@ -31,16 +31,23 @@ const ADVANCE_LOCAL = {
 };
 const RECORD_HEAD = { record_workflow_head: COMMITTED_HEAD };
 
-// What an author response owes. The fix head is conditional only on there
-// being a fix: an all-rejected response commits nothing. A submission that
-// also escalates still records the fix it made -- the escalation decides
-// whether a round inspects that head, not whether the work is bound. The
+// What an author response owes. The fix head is conditional on there being
+// a fix: an all-rejected response commits nothing. A submission that also
+// escalates still records the fix it made -- the escalation decides whether
+// a round inspects that head, not whether the work is bound. The advance
+// also refuses a repository HEAD the ledger never recorded, whatever the
+// dispositions, so the head is owed whenever the two differ: a driver that
+// committed in an earlier turn and reads this table afresh -- after a split
+// released with continue -- cannot rely on remembering that it did. The
 // resolutions are what move the review to the status the advance consumes.
 const fixHead = (revision) => ({
   record_workflow_head: [
     WORKFLOW_ID,
     revision,
-    ["head_sha", "the committed fix, required when any resolution is fixed"],
+    [
+      "head_sha",
+      "the committed fix, required when any resolution is fixed or whenever the repository HEAD differs from the recorded head",
+    ],
   ],
 });
 const SUBMIT_RESOLUTIONS = {
@@ -112,6 +119,12 @@ const PUBLICATION_TARGET_INPUTS = [
   ],
 ];
 
+// The report a passed gate is followed by: a read of the ledgers, written
+// beside them, that advances nothing. Declared where the workflow skill calls
+// it -- once the local gate is recorded, and once the publication reads
+// MERGE_READY -- so a driver finds it here rather than in prose.
+const REVIEW_REPORT = [["review_id", "id"]];
+
 export const REVIEW_ACTION_INPUTS = {
   AUTHOR_RESOLUTIONS: {
     submit_resolutions: [
@@ -133,6 +146,7 @@ export const REVIEW_ACTION_INPUTS = {
   PREPARE_REREVIEW: { prepare_rereview: [["review_id", "id"]] },
   FINALIZE_LOCAL_GATE: { finalize_local_gate: [["review_id", "id"]] },
   PUBLISH: {
+    render_review_report: REVIEW_REPORT,
     start_publication: [["review_id", "id"], ...PUBLICATION_TARGET_INPUTS],
   },
   HUMAN_ARBITRATION: {
@@ -175,6 +189,7 @@ export const PUBLICATION_ACTION_INPUTS = {
     ],
   },
   FINALIZE_PUBLICATION_GATE: {
+    render_review_report: [["review_id", "review_id"]],
     finalize_publication_gate: [
       ["review_id", "review_id"],
       ["expected_revision", "revision"],
@@ -236,7 +251,20 @@ export const WORKFLOW_ACTION_INPUTS = {
   ADDRESS_REMOTE_FINDINGS: RECORD_HEAD,
   ADDRESS_CHECK_FAILURE: RECORD_HEAD,
   UPDATE_FROM_BASE: RECORD_HEAD,
+  // The bind refuses a snapshot of a head the ledger never recorded, and a
+  // driver reading this table afresh cannot know whether an earlier turn
+  // committed one -- a split released with continue leaves its committed
+  // cut on the branch and hands the driver back this table. The recording is
+  // owed on the one condition the driver can check.
   PREPARE_LOCAL_REVIEW: {
+    record_workflow_head: [
+      WORKFLOW_ID,
+      WORKFLOW_REVISION,
+      [
+        "head_sha",
+        "the commit you made, required whenever the repository HEAD differs from the recorded head",
+      ],
+    ],
     prepare_review: [
       ["repository_path", "get_autonomous_workflow repository.path"],
       ["base_ref", "base_sha"],
@@ -254,7 +282,7 @@ export const WORKFLOW_ACTION_INPUTS = {
     ],
     bind_workflow_review: [
       WORKFLOW_ID,
-      WORKFLOW_REVISION,
+      afterWrite(WORKFLOW_REVISION, "any recorded head"),
       ["review_id", "the prepare_review result id"],
     ],
   },

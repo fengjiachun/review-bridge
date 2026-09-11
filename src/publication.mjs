@@ -369,7 +369,7 @@ function clone(value) {
   return structuredClone(value);
 }
 
-function canonicalDigest(value) {
+export function canonicalDigest(value) {
   return sha256(Buffer.from(canonicalJson(value), "utf8"));
 }
 
@@ -3006,6 +3006,51 @@ async function readBoundAuthorization(
   return actual;
 }
 
+// The report renders a publication beside the authorization that gated it,
+// and that authorization -- gate.json for a local gate, the remote sidecar
+// otherwise -- is admitted only by the same judge every publication read uses:
+// canonical bytes, the fields the authorization requires, and the ledger's
+// binding to it by head, base, and source digest. A file that was edited,
+// replaced, or belongs to another head fails here, not in the report.
+export async function readBoundPublicationAuthorization(storeRoot, reviewId, ledger) {
+  return readBoundAuthorization(pathsFor(storeRoot, reviewId), reviewId, ledger);
+}
+
+// The local gate a LOCAL_GATE_PASSED review minted, read and validated the
+// way a publication start reads it, for a reader that has the review but no
+// publication yet. core enters that status only by writing this file, so its
+// absence is an incomplete store, not a review that skipped its gate.
+export async function readLocalGateAuthorization(storeRoot, reviewId) {
+  return normalizedLocalGate(
+    await readLocalGate(pathsFor(storeRoot, reviewId), reviewId),
+  );
+}
+
+// Every field a local gate attests that the review ledger also holds, in one
+// list, so a gate swapped for another review's -- same snapshot, different
+// base; same head, different provider -- is caught whichever field differs.
+// The reader has already matched the gate's review_id and status. Returns
+// the first differing field with both values, or null.
+export function localGateReviewMismatch(gate, review) {
+  const lastRound = review.rounds?.at(-1) ?? {};
+  const expectations = [
+    ["base_sha", gate.base_sha, lastRound.base_sha],
+    ["head_sha", gate.head_sha, lastRound.head_sha],
+    ["snapshot_hash", gate.snapshot_hash, review.clean_snapshot_hash],
+    [
+      "reviewer_provider",
+      gate.reviewer_provider,
+      review.reviewer_provider ?? "CLAUDE_DESKTOP",
+    ],
+  ];
+  for (const [field, attested, held] of expectations) {
+    if (attested !== held) {
+      return { field, gate: attested ?? null, review: held ?? null };
+    }
+  }
+  return null;
+}
+
 async function openAuthorizationFiles(
   paths,
   reviewId,
@@ -3837,7 +3882,7 @@ function decidingRunsFor(requirement, runs) {
   return byKind;
 }
 
-function checkRequiredRuns(requiredChecks) {
+export function checkRequiredRuns(requiredChecks) {
   if (requiredChecks.collection.status !== "COMPLETE") {
     return "EVIDENCE_INCOMPLETE";
   }
@@ -4321,7 +4366,7 @@ function codexDecision(ledger) {
   return status("GITHUB_REVIEW_UNKNOWN");
 }
 
-function codexStatus(ledger) {
+export function codexStatus(ledger) {
   return codexDecision(ledger).status;
 }
 
@@ -4499,7 +4544,7 @@ function derivePublication(
 // event retired is audit evidence, not a live claim, so it is never compared
 // against the current watermark as though it were still active; a chain that
 // cannot be replayed as one linear frontier blocks through its own reason.
-function invalidatedAutomaticResolution(ledger) {
+export function invalidatedAutomaticResolution(ledger) {
   const frontier = resolutionFrontier(ledger);
   if (frontier.blockers.length > 0) {
     // A blocker invalidates the frontier even when it names no record
@@ -4549,7 +4594,7 @@ function invalidatedAutomaticResolution(ledger) {
  * projection for the post-ready evaluation), so the two share exactly one
  * notion of what is active and cannot disagree about it.
  */
-function resolutionFrontier(ledger) {
+export function resolutionFrontier(ledger) {
   const records = ledger.automatic_resolutions ?? [];
   const events = ledger.resolution_lifecycle ?? [];
   const active = new Map();

@@ -1260,6 +1260,14 @@ the mutation still needs to be retried.
   verdict.
 - Treat `LOCAL_GATE_PASSED` as permission to continue the user's publication
   workflow, not as permission by itself to push or create a pull request.
+- Once `LOCAL_GATE_PASSED` is recorded, call `render_review_report` with the
+  `review_id` and print the returned path. If `command -v plannotator` finds
+  Plannotator on PATH, run `plannotator annotate <path>` so the operator can
+  read the report there; otherwise the printed path is the whole step.
+  Annotations never flow back into the ledger: whatever the reader decides
+  goes through the ordinary tools. The report is a projection of the ledger,
+  not evidence, and a failure in this step changes no gate and no workflow
+  state.
 - If the state is `HUMAN_REQUIRED`, call `get_review_summary`, then call
   `export_human_arbitration` with its exact `state_version`. Give the returned
   Markdown to the human or externally coordinated reviewer. The export is
@@ -1411,6 +1419,16 @@ For either mode:
     `head_sha` using a head-matching operation such as
     `gh pr merge --match-head-commit <head_sha>`. Never reuse a finalize result,
     direct file read, cached verification, or older revision.
+11. Once the ledger reads `MERGE_READY`, call `render_review_report` with the
+    `review_id` — in `REMOTE_ONLY` mode the authorization's, since no local
+    review exists and the report then renders from the publication and its
+    authorization alone — and print the returned path. If `command -v plannotator` finds
+    Plannotator on PATH, run `plannotator annotate <path>` so the operator can
+    read the report there; otherwise the printed path is the whole step.
+    Annotations never flow back into the ledger: whatever the reader decides
+    goes through the ordinary tools. The report is a projection of the ledger,
+    not evidence, and a failure in this step changes no gate and no workflow
+    state, so it may run before or after the merge.
 
 The fifteen publication tools are `authorize_remote_publication`,
 `start_publication`, `get_publication`, `get_publication_summary`,

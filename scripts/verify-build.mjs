@@ -15,6 +15,7 @@ import {
   CODEX_TASK_DISPATCH_CONTRACT,
   DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
   HERMES_DISPATCH_CONTRACT,
+  REVIEW_REPORT_CONTRACT,
 } from "./dispatch-contract.mjs";
 import {
   deepSeekHarnessClientEntry,
@@ -482,6 +483,14 @@ assertDispatchContract(
   "packaged Codex workflow skill",
   ADVISORY_PANEL_CONTRACT,
 );
+for (const heading of ["## Finish", "## Publish through GitHub"]) {
+  assertDispatchContract(
+    workflowSkill,
+    heading,
+    "packaged Codex workflow skill",
+    REVIEW_REPORT_CONTRACT,
+  );
+}
 assert.match(
   workflowSkill,
   /Leave `parent_review_id` unset unless you have a specific parent in mind/,
@@ -738,6 +747,14 @@ const advisoryBadId = spawnSync(
 );
 assert.equal(advisoryBadId.status, 2);
 assert.match(advisoryBadId.stderr, /invalid --review-id/);
+const reportScript = path.join(pluginRoot, "scripts", "review-report.mjs");
+assert.ok(await fsp.stat(reportScript));
+const reportHelp = run(process.execPath, [reportScript, "--help"], pluginRoot);
+assert.match(
+  reportHelp,
+  /Usage: review-report\.mjs <review_id> \[--json\] \[--store <path>\]/,
+);
+assert.match(reportHelp, /projection of the ledger, not evidence/);
 
 const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
 assertAuthorServerDisabledInLaunches(
@@ -1355,6 +1372,50 @@ try {
     assert.equal(auditInspection.status, 0, auditInspection.stderr);
     assert.equal(JSON.parse(auditInspection.stdout).valid, true);
 
+    // The packaged report script and the author tool render the same ledgers:
+    // the script prints and writes nothing, the tool writes the report beside
+    // the ledger and returns what it wrote.
+    const packagedReport = spawnSync(
+      process.execPath,
+      [reportScript, prepared.id, "--store", store],
+      { cwd: pluginRoot, encoding: "utf8" },
+    );
+    assert.equal(packagedReport.status, 0, packagedReport.stderr);
+    assert.match(packagedReport.stdout, /^# Review report /);
+    assert.match(packagedReport.stdout, /## Remote publication/);
+    assert.match(packagedReport.stdout, /projection of the ledger, not evidence/);
+    // The JSON envelope names the same identity the Markdown footer prints,
+    // summary digest included.
+    const packagedReportJson = spawnSync(
+      process.execPath,
+      [reportScript, prepared.id, "--json", "--store", store],
+      { cwd: pluginRoot, encoding: "utf8" },
+    );
+    assert.equal(packagedReportJson.status, 0, packagedReportJson.stderr);
+    const reportEnvelope = JSON.parse(packagedReportJson.stdout);
+    assert.match(reportEnvelope.revision, /^\d+-p\d+-s[0-9a-f]{12}$/);
+    assert.match(
+      reportEnvelope.markdown,
+      new RegExp(`- Report revision: \`${reportEnvelope.revision}\`\\n`),
+    );
+    const renderedReport = await call(author, "render_review_report", {
+      review_id: prepared.id,
+    });
+    assert.equal(renderedReport.revision, reportEnvelope.revision);
+    // A receipt, never the Markdown: the file is what the driver prints the
+    // path of, and the digest lets a reader tie the two together.
+    assert.equal(renderedReport.reused, false);
+    assert.equal(renderedReport.markdown, undefined);
+    assert.match(path.basename(renderedReport.path), /^report-r\d+-p\d+-s[0-9a-f]{12}\.md$/);
+    assert.match(renderedReport.summary_digest, /^[0-9a-f]{12}$/);
+    const renderedBytes = await fsp.readFile(renderedReport.path);
+    assert.equal(renderedBytes.length, renderedReport.bytes);
+    assert.equal(
+      crypto.createHash("sha256").update(renderedBytes).digest("hex"),
+      renderedReport.sha256,
+    );
+    assert.equal(renderedBytes.toString("utf8"), packagedReport.stdout.replace(/- Rendered at: [^\n]+/, renderedBytes.toString("utf8").match(/- Rendered at: [^\n]+/)[0]));
+
     const remoteAuthorization = await call(
       author,
       "authorize_remote_publication",
@@ -1418,6 +1479,25 @@ try {
     assert.equal(remoteVerified.valid, true);
     assert.equal(remoteVerified.head_sha, headSha);
     assert.equal(remoteVerified.reviewer_provider, null);
+    // A remote-only publication has no review ledger; the report renders from
+    // the publication and its authorization and is named by the publication
+    // revision alone.
+    const remoteReport = await call(author, "render_review_report", {
+      review_id: remoteAuthorization.review_id,
+    });
+    assert.equal(remoteReport.reused, false);
+    assert.equal(remoteReport.review_state_version, null);
+    assert.match(path.basename(remoteReport.path), /^report-p\d+-s[0-9a-f]{12}\.md$/);
+    const remoteReportText = await fsp.readFile(remoteReport.path, "utf8");
+    assert.match(remoteReportText, /authorized `REMOTE_ONLY` with local review skipped/);
+    assert.match(remoteReportText, /projection of the ledger, not evidence/);
+    const packagedRemoteReport = spawnSync(
+      process.execPath,
+      [reportScript, remoteAuthorization.review_id, "--store", store],
+      { cwd: pluginRoot, encoding: "utf8" },
+    );
+    assert.equal(packagedRemoteReport.status, 0, packagedRemoteReport.stderr);
+    assert.match(packagedRemoteReport.stdout, /authorized `REMOTE_ONLY` with local review skipped/);
 
     await fsp.writeFile(
       path.join(repository, "value.test.js"),

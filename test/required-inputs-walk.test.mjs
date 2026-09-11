@@ -169,17 +169,21 @@ const PROBES = {
   record_workflow_head: async (ctx, summary, fields, m) => {
     const source = fields.find(([field]) => field === "head_sha")?.[1] ?? "";
     const content = declaresCut(fields, m) ? m.cutContent : m.content;
-    // A head stated as owed only on a gate's refusal, or a cut the driver has
-    // released with continue, is not owed on the walked happy path; a turn
-    // that supplies no content is the driver reading that condition as false.
+    // A head stated as owed only on a gate's refusal, only when the driver
+    // fixed something, or as a cut the driver has released with continue, is
+    // not owed on the walked happy path; a turn that supplies no content is
+    // the driver reading that condition as false.
+    const owedOnHead =
+      /whenever the repository HEAD differs from the recorded head/.test(source);
     const conditional =
-      /required only if/.test(source) ||
+      owedOnHead ||
+      /\brequired (only if|when)\b/.test(source) ||
       (/\bcut\b/.test(source) && m.decision === "continue");
     if (conditional && content == null) {
       // A release ends the cut, not the recording: where the declaration says
       // the head is owed whenever the repository is ahead of the ledger, the
       // driver compares the two heads and records the commit that exists.
-      if (!/whenever the repository HEAD differs from the recorded head/.test(source)) {
+      if (!owedOnHead) {
         return;
       }
       const head = git(ctx.state.repository, "rev-parse", "HEAD");
@@ -1104,6 +1108,62 @@ test("a committed fix released among the findings is still recorded", async (t) 
     expect: "ADDRESS_LOCAL_FINDINGS",
     materials: { decision: "continue" },
   });
+  assert.equal(after.next_action, "PREPARE_REREVIEW");
+  assert.equal(
+    (await getAutonomousWorkflow(ctx.store, ctx.workflowId)).current_head_sha,
+    committed,
+  );
+});
+
+// The same two releases with the driver stopping right after the continue.
+// The refreshed summary no longer stands on a split, so what it declares is
+// the ordinary table, and the repository is still ahead of the ledger: the
+// ordinary table has to say the head is owed whenever the two differ, or the
+// bind refuses the unrecorded cut with WORKFLOW_REVIEW_MISMATCH and the
+// advance the unrecorded fix with WORKFLOW_HEAD_MISMATCH.
+test("a committed cut released and refreshed where the round is prepared is still recorded", async (t) => {
+  const ctx = await reachCrossedPrepare(t, "walk-split-twelve");
+  await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  const committed = await commit(ctx.state.repository, ONE_LINE_CUT);
+  await runTurn(ctx, {
+    expect: "PREPARE_LOCAL_REVIEW",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "continue" },
+  });
+  const refreshed = await getAutonomousWorkflowSummary(
+    ctx.store,
+    ctx.workflowId,
+  );
+  assert.ok(
+    Object.hasOwn(refreshed.required_inputs, "record_workflow_head"),
+    "PREPARE_LOCAL_REVIEW declares no record_workflow_head after the release, so the bind refuses the unrecorded cut with WORKFLOW_REVIEW_MISMATCH",
+  );
+  const bound = await runTurn(ctx, { expect: "PREPARE_LOCAL_REVIEW" });
+  assert.equal(bound.next_action, "PLAN_CODEX_TASK_DISPATCH");
+  assert.equal(
+    (await getAutonomousWorkflow(ctx.store, ctx.workflowId)).current_head_sha,
+    committed,
+  );
+});
+
+test("a committed fix released and refreshed among the findings is still recorded", async (t) => {
+  const ctx = await reachCrossedFindings(t, "walk-split-thirteen");
+  await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "split" },
+  });
+  const committed = await commit(ctx.state.repository, SIX_LINE_FIX);
+  await runTurn(ctx, {
+    expect: "ADDRESS_LOCAL_FINDINGS",
+    use: ["acknowledge_change_size_warning"],
+    materials: { decision: "continue" },
+  });
+  const after = await runTurn(ctx, { expect: "ADDRESS_LOCAL_FINDINGS" });
   assert.equal(after.next_action, "PREPARE_REREVIEW");
   assert.equal(
     (await getAutonomousWorkflow(ctx.store, ctx.workflowId)).current_head_sha,
