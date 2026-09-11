@@ -831,6 +831,24 @@ test("a thread's outcome follows the frontier replay and the gate's invalidation
   threads.threads = [thread];
   threads.total_count = 1;
 
+  // A thread the records name but the observation no longer holds: the gate
+  // refuses over it, and the table cannot show it, so it gets its own line
+  // naming the thread and the record.
+  threads.threads = [];
+  threads.total_count = 0;
+  threads.unresolved_count = 0;
+  publication.automatic_resolutions = [resolutionRecord(thread, headSha)];
+  publication.resolution_lifecycle = [];
+  markdown = render(cleanInTwoRounds(), { publication });
+  const section = markdown.slice(markdown.indexOf("### Review threads"), markdown.indexOf("### Supersessions"));
+  assert.match(
+    section,
+    new RegExp(`- PRRT_1: not in the latest observation; record 1 \\(action act-1, reply comment 55, head \`${headSha.slice(0, 12)}\`\\) resolved it automatically and the gate judges THREAD_RESOLUTION_INVALIDATED`),
+  );
+  assert.doesNotMatch(markdown, /No review thread was observed/);
+  threads.threads = [thread];
+  threads.total_count = 1;
+
   // No record at all: the observed state, nothing more.
   publication.resolution_lifecycle = [];
   publication.automatic_resolutions = [];

@@ -556,11 +556,32 @@ function threadsSection(publication) {
       threadOutcome(thread, records, frontier, invalidated),
     ];
   });
+  // A thread the records name but the observation no longer holds is why the
+  // gate refuses, and the table above cannot show it: there is no thread to
+  // render. Each such thread gets its own line, so the operator reads which
+  // thread and which record rather than a bare verdict.
+  const observedIds = new Set(threads.map((thread) => thread.id));
+  const unobserved = [];
+  for (const [threadId, record] of frontier.active) {
+    if (observedIds.has(threadId)) continue;
+    unobserved.push(
+      `- ${inline(threadId)}: not in the latest observation; record ${record.number} (action ${inline(record.action_id)}, reply comment ${inline(String(record.reply_comment_id))}, head ${code(shortSha(record.head_sha))}) resolved it automatically and the gate judges THREAD_RESOLUTION_INVALIDATED`,
+    );
+  }
+  for (const blocker of frontier.blockers) {
+    if (observedIds.has(blocker.thread_id) || frontier.active.has(blocker.thread_id)) continue;
+    unobserved.push(
+      `- ${inline(blocker.thread_id)}: not in the latest observation; ${blocker.record == null ? "no record is active" : `record ${blocker.record.number} is no longer active`} (${inline(blocker.reason ?? "not in the active frontier")})`,
+    );
+  }
   return [
     "### Review threads",
-    rows.length === 0
-      ? "No review thread was observed."
-      : table(["Thread", "Location", "Comments", "Outcome"], rows),
+    ...(rows.length === 0 && unobserved.length === 0
+      ? ["No review thread was observed."]
+      : [
+          ...(rows.length === 0 ? [] : [table(["Thread", "Location", "Comments", "Outcome"], rows)]),
+          ...(unobserved.length === 0 ? [] : [unobserved.join("\n")]),
+        ]),
   ];
 }
 
