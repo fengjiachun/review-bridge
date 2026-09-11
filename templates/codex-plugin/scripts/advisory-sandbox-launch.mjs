@@ -1585,7 +1585,13 @@ async function mainRolloutRecords(sessionsRoot, sessionId, problems) {
 }
 
 // `startedLines` is null when the transcript was truncated: it can then only
-// undercount, so the cross-check is skipped rather than failed.
+// undercount, so the cross-check is skipped rather than failed by a bound of
+// our own. What that loses is one detection — a call with a transcript line
+// and no rollout record — and the loss sits inside what this criterion
+// already declares: it is run-health evidence recorded inside the container,
+// forgeable by a reviewer with a shell, and the copy-back's integrity rests
+// on the host replay. Every record's own property (completed, answered,
+// unexplained) is judged either way, which is the substance of criterion 1.
 function judgeMcpCalls(records, startedLines) {
   const reasons = [];
   if (records == null) reasons.push("no main rollout found under the isolated CODEX_HOME");
