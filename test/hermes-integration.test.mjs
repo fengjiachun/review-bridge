@@ -28,7 +28,7 @@ const projectRoot = path.resolve(
 );
 const hermesTemplates = path.join(projectRoot, "templates", "hermes");
 const serverPath = path.join(projectRoot, "src", "server.mjs");
-const RELEASE_VERSION = "0.12.0";
+const RELEASE_VERSION = "0.13.0";
 const RELEASE_PATH_PLACEHOLDER = "__REVIEW_BRIDGE_RELEASE_PATH__";
 const STORE_PLACEHOLDER = "__REVIEW_BRIDGE_HOME__";
 
@@ -810,7 +810,7 @@ test("Hermes README documents profile separation, exact release pinning, absolut
   assert.match(readme, /author\/publication side/i);
 });
 
-test("Hermes install and release artifacts use the 0.12.0 release identity", async () => {
+test("Hermes install and release artifacts use the 0.13.0 release identity", async () => {
   const [
     packageJson,
     packageLock,
@@ -897,7 +897,7 @@ test("Hermes install and release artifacts use the 0.12.0 release identity", asy
   const previousChangelog = changelog.match(
     /^## 0\.5\.0[^\n]*\n(?<body>[\s\S]*?)(?=^## )/m,
   );
-  assert.ok(currentChangelog, "the 0.12.0 changelog entry is missing");
+  assert.ok(currentChangelog, "the 0.13.0 changelog entry is missing");
   assert.match(currentChangelog.groups.body, /workspace-write/);
   assert.ok(previousChangelog, "the historical 0.5.0 changelog entry is missing");
   assert.doesNotMatch(previousChangelog.groups.body, /HERMES|hermes-integration/);
