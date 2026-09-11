@@ -456,7 +456,11 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // unlimited containers are the same exhaustion in two places.
     [
       "the staged store is a measured volume and every container is bounded",
-      /the staged review is copied into a Docker volume, measured inside the container when the run ends, and copied out only if it is within 64 MB — past that the volume is kept unread and named in the report\. Every container runs under memory, swap, process, and CPU limits/,
+      /the staged review is copied into a tmpfs-backed Docker volume capped at 64 MB and the isolated `CODEX_HOME` into one capped at 1 GB, so a write past the cap fails inside the container rather than on the host's disk; afterwards the store's apparent size is measured inside the container and copied out only within 64 MB overall and 8 MB for any one file/,
+    ],
+    [
+      "no name resolves inside the container but the sidecar's",
+      /The container also resolves no name but the sidecar's: `--internal` cuts routing, not resolution, and a name would carry data out on its own/,
     ],
     [
       "container logs are bounded on the host and repeats are collapsed",

@@ -138,7 +138,7 @@ async function fixture(t, { ledger = {}, checkoutName = "panel/review-bridge", c
 // records derived from the probe's own argument, and plays the reviewer by
 // moving the staged ledger with the server's own submit — or, when asked,
 // by also leaving the kind of trace the copy-back must refuse.
-async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "", volumeRmFail = false, head = "", rmFail = "", sessions = "", storeKb = "" } = {}) {
+async function fakeDocker(f, { tamper = "", directCode = "", big = false, serverError = "", present = "", imagePresent = "", baselineChildren = "", baselineHasExpected = false, leak = "", exit = "", logs = "", volumeRmFail = false, head = "", rmFail = "", sessions = "", storeKb = "", storeLargest = "", dns = "", volumeUnbounded = false } = {}) {
   const bin = path.join(f.root, "bin");
   await fsp.mkdir(bin, { recursive: true });
   const runner = path.join(bin, "fake-run.mjs");
@@ -153,7 +153,7 @@ if (args.includes("sh")) {
   // The store volume stands in for itself: the fake reviewer writes straight
   // into the scratch copy the launcher copies out to, so the copies in and
   // out are no-ops and only the measurement has to answer.
-  if (command.includes("du -sk")) { process.stdout.write((process.env.FAKE_STORE_KB || "8") + "\\n"); process.exit(0); }
+  if (command.includes("du -sk")) { process.stdout.write((process.env.FAKE_STORE_KB || "8") + " " + (process.env.FAKE_STORE_LARGEST || "4096") + "\\n"); process.exit(0); }
   const mode = process.env.FAKE_SESSIONS || "";
   if (command.includes("/sessions")) {
     if (mode === "fail") { process.stderr.write("cp: cannot create /out/sessions"); process.exit(1); }
@@ -194,6 +194,8 @@ if (!args.includes("codex")) {
   out.push({ kind: "egress", via: "proxy", code: "000", exit: 56 });
   out.push({ kind: "egress", via: "direct", code: process.env.FAKE_DIRECT_CODE || "000", exit: process.env.FAKE_DIRECT_CODE ? 0 : 6 });
   out.push({ kind: "codex-version", value: "codex-cli 0.153.4" });
+  out.push({ kind: "dns", name: "egress", resolved: process.env.FAKE_DNS !== "no-alias" });
+  out.push({ kind: "dns", name: "example.com", resolved: process.env.FAKE_DNS === "leak" });
   out.push({ kind: "uid", value: process.getuid() });
   process.stdout.write(out.map((r) => JSON.stringify(r)).join("\\n") + "\\n");
 } else {
@@ -259,6 +261,9 @@ if (!args.includes("codex")) {
   if (tamper === "findings") editLedger((l) => { l.findings.push({ ...l.findings[0], id: "F-002", title: "planted", status: "RESOLVED" }); });
   if (tamper === "hash") editLedger((l) => { l.rounds[0].snapshot_hash = "0".repeat(64); });
   if (tamper === "outside") fs.writeFileSync(path.join(staged, "other.txt"), "x");
+  // A sparse file: the container's block count says nothing, the apparent
+  // size is what the host would read.
+  if (tamper === "big-file") { const fd = fs.openSync(path.join(reviewDir, "snapshot.bin"), "w"); fs.ftruncateSync(fd, 9 * 1024 * 1024); fs.closeSync(fd); }
   if (tamper === "extra") fs.writeFileSync(path.join(reviewDir, "notes.txt"), "x");
   if (tamper === "snapshot") fs.appendFileSync(path.join(reviewDir, "rounds", "1", "manifest.json"), "\\n");
   if (tamper === "id") editLedger((l) => { l.advisory = false; });
@@ -278,6 +283,8 @@ case "$1 $2" in
   "volume rm") [ -n "\${FAKE_VOLUME_RM_FAIL}" ] && { echo "Error response from daemon: volume is in use" >&2; exit 1; }; exit 0 ;;
   "rm -f") case "\${FAKE_RM_FAIL}:$3" in nosuch:*-codex) echo "Error response from daemon: No such container: $3" >&2; exit 1 ;; other:*-codex) echo "Error response from daemon: boom" >&2; exit 1 ;; esac; exit 0 ;;
   "network create"|"network connect"|"network rm"|"stop -t") exit 0 ;;
+  "volume create") exit 0 ;;
+  "volume inspect") if [ -n "\${FAKE_VOLUME_UNBOUNDED}" ]; then echo '{"type":"tmpfs"}'; else echo '{"device":"tmpfs","o":"size=64m,mode=0700,uid=502,gid=20","type":"tmpfs"}'; fi ;;
   "logs "*) # the readiness poll (--tail 20000) sees a short log; the final collection (--tail 200000) is where the variants bite
     case "$*" in *"--tail 200000"*) collecting=1 ;; *) collecting= ;; esac
     if [ -n "$collecting" ] && [ -n "\${FAKE_LOGS_FAIL}" ]; then echo "Error response from daemon: log driver failed" >&2; exit 1; fi
@@ -315,6 +322,9 @@ esac
     FAKE_RM_FAIL: rmFail,
     FAKE_SESSIONS: sessions,
     FAKE_STORE_KB: storeKb,
+    FAKE_STORE_LARGEST: storeLargest,
+    FAKE_DNS: dns,
+    FAKE_VOLUME_UNBOUNDED: volumeUnbounded ? "1" : "",
     FAKE_HEAD: head,
     FAKE_CHECKOUT_LOG: path.join(bin, "checkout.json"),
   };
@@ -386,6 +396,20 @@ test("--dry-run prints the mount table and the container launch without Docker",
   assert.match(out, /cp -a \/codex-home\/sessions \/out\/sessions/);
   assert.match(out, /docker volume rm review-bridge-advisory-\S+-home/);
   assert.match(out, /docker volume rm review-bridge-advisory-\S+-store/);
+  // The bound holds while the reviewer runs: both volumes are tmpfs-backed
+  // and sized, and a keeper holds their tmpfs for the run.
+  assert.match(out, /docker volume create --driver local --opt type=tmpfs --opt device=tmpfs --opt o=size=1g,mode=0700(,uid=\d+,gid=\d+)? review-bridge-advisory-\S+-home/);
+  assert.match(out, /docker volume create --driver local --opt type=tmpfs --opt device=tmpfs --opt o=size=64m,mode=0700(,uid=\d+,gid=\d+)? review-bridge-advisory-\S+-store/);
+  assert.match(out, /--name review-bridge-advisory-\S+-keeper .*sleep infinity/);
+  assert.match(out, /docker rm -f review-bridge-advisory-\S+-keeper/);
+  // A name is a channel too: the reviewer's container and the probes get a
+  // resolver that answers nothing beyond the sidecar's alias.
+  for (const line of out.split("\n").filter((entry) => entry.includes(" node -e ") || entry.includes(" codex exec "))) {
+    assert.match(line, /--dns 127\.0\.0\.1/, line.slice(0, 120));
+  }
+  assert.doesNotMatch(out.split("\n").find((line) => line.includes("-egress --network")) ?? "", /--dns/);
+  assert.match(out, /du -sk --apparent-size \/store/);
+  assert.match(out, /find \/store -type f -printf/);
   // No container may exhaust the host: the reviewer's gets the documented
   // headroom, the helpers far less, and every one a process cap.
   for (const line of out.split("\n").filter((entry) => entry.startsWith("docker run"))) {
@@ -1287,6 +1311,45 @@ test("a staged store past the bound is never copied to the host, and its volume 
   const ledger = await loadReview(f.store, f.reviewId);
   assert.equal(ledger.status, "WAITING_FOR_REVIEW");
   assert.equal(ledger.state_version, 1);
+});
+
+test("a single staged file past its own bound is refused, in the container and again on the host", async (t) => {
+  // The container's measurement names the largest file; and if that
+  // measurement is ever fooled, the host sizes every staged file before it
+  // reads it.
+  const f = await fixture(t, { realReview: true });
+  let result = launch(f, ["--review-id", f.reviewId], await fakeDocker(f, { storeLargest: String(9 * 1024 * 1024) }));
+  assert.equal(result.status, 1, result.stdout.slice(-2000));
+  assert.match(result.stdout, /refused — pre-copy criteria failed: the largest staged file is 9\.0 MB, over the 8 MB bound for one file/);
+  assert.match(result.stdout, /the staged store volume review-bridge-advisory-\S+-store was kept, unread/);
+  const g = await fixture(t, { realReview: true });
+  result = launch(g, ["--review-id", g.reviewId], await fakeDocker(g, { tamper: "big-file" }));
+  assert.equal(result.status, 1, result.stdout.slice(-2000));
+  assert.match(result.stdout, /copy-back refused — the staged file snapshot\.bin is 9\.0 MB, over the 8 MB bound for one file/);
+  const ledger = await loadReview(g.store, g.reviewId);
+  assert.equal(ledger.state_version, 1);
+});
+
+test("a name is a channel: the container must resolve the sidecar's alias and nothing else", async (t) => {
+  const f = await fixture(t, { realReview: true });
+  let result = launch(f, ["--review-id", f.reviewId], await fakeDocker(f, { dns: "leak" }));
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, /the container resolved example\.com, so a name can carry data out/);
+  assert.doesNotMatch(result.stdout, /mcp: /);
+  // The positive control rides in the same probe: a resolver that answers
+  // nothing at all is not a boundary either.
+  const g = await fixture(t, { realReview: true });
+  result = launch(g, ["--review-id", g.reviewId], await fakeDocker(g, { dns: "no-alias" }));
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, /the sidecar's name egress does not resolve inside the container, so the probe proves nothing about the outside/);
+});
+
+test("a Docker that cannot bound the volumes stops the launch rather than running unbounded", async (t) => {
+  const f = await fixture(t, { realReview: true });
+  const result = launch(f, ["--review-id", f.reviewId], await fakeDocker(f, { volumeUnbounded: true }));
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, /was created without the tmpfs size option .*this Docker cannot bound the reviewer's writes, so the launch stops rather than running unbounded/s);
+  assert.doesNotMatch(result.stdout, /mcp: /);
 });
 
 test("the container mounts a clone the launcher makes, never the panel checkout's own .git", async (t) => {

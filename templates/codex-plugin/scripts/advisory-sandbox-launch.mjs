@@ -8,6 +8,7 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isolatedGit as hostGit } from "./isolated-git.mjs";
 
@@ -106,6 +107,8 @@ const codexLimits = (memory, cpus) => ["--memory", memory, "--memory-swap", memo
 // measured inside the container first. A review's ledger, findings, and
 // artifacts are far below this.
 const STAGED_STORE_LIMIT_MB = 64;
+const STAGED_FILE_LIMIT_MB = 8;
+const CODEX_HOME_LIMIT = "1g";
 
 const USAGE = `Usage: advisory-sandbox-launch.mjs --review-id <id> [--store <path>]
        [--marketplace <path>] [--dry-run]
@@ -125,12 +128,18 @@ const USAGE = `Usage: advisory-sandbox-launch.mjs --review-id <id> [--store <pat
   --store <path>       The review store (default: REVIEW_BRIDGE_HOME, else the
                        server's default). The host store is never mounted, and
                        neither is any host directory the reviewer can write:
-                       the one review is copied into a Docker volume mounted
-                       read-write at ${CONTAINER_STORE}, measured there after the
-                       run, and copied out only if it is within
-                       ${STAGED_STORE_LIMIT_MB} MB — past that the volume is kept
-                       unread and named in the report. The verdict is copied
-                       back only after validation.
+                       the one review is copied into a tmpfs-backed Docker
+                       volume capped at ${STAGED_STORE_LIMIT_MB} MB (CODEX_HOME
+                       likewise, at ${CODEX_HOME_LIMIT}), mounted read-write at
+                       ${CONTAINER_STORE}, so a write past the cap fails inside
+                       the container; both caps last the run and go with the
+                       volumes. Afterwards the store's apparent size is
+                       measured there and it is copied out only within
+                       ${STAGED_STORE_LIMIT_MB} MB overall and
+                       ${STAGED_FILE_LIMIT_MB} MB for any one file — past
+                       either the volume is kept unread and named in the
+                       report. The verdict is copied back only after
+                       validation.
   --marketplace <path> The packaged codex-marketplace directory (default: the
                        source of [marketplaces.${MARKETPLACE_NAME}] in the
                        operator's codex config.toml). Mounted read-only.
@@ -984,8 +993,12 @@ const LOG_LIMITS = ["--log-driver", "json-file", "--log-opt", "max-size=16m", "-
 
 const LOCK_ARTIFACTS = new Set([".review-state.lock", ".review-state.lock.guard"]);
 
+// Streamed, not read whole: a staged file is written inside the container and
+// a sparse one can claim any size (Codex round thirty-five on #125).
 async function sha256File(file) {
-  return crypto.createHash("sha256").update(await fsp.readFile(file)).digest("hex");
+  const hash = crypto.createHash("sha256");
+  await pipeline(fs.createReadStream(file), hash);
+  return hash.digest("hex");
 }
 
 // Copy the one review into the scratch store and remember every byte of it,
@@ -1022,6 +1035,13 @@ async function inspectStagedStore(inputs, stage) {
     const inner = path.relative(stage.staged, file);
     if (LOCK_ARTIFACTS.has(inner)) continue;
     seen.add(inner);
+    // Sized before it is read: the container wrote it, and nothing the host
+    // reads whole may be larger than one review's files ever are.
+    const { size } = await fsp.stat(file);
+    if (size > STAGED_FILE_LIMIT_MB * 1024 * 1024) {
+      reasons.push(`the staged file ${inner} is ${(size / (1024 * 1024)).toFixed(1)} MB, over the ${STAGED_FILE_LIMIT_MB} MB bound for one file`);
+      continue;
+    }
     const digest = await sha256File(file);
     if (inner === "review.json") {
       ledgerChanged = digest !== stage.digests.get(inner);
@@ -1138,6 +1158,14 @@ function containerArgs({ mounts, volumes, checkout }, network, extra = [], { wit
     CONTAINER_WORK,
   ];
   for (const [source, target] of volumes) args.push("--mount", `type=volume,src=${source},dst=${target}`);
+  // `--internal` cuts routing, not name resolution: Docker's embedded server
+  // would forward an outside query to the host's resolver, and a name is
+  // enough to carry a secret out (`<encoded>.attacker.example`). Pointing the
+  // upstream at the container's own loopback, where nothing listens, leaves
+  // the embedded server able to resolve the sidecar's network alias and
+  // nothing else (Codex round thirty-five on #125). The sidecar itself keeps
+  // a real resolver: it has the allowlisted hosts to look up.
+  args.push("--dns", "127.0.0.1");
   args.push("--tmpfs", `${CONTAINER_WORK}:rw,mode=1777`);
   for (const mount of mounts) {
     if (withoutCheckout && mount[1] === checkout) continue;
@@ -1260,8 +1288,17 @@ emit({ kind: "egress", via: "proxy", ...curl(process.env) });
 const direct = { ...process.env };
 for (const name of ${JSON.stringify(Object.keys(PROXY_ENV))}) direct[name] = "";
 emit({ kind: "egress", via: "direct", ...curl(direct) });
+const dns = require("node:dns").promises;
+const resolves = async (name) => { try { await dns.lookup(name); return true; } catch { return false; } };
 emit({ kind: "codex-version", value: (spawnSync("codex", ["--version"], { encoding: "utf8" }).stdout || "").trim() });
 emit({ kind: "uid", value: process.getuid() });
+// A name is a channel of its own, so the outside must not resolve at all —
+// with the sidecar's alias in the same probe as the positive control, so a
+// resolver that answers nothing at all cannot pass for a boundary.
+resolves("${PROXY_ALIAS}").then(async (alias) => {
+  emit({ kind: "dns", name: "${PROXY_ALIAS}", resolved: alias });
+  emit({ kind: "dns", name: "example.com", resolved: await resolves("example.com") });
+});
 }
 `;
 
@@ -1309,7 +1346,7 @@ function evaluateBoundary(baselineOutput, mountedOutput, inputs) {
     else if (record.kind === "ancestor") baseline.ancestors.set(record.path, record.children);
   }
   const failures = [];
-  const facts = { absent: [], present: [], children: [], egressProxied: null, egressDirect: null };
+  const facts = { absent: [], present: [], children: [], egressProxied: null, egressDirect: null, dns: [] };
   if (baseline.paths.size + baseline.ancestors.size === 0) {
     failures.push("the baseline probe produced no records");
   }
@@ -1370,6 +1407,14 @@ function evaluateBoundary(baselineOutput, mountedOutput, inputs) {
         failures.push(`git cannot read the mounted checkout: ${record.value}`);
       } else if (record.value !== hostHead) {
         failures.push(`the mounted checkout's HEAD is ${record.value}, the review's snapshot head is ${hostHead}`);
+      }
+    } else if (record.kind === "dns") {
+      facts.dns.push(`${record.name} ${record.resolved ? "resolves" : "does not resolve"}`);
+      if (record.name === PROXY_ALIAS && !record.resolved) {
+        failures.push(`the sidecar's name ${PROXY_ALIAS} does not resolve inside the container, so the probe proves nothing about the outside`);
+      }
+      if (record.name !== PROXY_ALIAS && record.resolved) {
+        failures.push(`the container resolved ${record.name}, so a name can carry data out`);
       }
     } else if (record.kind === "store-writable") {
       facts.storeWritable = record.value;
@@ -1639,6 +1684,45 @@ async function main() {
     "",
   ].join("\n");
 
+  // Both volumes are tmpfs-backed local volumes, so the bound holds while the
+  // reviewer runs rather than being discovered afterwards: a write past it
+  // fails with ENOSPC inside the container, and the criteria then fail on
+  // their own. A tmpfs volume lives only while some container mounts it, so a
+  // keeper container holds both for the run — without it the copy in would be
+  // gone before the reviewer started (measured 2026-09-11).
+  const volumeCreate = (name, size) => [
+    "volume",
+    "create",
+    "--driver",
+    "local",
+    "--opt",
+    "type=tmpfs",
+    "--opt",
+    "device=tmpfs",
+    "--opt",
+    `o=size=${size},mode=0700${uid ? `,uid=${process.getuid()},gid=${process.getgid()}` : ""}`,
+    name,
+  ];
+  const homeVolumeCreate = volumeCreate(homeVolume, CODEX_HOME_LIMIT);
+  const storeVolumeCreate = volumeCreate(storeVolume, `${STAGED_STORE_LIMIT_MB}m`);
+  const keeperName = `${network}-keeper`;
+  const keeperRun = [
+    "run",
+    "-d",
+    ...LOG_LIMITS,
+    ...HELPER_LIMITS,
+    "--name",
+    keeperName,
+    "--network",
+    "none",
+    "--mount",
+    `type=volume,src=${homeVolume},dst=${CONTAINER_CODEX_HOME}`,
+    "--mount",
+    `type=volume,src=${storeVolume},dst=${CONTAINER_STORE}`,
+    IMAGE,
+    "sleep",
+    "infinity",
+  ];
   const networkCreate = ["network", "create", "--internal", network];
   const proxyRun = [
     "run",
@@ -1679,7 +1763,14 @@ async function main() {
     command,
   ];
   const storeImport = storeHelper("rw", `cp -a /in/store/. ${CONTAINER_STORE}/ && chown -R ${uid ?? "0:0"} ${CONTAINER_STORE}`);
-  const storeSize = storeHelper("ro", `du -sk ${CONTAINER_STORE} | cut -f1`);
+  // Apparent size, not blocks: a sparse file allocates nothing and would
+  // otherwise pass the bound and then be read whole on the host. The largest
+  // single file is measured with it, since one file at the bound is as bad as
+  // the whole store.
+  const storeSize = storeHelper(
+    "ro",
+    `echo "$(du -sk --apparent-size ${CONTAINER_STORE} | cut -f1) $(find ${CONTAINER_STORE} -type f -printf '%s\n' | sort -n | tail -1)"`,
+  );
   const storeExport = storeHelper("ro", `rm -rf /out/store && cp -a ${CONTAINER_STORE} /out/store && chown -R ${uid ?? "0:0"} /out/store`);
   const sessionsExport = [
     "run",
@@ -1728,6 +1819,9 @@ async function main() {
     process.stdout.write(
       `dry run: nothing below is executed\n${CONTAINER_CODEX_HOME}/config.toml:\n${configToml.trimEnd().replace(/^/gm, "  ")}\n`,
     );
+    printCommand("docker", homeVolumeCreate);
+    printCommand("docker", storeVolumeCreate);
+    printCommand("docker", keeperRun);
     printCommand("docker", networkCreate);
     printCommand("docker", proxyRun);
     printCommand("docker", proxyConnect);
@@ -1739,7 +1833,7 @@ async function main() {
     printCommand("docker", storeSize);
     printCommand("docker", storeExport);
     printCommand("docker", sessionsExport);
-    process.stdout.write(`docker volume rm ${homeVolume}\ndocker volume rm ${storeVolume}\n`);
+    process.stdout.write(`docker rm -f ${keeperName}\ndocker volume rm ${homeVolume}\ndocker volume rm ${storeVolume}\n`);
     return;
   }
 
@@ -1771,6 +1865,7 @@ async function main() {
   let sessionsKept = null;
   let storeKept = null;
   let storeWithinBound = false;
+  let keeperStarted = false;
   const storeFailures = [];
   let cleaned = false;
   // A step fails on a spawn error or a nonzero exit alike; stderr's first
@@ -1833,12 +1928,15 @@ async function main() {
         storeKept = storeVolume;
         return result;
       }
-      const kilobytes = Number((result.stdout || "").trim().split(/\s+/).pop());
+      const [kilobytes, largest] = (result.stdout || "").trim().split(/\s+/).map(Number);
       if (!Number.isFinite(kilobytes)) {
         storeFailures.push("the staged store could not be measured");
         storeKept = storeVolume;
       } else if (kilobytes > STAGED_STORE_LIMIT_MB * 1024) {
         storeFailures.push(`staged store is ${(kilobytes / 1024).toFixed(1)} MB, over the ${STAGED_STORE_LIMIT_MB} MB bound`);
+        storeKept = storeVolume;
+      } else if (Number.isFinite(largest) && largest > STAGED_FILE_LIMIT_MB * 1024 * 1024) {
+        storeFailures.push(`the largest staged file is ${(largest / (1024 * 1024)).toFixed(1)} MB, over the ${STAGED_FILE_LIMIT_MB} MB bound for one file`);
         storeKept = storeVolume;
       } else {
         storeWithinBound = true;
@@ -1855,6 +1953,9 @@ async function main() {
         return result;
       });
     }
+    // The keeper holds both tmpfs volumes; it goes once nothing else needs
+    // to read them.
+    if (keeperStarted) step("remove volume keeper", () => spawnSync("docker", ["rm", "-f", keeperName], quiet), { tolerate: /No such container/ });
     if (!sessionsKept) step("remove volume", () => spawnSync("docker", ["volume", "rm", homeVolume], quiet));
     // A store past the bound stays where it is; nothing of it reached the
     // host, and the operator may want to look at what filled it.
@@ -1895,6 +1996,23 @@ async function main() {
       if (Date.now() > proxyDeadline) throw new Error("the egress proxy did not start");
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
+    // The bounded volumes, and the keeper that holds their tmpfs for the run.
+    for (const [name, create, size] of [
+      [homeVolume, homeVolumeCreate, CODEX_HOME_LIMIT],
+      [storeVolume, storeVolumeCreate, `${STAGED_STORE_LIMIT_MB}m`],
+    ]) {
+      const created = run("docker", create);
+      if (created.status !== 0) throw new Error(`the ${size} volume ${name} could not be created: ${(created.stderr || "").trim().slice(0, 200)}`);
+      const inspected = run("docker", ["volume", "inspect", name, "--format", "{{json .Options}}"]);
+      if (inspected.status !== 0 || !/(^|,|")o":"[^"]*size=/.test((inspected.stdout || "").replace(/\s/g, ""))) {
+        throw new Error(
+          `the volume ${name} was created without the tmpfs size option (${(inspected.stdout || "").trim() || (inspected.stderr || "").trim()}); this Docker cannot bound the reviewer's writes, so the launch stops rather than running unbounded`,
+        );
+      }
+    }
+    const keeper = run("docker", keeperRun);
+    if (keeper.status !== 0) throw new Error(`the volume keeper could not start: ${(keeper.stderr || "").trim().slice(0, 200)}`);
+    keeperStarted = true;
     // The staged review goes into the volume the reviewer will write to.
     const imported = run("docker", storeImport);
     if (imported.status !== 0) throw new Error(`the staged review could not be copied into the store volume: ${(imported.stderr || "").trim().slice(0, 200)}`);
@@ -1996,7 +2114,7 @@ async function main() {
     [
       "2 host filesystem absent",
       boundary.failures.length === 0,
-      `absent (and not in the image): ${boundary.facts.absent.join(", ")}${boundary.facts.present.length ? `; present: ${boundary.facts.present.join(", ")}` : ""}${boundary.facts.children.length ? `; checkout ancestors against the unmounted baseline: ${boundary.facts.children.join("; ")}` : ""}`,
+      `absent (and not in the image): ${boundary.facts.absent.join(", ")}${boundary.facts.present.length ? `; present: ${boundary.facts.present.join(", ")}` : ""}${boundary.facts.children.length ? `; checkout ancestors against the unmounted baseline: ${boundary.facts.children.join("; ")}` : ""}${boundary.facts.dns.length ? `; dns: ${boundary.facts.dns.join(", ")}` : ""}`,
     ],
     ["3 validated verdict copied back to the host store", copyBackOutcome.ok, copyBackOutcome.detail],
   ];

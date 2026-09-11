@@ -886,10 +886,15 @@ starts writes through a bounded json-file log driver (16 MB, two files) and
 the sidecar collapses a record that repeats into a counted line, so a
 reviewer looping on a refused host cannot fill the host's disk and the
 egress summary still totals every refusal. Nothing the reviewer can write
-touches the host while it runs: the staged review is copied into a Docker
-volume, measured inside the container when the run ends, and copied out only
-if it is within 64 MB — past that the volume is kept unread and named in the
-report. Every container runs under memory, swap, process, and CPU limits
+touches the host while it runs: the staged review is copied into a
+tmpfs-backed Docker volume capped at 64 MB and the isolated `CODEX_HOME` into
+one capped at 1 GB, so a write past the cap fails inside the container rather
+than on the host's disk; afterwards the store's apparent size is measured
+inside the container and copied out only within 64 MB overall and 8 MB for
+any one file — past either the volume is kept unread and named in the report,
+and the host hashes what does come out a stream at a time. The container also
+resolves no name but the sidecar's: `--internal` cuts routing, not
+resolution, and a name would carry data out on its own. Every container runs under memory, swap, process, and CPU limits
 (the reviewer's 4 GB and 2 CPUs by default, raisable with `--memory` and
 `--cpus`; the helpers far less). On exit the launcher prints the
 three criteria it verified — the reviewer's MCP calls completed inside the
