@@ -1146,11 +1146,20 @@ export async function loadValidatedReview(storeRoot, reviewId, { visited = new S
         throw mismatch(`finding ${JSON.stringify(carried.finding_id)} whose carried content does not hash to its fingerprint`);
       }
     }
-    // The carried set equals the source's open set, the empty set included:
-    // a review that names a source through any carried record -- a finding
-    // or an erratum -- carries all of that source's open findings.
-    const carriedIds = new Set(carriedFromSource.map((carried) => carried.finding_id));
-    const missing = [...frozen.keys()].find((id) => !carriedIds.has(id));
+    // The carried set corresponds one to one with the source's open set, the
+    // empty set included: a review that names a source through any carried
+    // record -- a finding or an erratum -- carries each of that source's open
+    // findings exactly once. The loop above holds every carried record to an
+    // open finding of the source, so with no repeated id and none of the
+    // source's left out, the two sets are the same size as well.
+    const carriedById = new Map();
+    for (const carried of carriedFromSource) {
+      if (carriedById.has(carried.finding_id)) {
+        throw mismatch(`finding ${JSON.stringify(carried.finding_id)} more than once`);
+      }
+      carriedById.set(carried.finding_id, carried);
+    }
+    const missing = [...frozen.keys()].find((id) => !carriedById.has(id));
     if (missing != null) throw mismatch(`only part of the open findings (source finding ${JSON.stringify(missing)} is not carried)`);
     // The carried errata are the source's errata, all of them, in order: the
     // freeze copies the whole list and renumbers it from 1.

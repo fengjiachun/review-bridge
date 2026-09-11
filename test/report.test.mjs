@@ -1379,6 +1379,12 @@ test("the continuation marker must be the one the history's REVIEW_CONTINUED eve
     assert.ok(!(await fsp.readdir(path.dirname(continuationPath))).some((name) => name.startsWith("report-")));
   };
   await tamperContinuation((ledger) => { ledger.carried_findings.push({ ...ledger.carried_findings[0], finding_id: "F-004" }); }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-004" as open/);
+  // One carried record per open finding: the same one twice would render
+  // twice and count twice, and the source holds it once.
+  await tamperContinuation((ledger) => { ledger.carried_findings.push({ ...ledger.carried_findings[0] }); }, "CONTINUATION_SOURCE_MISMATCH", /finding "F-002" more than once/);
+  // The same for the errata the freeze copies: the source's list, in order,
+  // renumbered from 1, so a repeated one is one erratum too many.
+  await tamperContinuation((ledger) => { ledger.errata.push({ ...ledger.errata[0], sequence: ledger.errata.length + 1 }); }, "CONTINUATION_SOURCE_MISMATCH", /2 carried erratum\/errata, where the source holds 1/);
   // The source is still named through the carried erratum, so an emptied
   // carried set is compared with the source's open findings and refused.
   await tamperContinuation((ledger) => { assert.equal(ledger.errata.filter((e) => e.continued_from_review_id).length, 1); ledger.carried_findings = []; }, "CONTINUATION_SOURCE_MISMATCH", /only part of the open findings \(source finding "F-002" is not carried\)/);
