@@ -618,8 +618,16 @@ risk precision loss; a future schema may encode REST identifiers as decimal
 strings. Object-identity comparisons remain scoped by review `resource_kind`
 even when two objects have the same numeric value.
 
-Version 1 accepts full Git object IDs only as 40 lowercase hexadecimal
-characters and SHA-256 digests only as 64 lowercase hexadecimal characters.
+Version 1 accepts a full Git object ID GitHub reported only as 40 lowercase
+hexadecimal characters, and SHA-256 digests only as 64 lowercase hexadecimal
+characters. An object ID the ledger names from the local repository -- the
+authorization's base and head, the local gate's, the head a request or an
+acknowledgement was issued at -- is 40 or 64 lowercase hexadecimal characters,
+since a repository created with `--object-format=sha256` names its objects with
+64. One ledger carries one width: two in the same ledger describe two
+repositories and are refused. GitHub hosts no sha256 repository, so authorizing
+a remote publication over one is refused by name at authorization time, and no
+observation of one can exist to reach the 40-character guards.
 The shortened values ending in `...` in this RFC are readability placeholders,
 not schema-valid inputs.
 

@@ -290,7 +290,7 @@ workflows/<workflow_id>/
   },
   "requirement": "...",
   "base_ref": "origin/main",
-  "base_sha": "<40 hexadecimal characters>",
+  "base_sha": "<40 or 64 hexadecimal characters, the repository's width>",
   "topic_branch": "agent/example",
   "authorization": {
     "mode": "AUTONOMOUS_LOCAL_GATE",

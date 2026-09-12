@@ -102,6 +102,22 @@ export async function gateAndPublishHead(
   workflow,
   headSha,
   label,
+  options = {},
+) {
+  const gated = await gateHeadLocally(state, workflow, headSha, label, options);
+  return publishGatedHead(state, gated.workflow, gated.headSha, gated.reviewId);
+}
+
+/**
+ * The local half of gateAndPublishHead: review, optional finding-and-fix
+ * cycle, and the local gate. It stops before the first remote action, which is
+ * the whole arc a repository GitHub cannot host still has.
+ */
+export async function gateHeadLocally(
+  state,
+  workflow,
+  headSha,
+  label,
   { localFinding = null } = {},
 ) {
   const summary = await getAutonomousWorkflowSummary(
@@ -214,7 +230,7 @@ export async function gateAndPublishHead(
   );
   assert.equal(gated.phase, "LOCAL_GATE_PASSED");
 
-  return publishGatedHead(state, gated, headSha, review.id);
+  return { workflow: gated, headSha, reviewId: review.id };
 }
 
 /** Push a locally gated head and create or update its draft pull request. */

@@ -1,11 +1,11 @@
 import path from "node:path";
+import { isLocalObjectId } from "./object-id.mjs";
 import { canonicalJson, readSecureFile, sha256 } from "./storage.mjs";
 
 export const WORKFLOW_ID_RE = /^rbwf-[0-9TZ-]+-[a-f0-9]{8}$/;
 export const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
 
 const DIGEST_RE = /^[0-9a-f]{64}$/;
-const SHA_RE = /^[0-9a-f]{40}$/;
 
 function fail(code, message, details = {}) {
   const error = new Error(`${code}: ${message}`);
@@ -148,7 +148,7 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
     }
     if (
       workflow.current_head_sha !== null &&
-      !SHA_RE.test(workflow.current_head_sha ?? "")
+      !isLocalObjectId(workflow.current_head_sha)
     ) {
       fail("WORKFLOW_STATE_INVALID", "workflow head is invalid");
     }
@@ -160,7 +160,7 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
       ? workflow.remote_attempts
       : [];
     for (const attempt of attempts) {
-      if (!SHA_RE.test(attempt?.head_sha ?? "")) {
+      if (!isLocalObjectId(attempt?.head_sha)) {
         fail("WORKFLOW_STATE_INVALID", "remote attempt head is invalid");
       }
     }
@@ -175,7 +175,7 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
       if (
         !Number.isSafeInteger(attempt?.number) ||
         attempt.number !== index + 1 ||
-        !SHA_RE.test(attempt?.head_sha ?? "")
+        !isLocalObjectId(attempt?.head_sha)
       ) {
         fail("WORKFLOW_STATE_INVALID", "workflow attempt history entry is invalid");
       }
@@ -192,10 +192,10 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
       if (
         !Number.isSafeInteger(findingsReview?.result_id) ||
         findingsReview.result_id < 1 ||
-        !SHA_RE.test(findingsReview.reviewed_head_sha ?? "") ||
+        !isLocalObjectId(findingsReview.reviewed_head_sha) ||
         !Array.isArray(record.addressed_by) ||
         record.addressed_by.length === 0 ||
-        record.addressed_by.some((sha) => !SHA_RE.test(sha ?? ""))
+        record.addressed_by.some((sha) => !isLocalObjectId(sha))
       ) {
         fail("WORKFLOW_STATE_INVALID", "addressed-finding record is invalid");
       }
@@ -237,7 +237,7 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
         typeof resolution.action_id !== "string" ||
         resolution.action_id === "" ||
         !DIGEST_RE.test(resolution.thread_watermark ?? "") ||
-        !SHA_RE.test(resolution.head_sha ?? "") ||
+        !isLocalObjectId(resolution.head_sha) ||
         typeof resolution.publication_review_id !== "string" ||
         resolution.publication_review_id === "" ||
         typeof resolution.recorded_at !== "string" ||
@@ -269,7 +269,7 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
         unresolve.publication_review_id === "" ||
         !Number.isSafeInteger(unresolve.findings_review?.result_id) ||
         unresolve.findings_review.result_id < 1 ||
-        !SHA_RE.test(unresolve.findings_review?.reviewed_head_sha ?? "")
+        !isLocalObjectId(unresolve.findings_review?.reviewed_head_sha)
       ) {
         fail("WORKFLOW_STATE_INVALID", "thread-unresolve record is invalid");
       }
@@ -347,7 +347,7 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
         target.thread_id === "" ||
         !DIGEST_RE.test(target.thread_watermark ?? "") ||
         !DIGEST_RE.test(target.eligibility_sha256 ?? "") ||
-        !SHA_RE.test(target.head_sha ?? "") ||
+        !isLocalObjectId(target.head_sha) ||
         !Number.isSafeInteger(target.reply_comment_id) ||
         target.reply_comment_id < 1 ||
         !Number.isSafeInteger(target.expected_actor_id) ||
@@ -410,7 +410,7 @@ export async function readWorkflowBinding(storeRoot, workflowId) {
           target.reason,
         ) ||
         !Number.isSafeInteger(target.findings_review?.result_id) ||
-        !SHA_RE.test(target.findings_review?.reviewed_head_sha ?? "") ||
+        !isLocalObjectId(target.findings_review?.reviewed_head_sha) ||
         action.executing_proof?.thread_id !== target.thread_id ||
         action.executing_proof.thread_watermark !== target.new_watermark ||
         response?.thread_id !== target.thread_id ||
