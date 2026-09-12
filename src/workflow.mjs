@@ -642,6 +642,11 @@ export const ACTION_KIND_SPECS = {
           "thread-reply target does not match the bound publication, head, and eligibility evidence",
         );
       }
+      // The shape is settled above so this only decides width: an addressed-by
+      // commit names the same repository as the rest of the ledger.
+      for (const sha of target.addressed_by) {
+        assertSha(sha, "thread-reply target addressed_by entry");
+      }
     },
     dispatch(action) {
       const marker = action.correlation_marker;
@@ -808,6 +813,11 @@ export const ACTION_KIND_SPECS = {
             "and invalidated record",
         );
       }
+      // The shape is settled above so this only decides width.
+      assertSha(
+        target.findings_review.reviewed_head_sha,
+        "thread-unresolve target findings_review.reviewed_head_sha",
+      );
     },
     dispatch: null,
     revalidateBeforeProof: true,

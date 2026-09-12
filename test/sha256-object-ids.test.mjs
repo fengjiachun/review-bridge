@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -19,26 +20,34 @@ import {
 import {
   authorizeRemotePublication,
   getPublication,
+  recordGithubSnapshot,
   startPublication,
 } from "../src/publication.mjs";
 import { buildScorecard } from "../src/scorecard.mjs";
 import { atomicWriteCanonicalJson, canonicalJson } from "../src/storage.mjs";
 import {
   advanceLocalWorkflow,
+  advanceRemoteWorkflow,
   bindWorkflowReview,
   completeWorkflowAction,
   getAutonomousWorkflow,
   markWorkflowActionExecuting,
   planCodexTaskDispatch,
+  planThreadReply,
+  planThreadUnresolve,
   recordCodexTaskObservation,
   recordWorkflowHead,
   startAutonomousWorkflow,
 } from "../src/workflow.mjs";
+import { iso, retimeObservation } from "./helpers/github-observation.mjs";
 import { commit, fixture, git } from "./helpers/repository-fixture";
 import {
+  CODEX_ACTOR_ID,
+  findingsResult,
   gateAndPublishHead,
   gateHeadLocally,
   publicationFilePath,
+  reachCompletedPreResolvedPostReady,
   reachRemoteWait,
   startInput,
   workflowInput,
@@ -405,6 +414,270 @@ test("starting a publication over a sha256 local gate is refused by name", async
       return true;
     },
   );
+});
+
+// A git that does not implement `--show-object-format` treats it as input:
+// `git rev-parse` echoes the switch back and exits 0. The shim reproduces that
+// contract exactly -- the answer under test, exit 0 -- and delegates every
+// other command to the real git, so the probe reads the unrecognized answer
+// through the same code path a host with such a git would.
+async function withObjectFormatAnswer(t, state, answer) {
+  const binDir = path.join(state.root, "old-git");
+  await fsp.mkdir(binDir);
+  const realGit = spawnSync("/bin/sh", ["-c", "command -v git"], {
+    encoding: "utf8",
+  }).stdout.trim();
+  await fsp.writeFile(
+    path.join(binDir, "git"),
+    [
+      "#!/bin/sh",
+      'if [ "$1" = "rev-parse" ] && [ "$2" = "--show-object-format" ]; then',
+      `  printf '%s\\n' ${JSON.stringify(answer)}`,
+      "  exit 0",
+      "fi",
+      `exec ${JSON.stringify(realGit)} "$@"`,
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const restore = process.env.PATH;
+  process.env.PATH = `${binDir}${path.delimiter}${restore}`;
+  t.after(() => {
+    process.env.PATH = restore;
+  });
+}
+
+for (const answer of ["--show-object-format", "", "usage: git rev-parse"]) {
+  test(`a sha1 repository publishes when the probe answers ${JSON.stringify(answer)}`, async (t) => {
+    const state = await fixture();
+    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+    const headSha = await commit(state.repository, "export const value = 2;\n");
+    await withObjectFormatAnswer(t, state, answer);
+
+    const authorization = await authorizeRemotePublication(state.store, {
+      repositoryPath: state.repository,
+      baseSha: state.baseSha,
+      headSha,
+      acknowledgement: "LOCAL_REVIEW_SKIPPED",
+      operatorLabel: "Test Operator",
+      rationale: "Publishing without a local review.",
+    });
+    assert.equal(authorization.head_sha, headSha);
+  });
+}
+
+/** Drive a workflow to a planned reply over one eligible Codex thread. */
+async function reachPlannedThreadReply(t) {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const firstHead = await commit(state.repository, "export const value = 2;\n");
+  const first = await gateAndPublishHead(state, workflow, firstHead, "one");
+  const { workflow: waiting } = await reachRemoteWait(
+    state,
+    first.workflow,
+    first.reviewId,
+    firstHead,
+    Date.now(),
+    findingsResult,
+  );
+  const repairing = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waiting.revision,
+  );
+  const secondHead = await commit(state.repository, "export const value = 3;\n");
+  const repaired = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    repairing.revision,
+    secondHead,
+  );
+  const second = await gateAndPublishHead(
+    state,
+    { workflow_id: workflow.workflow_id, revision: repaired.revision },
+    secondHead,
+    "two",
+  );
+  const threadAt = Date.now();
+  const codex = {
+    id: CODEX_ACTOR_ID,
+    type: "Bot",
+    login: "chatgpt-codex-connector[bot]",
+  };
+  const { workflow: waitingAgain } = await reachRemoteWait(
+    state,
+    second.workflow,
+    second.reviewId,
+    secondHead,
+    threadAt,
+    (payload) => {
+      payload.review_threads.total_count = 1;
+      payload.review_threads.unresolved_count = 1;
+      payload.review_threads.threads = [
+        {
+          id: "PRRT_1",
+          is_resolved: false,
+          is_outdated: false,
+          path: null,
+          line: null,
+          comment_count: 1,
+          comments_pagination_complete: true,
+          provenance_complete: true,
+          comments: [
+            {
+              id: "PRRC_1",
+              database_id: 900,
+              created_at: iso(threadAt - 5_000),
+              updated_at: iso(threadAt - 5_000),
+              actor: codex,
+              review: {
+                id: "PRR_1",
+                database_id: 101,
+                state: "COMMENTED",
+                reviewed_head_sha: firstHead,
+                actor: codex,
+              },
+            },
+          ],
+        },
+      ];
+      payload.review_threads.ancestry = [
+        {
+          finding_head_sha: firstHead,
+          status: "AHEAD",
+          descends: true,
+          endpoint: `GET /repos/example/review-bridge/compare/${firstHead}...${secondHead}`,
+          collected_at: iso(threadAt + 1_600),
+        },
+      ];
+      return payload;
+    },
+  );
+  const resolving = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    waitingAgain.revision,
+  );
+  const planned = await planThreadReply(
+    state.store,
+    workflow.workflow_id,
+    resolving.revision,
+    { threadId: "PRRT_1", actorId: 555, actorType: "User" },
+  );
+  return { state, workflow, planned, secondHead };
+}
+
+/** Splice one value into the stored workflow ledger and read it back. */
+async function spliceStoredWorkflow(state, workflowId, mutate) {
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflowId,
+    "workflow.json",
+  );
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  mutate(stored);
+  await atomicWriteCanonicalJson(workflowPath, stored);
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, workflowId),
+    (error) => {
+      assert.equal(error.code, "OBJECT_ID_WIDTH_MIXED");
+      assert.match(error.message, /object-id width/);
+      return true;
+    },
+  );
+}
+
+test("a thread-reply action naming a wide addressed-by commit is refused by name", async (t) => {
+  const { state, workflow, planned, secondHead } =
+    await reachPlannedThreadReply(t);
+  assert.deepEqual(planned.action.target.addressed_by, [secondHead]);
+
+  const wide = "a".repeat(SHA256_WIDTH);
+  await spliceStoredWorkflow(state, workflow.workflow_id, (stored) => {
+    assert.equal(stored.active_action.kind, "REPLY_TO_CODEX_THREAD");
+    const action = stored.active_action;
+    action.target.addressed_by = [wide];
+    // The dispatch is derived from the commits the target names, so a splice
+    // that leaves it behind is caught for saying more than its record. This
+    // one regenerates it, which is the splice the width scope has to name.
+    action.dispatch.body = [
+      `Fixed in ${wide.slice(0, 10)}.`,
+      "",
+      `<!-- ${action.correlation_marker} -->`,
+    ].join("\n");
+  });
+});
+
+test("a thread-reply action naming a malformed addressed-by commit keeps its own code", async (t) => {
+  const { state, workflow } = await reachPlannedThreadReply(t);
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  stored.active_action.target.addressed_by = ["nope"];
+  await atomicWriteCanonicalJson(workflowPath, stored);
+
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, workflow.workflow_id),
+    (error) => {
+      assert.equal(error.code, "WORKFLOW_ACTION_INVALID");
+      return true;
+    },
+  );
+});
+
+test("a thread-unresolve action naming a wide reviewed head is refused by name", async (t) => {
+  const { state, workflow, second, recordedPostReady } =
+    await reachCompletedPreResolvedPostReady(t, { outcome: "RESOLVED" });
+  const publication = await getPublication(state.store, second.reviewId);
+  const moved = structuredClone(publication.latest_observation);
+  const movedAt = Date.parse(moved.observed_at) + 1_000;
+  retimeObservation(moved, movedAt);
+  const thread = moved.review_threads.threads[0];
+  thread.comment_count += 1;
+  thread.comments.push({
+    id: "PRRC_follow_up",
+    database_id: 903,
+    created_at: iso(movedAt - 100),
+    updated_at: iso(movedAt - 100),
+    actor: { id: CODEX_ACTOR_ID, type: "Bot", login: "codex" },
+    review: null,
+  });
+  await recordGithubSnapshot(
+    state.store,
+    second.reviewId,
+    { expectedRevision: recordedPostReady.revision, observation: moved },
+    { clock: () => movedAt + 10 },
+  );
+  const unresolving = await advanceRemoteWorkflow(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    { clock: () => movedAt + 20 },
+  );
+  const planned = await planThreadUnresolve(
+    state.store,
+    workflow.workflow_id,
+    unresolving.revision,
+    { threadId: thread.id },
+  );
+  assert.equal(
+    planned.action.target.findings_review.reviewed_head_sha.length,
+    SHA1_WIDTH,
+  );
+
+  await spliceStoredWorkflow(state, workflow.workflow_id, (stored) => {
+    assert.equal(stored.active_action.kind, "UNRESOLVE_REVIEW_THREAD");
+    stored.active_action.target.findings_review.reviewed_head_sha =
+      "a".repeat(SHA256_WIDTH);
+  });
 });
 
 test("the observation schema keeps GitHub's own object ids at 40", async (t) => {

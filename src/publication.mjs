@@ -2784,17 +2784,31 @@ function runGit(repositoryPath, args) {
   return result.stdout.trim();
 }
 
+const KNOWN_OBJECT_FORMATS = new Set(["sha1", "sha256"]);
+
 // GitHub hosts no sha256 repository. A pull request over one cannot exist, so
 // nothing downstream of this point -- no observation, no check run, no review
 // thread -- can ever describe a real remote. The remote path refuses such a
 // repository here by name rather than tripping over the width of one of its
 // object ids somewhere further in.
+//
+// Only a format git names decides. `git rev-parse` treats a long option it does
+// not implement as input: it echoes the option back and exits 0, so on a git
+// without `--show-object-format` the answer is the literal switch rather than a
+// format name. Reading that as "not sha1" would refuse every sha1 repository on
+// such a host, and reading it as sha1 is not a guess: a sha256 repository is a
+// version-1 repository carrying `extensions.objectFormat`, which git refuses to
+// operate on at all unless it implements that extension, and the extension
+// arrived (git 2.29) after the option did. A git that cannot answer the
+// question therefore cannot have opened a sha256 repository -- the `rev-parse`
+// above would have failed instead of echoing -- so an unrecognized answer means
+// the option is unsupported and the repository is sha1.
 function assertRemoteHostableRepository(repositoryPath) {
   const objectFormat = runGit(repositoryPath, [
     "rev-parse",
     "--show-object-format",
   ]);
-  if (objectFormat !== "sha1") {
+  if (KNOWN_OBJECT_FORMATS.has(objectFormat) && objectFormat !== "sha1") {
     fail(
       "REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE",
       `GitHub does not host ${objectFormat} repositories, so this repository has no remote to publish to`,
