@@ -20,6 +20,11 @@ import {
 // records it. Two copies of this rule would be two things to keep in step.
 import { threadProvenanceComplete } from "./github-observation.mjs";
 import {
+  createObjectIdWidthScope,
+  isLocalObjectId,
+  LOCAL_OBJECT_ID_DESCRIPTION,
+} from "./object-id.mjs";
+import {
   atomicWriteCanonicalJson,
   canonicalJson,
   canonicalJsonBytes,
@@ -67,7 +72,9 @@ const HISTORICAL_ANCESTOR_LOCK_WAIT_MS = 1_000;
 const BODY_REQUEST = "@codex review";
 const REQUEST_BODY_SHA256 = sha256(Buffer.from(BODY_REQUEST, "utf8"));
 
-const SHA_RE = /^[0-9a-f]{40}$/;
+// Object ids GitHub reported. GitHub hosts no sha256 repository, so a 64-hex
+// id in a feed is a malformed observation, not a wide one.
+const GITHUB_SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 const RESOURCE_KINDS = new Set([
   "ISSUE_COMMENT",
@@ -293,9 +300,39 @@ function assertRevision(value) {
   }
 }
 
-function assertSha(value, name) {
-  if (typeof value !== "string" || !SHA_RE.test(value)) {
+function assertGithubSha(value, name) {
+  if (typeof value !== "string" || !GITHUB_SHA_RE.test(value)) {
     fail("INVALID_INPUT", `${name} must be a 40-character lowercase Git SHA`);
+  }
+  return value;
+}
+
+// The width scope of the ledger validation currently running, or null outside
+// one. A publication's local ids are all pinned to its authorization head, so
+// two widths in one ledger cannot come from any sequence of operations -- only
+// from a store file assembled elsewhere, which is what the stored-ledger
+// validator exists to catch.
+let ledgerObjectIdWidth = null;
+
+function withLedgerObjectIdWidth(validate) {
+  const enclosing = ledgerObjectIdWidth;
+  ledgerObjectIdWidth = createObjectIdWidthScope();
+  try {
+    return validate();
+  } finally {
+    ledgerObjectIdWidth = enclosing;
+  }
+}
+
+function assertLocalObjectId(value, name) {
+  if (!isLocalObjectId(value)) {
+    fail("INVALID_INPUT", `${name} must be ${LOCAL_OBJECT_ID_DESCRIPTION}`);
+  }
+  if (ledgerObjectIdWidth != null && !ledgerObjectIdWidth.admit(value)) {
+    fail(
+      "OBJECT_ID_WIDTH_MIXED",
+      `${name} does not have the object-id width the rest of this publication uses`,
+    );
   }
   return value;
 }
@@ -892,7 +929,7 @@ function validateRequestFacts(items, name, { baseline = false } = {}) {
           `${name}[${index}].issuance.recorded_revision is invalid`,
         );
       }
-      assertSha(
+      assertLocalObjectId(
         issuance.requested_head_sha,
         `${name}[${index}].issuance.requested_head_sha`,
       );
@@ -952,7 +989,10 @@ function validateResultFacts(
       fail("INVALID_INPUT", `${name}[${index}].request_id is invalid`);
     }
     if (item.reviewed_head_sha != null) {
-      assertSha(item.reviewed_head_sha, `${name}[${index}].reviewed_head_sha`);
+      assertGithubSha(
+        item.reviewed_head_sha,
+        `${name}[${index}].reviewed_head_sha`,
+      );
     }
     assertArray(
       item.attached_review_comments ?? [],
@@ -976,7 +1016,10 @@ function validateResultFacts(
         `${name}[${index}] attachment actor.type`,
         100,
       );
-      assertSha(attachment.commit_id, `${name}[${index}] attachment commit_id`);
+      assertGithubSha(
+        attachment.commit_id,
+        `${name}[${index}] attachment commit_id`,
+      );
       assertDigest(
         attachment.body_sha256,
         `${name}[${index}] attachment body_sha256`,
@@ -1183,7 +1226,7 @@ function validatePullRequest(pullRequest) {
     fail("INVALID_INPUT", "pull request merge and draft fields must be boolean");
   }
   for (const field of ["head_sha", "pr_reported_base_sha", "base_sha"]) {
-    assertSha(pullRequest[field], `pull_request.${field}`);
+    assertGithubSha(pullRequest[field], `pull_request.${field}`);
   }
   assertString(pullRequest.head_branch, "pull_request.head_branch", 255);
   assertString(pullRequest.base_branch, "pull_request.base_branch", 255);
@@ -1196,7 +1239,10 @@ function validatePullRequest(pullRequest) {
     const baseSource = pullRequest.collection.sources?.find(
       (source) => source.kind === "BASE_BRANCH_METADATA",
     );
-    assertSha(baseSource?.branch_tip_sha, "BASE_BRANCH_METADATA.branch_tip_sha");
+    assertGithubSha(
+      baseSource?.branch_tip_sha,
+      "BASE_BRANCH_METADATA.branch_tip_sha",
+    );
   }
   if (pullRequest.is_merged) {
     if (
@@ -1207,7 +1253,7 @@ function validatePullRequest(pullRequest) {
       fail("INVALID_INPUT", "merged pull request fields are inconsistent");
     }
     timestampMs(pullRequest.merged_at, "pull_request.merged_at");
-    assertSha(pullRequest.merge_commit_sha, "pull_request.merge_commit_sha");
+    assertGithubSha(pullRequest.merge_commit_sha, "pull_request.merge_commit_sha");
   } else if (pullRequest.merged_at != null || pullRequest.merge_commit_sha != null) {
     fail("INVALID_INPUT", "open or unmerged pull request cannot carry merge evidence");
   }
@@ -1224,8 +1270,8 @@ function validatePullRequest(pullRequest) {
       ["AHEAD", "IDENTICAL", "BEHIND", "DIVERGED", "UNKNOWN"],
       `pull_request.${name}.status`,
     );
-    assertSha(comparison.base_sha, `pull_request.${name}.base_sha`);
-    assertSha(comparison.head_sha, `pull_request.${name}.head_sha`);
+    assertGithubSha(comparison.base_sha, `pull_request.${name}.base_sha`);
+    assertGithubSha(comparison.head_sha, `pull_request.${name}.head_sha`);
   }
 }
 
@@ -1285,7 +1331,7 @@ function validateChecks(requiredChecks, pullRequest, target) {
     assertId(run.run_id, "run_id");
     assertEnum(run.run_kind, ["CHECK_RUN", "COMMIT_STATUS"], "run_kind");
     assertString(run.context, "run.context", 255);
-    assertSha(run.head_sha, "run.head_sha");
+    assertGithubSha(run.head_sha, "run.head_sha");
     timestampMs(run.started_at, "run.started_at");
     assertString(run.status, "run.status", 100);
     if (run.run_kind === "CHECK_RUN") {
@@ -1339,7 +1385,7 @@ function validateChecks(requiredChecks, pullRequest, target) {
   const branchSource = requiredChecks.collection.policy_sources?.find(
     (source) => source.kind === "BRANCH_METADATA",
   );
-  assertSha(branchSource?.branch_tip_sha, "BRANCH_METADATA.branch_tip_sha");
+  assertGithubSha(branchSource?.branch_tip_sha, "BRANCH_METADATA.branch_tip_sha");
   if (typeof branchSource.protected !== "boolean") {
     fail("INVALID_INPUT", "BRANCH_METADATA.protected must be boolean");
   }
@@ -1539,7 +1585,7 @@ function validateThreadProvenance(thread) {
       );
       assertObject(review.actor, "thread review actor");
       if (review.reviewed_head_sha !== null) {
-        assertSha(review.reviewed_head_sha, "thread review reviewed_head_sha");
+        assertGithubSha(review.reviewed_head_sha, "thread review reviewed_head_sha");
       }
     }
   }
@@ -1784,7 +1830,10 @@ function validateCodexPartitions(codexReview, ledger) {
     ) {
       fail("INVALID_INPUT", "recognized request is not the exact workflow issue comment");
     }
-    assertSha(request.requested_head_sha, "request.requested_head_sha");
+    assertLocalObjectId(
+      request.requested_head_sha,
+      "request.requested_head_sha",
+    );
   }
   for (const foreign of foreignActorObjects) {
     assertUrl(foreign.url, "foreign_actor_object.url");
@@ -2132,6 +2181,10 @@ function requireStoredReviewId(ledger, reviewId) {
 }
 
 function validateStoredLedger(ledger) {
+  return withLedgerObjectIdWidth(() => validateStoredLedgerFields(ledger));
+}
+
+function validateStoredLedgerFields(ledger) {
   assertObject(ledger, "publication");
   if (!SUPPORTED_PUBLICATION_VERSIONS.includes(ledger.version)) {
     fail(
@@ -2189,7 +2242,7 @@ function validateStoredLedger(ledger) {
         record.eligibility_sha256,
         "automatic-resolution eligibility_sha256",
       );
-      assertSha(record.head_sha, "automatic-resolution head_sha");
+      assertLocalObjectId(record.head_sha, "automatic-resolution head_sha");
       assertObject(record.actor, "automatic-resolution actor");
       assertId(record.actor.id, "automatic-resolution actor id");
       assertString(record.actor.type, "automatic-resolution actor type", 100);
@@ -2325,8 +2378,14 @@ function validateStoredLedger(ledger) {
   }
   if (ledger.version === 1) {
     assertObject(ledger.local_gate, "publication.local_gate");
-    assertSha(ledger.local_gate.head_sha, "publication.local_gate.head_sha");
-    assertSha(ledger.local_gate.base_sha, "publication.local_gate.base_sha");
+    assertLocalObjectId(
+      ledger.local_gate.head_sha,
+      "publication.local_gate.head_sha",
+    );
+    assertLocalObjectId(
+      ledger.local_gate.base_sha,
+      "publication.local_gate.base_sha",
+    );
     assertDigest(
       ledger.local_gate.snapshot_hash,
       "publication.local_gate.snapshot_hash",
@@ -2353,8 +2412,14 @@ function validateStoredLedger(ledger) {
       ["LOCAL_GATE", "REMOTE_ONLY"],
       "publication.authorization.mode",
     );
-    assertSha(authorization.head_sha, "publication.authorization.head_sha");
-    assertSha(authorization.base_sha, "publication.authorization.base_sha");
+    assertLocalObjectId(
+      authorization.head_sha,
+      "publication.authorization.head_sha",
+    );
+    assertLocalObjectId(
+      authorization.base_sha,
+      "publication.authorization.base_sha",
+    );
     assertDigest(
       authorization.source_sha256,
       "publication.authorization.source_sha256",
@@ -2520,7 +2585,10 @@ function validateStoredLedger(ledger) {
       fail("PUBLICATION_STORE_INVALID", "request history revision is invalid");
     }
     if (item.classification === "RECOGNIZED") {
-      assertSha(item.requested_head_sha, "request history requested_head_sha");
+      assertLocalObjectId(
+        item.requested_head_sha,
+        "request history requested_head_sha",
+      );
       if (
         baseline.collection.adapter_version === 2 &&
         !isCodexRequestId(item.request_id)
@@ -2565,7 +2633,7 @@ function validateStoredLedger(ledger) {
   );
   for (const item of acknowledgements) {
     assertString(item.acknowledgement_id, "acknowledgement_id", 255);
-    assertSha(item.head_sha, "acknowledgement head_sha");
+    assertLocalObjectId(item.head_sha, "acknowledgement head_sha");
     assertArray(
       item.closed_requests,
       "acknowledgement closed_requests",
@@ -2716,6 +2784,39 @@ function runGit(repositoryPath, args) {
   return result.stdout.trim();
 }
 
+const KNOWN_OBJECT_FORMATS = new Set(["sha1", "sha256"]);
+
+// GitHub hosts no sha256 repository. A pull request over one cannot exist, so
+// nothing downstream of this point -- no observation, no check run, no review
+// thread -- can ever describe a real remote. The remote path refuses such a
+// repository here by name rather than tripping over the width of one of its
+// object ids somewhere further in.
+//
+// Only a format git names decides. `git rev-parse` treats a long option it does
+// not implement as input: it echoes the option back and exits 0, so on a git
+// without `--show-object-format` the answer is the literal switch rather than a
+// format name. Reading that as "not sha1" would refuse every sha1 repository on
+// such a host, and reading it as sha1 is not a guess: a sha256 repository is a
+// version-1 repository carrying `extensions.objectFormat`, which git refuses to
+// operate on at all unless it implements that extension, and the extension
+// arrived (git 2.29) after the option did. A git that cannot answer the
+// question therefore cannot have opened a sha256 repository -- the `rev-parse`
+// above would have failed instead of echoing -- so an unrecognized answer means
+// the option is unsupported and the repository is sha1.
+function assertRemoteHostableRepository(repositoryPath) {
+  const objectFormat = runGit(repositoryPath, [
+    "rev-parse",
+    "--show-object-format",
+  ]);
+  if (KNOWN_OBJECT_FORMATS.has(objectFormat) && objectFormat !== "sha1") {
+    fail(
+      "REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE",
+      `GitHub does not host ${objectFormat} repositories, so this repository has no remote to publish to`,
+      { object_format: objectFormat, retryable: false },
+    );
+  }
+}
+
 async function readLocalGate(paths, reviewId, { verifyRepository = false } = {}) {
   const opened = await readSecureFile(paths.localGate, {
     maxBytes: 1024 * 1024,
@@ -2748,8 +2849,8 @@ async function validateOpenedLocalGate(
   ) {
     fail("LOCAL_GATE_INVALID", "local gate is not a version 1 LOCAL_GATE_PASSED gate");
   }
-  assertSha(gate.head_sha, "local_gate.head_sha");
-  assertSha(gate.base_sha, "local_gate.base_sha");
+  assertLocalObjectId(gate.head_sha, "local_gate.head_sha");
+  assertLocalObjectId(gate.base_sha, "local_gate.base_sha");
   assertDigest(gate.snapshot_hash, "local_gate.snapshot_hash");
   const review = await loadReview(path.dirname(path.dirname(paths.directory)), reviewId);
   if (review.status !== "LOCAL_GATE_PASSED") {
@@ -2893,10 +2994,10 @@ function validateOpenedRemoteAuthorization(
       "remote authorization repository_path must be a non-empty absolute path",
     );
   }
-  if (!SHA_RE.test(authorization.base_sha ?? "")) {
+  if (!isLocalObjectId(authorization.base_sha)) {
     fail("REMOTE_AUTHORIZATION_INVALID", "remote authorization base_sha is invalid");
   }
-  if (!SHA_RE.test(authorization.head_sha ?? "")) {
+  if (!isLocalObjectId(authorization.head_sha)) {
     fail("REMOTE_AUTHORIZATION_INVALID", "remote authorization head_sha is invalid");
   }
   if ((authorization.reviewer_provider ?? null) !== null) {
@@ -5652,8 +5753,7 @@ function validateAuditEvent(event, reviewId, head) {
     (Number.isSafeInteger(event.publication_revision) &&
       event.publication_revision > 0);
   const validHead =
-    event.head_sha === null ||
-    (typeof event.head_sha === "string" && SHA_RE.test(event.head_sha));
+    event.head_sha === null || isLocalObjectId(event.head_sha);
   const validObservationDigest =
     event.github_observation_sha256 === null ||
     (typeof event.github_observation_sha256 === "string" &&
@@ -6105,8 +6205,8 @@ export async function authorizeRemotePublication(
   { clock = Date.now } = {},
 ) {
   assertString(repositoryPath, "repository_path", 4096);
-  assertSha(baseSha, "base_sha");
-  assertSha(headSha, "head_sha");
+  assertLocalObjectId(baseSha, "base_sha");
+  assertLocalObjectId(headSha, "head_sha");
   if (acknowledgement !== "LOCAL_REVIEW_SKIPPED") {
     fail(
       "INVALID_INPUT",
@@ -6127,6 +6227,7 @@ export async function authorizeRemotePublication(
     }
     fail("LOCAL_REPOSITORY_ERROR", "repository_path is not an accessible Git repository");
   }
+  assertRemoteHostableRepository(repositoryRoot);
   const authorizedAt = new Date(clock()).toISOString();
   const repositoryBinding = {
     repository_path: repositoryRoot,
@@ -6221,6 +6322,7 @@ export async function startPublication(
       reviewId,
       { verifyRepository: true },
     );
+    assertRemoteHostableRepository(sourceAuthorization.repository_path);
     const workflowBinding =
       workflowId == null
         ? null
@@ -7459,7 +7561,7 @@ export async function recordCodexReviewRequest(
     assertUrl(url, "url");
     const canonicalCreatedAt = canonicalRequestTimestamp(createdAt);
     const createdMs = timestampMs(canonicalCreatedAt, "created_at");
-    assertSha(requestedHeadSha, "requested_head_sha");
+    assertLocalObjectId(requestedHeadSha, "requested_head_sha");
     if (
       currentMs - createdMs > MAX_AGE_MS ||
       createdMs - currentMs > MAX_FUTURE_MS
@@ -7683,7 +7785,7 @@ function invalidatedResolutionPlan(ledger, binding) {
     const rootReview = thread.comments[0]?.review;
     if (
       !Number.isSafeInteger(rootReview?.database_id) ||
-      !SHA_RE.test(rootReview?.reviewed_head_sha ?? "")
+      !GITHUB_SHA_RE.test(rootReview?.reviewed_head_sha ?? "")
     ) {
       return {
         review_id: ledger.review_id,
@@ -8353,7 +8455,7 @@ export async function acknowledgeCodexReviewAmbiguity(
   return publicationLock(paths, reviewId, async () => {
     const currentMs = clock();
     assertRevision(expectedRevision);
-    assertSha(headSha, "head_sha");
+    assertLocalObjectId(headSha, "head_sha");
     assertArray(requestRefs, "request_refs", MAX_CLOSURE_REQUEST_REFERENCES);
     assertArray(
       ambiguousResults,
@@ -8677,7 +8779,7 @@ export async function verifyPublicationGate(
                   : null,
               head_sha: result.valid
                 ? result.head_sha
-                : SHA_RE.test(gate?.head_sha ?? "")
+                : isLocalObjectId(gate?.head_sha)
                   ? gate.head_sha
                   : null,
               github_observation_sha256:

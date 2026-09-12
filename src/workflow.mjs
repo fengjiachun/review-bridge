@@ -37,6 +37,11 @@ import {
   workflowPaths,
   WORKFLOW_ID_RE,
 } from "./workflow-binding.mjs";
+import {
+  createObjectIdWidthScope,
+  isLocalObjectId,
+  LOCAL_OBJECT_ID_DESCRIPTION,
+} from "./object-id.mjs";
 import { workflowRequiredInputs } from "./tool-inputs.mjs";
 
 export const AUTONOMOUS_CAPABILITIES = Object.freeze([
@@ -68,7 +73,6 @@ export const DEFAULT_REMOTE_CYCLE_BUDGET = 12;
 export const DEFAULT_LOCAL_CYCLE_BUDGET = 12;
 export { DEFAULT_CHANGE_SIZE_BUDGET };
 
-const SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 // Phases whose exit is a new commit. The three remote repair phases rejoin the
 // existing local loop rather than getting a parallel one.
@@ -394,9 +398,32 @@ export function continuesLocalCycle(workflow) {
   );
 }
 
+// The width scope of the ledger validation currently running, or null outside
+// one. A workflow's object ids all name commits in the one repository it was
+// started against, so a second width in the same ledger is a second
+// repository, and every mutation passes back through validateWorkflow before
+// it is written.
+let workflowObjectIdWidth = null;
+
+function withWorkflowObjectIdWidth(validate) {
+  const enclosing = workflowObjectIdWidth;
+  workflowObjectIdWidth = createObjectIdWidthScope();
+  try {
+    return validate();
+  } finally {
+    workflowObjectIdWidth = enclosing;
+  }
+}
+
 function assertSha(value, name) {
-  if (typeof value !== "string" || !SHA_RE.test(value)) {
-    throw new TypeError(`${name} must be a full lowercase Git SHA`);
+  if (!isLocalObjectId(value)) {
+    throw new TypeError(`${name} must be ${LOCAL_OBJECT_ID_DESCRIPTION}`);
+  }
+  if (workflowObjectIdWidth != null && !workflowObjectIdWidth.admit(value)) {
+    fail(
+      "OBJECT_ID_WIDTH_MIXED",
+      `${name} does not have the object-id width the rest of this workflow uses`,
+    );
   }
   return value;
 }
@@ -608,12 +635,17 @@ export const ACTION_KIND_SPECS = {
         !["User", "Bot"].includes(target.expected_actor_type) ||
         !Array.isArray(target.addressed_by) ||
         target.addressed_by.length === 0 ||
-        target.addressed_by.some((sha) => !SHA_RE.test(sha ?? ""))
+        target.addressed_by.some((sha) => !isLocalObjectId(sha))
       ) {
         fail(
           "WORKFLOW_ACTION_INVALID",
           "thread-reply target does not match the bound publication, head, and eligibility evidence",
         );
+      }
+      // The shape is settled above so this only decides width: an addressed-by
+      // commit names the same repository as the rest of the ledger.
+      for (const sha of target.addressed_by) {
+        assertSha(sha, "thread-reply target addressed_by entry");
       }
     },
     dispatch(action) {
@@ -773,7 +805,7 @@ export const ACTION_KIND_SPECS = {
         ) ||
         !Array.isArray(target.follow_up_comments) ||
         !Number.isSafeInteger(target.findings_review?.result_id) ||
-        !SHA_RE.test(target.findings_review?.reviewed_head_sha ?? "")
+        !isLocalObjectId(target.findings_review?.reviewed_head_sha)
       ) {
         fail(
           "WORKFLOW_ACTION_INVALID",
@@ -781,6 +813,11 @@ export const ACTION_KIND_SPECS = {
             "and invalidated record",
         );
       }
+      // The shape is settled above so this only decides width.
+      assertSha(
+        target.findings_review.reviewed_head_sha,
+        "thread-unresolve target findings_review.reviewed_head_sha",
+      );
     },
     dispatch: null,
     revalidateBeforeProof: true,
@@ -1651,6 +1688,10 @@ async function readCanonicalSecureJson(filePath, maxBytes, code) {
 }
 
 function validateWorkflow(workflow) {
+  return withWorkflowObjectIdWidth(() => validateWorkflowFields(workflow));
+}
+
+function validateWorkflowFields(workflow) {
   assertObject(workflow, "workflow");
   if (workflow.version !== 1) {
     fail(

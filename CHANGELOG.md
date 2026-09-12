@@ -7,6 +7,40 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Added
+
+- Accept a repository created with `git init --object-format=sha256`, whose
+  objects are named with 64 hexadecimal characters rather than 40, on the local
+  path, issue #128 (#135). `src/object-id.mjs` holds one judge,
+  `isLocalObjectId`, that accepts either width, and every guard over an object
+  id Review Bridge reads from the local repository decides through it: the
+  publication's local-gate, remote-authorization and stored-ledger reads, its
+  audit event head and gate projection; the workflow's base and heads,
+  `addressed_by`, and `findings_review.reviewed_head_sha`; the workflow
+  binding's projection of the same; the scorecard's `addressed_head_sha`; and
+  the two guards that live in the GitHub-facing modules but read the
+  publication's own authorization head, `authorization()` in
+  `src/github-observation.mjs` and `authorization_head_sha` in
+  `src/github-adapter.mjs`. Object ids GitHub reported keep their own 40-only
+  guard, now named `assertGithubSha` where it was `assertSha`: a pull request's
+  head and base, a branch tip, a comparison's ends, a check run's head, a
+  review's `commit_id`, and the thread ancestry's `finding_head_sha`. GitHub
+  hosts no sha256 repository, so a 64-character id in a feed is a malformed
+  observation rather than a wide one.
+
+  One review is one repository, so one ledger carries one object-id width: the
+  publication and workflow validators pin the first width the pass admits and
+  refuse a second as `OBJECT_ID_WIDTH_MIXED`, which is the only way a ledger
+  spliced from two repositories can be named. And because GitHub cannot host
+  such a repository at all, authorizing a remote publication over one is
+  refused by name at authorization time --
+  `REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE`, from both
+  `authorize_remote_publication` and the start of a publication over a local
+  gate -- replacing a refusal that until now happened by accident, over a SHA's
+  length, deep inside an observation reader.
+
 ## 0.13.0 - 2026-09-11
 
 ### Added
