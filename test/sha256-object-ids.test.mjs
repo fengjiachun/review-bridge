@@ -18,18 +18,12 @@ import {
   authorizeRemotePublication,
   startPublication,
 } from "../src/publication.mjs";
-import { buildScorecard } from "../src/scorecard.mjs";
 import { atomicWriteCanonicalJson } from "../src/storage.mjs";
 import {
-  advanceLocalWorkflow,
   advanceRemoteWorkflow,
-  bindWorkflowReview,
-  completeWorkflowAction,
   getAutonomousWorkflow,
-  markWorkflowActionExecuting,
-  planCodexTaskDispatch,
+  listAutonomousWorkflows,
   planThreadReply,
-  recordCodexTaskObservation,
   recordWorkflowHead,
   startAutonomousWorkflow,
 } from "../src/workflow.mjs";
@@ -39,7 +33,6 @@ import {
   CODEX_ACTOR_ID,
   findingsResult,
   gateAndPublishHead,
-  gateHeadLocally,
   reachRemoteWait,
   startInput,
   workflowInput,
@@ -47,6 +40,9 @@ import {
 
 const SHA1_WIDTH = 40;
 const SHA256_WIDTH = 64;
+
+// A publication with no autonomous workflow behind it.
+const NO_WORKFLOW = { workflow_id: null, revision: null };
 
 function sha256Fixture() {
   return fixture({ objectFormat: "sha256" });
@@ -70,46 +66,6 @@ const LOCAL_FINDING = {
     rationale: "The rename landed.",
   },
 };
-
-/** Bind a prepared review to the workflow and run it past its dispatch. */
-async function dispatchReviewer(state, workflowId, revision, reviewId) {
-  const bound = await bindWorkflowReview(
-    state.store,
-    workflowId,
-    revision,
-    reviewId,
-  );
-  const planned = await planCodexTaskDispatch(
-    state.store,
-    workflowId,
-    bound.revision,
-    reviewId,
-  );
-  const executing = await markWorkflowActionExecuting(
-    state.store,
-    workflowId,
-    planned.workflow.revision,
-    planned.action.action_id,
-  );
-  const observed = await recordCodexTaskObservation(
-    state.store,
-    workflowId,
-    executing.revision,
-    planned.action.action_id,
-    {
-      matchingTaskIds: [`task-${reviewId}`],
-      taskId: `task-${reviewId}`,
-      title: planned.dispatch.title,
-      prompt: planned.dispatch.prompt,
-    },
-  );
-  return completeWorkflowAction(
-    state.store,
-    workflowId,
-    observed.revision,
-    planned.action.action_id,
-  );
-}
 
 test("the local object-id judge accepts both Git object-id widths", () => {
   assert.equal(isLocalObjectId("a".repeat(SHA1_WIDTH)), true);
@@ -154,131 +110,29 @@ test("a sha256 repository runs a full local review and local gate", async (t) =>
   assert.equal(gated.gate.base_sha, state.baseSha);
 });
 
-test("a sha256 repository runs the autonomous workflow's local arc", async (t) => {
+test("starting an autonomous workflow on a sha256 repository is refused by name", async (t) => {
   const state = await sha256Fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
+  assert.equal(state.baseSha.length, SHA256_WIDTH);
+
+  await assert.rejects(
+    startAutonomousWorkflow(
+      state.store,
+      workflowInput(state.repository, state.baseSha),
+    ),
+    (error) => {
+      assert.equal(error.code, "REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE");
+      assert.match(error.message, /GitHub does not host sha256 repositories/);
+      assert.equal(error.details.object_format, "sha256");
+      return true;
+    },
   );
-  assert.equal(workflow.base_sha.length, SHA256_WIDTH);
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const gated = await gateHeadLocally(state, workflow, headSha, "sha256", {
-    localFinding: LOCAL_FINDING,
+  // The refusal happens before anything is authorized, so no ledger exists to
+  // carry a half-run push, draft pull request, or publication.
+  await assert.rejects(fsp.readdir(path.join(state.store, "workflows")), {
+    code: "ENOENT",
   });
-  assert.equal(gated.workflow.phase, "LOCAL_GATE_PASSED");
-  assert.equal(gated.headSha.length, SHA256_WIDTH);
-
-  const stored = await getAutonomousWorkflow(state.store, workflow.workflow_id);
-  assert.equal(stored.current_head_sha, gated.headSha);
-  assert.equal(stored.base_sha, state.baseSha);
-});
-
-test("a sha256 repository records a local continuation cycle's addressed head", async (t) => {
-  const state = await sha256Fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const started = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  let workflow = await recordWorkflowHead(
-    state.store,
-    started.workflow_id,
-    started.revision,
-    headSha,
-  );
-  const review = await prepareReview(state.store, {
-    repositoryPath: state.repository,
-    baseRef: state.baseSha,
-    requirement: started.requirement,
-    implementationScope: started.implementation_scope,
-    reviewerProvider: "CODEX_TASK",
-  });
-  workflow = await dispatchReviewer(
-    state,
-    started.workflow_id,
-    workflow.revision,
-    review.id,
-  );
-  await submitInitialReview(
-    state.store,
-    review.id,
-    [LOCAL_FINDING.finding],
-    "CODEX_TASK",
-  );
-  workflow = await advanceLocalWorkflow(
-    state.store,
-    started.workflow_id,
-    workflow.revision,
-  );
-  const fixedHead = await commit(state.repository, LOCAL_FINDING.fixedContent);
-  workflow = await recordWorkflowHead(
-    state.store,
-    started.workflow_id,
-    workflow.revision,
-    fixedHead,
-  );
-  await submitResolutions(state.store, review.id, [LOCAL_FINDING.resolution]);
-  workflow = await advanceLocalWorkflow(
-    state.store,
-    started.workflow_id,
-    workflow.revision,
-  );
-  await prepareRereview(state.store, review.id);
-  workflow = await advanceLocalWorkflow(
-    state.store,
-    started.workflow_id,
-    workflow.revision,
-  );
-  // The rereview clears the first finding and raises a new one, which is what
-  // opens a continuation cycle rather than a gate.
-  await submitRereview(
-    state.store,
-    review.id,
-    [LOCAL_FINDING.rereview],
-    [
-      {
-        severity: "minor",
-        title: "Cover the new branch",
-        explanation: "The rereview found a separate edge case.",
-        recommendation: "Cover it.",
-        path: "app.js",
-        line: 1,
-      },
-    ],
-    "CODEX_TASK",
-  );
-  workflow = await advanceLocalWorkflow(
-    state.store,
-    started.workflow_id,
-    workflow.revision,
-  );
-  assert.equal(workflow.phase, "ADDRESS_LOCAL_FINDINGS");
-  assert.equal(workflow.local_review_cycles.length, 1);
-  assert.equal(workflow.local_review_cycles[0].addressed_head_sha, null);
-
-  const addressedHead = await commit(
-    state.repository,
-    "export const namedValue = 3;\n",
-  );
-  workflow = await recordWorkflowHead(
-    state.store,
-    started.workflow_id,
-    workflow.revision,
-    addressedHead,
-  );
-  assert.equal(addressedHead.length, SHA256_WIDTH);
-  assert.equal(
-    workflow.local_review_cycles[0].addressed_head_sha,
-    addressedHead,
-  );
-
-  // The scorecard reads the same cycle through its own guard.
-  const scorecard = await buildScorecard(state.store);
-  assert.deepEqual(scorecard.skipped_workflows, []);
-  assert.equal(scorecard.workflows.local_cycles.started, 1);
-  assert.equal(scorecard.workflows.local_cycles.addressed, 1);
+  assert.deepEqual(await listAutonomousWorkflows(state.store), []);
 });
 
 test("remote authorization on a sha256 repository is refused by name", async (t) => {
@@ -308,20 +162,27 @@ test("remote authorization on a sha256 repository is refused by name", async (t)
   assert.equal(isLocalObjectId(headSha), true);
 });
 
+// A local gate needs no autonomous workflow, so it is still reachable on a
+// repository no workflow can be authorized over. Publishing one is the remaining
+// way to ask GitHub about a sha256 repository, and it is refused by the same name.
 test("starting a publication over a sha256 local gate is refused by name", async (t) => {
   const state = await sha256Fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
   const headSha = await commit(state.repository, "export const value = 2;\n");
-  const gated = await gateHeadLocally(state, workflow, headSha, "sha256");
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: "Review a sha256 repository.",
+    implementationScope: "Change app.js.",
+  });
+  await submitInitialReview(state.store, review.id, []);
+  const gated = await finalizeLocalGate(state.store, review.id);
+  assert.equal(gated.gate.head_sha, headSha);
 
   await assert.rejects(
     startPublication(
       state.store,
-      startInput(state, gated.reviewId, gated.workflow, Date.now()),
+      startInput(state, review.id, NO_WORKFLOW, Date.now()),
     ),
     (error) => {
       assert.equal(error.code, "REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE");

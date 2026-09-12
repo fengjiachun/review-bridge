@@ -12,6 +12,7 @@ import {
   patchChangeSize,
 } from "./core.mjs";
 import {
+  assertRemoteHostableRepository,
   getAutonomousPreReady,
   getAutonomousTerminal,
   withAutonomousTerminalLock,
@@ -3519,6 +3520,13 @@ export async function startAutonomousWorkflow(
   );
   const repository = await repositoryIdentity(repositoryPath);
   requireCleanRepository(repository.path);
+  // An autonomous workflow exists to reach a pull request: its publication
+  // target is required and already validated above. A repository GitHub cannot
+  // host therefore has no workflow to authorize, and saying so here -- in the
+  // same admission block as identity and cleanliness -- covers the push, the
+  // draft pull request, and the publication at once, with no half-run action
+  // left behind to clean up.
+  assertRemoteHostableRepository(repository.path);
   if (currentBranch(repository.path) !== topicBranch) {
     fail(
       "WORKFLOW_BRANCH_MISMATCH",

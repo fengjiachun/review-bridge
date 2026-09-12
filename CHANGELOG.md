@@ -30,12 +30,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   hosts no sha256 repository, so a 64-character id in a feed is a malformed
   observation rather than a wide one.
 
-  Because GitHub cannot host such a repository at all, authorizing a remote
-  publication over one is refused by name at authorization time --
-  `REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE`, from both
-  `authorize_remote_publication` and the start of a publication over a local
-  gate -- replacing a refusal that until now happened by accident, over a SHA's
-  length, deep inside an observation reader.
+  Because GitHub cannot host such a repository at all, asking GitHub about one
+  is refused by name -- `REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE` -- when the
+  request is authorized rather than when it first reaches the network:
+  `authorize_remote_publication`, the start of a publication over a local gate,
+  and `start_autonomous_workflow`, whose arc is aimed at a pull request and
+  which therefore refuses before it plans a push. This replaces a refusal that
+  until now happened by accident, over a SHA's length, deep inside an
+  observation reader.
 
 ## 0.13.0 - 2026-09-11
 

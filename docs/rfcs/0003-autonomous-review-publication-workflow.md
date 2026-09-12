@@ -202,6 +202,13 @@ dirty worktree, unrelated branch commit, or existing open pull request requires
 an explicit continuation design rather than being silently absorbed into a new
 workflow.
 
+The repository must also be one GitHub can host. A repository created with
+`--object-format=sha256` names its objects with 64 hexadecimal characters and
+GitHub hosts none, so authorization refuses it by name. An autonomous workflow
+exists to reach a pull request, and refusing at authorization is what keeps the
+push, the draft pull request, and the publication from each discovering it
+separately.
+
 ## Capability boundaries
 
 ### Author-side Codex controller
@@ -290,7 +297,7 @@ workflows/<workflow_id>/
   },
   "requirement": "...",
   "base_ref": "origin/main",
-  "base_sha": "<40 or 64 hexadecimal characters, the repository's width>",
+  "base_sha": "<40 hexadecimal characters>",
   "topic_branch": "agent/example",
   "authorization": {
     "mode": "AUTONOMOUS_LOCAL_GATE",

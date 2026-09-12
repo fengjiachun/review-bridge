@@ -2772,7 +2772,7 @@ const KNOWN_OBJECT_FORMATS = new Set(["sha1", "sha256"]);
 // question therefore cannot have opened a sha256 repository -- the `rev-parse`
 // above would have failed instead of echoing -- so an unrecognized answer means
 // the option is unsupported and the repository is sha1.
-function assertRemoteHostableRepository(repositoryPath) {
+export function assertRemoteHostableRepository(repositoryPath) {
   const objectFormat = runGit(repositoryPath, [
     "rev-parse",
     "--show-object-format",
