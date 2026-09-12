@@ -3490,6 +3490,103 @@ test("a continuation review carries the source errata with resequenced watermark
   assert.equal(clean.history.at(-1).errata_watermark, 3);
 });
 
+test("a re-continued ledger keeps each carried erratum's origin review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const prepareInput = {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  };
+  // Each link needs its own commit: a continuation reviews the work done
+  // since the source's verdict.
+  const commitChange = async (value) => {
+    await fsp.writeFile(
+      path.join(repository, "app.js"),
+      `export const value = ${value};\n`,
+    );
+    git(repository, "add", "app.js");
+    git(repository, "commit", "-m", `change ${value}`);
+  };
+  // A verdict that opens a new finding without contesting an old one leaves
+  // the ledger continuable.
+  const driveToContinuable = async (reviewId, round) => {
+    await submitInitialReview(store, reviewId, [
+      { severity: "major", title: `Missing test ${round}`, explanation: "Add a test." },
+    ]);
+    await submitResolutions(store, reviewId, [
+      { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+    ]);
+    await prepareRereview(store, reviewId);
+    await submitRereview(
+      store,
+      reviewId,
+      [{ finding_id: "F-001", decision: "resolved", rationale: "The test exists." }],
+      [
+        {
+          severity: "minor",
+          title: `New edge case ${round}`,
+          explanation: "A separate edge case still needs a decision.",
+        },
+      ],
+    );
+  };
+
+  await commitChange(1);
+  const first = await prepareReview(store, prepareInput);
+  await appendReviewErratum(store, first.id, "Stale claim, noticed in the first ledger.");
+  await driveToContinuable(first.id, 1);
+
+  await commitChange(2);
+  const second = await prepareReview(store, {
+    ...prepareInput,
+    forceFullReview: true,
+    continuedFromReviewId: first.id,
+  });
+  // Two links: the carried erratum names the ledger it was appended in,
+  // which is also the ledger it was copied from.
+  assert.deepEqual(
+    second.errata.map((entry) => entry.continued_from_review_id),
+    [first.id],
+  );
+  await appendReviewErratum(
+    store,
+    second.id,
+    "Stale claim, noticed in the second ledger.",
+  );
+  await driveToContinuable(second.id, 2);
+
+  await commitChange(3);
+  const third = await prepareReview(store, {
+    ...prepareInput,
+    forceFullReview: true,
+    continuedFromReviewId: second.id,
+  });
+  // Three links: the copy is from the second ledger, but the first erratum
+  // was appended in the first one and still says so.
+  assert.deepEqual(
+    third.errata.map((entry) => ({
+      sequence: entry.sequence,
+      continued_from_review_id: entry.continued_from_review_id,
+      text: entry.text,
+    })),
+    [
+      {
+        sequence: 1,
+        continued_from_review_id: first.id,
+        text: "Stale claim, noticed in the first ledger.",
+      },
+      {
+        sequence: 2,
+        continued_from_review_id: second.id,
+        text: "Stale claim, noticed in the second ledger.",
+      },
+    ],
+  );
+});
+
 test("human arbitration exports carry errata beside author responses", async (t) => {
   const { store, prepared } = await erratumFixture(t);
   await submitInitialReview(store, prepared.id, [

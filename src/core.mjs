@@ -1121,14 +1121,16 @@ function continuationFindings(review) {
 // Errata bind to the requirement text they correct, and a continuation
 // carries that text verbatim, so the corrections cross with it — otherwise
 // the next reviewer reads claims the author already corrected. Sequences are
-// renumbered so the new ledger's watermark stays its own; the source id and
-// each entry's original round and timestamp remain as provenance.
+// renumbered so the new ledger's watermark stays its own; each entry's
+// original round, timestamp, and origin review remain as provenance. An
+// entry that already names an origin keeps it, so an erratum carried across
+// several continuations still names the ledger it was appended in.
 function continuationErrata(review) {
   return (review.errata ?? []).map((entry, index) => ({
     sequence: index + 1,
     at: entry.at,
     round: entry.round,
-    continued_from_review_id: review.id,
+    continued_from_review_id: entry.continued_from_review_id ?? review.id,
     text: entry.text,
   }));
 }
