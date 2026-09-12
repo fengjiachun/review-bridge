@@ -14,25 +14,3 @@ export const LOCAL_OBJECT_ID_DESCRIPTION =
 export function isLocalObjectId(value) {
   return typeof value === "string" && LOCAL_OBJECT_ID_RE.test(value);
 }
-
-// One review is one repository, and a repository has one object-id width. A
-// ledger carrying both widths describes two repositories, which no sequence of
-// operations can produce -- it can only have been spliced together outside the
-// store. The scope pins the first width a validation pass admits and refuses
-// every later id of the other width, so the rule holds over whatever fields
-// that pass reads rather than over a list of field names kept in step by hand.
-export function createObjectIdWidthScope() {
-  let width = null;
-  return {
-    admit(value) {
-      if (width == null) {
-        width = value.length;
-        return true;
-      }
-      return value.length === width;
-    },
-    get width() {
-      return width;
-    },
-  };
-}

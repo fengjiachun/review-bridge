@@ -13,18 +13,13 @@ import {
 } from "../src/core.mjs";
 import { adaptCodexEvidence } from "../src/github-adapter.mjs";
 import { normalizeGithubObservation } from "../src/github-observation.mjs";
-import {
-  createObjectIdWidthScope,
-  isLocalObjectId,
-} from "../src/object-id.mjs";
+import { isLocalObjectId } from "../src/object-id.mjs";
 import {
   authorizeRemotePublication,
-  getPublication,
-  recordGithubSnapshot,
   startPublication,
 } from "../src/publication.mjs";
 import { buildScorecard } from "../src/scorecard.mjs";
-import { atomicWriteCanonicalJson, canonicalJson } from "../src/storage.mjs";
+import { atomicWriteCanonicalJson } from "../src/storage.mjs";
 import {
   advanceLocalWorkflow,
   advanceRemoteWorkflow,
@@ -34,20 +29,17 @@ import {
   markWorkflowActionExecuting,
   planCodexTaskDispatch,
   planThreadReply,
-  planThreadUnresolve,
   recordCodexTaskObservation,
   recordWorkflowHead,
   startAutonomousWorkflow,
 } from "../src/workflow.mjs";
-import { iso, retimeObservation } from "./helpers/github-observation.mjs";
+import { iso } from "./helpers/github-observation.mjs";
 import { commit, fixture, git } from "./helpers/repository-fixture";
 import {
   CODEX_ACTOR_ID,
   findingsResult,
   gateAndPublishHead,
   gateHeadLocally,
-  publicationFilePath,
-  reachCompletedPreResolvedPostReady,
   reachRemoteWait,
   startInput,
   workflowInput,
@@ -130,21 +122,6 @@ test("the local object-id judge accepts both Git object-id widths", () => {
   for (const value of [null, undefined, 40, {}]) {
     assert.equal(isLocalObjectId(value), false, String(value));
   }
-});
-
-test("an object-id width scope pins the first width it admits", () => {
-  const scope = createObjectIdWidthScope();
-  assert.equal(scope.width, null);
-  assert.equal(scope.admit("a".repeat(SHA256_WIDTH)), true);
-  assert.equal(scope.width, SHA256_WIDTH);
-  assert.equal(scope.admit("b".repeat(SHA256_WIDTH)), true);
-  assert.equal(scope.admit("c".repeat(SHA1_WIDTH)), false);
-  // A refused id does not repin the scope: the first width stays the width.
-  assert.equal(scope.width, SHA256_WIDTH);
-
-  const narrow = createObjectIdWidthScope();
-  assert.equal(narrow.admit("a".repeat(SHA1_WIDTH)), true);
-  assert.equal(narrow.admit("b".repeat(SHA256_WIDTH)), false);
 });
 
 test("a sha256 repository runs a full local review and local gate", async (t) => {
@@ -302,68 +279,6 @@ test("a sha256 repository records a local continuation cycle's addressed head", 
   assert.deepEqual(scorecard.skipped_workflows, []);
   assert.equal(scorecard.workflows.local_cycles.started, 1);
   assert.equal(scorecard.workflows.local_cycles.addressed, 1);
-});
-
-test("a workflow ledger mixing object-id widths is refused by name", async (t) => {
-  const state = await sha256Fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  await gateHeadLocally(state, workflow, headSha, "sha256");
-
-  const workflowPath = path.join(
-    state.store,
-    "workflows",
-    workflow.workflow_id,
-    "workflow.json",
-  );
-  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
-  assert.equal(stored.base_sha.length, SHA256_WIDTH);
-  stored.current_review.head_sha = "a".repeat(SHA1_WIDTH);
-  await fsp.writeFile(workflowPath, `${canonicalJson(stored)}\n`, {
-    mode: 0o600,
-  });
-
-  await assert.rejects(
-    getAutonomousWorkflow(state.store, workflow.workflow_id),
-    (error) => {
-      assert.equal(error.code, "OBJECT_ID_WIDTH_MIXED");
-      assert.match(error.message, /object-id width/);
-      return true;
-    },
-  );
-});
-
-test("a publication ledger mixing object-id widths is refused by name", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
-  await reachRemoteWait(state, atPublication, reviewId, headSha, Date.now());
-
-  const ledgerPath = publicationFilePath(state, reviewId);
-  const ledger = JSON.parse(await fsp.readFile(ledgerPath, "utf8"));
-  assert.equal(ledger.authorization.head_sha.length, SHA1_WIDTH);
-  ledger.authorization.head_sha = "a".repeat(SHA256_WIDTH);
-  await atomicWriteCanonicalJson(ledgerPath, ledger);
-
-  await assert.rejects(getPublication(state.store, reviewId), (error) => {
-    assert.equal(error.code, "OBJECT_ID_WIDTH_MIXED");
-    assert.match(error.message, /object-id width/);
-    return true;
-  });
 });
 
 test("remote authorization on a sha256 repository is refused by name", async (t) => {
@@ -561,58 +476,15 @@ async function reachPlannedThreadReply(t) {
     workflow.workflow_id,
     waitingAgain.revision,
   );
-  const planned = await planThreadReply(
-    state.store,
-    workflow.workflow_id,
-    resolving.revision,
-    { threadId: "PRRT_1", actorId: 555, actorType: "User" },
-  );
-  return { state, workflow, planned, secondHead };
-}
-
-/** Splice one value into the stored workflow ledger and read it back. */
-async function spliceStoredWorkflow(state, workflowId, mutate) {
-  const workflowPath = path.join(
-    state.store,
-    "workflows",
-    workflowId,
-    "workflow.json",
-  );
-  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
-  mutate(stored);
-  await atomicWriteCanonicalJson(workflowPath, stored);
-  await assert.rejects(
-    getAutonomousWorkflow(state.store, workflowId),
-    (error) => {
-      assert.equal(error.code, "OBJECT_ID_WIDTH_MIXED");
-      assert.match(error.message, /object-id width/);
-      return true;
-    },
-  );
-}
-
-test("a thread-reply action naming a wide addressed-by commit is refused by name", async (t) => {
-  const { state, workflow, planned, secondHead } =
-    await reachPlannedThreadReply(t);
-  assert.deepEqual(planned.action.target.addressed_by, [secondHead]);
-
-  const wide = "a".repeat(SHA256_WIDTH);
-  await spliceStoredWorkflow(state, workflow.workflow_id, (stored) => {
-    assert.equal(stored.active_action.kind, "REPLY_TO_CODEX_THREAD");
-    const action = stored.active_action;
-    action.target.addressed_by = [wide];
-    // The dispatch is derived from the commits the target names, so a splice
-    // that leaves it behind is caught for saying more than its record. This
-    // one regenerates it, which is the splice the width scope has to name.
-    action.dispatch.body = [
-      `Fixed in ${wide.slice(0, 10)}.`,
-      "",
-      `<!-- ${action.correlation_marker} -->`,
-    ].join("\n");
+  await planThreadReply(state.store, workflow.workflow_id, resolving.revision, {
+    threadId: "PRRT_1",
+    actorId: 555,
+    actorType: "User",
   });
-});
+  return { state, workflow };
+}
 
-test("a thread-reply action naming a malformed addressed-by commit keeps its own code", async (t) => {
+test("a thread-reply action naming a malformed addressed-by commit is refused", async (t) => {
   const { state, workflow } = await reachPlannedThreadReply(t);
   const workflowPath = path.join(
     state.store,
@@ -631,53 +503,6 @@ test("a thread-reply action naming a malformed addressed-by commit keeps its own
       return true;
     },
   );
-});
-
-test("a thread-unresolve action naming a wide reviewed head is refused by name", async (t) => {
-  const { state, workflow, second, recordedPostReady } =
-    await reachCompletedPreResolvedPostReady(t, { outcome: "RESOLVED" });
-  const publication = await getPublication(state.store, second.reviewId);
-  const moved = structuredClone(publication.latest_observation);
-  const movedAt = Date.parse(moved.observed_at) + 1_000;
-  retimeObservation(moved, movedAt);
-  const thread = moved.review_threads.threads[0];
-  thread.comment_count += 1;
-  thread.comments.push({
-    id: "PRRC_follow_up",
-    database_id: 903,
-    created_at: iso(movedAt - 100),
-    updated_at: iso(movedAt - 100),
-    actor: { id: CODEX_ACTOR_ID, type: "Bot", login: "codex" },
-    review: null,
-  });
-  await recordGithubSnapshot(
-    state.store,
-    second.reviewId,
-    { expectedRevision: recordedPostReady.revision, observation: moved },
-    { clock: () => movedAt + 10 },
-  );
-  const unresolving = await advanceRemoteWorkflow(
-    state.store,
-    workflow.workflow_id,
-    workflow.revision,
-    { clock: () => movedAt + 20 },
-  );
-  const planned = await planThreadUnresolve(
-    state.store,
-    workflow.workflow_id,
-    unresolving.revision,
-    { threadId: thread.id },
-  );
-  assert.equal(
-    planned.action.target.findings_review.reviewed_head_sha.length,
-    SHA1_WIDTH,
-  );
-
-  await spliceStoredWorkflow(state, workflow.workflow_id, (stored) => {
-    assert.equal(stored.active_action.kind, "UNRESOLVE_REVIEW_THREAD");
-    stored.active_action.target.findings_review.reviewed_head_sha =
-      "a".repeat(SHA256_WIDTH);
-  });
 });
 
 test("the observation schema keeps GitHub's own object ids at 40", async (t) => {

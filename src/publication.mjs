@@ -19,11 +19,7 @@ import {
 // One derivation of thread completeness, shared with the normalizer that
 // records it. Two copies of this rule would be two things to keep in step.
 import { threadProvenanceComplete } from "./github-observation.mjs";
-import {
-  createObjectIdWidthScope,
-  isLocalObjectId,
-  LOCAL_OBJECT_ID_DESCRIPTION,
-} from "./object-id.mjs";
+import { isLocalObjectId, LOCAL_OBJECT_ID_DESCRIPTION } from "./object-id.mjs";
 import {
   atomicWriteCanonicalJson,
   canonicalJson,
@@ -307,32 +303,9 @@ function assertGithubSha(value, name) {
   return value;
 }
 
-// The width scope of the ledger validation currently running, or null outside
-// one. A publication's local ids are all pinned to its authorization head, so
-// two widths in one ledger cannot come from any sequence of operations -- only
-// from a store file assembled elsewhere, which is what the stored-ledger
-// validator exists to catch.
-let ledgerObjectIdWidth = null;
-
-function withLedgerObjectIdWidth(validate) {
-  const enclosing = ledgerObjectIdWidth;
-  ledgerObjectIdWidth = createObjectIdWidthScope();
-  try {
-    return validate();
-  } finally {
-    ledgerObjectIdWidth = enclosing;
-  }
-}
-
 function assertLocalObjectId(value, name) {
   if (!isLocalObjectId(value)) {
     fail("INVALID_INPUT", `${name} must be ${LOCAL_OBJECT_ID_DESCRIPTION}`);
-  }
-  if (ledgerObjectIdWidth != null && !ledgerObjectIdWidth.admit(value)) {
-    fail(
-      "OBJECT_ID_WIDTH_MIXED",
-      `${name} does not have the object-id width the rest of this publication uses`,
-    );
   }
   return value;
 }
@@ -2181,10 +2154,6 @@ function requireStoredReviewId(ledger, reviewId) {
 }
 
 function validateStoredLedger(ledger) {
-  return withLedgerObjectIdWidth(() => validateStoredLedgerFields(ledger));
-}
-
-function validateStoredLedgerFields(ledger) {
   assertObject(ledger, "publication");
   if (!SUPPORTED_PUBLICATION_VERSIONS.includes(ledger.version)) {
     fail(

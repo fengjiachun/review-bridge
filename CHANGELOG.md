@@ -30,12 +30,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   hosts no sha256 repository, so a 64-character id in a feed is a malformed
   observation rather than a wide one.
 
-  One review is one repository, so one ledger carries one object-id width: the
-  publication and workflow validators pin the first width the pass admits and
-  refuse a second as `OBJECT_ID_WIDTH_MIXED`, which is the only way a ledger
-  spliced from two repositories can be named. And because GitHub cannot host
-  such a repository at all, authorizing a remote publication over one is
-  refused by name at authorization time --
+  Because GitHub cannot host such a repository at all, authorizing a remote
+  publication over one is refused by name at authorization time --
   `REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE`, from both
   `authorize_remote_publication` and the start of a publication over a local
   gate -- replacing a refusal that until now happened by accident, over a SHA's
