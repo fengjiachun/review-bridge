@@ -11,7 +11,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Internal
 
-- (#PR) Memoize the expensive test lifecycle prefixes: each is built once per
+- (#143) Memoize the expensive test lifecycle prefixes: each is built once per
   test file and later callers get a private copy restored to the same absolute
   path, served only while the build started under a minute ago.
 
