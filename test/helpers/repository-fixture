@@ -27,14 +27,25 @@ export function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
-export async function fixture() {
+// objectFormat names the repository's Git object format when the caller needs
+// a specific one: a sha256 repository names its commits with 64 hex characters
+// instead of 40, which is the one difference the local guards have to survive.
+// Left unset, `git init` decides, so a caller that sets GIT_DEFAULT_HASH still
+// gets the format it asked the environment for.
+export async function fixture({ objectFormat = null } = {}) {
   const root = await fsp.mkdtemp(
     path.join(os.tmpdir(), "review-bridge-remote-"),
   );
   const repository = path.join(root, "repo");
   const store = path.join(root, "store");
   await fsp.mkdir(repository);
-  git(repository, "init", "-b", "main");
+  git(
+    repository,
+    "init",
+    "-b",
+    "main",
+    ...(objectFormat == null ? [] : [`--object-format=${objectFormat}`]),
+  );
   git(repository, "config", "user.name", "Review Bridge Test");
   git(repository, "config", "user.email", "review-bridge@example.invalid");
   await fsp.writeFile(

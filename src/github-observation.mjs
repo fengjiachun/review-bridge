@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { adaptCodexEvidence } from "./github-adapter.mjs";
+import { isLocalObjectId } from "./object-id.mjs";
 
 function object(value, name) {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
@@ -30,10 +31,7 @@ function latestTime(values) {
 function authorization(publication) {
   const value = publication.authorization ?? publication.local_gate;
   object(value, "publication authorization");
-  if (
-    !/^[0-9a-f]{40}$/.test(value.base_sha ?? "") ||
-    !/^[0-9a-f]{40}$/.test(value.head_sha ?? "")
-  ) {
+  if (!isLocalObjectId(value.base_sha) || !isLocalObjectId(value.head_sha)) {
     throw new Error("publication authorization must contain full base and head SHAs");
   }
   return {
