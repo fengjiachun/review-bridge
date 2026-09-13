@@ -461,7 +461,7 @@ test("the observation schema keeps GitHub's own object ids at 40", async (t) => 
   }
 });
 
-test("the adapter keeps a review's commit_id at 40 and widens its authorization head", () => {
+test("the adapter keeps a review's commit_id and its authorization head at 40", () => {
   const collection = {
     status: "COMPLETE",
     collected_at: "2026-07-27T00:00:00.000Z",
@@ -474,16 +474,17 @@ test("the adapter keeps a review's commit_id at 40 and widens its authorization 
     pull_request_review_comments: [],
   };
 
-  // A sha256 authorization head is a local object id and passes the judge.
+  // The authorization head comes from a publication, which a sha256
+  // repository never reaches, so a 64-character head is malformed.
   const adapted = adaptCodexEvidence({
     collection,
     expected_actor: expectedActor,
-    authorization_head_sha: "a".repeat(SHA256_WIDTH),
+    authorization_head_sha: "a".repeat(SHA1_WIDTH),
     ...emptyFeeds,
   });
   assert.deepEqual(adapted.results, []);
 
-  for (const width of [39, 41, 63, 65]) {
+  for (const width of [39, 41, 63, SHA256_WIDTH, 65]) {
     assert.throws(
       () =>
         adaptCodexEvidence({
@@ -499,7 +500,7 @@ test("the adapter keeps a review's commit_id at 40 and widens its authorization 
 
   // The commit_id beside it is GitHub's. A review whose commit_id is not a
   // 40-character SHA binds no reviewed head, which is how the adapter has
-  // always read a malformed one -- widening the local judge did not widen it.
+  // always read a malformed one.
   const review = {
     id: 5,
     body: "Codex Review: findings",
@@ -521,7 +522,7 @@ test("the adapter keeps a review's commit_id at 40 and widens its authorization 
   assert.equal(withReview.results[0].commit_binding, null);
 });
 
-test("the observation normalizer reads its authorization head with the local judge", () => {
+test("the observation normalizer keeps its authorization head at 40", () => {
   const publication = (headSha) => ({
     version: 2,
     review_id: "rb-2026-07-27T000000-000Z-00000000",
@@ -544,17 +545,14 @@ test("the observation normalizer reads its authorization head with the local jud
   const authorizationRefusal =
     /publication authorization must contain full base and head SHAs/;
 
-  // The raw collection is deliberately empty: both widths get past the
-  // authorization guard and stop at the first feed instead. Nothing here
-  // fabricates a GitHub feed, which could not carry a 64-character id.
-  for (const width of [SHA1_WIDTH, SHA256_WIDTH]) {
-    assert.throws(
-      () => normalizeGithubObservation(publication("b".repeat(width)), {}),
-      /pull_request must be an object/,
-      `width ${width}`,
-    );
-  }
-  for (const width of [39, 41, 63, 65]) {
+  // The raw collection is deliberately empty: a 40-character head gets past
+  // the authorization guard and stops at the first feed instead. A publication
+  // exists only past the sha256 refusal, so a 64-character head is refused.
+  assert.throws(
+    () => normalizeGithubObservation(publication("b".repeat(SHA1_WIDTH)), {}),
+    /pull_request must be an object/,
+  );
+  for (const width of [39, 41, 63, SHA256_WIDTH, 65]) {
     assert.throws(
       () => normalizeGithubObservation(publication("b".repeat(width)), {}),
       authorizationRefusal,

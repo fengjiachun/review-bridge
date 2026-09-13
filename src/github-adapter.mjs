@@ -6,7 +6,6 @@ import {
   codexResultRequestIdFromBodies,
   codexResultRequestMarkerCountFromBodies,
 } from "./codex-request.mjs";
-import { isLocalObjectId } from "./object-id.mjs";
 
 const EXACT_REQUEST = "@codex review";
 const TRIGGER_SHAPE = /@codex\s+review\b/i;
@@ -604,7 +603,7 @@ export function adaptCodexEvidence({
   ) {
     throw new Error("expected_actor must contain a positive ID and type Bot");
   }
-  if (!isLocalObjectId(headSha)) {
+  if (!/^[0-9a-f]{40}$/.test(headSha)) {
     throw new Error("authorization_head_sha must be a full lowercase Git SHA");
   }
   for (const value of [issueComments, reviews, reviewComments]) {
