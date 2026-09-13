@@ -38,6 +38,7 @@ import {
   workflowPaths,
   WORKFLOW_ID_RE,
 } from "./workflow-binding.mjs";
+import { isFullSha } from "./object-id.mjs";
 import { workflowRequiredInputs } from "./tool-inputs.mjs";
 
 export const AUTONOMOUS_CAPABILITIES = Object.freeze([
@@ -69,7 +70,6 @@ export const DEFAULT_REMOTE_CYCLE_BUDGET = 12;
 export const DEFAULT_LOCAL_CYCLE_BUDGET = 12;
 export { DEFAULT_CHANGE_SIZE_BUDGET };
 
-const SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 // Phases whose exit is a new commit. The three remote repair phases rejoin the
 // existing local loop rather than getting a parallel one.
@@ -396,7 +396,7 @@ export function continuesLocalCycle(workflow) {
 }
 
 function assertSha(value, name) {
-  if (typeof value !== "string" || !SHA_RE.test(value)) {
+  if (!isFullSha(value)) {
     throw new TypeError(`${name} must be a full lowercase Git SHA`);
   }
   return value;
@@ -609,7 +609,7 @@ export const ACTION_KIND_SPECS = {
         !["User", "Bot"].includes(target.expected_actor_type) ||
         !Array.isArray(target.addressed_by) ||
         target.addressed_by.length === 0 ||
-        target.addressed_by.some((sha) => !SHA_RE.test(sha ?? ""))
+        target.addressed_by.some((sha) => !isFullSha(sha))
       ) {
         fail(
           "WORKFLOW_ACTION_INVALID",
@@ -774,7 +774,7 @@ export const ACTION_KIND_SPECS = {
         ) ||
         !Array.isArray(target.follow_up_comments) ||
         !Number.isSafeInteger(target.findings_review?.result_id) ||
-        !SHA_RE.test(target.findings_review?.reviewed_head_sha ?? "")
+        !isFullSha(target.findings_review?.reviewed_head_sha)
       ) {
         fail(
           "WORKFLOW_ACTION_INVALID",

@@ -14,3 +14,11 @@ export const LOCAL_OBJECT_ID_DESCRIPTION =
 export function isLocalObjectId(value) {
   return typeof value === "string" && LOCAL_OBJECT_ID_RE.test(value);
 }
+
+const FULL_SHA_RE = /^[0-9a-f]{40}$/;
+
+// The 40-only guard past that refusal. The type check is not decoration:
+// RegExp.test coerces its argument, so ["<40 hex>"] would pass the bare regex.
+export function isFullSha(value) {
+  return typeof value === "string" && FULL_SHA_RE.test(value);
+}

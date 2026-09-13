@@ -19,7 +19,11 @@ import {
 // One derivation of thread completeness, shared with the normalizer that
 // records it. Two copies of this rule would be two things to keep in step.
 import { threadProvenanceComplete } from "./github-observation.mjs";
-import { isLocalObjectId, LOCAL_OBJECT_ID_DESCRIPTION } from "./object-id.mjs";
+import {
+  isFullSha,
+  isLocalObjectId,
+  LOCAL_OBJECT_ID_DESCRIPTION,
+} from "./object-id.mjs";
 import {
   atomicWriteCanonicalJson,
   canonicalJson,
@@ -68,7 +72,6 @@ const HISTORICAL_ANCESTOR_LOCK_WAIT_MS = 1_000;
 const BODY_REQUEST = "@codex review";
 const REQUEST_BODY_SHA256 = sha256(Buffer.from(BODY_REQUEST, "utf8"));
 
-const SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 const RESOURCE_KINDS = new Set([
   "ISSUE_COMMENT",
@@ -295,7 +298,7 @@ function assertRevision(value) {
 }
 
 function assertSha(value, name) {
-  if (typeof value !== "string" || !SHA_RE.test(value)) {
+  if (!isFullSha(value)) {
     fail("INVALID_INPUT", `${name} must be a 40-character lowercase Git SHA`);
   }
   return value;
@@ -1576,7 +1579,7 @@ function validateThreadAncestry(reviewThreads, gatedHeadSha) {
   );
   const byHead = new Map();
   for (const entry of entries) {
-    if (!/^[0-9a-f]{40}$/.test(entry.finding_head_sha ?? "")) {
+    if (!isFullSha(entry.finding_head_sha)) {
       fail("INVALID_INPUT", "ancestry finding head must be a full SHA");
     }
     assertEnum(
@@ -2934,10 +2937,10 @@ function validateOpenedRemoteAuthorization(
       "remote authorization repository_path must be a non-empty absolute path",
     );
   }
-  if (!SHA_RE.test(authorization.base_sha ?? "")) {
+  if (!isFullSha(authorization.base_sha)) {
     fail("REMOTE_AUTHORIZATION_INVALID", "remote authorization base_sha is invalid");
   }
-  if (!SHA_RE.test(authorization.head_sha ?? "")) {
+  if (!isFullSha(authorization.head_sha)) {
     fail("REMOTE_AUTHORIZATION_INVALID", "remote authorization head_sha is invalid");
   }
   if ((authorization.reviewer_provider ?? null) !== null) {
@@ -5694,7 +5697,7 @@ function validateAuditEvent(event, reviewId, head) {
       event.publication_revision > 0);
   const validHead =
     event.head_sha === null ||
-    (typeof event.head_sha === "string" && SHA_RE.test(event.head_sha));
+    isFullSha(event.head_sha);
   const validObservationDigest =
     event.github_observation_sha256 === null ||
     (typeof event.github_observation_sha256 === "string" &&
@@ -7726,7 +7729,7 @@ function invalidatedResolutionPlan(ledger, binding) {
     const rootReview = thread.comments[0]?.review;
     if (
       !Number.isSafeInteger(rootReview?.database_id) ||
-      !SHA_RE.test(rootReview?.reviewed_head_sha ?? "")
+      !isFullSha(rootReview?.reviewed_head_sha)
     ) {
       return {
         review_id: ledger.review_id,
@@ -8720,7 +8723,7 @@ export async function verifyPublicationGate(
                   : null,
               head_sha: result.valid
                 ? result.head_sha
-                : SHA_RE.test(gate?.head_sha ?? "")
+                : isFullSha(gate?.head_sha)
                   ? gate.head_sha
                   : null,
               github_observation_sha256:

@@ -26,7 +26,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   the stored ledger, the remote authorization file, audit events, the gate
   projection, request and acknowledgement heads, the workflow and its binding,
   the scorecard's `addressed_head_sha`, and the authorization head the
-  observation normalizer and the Codex adapter read -- is back to 40.
+  observation normalizer and the Codex adapter read -- is back to 40. Those
+  40-character guards now share one judge, `isFullSha`, that checks the value is
+  a string before matching it: `RegExp.test` coerces its argument, so a stored
+  one-element array holding a SHA passed the bare regex the guards had used.
 - Route the workflow skill by mode and reviewer provider, with detailed flows
   in packaged references. Separate unchanged workflow revisions from polling
   cadence, retaining local wait timeout semantics and protocol boundaries

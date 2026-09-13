@@ -878,6 +878,10 @@ test("a malformed repair-cycle entry is a defect, not a cycle", async (t) => {
     ["rbwf-2026-09-04T000000-000Z-d4e4f4a4",
       { local_review_cycles: [{ number: 1, addressed_head_sha: 7 }] },
       "local_review_cycles holds an entry that has an addressed_head_sha that is not a commit"],
+    // RegExp.test coerces its argument, so a one-element array passes a bare regex.
+    ["rbwf-2026-09-05T000000-000Z-e5f5a5b5",
+      { local_review_cycles: [{ number: 1, addressed_head_sha: ["a".repeat(40)] }] },
+      "local_review_cycles holds an entry that has an addressed_head_sha that is not a commit"],
     // Strings the counters would read as "addressed", "followed up", "diverted".
     ["rbwf-2026-09-13T000000-000Z-a3b3c3d3",
       { local_review_cycles: [{ number: 1, addressed_head_sha: "" }] },
