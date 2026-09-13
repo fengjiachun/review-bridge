@@ -35,6 +35,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   cadence, retaining local wait timeout semantics and protocol boundaries
   (#140).
 
+### Internal
+
+- (#142) The 0.14.1 release pull request, whose merge carries the v0.14.1 tag
+  and whose own changelog bullet is this one.
+
 ## 0.14.0 - 2026-09-13
 
 ### Added
