@@ -50,6 +50,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   ledger the erratum was appended in. Ledgers written before this keep the
   values they carry: nothing can recover an origin a ledger never kept.
 
+### Internal
+
+- (#136) The 0.14.0 release pull request, whose merge carries the v0.14.0 tag
+  and whose own changelog bullet is this one.
+
 ## 0.13.0 - 2026-09-11
 
 ### Added
