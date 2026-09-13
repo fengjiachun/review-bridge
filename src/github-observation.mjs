@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { adaptCodexEvidence } from "./github-adapter.mjs";
-import { isLocalObjectId } from "./object-id.mjs";
+import { isFullSha } from "./object-id.mjs";
 
 function object(value, name) {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
@@ -31,7 +31,10 @@ function latestTime(values) {
 function authorization(publication) {
   const value = publication.authorization ?? publication.local_gate;
   object(value, "publication authorization");
-  if (!isLocalObjectId(value.base_sha) || !isLocalObjectId(value.head_sha)) {
+  if (
+    !isFullSha(value.base_sha) ||
+    !isFullSha(value.head_sha)
+  ) {
     throw new Error("publication authorization must contain full base and head SHAs");
   }
   return {
@@ -686,7 +689,7 @@ function normalizeThreadAncestry(publication, raw, threads) {
   for (const [index, entryValue] of rawEntries.entries()) {
     const entry = object(entryValue, `thread_ancestry[${index}]`);
     const head = entry.finding_head_sha;
-    if (!/^[0-9a-f]{40}$/.test(head ?? "")) {
+    if (!isFullSha(head)) {
       throw new Error(`thread_ancestry[${index}] finding head is invalid`);
     }
     if (byHead.has(head)) {

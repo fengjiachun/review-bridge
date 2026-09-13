@@ -1,7 +1,7 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { MAX_ROUNDS, REVIEWER_PROVIDERS } from "./core.mjs";
-import { isLocalObjectId } from "./object-id.mjs";
+import { isFullSha } from "./object-id.mjs";
 import { DEFAULT_CHANGE_SIZE_BUDGET } from "./workflow.mjs";
 
 export const SCORECARD_SCHEMA_VERSION = 1;
@@ -248,10 +248,7 @@ function repairEntryDefect(entry, index) {
   if (entry.number !== index + 1) {
     return "is not numbered by its position";
   }
-  if (
-    entry.addressed_head_sha != null &&
-    !isLocalObjectId(entry.addressed_head_sha)
-  ) {
+  if (entry.addressed_head_sha != null && !isFullSha(entry.addressed_head_sha)) {
     return "has an addressed_head_sha that is not a commit";
   }
   if (

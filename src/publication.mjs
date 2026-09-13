@@ -19,7 +19,11 @@ import {
 // One derivation of thread completeness, shared with the normalizer that
 // records it. Two copies of this rule would be two things to keep in step.
 import { threadProvenanceComplete } from "./github-observation.mjs";
-import { isLocalObjectId, LOCAL_OBJECT_ID_DESCRIPTION } from "./object-id.mjs";
+import {
+  isFullSha,
+  isLocalObjectId,
+  LOCAL_OBJECT_ID_DESCRIPTION,
+} from "./object-id.mjs";
 import {
   atomicWriteCanonicalJson,
   canonicalJson,
@@ -68,9 +72,6 @@ const HISTORICAL_ANCESTOR_LOCK_WAIT_MS = 1_000;
 const BODY_REQUEST = "@codex review";
 const REQUEST_BODY_SHA256 = sha256(Buffer.from(BODY_REQUEST, "utf8"));
 
-// Object ids GitHub reported. GitHub hosts no sha256 repository, so a 64-hex
-// id in a feed is a malformed observation, not a wide one.
-const GITHUB_SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 const RESOURCE_KINDS = new Set([
   "ISSUE_COMMENT",
@@ -296,8 +297,8 @@ function assertRevision(value) {
   }
 }
 
-function assertGithubSha(value, name) {
-  if (typeof value !== "string" || !GITHUB_SHA_RE.test(value)) {
+function assertSha(value, name) {
+  if (!isFullSha(value)) {
     fail("INVALID_INPUT", `${name} must be a 40-character lowercase Git SHA`);
   }
   return value;
@@ -902,7 +903,7 @@ function validateRequestFacts(items, name, { baseline = false } = {}) {
           `${name}[${index}].issuance.recorded_revision is invalid`,
         );
       }
-      assertLocalObjectId(
+      assertSha(
         issuance.requested_head_sha,
         `${name}[${index}].issuance.requested_head_sha`,
       );
@@ -962,10 +963,7 @@ function validateResultFacts(
       fail("INVALID_INPUT", `${name}[${index}].request_id is invalid`);
     }
     if (item.reviewed_head_sha != null) {
-      assertGithubSha(
-        item.reviewed_head_sha,
-        `${name}[${index}].reviewed_head_sha`,
-      );
+      assertSha(item.reviewed_head_sha, `${name}[${index}].reviewed_head_sha`);
     }
     assertArray(
       item.attached_review_comments ?? [],
@@ -989,10 +987,7 @@ function validateResultFacts(
         `${name}[${index}] attachment actor.type`,
         100,
       );
-      assertGithubSha(
-        attachment.commit_id,
-        `${name}[${index}] attachment commit_id`,
-      );
+      assertSha(attachment.commit_id, `${name}[${index}] attachment commit_id`);
       assertDigest(
         attachment.body_sha256,
         `${name}[${index}] attachment body_sha256`,
@@ -1199,7 +1194,7 @@ function validatePullRequest(pullRequest) {
     fail("INVALID_INPUT", "pull request merge and draft fields must be boolean");
   }
   for (const field of ["head_sha", "pr_reported_base_sha", "base_sha"]) {
-    assertGithubSha(pullRequest[field], `pull_request.${field}`);
+    assertSha(pullRequest[field], `pull_request.${field}`);
   }
   assertString(pullRequest.head_branch, "pull_request.head_branch", 255);
   assertString(pullRequest.base_branch, "pull_request.base_branch", 255);
@@ -1212,10 +1207,7 @@ function validatePullRequest(pullRequest) {
     const baseSource = pullRequest.collection.sources?.find(
       (source) => source.kind === "BASE_BRANCH_METADATA",
     );
-    assertGithubSha(
-      baseSource?.branch_tip_sha,
-      "BASE_BRANCH_METADATA.branch_tip_sha",
-    );
+    assertSha(baseSource?.branch_tip_sha, "BASE_BRANCH_METADATA.branch_tip_sha");
   }
   if (pullRequest.is_merged) {
     if (
@@ -1226,7 +1218,7 @@ function validatePullRequest(pullRequest) {
       fail("INVALID_INPUT", "merged pull request fields are inconsistent");
     }
     timestampMs(pullRequest.merged_at, "pull_request.merged_at");
-    assertGithubSha(pullRequest.merge_commit_sha, "pull_request.merge_commit_sha");
+    assertSha(pullRequest.merge_commit_sha, "pull_request.merge_commit_sha");
   } else if (pullRequest.merged_at != null || pullRequest.merge_commit_sha != null) {
     fail("INVALID_INPUT", "open or unmerged pull request cannot carry merge evidence");
   }
@@ -1243,8 +1235,8 @@ function validatePullRequest(pullRequest) {
       ["AHEAD", "IDENTICAL", "BEHIND", "DIVERGED", "UNKNOWN"],
       `pull_request.${name}.status`,
     );
-    assertGithubSha(comparison.base_sha, `pull_request.${name}.base_sha`);
-    assertGithubSha(comparison.head_sha, `pull_request.${name}.head_sha`);
+    assertSha(comparison.base_sha, `pull_request.${name}.base_sha`);
+    assertSha(comparison.head_sha, `pull_request.${name}.head_sha`);
   }
 }
 
@@ -1304,7 +1296,7 @@ function validateChecks(requiredChecks, pullRequest, target) {
     assertId(run.run_id, "run_id");
     assertEnum(run.run_kind, ["CHECK_RUN", "COMMIT_STATUS"], "run_kind");
     assertString(run.context, "run.context", 255);
-    assertGithubSha(run.head_sha, "run.head_sha");
+    assertSha(run.head_sha, "run.head_sha");
     timestampMs(run.started_at, "run.started_at");
     assertString(run.status, "run.status", 100);
     if (run.run_kind === "CHECK_RUN") {
@@ -1358,7 +1350,7 @@ function validateChecks(requiredChecks, pullRequest, target) {
   const branchSource = requiredChecks.collection.policy_sources?.find(
     (source) => source.kind === "BRANCH_METADATA",
   );
-  assertGithubSha(branchSource?.branch_tip_sha, "BRANCH_METADATA.branch_tip_sha");
+  assertSha(branchSource?.branch_tip_sha, "BRANCH_METADATA.branch_tip_sha");
   if (typeof branchSource.protected !== "boolean") {
     fail("INVALID_INPUT", "BRANCH_METADATA.protected must be boolean");
   }
@@ -1558,7 +1550,7 @@ function validateThreadProvenance(thread) {
       );
       assertObject(review.actor, "thread review actor");
       if (review.reviewed_head_sha !== null) {
-        assertGithubSha(review.reviewed_head_sha, "thread review reviewed_head_sha");
+        assertSha(review.reviewed_head_sha, "thread review reviewed_head_sha");
       }
     }
   }
@@ -1587,7 +1579,7 @@ function validateThreadAncestry(reviewThreads, gatedHeadSha) {
   );
   const byHead = new Map();
   for (const entry of entries) {
-    if (!/^[0-9a-f]{40}$/.test(entry.finding_head_sha ?? "")) {
+    if (!isFullSha(entry.finding_head_sha)) {
       fail("INVALID_INPUT", "ancestry finding head must be a full SHA");
     }
     assertEnum(
@@ -1803,10 +1795,7 @@ function validateCodexPartitions(codexReview, ledger) {
     ) {
       fail("INVALID_INPUT", "recognized request is not the exact workflow issue comment");
     }
-    assertLocalObjectId(
-      request.requested_head_sha,
-      "request.requested_head_sha",
-    );
+    assertSha(request.requested_head_sha, "request.requested_head_sha");
   }
   for (const foreign of foreignActorObjects) {
     assertUrl(foreign.url, "foreign_actor_object.url");
@@ -2211,7 +2200,7 @@ function validateStoredLedger(ledger) {
         record.eligibility_sha256,
         "automatic-resolution eligibility_sha256",
       );
-      assertLocalObjectId(record.head_sha, "automatic-resolution head_sha");
+      assertSha(record.head_sha, "automatic-resolution head_sha");
       assertObject(record.actor, "automatic-resolution actor");
       assertId(record.actor.id, "automatic-resolution actor id");
       assertString(record.actor.type, "automatic-resolution actor type", 100);
@@ -2347,14 +2336,8 @@ function validateStoredLedger(ledger) {
   }
   if (ledger.version === 1) {
     assertObject(ledger.local_gate, "publication.local_gate");
-    assertLocalObjectId(
-      ledger.local_gate.head_sha,
-      "publication.local_gate.head_sha",
-    );
-    assertLocalObjectId(
-      ledger.local_gate.base_sha,
-      "publication.local_gate.base_sha",
-    );
+    assertSha(ledger.local_gate.head_sha, "publication.local_gate.head_sha");
+    assertSha(ledger.local_gate.base_sha, "publication.local_gate.base_sha");
     assertDigest(
       ledger.local_gate.snapshot_hash,
       "publication.local_gate.snapshot_hash",
@@ -2381,14 +2364,8 @@ function validateStoredLedger(ledger) {
       ["LOCAL_GATE", "REMOTE_ONLY"],
       "publication.authorization.mode",
     );
-    assertLocalObjectId(
-      authorization.head_sha,
-      "publication.authorization.head_sha",
-    );
-    assertLocalObjectId(
-      authorization.base_sha,
-      "publication.authorization.base_sha",
-    );
+    assertSha(authorization.head_sha, "publication.authorization.head_sha");
+    assertSha(authorization.base_sha, "publication.authorization.base_sha");
     assertDigest(
       authorization.source_sha256,
       "publication.authorization.source_sha256",
@@ -2554,10 +2531,7 @@ function validateStoredLedger(ledger) {
       fail("PUBLICATION_STORE_INVALID", "request history revision is invalid");
     }
     if (item.classification === "RECOGNIZED") {
-      assertLocalObjectId(
-        item.requested_head_sha,
-        "request history requested_head_sha",
-      );
+      assertSha(item.requested_head_sha, "request history requested_head_sha");
       if (
         baseline.collection.adapter_version === 2 &&
         !isCodexRequestId(item.request_id)
@@ -2602,7 +2576,7 @@ function validateStoredLedger(ledger) {
   );
   for (const item of acknowledgements) {
     assertString(item.acknowledgement_id, "acknowledgement_id", 255);
-    assertLocalObjectId(item.head_sha, "acknowledgement head_sha");
+    assertSha(item.head_sha, "acknowledgement head_sha");
     assertArray(
       item.closed_requests,
       "acknowledgement closed_requests",
@@ -2963,10 +2937,10 @@ function validateOpenedRemoteAuthorization(
       "remote authorization repository_path must be a non-empty absolute path",
     );
   }
-  if (!isLocalObjectId(authorization.base_sha)) {
+  if (!isFullSha(authorization.base_sha)) {
     fail("REMOTE_AUTHORIZATION_INVALID", "remote authorization base_sha is invalid");
   }
-  if (!isLocalObjectId(authorization.head_sha)) {
+  if (!isFullSha(authorization.head_sha)) {
     fail("REMOTE_AUTHORIZATION_INVALID", "remote authorization head_sha is invalid");
   }
   if ((authorization.reviewer_provider ?? null) !== null) {
@@ -5722,7 +5696,8 @@ function validateAuditEvent(event, reviewId, head) {
     (Number.isSafeInteger(event.publication_revision) &&
       event.publication_revision > 0);
   const validHead =
-    event.head_sha === null || isLocalObjectId(event.head_sha);
+    event.head_sha === null ||
+    isFullSha(event.head_sha);
   const validObservationDigest =
     event.github_observation_sha256 === null ||
     (typeof event.github_observation_sha256 === "string" &&
@@ -7530,7 +7505,7 @@ export async function recordCodexReviewRequest(
     assertUrl(url, "url");
     const canonicalCreatedAt = canonicalRequestTimestamp(createdAt);
     const createdMs = timestampMs(canonicalCreatedAt, "created_at");
-    assertLocalObjectId(requestedHeadSha, "requested_head_sha");
+    assertSha(requestedHeadSha, "requested_head_sha");
     if (
       currentMs - createdMs > MAX_AGE_MS ||
       createdMs - currentMs > MAX_FUTURE_MS
@@ -7754,7 +7729,7 @@ function invalidatedResolutionPlan(ledger, binding) {
     const rootReview = thread.comments[0]?.review;
     if (
       !Number.isSafeInteger(rootReview?.database_id) ||
-      !GITHUB_SHA_RE.test(rootReview?.reviewed_head_sha ?? "")
+      !isFullSha(rootReview?.reviewed_head_sha)
     ) {
       return {
         review_id: ledger.review_id,
@@ -8424,7 +8399,7 @@ export async function acknowledgeCodexReviewAmbiguity(
   return publicationLock(paths, reviewId, async () => {
     const currentMs = clock();
     assertRevision(expectedRevision);
-    assertLocalObjectId(headSha, "head_sha");
+    assertSha(headSha, "head_sha");
     assertArray(requestRefs, "request_refs", MAX_CLOSURE_REQUEST_REFERENCES);
     assertArray(
       ambiguousResults,
@@ -8748,7 +8723,7 @@ export async function verifyPublicationGate(
                   : null,
               head_sha: result.valid
                 ? result.head_sha
-                : isLocalObjectId(gate?.head_sha)
+                : isFullSha(gate?.head_sha)
                   ? gate.head_sha
                   : null,
               github_observation_sha256:

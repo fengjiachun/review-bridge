@@ -38,7 +38,7 @@ import {
   workflowPaths,
   WORKFLOW_ID_RE,
 } from "./workflow-binding.mjs";
-import { isLocalObjectId, LOCAL_OBJECT_ID_DESCRIPTION } from "./object-id.mjs";
+import { isFullSha } from "./object-id.mjs";
 import { workflowRequiredInputs } from "./tool-inputs.mjs";
 
 export const AUTONOMOUS_CAPABILITIES = Object.freeze([
@@ -396,8 +396,8 @@ export function continuesLocalCycle(workflow) {
 }
 
 function assertSha(value, name) {
-  if (!isLocalObjectId(value)) {
-    throw new TypeError(`${name} must be ${LOCAL_OBJECT_ID_DESCRIPTION}`);
+  if (!isFullSha(value)) {
+    throw new TypeError(`${name} must be a full lowercase Git SHA`);
   }
   return value;
 }
@@ -609,7 +609,7 @@ export const ACTION_KIND_SPECS = {
         !["User", "Bot"].includes(target.expected_actor_type) ||
         !Array.isArray(target.addressed_by) ||
         target.addressed_by.length === 0 ||
-        target.addressed_by.some((sha) => !isLocalObjectId(sha))
+        target.addressed_by.some((sha) => !isFullSha(sha))
       ) {
         fail(
           "WORKFLOW_ACTION_INVALID",
@@ -774,7 +774,7 @@ export const ACTION_KIND_SPECS = {
         ) ||
         !Array.isArray(target.follow_up_comments) ||
         !Number.isSafeInteger(target.findings_review?.result_id) ||
-        !isLocalObjectId(target.findings_review?.reviewed_head_sha)
+        !isFullSha(target.findings_review?.reviewed_head_sha)
       ) {
         fail(
           "WORKFLOW_ACTION_INVALID",
@@ -3505,7 +3505,6 @@ export async function startAutonomousWorkflow(
   },
 ) {
   assertString(baseRef, "base_ref", { max: 1024 });
-  assertSha(baseSha, "base_sha");
   assertString(requirement, "requirement");
   assertString(implementationScope, "implementation_scope");
   assertString(topicBranch, "topic_branch", { max: 1024 });
@@ -3525,8 +3524,10 @@ export async function startAutonomousWorkflow(
   // host therefore has no workflow to authorize, and saying so here -- in the
   // same admission block as identity and cleanliness -- covers the push, the
   // draft pull request, and the publication at once, with no half-run action
-  // left behind to clean up.
+  // left behind to clean up. Past this point every object id is sha1, so
+  // base_sha is judged at 40 only after the repository is known to be one.
   assertRemoteHostableRepository(repository.path);
+  assertSha(baseSha, "base_sha");
   if (currentBranch(repository.path) !== topicBranch) {
     fail(
       "WORKFLOW_BRANCH_MISMATCH",

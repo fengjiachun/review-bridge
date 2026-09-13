@@ -11,6 +11,25 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Changed
 
+- Narrow the 64-character object id back to the readers a sha256 repository
+  can reach before it is refused by name (#139). 0.14.0 let every guard over a
+  locally named object id accept 40 or 64 characters, but the
+  `REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE` refusal it added runs before any
+  publication, workflow, workflow binding, or scorecard entry exists, so none of
+  them can hold a 64-character id and the wider guard only let a damaged one
+  through. Two readers keep both widths: the local gate, which a local review of
+  a sha256 repository writes and which `start_publication` and the review report
+  read before any refusal, and the `base_sha` and `head_sha` handed to
+  `authorize_remote_publication`, which are checked before the repository is
+  known. `start_autonomous_workflow` now checks its `base_sha` after the
+  refusal instead of before it, so it needs no wide guard. Everything else --
+  the stored ledger, the remote authorization file, audit events, the gate
+  projection, request and acknowledgement heads, the workflow and its binding,
+  the scorecard's `addressed_head_sha`, and the authorization head the
+  observation normalizer and the Codex adapter read -- is back to 40. Those
+  40-character guards now share one judge, `isFullSha`, that checks the value is
+  a string before matching it: `RegExp.test` coerces its argument, so a stored
+  one-element array holding a SHA passed the bare regex the guards had used.
 - Route the workflow skill by mode and reviewer provider, with detailed flows
   in packaged references. Separate unchanged workflow revisions from polling
   cadence, retaining local wait timeout semantics and protocol boundaries
