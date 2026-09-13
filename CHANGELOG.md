@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.14.1 - 2026-09-13
 
 ### Changed
 
@@ -34,6 +34,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   in packaged references. Separate unchanged workflow revisions from polling
   cadence, retaining local wait timeout semantics and protocol boundaries
   (#140).
+
+### Internal
+
+- (#142) The 0.14.1 release pull request, whose merge carries the v0.14.1 tag
+  and whose own changelog bullet is this one.
 
 ## 0.14.0 - 2026-09-13
 
