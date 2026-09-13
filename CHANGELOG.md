@@ -12,7 +12,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 ### Changed
 
 - Narrow the 64-character object id back to the readers a sha256 repository
-  can reach before it is refused by name (#138). 0.14.0 let every guard over a
+  can reach before it is refused by name (#139). 0.14.0 let every guard over a
   locally named object id accept 40 or 64 characters, but the
   `REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE` refusal it added runs before any
   publication, workflow, workflow binding, or scorecard entry exists, so none of
