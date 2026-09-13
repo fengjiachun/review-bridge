@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readWorkflowDocuments, readWorkflowSkill } from "./workflow-skill.mjs";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fsp from "node:fs/promises";
@@ -405,7 +406,15 @@ const workflowSkillPath = path.join(
   "SKILL.md",
 );
 assert.ok(await fsp.stat(workflowSkillPath));
-const workflowSkill = await fsp.readFile(workflowSkillPath, "utf8");
+const workflowSkill = await readWorkflowSkill(workflowSkillPath);
+const sourceWorkflowDocuments = await readWorkflowDocuments(path.join(
+  projectRoot, "templates", "codex-plugin", "skills", "review-bridge-workflow", "SKILL.md",
+));
+const packagedWorkflowDocuments = await readWorkflowDocuments(workflowSkillPath);
+assert.deepEqual([...packagedWorkflowDocuments.keys()].sort(), [...sourceWorkflowDocuments.keys()].sort());
+for (const [name, text] of sourceWorkflowDocuments) {
+  assert.equal(packagedWorkflowDocuments.get(name), text, `packaged workflow differs: ${name}`);
+}
 const packagedReadme = await fsp.readFile(
   path.join(outputRoot, "README.md"),
   "utf8",

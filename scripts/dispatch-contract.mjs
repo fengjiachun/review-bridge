@@ -134,6 +134,7 @@ const SHARED_STRUCTURAL = [
 // routed to Codex's guardian subagent. So its contract states the genuinely
 // shared claims itself and adds the ones only that launch makes true.
 export const CODEX_TASK_DISPATCH_CONTRACT = {
+  additionalHeadings: ["## Advisory CODEX_TASK sandbox"],
   requirements: [
     [
       "step 1 records the state version the wait needs",
@@ -1263,8 +1264,11 @@ export function extractMarkdownSection(document, heading) {
 }
 
 export function assertDispatchContract(document, heading, label, contract) {
-  const body = extractMarkdownSection(document, heading);
-  assert.ok(body, `${label}: "${heading}" is missing`);
+  const body = [heading, ...(contract.additionalHeadings ?? [])].map((section) => {
+    const text = extractMarkdownSection(`\n${document}`, section);
+    assert.ok(text, `${label}: "${section}" is missing`);
+    return text;
+  }).join("\n\n");
   const prose = body.replace(/^ *> ?/gm, "").replace(/\s+/g, " ");
 
   for (const [mode, pattern, message] of contract.structural) {
