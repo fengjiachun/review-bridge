@@ -35,6 +35,15 @@ test("manual preparation routes to each provider without loading other playbooks
   }
 });
 
+test("a fresh findings route includes the cleanup required before its fix commit", async () => {
+  const entry = await fsp.readFile(path.join(root, "SKILL.md"), "utf8");
+  const findings = await fsp.readFile(path.join(root, "references", "findings.md"), "utf8");
+  const route = `${entry}\n${findings}`.replace(/\s+/g, " ");
+  assert.match(route, /remove comments that do not state a constraint the code cannot express/);
+  assert.match(route, /remove tests that no behavior change can turn red/);
+  assert.match(route, /fix commits before rereview/);
+});
+
 test("waiting keeps ledger revisions separate from cadence and local timeouts", async () => {
   const docs = await readWorkflowDocuments(path.join(root, "SKILL.md"));
   const entry = docs.get("SKILL.md").replace(/\s+/g, " ");

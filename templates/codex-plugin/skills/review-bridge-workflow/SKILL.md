@@ -30,6 +30,9 @@ load [Lock contention](references/lock-contention.md) before deciding to retry.
 
 ## Common boundaries
 
+- Before every commit, apply the pre-commit cleanup: remove comments that do
+  not state a constraint the code cannot express and remove tests that no
+  behavior change can turn red. This includes fix commits before rereview.
 - Keep the user's requirement and scope faithful. Bind review to the exact
   repository, immutable base SHA, captured head and snapshot, and chosen
   provider. A changed head needs the applicable fresh review or authorization.
