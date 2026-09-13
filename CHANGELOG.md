@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.14.0 - 2026-09-13
 
 ### Added
 
@@ -38,6 +38,22 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   which therefore refuses before it plans a push. This replaces a refusal that
   until now happened by accident, over a SHA's length, deep inside an
   observation reader.
+
+### Fixed
+
+- Keep a carried erratum's origin review across a chain of continuations,
+  issue #132 (#134). `continuationErrata` stamped every copied entry with the
+  ledger it was copying from, so over A -> B -> C an erratum appended in A
+  arrived in C named as coming from B, and the review report rendered that
+  attribution faithfully. The copy now keeps an entry's existing origin and
+  stamps the source ledger only on a first copy, so the field always names the
+  ledger the erratum was appended in. Ledgers written before this keep the
+  values they carry: nothing can recover an origin a ledger never kept.
+
+### Internal
+
+- (#136) The 0.14.0 release pull request, whose merge carries the v0.14.0 tag
+  and whose own changelog bullet is this one.
 
 ## 0.13.0 - 2026-09-11
 
