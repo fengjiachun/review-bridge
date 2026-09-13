@@ -7,6 +7,15 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Changed
+
+- Route the workflow skill by mode and reviewer provider, with detailed flows
+  in packaged references. Separate unchanged workflow revisions from polling
+  cadence, retaining local wait timeout semantics and protocol boundaries
+  (#140).
+
 ## 0.14.0 - 2026-09-13
 
 ### Added
