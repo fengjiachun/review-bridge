@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { REVIEWER_PROVIDERS } from "../src/core.mjs";
+import { readWorkflowSkill } from "../scripts/workflow-skill.mjs";
 import * as mcpSnippets from "../scripts/mcp-snippets.mjs";
 import {
   ADVISORY_PANEL_CONTRACT,
@@ -540,15 +541,7 @@ test("noise comments and decorative tests are contracted on both ends", async ()
   // rather than pinning line breaks.
   const flatten = (text) => text.replace(/\s+/g, " ");
   const workflowSkill = flatten(
-    await readRequired(
-      path.join(
-        "templates",
-        "codex-plugin",
-        "skills",
-        "review-bridge-workflow",
-        "SKILL.md",
-      ),
-    ),
+    await readWorkflowSkill(path.join(projectRoot, WORKFLOW_SKILL)),
   );
   // Both author paths — autonomous COMMIT_HEAD and the manual Prepare flow —
   // must carry the obligation, so one occurrence is a silent exemption.
@@ -615,15 +608,7 @@ test("noise comments and decorative tests are contracted on both ends", async ()
 test("publish-bound work states its gate provider and its review strategy", async () => {
   const flatten = (text) => text.replace(/\s+/g, " ");
   const workflowSkill = flatten(
-    await readRequired(
-      path.join(
-        "templates",
-        "codex-plugin",
-        "skills",
-        "review-bridge-workflow",
-        "SKILL.md",
-      ),
-    ),
+    await readWorkflowSkill(path.join(projectRoot, WORKFLOW_SKILL)),
   );
   for (const [sentence, why] of [
     [
@@ -678,15 +663,7 @@ test("publish-bound work states its gate provider and its review strategy", asyn
 });
 
 test("Codex workflow skill documents manual Hermes provider selection and handoff", async () => {
-  const skill = await readRequired(
-    path.join(
-      "templates",
-      "codex-plugin",
-      "skills",
-      "review-bridge-workflow",
-      "SKILL.md",
-    ),
-  );
+  const skill = await readWorkflowSkill(path.join(projectRoot, WORKFLOW_SKILL));
   // Keyed on each step's text rather than its number, so inserting a Prepare
   // step renumbers the list without reading as a missing section.
   const providerSelection = skill.match(
@@ -754,7 +731,10 @@ const DISPATCH_SECTIONS = [
 
 test("author-side contract pins each driver-dispatched launch and its discipline", async () => {
   for (const { name, file, heading, contract } of DISPATCH_SECTIONS) {
-    assertDispatchContract(await readRequired(file), heading, name, contract);
+    const document = file === WORKFLOW_SKILL
+      ? await readWorkflowSkill(path.join(projectRoot, file))
+      : await readRequired(file);
+    assertDispatchContract(document, heading, name, contract);
   }
 });
 
@@ -762,15 +742,7 @@ test("author-side contract pins each driver-dispatched launch and its discipline
 // order finishes it by asking the operator and never reaches the section that
 // lets the driver session dispatch the reviewer itself. Both surfaces need one.
 test("both author-side surfaces point a linear reader to the dispatch section", async () => {
-  const skill = await readRequired(
-    path.join(
-      "templates",
-      "codex-plugin",
-      "skills",
-      "review-bridge-workflow",
-      "SKILL.md",
-    ),
-  );
+  const skill = await readWorkflowSkill(path.join(projectRoot, WORKFLOW_SKILL));
   // Keyed on the step's text, not its number: Prepare is renumbered whenever a
   // step is inserted, and that must not read as a missing handoff.
   const reviewerHandoff = skill.match(
@@ -779,7 +751,7 @@ test("both author-side surfaces point a linear reader to the dispatch section", 
   assert.ok(reviewerHandoff, "manual reviewer handoff section is missing");
   assert.match(
     reviewerHandoff.groups.body.replace(/\s+/g, " "),
-    /follow Dispatching a HERMES review below/,
+    /follow Dispatching a HERMES review/,
   );
 
   const readme = await readRequired(path.join("templates", "hermes", "README.md"));
@@ -1262,7 +1234,7 @@ test("the DeepSeek Harness template is packaged and documented like the others",
 // script asserts the same contract against the packaged copy.
 test("the advisory panel section pins the fence, the dispatch asymmetry, and the report", async () => {
   assertDispatchContract(
-    await readRequired(WORKFLOW_SKILL),
+    await readWorkflowSkill(path.join(projectRoot, WORKFLOW_SKILL)),
     "## Advisory panel review of an external pull request",
     "Codex workflow skill (advisory panel)",
     ADVISORY_PANEL_CONTRACT,
@@ -1273,7 +1245,7 @@ test("the advisory panel section pins the fence, the dispatch asymmetry, and the
 // the contract beside the advisory one holds both to the same sentences so
 // neither can drift into treating the report as a gate or as evidence.
 test("the Finish and Publish steps pin the report render, its trigger, and the Plannotator gate", async () => {
-  const skill = await readRequired(WORKFLOW_SKILL);
+  const skill = await readWorkflowSkill(path.join(projectRoot, WORKFLOW_SKILL));
   for (const heading of ["## Finish", "## Publish through GitHub"]) {
     assertDispatchContract(
       skill,
@@ -1351,7 +1323,7 @@ test("every reviewer surface pins the errata contract", async () => {
 test("the CODEX_TASK launches disable the author server the manifest declares", async () => {
   assertAuthorServerDisabledInLaunches(
     JSON.parse(await readRequired(path.join("templates", "codex-plugin", ".mcp.json"))),
-    await readRequired(WORKFLOW_SKILL),
+    await readWorkflowSkill(path.join(projectRoot, WORKFLOW_SKILL)),
     "Codex plugin templates",
   );
 });
