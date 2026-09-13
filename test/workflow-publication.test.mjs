@@ -91,6 +91,7 @@ import {
   reachCompletedPreResolvedPostReady,
   reachObservedThreadResolution,
   reachPostReady,
+  reachPublishedHead,
   reachRepairAncestorProof,
   reachRemoteWait,
   readyObservation,
@@ -141,19 +142,8 @@ function retimeObservation(payload, at) {
 
 
 test("an autonomous publication binds its workflow at every independent check", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
 
   const startedAt = Date.now();
   const ledger = await startPublication(
@@ -216,19 +206,8 @@ test("an autonomous publication binds its workflow at every independent check", 
 });
 
 test("a publication cannot be started for a workflow that does not authorize it", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const startedAt = Date.now();
 
   await assert.rejects(
@@ -275,19 +254,8 @@ test("a publication cannot be started for a workflow that does not authorize it"
 });
 
 test("version 1 and 2 publications keep their behavior and cannot bind a workflow", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const startedAt = Date.now();
   const manual = await startPublication(
     state.store,
@@ -326,19 +294,8 @@ test("version 1 and 2 publications keep their behavior and cannot bind a workflo
 });
 
 test("the autonomous projection ignores only the draft flag", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   await reachRemoteWait(state, atPublication, reviewId, headSha, at);
 
@@ -2099,19 +2056,8 @@ test("a different finding after a real change is progress, not a stall", async (
 });
 
 test("the check fingerprint ignores runs that are not required", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   await reachRemoteWait(
     state,
     atPublication,
@@ -2178,19 +2124,8 @@ test("the check fingerprint ignores runs that are not required", async (t) => {
 });
 
 test("expired evidence never routes the remote wait anywhere", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -2264,19 +2199,8 @@ test("expired evidence never routes the remote wait anywhere", async (t) => {
 });
 
 test("cancelling the workflow revokes the publication it authorized", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -2351,19 +2275,8 @@ test("cancelling the workflow revokes the publication it authorized", async (t) 
 });
 
 test("the findings fingerprint dedupes, and a dead-head result fails closed", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   await reachRemoteWait(
     state,
     atPublication,
@@ -2470,19 +2383,8 @@ test("the findings fingerprint dedupes, and a dead-head result fails closed", as
 });
 
 test("a blocking status always yields at least one blocker", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
 
   // A formal CHANGES_REQUESTED review at the authorized head blocks through a
   // route that constrains neither the verdict nor the attached comments, so
@@ -2520,19 +2422,8 @@ test("a blocking status always yields at least one blocker", async (t) => {
 });
 
 test("an acknowledged ambiguity can still ask for the next review", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   await reachRemoteWait(
     state,
@@ -2580,19 +2471,8 @@ test("an acknowledged ambiguity can still ask for the next review", async (t) =>
 });
 
 test("an idle remote poll costs neither a revision nor an audit event", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const { workflow: waiting } = await reachRemoteWait(
     state,
     atPublication,
@@ -2807,19 +2687,8 @@ test("a required history rewrite cannot be resumed", async (t) => {
 });
 
 test("an update-required base gap repairs through a new gated head", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const { workflow: waiting } = await reachRemoteWait(
     state,
     atPublication,
@@ -2869,19 +2738,8 @@ test("an update-required base gap repairs through a new gated head", async (t) =
 });
 
 test("a superseded publication stops being actionable before the push", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -2953,19 +2811,8 @@ test("a gate cannot outlive the workflow head that could replace it", async (t) 
   // head; if that check later passes, the ledger returns to MERGE_READY and a
   // gate can be minted while the workflow is already sitting in a phase that
   // can record a later head.
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -3129,19 +2976,8 @@ test("a gate cannot outlive the workflow head that could replace it", async (t) 
 });
 
 test("the remote wait itself cannot record a later head", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -3344,19 +3180,8 @@ test("the check fingerprint follows the runs that decided the status", async (t)
 });
 
 test("the version 3 gate carries both digests and verifies them independently", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   await reachRemoteWait(state, atPublication, reviewId, headSha, at, (payload) => {
     payload.pull_request.is_draft = false;
@@ -3444,19 +3269,8 @@ test("the version 3 gate carries both digests and verifies them independently", 
 });
 
 test("the remote wait rejects a publication bound to another head", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -3492,19 +3306,8 @@ test("the remote wait rejects a publication bound to another head", async (t) =>
 });
 
 test("a cleared draft pull request marks itself ready and then stops", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -3693,19 +3496,8 @@ test("a cleared draft pull request marks itself ready and then stops", async (t)
 });
 
 test("a clearance that regresses at the pre-ready stop routes onward", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -3758,19 +3550,8 @@ test("a clearance that regresses at the pre-ready stop routes onward", async (t)
 });
 
 test("an idle advance at the pre-ready stop spends no revision", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -3808,19 +3589,8 @@ test("an idle advance at the pre-ready stop spends no revision", async (t) => {
 });
 
 test("a blocked publication is never plannable for mark-ready", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -3868,19 +3638,8 @@ test("a blocked publication is never plannable for mark-ready", async (t) => {
 });
 
 test("a pull request found already ready reconciles without claiming it", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -3953,19 +3712,8 @@ test("a pull request found already ready reconciles without claiming it", async 
 });
 
 test("a clearance that regresses after planning stops the mark-ready", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -4192,19 +3940,8 @@ test("a resolution whose publication went terminal still closes its action", asy
 });
 
 test("a crashed mark-ready is abandoned on recorded evidence, not testimony", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   // The whole publication timeline sits before the action executes, so its
   // observations are older than the write they would have to have missed.
   const at = Date.now() - 120_000;
@@ -4291,19 +4028,8 @@ test("a crashed mark-ready is abandoned on recorded evidence, not testimony", as
   assert.equal(repairing.phase, "ADDRESS_CHECK_FAILURE");
 });
 test("an exposed pull request is not evidence that a mark-ready left nothing", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -4393,19 +4119,8 @@ test("an exposed pull request is not evidence that a mark-ready left nothing", a
 });
 
 test("a busy publication lock never destroys the planned mark-ready", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -4463,19 +4178,8 @@ test("a busy publication lock never destroys the planned mark-ready", async (t) 
 });
 
 test("the ready record names the clearance the checkpoint read", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -4642,19 +4346,8 @@ test("the ready record names the clearance the checkpoint read", async (t) => {
 });
 
 test("a regressed clearance never returns an already-ready pull request to the loop", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -4784,19 +4477,8 @@ test("a regressed clearance never returns an already-ready pull request to the l
 });
 
 test("a repair returns the pull request to draft before it starts", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   // Someone marked the pull request ready while the workflow was waiting,
   // and the same observation carries a failing check. Repairing would push a
   // new head onto a pull request reviewers can already see.
@@ -4951,19 +4633,8 @@ test("a repair returns the pull request to draft before it starts", async (t) =>
 });
 
 test("a cleared publication still marks a visible pull request ready", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   // Same exposure, no blocker. Nothing is repaired here, so nothing is
   // pushed: the stop is reachable and the action reconciles what it finds.
   const at = Date.now();
@@ -5029,19 +4700,8 @@ test("a cleared publication still marks a visible pull request ready", async (t)
 });
 
 test("a repair diverted through the undo is not a repeated attempt", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -5177,19 +4837,8 @@ test("a repair diverted through the undo is not a repeated attempt", async (t) =
 });
 
 test("an exposed pull request reaches the undo even when the blocker also pauses", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -5238,19 +4887,8 @@ test("an exposed pull request reaches the undo even when the blocker also pauses
 });
 
 test("a terminal publication is not sent to an undo it cannot run", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -5327,19 +4965,8 @@ test("a terminal publication is not sent to an undo it cannot run", async (t) =>
 });
 
 test("a terminal publication stops deciding what the pull request is", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   // The observation that invalidates the publication also shows the pull
   // request visible. That reading is now frozen: a terminal ledger refuses
   // every further snapshot, so nothing can ever report the pull request as a
@@ -5408,19 +5035,8 @@ test("a terminal publication stops deciding what the pull request is", async (t)
 });
 
 test("a merged pull request ends the run instead of starting a cycle", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -5457,19 +5073,8 @@ test("a merged pull request ends the run instead of starting a cycle", async (t)
   );
 });
 test("the undo phase has an exit when the exposure resolves itself", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -5516,19 +5121,8 @@ test("the undo phase has an exit when the exposure resolves itself", async (t) =
 });
 
 test("a repair phase on a draft pull request cannot be advanced", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -5559,19 +5153,8 @@ test("a repair phase on a draft pull request cannot be advanced", async (t) => {
 });
 
 test("an undo stranded by a merged pull request can be abandoned", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now() - 120_000;
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -5653,19 +5236,8 @@ test("an undo stranded by a merged pull request can be abandoned", async (t) => 
 });
 
 test("an undo whose pull request is still returnable is not abandonable", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now() - 120_000;
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -5734,19 +5306,8 @@ test("an undo whose pull request is still returnable is not abandonable", async 
 });
 
 test("stale evidence cannot abandon an action either", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
@@ -5812,19 +5373,8 @@ test("stale evidence cannot abandon an action either", async (t) => {
 });
 
 test("a gated head is not pushed onto a pull request reviewers can see", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   // The publication dies with the pull request visible. Its reading is
   // frozen there, so nothing it says can gate the next head -- and the next
   // head is pushed to that same pull request.
@@ -8018,19 +7568,8 @@ test("a new thread comment between mark-ready and the terminal observation block
 });
 
 test("the terminal replay accepts one linear supersession chain and blocks every broken chain", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const { state, workflow, atPublication, reviewId, headSha } =
+    await reachPublishedHead(t);
   const at = Date.now();
   const { workflow: waiting } = await reachRemoteWait(
     state,
