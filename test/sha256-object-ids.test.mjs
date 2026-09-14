@@ -16,6 +16,8 @@ import { normalizeGithubObservation } from "../src/github-observation.mjs";
 import { isLocalObjectId } from "../src/object-id.mjs";
 import {
   authorizeRemotePublication,
+  getPublication,
+  recordGithubSnapshot,
   startPublication,
 } from "../src/publication.mjs";
 import { atomicWriteCanonicalJson } from "../src/storage.mjs";
@@ -31,6 +33,7 @@ import { iso } from "./helpers/github-observation.mjs";
 import { commit, fixture, git } from "./helpers/repository-fixture";
 import {
   CODEX_ACTOR_ID,
+  draftObservation,
   findingsResult,
   gateAndPublishHead,
   reachRemoteWait,
@@ -432,33 +435,57 @@ test("the observation schema keeps GitHub's own object ids at 40", async (t) => 
       },
     },
   ];
-  for (const scenario of cases) {
-    const state = await fixture();
-    t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-    const workflow = await startAutonomousWorkflow(
-      state.store,
-      workflowInput(state.repository, state.baseSha),
-    );
-    const headSha = await commit(state.repository, "export const value = 2;\n");
-    const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+  const headSha = await commit(state.repository, "export const value = 2;\n");
+  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
+    state,
+    workflow,
+    headSha,
+    "one",
+  );
+  const at = Date.now();
+  const [firstScenario, ...otherScenarios] = cases;
+  await assert.rejects(
+    reachRemoteWait(
       state,
-      workflow,
+      atPublication,
+      reviewId,
       headSha,
-      "one",
-    );
+      at,
+      firstScenario.mutate,
+    ),
+    firstScenario.expected ?? /must be a 40-character lowercase Git SHA/,
+    firstScenario.name,
+  );
+  // A refused snapshot persists nothing, so every other scenario meets the
+  // same writer over the same ledger the first one reached.
+  for (const scenario of otherScenarios) {
     await assert.rejects(
-      reachRemoteWait(
-        state,
-        atPublication,
+      recordGithubSnapshot(
+        state.store,
         reviewId,
-        headSha,
-        Date.now(),
-        scenario.mutate,
+        {
+          expectedRevision: 2,
+          observation: scenario.mutate(
+            draftObservation(state, headSha, {
+              at: at + 2_000,
+              requestId: 100,
+              requestAt: at + 1_000,
+            }),
+          ),
+        },
+        { clock: () => at + 2_010 },
       ),
       scenario.expected ?? /must be a 40-character lowercase Git SHA/,
       scenario.name,
     );
   }
+  assert.equal((await getPublication(state.store, reviewId)).revision, 2);
 });
 
 test("the adapter keeps a review's commit_id and its authorization head at 40", () => {

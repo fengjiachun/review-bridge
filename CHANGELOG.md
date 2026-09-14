@@ -7,6 +7,14 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Internal
+
+- (#143) Memoize the expensive test lifecycle prefixes: each is built once per
+  test file and later callers get a private copy restored to the same absolute
+  path, served only while the build started under a minute ago.
+
 ## 0.14.1 - 2026-09-13
 
 ### Changed
