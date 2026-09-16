@@ -11,6 +11,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Internal
 
+- (#147) Inventory the state space before deleting any of it (#145 phase 1):
+  `scripts/state-inventory.mjs` reports every SCREAMING_CASE literal in `src/`
+  with its definition, its producers -- a refusal code kept apart from a value
+  written into a ledger -- its consumers, how often the real store and the tests
+  hold it, and whether any path from a tool surface reaches a producer, grouping
+  the constants as the ruling does. Given a `NODE_V8_COVERAGE` directory it also
+  says which producer lines a run executed. Nothing in `src/` changes.
 - (#143) Memoize the expensive test lifecycle prefixes: each is built once per
   test file and later callers get a private copy restored to the same absolute
   path, served only while the build started under a minute ago.
