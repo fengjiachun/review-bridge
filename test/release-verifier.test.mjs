@@ -31,7 +31,7 @@ const verifier = path.join(
   "verify-release.mjs",
 );
 
-async function releaseRepository() {
+async function releaseRepository({ documented = true } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-release-"));
   const repository = path.join(root, "repo");
   await fsp.mkdir(repository);
@@ -54,6 +54,10 @@ async function releaseRepository() {
   git(repository, "tag", "v1.0.0");
   git(repository, "switch", "-c", "feature");
   await fsp.writeFile(path.join(repository, "feature.txt"), "work\n");
+  if (documented) {
+    await fsp.mkdir(path.join(repository, "docs"));
+    await fsp.writeFile(path.join(repository, "docs", "feature.md"), "The shipped thing.\n");
+  }
   git(repository, "add", ".");
   git(repository, "commit", "-m", "a shipped thing");
   const attestedHead = git(repository, "rev-parse", "HEAD");
@@ -118,6 +122,30 @@ test("pre-flight verifies a release pull request from the repository alone", asy
     deferring.report.deferred.map((entry) => entry.pull_request),
     [99],
   );
+});
+
+test("pre-flight refuses an Added entry whose range changed no documentation text", async (t) => {
+  // The fixture's README changes between the tags, but only in its version
+  // string, which every release rewrites.
+  const fixture = await releaseRepository({ documented: false });
+  t.after(() => fsp.rm(fixture.root, { recursive: true, force: true }));
+  const undocumented = runVerifier(["--pre"], fixture.repository);
+  assert.equal(undocumented.status, 1, undocumented.stdout + undocumented.stderr);
+  assert.deepEqual(
+    undocumented.report.failures.map((entry) => entry.code),
+    ["DOCS_UNTOUCHED"],
+  );
+
+  await fsp.mkdir(path.join(fixture.repository, "docs"));
+  await fsp.writeFile(
+    path.join(fixture.repository, "docs", "feature.md"),
+    "The shipped thing.\n",
+  );
+  git(fixture.repository, "add", ".");
+  git(fixture.repository, "commit", "-m", "document the shipped thing");
+  const documented = runVerifier(["--pre"], fixture.repository);
+  assert.equal(documented.status, 0, documented.stdout + documented.stderr);
+  assert.equal(documented.report.status, "PASSED");
 });
 
 test("pre-flight exempts only the named release pull request from its own claim", async (t) => {

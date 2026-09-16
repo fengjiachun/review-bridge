@@ -220,6 +220,28 @@ function localMergedPullRequests(repositoryPath, range) {
   return pullRequests.sort((left, right) => left.number - right.number);
 }
 
+const RELEASE_VERSION_RE = /\bv?\d+\.\d+\.\d+\b/g;
+
+// Documentation files whose text changed in the range once release version
+// strings are masked: a version bump alone documents no addition.
+function touchedDocumentation(repositoryPath, range) {
+  const base = range.kind === "ROOT" ? null : range.tag;
+  const paths = ["--", "docs", "README.md"];
+  const files =
+    base == null
+      ? git(repositoryPath, ["ls-tree", "-r", "--name-only", "HEAD", ...paths])
+      : git(repositoryPath, ["diff", "--name-only", base, "HEAD", ...paths]);
+  const text = (ref, file) =>
+    (ref == null
+      ? ""
+      : git(repositoryPath, ["show", `${ref}:${file}`], { allowFailure: true }) ?? ""
+    ).replace(RELEASE_VERSION_RE, "<version>");
+  return files
+    .split("\n")
+    .filter(Boolean)
+    .filter((file) => text(base, file) !== text("HEAD", file));
+}
+
 function localPreviousTag(repositoryPath, version) {
   const tags = git(repositoryPath, ["tag", "--list", "v*"])
     .split("\n")
@@ -346,6 +368,7 @@ if (options.phase === "PRE") {
     previousVersion:
       range.kind === "ROOT" ? null : versionFromTagName(range.tag),
     mergedPullRequests: localMergedPullRequests(repositoryPath, range),
+    touchedDocumentation: touchedDocumentation(repositoryPath, range),
     releasePullRequest:
       options["release-pull-request"] == null
         ? null

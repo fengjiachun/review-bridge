@@ -225,6 +225,17 @@ test("an entry at or after the cutoff cannot borrow the legacy exemption", () =>
   assert.deepEqual(codes(result), ["ENTRY_REFERENCES_MISSING"]);
 });
 
+test("DOCS_UNTOUCHED only when an Added entry changed no documentation", () => {
+  const pre = (overrides) =>
+    codes(verifyRelease(input({ phase: "PRE", observation: undefined, ...overrides })));
+  assert.deepEqual(pre({ touchedDocumentation: [] }), ["DOCS_UNTOUCHED"]);
+  assert.deepEqual(pre({ touchedDocumentation: ["README.md"] }), []);
+  const fixedOnly = files({
+    text: changelog().replace("### Added\n\n- A shipped", "### Fixed\n\n- A shipped"),
+  });
+  assert.deepEqual(pre({ files: fixedOnly, touchedDocumentation: [] }), []);
+});
+
 test("TAG_MISSING is the whole report for an unreleased version", () => {
   const result = verifyRelease(
     input({ observation: observation({ tag: { name: "v1.1.0", exists: false } }) }),
