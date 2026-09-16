@@ -44,15 +44,11 @@ const LEDGER_FILES = new Set([
   "review.json",
   "publication.json",
   "publication-gate.json",
-  "publication-gate-audit.jsonl",
-  "publication-gate-audit-head.json",
   "gate.json",
   "remote-authorization.json",
   "observation.json",
   "workflow-binding.json",
   "workflow.json",
-  "action-audit.jsonl",
-  "action-audit-head.json",
 ]);
 
 function parseArgs(argv) {
@@ -340,68 +336,35 @@ function walkJson(value, visit) {
   }
 }
 
-// An audit log is evidence only up to its head's cursor: the workflow reader
-// commits events through committed_bytes and treats anything past it as an
-// uncommitted or damaged tail. Reading the tail here would let a line that
-// never committed vouch for a state. Without a well-formed head beside the
-// log, none of the log is evidence.
-async function committedAuditText(file) {
-  const head = await fsp
-    .readFile(path.join(path.dirname(file), "action-audit-head.json"), "utf8")
-    .then(JSON.parse)
-    .catch(() => null);
-  const bytes = await fsp.readFile(file).catch(() => null);
-  if (
-    bytes == null ||
-    head?.version !== 1 ||
-    !Number.isSafeInteger(head.committed_bytes) ||
-    head.committed_bytes < 0 ||
-    head.committed_bytes > bytes.length
-  ) {
-    return null;
-  }
-  return bytes.subarray(0, head.committed_bytes).toString("utf8");
-}
-
-// Only whole values count. A constant quoted inside a reviewer's comment body
-// is that reviewer's prose, not a state this store ever held.
+// Only whole values in canonical ledgers count. A constant quoted inside a
+// reviewer's comment body is that reviewer's prose, not a state this store
+// ever held. Audit logs are not read: they are append-only files whose
+// committed extent only their own reader's head cursor and event chain can
+// decide, and re-deciding that here is a second copy of that reader.
 async function scanStore(storeRoot, known) {
   const counts = new Map();
   const publicationEdges = new Map();
-  const phaseEdges = new Map();
   let scanned = 0;
-  const files = (await listFiles(storeRoot, ".json")).concat(await listFiles(storeRoot, ".jsonl"));
-  for (const file of files) {
+  for (const file of await listFiles(storeRoot, ".json")) {
     const base = path.basename(file);
     if (!LEDGER_FILES.has(base) && !file.includes(`${path.sep}releases${path.sep}`)) continue;
-    const text =
-      base === "action-audit.jsonl"
-        ? await committedAuditText(file)
-        : await fsp.readFile(file, "utf8").catch(() => null);
+    const text = await fsp.readFile(file, "utf8").catch(() => null);
     if (text == null) continue;
+    let document;
+    try {
+      document = JSON.parse(text);
+    } catch {
+      continue; /* a half-written ledger is not a state observation */
+    }
     scanned += 1;
-    const documents = [];
-    for (const chunk of base.endsWith(".jsonl") ? text.split("\n") : [text]) {
-      if (chunk.trim() === "") continue;
-      try {
-        documents.push(JSON.parse(chunk));
-      } catch {
-        /* a half-written ledger line is not a state observation */
-      }
-    }
-    for (const document of documents) {
-      walkJson(document, (value) => {
-        if (known.has(value)) counts.set(value, (counts.get(value) ?? 0) + 1);
-      });
-    }
+    walkJson(document, (value) => {
+      if (known.has(value)) counts.set(value, (counts.get(value) ?? 0) + 1);
+    });
     if (base === "publication.json") {
-      recordEdges(publicationEdges, (documents[0]?.history ?? []).map((entry) => entry.status));
-    }
-    if (base === "action-audit.jsonl") {
-      recordEdges(phaseEdges, documents.map((entry) => entry.workflow_state?.phase));
+      recordEdges(publicationEdges, (document.history ?? []).map((entry) => entry.status));
     }
   }
-  return { counts, publicationEdges, phaseEdges, scanned };
+  return { counts, publicationEdges, scanned };
 }
 
 function recordEdges(edges, sequence) {
@@ -539,10 +502,7 @@ function markdown(result) {
     ...result.transitions.publication.defined_not_observed.map((edge) => `- defined, never observed: ${edge}`),
     ...result.transitions.publication.never_observed.map((name) => `- never entered: \`${name}\``),
     "",
-    `Workflow phase, domain of ${result.transitions.phase.domain.length}: ${result.transitions.phase.observed.length} edges observed, ${result.transitions.phase.defined_not_observed.length} defined here but never observed, ${result.transitions.phase.never_observed.length} members never entered at all.`,
-    "",
-    ...result.transitions.phase.defined_not_observed.map((edge) => `- defined, never observed: ${edge}`),
-    ...result.transitions.phase.never_observed.map((name) => `- never entered: \`${name}\``),
+    "Workflow phases are not tabulated: workflow.json carries only its current phase, and phase history lives in the action audit log, which this instrument does not read.",
     "",
     "## Instrument defects",
     "",
@@ -566,12 +526,10 @@ const executedLines = args.coverage ? await scanCoverage(path.resolve(args.cover
 const names = new Set(sites.map((site) => site.name));
 const store = storeRoot
   ? await scanStore(storeRoot, names)
-  : { counts: new Map(), publicationEdges: new Map(), phaseEdges: new Map(), scanned: 0 };
+  : { counts: new Map(), publicationEdges: new Map(), scanned: 0 };
 
 const publicationFiles = new Set(["publication.mjs"]);
-const workflowFiles = new Set(["workflow.mjs"]);
 const statusDomain = fieldDomain(texts, "PUBLICATION_STATUSES", sites, "status", publicationFiles);
-const phaseDomain = fieldDomain(texts, "WORKFLOW_PHASES", sites, "phase", workflowFiles);
 const entered = (edges, name) => [...edges.keys()].some((edge) => edge.endsWith(`-> ${name}`));
 
 const result = {
@@ -613,14 +571,6 @@ const result = {
         .filter((edge) => !store.publicationEdges.has(edge))
         .sort(),
       never_observed: [...statusDomain].filter((name) => !entered(store.publicationEdges, name)).sort(),
-    },
-    phase: {
-      domain: [...phaseDomain].sort(),
-      observed: [...store.phaseEdges.entries()].map(([edge, count]) => `${edge} (${count})`).sort(),
-      defined_not_observed: [...definedEdges(sites, "phase", workflowFiles, phaseDomain)]
-        .filter((edge) => !store.phaseEdges.has(edge))
-        .sort(),
-      never_observed: [...phaseDomain].filter((name) => !entered(store.phaseEdges, name)).sort(),
     },
   },
 };
