@@ -7,6 +7,15 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Internal
+
+- (#154) issue #145 second phase: `nowIso` and the exported
+  `getPublicationFindingsReview` in `src/publication.mjs` are deleted, since
+  nothing in the repository referenced either. `derivePublicationStatus`
+  stays as the status-derivation oracle the publication tests use.
+
 ## 0.15.1 - 2026-09-16
 
 ### Internal
