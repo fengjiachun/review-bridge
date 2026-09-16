@@ -16,6 +16,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   read it as a claim on a pull request the range does not contain and refused
   to record 0.15.0. The reference now reads `issue #148`; this release exists
   so the evidence chain carries a verified record.
+- (#151) The 0.15.1 release pull request, whose merge carries the v0.15.1 tag
+  and whose own changelog bullet is this one.
 
 ## 0.15.0 - 2026-09-16
 
