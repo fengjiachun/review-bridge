@@ -5,10 +5,22 @@ export function codexActor() {
   return { id: CODEX_ACTOR_ID, type: "Bot", login: "chatgpt-codex-connector[bot]" };
 }
 
+/**
+ * Every stamp these helpers fabricate is relative to the caller's time base:
+ * a prefix served from a snapshot keeps the timestamps of its build, so a
+ * helper reading the wall clock would race that base (#148).
+ */
+function timeBase(at, helper) {
+  if (typeof at !== "number" || !Number.isFinite(at)) {
+    throw new TypeError(`${helper} requires a millisecond time base: at`);
+  }
+  return at;
+}
+
 /** A resolved Codex-rooted thread whose root review examined the gated head. */
-export function resolvedThread(headSha, { threadId = "PRRT_1", comments = null } = {}) {
+export function resolvedThread(headSha, { at, threadId = "PRRT_1", comments = null } = {}) {
+  timeBase(at, "resolvedThread");
   const codex = codexActor();
-  const at = Date.now();
   const root = {
     id: "PRRC_1",
     database_id: 900,
@@ -39,6 +51,7 @@ export function resolvedThread(headSha, { threadId = "PRRT_1", comments = null }
 
 /** A server-owned automatic-resolution record in the stored shape. */
 export function resolutionRecord({
+  at,
   number,
   actionId,
   threadId = "PRRT_1",
@@ -46,7 +59,7 @@ export function resolutionRecord({
   headSha,
   recordedRevision,
 }) {
-  const at = Date.now();
+  timeBase(at, "resolutionRecord");
   return {
     number,
     action_id: actionId,
@@ -67,7 +80,7 @@ export function resolutionRecord({
   };
 }
 
-export function invalidatedEvent({ number, threadId = "PRRT_1", recordId, priorWatermark, newWatermark }) {
+export function invalidatedEvent({ at, number, threadId = "PRRT_1", recordId, priorWatermark, newWatermark }) {
   return {
     kind: "INVALIDATED",
     number,
@@ -77,22 +90,22 @@ export function invalidatedEvent({ number, threadId = "PRRT_1", recordId, priorW
     new_watermark: newWatermark,
     follow_up_comments: [],
     reason: "pinned codex feedback",
-    at: iso(Date.now()),
+    at: iso(timeBase(at, "invalidatedEvent")),
   };
 }
 
-export function unresolveEvent({ number, threadId = "PRRT_1", recordId }) {
+export function unresolveEvent({ at, number, threadId = "PRRT_1", recordId }) {
   return {
     kind: "UNRESOLVED_FOR_REPAIR",
     number,
     thread_id: threadId,
     record_id: recordId,
     action_id: `unresolve-${recordId}`,
-    at: iso(Date.now()),
+    at: iso(timeBase(at, "unresolveEvent")),
   };
 }
 
-export function supersedeEvent({ number, threadId = "PRRT_1", predecessorId, successorId, invalidationEvent, unresolveEvent }) {
+export function supersedeEvent({ at, number, threadId = "PRRT_1", predecessorId, successorId, invalidationEvent, unresolveEvent }) {
   return {
     kind: "SUPERSEDES",
     number,
@@ -101,6 +114,6 @@ export function supersedeEvent({ number, threadId = "PRRT_1", predecessorId, suc
     successor_id: successorId,
     invalidation_event: invalidationEvent,
     unresolve_event: unresolveEvent,
-    at: iso(Date.now()),
+    at: iso(timeBase(at, "supersedeEvent")),
   };
 }
