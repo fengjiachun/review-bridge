@@ -291,11 +291,17 @@ async function scanCoverage(dir, texts) {
       const name = path.basename(script.url ?? "");
       const flags = executed.get(name);
       if (!flags || !script.url?.includes("/src/")) continue;
+      // One report at a time: paint this process's ranges into a scratch
+      // bitmap, innermost last, then OR it in. Painting straight into the
+      // aggregate would let a later report's unexecuted range erase a line an
+      // earlier process ran, and the answer would depend on file order.
+      const own = new Uint8Array(flags.length);
       const ranges = script.functions.flatMap((fn) => fn.ranges);
       ranges.sort((a, b) => b.endOffset - b.startOffset - (a.endOffset - a.startOffset));
       for (const range of ranges) {
-        flags.fill(range.count > 0 ? 1 : 0, range.startOffset, Math.min(range.endOffset, flags.length));
+        own.fill(range.count > 0 ? 1 : 0, range.startOffset, Math.min(range.endOffset, own.length));
       }
+      for (let i = 0; i < flags.length; i += 1) flags[i] |= own[i];
     }
   }
   const lines = new Map();
@@ -414,9 +420,13 @@ function definedEdges(sites, field, files, domain) {
 // runtime -- so it is an external-input guard whatever the store says; a value
 // the store holds happens, whatever this instrument infers; only then does the
 // reachability of its producers decide.
-function classify(sites, reachable, storeCount, keyed) {
+function classify(sites, reachable, storeCount, keyed, executedProducers = 0) {
   const producers = sites.filter((site) => PRODUCER_ROLES.has(site.role));
   const reachableProducers = producers.filter((site) => reachable.has(`${site.file}:${site.unit}`));
+  // A producer line a recorded run executed is reachable whatever the
+  // name-matched call graph says about its unit; execution is the stronger
+  // evidence and it only ever moves a constant out of the deletion group.
+  const executed = executedProducers > 0;
   const where = [...new Set(producers.map((site) => `${site.file}:${site.unit}`))].join(", ");
   if (producers.length === 0 && !keyed) {
     const files = [...new Set(sites.map((site) => site.file))].join(", ");
@@ -432,12 +442,12 @@ function classify(sites, reachable, storeCount, keyed) {
     return {
       group: "reachable_observed",
       reason:
-        reachableProducers.length > 0 || keyed
+        reachableProducers.length > 0 || keyed || executed
           ? null
           : `a real ledger holds this value although every producer sits outside the closure (${where}): this instrument is wrong here`,
     };
   }
-  if (reachableProducers.length === 0 && !keyed) {
+  if (reachableProducers.length === 0 && !keyed && !executed) {
     return { group: "unreachable", reason: `every producer sits in a unit no tool surface reaches: ${where}` };
   }
   return { group: "reachable_unobserved", reason: null };
@@ -532,6 +542,9 @@ const result = {
     const storeCount = store.counts.get(name) ?? 0;
     const site = (entry) => `${entry.file}:${entry.line} (${entry.unit}${reachable.has(`${entry.file}:${entry.unit}`) ? "" : ", unreachable"})`;
     const producers = own.filter((entry) => PRODUCER_ROLES.has(entry.role));
+    const producersExecuted = executedLines
+      ? producers.filter((entry) => executedLines.get(entry.file)?.[entry.line - 1]).length
+      : null;
     return {
       name,
       definition: `${own[0].file}:${own[0].line}`,
@@ -542,10 +555,8 @@ const result = {
       object_keys: keyUses.get(name) ?? 0,
       store: storeCount,
       tests: testCounts.get(name) ?? 0,
-      producers_executed: executedLines
-        ? producers.filter((entry) => executedLines.get(entry.file)?.[entry.line - 1]).length
-        : null,
-      ...classify(own, reachable, storeCount, (keyUses.get(name) ?? 0) > 0),
+      producers_executed: producersExecuted,
+      ...classify(own, reachable, storeCount, (keyUses.get(name) ?? 0) > 0, producersExecuted ?? 0),
     };
   }),
   transitions: {

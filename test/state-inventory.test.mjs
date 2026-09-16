@@ -118,3 +118,40 @@ test("a planted ledger moves its value into the observed group", async () => {
   assert.equal(orphan.group, "reachable_observed");
   assert.match(orphan.reason, /this instrument is wrong here/);
 });
+
+// V8 writes one coverage report per process. A report whose function ranges
+// cover a line with count 0 must not erase a hit another process recorded,
+// and a producer any process executed is reachable whatever the name-matched
+// call graph concludes about its unit.
+function coverageReport(root, line, count) {
+  const url = `file://${path.join(root, "src", "publication.mjs")}`;
+  const offset = PUBLICATION.split("\n").slice(0, line - 1).join("\n").length + 1;
+  const end = offset + PUBLICATION.split("\n")[line - 1].length;
+  return JSON.stringify({
+    result: [{ url, functions: [{ functionName: "orphanTransition", ranges: [{ startOffset: offset, endOffset: end, count }] }] }],
+  });
+}
+
+test("an executed producer is reachable, and a hit survives a later report's miss", async () => {
+  const root = await sample();
+  const coverage = path.join(root, "coverage");
+  await fsp.mkdir(coverage, { recursive: true });
+  // The orphan's producer line is 11; report "a" ran it once, report "b",
+  // sorted after it, ran the same range zero times.
+  await fsp.writeFile(path.join(coverage, "coverage-a.json"), coverageReport(root, 11, 1));
+  await fsp.writeFile(path.join(coverage, "coverage-b.json"), coverageReport(root, 11, 0));
+
+  const result = spawnSync(
+    process.execPath,
+    [inventory, "--project", root, "--store", path.join(root, "store"), "--coverage", coverage, "--json"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const constants = new Map(JSON.parse(result.stdout).constants.map((entry) => [entry.name, entry]));
+
+  const orphan = constants.get("ORPHAN_STATUS");
+  assert.equal(orphan.producers_executed, 1, "the hit in report a must survive the miss in report b");
+  assert.equal(orphan.group, "reachable_unobserved", "an executed producer is reachable");
+  // The classification is not from the call graph: the unit is still outside it.
+  assert.deepEqual(orphan.producers, ["publication.mjs:11 (orphanTransition, unreachable)"]);
+});
