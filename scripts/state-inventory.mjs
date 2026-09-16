@@ -208,7 +208,12 @@ async function scanSource(srcDir) {
       // out. It never enters the quoted universe, so it is collected here as
       // producer evidence for whichever quoted constant shares the name.
       const key = /^\s*([A-Z][A-Z0-9_]{2,}):/.exec(line);
-      if (key) keyUses.set(key[1], (keyUses.get(key[1]) ?? 0) + 1);
+      if (key) {
+        const uses = keyUses.get(key[1]) ?? { count: 0, units: new Set() };
+        uses.count += 1;
+        uses.units.add(`${name}:${lineUnit[index]}`);
+        keyUses.set(key[1], uses);
+      }
       for (const match of line.matchAll(CONSTANT)) {
         sites.push({
           name: match[1],
@@ -460,14 +465,18 @@ function definitionOf(own) {
     : `${own[0].file}:${own[0].line} (first occurrence; no site in src defines it)`;
 }
 
-function classify(sites, reachable, storeCount, keyed, executedProducers = 0) {
+function classify(sites, reachable, storeCount, keyUnits, executedProducers = 0) {
   const producers = sites.filter((site) => PRODUCER_ROLES.has(site.role));
   const reachableProducers = producers.filter((site) => reachable.has(`${site.file}:${site.unit}`));
+  // An unquoted key is a producer too; like any producer it only counts as
+  // reachable from a unit a tool surface reaches.
+  const keyed = keyUnits.size > 0;
+  const keyedReachable = [...keyUnits].some((unit) => reachable.has(unit));
   // A producer line a recorded run executed is reachable whatever the
   // name-matched call graph says about its unit; execution is the stronger
   // evidence and it only ever moves a constant out of the deletion group.
   const executed = executedProducers > 0;
-  const where = [...new Set(producers.map((site) => `${site.file}:${site.unit}`))].join(", ");
+  const where = [...new Set([...producers.map((site) => `${site.file}:${site.unit}`), ...keyUnits])].join(", ");
   if (producers.length === 0 && !keyed) {
     const files = [...new Set(sites.map((site) => site.file))].join(", ");
     return {
@@ -482,12 +491,12 @@ function classify(sites, reachable, storeCount, keyed, executedProducers = 0) {
     return {
       group: "reachable_observed",
       reason:
-        reachableProducers.length > 0 || keyed || executed
+        reachableProducers.length > 0 || keyedReachable || executed
           ? null
           : `a real ledger holds this value although every producer sits outside the closure (${where}): this instrument is wrong here`,
     };
   }
-  if (reachableProducers.length === 0 && !keyed && !executed) {
+  if (reachableProducers.length === 0 && !keyedReachable && !executed) {
     return { group: "unreachable", reason: `every producer sits in a unit no tool surface reaches: ${where}` };
   }
   return { group: "reachable_unobserved", reason: null };
@@ -587,11 +596,11 @@ const result = {
       refusals: own.filter((entry) => entry.role === "refusal").map(site),
       consumers: own.filter((entry) => entry.role === "consumer").map(site),
       tables: own.filter((entry) => entry.role === "table").map(site),
-      object_keys: keyUses.get(name) ?? 0,
+      object_keys: keyUses.get(name)?.count ?? 0,
       store: storeCount,
       tests: testCounts.get(name) ?? 0,
       producers_executed: producersExecuted,
-      ...classify(own, reachable, storeCount, (keyUses.get(name) ?? 0) > 0, producersExecuted ?? 0),
+      ...classify(own, reachable, storeCount, keyUses.get(name)?.units ?? new Set(), producersExecuted ?? 0),
     };
   }),
   transitions: {

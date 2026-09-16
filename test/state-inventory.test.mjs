@@ -35,7 +35,10 @@ export function reachedTool(input) {
 }
 
 export function orphanTransition(ledger) {
-  return { ...ledger, status: "ORPHAN_STATUS" };
+  return { ...ledger, status: "ORPHAN_STATUS", table: {
+    ORPHAN_KEY: true,
+  } };
+  if (ledger.kind === "ORPHAN_KEY") return ledger;
 }
 `;
 
@@ -293,4 +296,16 @@ test("CRLF sources keep their unit boundaries", async () => {
   assert.deepEqual(orphan.producers, ["publication.mjs:11 (orphanTransition, unreachable)"]);
   assert.equal(orphan.group, "unreachable");
   assert.equal(constants.get("REACHED_STATUS").group, "reachable_unobserved");
+});
+
+// An unquoted object key is producer evidence for the constant sharing its
+// name, but only from a unit a tool surface reaches: a key written inside an
+// orphaned function reaches nothing, and the constant it names stays in the
+// deletion input.
+test("an object key inside an unreachable unit is not reachability", async () => {
+  const root = await sample();
+  const constants = run(root, path.join(root, "store"));
+  const orphanKey = constants.get("ORPHAN_KEY");
+  assert.equal(orphanKey.object_keys, 1);
+  assert.equal(orphanKey.group, "unreachable");
 });
