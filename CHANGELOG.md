@@ -7,6 +7,18 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## 0.15.1 - 2026-09-16
+
+### Internal
+
+- (#151) The 0.15.1 release pull request, whose merge carries the v0.15.1 tag
+  and whose own changelog bullet is this one. It carries no code change: the
+  0.15.0 entry wrote the issue its #149 bullet closes in the parenthesized
+  form this file reserves for pull-request claims, so the release verifier
+  read it as a claim on a pull request the range does not contain and refused
+  to record 0.15.0. That reference now reads `issue #148`, and this release
+  exists so the evidence chain carries a verified record.
+
 ## 0.15.0 - 2026-09-16
 
 ### Added
@@ -40,7 +52,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   test file and later callers get a private copy restored to the same absolute
   path, served only while the build started under a minute ago.
 - (#149) Take the time base of every fabricated ledger and observation
-  stamp from the caller (#148): `resolvedThread`, `resolutionRecord`, the
+  stamp from the caller, issue #148: `resolvedThread`, `resolutionRecord`, the
   lifecycle-event helpers, and `appendHistoricalResolutionProof` require an
   `at` instead of reading the wall clock, which raced the build time a
   memoized prefix keeps and made one terminal-projection test fail on the
