@@ -1545,6 +1545,44 @@ function brief(review, options = {}) {
   });
 }
 
+// An advisory review's findings stay OPEN in the ledger forever: there is no
+// author to answer them. The brief must call them reported, not open, and
+// must not open the "still open" section over them.
+test("the brief reports an advisory review's findings instead of calling them open", () => {
+  const submitted = {
+    advisory: true,
+    status: "REVIEW_SUBMITTED",
+    current_round: 1,
+    state_version: 2,
+    rounds: [round(1, HEAD_ONE, "2026-09-01T00:00:00.000Z")],
+    findings: [
+      finding("F-001", "major", "OPEN", { introduced_round: 1 }),
+      finding("F-002", "nit", "OPEN", { introduced_round: 1 }),
+    ],
+    resolutions: [],
+    rereview_decisions: [],
+    history: [
+      { at: "2026-09-01T00:00:00.000Z", event: "REVIEW_PREPARED", round: 1, mode: "FULL" },
+      { at: "2026-09-01T00:06:00.000Z", event: "FINDINGS_SUBMITTED", round: 1, count: 2 },
+    ],
+    clean_snapshot_hash: null,
+  };
+  const advisory = brief(cleanInTwoRounds(submitted));
+  assert.match(advisory, /^\*\*REVIEW_SUBMITTED\*\* — 2 findings reported.*advisory/m);
+  assert.match(advisory, /\| Outcome \| 2 reported \(advisory: no author loop\) \|/);
+  assert.match(advisory, /^## Reported — advisory, so no author loop will close these$/m);
+  assert.match(advisory, /Round 1 reported it\./);
+  assert.doesNotMatch(advisory, /still open/i);
+  assert.doesNotMatch(advisory, /no author response yet/);
+  // The same ledger without the advisory flag is an ordinary review whose
+  // findings really are open and awaiting the author.
+  const gated = brief(cleanInTwoRounds({ ...submitted, advisory: undefined }));
+  assert.match(gated, /2 of 2 findings still open/);
+  assert.match(gated, /^## Still open — what the next reader inherits$/m);
+  assert.match(gated, /no author response yet/);
+  assert.doesNotMatch(gated, /reported \(advisory/);
+});
+
 // The format number is the one line the bump is allowed to move. Everything
 // else in the full tier is pinned to the document this renderer produced
 // before the brief existed, so a change to a shared helper that alters the

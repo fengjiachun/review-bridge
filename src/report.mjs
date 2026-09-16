@@ -774,11 +774,18 @@ function count(number, singular, plural = `${singular}s`) {
   return `${number} ${number === 1 ? singular : plural}`;
 }
 
+// An advisory review that has submitted its findings is finished: there is no
+// author loop, so its findings are reported, not open. They keep the OPEN
+// status in the ledger because nothing will ever move them, and the brief
+// must not read that as "awaiting an author".
 function partitionFindings(review) {
   const findings = review.findings ?? [];
+  const unsettled = findings.filter((finding) => !SETTLED_STATUSES.has(finding.status));
+  const reported = advisoryReported(review);
   return {
     all: findings,
-    open: findings.filter((finding) => !SETTLED_STATUSES.has(finding.status)),
+    open: reported ? [] : unsettled,
+    reported: reported ? unsettled : [],
     resolved: findings.filter((finding) => finding.status === "RESOLVED"),
     rebutted: findings.filter((finding) => finding.status === "REBUTTAL_ACCEPTED"),
   };
@@ -939,7 +946,9 @@ function localFacts(review, publication, summary, partition, timings) {
     ["Findings", findingsFact(review, partition)],
     [
       "Outcome",
-      `${partition.resolved.length} fixed and verified · ${partition.open.length} open · ${partition.rebutted.length} rebutted`,
+      partition.reported.length > 0
+        ? `${partition.reported.length} reported (advisory: no author loop)`
+        : `${partition.resolved.length} fixed and verified · ${partition.open.length} open · ${partition.rebutted.length} rebutted`,
     ],
     ["Wall time", wallTimeRow(timings)],
   ];
@@ -1001,9 +1010,11 @@ function verdictLines(review, publication, summary, partition) {
   const standing =
     total === 0
       ? "no finding was raised"
-      : open === 0
-        ? `${count(total, "finding")} raised, none still open`
-        : `${open} of ${count(total, "finding")} still open`;
+      : partition.reported.length > 0
+        ? `${count(partition.reported.length, "finding")} reported`
+        : open === 0
+          ? `${count(total, "finding")} raised, none still open`
+          : `${open} of ${count(total, "finding")} still open`;
   const carried =
     review.continued_by_review_id == null
       ? ""
@@ -1034,6 +1045,17 @@ function openFindingsSection(review, partition) {
       carried.length === 0
         ? "No finding was raised in this review, so nothing is open."
         : `No finding was raised in this review; ${count(carried.length, "finding")} carried in from an earlier review and the full report renders each.`,
+    ];
+  }
+  if (partition.reported.length > 0) {
+    return [
+      "## Reported — advisory, so no author loop will close these",
+      ...partition.reported.map((finding) =>
+        [
+          findingHeadline(finding),
+          `Round ${inline(finding.introduced_round ?? "n/a")} reported it. ${inline(finding.explanation)}`,
+        ].join("\n"),
+      ),
     ];
   }
   if (partition.open.length === 0) {
