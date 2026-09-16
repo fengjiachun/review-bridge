@@ -197,3 +197,29 @@ test("definition names a producing site, or says no site defines the value", asy
     "publication.mjs:4 (first occurrence; no site in src defines it)",
   );
 });
+
+// An audit log counts only through its head's committed_bytes. A line past
+// the cursor never committed, so it must not vouch for a state; a log with
+// no well-formed head beside it is not evidence at all.
+test("audit lines past the committed cursor are not observations", async () => {
+  const root = await sample();
+  const workflow = path.join(root, "store", "workflows", "rbwf-sample");
+  await fsp.mkdir(workflow, { recursive: true });
+  const committed = `${JSON.stringify({ workflow_state: { phase: "REACHED_STATUS" } })}\n`;
+  const tail = `${JSON.stringify({ workflow_state: { phase: "ORPHAN_STATUS" } })}\n`;
+  await fsp.writeFile(path.join(workflow, "action-audit.jsonl"), committed + tail);
+  await fsp.writeFile(
+    path.join(workflow, "action-audit-head.json"),
+    JSON.stringify({ version: 1, workflow_id: "rbwf-sample", committed_bytes: Buffer.byteLength(committed), next_sequence: 2, last_event_sha256: null }),
+  );
+  let constants = run(root, path.join(root, "store"));
+  assert.equal(constants.get("REACHED_STATUS").store, 1, "the committed line counts");
+  assert.equal(constants.get("ORPHAN_STATUS").store, 0, "the uncommitted tail does not");
+  assert.equal(constants.get("ORPHAN_STATUS").group, "unreachable");
+
+  // Without a head the whole log is unvalidated, and none of it counts.
+  await fsp.rm(path.join(workflow, "action-audit-head.json"));
+  constants = run(root, path.join(root, "store"));
+  assert.equal(constants.get("REACHED_STATUS").store, 0);
+  assert.equal(constants.get("ORPHAN_STATUS").store, 0);
+});

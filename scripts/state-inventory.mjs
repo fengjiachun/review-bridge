@@ -340,6 +340,29 @@ function walkJson(value, visit) {
   }
 }
 
+// An audit log is evidence only up to its head's cursor: the workflow reader
+// commits events through committed_bytes and treats anything past it as an
+// uncommitted or damaged tail. Reading the tail here would let a line that
+// never committed vouch for a state. Without a well-formed head beside the
+// log, none of the log is evidence.
+async function committedAuditText(file) {
+  const head = await fsp
+    .readFile(path.join(path.dirname(file), "action-audit-head.json"), "utf8")
+    .then(JSON.parse)
+    .catch(() => null);
+  const bytes = await fsp.readFile(file).catch(() => null);
+  if (
+    bytes == null ||
+    head?.version !== 1 ||
+    !Number.isSafeInteger(head.committed_bytes) ||
+    head.committed_bytes < 0 ||
+    head.committed_bytes > bytes.length
+  ) {
+    return null;
+  }
+  return bytes.subarray(0, head.committed_bytes).toString("utf8");
+}
+
 // Only whole values count. A constant quoted inside a reviewer's comment body
 // is that reviewer's prose, not a state this store ever held.
 async function scanStore(storeRoot, known) {
@@ -351,7 +374,10 @@ async function scanStore(storeRoot, known) {
   for (const file of files) {
     const base = path.basename(file);
     if (!LEDGER_FILES.has(base) && !file.includes(`${path.sep}releases${path.sep}`)) continue;
-    const text = await fsp.readFile(file, "utf8").catch(() => null);
+    const text =
+      base === "action-audit.jsonl"
+        ? await committedAuditText(file)
+        : await fsp.readFile(file, "utf8").catch(() => null);
     if (text == null) continue;
     scanned += 1;
     const documents = [];
