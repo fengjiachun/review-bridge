@@ -5594,11 +5594,13 @@ test("an unresolve refresh preserves every unaffected active proof", () => {
   const eventAt = at + 1_000;
   const observedAt = eventAt + 1_000;
   const headSha = "b".repeat(40);
-  const targetThread = resolvedThread(headSha, { threadId: "PRRT_target" });
+  const targetThread = resolvedThread(headSha, { at, threadId: "PRRT_target" });
   const unaffectedThread = resolvedThread(headSha, {
+    at,
     threadId: "PRRT_unaffected",
   });
   const targetRecord = resolutionRecord({
+    at,
     number: 1,
     actionId: "act-target",
     threadId: targetThread.id,
@@ -5607,6 +5609,7 @@ test("an unresolve refresh preserves every unaffected active proof", () => {
     recordedRevision: 3,
   });
   const unaffectedRecord = resolutionRecord({
+    at,
     number: 2,
     actionId: "act-unaffected",
     threadId: unaffectedThread.id,
@@ -6210,7 +6213,7 @@ test("a stale referenced review-thread ancestry comparison stays POST_READY", as
   const observedAt = readyAt + 2_000;
   const staleAt = iso(readyAt - 1);
   const findingHeadSha = "a".repeat(40);
-  const thread = resolvedThread(findingHeadSha);
+  const thread = resolvedThread(findingHeadSha, { at });
   const payload = readyObservation(state, headSha, {
     at: observedAt,
     requestId: 100,
@@ -6256,6 +6259,7 @@ test("a stale referenced review-thread ancestry comparison stays POST_READY", as
   await editPublication(state, reviewId, (ledger) => {
     ledger.automatic_resolutions = [
       resolutionRecord({
+        at,
         number: 1,
         actionId: "act-ancestry",
         watermark: threadWatermark(thread),
@@ -6625,6 +6629,7 @@ test("historical resolution proof mutation controls fail closed at every consume
       apply(old) {
         old.resolution_lifecycle = [
           invalidatedEvent({
+            at: currentReadyAt,
             number: 1,
             recordId: old.automatic_resolutions[0].action_id,
             priorWatermark: old.automatic_resolutions[0].thread_watermark,
@@ -6639,6 +6644,7 @@ test("historical resolution proof mutation controls fail closed at every consume
       apply(old) {
         old.resolution_lifecycle = [
           unresolveEvent({
+            at: currentReadyAt,
             number: 1,
             recordId: old.automatic_resolutions[0].action_id,
           }),
@@ -6652,6 +6658,7 @@ test("historical resolution proof mutation controls fail closed at every consume
         old.automatic_resolutions = [];
         old.resolution_lifecycle = [
           invalidatedEvent({
+            at: currentReadyAt,
             number: 1,
             recordId: "act-ghost",
             priorWatermark: old.automatic_resolutions[0]?.thread_watermark ?? watermark,
@@ -6677,13 +6684,15 @@ test("historical resolution proof mutation controls fail closed at every consume
         old.automatic_resolutions = [retired, successor];
         old.resolution_lifecycle = [
           invalidatedEvent({
+            at: currentReadyAt,
             number: 1,
             recordId: retired.action_id,
             priorWatermark: retired.thread_watermark,
             newWatermark: otherDigest,
           }),
-          unresolveEvent({ number: 2, recordId: retired.action_id }),
+          unresolveEvent({ at: currentReadyAt, number: 2, recordId: retired.action_id }),
           supersedeEvent({
+            at: currentReadyAt,
             number: 3,
             predecessorId: retired.action_id,
             successorId: "act-successor",
@@ -6700,13 +6709,15 @@ test("historical resolution proof mutation controls fail closed at every consume
         const retired = old.automatic_resolutions[0];
         old.resolution_lifecycle = [
           invalidatedEvent({
+            at: currentReadyAt,
             number: 1,
             recordId: retired.action_id,
             priorWatermark: retired.thread_watermark,
             newWatermark: otherDigest,
           }),
-          unresolveEvent({ number: 2, recordId: retired.action_id }),
+          unresolveEvent({ at: currentReadyAt, number: 2, recordId: retired.action_id }),
           supersedeEvent({
+            at: currentReadyAt,
             number: 3,
             predecessorId: retired.action_id,
             successorId: "act-missing",
@@ -6971,6 +6982,7 @@ test("post-gate historical proof substitution causes GATE_MISMATCH", async (t) =
       apply(old) {
         old.resolution_lifecycle = [
           invalidatedEvent({
+            at: currentReadyAt,
             number: 1,
             threadId: "PRRT_OTHER",
             recordId: "act-ghost",
@@ -7491,7 +7503,7 @@ test("a new thread comment between mark-ready and the terminal observation block
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
   const observedAt = at + 2_000;
-  const thread = resolvedThread(headSha);
+  const thread = resolvedThread(headSha, { at });
   const watermark = threadWatermark(thread);
   const payload = readyObservation(state, headSha, {
     at: observedAt,
@@ -7510,6 +7522,7 @@ test("a new thread comment between mark-ready and the terminal observation block
   await editPublication(state, reviewId, (ledger) => {
     ledger.automatic_resolutions = [
       resolutionRecord({
+        at,
         number: 1,
         actionId: "act-1",
         watermark,
@@ -7526,6 +7539,7 @@ test("a new thread comment between mark-ready and the terminal observation block
   // even though the publication status is still MERGE_READY.
   const codex = codexActor();
   const movedThread = resolvedThread(headSha, {
+    at,
     comments: [
       ...thread.comments,
       {
@@ -7581,7 +7595,7 @@ test("the terminal replay accepts one linear supersession chain and blocks every
   // The terminal projection only replays over a derived MERGE_READY, so this
   // test drives the ledger directly: a ready observation with one resolved
   // thread, then records and lifecycle events injected in the stored shape.
-  const thread = resolvedThread(headSha);
+  const thread = resolvedThread(headSha, { at });
   const finalWatermark = threadWatermark(thread);
   const payload = readyObservation(state, headSha, {
     at: at + 20_000,
@@ -7600,6 +7614,7 @@ test("the terminal replay accepts one linear supersession chain and blocks every
   const earlierWatermark = digest("earlier watermark");
   const earlierHead = "a".repeat(40);
   const recordOne = resolutionRecord({
+    at,
     number: 1,
     actionId: "act-1",
     watermark: earlierWatermark,
@@ -7607,6 +7622,7 @@ test("the terminal replay accepts one linear supersession chain and blocks every
     recordedRevision: 3,
   });
   const recordTwo = resolutionRecord({
+    at,
     number: 2,
     actionId: "act-2",
     watermark: finalWatermark,
@@ -7622,13 +7638,15 @@ test("the terminal replay accepts one linear supersession chain and blocks every
     ledger.automatic_resolutions = [recordOne, recordTwo];
     ledger.resolution_lifecycle = [
       invalidatedEvent({
+        at,
         number: 1,
         recordId: "act-1",
         priorWatermark: earlierWatermark,
         newWatermark: finalWatermark,
       }),
-      unresolveEvent({ number: 2, recordId: "act-1" }),
+      unresolveEvent({ at, number: 2, recordId: "act-1" }),
       supersedeEvent({
+        at,
         number: 3,
         predecessorId: "act-1",
         successorId: "act-2",
@@ -7670,13 +7688,15 @@ test("the terminal replay accepts one linear supersession chain and blocks every
   await editPublication(state, reviewId, (ledger) => {
     ledger.resolution_lifecycle = [
       invalidatedEvent({
+        at,
         number: 1,
         recordId: "act-1",
         priorWatermark: earlierWatermark,
         newWatermark: finalWatermark,
       }),
-      unresolveEvent({ number: 2, recordId: "act-1" }),
+      unresolveEvent({ at, number: 2, recordId: "act-1" }),
       supersedeEvent({
+        at,
         number: 3,
         predecessorId: "act-1",
         successorId: "act-2",
@@ -7690,6 +7710,7 @@ test("the terminal replay accepts one linear supersession chain and blocks every
 
   // A fork: one predecessor to two successors is not a chain.
   const recordThree = resolutionRecord({
+    at,
     number: 3,
     actionId: "act-3",
     threadId: "PRRT_1",
@@ -7701,13 +7722,15 @@ test("the terminal replay accepts one linear supersession chain and blocks every
     ledger.automatic_resolutions = [recordOne, recordTwo, recordThree];
     ledger.resolution_lifecycle = [
       invalidatedEvent({
+        at,
         number: 1,
         recordId: "act-1",
         priorWatermark: earlierWatermark,
         newWatermark: finalWatermark,
       }),
-      unresolveEvent({ number: 2, recordId: "act-1" }),
+      unresolveEvent({ at, number: 2, recordId: "act-1" }),
       supersedeEvent({
+        at,
         number: 3,
         predecessorId: "act-1",
         successorId: "act-2",
@@ -7715,6 +7738,7 @@ test("the terminal replay accepts one linear supersession chain and blocks every
         unresolveEvent: 2,
       }),
       supersedeEvent({
+        at,
         number: 4,
         predecessorId: "act-1",
         successorId: "act-3",
@@ -7732,13 +7756,15 @@ test("the terminal replay accepts one linear supersession chain and blocks every
     ledger.automatic_resolutions = [recordOne, recordTwo];
     ledger.resolution_lifecycle = [
       invalidatedEvent({
+        at,
         number: 1,
         recordId: "act-1",
         priorWatermark: earlierWatermark,
         newWatermark: finalWatermark,
       }),
-      unresolveEvent({ number: 2, recordId: "act-1" }),
+      unresolveEvent({ at, number: 2, recordId: "act-1" }),
       supersedeEvent({
+        at,
         number: 3,
         predecessorId: "act-1",
         successorId: "act-2",
@@ -7746,6 +7772,7 @@ test("the terminal replay accepts one linear supersession chain and blocks every
         unresolveEvent: 2,
       }),
       supersedeEvent({
+        at,
         number: 4,
         predecessorId: "act-2",
         successorId: "act-1",
@@ -7771,13 +7798,15 @@ test("the terminal replay accepts one linear supersession chain and blocks every
     ledger.automatic_resolutions = [recordOne];
     ledger.resolution_lifecycle = [
       invalidatedEvent({
+        at,
         number: 1,
         recordId: "act-1",
         priorWatermark: earlierWatermark,
         newWatermark: finalWatermark,
       }),
-      unresolveEvent({ number: 2, recordId: "act-1" }),
+      unresolveEvent({ at, number: 2, recordId: "act-1" }),
       supersedeEvent({
+        at,
         number: 3,
         predecessorId: "act-1",
         successorId: "act-missing",
@@ -7794,6 +7823,7 @@ test("the terminal replay accepts one linear supersession chain and blocks every
   await editPublication(state, reviewId, (ledger) => {
     ledger.automatic_resolutions = [
       resolutionRecord({
+        at,
         number: 1,
         actionId: "act-1",
         watermark: finalWatermark,
@@ -7803,6 +7833,7 @@ test("the terminal replay accepts one linear supersession chain and blocks every
     ];
     ledger.resolution_lifecycle = [
       invalidatedEvent({
+        at,
         number: 1,
         recordId: "act-1",
         priorWatermark: finalWatermark,
@@ -7821,6 +7852,7 @@ test("the terminal replay accepts one linear supersession chain and blocks every
     ledger.automatic_resolutions = [];
     ledger.resolution_lifecycle = [
       invalidatedEvent({
+        at,
         number: 1,
         recordId: "act-ghost",
         priorWatermark: finalWatermark,
@@ -7843,13 +7875,15 @@ test("the terminal replay accepts one linear supersession chain and blocks every
     ledger.automatic_resolutions = [recordOne, recordTwo];
     ledger.resolution_lifecycle = [
       invalidatedEvent({
+        at,
         number: 1,
         recordId: "act-1",
         priorWatermark: earlierWatermark,
         newWatermark: finalWatermark,
       }),
-      unresolveEvent({ number: 2, recordId: "act-1" }),
+      unresolveEvent({ at, number: 2, recordId: "act-1" }),
       supersedeEvent({
+        at,
         number: 3,
         predecessorId: "act-1",
         successorId: "act-2",
@@ -7857,6 +7891,7 @@ test("the terminal replay accepts one linear supersession chain and blocks every
         unresolveEvent: 2,
       }),
       invalidatedEvent({
+        at,
         number: 4,
         threadId: "PRRT_GHOST",
         recordId: "act-ghost",
@@ -7915,6 +7950,7 @@ test("the terminal replay accepts one linear supersession chain and blocks every
   await editPublication(state, reviewId, (ledger) => {
     ledger.automatic_resolutions = [
       resolutionRecord({
+        at,
         number: 1,
         actionId: "act-1",
         threadId: "PRRT_1",
@@ -7923,6 +7959,7 @@ test("the terminal replay accepts one linear supersession chain and blocks every
         recordedRevision: recorded.revision,
       }),
       resolutionRecord({
+        at,
         number: 2,
         actionId: "act-2",
         threadId: "PRRT_1",
@@ -7933,13 +7970,15 @@ test("the terminal replay accepts one linear supersession chain and blocks every
     ];
     ledger.resolution_lifecycle = [
       invalidatedEvent({
+        at,
         number: 1,
         recordId: "act-1",
         priorWatermark: earlierWatermark,
         newWatermark: finalWatermark,
       }),
-      unresolveEvent({ number: 2, recordId: "act-1" }),
+      unresolveEvent({ at, number: 2, recordId: "act-1" }),
       supersedeEvent({
+        at,
         number: 3,
         predecessorId: "act-1",
         successorId: "act-2",
@@ -7956,7 +7995,7 @@ test("the final gate rejects replay-valid same-revision resolution evidence subs
   const { state, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
   const observedAt = at + 2_000;
-  const thread = resolvedThread(headSha);
+  const thread = resolvedThread(headSha, { at });
   const watermark = threadWatermark(thread);
   const payload = readyObservation(state, headSha, {
     at: observedAt,
@@ -7975,6 +8014,7 @@ test("the final gate rejects replay-valid same-revision resolution evidence subs
   await editPublication(state, reviewId, (ledger) => {
     ledger.automatic_resolutions = [
       resolutionRecord({
+        at,
         number: 1,
         actionId: "act-original",
         watermark,
@@ -8021,7 +8061,7 @@ test("the manual gate verification refuses evidence the terminal replay rejects"
   const { state, workflow, reviewId, headSha, at, clearanceRevision } =
     await reachPostReady(t);
   const observedAt = at + 2_000;
-  const thread = resolvedThread(headSha);
+  const thread = resolvedThread(headSha, { at });
   const watermark = threadWatermark(thread);
   const payload = readyObservation(state, headSha, {
     at: observedAt,
@@ -8040,6 +8080,7 @@ test("the manual gate verification refuses evidence the terminal replay rejects"
   await editPublication(state, reviewId, (ledger) => {
     ledger.automatic_resolutions = [
       resolutionRecord({
+        at,
         number: 1,
         actionId: "act-1",
         watermark,
@@ -8078,6 +8119,7 @@ test("the terminal replay refuses human participation in an active record's thre
   const observedAt = at + 2_000;
   const human = { id: 555, type: "User", login: "human" };
   const thread = resolvedThread(headSha, {
+    at,
     comments: [
       {
         id: "PRRC_1",
@@ -8124,6 +8166,7 @@ test("the terminal replay refuses human participation in an active record's thre
   await editPublication(state, reviewId, (ledger) => {
     ledger.automatic_resolutions = [
       resolutionRecord({
+        at,
         number: 1,
         actionId: "act-1",
         watermark,
