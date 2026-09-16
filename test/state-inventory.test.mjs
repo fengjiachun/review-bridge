@@ -309,3 +309,23 @@ test("an object key inside an unreachable unit is not reachability", async () =>
   assert.equal(orphanKey.object_keys, 1);
   assert.equal(orphanKey.group, "unreachable");
 });
+
+// Execution evidence covers key sites the same way it covers quoted
+// producers: a run that executed the line an orphan's key sits on reached
+// that producer, and the constant leaves the deletion input.
+test("an executed object key counts as an executed producer", async () => {
+  const root = await sample();
+  const coverage = path.join(root, "coverage");
+  await fsp.mkdir(coverage, { recursive: true });
+  // The orphan's key sits on line 12 of the sample.
+  await fsp.writeFile(path.join(coverage, "coverage-key.json"), coverageReport(root, 12, 1));
+  const result = spawnSync(
+    process.execPath,
+    [inventory, "--project", root, "--store", path.join(root, "store"), "--coverage", coverage, "--json"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const orphanKey = new Map(JSON.parse(result.stdout).constants.map((entry) => [entry.name, entry])).get("ORPHAN_KEY");
+  assert.equal(orphanKey.producers_executed, 1);
+  assert.equal(orphanKey.group, "reachable_unobserved");
+});

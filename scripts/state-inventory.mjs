@@ -209,9 +209,10 @@ async function scanSource(srcDir) {
       // producer evidence for whichever quoted constant shares the name.
       const key = /^\s*([A-Z][A-Z0-9_]{2,}):/.exec(line);
       if (key) {
-        const uses = keyUses.get(key[1]) ?? { count: 0, units: new Set() };
+        const uses = keyUses.get(key[1]) ?? { count: 0, units: new Set(), lines: [] };
         uses.count += 1;
         uses.units.add(`${name}:${lineUnit[index]}`);
+        uses.lines.push({ file: name, line: index + 1 });
         keyUses.set(key[1], uses);
       }
       for (const match of line.matchAll(CONSTANT)) {
@@ -586,8 +587,11 @@ const result = {
     const storeCount = store.counts.get(name) ?? 0;
     const site = (entry) => `${entry.file}:${entry.line} (${entry.unit}${reachable.has(`${entry.file}:${entry.unit}`) ? "" : ", unreachable"})`;
     const producers = own.filter((entry) => PRODUCER_ROLES.has(entry.role));
+    // A key site is a producer site for execution evidence too: a recorded
+    // run that executed the line the key sits on reached that producer.
+    const producerLines = [...producers, ...(keyUses.get(name)?.lines ?? [])];
     const producersExecuted = executedLines
-      ? producers.filter((entry) => executedLines.get(entry.file)?.[entry.line - 1]).length
+      ? producerLines.filter((entry) => executedLines.get(entry.file)?.[entry.line - 1]).length
       : null;
     return {
       name,
