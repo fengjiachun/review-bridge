@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.15.0 - 2026-09-16
 
 ### Added
 
@@ -45,6 +45,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `at` instead of reading the wall clock, which raced the build time a
   memoized prefix keeps and made one terminal-projection test fail on the
   macOS runner once the snapshot was served more than a few seconds later.
+- (#150) The 0.15.0 release pull request, whose merge carries the v0.15.0 tag
+  and whose own changelog bullet is this one.
 
 ## 0.14.1 - 2026-09-13
 
