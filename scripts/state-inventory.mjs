@@ -459,11 +459,13 @@ function definedEdges(sites, field, files, domain) {
 // The site to trace a value from: one that writes, throws or tabulates it.
 // When every site only compares the value, say so rather than pass a
 // comparison off as a definition.
-function definitionOf(own) {
+function definitionOf(own, keyLines) {
   const defining = own.find((site) => PRODUCER_ROLES.has(site.role) || site.role === "table");
-  return defining
-    ? `${defining.file}:${defining.line}`
-    : `${own[0].file}:${own[0].line} (first occurrence; no site in src defines it)`;
+  if (defining) return `${defining.file}:${defining.line}`;
+  // An unquoted key writes the value too, and is where to trace it from when
+  // no quoted site does.
+  if (keyLines.length > 0) return `${keyLines[0].file}:${keyLines[0].line}`;
+  return `${own[0].file}:${own[0].line} (first occurrence; no site in src defines it)`;
 }
 
 function classify(sites, reachable, storeCount, keyUnits, executedProducers = 0) {
@@ -513,7 +515,7 @@ function markdown(result) {
       const kind = entry.refusals.length > 0 && entry.refusals.length === entry.producers.length ? " refusal-only," : "";
       lines.push(
         `- \`${entry.name}\`${kind} defined ${entry.definition}, store ${entry.store}, tests ${entry.tests}${
-          entry.producers_executed == null ? "" : `, producer lines executed ${entry.producers_executed}/${entry.producers.length}`
+          entry.producers_executed == null ? "" : `, producer lines executed ${entry.producers_executed}/${entry.producer_lines}`
         }${reason}`,
       );
     }
@@ -593,9 +595,10 @@ const result = {
     const producersExecuted = executedLines
       ? producerLines.filter((entry) => executedLines.get(entry.file)?.[entry.line - 1]).length
       : null;
+    const producerLineCount = producerLines.length;
     return {
       name,
-      definition: definitionOf(own),
+      definition: definitionOf(own, keyUses.get(name)?.lines ?? []),
       producers: producers.map(site),
       refusals: own.filter((entry) => entry.role === "refusal").map(site),
       consumers: own.filter((entry) => entry.role === "consumer").map(site),
@@ -604,6 +607,7 @@ const result = {
       store: storeCount,
       tests: testCounts.get(name) ?? 0,
       producers_executed: producersExecuted,
+      producer_lines: producerLineCount,
       ...classify(own, reachable, storeCount, keyUses.get(name)?.units ?? new Set(), producersExecuted ?? 0),
     };
   }),

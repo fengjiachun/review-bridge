@@ -327,5 +327,21 @@ test("an executed object key counts as an executed producer", async () => {
   assert.equal(result.status, 0, result.stderr);
   const orphanKey = new Map(JSON.parse(result.stdout).constants.map((entry) => [entry.name, entry])).get("ORPHAN_KEY");
   assert.equal(orphanKey.producers_executed, 1);
+  assert.equal(orphanKey.producer_lines, 1, "the key line is the whole denominator");
   assert.equal(orphanKey.group, "reachable_unobserved");
+  // The Markdown ratio counts the same sites on both sides.
+  const markdown = spawnSync(
+    process.execPath,
+    [inventory, "--project", root, "--store", path.join(root, "store"), "--coverage", coverage],
+    { encoding: "utf8" },
+  );
+  assert.equal(markdown.status, 0, markdown.stderr);
+  assert.match(markdown.stdout, /`ORPHAN_KEY`.*producer lines executed 1\/1/);
+});
+
+// A value produced only by an unquoted key is traced to that key.
+test("definition names the key site when no quoted site defines the value", async () => {
+  const root = await sample();
+  const constants = run(root, path.join(root, "store"));
+  assert.equal(constants.get("ORPHAN_KEY").definition, "publication.mjs:12");
 });
