@@ -216,3 +216,23 @@ test("audit logs are not evidence", async () => {
   assert.equal(constants.get("ORPHAN_STATUS").store, 0);
   assert.equal(constants.get("ORPHAN_STATUS").group, "unreachable");
 });
+
+// A reviewed repository can carry a file named like a ledger, and a snapshot
+// keeps it below reviews/<id>/rounds/<n>/files/. Only the store's own
+// locations are ledgers.
+test("a snapshot's copy of a ledger-named project file is not a ledger", async () => {
+  const root = await sample();
+  const overlay = path.join(root, "store", "reviews", "rb-sample", "rounds", "1", "files");
+  await fsp.mkdir(overlay, { recursive: true });
+  await fsp.writeFile(path.join(overlay, "review.json"), `${JSON.stringify({ status: "ORPHAN_STATUS" })}\n`);
+  await fsp.writeFile(path.join(overlay, "workflow.json"), `${JSON.stringify({ phase: "ORPHAN_STATUS" })}\n`);
+  // A ledger at the canonical location still counts.
+  await fsp.writeFile(
+    path.join(root, "store", "reviews", "rb-sample", "review.json"),
+    `${JSON.stringify({ status: "REACHED_STATUS" })}\n`,
+  );
+  const constants = run(root, path.join(root, "store"));
+  assert.equal(constants.get("ORPHAN_STATUS").store, 0, "an overlay file is not a ledger");
+  assert.equal(constants.get("ORPHAN_STATUS").group, "unreachable");
+  assert.equal(constants.get("REACHED_STATUS").store, 1);
+});

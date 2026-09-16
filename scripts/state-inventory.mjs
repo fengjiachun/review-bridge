@@ -336,6 +336,21 @@ function walkJson(value, visit) {
   }
 }
 
+// A ledger is known by where the store keeps it, not by its basename: a
+// reviewed repository can carry its own review.json, and a snapshot stores
+// that file below reviews/<id>/rounds/<n>/files/. Only the store's own
+// locations count -- a ledger directly under reviews/<id>/ or
+// workflows/<id>/, or anything the release store writes under releases/.
+function isCanonicalLedgerPath(storeRoot, file) {
+  const parts = path.relative(storeRoot, file).split(path.sep);
+  if (parts.includes("rounds")) return false;
+  if (parts[0] === "releases") return parts.length >= 3;
+  if (parts.length !== 3) return false;
+  if (parts[0] === "reviews") return LEDGER_FILES.has(parts[2]);
+  if (parts[0] === "workflows") return parts[2] === "workflow.json";
+  return false;
+}
+
 // Only whole values in canonical ledgers count. A constant quoted inside a
 // reviewer's comment body is that reviewer's prose, not a state this store
 // ever held. Audit logs are not read: they are append-only files whose
@@ -346,8 +361,8 @@ async function scanStore(storeRoot, known) {
   const publicationEdges = new Map();
   let scanned = 0;
   for (const file of await listFiles(storeRoot, ".json")) {
+    if (!isCanonicalLedgerPath(storeRoot, file)) continue;
     const base = path.basename(file);
-    if (!LEDGER_FILES.has(base) && !file.includes(`${path.sep}releases${path.sep}`)) continue;
     const text = await fsp.readFile(file, "utf8").catch(() => null);
     if (text == null) continue;
     let document;
