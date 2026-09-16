@@ -318,3 +318,24 @@ export function keyed(input) {
   assert.equal(constants.get("KEY_INLINE_VALUE").group, "external_input_guard");
   assert.deepEqual(constants.get("KEY_ONLY_VALUE").producers, []);
 });
+
+// An arrow that returns a parenthesized object closes on "});", not "}". If
+// that line did not close the unit, every declaration after it would inherit
+// the arrow's unit and its reachability.
+test("an arrow returning a parenthesized object closes its unit", async () => {
+  const root = await sample();
+  await fsp.writeFile(
+    path.join(root, "src", "publication.mjs"),
+    `${PUBLICATION}
+export const arrow = () => ({
+  status: "ARROW_STATUS",
+});
+export const after = "AFTER_VALUE";
+`,
+  );
+  const constants = run(root, path.join(root, "store"));
+  // The module body is a root, so a value it writes is reachable from it --
+  // and its producer must be attributed to the module, not to the arrow.
+  assert.match(constants.get("AFTER_VALUE").producers.join(), /^publication\.mjs:\d+ \(<module>\)$/);
+  assert.match(constants.get("ARROW_STATUS").producers.join(), /^publication\.mjs:\d+ \(arrow, unreachable\)$/);
+});
