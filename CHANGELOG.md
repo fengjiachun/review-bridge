@@ -46,6 +46,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   memoized prefix keeps and made one terminal-projection test fail on the
   macOS runner once the snapshot was served more than a few seconds later.
 
+### Internal
+
+- (#150) The 0.15.0 release pull request, whose merge carries the v0.15.0 tag
+  and whose own changelog bullet is this one.
+
 ## 0.14.1 - 2026-09-13
 
 ### Changed
