@@ -264,3 +264,19 @@ test("coverage recorded under a real path matches a symlinked project", async ()
   assert.equal(orphan.producers_executed, 1, "the real-path hit belongs to the symlinked project's source");
   assert.equal(orphan.group, "reachable_unobserved");
 });
+
+// The suites import extensionless helpers under test/helpers by bare path.
+// A constant those helpers name is named by a test module, and the count
+// says so; a fixture with another extension is data and does not count.
+test("extensionless test helpers count as test modules", async () => {
+  const root = await sample();
+  await fsp.mkdir(path.join(root, "test", "helpers"), { recursive: true });
+  await fsp.writeFile(
+    path.join(root, "test", "helpers", "publication-chain"),
+    'export const refusal = "REACHED_REFUSAL";\n',
+  );
+  await fsp.writeFile(path.join(root, "test", "baseline.md"), '"ORPHAN_STATUS"\n');
+  const constants = run(root, path.join(root, "store"));
+  assert.equal(constants.get("REACHED_REFUSAL").tests, 1);
+  assert.equal(constants.get("ORPHAN_STATUS").tests, 0);
+});

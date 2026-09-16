@@ -264,7 +264,13 @@ async function reachableUnits(project, srcDir, units) {
 
 async function scanTests(testDir) {
   const counts = new Map();
-  for (const file of await listFiles(testDir, ".mjs")) {
+  // Test modules are .mjs files and the extensionless helpers under
+  // test/helpers, which the suites import by bare path; a fixture with any
+  // other extension is data, not a module that names a state.
+  const testModules = (await listFiles(testDir, "")).filter(
+    (file) => file.endsWith(".mjs") || path.extname(file) === "",
+  );
+  for (const file of testModules) {
     for (const match of (await fsp.readFile(file, "utf8")).matchAll(CONSTANT)) {
       counts.set(match[1], (counts.get(match[1]) ?? 0) + 1);
     }
