@@ -35,10 +35,7 @@ export function reachedTool(input) {
 }
 
 export function orphanTransition(ledger) {
-  return { ...ledger, status: "ORPHAN_STATUS", table: {
-    ORPHAN_KEY: true,
-  } };
-  if (ledger.kind === "ORPHAN_KEY") return ledger;
+  return { ...ledger, status: "ORPHAN_STATUS" };
 }
 `;
 
@@ -298,50 +295,26 @@ test("CRLF sources keep their unit boundaries", async () => {
   assert.equal(constants.get("REACHED_STATUS").group, "reachable_unobserved");
 });
 
-// An unquoted object key is producer evidence for the constant sharing its
-// name, but only from a unit a tool surface reaches: a key written inside an
-// orphaned function reaches nothing, and the constant it names stays in the
-// deletion input.
-test("an object key inside an unreachable unit is not reachability", async () => {
+// Unquoted object keys are not read. A hand-rolled key scanner drew four
+// review rounds of gaps -- leading keys, executed keys, key definitions,
+// inline keys -- and each fix left the next; the instrument names this as a
+// blind spot instead. A value that only a key writes reads as an
+// external-input guard here, which is wrong and listed, not silent.
+test("unquoted object keys are a named blind spot, not evidence", async () => {
   const root = await sample();
-  const constants = run(root, path.join(root, "store"));
-  const orphanKey = constants.get("ORPHAN_KEY");
-  assert.equal(orphanKey.object_keys, 1);
-  assert.equal(orphanKey.group, "unreachable");
-});
-
-// Execution evidence covers key sites the same way it covers quoted
-// producers: a run that executed the line an orphan's key sits on reached
-// that producer, and the constant leaves the deletion input.
-test("an executed object key counts as an executed producer", async () => {
-  const root = await sample();
-  const coverage = path.join(root, "coverage");
-  await fsp.mkdir(coverage, { recursive: true });
-  // The orphan's key sits on line 12 of the sample.
-  await fsp.writeFile(path.join(coverage, "coverage-key.json"), coverageReport(root, 12, 1));
-  const result = spawnSync(
-    process.execPath,
-    [inventory, "--project", root, "--store", path.join(root, "store"), "--coverage", coverage, "--json"],
-    { encoding: "utf8" },
+  await fsp.writeFile(
+    path.join(root, "src", "publication.mjs"),
+    `${PUBLICATION}
+export const TABLE = {
+  KEY_ONLY_VALUE: 1,
+};
+export function keyed(input) {
+  return { KEY_INLINE_VALUE: input }, input.kind === "KEY_ONLY_VALUE" || input.kind === "KEY_INLINE_VALUE";
+}
+`,
   );
-  assert.equal(result.status, 0, result.stderr);
-  const orphanKey = new Map(JSON.parse(result.stdout).constants.map((entry) => [entry.name, entry])).get("ORPHAN_KEY");
-  assert.equal(orphanKey.producers_executed, 1);
-  assert.equal(orphanKey.producer_lines, 1, "the key line is the whole denominator");
-  assert.equal(orphanKey.group, "reachable_unobserved");
-  // The Markdown ratio counts the same sites on both sides.
-  const markdown = spawnSync(
-    process.execPath,
-    [inventory, "--project", root, "--store", path.join(root, "store"), "--coverage", coverage],
-    { encoding: "utf8" },
-  );
-  assert.equal(markdown.status, 0, markdown.stderr);
-  assert.match(markdown.stdout, /`ORPHAN_KEY`.*producer lines executed 1\/1/);
-});
-
-// A value produced only by an unquoted key is traced to that key.
-test("definition names the key site when no quoted site defines the value", async () => {
-  const root = await sample();
   const constants = run(root, path.join(root, "store"));
-  assert.equal(constants.get("ORPHAN_KEY").definition, "publication.mjs:12");
+  assert.equal(constants.get("KEY_ONLY_VALUE").group, "external_input_guard");
+  assert.equal(constants.get("KEY_INLINE_VALUE").group, "external_input_guard");
+  assert.deepEqual(constants.get("KEY_ONLY_VALUE").producers, []);
 });

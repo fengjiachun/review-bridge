@@ -177,7 +177,6 @@ async function scanSource(srcDir) {
   const files = await listFiles(srcDir, ".mjs", 0);
   const sites = [];
   const units = new Map();
-  const keyUses = new Map();
   const texts = new Map();
   for (const file of files) {
     const name = path.basename(file);
@@ -204,17 +203,6 @@ async function scanSource(srcDir) {
     lines.forEach((line, index) => {
       const lineStart = offset;
       offset += line.length + 1;
-      // A constant used as an unquoted object key is a value a lookup hands
-      // out. It never enters the quoted universe, so it is collected here as
-      // producer evidence for whichever quoted constant shares the name.
-      const key = /^\s*([A-Z][A-Z0-9_]{2,}):/.exec(line);
-      if (key) {
-        const uses = keyUses.get(key[1]) ?? { count: 0, units: new Set(), lines: [] };
-        uses.count += 1;
-        uses.units.add(`${name}:${lineUnit[index]}`);
-        uses.lines.push({ file: name, line: index + 1 });
-        keyUses.set(key[1], uses);
-      }
       for (const match of line.matchAll(CONSTANT)) {
         sites.push({
           name: match[1],
@@ -232,7 +220,7 @@ async function scanSource(srcDir) {
       }
     });
   }
-  return { files, sites, units, keyUses, texts };
+  return { files, sites, units, texts };
 }
 
 // Roots are the tool surfaces: the server module, and every packaged or
@@ -459,28 +447,22 @@ function definedEdges(sites, field, files, domain) {
 // The site to trace a value from: one that writes, throws or tabulates it.
 // When every site only compares the value, say so rather than pass a
 // comparison off as a definition.
-function definitionOf(own, keyLines) {
+function definitionOf(own) {
   const defining = own.find((site) => PRODUCER_ROLES.has(site.role) || site.role === "table");
-  if (defining) return `${defining.file}:${defining.line}`;
-  // An unquoted key writes the value too, and is where to trace it from when
-  // no quoted site does.
-  if (keyLines.length > 0) return `${keyLines[0].file}:${keyLines[0].line}`;
-  return `${own[0].file}:${own[0].line} (first occurrence; no site in src defines it)`;
+  return defining
+    ? `${defining.file}:${defining.line}`
+    : `${own[0].file}:${own[0].line} (first occurrence; no site in src defines it)`;
 }
 
-function classify(sites, reachable, storeCount, keyUnits, executedProducers = 0) {
+function classify(sites, reachable, storeCount, executedProducers = 0) {
   const producers = sites.filter((site) => PRODUCER_ROLES.has(site.role));
   const reachableProducers = producers.filter((site) => reachable.has(`${site.file}:${site.unit}`));
-  // An unquoted key is a producer too; like any producer it only counts as
-  // reachable from a unit a tool surface reaches.
-  const keyed = keyUnits.size > 0;
-  const keyedReachable = [...keyUnits].some((unit) => reachable.has(unit));
   // A producer line a recorded run executed is reachable whatever the
   // name-matched call graph says about its unit; execution is the stronger
   // evidence and it only ever moves a constant out of the deletion group.
   const executed = executedProducers > 0;
-  const where = [...new Set([...producers.map((site) => `${site.file}:${site.unit}`), ...keyUnits])].join(", ");
-  if (producers.length === 0 && !keyed) {
+  const where = [...new Set(producers.map((site) => `${site.file}:${site.unit}`))].join(", ");
+  if (producers.length === 0) {
     const files = [...new Set(sites.map((site) => site.file))].join(", ");
     return {
       group: "external_input_guard",
@@ -494,12 +476,12 @@ function classify(sites, reachable, storeCount, keyUnits, executedProducers = 0)
     return {
       group: "reachable_observed",
       reason:
-        reachableProducers.length > 0 || keyedReachable || executed
+        reachableProducers.length > 0 || executed
           ? null
           : `a real ledger holds this value although every producer sits outside the closure (${where}): this instrument is wrong here`,
     };
   }
-  if (reachableProducers.length === 0 && !keyedReachable && !executed) {
+  if (reachableProducers.length === 0 && !executed) {
     return { group: "unreachable", reason: `every producer sits in a unit no tool surface reaches: ${where}` };
   }
   return { group: "reachable_unobserved", reason: null };
@@ -515,7 +497,7 @@ function markdown(result) {
       const kind = entry.refusals.length > 0 && entry.refusals.length === entry.producers.length ? " refusal-only," : "";
       lines.push(
         `- \`${entry.name}\`${kind} defined ${entry.definition}, store ${entry.store}, tests ${entry.tests}${
-          entry.producers_executed == null ? "" : `, producer lines executed ${entry.producers_executed}/${entry.producer_lines}`
+          entry.producers_executed == null ? "" : `, producer lines executed ${entry.producers_executed}/${entry.producers.length}`
         }${reason}`,
       );
     }
@@ -547,6 +529,8 @@ function markdown(result) {
     "",
     "Workflow phases are not tabulated: workflow.json carries only its current phase, and phase history lives in the action audit log, which this instrument does not read.",
     "",
+    "Unquoted object keys are not read: a value that only a key writes appears here as an external-input guard. HISTORY_REWRITE_REQUIRED is the known case; read the group-4 list with that in mind.",
+    "",
     "## Instrument defects",
     "",
     result.instrument_defects.length === 0
@@ -562,7 +546,7 @@ const project = path.resolve(args.project ?? path.join(path.dirname(fileURLToPat
 const storeRoot = args.store === null ? null : path.resolve(args.store ?? defaultStoreRoot());
 const srcDir = path.join(project, "src");
 
-const { files, sites, units, keyUses, texts } = await scanSource(srcDir);
+const { files, sites, units, texts } = await scanSource(srcDir);
 const { reachable, rootFiles } = await reachableUnits(project, srcDir, units);
 const testCounts = await scanTests(path.join(project, "test"));
 const executedLines = args.coverage ? await scanCoverage(path.resolve(args.coverage), texts, srcDir) : null;
@@ -589,26 +573,20 @@ const result = {
     const storeCount = store.counts.get(name) ?? 0;
     const site = (entry) => `${entry.file}:${entry.line} (${entry.unit}${reachable.has(`${entry.file}:${entry.unit}`) ? "" : ", unreachable"})`;
     const producers = own.filter((entry) => PRODUCER_ROLES.has(entry.role));
-    // A key site is a producer site for execution evidence too: a recorded
-    // run that executed the line the key sits on reached that producer.
-    const producerLines = [...producers, ...(keyUses.get(name)?.lines ?? [])];
     const producersExecuted = executedLines
-      ? producerLines.filter((entry) => executedLines.get(entry.file)?.[entry.line - 1]).length
+      ? producers.filter((entry) => executedLines.get(entry.file)?.[entry.line - 1]).length
       : null;
-    const producerLineCount = producerLines.length;
     return {
       name,
-      definition: definitionOf(own, keyUses.get(name)?.lines ?? []),
+      definition: definitionOf(own),
       producers: producers.map(site),
       refusals: own.filter((entry) => entry.role === "refusal").map(site),
       consumers: own.filter((entry) => entry.role === "consumer").map(site),
       tables: own.filter((entry) => entry.role === "table").map(site),
-      object_keys: keyUses.get(name)?.count ?? 0,
       store: storeCount,
       tests: testCounts.get(name) ?? 0,
       producers_executed: producersExecuted,
-      producer_lines: producerLineCount,
-      ...classify(own, reachable, storeCount, keyUses.get(name)?.units ?? new Set(), producersExecuted ?? 0),
+      ...classify(own, reachable, storeCount, producersExecuted ?? 0),
     };
   }),
   transitions: {
