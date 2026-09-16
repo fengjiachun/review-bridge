@@ -11,7 +11,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Changed
 
-- (#PR) Move the README's per-client install sections, the autonomous workflow,
+- (#153) Move the README's per-client install sections, the autonomous workflow,
   the GitHub publication gate, and most of Troubleshooting into pages under
   `docs/`, each naming the release it describes, and leave a link in their
   place. `docs/review-flow.md` now covers the review report, advisory panels,
@@ -21,7 +21,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Internal
 
-- (#PR) `scripts/render-reference.mjs` generates `docs/reference.md` from the
+- (#153) `scripts/render-reference.mjs` generates `docs/reference.md` from the
   tools each server role lists and the error codes `src/` raises, and a test
   fails when the committed page differs. `verify-release.mjs --pre` fails with
   `DOCS_UNTOUCHED` when the release entry has `### Added` and no file under
