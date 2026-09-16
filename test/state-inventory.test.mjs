@@ -280,3 +280,17 @@ test("extensionless test helpers count as test modules", async () => {
   assert.equal(constants.get("REACHED_REFUSAL").tests, 1);
   assert.equal(constants.get("ORPHAN_STATUS").tests, 0);
 });
+
+// A checkout made with core.autocrlf carries "\r\n" line ends. Unit
+// boundaries must still close, or every later producer in a file would be
+// attributed to its first function and an orphan would read as reachable.
+test("CRLF sources keep their unit boundaries", async () => {
+  const root = await sample();
+  const crlf = PUBLICATION.replace(/\n/g, "\r\n");
+  await fsp.writeFile(path.join(root, "src", "publication.mjs"), crlf);
+  const constants = run(root, path.join(root, "store"));
+  const orphan = constants.get("ORPHAN_STATUS");
+  assert.deepEqual(orphan.producers, ["publication.mjs:11 (orphanTransition, unreachable)"]);
+  assert.equal(orphan.group, "unreachable");
+  assert.equal(constants.get("REACHED_STATUS").group, "reachable_unobserved");
+});

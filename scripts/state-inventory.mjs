@@ -33,7 +33,9 @@ import { fileURLToPath } from "node:url";
 const CONSTANT = /"([A-Z][A-Z0-9_]{2,})"/g;
 const UNIT_START =
   /^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_$]+)|^(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*(?:async\s*)?\(/;
-const UNIT_END = /^[}\)\]][;,]?$/;
+// A CRLF checkout leaves "\r" on every split line; the text itself is kept
+// raw so coverage offsets still line up, and the boundary tolerates it.
+const UNIT_END = /^[}\)\]][;,]?\r?$/;
 const MODULE_UNIT = "<module>";
 const WORD = /[A-Za-z_$][A-Za-z0-9_$]*/g;
 
