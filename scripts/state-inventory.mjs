@@ -277,12 +277,14 @@ async function scanTests(testDir) {
 }
 
 // Which lines of each source file a recorded run executed. V8 reports ranges
-// per function; the innermost range covering a byte decides it, so ranges are
-// painted widest first. The union across every coverage file is taken: a line
-// any process ran is executed.
+// per function in source string offsets -- not bytes, which matters wherever a
+// comment carries an em dash -- and the innermost range covering an offset
+// decides it, so ranges are painted widest first. The union across every
+// coverage file is taken: a line any process ran is executed. Checked against
+// the uncovered lines node --experimental-test-coverage prints for the same run.
 async function scanCoverage(dir, texts) {
   const executed = new Map();
-  for (const [name, text] of texts) executed.set(name, new Uint8Array(Buffer.byteLength(text)));
+  for (const [name, text] of texts) executed.set(name, new Uint8Array(text.length));
   for (const file of await listFiles(dir, ".json", 2)) {
     const report = JSON.parse(await fsp.readFile(file, "utf8"));
     for (const script of report.result ?? []) {
@@ -302,7 +304,7 @@ async function scanCoverage(dir, texts) {
     const marks = [];
     let offset = 0;
     for (const line of text.split("\n")) {
-      const width = Buffer.byteLength(line);
+      const width = line.length;
       marks.push(flags.subarray(offset, offset + width).includes(1));
       offset += width + 1;
     }
