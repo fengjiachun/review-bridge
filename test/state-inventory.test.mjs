@@ -236,3 +236,31 @@ test("a snapshot's copy of a ledger-named project file is not a ledger", async (
   assert.equal(constants.get("ORPHAN_STATUS").group, "unreachable");
   assert.equal(constants.get("REACHED_STATUS").store, 1);
 });
+
+// Node records a module's real path in coverage URLs. A project reached
+// through a symlink must still recognise its own scripts, so a hit recorded
+// under the real path counts for the source the symlinked project names.
+test("coverage recorded under a real path matches a symlinked project", async () => {
+  const real = await sample();
+  const link = path.join(path.dirname(real), `${path.basename(real)}-link`);
+  await fsp.symlink(real, link, "dir");
+  const coverage = path.join(real, "coverage");
+  await fsp.mkdir(coverage, { recursive: true });
+  const target = await fsp.realpath(path.join(real, "src", "publication.mjs"));
+  const offset = PUBLICATION.split("\n").slice(0, 10).join("\n").length + 1;
+  await fsp.writeFile(
+    path.join(coverage, "coverage-real.json"),
+    JSON.stringify({
+      result: [{ url: `file://${target}`, functions: [{ functionName: "orphanTransition", ranges: [{ startOffset: offset, endOffset: offset + 40, count: 1 }] }] }],
+    }),
+  );
+  const result = spawnSync(
+    process.execPath,
+    [inventory, "--project", link, "--store", path.join(link, "store"), "--coverage", coverage, "--json"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const orphan = new Map(JSON.parse(result.stdout).constants.map((entry) => [entry.name, entry])).get("ORPHAN_STATUS");
+  assert.equal(orphan.producers_executed, 1, "the real-path hit belongs to the symlinked project's source");
+  assert.equal(orphan.group, "reachable_unobserved");
+});

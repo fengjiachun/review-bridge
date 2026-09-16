@@ -284,13 +284,21 @@ async function scanCoverage(dir, texts, srcDir) {
   // A script is one of ours only when its URL resolves to the project's own
   // src file. The suite copies src/ into temp directories and imports the
   // copies, so a basename match would credit the copy's hits to the original.
-  const own = new Map([...texts.keys()].map((name) => [path.resolve(srcDir, name), name]));
+  // Node records a module's real path in coverage URLs, so a checkout reached
+  // through a symlink would never match its own scripts: both sides are
+  // canonicalised before they are compared.
+  const own = new Map();
+  for (const name of texts.keys()) {
+    const file = path.resolve(srcDir, name);
+    own.set(await fsp.realpath(file).catch(() => file), name);
+  }
   for (const file of await listFiles(dir, ".json", 2)) {
     const report = JSON.parse(await fsp.readFile(file, "utf8"));
     for (const script of report.result ?? []) {
       let scriptPath;
       try {
-        scriptPath = script.url?.startsWith("file:") ? path.resolve(fileURLToPath(script.url)) : null;
+        const resolved = script.url?.startsWith("file:") ? path.resolve(fileURLToPath(script.url)) : null;
+        scriptPath = resolved == null ? null : await fsp.realpath(resolved).catch(() => resolved);
       } catch {
         scriptPath = null;
       }
