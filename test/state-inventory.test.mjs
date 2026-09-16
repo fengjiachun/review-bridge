@@ -28,7 +28,7 @@ register("start_publication", {}, async (input) => reachedTool(input));
 const PUBLICATION = `const FEED_CONCLUSIONS = new Set(["FEED_ONLY_VALUE"]);
 
 export function reachedTool(input) {
-  if (!FEED_CONCLUSIONS.has(input.conclusion)) {
+  if (!FEED_CONCLUSIONS.has(input.conclusion) || input.status === "ORPHAN_STATUS" || input.kind === "COMPARED_ONLY") {
     fail("REACHED_REFUSAL");
   }
   return { status: "REACHED_STATUS" };
@@ -154,4 +154,46 @@ test("an executed producer is reachable, and a hit survives a later report's mis
   assert.equal(orphan.group, "reachable_unobserved", "an executed producer is reachable");
   // The classification is not from the call graph: the unit is still outside it.
   assert.deepEqual(orphan.producers, ["publication.mjs:11 (orphanTransition, unreachable)"]);
+});
+
+// The suite copies src/ into temp directories and imports the copies, so a
+// coverage report can hold the same basename under another path. Hits there
+// belong to the copy, never to the project source.
+test("coverage of a copied source tree does not count for the original", async () => {
+  const root = await sample();
+  const coverage = path.join(root, "coverage");
+  await fsp.mkdir(coverage, { recursive: true });
+  const copy = path.join(root, "elsewhere", "src", "publication.mjs");
+  const offset = PUBLICATION.split("\n").slice(0, 10).join("\n").length + 1;
+  await fsp.writeFile(
+    path.join(coverage, "coverage-copy.json"),
+    JSON.stringify({
+      result: [{ url: `file://${copy}`, functions: [{ functionName: "orphanTransition", ranges: [{ startOffset: offset, endOffset: offset + 40, count: 1 }] }] }],
+    }),
+  );
+  const result = spawnSync(
+    process.execPath,
+    [inventory, "--project", root, "--store", path.join(root, "store"), "--coverage", coverage, "--json"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const orphan = new Map(JSON.parse(result.stdout).constants.map((entry) => [entry.name, entry])).get("ORPHAN_STATUS");
+  assert.equal(orphan.producers_executed, 0, "a hit in the copy is not a hit in the original");
+  assert.equal(orphan.group, "unreachable");
+});
+
+// The definition field traces a value to a site that writes it, not to
+// whichever comparison happens to come first in the file.
+test("definition names a producing site, or says no site defines the value", async () => {
+  const root = await sample();
+  const constants = run(root, path.join(root, "store"));
+  // ORPHAN_STATUS is compared on line 4 and produced on line 11.
+  assert.equal(constants.get("ORPHAN_STATUS").definition, "publication.mjs:11");
+  // A Set literal is a table: it defines the value, so line 1 stands unlabelled.
+  assert.equal(constants.get("FEED_ONLY_VALUE").definition, "publication.mjs:1");
+  // A value every site only compares has no definition to point at.
+  assert.equal(
+    constants.get("COMPARED_ONLY").definition,
+    "publication.mjs:4 (first occurrence; no site in src defines it)",
+  );
 });

@@ -282,26 +282,36 @@ async function scanTests(testDir) {
 // decides it, so ranges are painted widest first. The union across every
 // coverage file is taken: a line any process ran is executed. Checked against
 // the uncovered lines node --experimental-test-coverage prints for the same run.
-async function scanCoverage(dir, texts) {
+async function scanCoverage(dir, texts, srcDir) {
   const executed = new Map();
   for (const [name, text] of texts) executed.set(name, new Uint8Array(text.length));
+  // A script is one of ours only when its URL resolves to the project's own
+  // src file. The suite copies src/ into temp directories and imports the
+  // copies, so a basename match would credit the copy's hits to the original.
+  const own = new Map([...texts.keys()].map((name) => [path.resolve(srcDir, name), name]));
   for (const file of await listFiles(dir, ".json", 2)) {
     const report = JSON.parse(await fsp.readFile(file, "utf8"));
     for (const script of report.result ?? []) {
-      const name = path.basename(script.url ?? "");
-      const flags = executed.get(name);
-      if (!flags || !script.url?.includes("/src/")) continue;
+      let scriptPath;
+      try {
+        scriptPath = script.url?.startsWith("file:") ? path.resolve(fileURLToPath(script.url)) : null;
+      } catch {
+        scriptPath = null;
+      }
+      const name = scriptPath == null ? null : own.get(scriptPath);
+      const flags = name == null ? null : executed.get(name);
+      if (!flags) continue;
       // One report at a time: paint this process's ranges into a scratch
       // bitmap, innermost last, then OR it in. Painting straight into the
       // aggregate would let a later report's unexecuted range erase a line an
       // earlier process ran, and the answer would depend on file order.
-      const own = new Uint8Array(flags.length);
+      const scratch = new Uint8Array(flags.length);
       const ranges = script.functions.flatMap((fn) => fn.ranges);
       ranges.sort((a, b) => b.endOffset - b.startOffset - (a.endOffset - a.startOffset));
       for (const range of ranges) {
-        own.fill(range.count > 0 ? 1 : 0, range.startOffset, Math.min(range.endOffset, own.length));
+        scratch.fill(range.count > 0 ? 1 : 0, range.startOffset, Math.min(range.endOffset, scratch.length));
       }
-      for (let i = 0; i < flags.length; i += 1) flags[i] |= own[i];
+      for (let i = 0; i < flags.length; i += 1) flags[i] |= scratch[i];
     }
   }
   const lines = new Map();
@@ -420,6 +430,16 @@ function definedEdges(sites, field, files, domain) {
 // runtime -- so it is an external-input guard whatever the store says; a value
 // the store holds happens, whatever this instrument infers; only then does the
 // reachability of its producers decide.
+// The site to trace a value from: one that writes, throws or tabulates it.
+// When every site only compares the value, say so rather than pass a
+// comparison off as a definition.
+function definitionOf(own) {
+  const defining = own.find((site) => PRODUCER_ROLES.has(site.role) || site.role === "table");
+  return defining
+    ? `${defining.file}:${defining.line}`
+    : `${own[0].file}:${own[0].line} (first occurrence; no site in src defines it)`;
+}
+
 function classify(sites, reachable, storeCount, keyed, executedProducers = 0) {
   const producers = sites.filter((site) => PRODUCER_ROLES.has(site.role));
   const reachableProducers = producers.filter((site) => reachable.has(`${site.file}:${site.unit}`));
@@ -516,7 +536,7 @@ const srcDir = path.join(project, "src");
 const { files, sites, units, keyUses, texts } = await scanSource(srcDir);
 const { reachable, rootFiles } = await reachableUnits(project, srcDir, units);
 const testCounts = await scanTests(path.join(project, "test"));
-const executedLines = args.coverage ? await scanCoverage(path.resolve(args.coverage), texts) : null;
+const executedLines = args.coverage ? await scanCoverage(path.resolve(args.coverage), texts, srcDir) : null;
 const names = new Set(sites.map((site) => site.name));
 const store = storeRoot
   ? await scanStore(storeRoot, names)
@@ -547,7 +567,7 @@ const result = {
       : null;
     return {
       name,
-      definition: `${own[0].file}:${own[0].line}`,
+      definition: definitionOf(own),
       producers: producers.map(site),
       refusals: own.filter((entry) => entry.role === "refusal").map(site),
       consumers: own.filter((entry) => entry.role === "consumer").map(site),
