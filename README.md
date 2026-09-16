@@ -748,13 +748,30 @@ one store, writes nothing, sends nothing anywhere, and lists a ledger it cannot
 parse as skipped rather than repairing it.
 
 The author tool `render_review_report` and the packaged
-`scripts/review-report.mjs <review_id> [--json] [--store <path>]` render one
-review's ledger, and its publication ledger when present, as a Markdown report
-a person can read in one sitting (a `REMOTE_ONLY` publication, which has no
-review ledger, renders from its publication and authorization alone): requirement and scope, each round's findings
+`scripts/review-report.mjs <review_id> [--full] [--json] [--store <path>]`
+render one review's ledger, and its publication ledger when present, as a
+Markdown report a person can read in one sitting (a `REMOTE_ONLY` publication,
+which has no review ledger, renders from its publication and authorization
+alone).
+
+The script prints a brief by default: the terminal state and where the review
+goes next in the first two lines, a fact table, the findings still open before
+the ones already settled, the round-level facts, and a pointer to the full
+rendering. Every number in it is counted over the ledger and every grouping is
+one the ledger decides -- severity, the round a finding was introduced in,
+whether two findings name the same title at the same location -- because the
+renderer calls no model; a line that would read across findings to say what
+they have in common is out of its reach, and it states the counting rule
+instead. A review with nothing open says so rather than heading an empty
+section, and a `REMOTE_ONLY` publication briefs in the same shape.
+
+`--full` prints the full rendering, which is also what the tool writes:
+requirement and scope, each round's findings
 with the author's disposition and the rereviewer's decision, what changed
 between rounds, the terminal state, and the pull request, Codex results,
-checks, and threads a publication recorded. The tool writes
+checks, and threads a publication recorded. Both tiers read the same ledgers
+through the same reader and print the same report revision in their footer;
+`--json` names which tier it rendered. The tool writes
 `reviews/<review_id>/report-r<state_version>[-p<revision>-s<summary digest>]-f<renderer format>.md`
 (`report-p<revision>-s<summary digest>-f<renderer format>.md` when remote-only) beside the ledger
 and returns a receipt -- path, byte count, sha256, the ledger revisions and

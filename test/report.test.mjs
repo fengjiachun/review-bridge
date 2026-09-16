@@ -5,7 +5,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   appendReviewErratum,
   finalizeLocalGate,
@@ -31,6 +31,7 @@ import {
   PROJECTION_NOTICE,
   PROJECTION_NOTICE_REMOTE_ONLY,
   loadReportLedgers,
+  renderReviewBrief,
   renderReviewReport,
   REPORT_FORMAT,
   reportRevision,
@@ -45,6 +46,12 @@ import {
   workflowInput,
 } from "./helpers/publication-chain";
 import { commit, fixture as workflowFixture } from "./helpers/repository-fixture";
+import {
+  BASELINE_RENDERED_AT,
+  BASELINE_REVIEW_ID,
+  continuableInTwoRounds,
+  continuableWithOneMoreOpenFinding,
+} from "./helpers/report-ledger.mjs";
 
 const REVIEW_ID = "rb-2026-09-01T000000-000Z-0badf00d";
 const BASE = "a".repeat(40);
@@ -1523,4 +1530,461 @@ test("a renderer format bump writes a new report and leaves the earlier one alon
   assert.notEqual(bumped.path, first.path);
   // The report the earlier renderer wrote is still there, byte for byte.
   assert.equal(await fsp.readFile(first.path, "utf8"), firstText);
+});
+
+// ---------------------------------------------------------------------------
+// The brief: the default tier. Same reader, same ledgers, the other depth.
+
+const BRIEF_LEDGER_DIRECTORY = path.join("reviews", BASELINE_REVIEW_ID);
+
+function brief(review, options = {}) {
+  return renderReviewBrief(review, {
+    renderedAt: BASELINE_RENDERED_AT,
+    ledgerDirectory: BRIEF_LEDGER_DIRECTORY,
+    ...options,
+  });
+}
+
+// The second line promises to say where the review goes next. Without a
+// publication that has to come from the local status itself, one sentence
+// per status, and never the same generic sentence for all of them.
+test("the brief's second line names the next local step when no publication exists", () => {
+  const expected = {
+    WAITING_FOR_REVIEW: /^Next: the reviewer's first review is still owed\./,
+    REVIEW_SUBMITTED: /^Next: the author's resolutions are owed next\./,
+    AUTHOR_RESPONDED: /^Next: a rereview is the next step\./,
+    WAITING_FOR_REREVIEW: /^Next: the rereview is still owed\./,
+    CLEAN: /^Next: the local gate can be finalized next\./,
+    HUMAN_REQUIRED: /^Next: a human arbitration is owed before anything else moves\./,
+    CONTINUABLE_FINDINGS: /^Next: the open findings are addressed in a fresh full review\./,
+  };
+  const seen = new Set();
+  for (const [status, pattern] of Object.entries(expected)) {
+    const markdown = brief(cleanInTwoRounds({ status }));
+    const second = markdown.split("\n").find((line) => line.startsWith("Next: "));
+    assert.match(second, pattern, status);
+    assert.match(second, /nothing here is merged or gated\.$/, status);
+    seen.add(second);
+  }
+  assert.equal(seen.size, Object.keys(expected).length, "each status gets its own destination");
+  // The advisory terminal states owe nothing further, and say so instead of
+  // pointing at an author loop that does not exist.
+  const reported = brief(cleanInTwoRounds({ advisory: true, status: "REVIEW_SUBMITTED" }));
+  assert.match(reported.split("\n").find((line) => line.startsWith("Next: ")), /^Next: the findings are reported and nothing further is owed/);
+  const clean = brief(cleanInTwoRounds({ advisory: true, status: "CLEAN" }));
+  assert.match(clean.split("\n").find((line) => line.startsWith("Next: ")), /^Next: the advisory review found nothing and nothing further is owed/);
+  // A status the table does not know is not silently generic.
+  const odd = brief(cleanInTwoRounds({ status: "SOMETHING_NEW" }));
+  assert.match(odd.split("\n").find((line) => line.startsWith("Next: ")), /names no next step here; inspect the ledger/);
+});
+
+// An advisory review's findings stay OPEN in the ledger forever: there is no
+// author to answer them. The brief must call them reported, not open, and
+// must not open the "still open" section over them.
+test("the brief reports an advisory review's findings instead of calling them open", () => {
+  const submitted = {
+    advisory: true,
+    status: "REVIEW_SUBMITTED",
+    current_round: 1,
+    state_version: 2,
+    rounds: [round(1, HEAD_ONE, "2026-09-01T00:00:00.000Z")],
+    findings: [
+      finding("F-001", "major", "OPEN", { introduced_round: 1 }),
+      finding("F-002", "nit", "OPEN", { introduced_round: 1 }),
+    ],
+    resolutions: [],
+    rereview_decisions: [],
+    history: [
+      { at: "2026-09-01T00:00:00.000Z", event: "REVIEW_PREPARED", round: 1, mode: "FULL" },
+      { at: "2026-09-01T00:06:00.000Z", event: "FINDINGS_SUBMITTED", round: 1, count: 2 },
+    ],
+    clean_snapshot_hash: null,
+  };
+  const advisory = brief(cleanInTwoRounds(submitted));
+  assert.match(advisory, /^\*\*REVIEW_SUBMITTED\*\* — 2 findings reported.*advisory/m);
+  assert.match(advisory, /\| Outcome \| 2 reported \(advisory: no author loop\) \|/);
+  assert.match(advisory, /^## Reported — advisory, so no author loop will close these$/m);
+  assert.match(advisory, /Round 1 reported it\./);
+  assert.doesNotMatch(advisory, /still open/i);
+  assert.doesNotMatch(advisory, /no author response yet/);
+  // The same ledger without the advisory flag is an ordinary review whose
+  // findings really are open and awaiting the author.
+  const gated = brief(cleanInTwoRounds({ ...submitted, advisory: undefined }));
+  assert.match(gated, /2 of 2 findings still open/);
+  assert.match(gated, /^## Still open — what the next reader inherits$/m);
+  assert.match(gated, /no author response yet/);
+  assert.doesNotMatch(gated, /reported \(advisory/);
+});
+
+// The format number is the one line the bump is allowed to move. Everything
+// else in the full tier is pinned to the document this renderer produced
+// before the brief existed, so a change to a shared helper that alters the
+// full rendering fails here rather than passing unnoticed.
+test("the full tier still renders the document it rendered before the brief, format number aside", async () => {
+  const baseline = await fsp.readFile(
+    new URL("./fixtures/report-full-baseline.md", import.meta.url),
+    "utf8",
+  );
+  const rendered = renderReviewReport(continuableInTwoRounds(), {
+    renderedAt: BASELINE_RENDERED_AT,
+    ledgerDirectory: BRIEF_LEDGER_DIRECTORY,
+  });
+  const withoutFormat = (markdown) => markdown.replace(/-f\d+`/g, "-f<format>`");
+  assert.equal(withoutFormat(rendered), withoutFormat(baseline));
+  // The baseline was captured at format 1; the bump is what the brief is for.
+  assert.ok(baseline.includes("- Report revision: `9-f1`"));
+  assert.ok(rendered.includes(`- Report revision: \`9-f${REPORT_FORMAT}\``));
+  assert.equal(REPORT_FORMAT, 2);
+});
+
+test("the brief opens with the terminal state and where the review goes next", () => {
+  const markdown = brief(continuableInTwoRounds());
+  const lines = markdown.split("\n");
+  assert.equal(lines[0], `# Review report ${BASELINE_REVIEW_ID}`);
+  assert.equal(lines[1], "");
+  // The two lines the reader sees first: the verdict, then the destination.
+  assert.match(lines[2], /^\*\*CONTINUABLE_FINDINGS\*\* — 2 of 5 findings still open/);
+  assert.match(lines[2], /carried into `rb-2026-09-02T000000-000Z-c35398d3`/);
+  assert.match(lines[3], /^Next: the open findings are addressed in a fresh full review\. No publication ledger was rendered, so nothing here is merged or gated\.$/);
+  assert.equal(lines[4], "");
+  // And it is a brief: one ledger, a quarter of the lines.
+  const full = renderReviewReport(continuableInTwoRounds(), {
+    renderedAt: BASELINE_RENDERED_AT,
+    ledgerDirectory: BRIEF_LEDGER_DIRECTORY,
+  });
+  assert.ok(
+    lines.length * 3 < full.split("\n").length,
+    `the brief is ${lines.length} lines against the full report's ${full.split("\n").length}`,
+  );
+});
+
+test("the brief puts what is still open before what is settled, and counts both from the ledger", () => {
+  const markdown = brief(continuableInTwoRounds());
+  const open = markdown.indexOf("## Still open");
+  const fixed = markdown.indexOf("## Fixed and verified");
+  const rebutted = markdown.indexOf("## Rebutted, and the rebuttal accepted");
+  assert.ok(open > 0 && fixed > open && rebutted > fixed);
+  // Every count in the fact table, against the ledger the fixture builds:
+  // five findings (one major, two minor, two nit), two of them settled as
+  // resolved, one as a sustained rebuttal, two still open, one carried in.
+  assert.ok(markdown.includes("| Findings | 5 — 1 major, 2 minor, 2 nit; 1 finding carried in from an earlier review |"));
+  assert.ok(markdown.includes("| Outcome | 2 fixed and verified · 2 open · 1 rebutted |"));
+  assert.ok(markdown.includes("| Reviewer | `CODEX_TASK`, `FULL` strategy, 2 rounds |"));
+  assert.ok(markdown.includes("| Reviewed | `docs/rfcs/0007-object-store-wal.md` (+224 −6 in round 1, +244 −31 in round 2) |"));
+  // Wall time is summed from each round's prepared event to its own verdict,
+  // and the span is the first head to the last verdict, which is longer.
+  assert.ok(markdown.includes("| Wall time | 10m 6s under review (5m 28s + 4m 38s), across 24m 38s from the first head to the last verdict |"));
+  // The two open findings are the round-2 ones, each with the round that
+  // raised it and what it is waiting on.
+  assert.ok(markdown.includes("**F-004 · minor · `docs/rfcs/0007-object-store-wal.md:114` — Title of F-004**\nRound 2 introduced it; no author response yet. Explanation of F-004."));
+  assert.ok(markdown.includes("**F-005 · nit · `docs/rfcs/0007-object-store-wal.md:222` — Title of F-005**"));
+  assert.ok(!markdown.includes("F-001 · major"), "a settled finding is a table row, not a section");
+  // A settled finding's row carries how the rereviewer verified it, and says
+  // so rather than leaving the column blank when none was recorded.
+  assert.ok(markdown.includes("| F-001 | major | `docs/rfcs/0007-object-store-wal.md:90` | Title of F-001 | read the admit path and its test |"));
+  assert.ok(markdown.includes("| F-003 | nit | `docs/rfcs/0007-object-store-wal.md:183` | Title of F-003 | not recorded |"));
+  assert.ok(markdown.includes("| F-002 | minor | `docs/rfcs/0007-object-store-wal.md:98` | Title of F-002 | reran the probe against the snapshot |"));
+  // Round-level facts, and the two cross-finding groupings the ledger can
+  // decide on its own, with the comparison stated.
+  assert.ok(markdown.includes("- Round 1 on `bbbbbbbbbbbb`: 3 findings raised, verdict `FINDINGS_SUBMITTED` after 5m 28s."));
+  assert.ok(markdown.includes("- Round 2 on `cccccccccccc`: 2 findings raised, verdict `REREVIEW_CONTINUABLE_FINDINGS` after 4m 38s."));
+  assert.ok(markdown.includes("- No finding repeated across rounds; findings are compared by title and location."));
+  assert.ok(markdown.includes("- 1 erratum appended;"));
+  // The projection notice and the report identity, the same in both tiers.
+  assert.ok(markdown.includes(PROJECTION_NOTICE));
+  assert.ok(markdown.includes(`- Report revision: \`9-f${REPORT_FORMAT}\``));
+});
+
+// A count written as a literal, or read from the wrong field, would satisfy
+// the ledger above and fail here: one more open finding of a severity the
+// ledger did not already carry moves the total, the breakdown, the open
+// count, and the round-2 tally, and leaves the settled counts alone.
+test("the brief's counts follow the ledger rather than the shape of the ledger", () => {
+  const markdown = brief(continuableWithOneMoreOpenFinding());
+  assert.ok(markdown.includes("| Findings | 6 — 1 blocker, 1 major, 2 minor, 2 nit; 1 finding carried in from an earlier review |"));
+  assert.ok(markdown.includes("| Outcome | 2 fixed and verified · 3 open · 1 rebutted |"));
+  assert.match(markdown.split("\n")[2], /^\*\*CONTINUABLE_FINDINGS\*\* — 3 of 6 findings still open/);
+  assert.ok(markdown.includes("- Round 2 on `cccccccccccc`: 3 findings raised,"));
+  assert.ok(markdown.includes("**F-006 · blocker · `docs/rfcs/0007-object-store-wal.md:301` — Title of F-006**"));
+  // The settled side is untouched, so the two sides are counted separately.
+  assert.ok(markdown.includes("- Round 1 on `bbbbbbbbbbbb`: 3 findings raised,"));
+});
+
+test("a review with nothing open says so instead of opening a heading over nothing", () => {
+  const settled = continuableInTwoRounds({
+    status: "CLEAN",
+    continued_by_review_id: null,
+  });
+  settled.findings = settled.findings.filter((entry) => entry.status !== "OPEN");
+  const markdown = brief(settled);
+  assert.ok(!markdown.includes("## Still open"));
+  assert.ok(markdown.includes("Nothing is still open: every finding this review raised was settled, below."));
+  assert.match(markdown.split("\n")[2], /^\*\*CLEAN\*\* — 3 findings raised, none still open\.$/);
+  // And a review that raised nothing at all says that, not "nothing is open".
+  const empty = continuableInTwoRounds({
+    status: "CLEAN",
+    findings: [],
+    resolutions: [],
+    rereview_decisions: [],
+    carried_findings: [],
+    continued_by_review_id: null,
+  });
+  const emptyMarkdown = brief(empty);
+  assert.ok(emptyMarkdown.includes("No finding was raised in this review, so nothing is open."));
+  assert.ok(emptyMarkdown.includes("| Findings | none raised |"));
+  assert.ok(!emptyMarkdown.includes("## Fixed and verified"));
+  assert.ok(!emptyMarkdown.includes("## Rebutted"));
+});
+
+test("an open finding says what it is waiting on, from its own status", () => {
+  const contested = continuableInTwoRounds({ status: "HUMAN_REQUIRED" });
+  contested.findings[0].status = "STILL_OPEN";
+  contested.findings[1].status = "AUTHOR_REJECTED";
+  contested.findings[2].status = "HUMAN_REQUIRED";
+  contested.findings[3].status = "AUTHOR_FIXED";
+  contested.history.push({
+    at: "2026-09-01T00:26:00.000Z",
+    event: "REREVIEW_UNRESOLVED",
+    round: 2,
+  });
+  const markdown = brief(contested);
+  assert.ok(markdown.includes("Round 1 introduced it; the rereviewer decided the author's answer did not settle it."));
+  assert.ok(markdown.includes("Round 1 introduced it; the author rejected it, and no rereview has decided it."));
+  assert.ok(markdown.includes("Round 1 introduced it; the author escalated it to a human."));
+  assert.ok(markdown.includes("Round 2 introduced it; the author reports it fixed, and no rereview has decided it."));
+  assert.ok(markdown.includes("| Outcome | 0 fixed and verified · 5 open · 0 rebutted |"));
+  assert.ok(markdown.includes("- Human arbitration required: `REREVIEW_UNRESOLVED` at 2026-09-01T00:26:00.000Z."));
+});
+
+test("a finding restated in a later round is named as a repeat, by the rule the brief prints", () => {
+  const repeated = continuableInTwoRounds();
+  repeated.findings[3].title = repeated.findings[0].title;
+  repeated.findings[3].line = repeated.findings[0].line;
+  const markdown = brief(repeated);
+  assert.ok(markdown.includes("- Repeated across rounds, compared by title and location: `F-001` = `F-004`."));
+});
+
+test("a review still in progress is briefed as in progress, and an advisory one as reported", () => {
+  const running = brief(continuableInTwoRounds({ status: "AUTHOR_RESPONDED" }));
+  assert.match(running.split("\n")[2], /\(not a terminal state: the review is still in progress\)\.$/);
+  const advisory = brief(
+    continuableInTwoRounds({ status: "REVIEW_SUBMITTED", advisory: true }),
+  );
+  assert.match(advisory.split("\n")[2], /\(advisory: the findings are reported and there is no author loop to close them\)\.$/);
+  assert.ok(advisory.includes("| Reviewer | `CODEX_TASK` (advisory: attests nothing), `FULL` strategy, 2 rounds |"));
+});
+
+test("free text from the ledger cannot shape the brief or break out of a table cell", () => {
+  const hostile = continuableInTwoRounds();
+  hostile.findings[3].title = "# not a heading | not a cell";
+  hostile.findings[3].explanation = "## also not a heading\n- not a list item";
+  hostile.findings[0].path = "src/we|rd.mjs";
+  hostile.rereview_decisions[0].verification = "| broke | the | row |";
+  const markdown = brief(hostile);
+  for (const line of markdown.split("\n")) {
+    assert.ok(
+      !/^#{1,6} (?:not|also not)/.test(line),
+      `ledger text opened a heading: ${line}`,
+    );
+  }
+  // inline() escapes what opens inline markup, a link, raw HTML, or a cell; a
+  // `#` it leaves alone, because inline text is never placed at a line start.
+  assert.ok(markdown.includes("— # not a heading \\| not a cell**"));
+  assert.ok(
+    markdown.includes("no author response yet. ## also not a heading - not a list item"),
+  );
+  // A `|` in a path survives inside its code span without splitting the row,
+  // and every row of the settled table still has the column count it declares.
+  assert.ok(markdown.includes("`src/we\\|rd.mjs:90`"));
+  const rows = markdown
+    .split("\n")
+    .filter((line) => line.startsWith("| F-"))
+    .map((line) => line.split(/(?<!\\)\|/).length);
+  assert.deepEqual([...new Set(rows)], [7]);
+});
+
+test("the brief is a pure function of its inputs", () => {
+  const review = continuableInTwoRounds();
+  assert.equal(brief(review), brief(continuableInTwoRounds()));
+  assert.deepEqual(review, continuableInTwoRounds());
+});
+
+test("a remote-only publication briefs in the same shape, saying why it has no findings", async (t) => {
+  const state = await remoteFixture(t);
+  await reachReady(state);
+  const { review, publication, authorization, publicationSummary } = await loadReportLedgers(
+    state.store,
+    state.reviewId,
+  );
+  assert.equal(review, null);
+  const markdown = renderReviewBrief(review, {
+    publication,
+    authorization,
+    publicationSummary,
+    renderedAt: RENDERED_AT,
+    ledgerDirectory: reviewDirectory(state),
+  });
+  const lines = markdown.split("\n");
+  assert.equal(lines[0], `# Review report ${state.reviewId}`);
+  assert.match(
+    lines[2],
+    /^\*\*REMOTE_ONLY\*\* — this publication was authorized with local review skipped/,
+  );
+  assert.match(lines[3], /^Publication owner\/repo#7: `MERGE_READY`/);
+  // The same shape as a local brief: a fact table, a statement where the
+  // findings would be rather than an empty heading, the pointer to the full
+  // rendering, round-level facts, the footer, the projection notice.
+  assert.ok(
+    markdown.includes(
+      "| Findings | none: a REMOTE_ONLY publication has no review ledger to raise them in |",
+    ),
+  );
+  assert.ok(
+    markdown.includes(
+      "No finding is reported here: a `REMOTE_ONLY` publication has no review ledger",
+    ),
+  );
+  assert.ok(!markdown.includes("## Still open"));
+  assert.ok(!markdown.includes("## Fixed and verified"));
+  assert.ok(markdown.includes("## About this publication"));
+  assert.ok(markdown.includes("<details><summary>The full rendering carries"));
+  assert.ok(markdown.includes(PROJECTION_NOTICE_REMOTE_ONLY));
+  assert.ok(
+    markdown.includes(
+      `- Report revision: \`${reportRevision(null, publication, publicationSummary)}\``,
+    ),
+  );
+});
+
+test("a brief with a publication names the pull request and the summary's verdict, and derives neither", async (t) => {
+  const state = await gatedFixture(t);
+  await reachReady(state);
+  const { review, publication, authorization, publicationSummary } = await loadReportLedgers(
+    state.store,
+    state.reviewId,
+  );
+  const markdown = renderReviewBrief(review, {
+    publication,
+    authorization,
+    publicationSummary,
+    renderedAt: RENDERED_AT,
+    ledgerDirectory: reviewDirectory(state),
+  });
+  assert.equal(publicationSummary.status, "MERGE_READY");
+  assert.match(markdown.split("\n")[3], /^Publication owner\/repo#7: `MERGE_READY`/);
+  assert.ok(
+    markdown.includes(
+      `| Publication | owner/repo#7 — \`MERGE_READY\`, next action \`${publicationSummary.next_action}\`, gate \`${publicationSummary.gate_state}\` |`,
+    ),
+  );
+  // The review itself had no finding, so the brief says so instead of
+  // opening a heading, and the destination line is the publication's.
+  assert.ok(markdown.includes("No finding was raised in this review, so nothing is open."));
+});
+
+// ---------------------------------------------------------------------------
+// The packaged script. It is the only caller that chooses a tier, so it is
+// spawned as shipped: the script from templates/ over a server directory that
+// is this checkout's src/, which is what the build copies there.
+
+async function packagedScript(t) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-report-cli-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const plugin = path.join(root, "plugin");
+  await fsp.mkdir(path.join(plugin, "scripts"), { recursive: true });
+  await fsp.copyFile(
+    fileURLToPath(new URL("../templates/codex-plugin/scripts/review-report.mjs", import.meta.url)),
+    path.join(plugin, "scripts", "review-report.mjs"),
+  );
+  await fsp.symlink(
+    fileURLToPath(new URL("../src", import.meta.url)),
+    path.join(plugin, "server"),
+  );
+  return (...args) => {
+    const result = spawnSync(
+      process.execPath,
+      [path.join(plugin, "scripts", "review-report.mjs"), ...args],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+}
+
+test("the packaged script prints the brief by default and the full report under --full", async (t) => {
+  const state = await gatedFixture(t);
+  const run = await packagedScript(t);
+  const briefOut = run(state.reviewId, "--store", state.store);
+  const fullOut = run(state.reviewId, "--full", "--store", state.store);
+  assert.match(briefOut.split("\n")[0], /^# Review report /);
+  assert.match(briefOut.split("\n")[2], /^\*\*LOCAL_GATE_PASSED\*\* — no finding was raised\.$/);
+  assert.match(briefOut.split("\n")[3], /^The local gate passed over snapshot `/);
+  assert.ok(briefOut.includes("| Outcome | 0 fixed and verified · 0 open · 0 rebutted |"));
+  assert.ok(briefOut.includes("No finding was raised in this review, so nothing is open."));
+  // The two tiers are two depths of one document: only the full one carries
+  // the author's own text back at the reader.
+  assert.ok(!briefOut.includes("### Requirement"));
+  assert.ok(fullOut.includes("### Requirement"));
+  assert.ok(fullOut.split("\n").length > briefOut.split("\n").length);
+
+  const briefEnvelope = JSON.parse(run(state.reviewId, "--json", "--store", state.store));
+  const fullEnvelope = JSON.parse(run(state.reviewId, "--json", "--full", "--store", state.store));
+  assert.equal(briefEnvelope.tier, "brief");
+  assert.equal(fullEnvelope.tier, "full");
+  assert.equal(briefEnvelope.review_id, state.reviewId);
+  assert.notEqual(briefEnvelope.markdown, fullEnvelope.markdown);
+  // The envelope carries the same bytes the bare run prints, render time aside:
+  // each run stamps its own.
+  const renderedAt = /- Rendered at: [^\n]+/;
+  assert.equal(
+    briefEnvelope.markdown.replace(renderedAt, ""),
+    briefOut.replace(renderedAt, ""),
+  );
+  assert.equal(
+    fullEnvelope.markdown.replace(renderedAt, ""),
+    fullOut.replace(renderedAt, ""),
+  );
+  // One identity over two depths: the revision names the ledgers and the
+  // renderer format and says nothing about depth, so `tier` is the only field
+  // that tells the two documents apart.
+  assert.equal(briefEnvelope.revision, fullEnvelope.revision);
+  assert.match(run("--help"), /--full {10}Print the full rendering instead/);
+});
+
+// The report's identity is `r<state_version>[-p<revision>-s<digest>]-f<format>`
+// and five places print it. A layout change that left the format at 1 would
+// make two different documents claim one identity, so the format is checked
+// into every one of them here rather than only where it is minted.
+test("the five places that carry the report's identity agree, renderer format included", async (t) => {
+  const state = await gatedFixture(t);
+  const run = await packagedScript(t);
+  const { review, publication, publicationSummary } = await loadReportLedgers(
+    state.store,
+    state.reviewId,
+  );
+  // 1. reportRevision, where the identity is minted.
+  const revision = reportRevision(review, publication, publicationSummary);
+  assert.equal(revision, `${review.state_version}-f${REPORT_FORMAT}`);
+  assert.equal(REPORT_FORMAT, 2);
+
+  const receipt = await writeReviewReport(state.store, state.reviewId);
+  // 2. the file name, and 3. the tool receipt.
+  assert.equal(path.basename(receipt.path), `report-r${revision}.md`);
+  assert.equal(receipt.revision, revision);
+  // 4. the --json envelope, at either tier.
+  for (const tier of [[], ["--full"]]) {
+    const envelope = JSON.parse(run(state.reviewId, "--json", ...tier, "--store", state.store));
+    assert.equal(envelope.revision, revision);
+    // 5. the footer, which is what a person reading the document sees.
+    assert.ok(envelope.markdown.includes(`- Report revision: \`${revision}\``));
+  }
+  const written = await fsp.readFile(receipt.path, "utf8");
+  assert.ok(written.includes(`- Report revision: \`${revision}\``));
+  // The tool writes the full tier: the file beside the ledger is the archive,
+  // and the brief is a reading of it that anyone can regenerate.
+  const renderTime = /- Rendered at: [^\n]+/;
+  assert.equal(
+    written.replace(renderTime, ""),
+    run(state.reviewId, "--full", "--store", state.store).replace(renderTime, ""),
+  );
 });

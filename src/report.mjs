@@ -93,6 +93,12 @@ function shortSha(sha) {
   return typeof sha === "string" ? sha.slice(0, 12) : "n/a";
 }
 
+// `path:line` as the ledger recorded it, before any escaping; each caller
+// wraps it for the place it goes.
+function findingLocation(finding) {
+  return `${finding.path}${finding.line == null ? "" : `:${finding.line}`}`;
+}
+
 function table(headers, rows) {
   return [
     `| ${headers.join(" | ")} |`,
@@ -101,12 +107,20 @@ function table(headers, rows) {
   ].join("\n");
 }
 
-function wallTime(from, to) {
+function durationSeconds(from, to) {
   const start = Date.parse(from ?? "");
   const end = Date.parse(to ?? "");
-  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return "n/a";
-  const seconds = Math.round((end - start) / 1000);
+  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return null;
+  return Math.round((end - start) / 1000);
+}
+
+function formatDuration(seconds) {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function wallTime(from, to) {
+  const seconds = durationSeconds(from, to);
+  return seconds == null ? "n/a" : formatDuration(seconds);
 }
 
 function eventFor(history, events, round) {
@@ -170,6 +184,13 @@ function remoteOnlySection() {
   ];
 }
 
+// The mode a round was prepared under, as its own prepared event recorded it;
+// a round from before the event carried one is read from its own proof.
+function roundMode(history, round) {
+  const prepared = eventFor(history, PREPARED_EVENTS, round.round);
+  return prepared?.mode ?? (round.successor == null ? "FULL" : "SUCCESSOR");
+}
+
 // Each round is reviewed under its own strategy: a rereview recomputes the
 // successor proof for the new head, and may fall back to FULL. So the
 // strategy and proof are rendered per round, from that round's prepared event
@@ -185,8 +206,7 @@ function remoteOnlySection() {
 function roundStrategySections(review) {
   const history = review.history ?? [];
   return (review.rounds ?? []).flatMap((round) => {
-    const prepared = eventFor(history, PREPARED_EVENTS, round.round);
-    const mode = prepared?.mode ?? (round.successor == null ? "FULL" : "SUCCESSOR");
+    const mode = roundMode(history, round);
     const successor = round.successor;
     const match = successor?.requirement_match;
     return [
@@ -247,9 +267,7 @@ function roundsSection(review) {
 // it was given.
 function findingSections(finding, resolution, decision) {
   const location =
-    finding.path == null
-      ? "no location"
-      : inline(`${finding.path}${finding.line == null ? "" : `:${finding.line}`}`);
+    finding.path == null ? "no location" : inline(findingLocation(finding));
   const facts = [
     `- Title: ${inline(finding.title)}`,
     `- Introduced in round ${finding.introduced_round ?? "n/a"}; status ${code(finding.status)}`,
@@ -300,9 +318,7 @@ function carriedSection(review) {
     "### Carried findings",
     ...carried.flatMap((entry) => {
       const location =
-        entry.path == null
-          ? "no location"
-          : inline(`${entry.path}${entry.line == null ? "" : `:${entry.line}`}`);
+        entry.path == null ? "no location" : inline(findingLocation(entry));
       const sections = [
         `#### ${inline(entry.finding_id)} carried from ${inline(entry.continued_from_review_id)} · ${inline(entry.severity)} · ${location}`,
         `- Title: ${inline(entry.title)}`,
@@ -714,7 +730,7 @@ export function summaryDigest(summary) {
 // Raise it by one in any change that alters the Markdown this module renders
 // -- wording, ordering, a new line, a heading -- so the reports the previous
 // version wrote stay readable at their own names.
-export const REPORT_FORMAT = 1;
+export const REPORT_FORMAT = 2;
 
 // `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
 // `p<revision>-s<summary digest>-f<format>` without one.
@@ -728,11 +744,469 @@ export function reportRevision(review, publication, summary = null) {
     : `${stateVersion}-p${publication.revision}${summaryPart}${formatPart}`;
 }
 
-// `review` is null for a REMOTE_ONLY publication, which has no review ledger;
-// the publication is then required. `authorization` is the bound gate or
-// sidecar the store reader admitted, and `publicationSummary` the summary the
-// server computed over the same ledger, when the caller read them.
-export function renderReviewReport(
+// ---------------------------------------------------------------------------
+// The brief: the same ledgers through the same reader, at the depth a person
+// reads. The verdict and where the review goes next come first, what is still
+// open comes before what is settled, and a settled finding is one table row.
+//
+// Nothing here is inferred. Every number is counted over the ledger's own
+// fields and every grouping is one the ledger decides -- a finding's severity,
+// the round it was introduced in, whether two findings name the same title at
+// the same location. A sentence that reads across findings to say what they
+// have in common needs a reader who understands them; this renderer has none,
+// and states the counting rule instead of the conclusion.
+
+const SEVERITY_ORDER = ["blocker", "major", "minor", "nit"];
+// Settled where core says settled: submitRereview writes exactly these two
+// statuses as an end. Everything else -- raised, answered, escalated, or
+// contested -- is open, and is what the brief leads with.
+const SETTLED_STATUSES = new Set(["RESOLVED", "REBUTTAL_ACCEPTED"]);
+// What an open finding is still waiting on, from its own status alone.
+const OPEN_FINDING_STATE = {
+  OPEN: "no author response yet",
+  AUTHOR_FIXED: "the author reports it fixed, and no rereview has decided it",
+  AUTHOR_REJECTED: "the author rejected it, and no rereview has decided it",
+  HUMAN_REQUIRED: "the author escalated it to a human",
+  STILL_OPEN: "the rereviewer decided the author's answer did not settle it",
+};
+
+function count(number, singular, plural = `${singular}s`) {
+  return `${number} ${number === 1 ? singular : plural}`;
+}
+
+// An advisory review that has submitted its findings is finished: there is no
+// author loop, so its findings are reported, not open. They keep the OPEN
+// status in the ledger because nothing will ever move them, and the brief
+// must not read that as "awaiting an author".
+function partitionFindings(review) {
+  const findings = review.findings ?? [];
+  const unsettled = findings.filter((finding) => !SETTLED_STATUSES.has(finding.status));
+  const reported = advisoryReported(review);
+  return {
+    all: findings,
+    open: reported ? [] : unsettled,
+    reported: reported ? unsettled : [],
+    resolved: findings.filter((finding) => finding.status === "RESOLVED"),
+    rebutted: findings.filter((finding) => finding.status === "REBUTTAL_ACCEPTED"),
+  };
+}
+
+// A code span inside a table cell. GFM splits a row on a raw `|` even inside a
+// span, and a span does not process the backslash that repairs it, so the
+// escape goes on the value before it is wrapped; a value carrying a backtick
+// falls back to inline(), which escapes the separator already.
+function cellCode(value) {
+  if (value == null || value === "") return "n/a";
+  const text = String(value).replace(/\s+/g, " ");
+  return text.includes("`") ? inline(text) : `\`${text.replace(/\|/g, "\\|")}\``;
+}
+
+// A two-column table of a label and the fact it names, with no header text.
+function factTable(rows) {
+  return [
+    "| | |",
+    "| --- | --- |",
+    ...rows.map(([label, value]) => `| ${label} | ${value} |`),
+  ].join("\n");
+}
+
+// Unlike table(), this one does not escape: every cell was built by its caller
+// out of inline() and cellCode(), because these cells carry code spans.
+function builtTable(headers, rows) {
+  return [
+    `| ${headers.join(" | ")} |`,
+    `| ${headers.map(() => "---").join(" | ")} |`,
+    ...rows.map((row) => `| ${row.join(" | ")} |`),
+  ].join("\n");
+}
+
+function severityRank(severity) {
+  const index = SEVERITY_ORDER.indexOf(severity);
+  return index < 0 ? SEVERITY_ORDER.length : index;
+}
+
+// Counted over the findings themselves rather than over the ranked severities,
+// so the breakdown sums to the total printed beside it even for a severity
+// this renderer does not rank.
+function severityBreakdown(findings) {
+  const counts = new Map();
+  for (const finding of findings) {
+    counts.set(finding.severity, (counts.get(finding.severity) ?? 0) + 1);
+  }
+  return [...counts.keys()]
+    // Ranked severities first, in the ledger's own order of seriousness, and
+    // anything else after them by code unit -- never by locale, which would
+    // make the same ledger render differently on two machines.
+    .sort(
+      (left, right) =>
+        severityRank(left) - severityRank(right) ||
+        (String(left) < String(right) ? -1 : String(left) > String(right) ? 1 : 0),
+    )
+    .map((severity) => `${counts.get(severity)} ${inline(severity)}`)
+    .join(", ");
+}
+
+function roundTimings(review) {
+  const history = review.history ?? [];
+  return (review.rounds ?? []).map((round) => {
+    const prepared = eventFor(history, PREPARED_EVENTS, round.round);
+    const verdict = eventFor(history, VERDICT_EVENTS, round.round);
+    return {
+      round: round.round,
+      head: round.head_sha,
+      preparedAt: prepared?.at,
+      verdict: verdict?.event,
+      verdictAt: verdict?.at,
+      seconds: durationSeconds(prepared?.at, verdict?.at),
+    };
+  });
+}
+
+// Time spent under review, and the span it was spread over. A round without
+// both a prepared event and a verdict is left out of the sum rather than
+// counted as zero, and the sum says so by naming only the rounds it added.
+function wallTimeRow(timings) {
+  const measured = timings.filter((entry) => entry.seconds != null);
+  if (measured.length === 0) {
+    return "not recorded: no round carries both a prepared event and a verdict";
+  }
+  const total = measured.reduce((sum, entry) => sum + entry.seconds, 0);
+  const parts =
+    measured.length === 1
+      ? ""
+      : ` (${measured.map((entry) => formatDuration(entry.seconds)).join(" + ")})`;
+  const span = durationSeconds(timings[0]?.preparedAt, timings.at(-1)?.verdictAt);
+  const across =
+    span == null
+      ? ""
+      : `, across ${formatDuration(span)} from the first head to the last verdict`;
+  return `${formatDuration(total)} under review${parts}${across}`;
+}
+
+function reviewedRow(review) {
+  const rounds = review.rounds ?? [];
+  const files = [...new Set(rounds.flatMap((round) => round.changed_files ?? []))];
+  const named =
+    files.length === 0
+      ? "no changed file"
+      : `${files.slice(0, 3).map(cellCode).join(", ")}${files.length > 3 ? `, and ${files.length - 3} more` : ""}`;
+  const sizes = rounds
+    .map((round) =>
+      round.change_size == null
+        ? `size not recorded in round ${round.round}`
+        : `+${round.change_size.added_lines} −${round.change_size.deleted_lines} in round ${round.round}`,
+    )
+    .join(", ");
+  return sizes === "" ? named : `${named} (${sizes})`;
+}
+
+function reviewerRow(review) {
+  const history = review.history ?? [];
+  const rounds = review.rounds ?? [];
+  const modes = [...new Set(rounds.map((round) => roundMode(history, round)))];
+  return [
+    `${cellCode(review.reviewer_provider ?? "CLAUDE_DESKTOP")}${review.advisory === true ? " (advisory: attests nothing)" : ""}`,
+    modes.length === 0
+      ? "no round prepared"
+      : `${modes.map(cellCode).join(" then ")} strategy`,
+    count(rounds.length, "round"),
+  ].join(", ");
+}
+
+function publicationStanding(publication, summary) {
+  return summary == null
+    ? `stored ${cellCode(publication.status)} at revision ${publication.revision}, with no publication summary supplied`
+    : `${cellCode(summary.status)}, next action ${cellCode(summary.next_action)}, gate ${cellCode(summary.gate_state)}`;
+}
+
+function pullRequestName(publication) {
+  const target = publication.target ?? {};
+  return `${inline(target.owner)}/${inline(target.repo)}#${inline(target.pr_number)}`;
+}
+
+// The count and its breakdown, with the findings this review carried in named
+// beside them rather than folded into either: a carried finding was raised
+// somewhere else, and adding it to the total would make the total disagree
+// with the sections below.
+function findingsFact(review, partition) {
+  const carried = (review.carried_findings ?? []).length;
+  const raised =
+    partition.all.length === 0
+      ? "none raised"
+      : `${partition.all.length} — ${severityBreakdown(partition.all)}`;
+  return carried === 0
+    ? raised
+    : `${raised}; ${count(carried, "finding")} carried in from an earlier review`;
+}
+
+function localFacts(review, publication, summary, partition, timings) {
+  const rows = [
+    ["Reviewed", reviewedRow(review)],
+    ["Reviewer", reviewerRow(review)],
+    ["Findings", findingsFact(review, partition)],
+    [
+      "Outcome",
+      partition.reported.length > 0
+        ? `${partition.reported.length} reported (advisory: no author loop)`
+        : `${partition.resolved.length} fixed and verified · ${partition.open.length} open · ${partition.rebutted.length} rebutted`,
+    ],
+    ["Wall time", wallTimeRow(timings)],
+  ];
+  if (publication != null) {
+    rows.push([
+      "Publication",
+      `${pullRequestName(publication)} — ${publicationStanding(publication, summary)}`,
+    ]);
+  }
+  return rows;
+}
+
+function remoteOnlyFacts(publication, authorization, summary) {
+  const record = authorization ?? publication.authorization ?? {};
+  const target = publication.target ?? {};
+  return [
+    [
+      "Reviewed",
+      `no local review: authorized ${cellCode(record.mode)} over head ${cellCode(record.head_sha)} on base ${cellCode(record.base_sha)}`,
+    ],
+    [
+      "Authorized",
+      `${record.operator_label ? `operator ${inline(record.operator_label)}` : "operator not recorded"}${record.acknowledgement ? `, ${cellCode(record.acknowledgement)}` : ""}${record.authorized_at ? `, at ${inline(record.authorized_at)}` : ""}`,
+    ],
+    [
+      "Pull request",
+      `${pullRequestName(publication)}, ${cellCode(target.head_branch)} into ${cellCode(target.base_branch)}`,
+    ],
+    ["Findings", "none: a REMOTE_ONLY publication has no review ledger to raise them in"],
+    ["Outcome", publicationStanding(publication, summary)],
+  ];
+}
+
+// Where the review goes from here, in the terms the ledger itself carries: the
+// publication summary's verdict when a summary was supplied, the stored status
+// when one was not, and an explicit "nothing is merged or gated" when there is
+// no publication at all.
+// Where a review with no publication goes next, from its own status. The
+// vocabulary is core's actionRequired, in the reader's terms rather than the
+// driver's; anything the table does not name is left to the reader to
+// inspect, and says so.
+const LOCAL_NEXT_STEP = {
+  WAITING_FOR_REVIEW: "the reviewer's first review is still owed",
+  REVIEW_SUBMITTED: "the author's resolutions are owed next",
+  AUTHOR_RESPONDED: "a rereview is the next step",
+  WAITING_FOR_REREVIEW: "the rereview is still owed",
+  CLEAN: "the local gate can be finalized next",
+  HUMAN_REQUIRED: "a human arbitration is owed before anything else moves",
+  CONTINUABLE_FINDINGS: "the open findings are addressed in a fresh full review",
+};
+
+function destinationSentence(review, publication, summary) {
+  if (publication != null) {
+    return `Publication ${pullRequestName(publication)}: ${publicationStanding(publication, summary)}.`;
+  }
+  if (review?.status === "LOCAL_GATE_PASSED") {
+    return `The local gate passed over snapshot ${code(review.clean_snapshot_hash)}; no publication ledger was rendered, so nothing here is merged.`;
+  }
+  const next = advisoryReported(review)
+    ? "the findings are reported and nothing further is owed on this review"
+    : review?.advisory === true && review?.status === "CLEAN"
+      ? "the advisory review found nothing and nothing further is owed on it"
+      : Object.hasOwn(LOCAL_NEXT_STEP, review?.status)
+        ? LOCAL_NEXT_STEP[review.status]
+        : `its status ${code(review?.status)} names no next step here; inspect the ledger`;
+  return `Next: ${next}. No publication ledger was rendered, so nothing here is merged or gated.`;
+}
+
+// The first two lines: the terminal state, what is still owed, and where the
+// review goes next. Everything below them is detail on these two.
+function verdictLines(review, publication, summary, partition) {
+  if (review == null) {
+    return [
+      "**REMOTE_ONLY** — this publication was authorized with local review skipped, so there is no review ledger, no round, and no finding to report.",
+      destinationSentence(null, publication, summary),
+    ];
+  }
+  const total = partition.all.length;
+  const open = partition.open.length;
+  const standing =
+    total === 0
+      ? "no finding was raised"
+      : partition.reported.length > 0
+        ? `${count(partition.reported.length, "finding")} reported`
+        : open === 0
+          ? `${count(total, "finding")} raised, none still open`
+          : `${open} of ${count(total, "finding")} still open`;
+  const carried =
+    review.continued_by_review_id == null
+      ? ""
+      : `, carried into ${code(review.continued_by_review_id)}`;
+  const qualifier = advisoryReported(review)
+    ? " (advisory: the findings are reported and there is no author loop to close them)"
+    : TERMINAL_STATUSES.includes(review.status)
+      ? ""
+      : " (not a terminal state: the review is still in progress)";
+  return [
+    `**${inline(review.status)}** — ${standing}${carried}${qualifier}.`,
+    destinationSentence(review, publication, summary),
+  ];
+}
+
+function findingHeadline(finding) {
+  const where =
+    finding.path == null ? "no location" : code(findingLocation(finding));
+  return `**${inline(finding.id)} · ${inline(finding.severity)} · ${where} — ${inline(finding.title)}**`;
+}
+
+// Unresolved first, and a review with none says so on one line instead of
+// opening a heading over nothing.
+function openFindingsSection(review, partition) {
+  const carried = review.carried_findings ?? [];
+  if (partition.all.length === 0) {
+    return [
+      carried.length === 0
+        ? "No finding was raised in this review, so nothing is open."
+        : `No finding was raised in this review; ${count(carried.length, "finding")} carried in from an earlier review and the full report renders each.`,
+    ];
+  }
+  if (partition.reported.length > 0) {
+    return [
+      "## Reported — advisory, so no author loop will close these",
+      ...partition.reported.map((finding) =>
+        [
+          findingHeadline(finding),
+          `Round ${inline(finding.introduced_round ?? "n/a")} reported it. ${inline(finding.explanation)}`,
+        ].join("\n"),
+      ),
+    ];
+  }
+  if (partition.open.length === 0) {
+    return ["Nothing is still open: every finding this review raised was settled, below."];
+  }
+  return [
+    "## Still open — what the next reader inherits",
+    ...partition.open.map((finding) => {
+      const state = Object.hasOwn(OPEN_FINDING_STATE, finding.status)
+        ? OPEN_FINDING_STATE[finding.status]
+        : `its status is ${code(finding.status)}`;
+      return [
+        findingHeadline(finding),
+        `Round ${inline(finding.introduced_round ?? "n/a")} introduced it; ${state}. ${inline(finding.explanation)}`,
+      ].join("\n");
+    }),
+  ];
+}
+
+function settledSection(heading, findings, decisionByFinding) {
+  if (findings.length === 0) return [];
+  return [
+    heading,
+    builtTable(
+      ["ID", "Severity", "Location", "Finding", "Verified by"],
+      findings.map((finding) => {
+        const decision = decisionByFinding.get(finding.id);
+        return [
+          inline(finding.id),
+          inline(finding.severity),
+          finding.path == null ? "no location" : cellCode(findingLocation(finding)),
+          inline(finding.title),
+          decision?.verification ? inline(decision.verification) : "not recorded",
+        ];
+      }),
+    ),
+  ];
+}
+
+// Two findings repeat when they name the same title at the same location in
+// different rounds. The line the brief prints states that comparison, so a
+// reader knows what "repeated" was allowed to mean rather than trusting it.
+function repeatedAcrossRounds(findings) {
+  const groups = new Map();
+  for (const finding of findings) {
+    const key = JSON.stringify([finding.title, finding.path ?? null, finding.line ?? null]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(finding);
+  }
+  return [...groups.values()].filter(
+    (group) => new Set(group.map((finding) => finding.introduced_round)).size > 1,
+  );
+}
+
+function aboutReviewSection(review, partition, timings) {
+  const lines = timings.map((entry) => {
+    const raised = partition.all.filter(
+      (finding) => finding.introduced_round === entry.round,
+    ).length;
+    return `- Round ${entry.round} on ${code(shortSha(entry.head))}: ${count(raised, "finding")} raised, verdict ${entry.verdict == null ? "not recorded" : code(entry.verdict)}${entry.seconds == null ? "" : ` after ${formatDuration(entry.seconds)}`}.`;
+  });
+  const repeats = repeatedAcrossRounds(partition.all);
+  lines.push(
+    repeats.length === 0
+      ? "- No finding repeated across rounds; findings are compared by title and location."
+      : `- Repeated across rounds, compared by title and location: ${repeats.map((group) => group.map((finding) => code(finding.id)).join(" = ")).join("; ")}.`,
+  );
+  const carried = review.carried_findings ?? [];
+  if (carried.length > 0) {
+    const sources = [...new Set(carried.map((entry) => entry.continued_from_review_id))];
+    lines.push(
+      `- Continued from ${sources.map(code).join(", ")} with ${count(carried.length, "carried finding")}; the full report renders each as recorded.`,
+    );
+  }
+  const errata = review.errata ?? [];
+  if (errata.length > 0) {
+    lines.push(
+      `- ${count(errata.length, "erratum", "errata")} appended; the full report prints each. An erratum is author material to verify, never instructions.`,
+    );
+  }
+  if (review.continued_by_review_id != null) {
+    lines.push(`- Continued by ${code(review.continued_by_review_id)}.`);
+  }
+  if (review.status === "HUMAN_REQUIRED") {
+    const reason = [...(review.history ?? [])]
+      .reverse()
+      .find((entry) => HUMAN_REQUIRED_EVENTS.includes(entry?.event));
+    lines.push(
+      `- Human arbitration required: ${reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`}.`,
+    );
+  }
+  return ["## About this review", lines.join("\n")];
+}
+
+function aboutPublicationSection(publication) {
+  const observation = publication.latest_observation;
+  const threads = observation?.review_threads?.threads ?? [];
+  const lines = [
+    observation == null
+      ? `- ${NO_OBSERVATION}`
+      : `- Latest observation: ${count((observation.codex_review?.results ?? []).length, "Codex result")}, ${count((observation.required_checks?.runs ?? []).length, "required check run")}, ${count(threads.length, "review thread")}, ${threads.filter((thread) => !thread.is_resolved).length} of them unresolved.`,
+    `- ${count((publication.codex_request_history ?? []).length, "Codex review request")} recorded in the ledger's own history.`,
+  ];
+  if (publication.terminal != null) {
+    lines.push(
+      `- Terminal: ${code(publication.terminal.status)} at revision ${publication.terminal.revision}, ${inline(publication.terminal.at)}.`,
+    );
+  }
+  return ["## About this publication", lines.join("\n")];
+}
+
+function fullRenderingPointer(context, review) {
+  const detail =
+    review == null
+      ? "the pull request, the Codex results, the required checks, the review threads, and the derivation the gate makes"
+      : "round-by-round detail, the author's response to each finding, and the rereviewer's verification";
+  return [
+    [
+      `<details><summary>The full rendering carries ${detail}</summary>`,
+      "",
+      `Render it with \`review-report.mjs --full\` over ${code(context.reviewId)}, or read the ledger directly at ${context.ledgers.join(", ")}.`,
+      "",
+      "</details>",
+    ].join("\n"),
+  ];
+}
+
+// The default tier. Same arguments, same admission, same footer as
+// renderReviewReport; only the depth differs.
+export function renderReviewBrief(
   review,
   {
     publication = null,
@@ -742,6 +1216,44 @@ export function renderReviewReport(
     ledgerDirectory = null,
   } = {},
 ) {
+  const context = reportContext(review, publication, authorization, ledgerDirectory);
+  const partition = review == null ? null : partitionFindings(review);
+  const timings = review == null ? [] : roundTimings(review);
+  const decisionByFinding = new Map(
+    (review?.rereview_decisions ?? []).map((entry) => [entry.finding_id, entry]),
+  );
+  const sections = [
+    `# Review report ${inline(context.reviewId)}`,
+    verdictLines(review, publication, publicationSummary, partition).join("\n"),
+    review == null
+      ? factTable(remoteOnlyFacts(publication, authorization, publicationSummary))
+      : factTable(localFacts(review, publication, publicationSummary, partition, timings)),
+    ...(review == null
+      ? [
+          "No finding is reported here: a `REMOTE_ONLY` publication has no review ledger, so none was raised locally. What gated it is the remote side alone -- the Codex review, the required checks, and the review threads the publication recorded.",
+        ]
+      : [
+          ...openFindingsSection(review, partition),
+          ...settledSection("## Fixed and verified", partition.resolved, decisionByFinding),
+          ...settledSection(
+            "## Rebutted, and the rebuttal accepted",
+            partition.rebutted,
+            decisionByFinding,
+          ),
+        ]),
+    ...fullRenderingPointer(context, review),
+    ...(review == null
+      ? aboutPublicationSection(publication)
+      : aboutReviewSection(review, partition, timings)),
+    ...footerSections(context, { review, publication, publicationSummary, renderedAt }),
+  ];
+  return `${sections.join("\n\n")}\n`;
+}
+
+// What both tiers are rendered against: the same admission rules, the same
+// review id, and the same list of files the footer names. A tier that reached
+// this with a ledger the other tier would refuse would be a second code path.
+function reportContext(review, publication, authorization, ledgerDirectory) {
   if (review == null && publication == null) {
     throw new Error("a report needs a review ledger or a publication ledger");
   }
@@ -764,19 +1276,17 @@ export function renderReviewReport(
       ? []
       : [authorization.mode === "LOCAL_GATE" ? "gate.json" : "remote-authorization.json"]),
   ].map((name) => code(path.join(directory, name)));
-  const sections = [
-    `# Review report ${inline(reviewId)}`,
-    ...(review == null
-      ? remoteOnlySection()
-      : [
-          ...identitySection(review),
-          ...roundsSection(review),
-          ...carriedSection(review),
-          ...findingsSection(review),
-          ...changesSection(review),
-          ...outcomeSection(review),
-        ]),
-    ...remoteSection(publication, authorization, publicationSummary),
+  return { reviewId, directory, ledgers };
+}
+
+// The identity and the projection notice, the same in both tiers: a brief and
+// a full report of one ledger are one document at two depths, so they must
+// answer "which ledgers, at which revision, rendered by which format" alike.
+function footerSections(
+  { reviewId, ledgers },
+  { review, publication, publicationSummary, renderedAt },
+) {
+  return [
     "## Footer",
     [
       `- Review: ${code(reviewId)}`,
@@ -794,6 +1304,38 @@ export function renderReviewReport(
           ]),
     ].join("\n"),
     review == null ? PROJECTION_NOTICE_REMOTE_ONLY : PROJECTION_NOTICE,
+  ];
+}
+
+// `review` is null for a REMOTE_ONLY publication, which has no review ledger;
+// the publication is then required. `authorization` is the bound gate or
+// sidecar the store reader admitted, and `publicationSummary` the summary the
+// server computed over the same ledger, when the caller read them.
+export function renderReviewReport(
+  review,
+  {
+    publication = null,
+    authorization = null,
+    publicationSummary = null,
+    renderedAt = new Date().toISOString(),
+    ledgerDirectory = null,
+  } = {},
+) {
+  const context = reportContext(review, publication, authorization, ledgerDirectory);
+  const sections = [
+    `# Review report ${inline(context.reviewId)}`,
+    ...(review == null
+      ? remoteOnlySection()
+      : [
+          ...identitySection(review),
+          ...roundsSection(review),
+          ...carriedSection(review),
+          ...findingsSection(review),
+          ...changesSection(review),
+          ...outcomeSection(review),
+        ]),
+    ...remoteSection(publication, authorization, publicationSummary),
+    ...footerSections(context, { review, publication, publicationSummary, renderedAt }),
   ];
   return `${sections.join("\n\n")}\n`;
 }
