@@ -11,11 +11,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Internal
 
-- The 0.15.0 entry wrote the issue its #149 bullet closes as `(#148)`, the
-  form this file reserves for pull-request claims, so the release verifier
-  read it as a claim on a pull request the range does not contain and refused
-  to record 0.15.0. The reference now reads `issue #148`; this release exists
-  so the evidence chain carries a verified record.
+- The 0.15.0 entry wrote the issue its #149 bullet closes in the
+  parenthesized form this file reserves for pull-request claims, so the
+  release verifier read it as a claim on a pull request the range does not
+  contain and refused to record 0.15.0. The reference now reads `issue #148`;
+  this release exists so the evidence chain carries a verified record.
 - (#151) The 0.15.1 release pull request, whose merge carries the v0.15.1 tag
   and whose own changelog bullet is this one.
 
