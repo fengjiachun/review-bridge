@@ -986,6 +986,20 @@ function remoteOnlyFacts(publication, authorization, summary) {
 // publication summary's verdict when a summary was supplied, the stored status
 // when one was not, and an explicit "nothing is merged or gated" when there is
 // no publication at all.
+// Where a review with no publication goes next, from its own status. The
+// vocabulary is core's actionRequired, in the reader's terms rather than the
+// driver's; anything the table does not name is left to the reader to
+// inspect, and says so.
+const LOCAL_NEXT_STEP = {
+  WAITING_FOR_REVIEW: "the reviewer's first review is still owed",
+  REVIEW_SUBMITTED: "the author's resolutions are owed next",
+  AUTHOR_RESPONDED: "a rereview is the next step",
+  WAITING_FOR_REREVIEW: "the rereview is still owed",
+  CLEAN: "the local gate can be finalized next",
+  HUMAN_REQUIRED: "a human arbitration is owed before anything else moves",
+  CONTINUABLE_FINDINGS: "the open findings are addressed in a fresh full review",
+};
+
 function destinationSentence(review, publication, summary) {
   if (publication != null) {
     return `Publication ${pullRequestName(publication)}: ${publicationStanding(publication, summary)}.`;
@@ -993,7 +1007,14 @@ function destinationSentence(review, publication, summary) {
   if (review?.status === "LOCAL_GATE_PASSED") {
     return `The local gate passed over snapshot ${code(review.clean_snapshot_hash)}; no publication ledger was rendered, so nothing here is merged.`;
   }
-  return "No publication ledger was rendered, so nothing here is merged or gated.";
+  const next = advisoryReported(review)
+    ? "the findings are reported and nothing further is owed on this review"
+    : review?.advisory === true && review?.status === "CLEAN"
+      ? "the advisory review found nothing and nothing further is owed on it"
+      : Object.hasOwn(LOCAL_NEXT_STEP, review?.status)
+        ? LOCAL_NEXT_STEP[review.status]
+        : `its status ${code(review?.status)} names no next step here; inspect the ledger`;
+  return `Next: ${next}. No publication ledger was rendered, so nothing here is merged or gated.`;
 }
 
 // The first two lines: the terminal state, what is still owed, and where the

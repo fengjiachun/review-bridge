@@ -1545,6 +1545,39 @@ function brief(review, options = {}) {
   });
 }
 
+// The second line promises to say where the review goes next. Without a
+// publication that has to come from the local status itself, one sentence
+// per status, and never the same generic sentence for all of them.
+test("the brief's second line names the next local step when no publication exists", () => {
+  const expected = {
+    WAITING_FOR_REVIEW: /^Next: the reviewer's first review is still owed\./,
+    REVIEW_SUBMITTED: /^Next: the author's resolutions are owed next\./,
+    AUTHOR_RESPONDED: /^Next: a rereview is the next step\./,
+    WAITING_FOR_REREVIEW: /^Next: the rereview is still owed\./,
+    CLEAN: /^Next: the local gate can be finalized next\./,
+    HUMAN_REQUIRED: /^Next: a human arbitration is owed before anything else moves\./,
+    CONTINUABLE_FINDINGS: /^Next: the open findings are addressed in a fresh full review\./,
+  };
+  const seen = new Set();
+  for (const [status, pattern] of Object.entries(expected)) {
+    const markdown = brief(cleanInTwoRounds({ status }));
+    const second = markdown.split("\n").find((line) => line.startsWith("Next: "));
+    assert.match(second, pattern, status);
+    assert.match(second, /nothing here is merged or gated\.$/, status);
+    seen.add(second);
+  }
+  assert.equal(seen.size, Object.keys(expected).length, "each status gets its own destination");
+  // The advisory terminal states owe nothing further, and say so instead of
+  // pointing at an author loop that does not exist.
+  const reported = brief(cleanInTwoRounds({ advisory: true, status: "REVIEW_SUBMITTED" }));
+  assert.match(reported.split("\n").find((line) => line.startsWith("Next: ")), /^Next: the findings are reported and nothing further is owed/);
+  const clean = brief(cleanInTwoRounds({ advisory: true, status: "CLEAN" }));
+  assert.match(clean.split("\n").find((line) => line.startsWith("Next: ")), /^Next: the advisory review found nothing and nothing further is owed/);
+  // A status the table does not know is not silently generic.
+  const odd = brief(cleanInTwoRounds({ status: "SOMETHING_NEW" }));
+  assert.match(odd.split("\n").find((line) => line.startsWith("Next: ")), /names no next step here; inspect the ledger/);
+});
+
 // An advisory review's findings stay OPEN in the ledger forever: there is no
 // author to answer them. The brief must call them reported, not open, and
 // must not open the "still open" section over them.
@@ -1612,7 +1645,7 @@ test("the brief opens with the terminal state and where the review goes next", (
   // The two lines the reader sees first: the verdict, then the destination.
   assert.match(lines[2], /^\*\*CONTINUABLE_FINDINGS\*\* — 2 of 5 findings still open/);
   assert.match(lines[2], /carried into `rb-2026-09-02T000000-000Z-c35398d3`/);
-  assert.match(lines[3], /^No publication ledger was rendered, so nothing here is merged or gated\.$/);
+  assert.match(lines[3], /^Next: the open findings are addressed in a fresh full review\. No publication ledger was rendered, so nothing here is merged or gated\.$/);
   assert.equal(lines[4], "");
   // And it is a brief: one ledger, a quarter of the lines.
   const full = renderReviewReport(continuableInTwoRounds(), {
