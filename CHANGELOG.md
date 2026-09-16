@@ -14,7 +14,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - (#143) Memoize the expensive test lifecycle prefixes: each is built once per
   test file and later callers get a private copy restored to the same absolute
   path, served only while the build started under a minute ago.
-- (#PRNUM) Take the time base of every fabricated ledger and observation
+- (#149) Take the time base of every fabricated ledger and observation
   stamp from the caller (#148): `resolvedThread`, `resolutionRecord`, the
   lifecycle-event helpers, and `appendHistoricalResolutionProof` require an
   `at` instead of reading the wall clock, which raced the build time a
