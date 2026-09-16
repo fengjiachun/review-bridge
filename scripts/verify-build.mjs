@@ -761,8 +761,10 @@ assert.ok(await fsp.stat(reportScript));
 const reportHelp = run(process.execPath, [reportScript, "--help"], pluginRoot);
 assert.match(
   reportHelp,
-  /Usage: review-report\.mjs <review_id> \[--json\] \[--store <path>\]/,
+  /Usage: review-report\.mjs <review_id> \[--full\] \[--json\] \[--store <path>\]/,
 );
+assert.match(reportHelp, /By default it prints a brief/);
+assert.match(reportHelp, /--full {10}Print the full rendering instead/);
 assert.match(reportHelp, /projection of the ledger, not evidence/);
 
 const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
@@ -1381,27 +1383,42 @@ try {
     assert.equal(auditInspection.status, 0, auditInspection.stderr);
     assert.equal(JSON.parse(auditInspection.stdout).valid, true);
 
-    // The packaged report script and the author tool render the same ledgers:
-    // the script prints and writes nothing, the tool writes the report beside
-    // the ledger and returns what it wrote.
-    const packagedReport = spawnSync(
+    // The packaged report script's default tier: a brief, whose first two
+    // lines carry the verdict and where the review goes next.
+    const packagedBrief = spawnSync(
       process.execPath,
       [reportScript, prepared.id, "--store", store],
+      { cwd: pluginRoot, encoding: "utf8" },
+    );
+    assert.equal(packagedBrief.status, 0, packagedBrief.stderr);
+    assert.match(packagedBrief.stdout.split("\n")[0], /^# Review report /);
+    assert.match(packagedBrief.stdout.split("\n")[2], /^\*\*[A-Z_]+\*\* — /);
+    assert.match(packagedBrief.stdout.split("\n")[3], /^Publication owner\/repo#7: /);
+    assert.match(packagedBrief.stdout, /\| Outcome \| \d+ fixed and verified · \d+ open · \d+ rebutted \|/);
+    assert.match(packagedBrief.stdout, /projection of the ledger, not evidence/);
+    // The packaged report script under --full and the author tool render the
+    // same ledgers at the same depth: the script prints and writes nothing,
+    // the tool writes the report beside the ledger and returns what it wrote.
+    const packagedReport = spawnSync(
+      process.execPath,
+      [reportScript, prepared.id, "--full", "--store", store],
       { cwd: pluginRoot, encoding: "utf8" },
     );
     assert.equal(packagedReport.status, 0, packagedReport.stderr);
     assert.match(packagedReport.stdout, /^# Review report /);
     assert.match(packagedReport.stdout, /## Remote publication/);
     assert.match(packagedReport.stdout, /projection of the ledger, not evidence/);
+    assert.ok(packagedReport.stdout.split("\n").length > packagedBrief.stdout.split("\n").length);
     // The JSON envelope names the same identity the Markdown footer prints,
-    // summary digest included.
+    // summary digest included, and says which tier it rendered.
     const packagedReportJson = spawnSync(
       process.execPath,
-      [reportScript, prepared.id, "--json", "--store", store],
+      [reportScript, prepared.id, "--json", "--full", "--store", store],
       { cwd: pluginRoot, encoding: "utf8" },
     );
     assert.equal(packagedReportJson.status, 0, packagedReportJson.stderr);
     const reportEnvelope = JSON.parse(packagedReportJson.stdout);
+    assert.equal(reportEnvelope.tier, "full");
     assert.match(reportEnvelope.revision, /^\d+-p\d+-s[0-9a-f]{12}-f\d+$/);
     assert.match(
       reportEnvelope.markdown,
@@ -1502,11 +1519,27 @@ try {
     assert.match(remoteReportText, /projection of the ledger, not evidence/);
     const packagedRemoteReport = spawnSync(
       process.execPath,
-      [reportScript, remoteAuthorization.review_id, "--store", store],
+      [reportScript, remoteAuthorization.review_id, "--full", "--store", store],
       { cwd: pluginRoot, encoding: "utf8" },
     );
     assert.equal(packagedRemoteReport.status, 0, packagedRemoteReport.stderr);
     assert.match(packagedRemoteReport.stdout, /authorized `REMOTE_ONLY` with local review skipped/);
+    // A publication with no review ledger briefs in the same shape rather
+    // than failing or falling back to the full rendering.
+    const packagedRemoteBrief = spawnSync(
+      process.execPath,
+      [reportScript, remoteAuthorization.review_id, "--store", store],
+      { cwd: pluginRoot, encoding: "utf8" },
+    );
+    assert.equal(packagedRemoteBrief.status, 0, packagedRemoteBrief.stderr);
+    assert.match(
+      packagedRemoteBrief.stdout.split("\n")[2],
+      /^\*\*REMOTE_ONLY\*\* — this publication was authorized with local review skipped/,
+    );
+    assert.match(
+      packagedRemoteBrief.stdout,
+      /\| Findings \| none: a REMOTE_ONLY publication has no review ledger to raise them in \|/,
+    );
 
     await fsp.writeFile(
       path.join(repository, "value.test.js"),

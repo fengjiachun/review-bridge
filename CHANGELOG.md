@@ -9,6 +9,24 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Added
+
+- (#146) `scripts/review-report.mjs` prints a brief by default: the terminal
+  state and where the review goes next in the first two lines, a fact table,
+  the findings still open before the ones already settled, the round-level
+  facts, and a pointer to the full rendering. `--full` prints the rendering the
+  script printed before, which is still what `render_review_report` writes
+  beside the ledger, and `--json` names which tier it rendered. Both tiers read
+  the same ledgers through the same reader. Every number in the brief is
+  counted over the ledger; the renderer calls no model, so a line that would
+  read across findings to say what they have in common is out of its reach.
+
+### Changed
+
+- (#146) `REPORT_FORMAT` is 2. The full rendering is unchanged apart from the
+  format number it now prints, and a report written at format 1 keeps its own
+  file name rather than colliding with a format-2 render of the same ledger.
+
 ### Internal
 
 - (#143) Memoize the expensive test lifecycle prefixes: each is built once per
