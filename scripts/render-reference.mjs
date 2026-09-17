@@ -69,7 +69,8 @@ function callArguments(text, open) {
 }
 
 // A code is a literal passed where a function or constructor declares a
-// parameter named `code`, or a value a `*ErrorCode` lookup returns.
+// parameter named `code`, a literal assigned to an error's `code`, or a value
+// a `*ErrorCode` lookup returns.
 export function scanErrorCodes(sources) {
   const raisers = new Map();
   for (const text of Object.values(sources)) {
@@ -100,6 +101,11 @@ export function scanErrorCodes(sources) {
         if (code != null) {
           add(code, file);
         }
+      }
+    }
+    for (const match of text.matchAll(/\.code\s*=(?!=)([^;]*);/g)) {
+      for (const literal of match[1].matchAll(/"([A-Z][A-Z0-9_]{2,})"/g)) {
+        add(literal[1], file);
       }
     }
     for (const match of text.matchAll(/function\s+\w*ErrorCode\([^)]*\)\s*\{([\s\S]*?)\n\}/g)) {
@@ -163,7 +169,8 @@ export async function renderReference() {
     "",
     "A failed tool call returns one of these in its `code` field.",
     "A code is listed when `src/` passes it as a literal where a function or constructor declares a `code` parameter,",
-    "or returns it from a `*ErrorCode` lookup. A code chosen at run time from a variable is not seen.",
+    "assigns it as a literal to an error's `code`, or returns it from a `*ErrorCode` lookup.",
+    "A code chosen at run time from a variable is not seen.",
     "",
     "| Code | Raised in |",
     "| --- | --- |",

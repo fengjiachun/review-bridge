@@ -92,7 +92,8 @@ The server started with `--role reviewer`. The summary is the first sentence of 
 
 A failed tool call returns one of these in its `code` field.
 A code is listed when `src/` passes it as a literal where a function or constructor declares a `code` parameter,
-or returns it from a `*ErrorCode` lookup. A code chosen at run time from a variable is not seen.
+assigns it as a literal to an error's `code`, or returns it from a `*ErrorCode` lookup.
+A code chosen at run time from a variable is not seen.
 
 | Code | Raised in |
 | --- | --- |
@@ -121,6 +122,7 @@ or returns it from a `*ErrorCode` lookup. A code chosen at run time from a varia
 | `LOCK_OWNERSHIP_LOST` | `src/storage.mjs` |
 | `LOCK_OWNER_UNKNOWN` | `src/storage.mjs` |
 | `LOCK_RECORD_INVALID` | `src/storage.mjs` |
+| `LOCK_RELEASE_FAILED` | `src/storage.mjs` |
 | `LOCK_RUNTIME_UNAVAILABLE` | `src/storage.mjs` |
 | `OBSERVATION_FILE_MALFORMED` | `src/publication.mjs` |
 | `OBSERVATION_FILE_TOO_LARGE` | `src/publication.mjs` |

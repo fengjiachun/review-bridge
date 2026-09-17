@@ -27,6 +27,8 @@ fail("DIRECT_CODE", "x", { status: "NOT_A_CODE" });
 parse(bytes, "FORWARDED_CODE", "y");
 parse("NOT_A_CODE_EITHER", code, "z");
 fail(code, "chosen at run time");
+combined.code = releaseError?.code ?? "ASSIGNED_CODE";
+if (error?.code === "COMPARED_NOT_RAISED") {}
 `,
     "src/b.mjs": `class StoreError extends Error {
   constructor(code, message) { super(message); }
@@ -39,6 +41,7 @@ fail("DIRECT_CODE", "again");
 `,
   });
   assert.deepEqual(codes, [
+    { code: "ASSIGNED_CODE", files: ["src/a.mjs"] },
     { code: "DIRECT_CODE", files: ["src/a.mjs", "src/b.mjs"] },
     { code: "FORWARDED_CODE", files: ["src/a.mjs"] },
     { code: "MULTILINE_CODE", files: ["src/b.mjs"] },
