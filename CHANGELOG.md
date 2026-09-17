@@ -23,7 +23,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   The manual local review, successor reviews, and the state machine move to
   `docs/local-review.md`. The Hermes provenance sentences and the provider
   binding that tests pinned in the README move into the workflow skill's
-  Hermes and Prepare references, and the tests read them there. Part of
+  Hermes and Prepare references, and the tests read them there. The build no
+  longer copies the README into its output, where its links into `docs/` could
+  not resolve; the source archive carries the documentation. Part of
   issue #152.
 
 ### Internal
