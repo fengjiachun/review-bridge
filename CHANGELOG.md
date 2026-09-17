@@ -28,6 +28,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   has `### Added` and no file under `docs/` or `README.md` changed in the range
   beyond its version strings.
 
+- (#154) issue #145 second phase: `nowIso` and the exported
+  `getPublicationFindingsReview` in `src/publication.mjs` are deleted, since
+  nothing in the repository referenced either. `derivePublicationStatus`
+  stays as the status-derivation oracle the publication tests use.
+
 ## 0.15.1 - 2026-09-16
 
 ### Internal

@@ -182,10 +182,6 @@ export async function readObservationFile(filePath) {
   );
 }
 
-function nowIso(clock) {
-  return new Date(clock()).toISOString();
-}
-
 function publicationDirectory(storeRoot, reviewId) {
   if (typeof reviewId !== "string" || !/^rb-[0-9TZ-]+-[a-f0-9]{8}$/.test(reviewId)) {
     fail("INVALID_INPUT", "invalid review_id");
@@ -7051,26 +7047,6 @@ export async function getThreadResolutionPlan(storeRoot, reviewId) {
       await closeAuthorizationFiles(authorization);
     }
   });
-}
-
-/**
- * The correlated Codex findings review this publication currently holds
- * against its gated head, or null when its recorded evidence decides no such
- * review. This is what the workflow's addressed-by record names: the identity
- * comes from the same selection that derived CHANGES_REQUIRED, so the record
- * can only ever name the review that actually blocked.
- *
- * Deliberately not a projection: no staleness clock. The question is
- * historical -- which finding was this repair answering -- and the answer
- * must not disappear because the repair took longer than the evidence
- * freshness window.
- */
-export async function getPublicationFindingsReview(storeRoot, reviewId) {
-  return withPublicationFindingsReviewLock(
-    storeRoot,
-    reviewId,
-    async (findings) => findings,
-  );
 }
 
 export async function withPublicationFindingsReviewLock(
