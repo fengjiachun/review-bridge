@@ -183,7 +183,6 @@ run(mcpbCli, ["validate", claudeSource], projectRoot);
 run(mcpbCli, ["pack", claudeSource, mcpbOutput], projectRoot);
 await fsp.copyFile(mcpbOutput, dxtOutput);
 
-await fsp.copyFile(path.join(projectRoot, "README.md"), path.join(outputRoot, "README.md"));
 run(
   "git",
   ["archive", "--format=zip", "-o", sourceOutput, "HEAD"],
