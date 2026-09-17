@@ -222,15 +222,15 @@ function localMergedPullRequests(repositoryPath, range) {
 
 const RELEASE_VERSION_RE = /\bv?\d+\.\d+\.\d+\b/g;
 
-// Documentation files whose text changed in the range once release version
-// strings are masked: a version bump alone documents no addition.
-function touchedDocumentation(repositoryPath, range) {
-  const base = range.kind === "ROOT" ? null : range.tag;
+// Documentation files whose text changed between `base` (null for a root
+// range) and `head` once release version strings are masked: a version bump
+// alone documents no addition.
+function touchedDocumentation(repositoryPath, base, head) {
   const paths = ["--", "docs", "README.md"];
   const files =
     base == null
-      ? git(repositoryPath, ["ls-tree", "-r", "--name-only", "HEAD", ...paths])
-      : git(repositoryPath, ["diff", "--name-only", base, "HEAD", ...paths]);
+      ? git(repositoryPath, ["ls-tree", "-r", "--name-only", head, ...paths])
+      : git(repositoryPath, ["diff", "--name-only", base, head, ...paths]);
   const text = (ref, file) =>
     (ref == null
       ? ""
@@ -239,7 +239,7 @@ function touchedDocumentation(repositoryPath, range) {
   return files
     .split("\n")
     .filter(Boolean)
-    .filter((file) => text(base, file) !== text("HEAD", file));
+    .filter((file) => text(base, file) !== text(head, file));
 }
 
 function localPreviousTag(repositoryPath, version) {
@@ -368,7 +368,11 @@ if (options.phase === "PRE") {
     previousVersion:
       range.kind === "ROOT" ? null : versionFromTagName(range.tag),
     mergedPullRequests: localMergedPullRequests(repositoryPath, range),
-    touchedDocumentation: touchedDocumentation(repositoryPath, range),
+    touchedDocumentation: touchedDocumentation(
+      repositoryPath,
+      range.kind === "ROOT" ? null : range.tag,
+      "HEAD",
+    ),
     releasePullRequest:
       options["release-pull-request"] == null
         ? null
@@ -415,6 +419,13 @@ if (options.phase === "PRE") {
         ? versionFromTagName(observation.range.tag)
         : null,
     mergedPullRequests: observation.merged_pull_requests ?? [],
+    touchedDocumentation: observation.tag.exists
+      ? touchedDocumentation(
+          repositoryPath,
+          observation.range?.kind === "TAG" ? observation.range.target_sha : null,
+          target,
+        )
+      : [],
     observation,
     localManifest,
     attestations: await collectAttestations(storeRoot, observation.repository.id),

@@ -229,6 +229,11 @@ test("DOCS_UNTOUCHED only when an Added entry changed no documentation", () => {
   const pre = (overrides) =>
     codes(verifyRelease(input({ phase: "PRE", observation: undefined, ...overrides })));
   assert.deepEqual(pre({ touchedDocumentation: [] }), ["DOCS_UNTOUCHED"]);
+  // The final phase reruns every pre-flight requirement against the tag, so a
+  // release that skipped pre-flight cannot record around the gate.
+  const final = verifyRelease(input({ touchedDocumentation: [] }));
+  assert.deepEqual(codes(final), ["DOCS_UNTOUCHED"]);
+  assert.equal(final.record, null);
   assert.deepEqual(pre({ touchedDocumentation: ["README.md"] }), []);
   const fixedOnly = files({
     text: changelog().replace("### Added\n\n- A shipped", "### Fixed\n\n- A shipped"),

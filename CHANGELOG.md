@@ -23,9 +23,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - (#153) `scripts/render-reference.mjs` generates `docs/reference.md` from the
   tools each server role lists and the error codes `src/` raises, and a test
-  fails when the committed page differs. `verify-release.mjs --pre` fails with
-  `DOCS_UNTOUCHED` when the release entry has `### Added` and no file under
-  `docs/` or `README.md` changed in the range beyond its version strings.
+  fails when the committed page differs. `verify-release.mjs`, in both its
+  pre-flight and final phases, fails with `DOCS_UNTOUCHED` when the release entry
+  has `### Added` and no file under `docs/` or `README.md` changed in the range
+  beyond its version strings.
 
 ## 0.15.1 - 2026-09-16
 

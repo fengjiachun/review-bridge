@@ -7,7 +7,6 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   MANIFEST,
-  PREVIOUS_TAG_SHA,
   changelog,
   files,
   observation,
@@ -223,7 +222,11 @@ test("the final phase records once, agrees on re-run, and refuses to overwrite",
     { mode: 0o600 },
   );
 
+  // The final phase diffs documentation from the previous tag's target, so
+  // the range names the fixture's real v1.0.0 commit.
+  const previousTagSha = git(fixture.repository, "rev-parse", "v1.0.0^{commit}");
   const collected = observation({
+    range: { kind: "TAG", tag: "v1.0.0", target_sha: previousTagSha },
     tag: {
       name: "v1.1.0",
       exists: true,
@@ -289,7 +292,7 @@ test("the final phase records once, agrees on re-run, and refuses to overwrite",
     supersedingPath,
     JSON.stringify({
       ...collected,
-      range: { kind: "TAG", tag: "v1.0.5", target_sha: PREVIOUS_TAG_SHA },
+      range: { kind: "TAG", tag: "v1.0.5", target_sha: previousTagSha },
     }),
   );
   const superseded = runVerifier(

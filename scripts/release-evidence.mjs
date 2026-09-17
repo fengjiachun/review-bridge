@@ -722,14 +722,14 @@ export function verifyRelease(input) {
     releasePullRequest: input.releasePullRequest ?? null,
   });
   failures.push(...reconciliation.failures);
+  failures.push(
+    ...documentationGate(
+      parseChangelogEntries(input.files["CHANGELOG.md"] ?? ""),
+      input.version,
+      input.touchedDocumentation,
+    ),
+  );
   if (phase === "PRE") {
-    failures.push(
-      ...documentationGate(
-        parseChangelogEntries(input.files["CHANGELOG.md"] ?? ""),
-        input.version,
-        input.touchedDocumentation,
-      ),
-    );
     return {
       phase,
       status: failures.length === 0 ? "PASSED" : "FAILED",
