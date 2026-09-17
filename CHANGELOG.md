@@ -41,6 +41,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `getPublicationFindingsReview` in `src/publication.mjs` are deleted, since
   nothing in the repository referenced either. `derivePublicationStatus`
   stays as the status-derivation oracle the publication tests use.
+- (#156) Release 0.15.2.
 
 ## 0.15.1 - 2026-09-16
 
