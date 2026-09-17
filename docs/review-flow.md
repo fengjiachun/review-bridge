@@ -1,8 +1,11 @@
 # How Review Bridge reviews a change
 
+Describes Review Bridge v0.15.1.
+
 This is the narrative introduction: what happens to one change from commit to
-merge-ready, and why each step exists. For installation and the complete tool
-reference, see the [README](../README.md).
+merge-ready, and why each step exists. For installation, see the
+[README](../README.md) and the pages under [install/](install/); for every
+tool and error code, see the [reference](reference.md).
 
 ## The problem it solves
 
@@ -63,12 +66,12 @@ snapshot may also capture uncommitted working-tree state; the workflow never
 has any, since step 1 required a clean tree.
 
 Before dispatch, the immutable patch is measured as added plus deleted lines.
-At 75% of the current budget, the driver reports the total and remaining
-headroom and states whether it will continue or split; this warning does not
-block. The autonomous workflow pauses for an operator decision when the total
-exceeds its default 2000-line budget, so no reviewer context is spent before a
-split is discussed. A manual review reports the same measurement but proceeds,
-because the operator is already present.
+At 75% of the current budget the autonomous workflow reports the total and
+remaining headroom, and it refuses to prepare the next round until the split
+decision is recorded as continue or split. It pauses for an operator decision
+when the total exceeds its default 2000-line budget, so no reviewer context is
+spent before a split is discussed. A manual review reports the same
+measurement but proceeds, because the operator is already present.
 
 Note that this gate attests **snapshot consistency**, not test results:
 finalizing it re-checks that the tree still matches what the reviewer saw.
@@ -78,6 +81,12 @@ provider evidence rather than the author's word.
 **3 — Push and open a draft PR.** What gets pushed must be byte-for-byte the
 head that passed review. The PR is created as a **draft**: draft means
 reviewers are not looking at it yet, and the workflow relies on that.
+
+A repository in Git's sha256 object format can run a full local review and
+reach the local gate, but it cannot go further. GitHub hosts no sha256
+repository, so starting an autonomous workflow, authorizing a remote-only
+publication, and starting a publication each refuse it with
+`REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE`.
 
 **4 — Ask Codex to review.** The server composes the request comment — with a
 correlation marker — and the driver posts it verbatim. The marker is how a
@@ -213,6 +222,46 @@ review feeds are walked page by page, but each page's provenance is recorded
 and the adapter validates the walk's completeness before anything is decided
 from it.
 
+**The report is for people, not for the ledger.** `render_review_report`
+writes one review's ledger, and its publication ledger when there is one, as
+Markdown beside the ledger and returns a receipt rather than the text. The
+packaged `scripts/review-report.mjs` prints a brief by default: the terminal
+state and where the review goes next, a fact table, the findings still open,
+and the round-level facts. `--full` prints the full rendering the tool writes.
+The workflow skill renders the report once `LOCAL_GATE_PASSED` is recorded and
+again once a publication reads `MERGE_READY`, and opens it in Plannotator when
+that tool is on PATH. Rendering changes no ledger, consumes no round, and
+touches no gate; the report is a projection of the ledger, not evidence.
+
+**An advisory panel reviews someone else's pull request.** A panel is several
+independent reviewers over one set of frozen bytes: a packaged script clones
+the pull request outside every authoring tree, and each member gets its own
+`prepare_review` with `advisory: true` over the same base. An advisory review
+accepts `submit_review` and nothing else — `finalize_local_gate`,
+`submit_resolutions`, `prepare_rereview`, and `append_review_erratum` each
+refuse it — so it ends in a report and can never mint a local gate over code
+this operator did not author.
+
+**A `CODEX_TASK` panel member runs in a container.** The host sandbox bounds
+writes and network, not reads, and a third party's diff is text that can steer
+a reviewer. So an advisory `CODEX_TASK` member is launched only through the
+packaged `scripts/advisory-sandbox-launch.mjs`, which runs the reviewer in a
+Linux container that is the read boundary. Inside it are the operator's
+`auth.json` read-only, the packaged plugin read-only, a fresh clone of the
+checkout read-only, and a staged copy of the one review; the host store is
+never mounted. Egress goes only through a proxy that admits `chatgpt.com`,
+`api.openai.com`, and `auth.openai.com`. The verdict is replayed through the host's own
+`submit_review` and kept only if the replay equals the staged ledger. The
+launcher fails closed without Docker.
+
+**The workflow skill loads one route at a time.** The packaged
+`review-bridge-workflow` skill is a router: a table maps the current task —
+prepare a manual review, handle findings, finish, publish, run the autonomous
+workflow, or run an advisory panel — to one reference page, and the agent reads
+only that page and the references it calls for at the current step. A manual
+review loads only its selected provider's dispatch page. The boundaries that
+hold in every mode stay in the skill itself.
+
 **Templates are packaging, not the capability boundary.** The repository
 ships install templates for a Codex plugin, a Claude Desktop reviewer
 extension, and Hermes and DeepSeek Harness profiles. The author side is the same server started
@@ -221,15 +270,10 @@ it; a small script importing the modules directly works too.
 
 ---
 
-## What works today, and what is still open
+## What works today
 
 Everything above is implemented and tested: local review with four isolated
-reviewer providers, publication with baseline and atomic observations, the
-thread reply-and-resolve loop, mark-ready, return-to-draft, and the terminal
-record.
-
-Still open: compensating unresolve (reopening a thread whose resolution was
-later proven wrong — the capability is declared and the evidence chain is
-validated, but the action is not yet implemented), end-to-end crash-recovery
-tests, and final packaging. RFC 0003 flips from `Accepted` to `Implemented`
-when those land.
+reviewer providers, advisory panels, publication with baseline and atomic
+observations, the thread reply-and-resolve loop with its compensating
+unresolve, mark-ready, return-to-draft, and the terminal record. RFC 0003 is
+`Implemented`.

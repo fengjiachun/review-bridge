@@ -45,8 +45,8 @@ endorsed by, or sponsored by OpenAI or Anthropic.
 - [How Review Bridge reviews a change](docs/review-flow.md)
 - [Platform support](#platform-support)
 - [Install](#install)
-- [Hermes reviewer profile](#hermes-reviewer-profile)
-- [DeepSeek Harness reviewer profile](#deepseek-harness-reviewer-profile)
+- [Hermes reviewer profile](docs/install/hermes.md)
+- [DeepSeek Harness reviewer profile](docs/install/deepseek-harness.md)
 - [Use](#use)
 - [Successor reviews](#successor-reviews)
 - [State machine](#state-machine)
@@ -78,8 +78,8 @@ The client integrations install differently:
 | --- | --- |
 | Claude Desktop reviewer extension | Prebuilt `.mcpb` on the [latest release](https://github.com/fengjiachun/review-bridge/releases/latest) |
 | Codex plugin (author + `CODEX_TASK` reviewer) | Build from a clone at the same release tag — the marketplace directory is not published as a release asset |
-| Hermes reviewer and author profiles | `hermes-integration/` inside the same build output — see [Hermes reviewer profile](#hermes-reviewer-profile) |
-| DeepSeek Harness reviewer and author profiles | `deepseek-harness/` inside the same build output — see [DeepSeek Harness reviewer profile](#deepseek-harness-reviewer-profile) |
+| Hermes reviewer and author profiles | `hermes-integration/` inside the same build output — see [Hermes reviewer profile](docs/install/hermes.md) |
+| DeepSeek Harness reviewer and author profiles | `deepseek-harness/` inside the same build output — see [DeepSeek Harness reviewer profile](docs/install/deepseek-harness.md) |
 
 Install every process that shares a store from the same Review Bridge build. Do
 not mix a locking-enabled build with artifacts from an earlier release; earlier
@@ -92,124 +92,18 @@ from an arbitrary `main` checkout can pair a newer author process with an older
 reviewer against one store. The version examples below use `v0.15.1`; substitute
 the exact release you installed.
 
-### Claude Desktop extension
+Install the Claude Desktop extension: see [docs/install/claude-desktop.md](docs/install/claude-desktop.md).
 
-Download `review-bridge-reviewer-<version>.mcpb` from the
-[latest release](https://github.com/fengjiachun/review-bridge/releases/latest),
-and note the tag — you will build the Codex plugin from it. A `.dxt`
-compatibility copy is published for Claude Desktop versions that still use the
-older file extension; the two files are byte-identical.
+Install the Codex plugin: see [docs/install/codex-plugin.md](docs/install/codex-plugin.md).
 
-Optionally verify the download against the release's `SHA256SUMS.txt`:
-
-```bash
-shasum -a 256 -c SHA256SUMS.txt --ignore-missing
-```
-
-Then, in Claude Desktop:
-
-1. Open **Settings → Extensions → Advanced settings**.
-2. Choose **Install Extension**.
-3. Select the `.mcpb` file. If the picker only accepts `.dxt`, select the
-   compatibility copy.
-4. Keep the default Review Bridge data directory, or select the same directory
-   configured through `REVIEW_BRIDGE_HOME` for Codex.
-5. Restart Claude Desktop if its tools do not appear immediately.
-
-### Codex plugin
-
-Clone the repository and check out the release tag matching the extension you
-installed, then build the local marketplace and register it:
-
-```bash
-git clone https://github.com/fengjiachun/review-bridge.git
-cd review-bridge
-git checkout v0.15.1
-npm ci
-npm run build
-codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.15.1/codex-marketplace"
-```
-
-Build from a Git clone, not from the release's source archive: `scripts/build.mjs`
-runs `git status` to reject a dirty tree, which fails outside a Git worktree. The
-archive is for inspection and provenance.
-
-Restart the Codex desktop app, open Plugins, select **Review Bridge Local**, and
-install **Review Bridge**.
-
-The local marketplace remains the source of the installed plugin. Keep the
-`codex-marketplace` directory in place while using this build.
-
-Two things about `npm run build` are worth knowing before you run it: it refuses
-to build from a working tree with any modified or untracked file, and it runs
-`npm install` for the packaged runtime, so it needs network access. A fresh
-clone at a release tag satisfies both. See [Develop](#develop) for the full
-build and verification loop.
-
-### Hermes reviewer profile
-
-Hermes is a supported local reviewer provider. The build output contains
-`hermes-integration/`, which packages the same server runtime plus:
-
-- `mcp/reviewer.config.yaml` — a reviewer-only Hermes MCP config snippet.
-- `mcp/author.config.yaml` — a separate author-only Hermes MCP config snippet.
-- `skills/review-bridge-reviewer/SKILL.md` — the Review Bridge-owned Hermes
-  reviewer skill.
-- `README.md` — install, upgrade, and profile-isolation instructions.
-
-Hermes auto-injects every tool from a configured MCP server into the profile
-that references it, so **author and reviewer MUST live in separate Hermes
-profiles**: the reviewer profile receives only the reviewer server and skill,
-and the author profile receives only the author server. Never add the
-author/publication server to the reviewer profile, and never add a reviewer
-provider binding to the author profile.
-
-Run `npm run verify:build`, then render `__REVIEW_BRIDGE_RELEASE_PATH__` to the
-absolute, versioned `review-bridge-v0.15.1/hermes-integration` directory and
-`__REVIEW_BRIDGE_HOME__` to one explicit absolute shared store. Merge each
-snippet's server entry into only its matching profile's top-level `mcp_servers`
-mapping.
-All participants share that one `REVIEW_BRIDGE_HOME` and one exact Review
-Bridge version. The packaged `hermes-integration/README.md` gives the complete
-install, profile tool checks, and atomic upgrade procedure.
+Install the Hermes reviewer profile: see [docs/install/hermes.md](docs/install/hermes.md).
 
 `HERMES` records configured reviewer provenance; it is not cryptographic model
 identity. Autonomous local task creation remains `CODEX_TASK`-only. After a
 local HERMES gate passes, remote GitHub Codex publication remains an
 author/publication-side operation.
 
-### DeepSeek Harness reviewer profile
-
-DeepSeek Harness is a supported local reviewer provider. The build output
-contains `deepseek-harness/`, which packages the same server runtime plus:
-
-- `cordis/reviewer.patch.yml` — a reviewer-only profile patch snippet.
-- `cordis/author.patch.yml` — a separate author-only profile patch snippet.
-- `skills/review-bridge-reviewer/SKILL.md` — the Review Bridge-owned DeepSeek
-  Harness reviewer skill.
-- `README.md` — install, upgrade, and profile-isolation instructions.
-
-Every MCP server a profile configures registers its tools for that profile's
-model, so **author and reviewer MUST live in separate profiles**, on the same
-terms as Hermes. Two further scopes are host-level rather than profile-level —
-skill discovery and the user-global `AGENTS.md` — and the packaged reviewer
-snippet restricts both to the release directory so the reviewer inherits
-neither the machine's other skills nor the author's guidance.
-
-Pin `@deepseek-ai/dsh@0.1.0-rc.6`, the release these snippets were verified
-against; its plugin configuration is a developer preview and will move. Run
-`npm run verify:build`, then render `__REVIEW_BRIDGE_RELEASE_PATH__` to the
-absolute, versioned `review-bridge-v0.15.1/deepseek-harness` directory and
-`__REVIEW_BRIDGE_HOME__` to one explicit absolute shared store. Append each
-snippet's entries to only its matching profile's `cordis.patch.yml`. The
-packaged `deepseek-harness/README.md` gives the complete install, profile tool
-checks, and atomic upgrade procedure.
-
-`DEEPSEEK_HARNESS` records configured reviewer provenance; it is not
-cryptographic model identity. Autonomous local task creation remains
-`CODEX_TASK`-only. A round-two rereview runs in a new session rather than a
-resumed one, because a headless run always starts a fresh session; the reviewer
-decides from the ledger `open_review` serves and re-runs its own verification.
+Install the DeepSeek Harness reviewer profile: see [docs/install/deepseek-harness.md](docs/install/deepseek-harness.md).
 
 ### Build output
 
@@ -264,7 +158,7 @@ progress; call it again with the same `state_version`, or resume when the user
 confirms the review is complete.
 
 State-changing tools can also return structured concurrency and durability
-errors. See [Troubleshooting](#troubleshooting) for what each one means and
+errors. See [Troubleshooting](docs/troubleshooting.md) for what each one means and
 whether retrying is safe.
 
 For a `CODEX_TASK` review, create a new Codex task. Do not fork the author task
@@ -473,340 +367,11 @@ full form.
 
 ## Autonomous workflow
 
-An explicitly authorized schema-version-1 workflow persists RFC 0003's
-autonomous path, from implementation through the local gate and draft
-publication to the recorded terminal state:
-
-```text
-IMPLEMENTING
-  -> committed clean head
-  -> bound CODEX_TASK review
-  -> marker-reconciled independent reviewer task
-  -> local findings and round two when needed
-  -> LOCAL_GATE_PASSED
-  -> reconciled fast-forward push of the exact gated head
-  -> marker-bound draft pull request, claimed store-wide
-  -> version-3 publication bound to the workflow authorization
-  -> WAIT_PUBLICATION
-       ├─ machine finding      -> ADDRESS_REMOTE_FINDINGS ─┐
-       ├─ required check fails -> ADDRESS_CHECK_FAILURE  ──┤-> COMMIT_HEAD
-       ├─ base gap             -> UPDATE_FROM_BASE       ──┘   -> new local review
-       ├─ ambiguity, conflict, unsafe invalidation, or no progress -> PAUSED_HUMAN
-       ├─ any head to push while the pull request is out of draft
-       │    -> ENSURE_DRAFT_FOR_REPAIR -> back to WAIT_PUBLICATION
-       │       (recording a head refuses on the same evidence)
-       ├─ eligible Codex finding thread -> RESOLVE_CODEX_THREADS
-       │    -> recorded reply -> proven resolution -> back to WAIT_PUBLICATION
-       │    -> later pinned-Codex follow-up -> proven unresolve
-       │       -> return to draft -> ADDRESS_REMOTE_FINDINGS
-       │    (a publication that goes terminal mid-resolution closes the
-       │     action without a resolution or unresolution record and pauses)
-       └─ every other invariant passes -> PRE_READY
-            -> MARK_PR_READY on the re-read clearance -> POST_READY
-                 -> fresh post-ready observation
-                 -> autonomous_terminal MERGE_READY -> terminal record, stop
-                    (actionable finding/check/base gap returns to draft first;
-                     any other blocker stays stopped as operator work)
-```
-
-`start_autonomous_workflow` binds the immutable repository, base, requirement,
-topic branch, publication target, complete capability set, and authorization
-digest. Store-wide claims admit only one active or paused owner for the local
-branch, the GitHub head ref, and — once a draft pull request is bound — the
-exact pull request. Every external action (reviewer task dispatch, gated-head
-push, draft pull-request creation, thread reply, thread resolution,
-mark-ready) persists
-`PLANNED -> EXECUTING -> OBSERVED -> COMPLETED` in a digest-chained action
-audit and recover one committed crash-tail event before another mutation.
-The complete marker-bound task title and prompt remain in the active action and
-compact summary, so a restarted controller reuses the persisted dispatch
-instead of replanning or reconstructing it.
-Pause and cancellation are committed to the same audit chain, so recovery
-replays a durable stop with its bound review and finding state, or rejects a
-stale active ledger before another write.
-Ownership claims live in each workflow ledger: the atomic `workflow.json`
-write is the single claim commit point, starts scan every persisted ledger for
-conflicts under one store-wide lock, and a crashed start leaves no claims
-behind. Every start and mutation also reserves the full worst-case
-cancellation — both the bounded audit event and the resulting near-limit
-ledger — so an admitted workflow can always persist an operator cancellation.
-
-The compact workflow summary is the controller's source of truth for the next
-action. A missing or ambiguous Codex task pauses rather than falling back to
-the author task. A contested round-two finding becomes `HUMAN_REQUIRED` and
-pauses. Uncontested new round-two findings become `CONTINUABLE_FINDINGS`: the
-workflow records their IDs and fingerprints, enters `ADDRESS_LOCAL_FINDINGS`,
-requires a changed committed head, and binds a new `FULL` review carrying only
-the source finding descriptions as scope hints. No review ID receives a third
-model round. Cancellation retains claims until an explicit,
-exactly-reconciled release proves each branch and head ref absent — and each
-bound pull request closed — with a fresh observation bound to the current
-workflow revision and canonical claim target.
-
-An autonomous publication is publication schema version 3: it keeps the
-version-2 `authorization` object and its `source_sha256` meaning unchanged and
-separately binds `workflow_id` and `workflow_authorization_sha256`, in both the
-ledger and `publication-gate.json`. Start, snapshot recording, the autonomous
-projection, finalization, and gate verification each revalidate both digests
-against the workflow ledger itself, and any mismatch fails closed. Version-1
-and version-2 ledgers keep their exact existing behavior and can never bind a
-workflow.
-
-`get_autonomous_pre_ready` is the only proof that a draft pull request is
-otherwise complete. It is the same evaluator as the manual status in the same
-fail-closed order, with the draft flag alone ignored, so a blocker can never
-pass there and fail here; the manual `PR_DRAFT` and `MARK_PULL_REQUEST_READY`
-behavior is unchanged. An attempt whose normalized blockers and either head or
-tree match *any* earlier recorded attempt pauses `NO_PROGRESS`, so an
-oscillating tree or an alternating blocker cannot walk around the check by
-never repeating adjacently.
-
-The autonomous workflow also defaults to a 2000-line change-size budget,
-measured as added plus deleted lines from the immutable snapshot patch. An
-internal warning threshold at 75% reports the measured total and remaining
-headroom. The review round in flight when a snapshot crosses it completes
-normally, but the workflow refuses to prepare the next round until
-`acknowledge_change_size_warning` records the explicit split decision —
-`continue` with a stated reason or `split` with the intended cut — and after
-a `continue`, a later, strictly larger crossing re-arms the demand. A
-recorded split keeps the gate closed until the cut shrinks the measured
-change below the acknowledged crossing, or
-the decision is re-acknowledged as `continue`. An
-oversized snapshot binds normally but
-pauses with
-`CHANGE_SIZE_BUDGET_EXCEEDED` before a reviewer task is dispatched.
-The same check runs again before an existing reviewer task is reused for a
-newly captured rereview snapshot. Pre-upgrade bound reviews derive any missing
-measurement from their immutable patch before dispatch.
-`extend_change_size_budget` records an explicit increase; the operator resumes
-separately after the new budget admits the measured total. Manual
-`prepare_review` reports the same measurement against the default but never
-blocks. Estimating and discussing a split before writing remains a driver
-obligation because no snapshot exists yet.
-
-The local continuation and remote repair loops each default to a 12-cycle
-budget. Local cycles are counted when an addressed head is recorded;
-exhaustion pauses with `LOCAL_CYCLE_BUDGET_EXHAUSTED` and the complete
-continuation chain before another repair starts. `extend_local_cycle_budget`
-records an explicit increase. The workflow ledger retains that complete chain;
-ordinary audit events bind its digest, while an event that changes the chain
-carries only an append-or-patch delta for the latest cycle, keeping audit-log
-growth linear. The remote count is projected from non-diverted
-`remote_attempts`; exhausting it pauses with
-`REMOTE_CYCLE_BUDGET_EXHAUSTED` and the complete attempt chain before another
-repair starts. `extend_remote_cycle_budget` records an explicit increase in the
-workflow audit, after which the operator uses the ordinary resume path. All
-three budgets are mutable workflow state, not part of the immutable
-authorization digest, and older ledgers that lack them load with the defaults.
-
-This release closes eligible Codex finding threads with a recorded reply and a
-server-owned resolution proof, and marks the cleared pull request ready: the
-mark-ready intent records which observation cleared the head, and the
-clearance is read again immediately before the call, so a publication that
-regresses after planning refuses the write rather than exposing a head with a
-standing blocker. That checkpoint runs once, before the single call the
-action makes; a controller re-issuing the call after a crash re-reads the
-clearance itself, and a crash it cannot settle that way is abandoned on the
-publication's own recorded observation rather than on anything the driver
-claims.
-
-It also returns the pull request to draft whenever the next thing it would
-push a head for is blocked by one that is already visible for review, so no
-head reaches a pull request reviewers are looking at. Two kinds of evidence
-answer that question, and each is trusted in one direction only: a live
-publication's recorded observation, which can refuse a repair, and the
-controller's own pre-read immediately before the push, which can stop that
-push but never permit one. A terminal publication answers nothing — its
-reading is frozen — which is why the push carries its own.
-
-After the mark-ready action completes, the controller records one fresh
-complete observation of the ready pull request, and the run evaluates it
-through the `autonomous_terminal` projection: the same fail-closed invariant
-order with the draft flag *not* ignored, then an independent revalidation of
-the workflow binding and both authorization digests, then a complete replay of
-every automatic-resolution record and lifecycle chain against that same
-observation. Only a projection that reports `MERGE_READY` over an observation
-recorded after the clearance the mark-ready consumed lets the workflow record
-its terminal entry (status, workflow revision, pull request identity and URL,
-exact head, local review and publication IDs, post-ready observation revision
-and digest, both authorization digests, and the record-and-lifecycle-set
-digest), set status `MERGE_READY`, and stop. It never calls
-`verify_publication_gate` and never merges; a later operator merge instruction
-goes through the existing manual path unchanged. An invalidated active
-resolution frontier, a missing or extra record, a broken supersession chain, a
-mismatched active record, or human participation in a resolved thread blocks
-the terminal projection with its own reason even when the publication status
-is `MERGE_READY`, and a valid superseded predecessor stays audit evidence
-rather than being compared against the current watermark. An actionable
-current-head finding, failed required check, or strict-policy base gap in the
-post-ready observation returns the ready pull request to draft before repair;
-anything else that blocks after the pull request is ready — a contested
-resolution, a new thread comment, a stale observation, an unresolved thread —
-remains operator work. Threads the eligibility plan refuses also remain
-operator work. The existing manual publication flow below remains unchanged.
+See [Autonomous workflow](docs/autonomous-workflow.md).
 
 ## GitHub publication gate
 
-Publishing to GitHub requires an explicit authorization, in one of two modes:
-
-```text
-LOCAL_GATE_PASSED ────────────┐
-REMOTE_ONLY authorization ────┴─> publication baseline
-  -> bound @codex review request
-  -> atomic GitHub snapshot
-  -> MERGE_READY
-  -> finalize + immediate verification
-```
-
-`LOCAL_GATE` is the default: a passed local review authorizes publication.
-`REMOTE_ONLY` is available only when the operator directly chooses to skip local
-review. Its `authorize_remote_publication` tool records the exact
-`LOCAL_REVIEW_SKIPPED` acknowledgement, operator label, rationale, clean local
-repository, reviewed base SHA, and head SHA under a new review ID, and does not
-create or claim `LOCAL_GATE_PASSED`. The reviewed base is the merge base of the
-freshly observed PR base tip and head, so an advanced base branch does not need
-to be an ancestor of the feature head.
-
-Either way, the author tools bind the selected authorization, pull request,
-required checks, exact request, pinned Codex Bot actor, result, and review
-threads to **one head SHA**. Every mutation carries an expected revision and
-revokes an older `publication-gate.json`. Finalization creates an expiring gate
-and appends a chained audit event; Codex must call `verify_publication_gate`
-immediately before a head-matching merge.
-
-The GitHub adapter is deliberately fail-closed: a standalone review comment, a
-reaction, silence, an unbound or unsupported request, incomplete pagination,
-or an ambiguous result all fail rather than pass. Version-2 requests carry a
-server-derived ID. If Codex omits it, Review Bridge accepts only one recorded
-open request with no preceding unbound request, no compatible unresolved
-baseline request, and a compatible reviewed-commit prefix or native GitHub
-`commit_id`. A historical baseline request is head-scoped only when its exact
-GitHub facts match a valid prior local publication ledger; caller-supplied
-provenance is rejected. Multiple candidates and incompatible heads remain
-ambiguous. Inline comments count only when structurally attached to a formal
-review. Legacy ambiguity still requires direct human approval of the complete
-resource-scoped request/result set.
-
-Version 0.4 writes authorization-union publication ledgers with schema version 2
-and remains able to read and complete version-1 local-gate ledgers. New
-baselines use GitHub adapter version 2; adapter-version-1 publication ledgers
-remain completable.
-
-Use `get_publication_summary` for the compact current revision,
-`blocking_reason`, `next_action`, gate state, and exact ambiguity sets. It does
-not access GitHub or return the full ledger. A finalized gate also reports
-`gate_expires_in_seconds`: the gate expires five minutes after the oldest source
-collection in the observation it was minted over, not five minutes after
-issuance, so part of that window is already spent when the gate first exists.
-Its `required_inputs` — like the one on `get_review_summary`,
-`get_autonomous_workflow_summary`, and `list_autonomous_workflows` — names the
-calls the current action implies as `{tool: [[field, source], ...]}`, so a
-driver never has to discover a schema by sending empty arguments. When
-`next_action` is
-`POST_AND_RECORD_CODEX_REVIEW_REQUEST`, post the returned
-`codex_review_request.body` unchanged and bind the post with its
-`codex_review_request.request_id` when present. Adapter-version-1 ledgers
-return the legacy exact body without an ID. For a fresh snapshot, run the
-packaged read-only collector against the review ID:
-
-```bash
-node dist/review-bridge-v0.15.1/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id>
-```
-
-Run that command from the repository root after `npm run build`. Inside an
-installed Codex plugin, the workflow skill resolves the same helper as
-`../../scripts/collect-github-observation.mjs` relative to its own `SKILL.md`.
-The collector reads the ledger from the store itself, uses the authenticated
-`gh` CLI, follows every required REST and GraphQL page, canonicalizes GitHub
-timestamps to UTC milliseconds, and fails closed when required policy evidence
-is unavailable. It writes the observation into the private store beside the
-ledger and prints only a receipt; pass the printed path to
-`record_github_snapshot` as `observation_path`. An explicit `--out` is refused
-inside any Git worktree, because an untracked observation file would dirty the
-reviewed repository and fail publication-gate verification.
-
-Neither the ledger nor the observation should be routed through the reviewing
-or authoring model. Both run to tens of thousands of tokens, and a model that
-retypes them pays for the same bytes twice — once to read them and again to
-emit them — while adding a transcription failure mode the file handoff does not
-have. The collector still accepts a ledger path or stdin, and
-`record_github_snapshot` still accepts an inline `observation`, for callers that
-have already loaded the data by other means.
-
-The packaged Codex plugin also includes
-`scripts/inspect-publication-audit.mjs <review_id>` for read-only, full-chain
-offline audit validation.
-
-`scripts/review-scorecard.mjs` aggregates the ledgers already in the configured
-store into one report: findings by severity, author dispositions crossed with
-reviewer decisions, rebuttal outcomes before and after the verification
-obligation, rounds to CLEAN, continuations, workflow budget events, and human
-arbitration escalations, each per reviewer provider and overall. It prints
-markdown, or JSON with `--json`, and states every counting rule in the report
-itself so a number can be replayed against the ledgers it came from. It reads
-one store, writes nothing, sends nothing anywhere, and lists a ledger it cannot
-parse as skipped rather than repairing it.
-
-The author tool `render_review_report` and the packaged
-`scripts/review-report.mjs <review_id> [--full] [--json] [--store <path>]`
-render one review's ledger, and its publication ledger when present, as a
-Markdown report a person can read in one sitting (a `REMOTE_ONLY` publication,
-which has no review ledger, renders from its publication and authorization
-alone).
-
-The script prints a brief by default: the terminal state and where the review
-goes next in the first two lines, a fact table, the findings still open before
-the ones already settled, the round-level facts, and a pointer to the full
-rendering. Every number in it is counted over the ledger and every grouping is
-one the ledger decides -- severity, the round a finding was introduced in,
-whether two findings name the same title at the same location -- because the
-renderer calls no model; a line that would read across findings to say what
-they have in common is out of its reach, and it states the counting rule
-instead. A review with nothing open says so rather than heading an empty
-section, and a `REMOTE_ONLY` publication briefs in the same shape.
-
-`--full` prints the full rendering, which is also what the tool writes:
-requirement and scope, each round's findings
-with the author's disposition and the rereviewer's decision, what changed
-between rounds, the terminal state, and the pull request, Codex results,
-checks, and threads a publication recorded. Both tiers read the same ledgers
-through the same reader and print the same report revision in their footer;
-`--json` names which tier it rendered. The tool writes
-`reviews/<review_id>/report-r<state_version>[-p<revision>-s<summary digest>]-f<renderer format>.md`
-(`report-p<revision>-s<summary digest>-f<renderer format>.md` when remote-only) beside the ledger
-and returns a receipt -- path, byte count, sha256, the ledger revisions and
-the summary digest rendered -- rather than the Markdown, which can run to
-megabytes; the script only prints. The summary digest covers the publication
-summary fields the report prints, so a gate appearing or evidence expiring
-writes a new report rather than reusing one that says otherwise. The `f<N>` is
-the renderer's own format version, raised whenever the Markdown changes, so an
-upgrade writes its report beside the ones earlier versions wrote instead of
-colliding with them. Both read every ledger through the reader the server
-itself uses, so a publication that is not canonical, names another review, or
-is not bound to the gate or authorization file beside it fails the render with
-that reader's error, and a review ledger filed under another review's id is
-refused. Neither changes a ledger, consumes a round, or touches a gate. The workflow skill renders the report once `LOCAL_GATE_PASSED` is
-recorded and again once a publication reads `MERGE_READY`, and opens it in
-Plannotator when that tool is on PATH; annotations never flow back into the
-ledger. Like operator narration, the report is a projection of the ledger, not
-evidence.
-
-### Head-SHA discipline
-
-Before requesting GitHub review, both the local branch head and PR head must
-equal the selected authorization's `head_sha`. A mismatch invalidates the
-publication ledger. After any fix commit, create a new local review task or a
-new explicit remote-only authorization according to the selected mode. Required
-checks and a new GitHub Codex review must then pass for that new exact PR head.
-
-For a publishable change, resolve the review base to an immutable commit SHA
-before committing, then pass that SHA to `prepare_review`. Commit before local
-review and commit fixes before rereview. This binds the reviewed diff to the
-pre-change base and the local snapshot to the exact commit later pushed as the
-PR head.
-
-Design background: [RFC 0001 — GitHub Publication
-Ledger](docs/rfcs/0001-github-publication-ledger.md).
+See [GitHub publication gate](docs/publication-gate.md), including its Head-SHA discipline.
 
 ## Security and scope
 
@@ -881,7 +446,7 @@ npm run verify:build
 `npm run build` refuses to run against a dirty working tree and needs network
 access to install the packaged runtime. The check uses
 `git status --untracked-files=all`, so untracked files block it too; see
-[Troubleshooting](#troubleshooting) for how to clear them. Set
+[Troubleshooting](docs/troubleshooting.md) for how to clear them. Set
 `REVIEW_BRIDGE_OUTPUT_ROOT` to write the build somewhere other than `dist/`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the pull request process and
@@ -890,54 +455,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the pull request process and
 
 ## Troubleshooting
 
-State-changing tools return structured errors. Whether a retry is safe depends
-on `details`:
-
-**`REVIEW_BUSY` with `details.retryable: true`** — another process owns the
-review lock and the bounded wait expired. Call `get_review_summary` and retry
-the same transition only if it is still required.
-
-**`PUBLICATION_BUSY` with `details.retryable: true`** — another process owns the
-publication lock and the bounded wait expired. Call `get_publication` for the
-current state and revision, then retry the same transition only if it is still
-required.
-
-Errors with `details.retryable: false` are fail-closed: resolve the stated cause
-before retrying. Three of them also set `details.state_may_have_changed: true`,
-meaning the write may already be on disk:
-
-**`LOCK_OWNERSHIP_LOST`** — the transition may already have been applied. Call
-`get_review_summary` after a review operation or `get_publication` after a
-publication operation before deciding whether any retry is still required.
-
-**`LOCK_CLEANUP_FAILED`** — the protected write may already be on disk while the
-named lock record remains. Stop the owning Review Bridge process before
-inspecting or removing that record. After cleanup, reread the affected review or
-publication state; do not loop on the same mutation.
-
-**`STORE_WRITE_INDETERMINATE`** — the canonical file was replaced, but syncing
-its parent directory failed. Call `get_review_summary` after a review operation
-or `get_publication` after a publication operation before deciding whether any
-retry is still required.
-
-Other common situations:
-
-**`npm run build` fails immediately with `refusing to build from a dirty working
-tree`** — the check runs `git status --porcelain --untracked-files=all`, so
-untracked files count, and a plain `git stash` will not clear them. Commit the
-changes, delete the stray files, or stash everything including untracked:
-
-```bash
-git stash --include-untracked
-```
-
-**`npm run build` fails with `fatal: not a git repository`** — you are building
-from the extracted source archive. That check needs a Git worktree; clone the
-repository and check out the release tag instead.
-
-**Claude Desktop shows no Review Bridge tools** — restart the app. If they are
-still missing, confirm the extension's data directory matches the Codex
-`REVIEW_BRIDGE_HOME`.
+See [Troubleshooting](docs/troubleshooting.md) for structured errors and build failures.
 
 **A reviewer cannot see a pending review** — each review is immutably bound to
 one provider. A `CLAUDE_DESKTOP`, `CODEX_TASK`, `HERMES`, or `DEEPSEEK_HARNESS`

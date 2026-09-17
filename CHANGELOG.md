@@ -9,7 +9,24 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Changed
+
+- (#153) Move the README's per-client install sections, the autonomous workflow,
+  the GitHub publication gate, and most of Troubleshooting into pages under
+  `docs/`, each naming the release it describes, and leave a link in their
+  place. `docs/review-flow.md` now covers the review report, advisory panels,
+  the container launcher for advisory `CODEX_TASK` members, the sha256
+  publication refusal, and the workflow skill's routes, and no longer reports
+  compensating unresolve as missing. Part of issue #152.
+
 ### Internal
+
+- (#153) `scripts/render-reference.mjs` generates `docs/reference.md` from the
+  tools each server role lists and the error codes `src/` raises, and a test
+  fails when the committed page differs. `verify-release.mjs`, in both its
+  pre-flight and final phases, fails with `DOCS_UNTOUCHED` when the release entry
+  has `### Added` and no file under `docs/` or `README.md` changed in the range
+  beyond its version strings.
 
 - (#154) issue #145 second phase: `nowIso` and the exported
   `getPublicationFindingsReview` in `src/publication.mjs` are deleted, since

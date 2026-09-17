@@ -220,6 +220,28 @@ function localMergedPullRequests(repositoryPath, range) {
   return pullRequests.sort((left, right) => left.number - right.number);
 }
 
+const RELEASE_VERSION_RE = /\bv?\d+\.\d+\.\d+\b/g;
+
+// Documentation files whose text changed between `base` (null for a root
+// range) and `head` once release version strings are masked: a version bump
+// alone documents no addition.
+function touchedDocumentation(repositoryPath, base, head) {
+  const paths = ["--", "docs", "README.md"];
+  const files =
+    base == null
+      ? git(repositoryPath, ["ls-tree", "-r", "--name-only", head, ...paths])
+      : git(repositoryPath, ["diff", "--name-only", base, head, ...paths]);
+  const text = (ref, file) =>
+    (ref == null
+      ? ""
+      : git(repositoryPath, ["show", `${ref}:${file}`], { allowFailure: true }) ?? ""
+    ).replace(RELEASE_VERSION_RE, "<version>");
+  return files
+    .split("\n")
+    .filter(Boolean)
+    .filter((file) => text(base, file) !== text(head, file));
+}
+
 function localPreviousTag(repositoryPath, version) {
   const tags = git(repositoryPath, ["tag", "--list", "v*"])
     .split("\n")
@@ -346,6 +368,11 @@ if (options.phase === "PRE") {
     previousVersion:
       range.kind === "ROOT" ? null : versionFromTagName(range.tag),
     mergedPullRequests: localMergedPullRequests(repositoryPath, range),
+    touchedDocumentation: touchedDocumentation(
+      repositoryPath,
+      range.kind === "ROOT" ? null : range.tag,
+      "HEAD",
+    ),
     releasePullRequest:
       options["release-pull-request"] == null
         ? null
@@ -382,6 +409,17 @@ if (options.phase === "PRE") {
       `--build-dir must name a directory holding ${CHECKSUM_MANIFEST_NAME}; run npm run build at ${observation.tag.name} first`,
     );
   }
+  if (
+    observation.tag.exists &&
+    observation.range?.kind === "TAG" &&
+    git(repositoryPath, ["cat-file", "-e", `${observation.range.target_sha}^{commit}`], {
+      allowFailure: true,
+    }) == null
+  ) {
+    usageError(
+      `${repositoryPath} does not contain ${observation.range.tag} (${observation.range.target_sha}), which the documentation gate diffs from; fetch the previous release tag first`,
+    );
+  }
   result = verifyRelease({
     phase: "FINAL",
     version: observation.version,
@@ -392,6 +430,13 @@ if (options.phase === "PRE") {
         ? versionFromTagName(observation.range.tag)
         : null,
     mergedPullRequests: observation.merged_pull_requests ?? [],
+    touchedDocumentation: observation.tag.exists
+      ? touchedDocumentation(
+          repositoryPath,
+          observation.range?.kind === "TAG" ? observation.range.target_sha : null,
+          target,
+        )
+      : [],
     observation,
     localManifest,
     attestations: await collectAttestations(storeRoot, observation.repository.id),

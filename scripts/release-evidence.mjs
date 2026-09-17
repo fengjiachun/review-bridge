@@ -657,6 +657,26 @@ export function normalizeReleaseObservation(input) {
  * requirements against the peeled tag target and adds the requirements that
  * only exist once the tag and release are published.
  */
+// A release that adds something owes its readers a page that says so. The
+// caller names the documentation files whose text changed in the release range
+// beyond its version strings, which every release rewrites.
+export function documentationGate(entries, version, touchedDocumentation) {
+  const entry = entries.find((candidate) => candidate.heading === version);
+  if (
+    entry == null ||
+    !/^### Added[ \t]*$/m.test(entry.text) ||
+    touchedDocumentation.length > 0
+  ) {
+    return [];
+  }
+  return [
+    failure(
+      "DOCS_UNTOUCHED",
+      `the ${version} entry has ### Added, but no page under docs/ and no README text changed in its range`,
+    ),
+  ];
+}
+
 export function verifyRelease(input) {
   const phase = input.phase;
   if (phase !== "PRE" && phase !== "FINAL") {
@@ -702,6 +722,13 @@ export function verifyRelease(input) {
     releasePullRequest: input.releasePullRequest ?? null,
   });
   failures.push(...reconciliation.failures);
+  failures.push(
+    ...documentationGate(
+      parseChangelogEntries(input.files["CHANGELOG.md"] ?? ""),
+      input.version,
+      input.touchedDocumentation,
+    ),
+  );
   if (phase === "PRE") {
     return {
       phase,

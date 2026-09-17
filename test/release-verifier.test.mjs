@@ -7,7 +7,6 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   MANIFEST,
-  PREVIOUS_TAG_SHA,
   changelog,
   files,
   observation,
@@ -31,7 +30,7 @@ const verifier = path.join(
   "verify-release.mjs",
 );
 
-async function releaseRepository() {
+async function releaseRepository({ documented = true } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-release-"));
   const repository = path.join(root, "repo");
   await fsp.mkdir(repository);
@@ -54,6 +53,10 @@ async function releaseRepository() {
   git(repository, "tag", "v1.0.0");
   git(repository, "switch", "-c", "feature");
   await fsp.writeFile(path.join(repository, "feature.txt"), "work\n");
+  if (documented) {
+    await fsp.mkdir(path.join(repository, "docs"));
+    await fsp.writeFile(path.join(repository, "docs", "feature.md"), "The shipped thing.\n");
+  }
   git(repository, "add", ".");
   git(repository, "commit", "-m", "a shipped thing");
   const attestedHead = git(repository, "rev-parse", "HEAD");
@@ -118,6 +121,30 @@ test("pre-flight verifies a release pull request from the repository alone", asy
     deferring.report.deferred.map((entry) => entry.pull_request),
     [99],
   );
+});
+
+test("pre-flight refuses an Added entry whose range changed no documentation text", async (t) => {
+  // The fixture's README changes between the tags, but only in its version
+  // string, which every release rewrites.
+  const fixture = await releaseRepository({ documented: false });
+  t.after(() => fsp.rm(fixture.root, { recursive: true, force: true }));
+  const undocumented = runVerifier(["--pre"], fixture.repository);
+  assert.equal(undocumented.status, 1, undocumented.stdout + undocumented.stderr);
+  assert.deepEqual(
+    undocumented.report.failures.map((entry) => entry.code),
+    ["DOCS_UNTOUCHED"],
+  );
+
+  await fsp.mkdir(path.join(fixture.repository, "docs"));
+  await fsp.writeFile(
+    path.join(fixture.repository, "docs", "feature.md"),
+    "The shipped thing.\n",
+  );
+  git(fixture.repository, "add", ".");
+  git(fixture.repository, "commit", "-m", "document the shipped thing");
+  const documented = runVerifier(["--pre"], fixture.repository);
+  assert.equal(documented.status, 0, documented.stdout + documented.stderr);
+  assert.equal(documented.report.status, "PASSED");
 });
 
 test("pre-flight exempts only the named release pull request from its own claim", async (t) => {
@@ -195,7 +222,11 @@ test("the final phase records once, agrees on re-run, and refuses to overwrite",
     { mode: 0o600 },
   );
 
+  // The final phase diffs documentation from the previous tag's target, so
+  // the range names the fixture's real v1.0.0 commit.
+  const previousTagSha = git(fixture.repository, "rev-parse", "v1.0.0^{commit}");
   const collected = observation({
+    range: { kind: "TAG", tag: "v1.0.0", target_sha: previousTagSha },
     tag: {
       name: "v1.1.0",
       exists: true,
@@ -261,7 +292,7 @@ test("the final phase records once, agrees on re-run, and refuses to overwrite",
     supersedingPath,
     JSON.stringify({
       ...collected,
-      range: { kind: "TAG", tag: "v1.0.5", target_sha: PREVIOUS_TAG_SHA },
+      range: { kind: "TAG", tag: "v1.0.5", target_sha: previousTagSha },
     }),
   );
   const superseded = runVerifier(
@@ -269,6 +300,19 @@ test("the final phase records once, agrees on re-run, and refuses to overwrite",
     fixture.repository,
   );
   assert.equal(superseded.report.record.status, "SUPERSEDED");
+
+  // A shallow checkout can hold the tag but not the previous tag's commit.
+  const unfetchedPath = path.join(fixture.root, "observation-unfetched.json");
+  await fsp.writeFile(
+    unfetchedPath,
+    JSON.stringify({
+      ...collected,
+      range: { kind: "TAG", tag: "v1.0.0", target_sha: "c".repeat(40) },
+    }),
+  );
+  const unfetched = runVerifier(withObservation(unfetchedPath), fixture.repository);
+  assert.equal(unfetched.status, 2);
+  assert.match(unfetched.stderr, /fetch the previous release tag first/);
 
   const stored = JSON.parse(await fsp.readFile(recordPath, "utf8"));
   stored.tag.target_sha = "0".repeat(40);

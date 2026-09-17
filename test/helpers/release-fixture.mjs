@@ -104,6 +104,7 @@ export function verificationInput(overrides = {}) {
     cutoff: "1.0.0",
     previousVersion: "1.0.0",
     mergedPullRequests: collected.merged_pull_requests ?? [],
+    touchedDocumentation: ["docs/feature.md"],
     localManifest: MANIFEST,
     attestations: {},
     observationRef: {
