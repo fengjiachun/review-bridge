@@ -1,6 +1,6 @@
 # Autonomous workflow
 
-Describes Review Bridge v0.15.1.
+Describes Review Bridge v0.15.2.
 
 An explicitly authorized schema-version-1 workflow persists RFC 0003's
 autonomous path, from implementation through the local gate and draft

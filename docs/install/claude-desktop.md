@@ -1,6 +1,6 @@
 # Install the Claude Desktop extension
 
-Describes Review Bridge v0.15.1.
+Describes Review Bridge v0.15.2.
 
 Download `review-bridge-reviewer-<version>.mcpb` from the
 [latest release](https://github.com/fengjiachun/review-bridge/releases/latest),

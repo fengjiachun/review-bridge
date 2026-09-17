@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.15.2 - 2026-09-17
 
 ### Changed
 
@@ -41,6 +41,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `getPublicationFindingsReview` in `src/publication.mjs` are deleted, since
   nothing in the repository referenced either. `derivePublicationStatus`
   stays as the status-derivation oracle the publication tests use.
+- (#156) Release 0.15.2.
 
 ## 0.15.1 - 2026-09-16
 
