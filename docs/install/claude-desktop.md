@@ -23,3 +23,7 @@ Then, in Claude Desktop:
 4. Keep the default Review Bridge data directory, or select the same directory
    configured through `REVIEW_BRIDGE_HOME` for Codex.
 5. Restart Claude Desktop if its tools do not appear immediately.
+
+Claude Desktop is a local application, but that does not imply local model
+inference. Apply your Anthropic account and organization data policy before
+reviewing confidential code.

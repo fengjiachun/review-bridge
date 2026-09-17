@@ -415,10 +415,6 @@ assert.deepEqual([...packagedWorkflowDocuments.keys()].sort(), [...sourceWorkflo
 for (const [name, text] of sourceWorkflowDocuments) {
   assert.equal(packagedWorkflowDocuments.get(name), text, `packaged workflow differs: ${name}`);
 }
-const packagedReadme = await fsp.readFile(
-  path.join(outputRoot, "README.md"),
-  "utf8",
-);
 assert.match(
   workflowSkill,
   /Resolve it to an\n   immutable commit SHA before creating or committing publication changes/,
@@ -571,11 +567,7 @@ assert.match(
   workflowSkill,
   /Session narration is operator observability only/,
 );
-assert.match(packagedReadme, /### Operator narration/);
-assert.match(
-  packagedReadme,
-  /This narration is observability, not evidence/,
-);
+assert.match(workflowSkill, /Never use it as review\s+evidence/);
 assert.match(workflowSkill, /For `SUCCESSOR`/);
 assert.match(workflowSkill, /A `timed_out` result is expected/);
 assert.match(

@@ -50,3 +50,7 @@ repository and check out the release tag instead.
 **Claude Desktop shows no Review Bridge tools** — restart the app. If they are
 still missing, confirm the extension's data directory matches the Codex
 `REVIEW_BRIDGE_HOME`.
+
+**A reviewer cannot see a pending review** — each review is immutably bound to
+one provider. A `CLAUDE_DESKTOP`, `CODEX_TASK`, `HERMES`, or `DEEPSEEK_HARNESS`
+reviewer cannot list or open a review bound to any of the other providers.

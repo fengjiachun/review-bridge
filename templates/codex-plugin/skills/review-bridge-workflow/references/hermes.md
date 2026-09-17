@@ -122,6 +122,10 @@ measured here — so even that prompt ends in a denial rather than a wait.
 Review Bridge records the review's `HERMES` binding; it observes nothing about
 how the instance was started, and this section adds no mechanism that would.
 The autonomous workflow continues to accept `CODEX_TASK` dispatch only.
+`HERMES` records configured reviewer provenance; it is not cryptographic model
+identity. Autonomous local task creation remains `CODEX_TASK`-only. After a
+local HERMES gate passes, remote GitHub Codex publication remains an
+author/publication-side operation.
 The `CLAUDE_DESKTOP` boundary is unchanged, and nothing above narrows it:
 never launch, script, or otherwise programmatically invoke a Claude reviewer
 from this session — the operator opens that conversation themselves, an

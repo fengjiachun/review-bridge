@@ -62,6 +62,13 @@ After a verdict, load [Handle findings](findings.md) for findings or
 
    Never call reviewer tools from the author task; provider binding and task
    separation are workflow attestations, not authenticated model identity.
+
+   Each local review is immutably bound to `CLAUDE_DESKTOP`, `CODEX_TASK`,
+   `HERMES`, or `DEEPSEEK_HARNESS`; mismatched reviewer processes cannot list,
+   read, or submit it. When a reviewer reports no pending review, check the
+   binding first: each review is immutably bound to one provider, and a
+   `CLAUDE_DESKTOP`, `CODEX_TASK`, `HERMES`, or `DEEPSEEK_HARNESS` reviewer
+   cannot list or open a review bound to any of the other providers.
 7. Call `prepare_review` with the base SHA captured in step 1, the selected
    provider, and the optional verified parent from step 5.
 8. Call `get_review_summary`, record its `state_version`, and report the

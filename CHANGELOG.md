@@ -18,6 +18,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   the container launcher for advisory `CODEX_TASK` members, the sha256
   publication refusal, and the workflow skill's routes, and no longer reports
   compensating unresolve as missing. Part of issue #152.
+- (#155) Cut the README to a front door for people: what Review Bridge is, a
+  Codex plugin install, one example from a commit to `MERGE_READY`, and links.
+  The manual local review, successor reviews, and the state machine move to
+  `docs/local-review.md`. The Hermes provenance sentences and the provider
+  binding that tests pinned in the README move into the workflow skill's
+  Hermes and Prepare references, and the tests read them there. Part of
+  issue #152.
 
 ### Internal
 

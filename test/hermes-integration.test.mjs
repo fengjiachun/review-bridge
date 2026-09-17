@@ -955,56 +955,45 @@ test("verify-build validates packaged Hermes artifacts, HERMES binding, isolatio
   assert.match(verify, /package\.json/);
 });
 
-test("root README and CHANGELOG document Hermes as a local reviewer provider", async () => {
-  const [readme, changelog] = await Promise.all([
-    readRequired("README.md"),
+test("the install page and CHANGELOG document Hermes as a local reviewer provider", async () => {
+  const [install, changelog] = await Promise.all([
+    readRequired(path.join("docs", "install", "hermes.md")),
     readRequired("CHANGELOG.md"),
   ]);
-  assert.match(readme, /Hermes/);
-  assert.match(readme, /REVIEW_BRIDGE_HOME/);
-  assert.match(readme, /hermes-integration/);
-  assert.match(readme, /CODEX_TASK/);
-  assert.match(readme, /configured.*provenance.*not cryptographic/is);
-  assert.match(readme, /local HERMES gate passes/i);
-  assert.match(readme, /author\/publication-side operation/i);
+  assert.match(install, /Hermes/);
+  assert.match(install, /REVIEW_BRIDGE_HOME/);
+  assert.match(install, /hermes-integration/);
   assert.match(changelog, /Hermes/i);
   assert.match(changelog, /hermes-integration|profile/);
 });
 
-test("root README provider isolation covers Hermes in security and troubleshooting", async () => {
-  const readme = await readRequired("README.md");
-  const security = readme.match(
-    /## Security and scope(?<body>[\s\S]*?)\n## /,
+// An agent reads the routed workflow skill, not the README, so the provider
+// contract is pinned where the driver loads it.
+test("the workflow skill states Hermes provenance and provider binding", async () => {
+  const references = path.join(
+    "templates", "codex-plugin", "skills", "review-bridge-workflow", "references",
   );
-  const troubleshooting = readme.match(
-    /## Troubleshooting(?<body>[\s\S]*?)\n## /,
-  );
-  assert.ok(security, "Security and scope section is missing");
-  assert.ok(troubleshooting, "Troubleshooting section is missing");
+  const [hermes, prepare] = await Promise.all([
+    readRequired(path.join(references, "hermes.md")),
+    readRequired(path.join(references, "prepare.md")),
+  ]);
+  const hermesText = hermes.replace(/\s+/g, " ");
+  assert.match(hermesText, /configured.*provenance.*not cryptographic/is);
+  assert.match(hermesText, /Autonomous local task creation remains `CODEX_TASK`-only\./);
+  assert.match(hermesText, /local HERMES gate passes/i);
+  assert.match(hermesText, /author\/publication-side operation/i);
 
-  for (const [name, section] of [
-    ["Security and scope", security.groups.body],
-    ["Troubleshooting", troubleshooting.groups.body],
-  ]) {
-    for (const provider of REVIEWER_PROVIDERS) {
-      assert.ok(
-        section.includes("`" + provider + "`"),
-        `${name} omits ${provider}`,
-      );
-    }
+  const prepareText = prepare.replace(/\s+/g, " ");
+  for (const provider of REVIEWER_PROVIDERS) {
+    assert.ok(prepareText.includes("`" + provider + "`"), `Prepare omits ${provider}`);
   }
-
   assert.match(
-    security.groups.body.replace(/\s+/g, " "),
+    prepareText,
     /mismatched reviewer processes cannot list, read, or submit it/i,
   );
   assert.match(
-    troubleshooting.groups.body.replace(/\s+/g, " "),
+    prepareText,
     /immutably bound to one provider[\s\S]*?reviewer cannot list or open a review bound to any of the other providers/i,
-  );
-  assert.match(
-    readme,
-    /Autonomous local task creation remains `CODEX_TASK`-only\./,
   );
 });
 
@@ -1223,9 +1212,9 @@ test("the DeepSeek Harness template is packaged and documented like the others",
   assert.match(build, /templates.*"deepseek-harness"/s);
   assert.match(build, /copyServer\(deepseekHarness\)/);
   assert.match(build, /installRuntime\(deepseekHarness\)/);
-  const readme = await readRequired("README.md");
-  assert.match(readme, /deepseek-harness/);
-  assert.match(readme, /`DEEPSEEK_HARNESS`/);
+  const install = await readRequired(path.join("docs", "install", "deepseek-harness.md"));
+  assert.match(install, /deepseek-harness/);
+  assert.match(install, /`DEEPSEEK_HARNESS`/);
 });
 
 // The advisory panel contract lives in scripts/dispatch-contract.mjs beside the
