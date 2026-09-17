@@ -1,6 +1,6 @@
 # Run a local review
 
-Describes Review Bridge v0.15.1.
+Describes Review Bridge v0.15.2.
 
 The manual local review, step by step: the requests to give each reviewer,
 the states a review ends in, successor reviews, and the state machine. For
