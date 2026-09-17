@@ -301,6 +301,19 @@ test("the final phase records once, agrees on re-run, and refuses to overwrite",
   );
   assert.equal(superseded.report.record.status, "SUPERSEDED");
 
+  // A shallow checkout can hold the tag but not the previous tag's commit.
+  const unfetchedPath = path.join(fixture.root, "observation-unfetched.json");
+  await fsp.writeFile(
+    unfetchedPath,
+    JSON.stringify({
+      ...collected,
+      range: { kind: "TAG", tag: "v1.0.0", target_sha: "c".repeat(40) },
+    }),
+  );
+  const unfetched = runVerifier(withObservation(unfetchedPath), fixture.repository);
+  assert.equal(unfetched.status, 2);
+  assert.match(unfetched.stderr, /fetch the previous release tag first/);
+
   const stored = JSON.parse(await fsp.readFile(recordPath, "utf8"));
   stored.tag.target_sha = "0".repeat(40);
   await fsp.writeFile(recordPath, JSON.stringify(stored), { mode: 0o600 });

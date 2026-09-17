@@ -409,6 +409,17 @@ if (options.phase === "PRE") {
       `--build-dir must name a directory holding ${CHECKSUM_MANIFEST_NAME}; run npm run build at ${observation.tag.name} first`,
     );
   }
+  if (
+    observation.tag.exists &&
+    observation.range?.kind === "TAG" &&
+    git(repositoryPath, ["cat-file", "-e", `${observation.range.target_sha}^{commit}`], {
+      allowFailure: true,
+    }) == null
+  ) {
+    usageError(
+      `${repositoryPath} does not contain ${observation.range.tag} (${observation.range.target_sha}), which the documentation gate diffs from; fetch the previous release tag first`,
+    );
+  }
   result = verifyRelease({
     phase: "FINAL",
     version: observation.version,
