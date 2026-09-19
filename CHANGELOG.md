@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.15.3 - 2026-09-19
 
 ### Fixed
 
@@ -19,6 +19,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   emitted whole on its own line rather than split. The fence is still longer
   than any backtick run inside it. `REPORT_FORMAT` is 3, so a report an earlier
   renderer wrote keeps its own name.
+
+### Internal
+
+- (#158) Release 0.15.3.
 
 ## 0.15.2 - 2026-09-17
 
