@@ -7,6 +7,19 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Fixed
+
+- (#157) Wrap every line longer than 80 columns inside a review report's
+  fenced free-text blocks at whitespace, so a requirement, explanation,
+  recommendation, or rationale the ledger carries on one long line no longer
+  renders as one horizontally scrolling line. Lines that already fit and
+  existing newlines are unchanged, and a token longer than the column is
+  emitted whole on its own line rather than split. The fence is still longer
+  than any backtick run inside it. `REPORT_FORMAT` is 3, so a report an earlier
+  renderer wrote keeps its own name.
+
 ## 0.15.2 - 2026-09-17
 
 ### Changed
