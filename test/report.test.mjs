@@ -642,6 +642,37 @@ test("free text from the ledger is rendered literally and cannot shape the docum
   assert.ok(markdown.indexOf("````text\nbefore") < footers[0].index && footers[0].index < markdown.indexOf("\nafter\n````"));
 });
 
+// Fenced text never wraps in a renderer, so the block is wrapped before it is
+// fenced: the reader never scrolls sideways, and the fence rule is unchanged.
+function requirementBlock(markdown) {
+  const match = /### Requirement\n\n(`{3,})text\n([\s\S]*?)\n\1\n/.exec(markdown);
+  assert.ok(match, "the requirement is rendered as a text fence");
+  return { fence: match[1], lines: match[2].split("\n") };
+}
+
+test("a long line in a block is wrapped at whitespace, and a short one is left alone", () => {
+  const long =
+    "The renderer wraps a long requirement line at whitespace so that a reader of the report never has to scroll sideways to read one sentence of it.";
+  const requirement = `${long}\nA short second line.`;
+  const { fence, lines } = requirementBlock(render(cleanInTwoRounds({ requirement })));
+  // The fence is unchanged, and nothing inside it is wider than the column.
+  assert.equal(fence, "```");
+  for (const line of lines) assert.ok(line.length <= 80, `${line.length}: ${line}`);
+  // The long line really was wrapped, the short one was not, and the words
+  // come back in order with none of them split.
+  assert.ok(lines.length > 2);
+  assert.equal(lines.at(-1), "A short second line.");
+  assert.equal(lines.join(" "), `${long} A short second line.`);
+});
+
+test("a token longer than the column is emitted whole on its own line", () => {
+  const token = `https://example.invalid/${"segment-".repeat(14)}end`;
+  assert.ok(token.length > 80);
+  const requirement = `see ${token} now\n${token}`;
+  const { lines } = requirementBlock(render(cleanInTwoRounds({ requirement })));
+  assert.deepEqual(lines, ["see", token, "now", token]);
+});
+
 test("rendering is a pure function of its inputs", () => {
   const review = cleanInTwoRounds();
   const before = JSON.stringify(review);
@@ -1634,7 +1665,7 @@ test("the full tier still renders the document it rendered before the brief, for
   // The baseline was captured at format 1; the bump is what the brief is for.
   assert.ok(baseline.includes("- Report revision: `9-f1`"));
   assert.ok(rendered.includes(`- Report revision: \`9-f${REPORT_FORMAT}\``));
-  assert.equal(REPORT_FORMAT, 2);
+  assert.equal(REPORT_FORMAT, 3);
 });
 
 test("the brief opens with the terminal state and where the review goes next", () => {
@@ -1965,7 +1996,7 @@ test("the five places that carry the report's identity agree, renderer format in
   // 1. reportRevision, where the identity is minted.
   const revision = reportRevision(review, publication, publicationSummary);
   assert.equal(revision, `${review.state_version}-f${REPORT_FORMAT}`);
-  assert.equal(REPORT_FORMAT, 2);
+  assert.equal(REPORT_FORMAT, 3);
 
   const receipt = await writeReviewReport(state.store, state.reviewId);
   // 2. the file name, and 3. the tool receipt.

@@ -72,13 +72,36 @@ function inline(value) {
     .replace(/[\\`*[\]<>|]/g, "\\$&");
 }
 
+const WRAP_COLUMNS = 80;
+
+// Fenced text never wraps in a Markdown renderer, so one long line renders as
+// one horizontally scrolling line. A line that already fits is emitted
+// unchanged; a longer one is broken at whitespace, and a token longer than the
+// column is emitted whole on its own line rather than split.
+function wrapLine(line) {
+  const pieces = [];
+  let rest = line;
+  while (rest.length > WRAP_COLUMNS) {
+    const breaks = [...rest.matchAll(/\s+/g)].filter((m) => m.index > 0);
+    const at = breaks.filter((m) => m.index <= WRAP_COLUMNS).pop() ?? breaks[0];
+    if (!at) break;
+    pieces.push(rest.slice(0, at.index));
+    rest = rest.slice(at.index + at[0].length);
+  }
+  if (rest !== "" || pieces.length === 0) pieces.push(rest);
+  return pieces.join("\n");
+}
+
 // A multi-line field is a fenced block whose fence is longer than any backtick
-// run inside it, so the text cannot close the fence early.
+// run inside it, so the text cannot close the fence early. Breaking a long
+// line at whitespace neither merges nor splits a backtick run, so the fence is
+// still longer than every run the block holds.
 function block(value) {
   const text = value == null || value === "" ? "(empty)" : String(value);
-  const longest = Math.max(2, ...[...text.matchAll(/`+/g)].map((m) => m[0].length));
+  const wrapped = text.split("\n").map(wrapLine).join("\n");
+  const longest = Math.max(2, ...[...wrapped.matchAll(/`+/g)].map((m) => m[0].length));
   const fence = "`".repeat(longest + 1);
-  return `${fence}text\n${text}\n${fence}`;
+  return `${fence}text\n${wrapped}\n${fence}`;
 }
 
 // Identifiers, digests, and paths the ledger itself minted are shown as code;
@@ -730,7 +753,7 @@ export function summaryDigest(summary) {
 // Raise it by one in any change that alters the Markdown this module renders
 // -- wording, ordering, a new line, a heading -- so the reports the previous
 // version wrote stay readable at their own names.
-export const REPORT_FORMAT = 2;
+export const REPORT_FORMAT = 3;
 
 // `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
 // `p<revision>-s<summary digest>-f<format>` without one.
