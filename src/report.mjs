@@ -77,18 +77,34 @@ const WRAP_COLUMNS = 80;
 // Fenced text never wraps in a Markdown renderer, so one long line renders as
 // one horizontally scrolling line. A line that already fits is emitted
 // unchanged; a longer one is broken at whitespace, and a token longer than the
-// column is emitted whole on its own line rather than split.
+// column is emitted whole on its own line rather than split. Each whitespace
+// run is visited once, so a field at the store's size limit costs one pass
+// rather than one per emitted line.
 function wrapLine(line) {
   const pieces = [];
-  let rest = line;
-  while (rest.length > WRAP_COLUMNS) {
-    const breaks = [...rest.matchAll(/\s+/g)].filter((m) => m.index > 0);
-    const at = breaks.filter((m) => m.index <= WRAP_COLUMNS).pop() ?? breaks[0];
-    if (!at) break;
-    pieces.push(rest.slice(0, at.index));
-    rest = rest.slice(at.index + at[0].length);
+  let start = 0;
+  // The last run that would still leave a line within the column, if any.
+  let candidate = null;
+  const emit = (run) => {
+    pieces.push(line.slice(start, run.index));
+    start = run.index + run[0].length;
+    candidate = null;
+  };
+  for (const run of line.matchAll(/\s+/g)) {
+    if (run.index <= start) continue;
+    if (run.index - start > WRAP_COLUMNS) {
+      if (candidate !== null) emit(candidate);
+      // Still past the column with nothing to break on: one token is wider
+      // than the column, so it goes out whole.
+      if (run.index - start > WRAP_COLUMNS) {
+        emit(run);
+        continue;
+      }
+    }
+    candidate = run;
   }
-  if (rest !== "" || pieces.length === 0) pieces.push(rest);
+  if (line.length - start > WRAP_COLUMNS && candidate !== null) emit(candidate);
+  if (start < line.length || pieces.length === 0) pieces.push(line.slice(start));
   return pieces.join("\n");
 }
 
