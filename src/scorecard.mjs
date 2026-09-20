@@ -4,7 +4,7 @@ import { MAX_ROUNDS, REVIEWER_PROVIDERS } from "./core.mjs";
 import { isFullSha } from "./object-id.mjs";
 import { DEFAULT_CHANGE_SIZE_BUDGET } from "./workflow.mjs";
 
-export const SCORECARD_SCHEMA_VERSION = 1;
+export const SCORECARD_SCHEMA_VERSION = 2;
 
 const SEVERITIES = ["blocker", "major", "minor", "nit"];
 const DISPOSITIONS = ["fixed", "rejected", "human_required"];
@@ -21,6 +21,20 @@ const REVIEW_STATUSES = [
   "CONTINUABLE_FINDINGS",
 ];
 const CLEAN_STATUSES = ["CLEAN", "LOCAL_GATE_PASSED"];
+const REVIEW_TYPES = ["gate", "advisory"];
+const REVIEW_STRATEGIES = ["FULL", "SUCCESSOR"];
+const WORKFLOW_OMISSION_REASON =
+  "Review filters do not define a workflow or audit-log cohort; workflow statistics are omitted.";
+const METRIC_SEMANTICS = {
+  not_clean:
+    "Counts statuses other than CLEAN/LOCAL_GATE_PASSED; it is not a failure count.",
+  rounds_to_clean:
+    "Counts current_round for CLEAN/LOCAL_GATE_PASSED. Advisory CLEAN is a completed report, not a gate attestation.",
+  advisory_reported:
+    "Counts advisory REVIEW_SUBMITTED: findings have been reported and the review is terminal. Advisory CLEAN is also terminal and is included in the clean counts.",
+  author_loop:
+    "Disposition, rebuttal and continuation metrics describe the gate author/rereview loop; advisory reviews have no such loop.",
+};
 const HUMAN_REQUIRED_EVENTS = [
   "AUTHOR_ESCALATED",
   "ROUND_LIMIT_REACHED",
@@ -50,7 +64,9 @@ function zeroCounts(keys) {
 function emptyStats() {
   return {
     reviews: 0,
+    reviews_by_type: zeroCounts(REVIEW_TYPES),
     reviews_by_status: zeroCounts(REVIEW_STATUSES),
+    advisory_reported: 0,
     rounds_to_clean: {},
     not_clean: 0,
     findings: 0,
@@ -135,6 +151,18 @@ function reviewDefect(review, directoryName) {
     !REVIEWER_PROVIDERS.includes(review.reviewer_provider)
   ) {
     return `unknown reviewer_provider ${JSON.stringify(review.reviewer_provider)}`;
+  }
+  if (review.advisory != null && typeof review.advisory !== "boolean") {
+    return `advisory is not a boolean: ${JSON.stringify(review.advisory)}`;
+  }
+  if (
+    review.review_strategy != null &&
+    !REVIEW_STRATEGIES.includes(review.review_strategy.mode)
+  ) {
+    return `unknown review_strategy mode ${JSON.stringify(review.review_strategy?.mode)}`;
+  }
+  if (review.repository_path != null && !isName(review.repository_path)) {
+    return "repository_path is not a non-empty string";
   }
   for (const key of ["findings", "resolutions", "rereview_decisions", "history"]) {
     if (!Array.isArray(review[key])) return `${key} is not an array`;
@@ -271,6 +299,66 @@ function isName(value) {
   return typeof value === "string" && value !== "";
 }
 
+// Bare dates mean UTC midnight. Times must name a timezone so a command has
+// the same boundaries on every host. Check the calendar date too: Date.parse
+// normalizes impossible dates such as February 30 instead of rejecting them.
+function filterTimestamp(value, option) {
+  if (value == null) return null;
+  if (
+    typeof value !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}(?:T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?$/.test(value) ||
+    !isTimestamp(value) ||
+    new Date(`${value.slice(0, 10)}T00:00:00Z`).toISOString().slice(0, 10) !==
+      value.slice(0, 10)
+  ) {
+    throw new Error(
+      `--${option} must be a valid YYYY-MM-DD date or ISO timestamp with a timezone`,
+    );
+  }
+  return new Date(value).toISOString();
+}
+
+function scorecardFilters({ since, until, repository, reviewType, strategy }) {
+  const filters = {
+    since: filterTimestamp(since, "since"),
+    until: filterTimestamp(until, "until"),
+    repository: repository ?? null,
+    review_type: reviewType ?? null,
+    strategy: strategy ?? null,
+  };
+  if (
+    filters.since != null &&
+    filters.until != null &&
+    Date.parse(filters.since) >= Date.parse(filters.until)
+  ) {
+    throw new Error("--since must be earlier than --until");
+  }
+  if (repository != null && !isName(repository)) {
+    throw new Error("--repository must be a non-empty repository_path string");
+  }
+  if (reviewType != null && !REVIEW_TYPES.includes(reviewType)) {
+    throw new Error("--review-type must be gate or advisory");
+  }
+  if (strategy != null && !REVIEW_STRATEGIES.includes(strategy)) {
+    throw new Error("--strategy must be FULL or SUCCESSOR");
+  }
+  return filters;
+}
+
+function matchesFilters(review, filters) {
+  const at = Date.parse(review.created_at);
+  return (
+    (filters.since == null || at >= Date.parse(filters.since)) &&
+    (filters.until == null || at < Date.parse(filters.until)) &&
+    (filters.repository == null ||
+      review.repository_path === filters.repository) &&
+    (filters.review_type == null ||
+      (review.advisory === true ? "advisory" : "gate") === filters.review_type) &&
+    (filters.strategy == null ||
+      (review.review_strategy?.mode ?? "FULL") === filters.strategy)
+  );
+}
+
 // The total is what every threshold is computed from, so it has to be a real
 // measurement: counting lines, and the sum of the two halves it reports.
 function isChangeSize({ added_lines: added, deleted_lines: deleted, total_lines: total }) {
@@ -289,7 +377,11 @@ function humanRequiredReason(review) {
 
 function countReview(stats, review) {
   stats.reviews += 1;
+  stats.reviews_by_type[review.advisory === true ? "advisory" : "gate"] += 1;
   stats.reviews_by_status[review.status] += 1;
+  if (review.advisory === true && review.status === "REVIEW_SUBMITTED") {
+    stats.advisory_reported += 1;
+  }
   if (CLEAN_STATUSES.includes(review.status)) {
     const round = String(review.current_round);
     stats.rounds_to_clean[round] = (stats.rounds_to_clean[round] ?? 0) + 1;
@@ -554,19 +646,26 @@ function countWorkflow(stats, workflow) {
   }
 }
 
-export async function buildScorecard(storeRoot, { generatedAt } = {}) {
+export async function buildScorecard(storeRoot, options = {}) {
+  const filters = scorecardFilters(options);
+  const filtered = Object.values(filters).some((value) => value != null);
   const reviewLedgers = await readJsonLedgers(
     path.join(storeRoot, "reviews"),
     "review.json",
   );
   const providers = new Map([[OVERALL, emptyStats()]]);
   const skipped = [...reviewLedgers.skipped];
+  let filteredOut = 0;
   let earliest = null;
   let latest = null;
   for (const { id, record } of reviewLedgers.records) {
     const defect = reviewDefect(record, id);
     if (defect != null) {
       skipped.push({ id, reason: defect });
+      continue;
+    }
+    if (!matchesFilters(record, filters)) {
+      filteredOut += 1;
       continue;
     }
     const provider = record.reviewer_provider ?? "CLAUDE_DESKTOP";
@@ -584,11 +683,13 @@ export async function buildScorecard(storeRoot, { generatedAt } = {}) {
   for (const stats of providers.values()) finalizeRebuttals(stats);
 
   const workflowsRoot = path.join(storeRoot, "workflows");
-  const workflowLedgers = await readJsonLedgers(workflowsRoot, "workflow.json");
-  const workflows = emptyWorkflowStats();
-  const skippedWorkflows = [...workflowLedgers.skipped];
-  const skippedAuditLogs = [];
-  for (const { id, record } of workflowLedgers.records) {
+  const workflowLedgers = filtered
+    ? null
+    : await readJsonLedgers(workflowsRoot, "workflow.json");
+  const workflows = filtered ? null : emptyWorkflowStats();
+  const skippedWorkflows = filtered ? null : [...workflowLedgers.skipped];
+  const skippedAuditLogs = filtered ? null : [];
+  for (const { id, record } of workflowLedgers?.records ?? []) {
     const defect = workflowDefect(record, id);
     if (defect != null) {
       skippedWorkflows.push({ id, reason: defect });
@@ -608,16 +709,26 @@ export async function buildScorecard(storeRoot, { generatedAt } = {}) {
 
   return {
     schema_version: SCORECARD_SCHEMA_VERSION,
-    generated_at: generatedAt ?? new Date().toISOString(),
+    generated_at: options.generatedAt ?? new Date().toISOString(),
     store_root: storeRoot,
+    filters,
+    scope: {
+      reviews: "selected_valid_review_ledgers",
+      review_time: "review.created_at as UTC instants in [since, until)",
+      review_diagnostics: "all_review_directories_in_store",
+      workflows: filtered ? "omitted" : "all_valid_workflow_ledgers",
+      workflow_omission_reason: filtered ? WORKFLOW_OMISSION_REASON : null,
+    },
+    metric_semantics: { ...METRIC_SEMANTICS },
     corpus: {
       reviews_counted: providers.get(OVERALL).reviews,
+      reviews_filtered_out: filteredOut,
       reviews_skipped: skipped.length,
       review_directories_without_ledger: reviewLedgers.absent,
-      workflows_counted: workflows.workflows,
-      workflows_skipped: skippedWorkflows.length,
-      workflow_directories_without_ledger: workflowLedgers.absent,
-      audit_logs_skipped: skippedAuditLogs.length,
+      workflows_counted: workflows?.workflows ?? null,
+      workflows_skipped: skippedWorkflows?.length ?? null,
+      workflow_directories_without_ledger: workflowLedgers?.absent ?? null,
+      audit_logs_skipped: skippedAuditLogs?.length ?? null,
       earliest_review_created_at: earliest?.text ?? null,
       latest_review_created_at: latest?.text ?? null,
     },
@@ -677,21 +788,35 @@ function providerRows(scorecard, build) {
 }
 
 const COUNTING_RULES = [
-  "Reviews are read from `<store>/reviews/*/review.json` and workflows from",
-  "`<store>/workflows/*/workflow.json`. Nothing is written.",
+  "Reviews are read from `<store>/reviews/*/review.json`. Without filters,",
+  "workflows are read from `<store>/workflows/*/workflow.json`. Nothing is written.",
   "",
   "- A review is attributed to `reviewer_provider`; a ledger written before that",
   "  field existed counts as `CLAUDE_DESKTOP`, which is the server's own default.",
-  "- The corpus window is the span of review `created_at`. No review is excluded",
-  "  by time, and `ALL` is every counted review, not a sum of listed providers.",
+  "- Review filters are combined with AND. Dates mean UTC midnight; timestamp",
+  "  bounds name a timezone. Review `created_at` is compared as a UTC instant",
+  "  in [since, until). The corpus window and every review metric describe the",
+  "  same selected valid reviews; `ALL` counts each selected review once.",
+  "- Repository matching is exact against persisted `repository_path`, without",
+  "  resolving paths or checking whether a worktree still exists. Missing paths",
+  "  do not match a repository filter. Missing/null advisory means gate and",
+  "  missing/null strategy means FULL, matching the core compatibility defaults.",
   "- Rounds-to-CLEAN counts `current_round` for reviews whose status is `CLEAN`",
-  "  or `LOCAL_GATE_PASSED`. Every other review counts as not clean.",
+  "  or `LOCAL_GATE_PASSED`. Every other review counts as `not_clean`: this is",
+  "  a status count, not a failure count. Advisory `REVIEW_SUBMITTED` and `CLEAN`",
+  "  are terminal reports; advisory CLEAN attests no gate. Advisory reported",
+  "  counts REVIEW_SUBMITTED and is excluded from In flight. Disposition,",
+  "  rebuttal and continuation metrics describe the gate author/rereview loop;",
+  "  advisory reviews have no such loop.",
   "- A finding's outcome is the author's disposition crossed with the reviewer's",
   "  round-two decision; `undecided` means no round-two decision was recorded.",
   "- A **rebuttal** is a finding the author dispositioned `rejected`. It is",
   "  **sustained** when the reviewer decided `rebuttal_accepted`, **overturned**",
   "  when the reviewer decided `still_open`, and counted under `resolved` when",
   "  the reviewer decided `resolved`. Overturn rate is overturned / rebuttals.",
+  "  Neither fixed/resolved nor rebuttal_accepted measures model accuracy or",
+  "  establishes a false positive. `parent_review_id` is reuse provenance, not",
+  "  evidence of a continuation; continuation counts use `carried_findings`.",
   "- The buckets below count only rebuttals the reviewer has already decided. A",
   "  rebuttal still awaiting a decision has no decision record and so cannot sit",
   "  on either side of the obligation; it is counted separately under the table",
@@ -711,6 +836,8 @@ const COUNTING_RULES = [
   "  `workflow_state.pause.reason_code`; extensions count the `*_BUDGET_EXTENDED`",
   "  audit events. Workflows are dispatched to `CODEX_TASK` by construction, so",
   "  workflow numbers are not split by provider.",
+  "  With any review filter, workflow ledgers and audit logs are not read and",
+  "  their statistics are omitted: a review selection does not select workflows.",
   "- Audit logs are read only up to `action-audit-head.json`'s `committed_bytes`,",
   "  measured in bytes, so an uncommitted append never reaches the counts. The",
   "  hash chain is not verified here. An audit log that does not parse, is",
@@ -721,6 +848,10 @@ const COUNTING_RULES = [
   "  under Skipped and left untouched. A directory holding no ledger of its kind",
   "  is counted separately: a remote-only publication never creates a local",
   "  review, so its directory is expected to have none.",
+  "  Review skips and missing-ledger diagnostics cover the entire store scan,",
+  "  not the selected cohort; they never enter a metric denominator. Empty",
+  "  cohorts have zero counts, an unknown (null/n/a) time window and no rate",
+  "  where its denominator is zero.",
 ].join("\n");
 
 export function renderScorecardMarkdown(scorecard) {
@@ -730,6 +861,16 @@ export function renderScorecardMarkdown(scorecard) {
     `Generated ${scorecard.generated_at} from \`${scorecard.store_root}\`. Read-only: this report never writes to the store.`,
     "## Counting rules",
     COUNTING_RULES,
+    "## Selection and scope",
+    Object.entries(scorecard.filters).map(([key, value]) => {
+      const display = value == null ? "unrestricted" : JSON.stringify(value)
+        .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+      return `- ${key}: <code>${display}</code>`;
+    }).join("\n"),
+    `Review metrics and the corpus window use ${corpus.reviews_counted} selected valid reviews. Valid reviews excluded by filters: ${corpus.reviews_filtered_out}. Review scan diagnostics cover all review directories in the store.`,
+    workflows == null
+      ? scorecard.scope.workflow_omission_reason
+      : "Workflow statistics independently cover all valid workflow ledgers and their readable committed audit logs in the store.",
     "## Corpus",
     table(
       ["Ledger", "Counted", "Skipped", "Directories with no ledger"],
@@ -740,24 +881,31 @@ export function renderScorecardMarkdown(scorecard) {
           corpus.reviews_skipped,
           corpus.review_directories_without_ledger,
         ],
-        [
-          "Workflows",
-          corpus.workflows_counted,
-          corpus.workflows_skipped,
-          corpus.workflow_directories_without_ledger,
-        ],
+        ...(workflows == null ? [] : [
+          [
+            "Workflows",
+            corpus.workflows_counted,
+            corpus.workflows_skipped,
+            corpus.workflow_directories_without_ledger,
+          ],
+        ]),
       ],
     ),
-    `Audit logs skipped: ${corpus.audit_logs_skipped}.`,
+    workflows == null
+      ? "Workflow and audit-log counts: n/a (not read)."
+      : `Audit logs skipped: ${corpus.audit_logs_skipped}.`,
     `Review \`created_at\` spans ${corpus.earliest_review_created_at ?? "n/a"} to ${corpus.latest_review_created_at ?? "n/a"}.`,
     "## Review outcomes",
     table(
       [
         "Provider",
         "Reviews",
+        "Gate",
+        "Advisory",
         "Clean",
         "Clean in round 1",
         "Clean in round 2",
+        "Advisory reported",
         "Human required",
         "Continuable",
         "In flight",
@@ -771,12 +919,15 @@ export function renderScorecardMarkdown(scorecard) {
           [
             provider,
             stats.reviews,
+            stats.reviews_by_type.gate,
+            stats.reviews_by_type.advisory,
             clean,
             stats.rounds_to_clean["1"] ?? 0,
             stats.rounds_to_clean["2"] ?? 0,
+            stats.advisory_reported,
             stats.human_required,
             stats.continuable_findings,
-            stats.reviews - clean - stats.human_required - stats.continuable_findings,
+            stats.reviews - clean - stats.human_required - stats.continuable_findings - stats.advisory_reported,
           ],
         ];
       }),
@@ -864,7 +1015,7 @@ export function renderScorecardMarkdown(scorecard) {
     ),
     "The recorded reason is the escalating ledger event. The prose behind it stays in the ledger; `export_human_arbitration` renders one review's packet.",
     "## Workflow budgets and repair cycles",
-    table(
+    workflows == null ? scorecard.scope.workflow_omission_reason : table(
       ["Metric", "Count"],
       [
         ["Workflows", workflows.workflows],
@@ -901,11 +1052,11 @@ export function renderScorecardMarkdown(scorecard) {
   ];
   const skippedRows = [
     ...scorecard.skipped.map(({ id, reason }) => [`reviews/${id}`, reason]),
-    ...scorecard.skipped_workflows.map(({ id, reason }) => [
+    ...(scorecard.skipped_workflows ?? []).map(({ id, reason }) => [
       `workflows/${id}`,
       reason,
     ]),
-    ...scorecard.skipped_audit_logs.map(({ id, reason }) => [
+    ...(scorecard.skipped_audit_logs ?? []).map(({ id, reason }) => [
       `workflows/${id}/action-audit.jsonl`,
       reason,
     ]),

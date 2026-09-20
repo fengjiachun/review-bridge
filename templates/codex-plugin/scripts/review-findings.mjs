@@ -8,6 +8,7 @@ const USAGE = `Usage: review-findings.mjs [filters] [--limit <n>] [--json] [--st
 
   Search historical findings from review.json ledgers. All filters combine
   with AND; each option accepts one value and may appear only once.
+  Use --option=value for literal values starting with --, e.g. --keyword=--store.
 
   --repository <path>    Exact match of the persisted repository_path string;
                          no path resolution, basename matching, or Git lookup.
@@ -42,7 +43,12 @@ const seen = new Set();
 try {
   const argv = process.argv.slice(2);
   for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
+    const token = argv[index];
+    const equals = token.indexOf("=");
+    const arg = equals < 0 ? token : token.slice(0, equals);
+    if (equals >= 0 && ["--help", "--json"].includes(arg)) {
+      throw new Error(`${arg} does not accept a value`);
+    }
     if (arg === "--help") {
       process.stdout.write(USAGE);
       process.exit(0);
@@ -56,8 +62,8 @@ try {
     if (!["--repository", "--file", "--keyword", "--severity", "--disposition", "--decision", "--limit", "--store"].includes(arg)) {
       throw new Error(`unknown argument ${arg}`);
     }
-    const value = argv[++index];
-    if (value == null || value.startsWith("--") || value.trim() === "") throw new Error(`${arg} needs a value`);
+    const value = equals < 0 ? argv[++index] : token.slice(equals + 1);
+    if (value == null || (equals < 0 && value.startsWith("--")) || value.trim() === "") throw new Error(`${arg} needs a value`);
     if (arg === "--store") store = value;
     else if (arg === "--limit") {
       if (!/^[0-9]+$/.test(value)) throw new Error("--limit must be an integer between 1 and 1000");

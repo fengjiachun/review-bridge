@@ -11,10 +11,23 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Added
 
+- (#160) Filter review scorecards by UTC creation-time range, exact persisted
+  repository path, gate/advisory type, and FULL/SUCCESSOR strategy. All review
+  metrics and corpus timestamps use the selected reviews; any filter omits
+  workflow statistics with an explicit reason. JSON schema 2 records the
+  selection and counting scope, and distinguishes omitted workflow statistics
+  from zero counts. Submitted advisory reports no longer appear in flight.
+
 - (#159) Add the read-only `review-findings.mjs` CLI for historical findings,
   with repository, file, keyword, severity, author disposition, and rereview
   decision filters. Results preserve each finding's original snapshot and
   ledger location, distinguish rereview evidence, and report damaged records.
+
+### Fixed
+
+- (#160) Accept `--option=value` in the historical finding-search CLI so
+  literal option names such as `--store` can be searched, while preserving
+  missing-value and duplicate-option checks.
 
 ## 0.15.3 - 2026-09-19
 

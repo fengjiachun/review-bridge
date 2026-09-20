@@ -365,6 +365,23 @@ test("the packaged CLI prints bounded readable results or JSON and honors store 
   assert.deepEqual(await treeBytes(store), before);
 });
 
+test("the packaged CLI accepts leading hyphens and equals signs in literal values", async (t) => {
+  const store = await temporaryDirectory(t);
+  const review = continuableInTwoRounds();
+  review.findings[0].explanation = "The --store=cache option selects the wrong ledger.";
+  review.findings[0].path = "src/--name.mjs";
+  await writeReview(store, review);
+  const run = await packagedScript(t, store);
+  for (const keyword of ["--store", "--store=cache"]) {
+    const result = run("--json", `--keyword=${keyword}`, "--file=--name", "--severity=major");
+    assert.equal(result.status, 0, result.stderr);
+    const search = JSON.parse(result.stdout);
+    assert.deepEqual(resultIds(search), [`${REVIEW_A}/F-001`]);
+    assert.equal(search.filters.keyword, keyword);
+    assert.equal(search.filters.file, "--name");
+  }
+});
+
 test("the packaged CLI reports invalid flags and damaged ledgers with distinct exit codes", async (t) => {
   const store = await temporaryDirectory(t);
   const run = await packagedScript(t, store);
@@ -372,6 +389,9 @@ test("the packaged CLI reports invalid flags and damaged ledgers with distinct e
     ["--bogus"], ["--repository"], ["--keyword", " "], ["--severity", "critical"],
     ["--disposition", "resolved"], ["--decision", "fixed"], ["--limit", "0"], ["--limit", "1.5"],
     ["--severity", "major", "--severity", "minor"],
+    ["--keyword"], ["--keyword", "--json"], ["--keyword="],
+    ["--keyword", "one", "--keyword=two"], ["--keyword=one", "--keyword", "two"],
+    ["--bogus=value"], ["--json=true"], ["--help=true"],
   ]) {
     const result = run(...args);
     assert.equal(result.status, 2, `${args.join(" ")}: ${result.stderr}`);
