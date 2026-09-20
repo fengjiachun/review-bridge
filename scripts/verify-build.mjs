@@ -759,6 +759,32 @@ assert.match(reportHelp, /By default it prints a brief/);
 assert.match(reportHelp, /--full {10}Print the full rendering instead/);
 assert.match(reportHelp, /projection of the ledger, not evidence/);
 
+const findingsScript = path.join(pluginRoot, "scripts", "review-findings.mjs");
+const findingsHelp = run(process.execPath, [findingsScript, "--help"], pluginRoot);
+assert.match(findingsHelp, /Exact match of the persisted repository_path/);
+const findingsStore = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-findings-build-"));
+try {
+  const findingReviewId = "rb-2026-09-20T000000-000Z-1234abcd";
+  const directory = path.join(findingsStore, "reviews", findingReviewId);
+  await fsp.mkdir(directory, { recursive: true });
+  await fsp.writeFile(path.join(directory, "review.json"), JSON.stringify({
+    id: findingReviewId,
+    repository_path: "/deleted/historical/worktree",
+    rounds: [{ round: 1, head_sha: "a".repeat(40), snapshot_hash: "b".repeat(64) }],
+    findings: [{ id: "F-001", introduced_round: 1, severity: "major", title: "Historical probe", explanation: "Snapshot evidence", path: "src/probe.mjs" }],
+    resolutions: [],
+    rereview_decisions: [],
+    history: [],
+  }));
+  const output = run(process.execPath, [findingsScript, "--store", findingsStore, "--repository", "/deleted/historical/worktree", "--keyword", "snapshot", "--decision", "missing", "--json"], pluginRoot);
+  const findings = JSON.parse(output);
+  assert.equal(findings.total_matches, 1);
+  assert.equal(findings.results[0].snapshot.head_sha, "a".repeat(40));
+  assert.equal(findings.results[0].evidence.ledger_path, path.join(directory, "review.json"));
+} finally {
+  await fsp.rm(findingsStore, { recursive: true, force: true });
+}
+
 const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
 assertAuthorServerDisabledInLaunches(
   mcpConfig,
