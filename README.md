@@ -111,6 +111,7 @@ and explains why each step exists.
 | [How Review Bridge reviews a change](docs/review-flow.md) | The narrative: commit to merge-ready, and why |
 | [Run a local review](docs/local-review.md) | Every provider's request, round two, successor reviews, the state machine |
 | [GitHub publication gate](docs/publication-gate.md) | `LOCAL_GATE` and `REMOTE_ONLY` publication |
+| [Search historical findings](docs/finding-search.md) | Read-only CLI filters, provenance, and ledger diagnostics |
 | [Autonomous workflow](docs/autonomous-workflow.md) | The authorized end-to-end workflow |
 | [Reference](docs/reference.md) | Every tool and error code, generated from the source |
 | [Troubleshooting](docs/troubleshooting.md) | Structured errors and build failures |

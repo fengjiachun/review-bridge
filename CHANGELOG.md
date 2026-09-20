@@ -18,6 +18,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   selection and counting scope, and distinguishes omitted workflow statistics
   from zero counts. Submitted advisory reports no longer appear in flight.
 
+- (#159) Add the read-only `review-findings.mjs` CLI for historical findings,
+  with repository, file, keyword, severity, author disposition, and rereview
+  decision filters. Results preserve each finding's original snapshot and
+  ledger location, distinguish rereview evidence, and report damaged records.
+
 ## 0.15.3 - 2026-09-19
 
 ### Fixed
