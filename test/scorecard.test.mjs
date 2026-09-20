@@ -1447,7 +1447,6 @@ test("combined filters keep every metric and the corpus window on the selected r
     await writeReview(store, record.id, record);
     await writeReview(selectedStore, record.id, record);
   }
-  // Each otherwise identical record differs on just one selection dimension.
   const exclusions = [
     { id: "too-early", created_at: "2026-08-31T00:00:00Z" },
     { id: "too-late", created_at: "2026-09-04T00:00:00Z" },

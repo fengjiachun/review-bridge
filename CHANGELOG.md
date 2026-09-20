@@ -7,6 +7,17 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Added
+
+- (#160) Filter review scorecards by UTC creation-time range, exact persisted
+  repository path, gate/advisory type, and FULL/SUCCESSOR strategy. All review
+  metrics and corpus timestamps use the selected reviews; any filter omits
+  workflow statistics with an explicit reason. JSON schema 2 records the
+  selection and counting scope, and distinguishes omitted workflow statistics
+  from zero counts. Submitted advisory reports no longer appear in flight.
+
 ## 0.15.3 - 2026-09-19
 
 ### Fixed
