@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   prepareRereview,
   prepareReview,
@@ -1329,4 +1331,339 @@ test("an empty store renders a report that states its counting rules", async (t)
   assert.match(markdown, /No cutoff timestamp is involved/);
   assert.match(markdown, /total_lines >= ceil\(change_size_budget \* 0\.75\)/);
   assert.doesNotMatch(markdown, /## Skipped/);
+});
+
+test("time filters compare UTC instants with inclusive since and exclusive until", async (t) => {
+  const store = await emptyStore(t);
+  const timestamps = {
+    before: "2026-08-31T23:59:59.999Z",
+    since: "2026-09-01T08:00:00+08:00",
+    inside: "2026-09-01T23:59:59.999Z",
+    until: "2026-09-01T17:00:00-07:00",
+  };
+  for (const [id, createdAt] of Object.entries(timestamps)) {
+    await writeReview(store, id, reviewLedger({ id, status: "CLEAN", createdAt }));
+  }
+  const scorecard = await buildScorecard(store, {
+    since: "2026-09-01T01:00:00+01:00",
+    until: "2026-09-02",
+  });
+  assert.equal(scorecard.schema_version, 2);
+  assert.equal(scorecard.filters.since, "2026-09-01T00:00:00.000Z");
+  assert.equal(scorecard.filters.until, "2026-09-02T00:00:00.000Z");
+  assert.equal(scorecard.corpus.reviews_counted, 2);
+  assert.equal(scorecard.corpus.reviews_filtered_out, 2);
+  assert.equal(scorecard.corpus.earliest_review_created_at, timestamps.since);
+  assert.equal(scorecard.corpus.latest_review_created_at, timestamps.inside);
+  assert.equal((await buildScorecard(store, { since: "2026-09-01" })).corpus.reviews_counted, 3);
+  assert.equal((await buildScorecard(store, { until: "2026-09-02" })).corpus.reviews_counted, 3);
+});
+
+test("filter validation rejects ambiguous dates, invalid calendar dates and inverted ranges", async (t) => {
+  const store = await emptyStore(t);
+  const invalid = [
+    [{ since: "yesterday" }, /--since/],
+    [{ until: "2026-09-01T00:00:00" }, /--until/],
+    [{ since: "2026-02-29" }, /--since/],
+    [{ until: "2024-02-30T00:00:00Z" }, /--until/],
+    [{ since: "2026-09-01T24:00:00Z" }, /--since/],
+    [{ since: "2026-09-02", until: "2026-09-01" }, /earlier than/],
+    [{ since: "2026-09-01", until: "2026-09-01T08:00:00+08:00" }, /earlier than/],
+    [{ repository: "" }, /--repository/],
+    [{ repository: 1 }, /--repository/],
+    [{ reviewType: "GATE" }, /--review-type/],
+    [{ strategy: "full" }, /--strategy/],
+  ];
+  for (const [options, message] of invalid) {
+    await assert.rejects(buildScorecard(store, options), message);
+  }
+  const leapDay = await buildScorecard(store, { since: "2024-02-29", until: "2024-03-01" });
+  assert.equal(leapDay.filters.since, "2024-02-29T00:00:00.000Z");
+});
+
+test("repository filters match the persisted string without resolving paths or merging basenames", async (t) => {
+  const store = await emptyStore(t);
+  const repository = path.join(store, "deleted-checkout", "project");
+  const paths = [repository, path.join(store, "other-checkout", "project"), `${repository}/`, undefined];
+  for (const [index, repositoryPath] of paths.entries()) {
+    const id = `repository-${index}`;
+    await writeReview(store, id, {
+      ...reviewLedger({ id, status: "CLEAN" }),
+      ...(repositoryPath === undefined ? {} : { repository_path: repositoryPath }),
+    });
+  }
+  await assert.rejects(fsp.stat(repository), { code: "ENOENT" });
+  const scorecard = await buildScorecard(store, { repository });
+  assert.equal(scorecard.filters.repository, repository);
+  assert.equal(scorecard.corpus.reviews_counted, 1);
+  assert.equal(scorecard.corpus.reviews_filtered_out, 3);
+  assert.equal(scorecard.providers.ALL.reviews, 1);
+  assert.equal((await buildScorecard(store, { repository: "project" })).corpus.reviews_counted, 0);
+});
+
+test("combined filters keep every metric and the corpus window on the selected reviews", async (t) => {
+  const store = await emptyStore(t);
+  const selectedStore = await emptyStore(t);
+  const repository = "/removed/worktrees/project";
+  const rich = {
+    ...reviewLedger({
+      id: "selected-human",
+      status: "HUMAN_REQUIRED",
+      provider: "HERMES",
+      createdAt: "2026-09-02T00:00:00Z",
+      currentRound: 2,
+      findings: [
+        finding("F-1", "blocker", "RESOLVED"),
+        finding("F-2", "major", "REBUTTAL_ACCEPTED"),
+        finding("F-3", "minor", "STILL_OPEN"),
+        finding("F-4", "nit", "STILL_OPEN"),
+        finding("F-5", "major", "STILL_OPEN"),
+      ],
+      resolutions: [
+        { finding_id: "F-1", disposition: "fixed" },
+        { finding_id: "F-2", disposition: "rejected" },
+        { finding_id: "F-3", disposition: "rejected" },
+        { finding_id: "F-4", disposition: "rejected" },
+        { finding_id: "F-5", disposition: "human_required" },
+      ],
+      decisions: [
+        { finding_id: "F-1", decision: "resolved" },
+        { finding_id: "F-2", decision: "rebuttal_accepted", verification: "checked caller" },
+        { finding_id: "F-3", decision: "still_open", verification: "" },
+      ],
+      carriedFindings: [{ finding_id: "old-F-1", continued_from_review_id: "earlier-review" }],
+      history: [{ event: "REREVIEW_UNRESOLVED" }],
+    }),
+    repository_path: repository,
+    advisory: false,
+    review_strategy: { mode: "SUCCESSOR" },
+  };
+  const clean = {
+    ...rich,
+    ...reviewLedger({ id: "selected-clean", status: "CLEAN", provider: "CODEX_TASK", createdAt: "2026-09-03T12:00:00Z", currentRound: 2 }),
+    review_strategy: { mode: "SUCCESSOR", parent_review_id: "selected-human" },
+  };
+  for (const record of [rich, clean]) {
+    await writeReview(store, record.id, record);
+    await writeReview(selectedStore, record.id, record);
+  }
+  // Each otherwise identical record differs on just one selection dimension.
+  const exclusions = [
+    { id: "too-early", created_at: "2026-08-31T00:00:00Z" },
+    { id: "too-late", created_at: "2026-09-04T00:00:00Z" },
+    { id: "other-repository", repository_path: "/elsewhere/project" },
+    { id: "advisory", advisory: true },
+    { id: "full", review_strategy: { mode: "FULL" } },
+  ];
+  for (const excluded of exclusions) {
+    await writeReview(store, excluded.id, { ...rich, ...excluded, reviewer_provider: "CLAUDE_DESKTOP" });
+  }
+  const scorecard = await buildScorecard(store, {
+    since: "2026-09-01",
+    until: "2026-09-04",
+    repository,
+    reviewType: "gate",
+    strategy: "SUCCESSOR",
+  });
+  const selectedOnly = await buildScorecard(selectedStore);
+  assert.deepEqual(scorecard.providers, selectedOnly.providers);
+  assert.equal(scorecard.corpus.reviews_counted, 2);
+  assert.equal(scorecard.corpus.reviews_filtered_out, exclusions.length);
+  assert.equal(scorecard.corpus.earliest_review_created_at, rich.created_at);
+  assert.equal(scorecard.corpus.latest_review_created_at, clean.created_at);
+  assert.equal(scorecard.providers.ALL.findings, 5);
+  assert.equal(scorecard.providers.ALL.rebuttals.after_obligation.overturn_rate, 0.5);
+  assert.equal(scorecard.providers.ALL.rebuttals_pending, 1);
+  assert.equal(scorecard.providers.ALL.continuations_started, 1);
+  assert.equal(scorecard.providers.ALL.carried_findings, 1);
+  assert.deepEqual(scorecard.providers.ALL.rounds_to_clean, { 2: 1 });
+  assert.equal(scorecard.providers.ALL.human_required_by_reason.REREVIEW_UNRESOLVED, 1);
+  assert.equal(scorecard.providers.CLAUDE_DESKTOP, undefined);
+});
+
+test("legacy absent and null mode fields retain core compatibility defaults", async (t) => {
+  const store = await emptyStore(t);
+  const records = [
+    { id: "absent" },
+    { id: "null", advisory: null, review_strategy: null, reviewer_provider: null },
+    { id: "explicit", advisory: false, review_strategy: { mode: "FULL" } },
+    { id: "successor", advisory: false, review_strategy: { mode: "SUCCESSOR" } },
+    { id: "advisory", advisory: true, review_strategy: { mode: "FULL" } },
+  ];
+  for (const fields of records) {
+    await writeReview(store, fields.id, {
+      ...reviewLedger({ id: fields.id, status: "CLEAN", provider: null }),
+      ...fields,
+    });
+  }
+  const legacy = await buildScorecard(store, { reviewType: "gate", strategy: "FULL" });
+  assert.equal(legacy.corpus.reviews_counted, 3);
+  assert.equal(legacy.corpus.reviews_skipped, 0);
+  assert.deepEqual(legacy.providers.CLAUDE_DESKTOP.reviews_by_type, { gate: 3, advisory: 0 });
+  assert.equal((await buildScorecard(store, { strategy: "SUCCESSOR" })).corpus.reviews_counted, 1);
+  assert.equal((await buildScorecard(store, { reviewType: "advisory" })).corpus.reviews_counted, 1);
+});
+
+test("advisory reported and clean are terminal while status counts retain their original facts", async (t) => {
+  const store = await emptyStore(t);
+  for (const advisory of [false, true]) {
+    for (const status of ["REVIEW_SUBMITTED", "CLEAN", "WAITING_FOR_REVIEW"]) {
+      const id = `${advisory}-${status}`;
+      await writeReview(store, id, { ...reviewLedger({ id, status }), advisory });
+    }
+  }
+  const scorecard = await buildScorecard(store, { reviewType: "advisory" });
+  const stats = scorecard.providers.ALL;
+  assert.deepEqual(stats.reviews_by_type, { gate: 0, advisory: 3 });
+  assert.equal(stats.reviews_by_status.REVIEW_SUBMITTED, 1);
+  assert.equal(stats.reviews_by_status.CLEAN, 1);
+  assert.equal(stats.reviews_by_status.WAITING_FOR_REVIEW, 1);
+  assert.equal(stats.not_clean, 2);
+  assert.equal(stats.advisory_reported, 1);
+  assert.deepEqual(stats.rounds_to_clean, { 1: 1 });
+  assert.match(scorecard.metric_semantics.not_clean, /not a failure count/);
+  assert.match(scorecard.metric_semantics.advisory_reported, /terminal/);
+  assert.match(scorecard.metric_semantics.author_loop, /advisory reviews have no such loop/);
+  const markdown = renderScorecardMarkdown(scorecard);
+  assert.match(markdown, /\| ALL \| 3 \| 0 \| 3 \| 1 \| 1 \| 0 \| 1 \| 0 \| 0 \| 1 \|/);
+  assert.match(markdown, /Advisory `REVIEW_SUBMITTED` and `CLEAN`\s+are terminal reports/);
+  const gate = await buildScorecard(store, { reviewType: "gate" });
+  assert.equal(gate.providers.ALL.advisory_reported, 0);
+  assert.match(renderScorecardMarkdown(gate), /\| ALL \| 3 \| 3 \| 0 \| 1 \| 1 \| 0 \| 0 \| 0 \| 0 \| 2 \|/);
+});
+
+test("invalid mode and repository fields are skipped before filtering and diagnostics cover the scan", async (t) => {
+  const store = await emptyStore(t);
+  const defects = [
+    { advisory: "false" },
+    { review_strategy: {} },
+    { review_strategy: { mode: "OTHER" } },
+    { repository_path: 42 },
+    { reviewer_provider: "OTHER" },
+    { created_at: "not-a-time" },
+  ];
+  for (const [index, defect] of defects.entries()) {
+    const id = `invalid-${index}`;
+    await writeReview(store, id, { ...reviewLedger({ id, status: "CLEAN" }), ...defect });
+  }
+  await writeReview(store, "selected", { ...reviewLedger({ id: "selected", status: "CLEAN" }), repository_path: "/selected" });
+  await writeReview(store, "excluded", { ...reviewLedger({ id: "excluded", status: "CLEAN" }), repository_path: "/excluded" });
+  await fsp.mkdir(path.join(store, "reviews", "no-ledger"));
+  const scorecard = await buildScorecard(store, { repository: "/selected" });
+  assert.equal(scorecard.corpus.reviews_counted, 1);
+  assert.equal(scorecard.corpus.reviews_filtered_out, 1);
+  assert.equal(scorecard.corpus.reviews_skipped, defects.length);
+  assert.equal(scorecard.corpus.review_directories_without_ledger, 1);
+  assert.equal(scorecard.skipped.length, defects.length);
+  assert.equal(scorecard.scope.review_diagnostics, "all_review_directories_in_store");
+  assert.match(scorecard.skipped.map(({ reason }) => reason).join("\n"), /advisory[\s\S]*review_strategy[\s\S]*repository_path[\s\S]*reviewer_provider[\s\S]*created_at/);
+});
+
+test("every filter omits workflow reads and empty selections distinguish zero from unknown", async (t) => {
+  const store = await emptyStore(t);
+  await writeReview(store, "one", reviewLedger({ id: "one", status: "CLEAN" }));
+  // A directory read would fail, demonstrating that no workflow scan occurs.
+  await fsp.writeFile(path.join(store, "workflows"), "not a directory\n");
+  await assert.rejects(buildScorecard(store), { code: "ENOTDIR" });
+  for (const options of [
+    { since: "2026-09-01" },
+    { until: "2026-01-01" },
+    { repository: "/missing" },
+    { reviewType: "advisory" },
+    { strategy: "SUCCESSOR" },
+  ]) {
+    const scorecard = await buildScorecard(store, options);
+    assert.equal(scorecard.corpus.reviews_counted, 0);
+    assert.equal(scorecard.corpus.reviews_filtered_out, 1);
+    assert.equal(scorecard.corpus.earliest_review_created_at, null);
+    assert.equal(scorecard.corpus.latest_review_created_at, null);
+    assert.equal(scorecard.providers.ALL.findings, 0);
+    assert.equal(scorecard.providers.ALL.rebuttals.after_obligation.overturn_rate, null);
+    assert.deepEqual(scorecard.providers.ALL.rounds_to_clean, {});
+    for (const key of ["workflows_counted", "workflows_skipped", "workflow_directories_without_ledger", "audit_logs_skipped"]) {
+      assert.equal(scorecard.corpus[key], null);
+    }
+    assert.equal(scorecard.workflows, null);
+    assert.equal(scorecard.skipped_workflows, null);
+    assert.equal(scorecard.skipped_audit_logs, null);
+    assert.equal(scorecard.scope.workflows, "omitted");
+    assert.match(scorecard.scope.workflow_omission_reason, /Review filters[\s\S]*workflow statistics are omitted/);
+    const markdown = renderScorecardMarkdown(scorecard);
+    assert.match(markdown, /0 selected valid reviews/);
+    assert.match(markdown, /Workflow and audit-log counts: n\/a \(not read\)/);
+    assert.match(markdown, /created_at` spans n\/a to n\/a/);
+    assert.doesNotMatch(markdown, /\| Workflows \|/);
+    assert.doesNotMatch(markdown, /\| Metric \| Count \|/);
+  }
+});
+
+async function scorecardScript(t, store) {
+  const root = await emptyStore(t);
+  await fsp.mkdir(path.join(root, "scripts"));
+  const script = path.join(root, "scripts", "review-scorecard.mjs");
+  await fsp.copyFile(new URL("../templates/codex-plugin/scripts/review-scorecard.mjs", import.meta.url), script);
+  await fsp.symlink(fileURLToPath(new URL("../src", import.meta.url)), path.join(root, "server"));
+  return (...args) => spawnSync(process.execPath, [script, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, REVIEW_BRIDGE_HOME: store },
+  });
+}
+
+test("the scorecard CLI passes combined filters through JSON and states scope in markdown", async (t) => {
+  const store = await emptyStore(t);
+  const repository = "/deleted/checkout with spaces/project";
+  await writeReview(store, "selected", {
+    ...reviewLedger({ id: "selected", status: "REVIEW_SUBMITTED", createdAt: "2026-09-02T00:00:00Z" }),
+    repository_path: repository,
+    advisory: true,
+    review_strategy: { mode: "SUCCESSOR" },
+  });
+  const run = await scorecardScript(t, store);
+  const args = ["--since", "2026-09-01", "--until", "2026-09-03", "--repository", repository, "--review-type", "advisory", "--strategy", "SUCCESSOR"];
+  const result = run("--json", ...args);
+  assert.equal(result.status, 0, result.stderr);
+  const scorecard = JSON.parse(result.stdout);
+  assert.deepEqual(scorecard.filters, {
+    since: "2026-09-01T00:00:00.000Z",
+    until: "2026-09-03T00:00:00.000Z",
+    repository,
+    review_type: "advisory",
+    strategy: "SUCCESSOR",
+  });
+  assert.equal(scorecard.corpus.reviews_counted, 1);
+  assert.equal(scorecard.workflows, null);
+  const markdown = run(...args);
+  assert.equal(markdown.status, 0, markdown.stderr);
+  assert.match(markdown.stdout, /workflow statistics are omitted/);
+  assert.match(markdown.stdout, /- review_type: <code>"advisory"<\/code>/);
+  const unfiltered = run("--json");
+  assert.equal(unfiltered.status, 0, unfiltered.stderr);
+  assert.equal(JSON.parse(unfiltered.stdout).workflows.workflows, 0);
+});
+
+test("the scorecard CLI rejects invalid, missing, unknown and repeated value options", async (t) => {
+  const store = await emptyStore(t);
+  const run = await scorecardScript(t, store);
+  const cases = [
+    ["--unknown"],
+    ["unexpected"],
+    ["--since"],
+    ["--until", "--json"],
+    ["--since", "2026-02-29"],
+    ["--since", "2026-09-02", "--until", "2026-09-01"],
+    ["--review-type", "unknown"],
+    ["--strategy", "full"],
+    ["--repository", ""],
+    ["--repository", "/one", "--repository", "/two"],
+  ];
+  for (const args of cases) {
+    const result = run(...args);
+    assert.equal(result.status, 2, `${args.join(" ")}: ${result.stderr}`);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /Usage: review-scorecard/);
+  }
+  const help = run("--help");
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /\[--review-type gate\|advisory\]/);
+  assert.match(help.stdout, /\[--strategy FULL\|SUCCESSOR\]/);
 });

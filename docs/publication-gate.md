@@ -102,6 +102,66 @@ itself so a number can be replayed against the ledgers it came from. It reads
 one store, writes nothing, sends nothing anywhere, and lists a ledger it cannot
 parse as skipped rather than repairing it.
 
+Use review filters together to compare the same period, repository, review
+type, and strategy:
+
+```bash
+node dist/review-bridge-v0.15.3/codex-marketplace/plugins/review-bridge/scripts/review-scorecard.mjs \
+  --since 2026-09-01 --until 2026-10-01 \
+  --repository /path/persisted/in/the/ledger \
+  --review-type gate --strategy FULL --json
+```
+
+Run the packaged helper from the repository root after `npm run build`.
+Set `REVIEW_BRIDGE_HOME` to select another store. Every supplied filter must match:
+
+- `--since` and `--until` accept `YYYY-MM-DD` (UTC midnight) or an ISO timestamp
+  with seconds, optional millisecond precision, and an explicit `Z` or UTC
+  offset. They compare `review.created_at` as UTC instants in `[since, until)`:
+  the lower bound is inclusive and the upper bound is exclusive. Invalid dates
+  and `since >= until` are rejected.
+- `--repository` matches the ledger's persisted `repository_path` string
+  exactly. It does not resolve a filesystem path, normalize it, or combine
+  matching basenames, and the recorded worktree need not still exist.
+- `--review-type` accepts `gate` or `advisory`; `--strategy` accepts `FULL` or
+  `SUCCESSOR`. Strategy means the review's current `review_strategy.mode`,
+  not a separate selection of its historical rounds. Missing/null legacy
+  fields follow core compatibility defaults: provider `CLAUDE_DESKTOP`,
+  review type `gate`, and strategy `FULL`.
+
+All review counters, denominators, and the corpus's earliest/latest
+`created_at` come from the same selected valid reviews. Read/validation
+diagnostics describe the whole scanned review store, including unreadable or
+invalid ledgers that cannot be classified reliably; they are not selected
+review counts. Valid reviews excluded by the filters are counted separately
+as `corpus.reviews_filtered_out`. An empty selection has zero counters and
+null corpus timestamps and rates whose denominator is zero.
+
+Review filters do not identify an entire workflow or its audit events. With
+any filter enabled, the helper does not read workflow ledgers or audit logs:
+JSON `workflows`, corpus workflow/audit counts, and workflow/audit diagnostic
+lists are null, and
+`scope.workflow_omission_reason` explains their omission. Markdown gives the
+same explanation. With no filters, existing workflow statistics remain
+included over the whole store.
+
+The JSON schema is version 2. It preserves existing unfiltered counters and
+adds `filters`, `scope`, `metric_semantics`, `corpus.reviews_filtered_out`, and
+each provider's `reviews_by_type` and `advisory_reported`. Consumers should
+check `schema_version` and handle the null workflow fields in filtered
+reports. The raw `not_clean` counter means a status other than `CLEAN` or
+`LOCAL_GATE_PASSED`; it is not a failure count. An advisory review reaches a
+terminal report at `REVIEW_SUBMITTED` (counted in `advisory_reported`) or
+`CLEAN` (counted in the existing clean totals). Markdown excludes reported
+advisory reviews from its in-flight count. Author disposition, rebuttal, and
+continuation metrics describe the gate author/rereview loop; advisory reviews
+have no author loop, and advisory `CLEAN` does not attest a gate.
+
+These are recorded outcomes, not model accuracy: `fixed`/`resolved` does not
+establish accuracy, and `rebuttal_accepted` does not establish a false
+positive. A strategy's `parent_review_id` is not evidence of a continuation
+or rework chain.
+
 The author tool `render_review_report` and the packaged
 `scripts/review-report.mjs <review_id> [--full] [--json] [--store <path>]`
 render one review's ledger, and its publication ledger when present, as a
