@@ -7,6 +7,15 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Added
+
+- (#159) Add the read-only `review-findings.mjs` CLI for historical findings,
+  with repository, file, keyword, severity, author disposition, and rereview
+  decision filters. Results preserve each finding's original snapshot and
+  ledger location, distinguish rereview evidence, and report damaged records.
+
 ## 0.15.3 - 2026-09-19
 
 ### Fixed
