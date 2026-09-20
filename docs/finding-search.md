@@ -20,6 +20,10 @@ All supplied filters combine with AND. Each option accepts one value and may
 appear once. Unknown options, empty values, invalid enum values, and invalid
 limits fail before reading the store.
 
+Use `--option=value` for a literal value beginning with `--`, such as
+`--keyword=--store` or `--file=--name`. Both value forms share the same
+duplicate-option checks; `--keyword --json` still reports a missing value.
+
 | Option | Meaning |
 | --- | --- |
 | `--repository <path>` | Exact, case-sensitive match of the ledger's persisted `repository_path` string. |

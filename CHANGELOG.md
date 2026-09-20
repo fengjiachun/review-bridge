@@ -23,6 +23,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   decision filters. Results preserve each finding's original snapshot and
   ledger location, distinguish rereview evidence, and report damaged records.
 
+### Fixed
+
+- (#160) Accept `--option=value` in the historical finding-search CLI so
+  literal option names such as `--store` can be searched, while preserving
+  missing-value and duplicate-option checks.
+
 ## 0.15.3 - 2026-09-19
 
 ### Fixed
