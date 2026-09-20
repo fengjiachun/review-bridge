@@ -29,7 +29,7 @@ const projectRoot = path.resolve(
 );
 const hermesTemplates = path.join(projectRoot, "templates", "hermes");
 const serverPath = path.join(projectRoot, "src", "server.mjs");
-const RELEASE_VERSION = "0.15.3";
+const RELEASE_VERSION = "0.16.0";
 const RELEASE_PATH_PLACEHOLDER = "__REVIEW_BRIDGE_RELEASE_PATH__";
 const STORE_PLACEHOLDER = "__REVIEW_BRIDGE_HOME__";
 
@@ -782,7 +782,7 @@ test("Hermes README documents profile separation, exact release pinning, absolut
   assert.match(readme, /author\/publication side/i);
 });
 
-test("Hermes install and release artifacts use the 0.15.3 release identity", async () => {
+test("Hermes install and release artifacts use the 0.16.0 release identity", async () => {
   const [
     packageJson,
     packageLock,
@@ -869,7 +869,7 @@ test("Hermes install and release artifacts use the 0.15.3 release identity", asy
   const previousChangelog = changelog.match(
     /^## 0\.5\.0[^\n]*\n(?<body>[\s\S]*?)(?=^## )/m,
   );
-  assert.ok(currentChangelog, "the 0.15.3 changelog entry is missing");
+  assert.ok(currentChangelog, "the 0.16.0 changelog entry is missing");
   // What holds across releases is the convention, not any one release's
   // subject: the current entry names the pull requests it describes. A check
   // on this release's own wording would have to be rewritten every time the

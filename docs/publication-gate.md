@@ -1,6 +1,6 @@
 # GitHub publication gate
 
-Describes Review Bridge v0.15.3.
+Describes Review Bridge v0.16.0.
 
 Publishing to GitHub requires an explicit authorization, in one of two modes:
 
@@ -65,7 +65,7 @@ return the legacy exact body without an ID. For a fresh snapshot, run the
 packaged read-only collector against the review ID:
 
 ```bash
-node dist/review-bridge-v0.15.3/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id>
+node dist/review-bridge-v0.16.0/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id>
 ```
 
 Run that command from the repository root after `npm run build`. Inside an
@@ -106,7 +106,7 @@ Use review filters together to compare the same period, repository, review
 type, and strategy:
 
 ```bash
-node dist/review-bridge-v0.15.3/codex-marketplace/plugins/review-bridge/scripts/review-scorecard.mjs \
+node dist/review-bridge-v0.16.0/codex-marketplace/plugins/review-bridge/scripts/review-scorecard.mjs \
   --since 2026-09-01 --until 2026-10-01 \
   --repository /path/persisted/in/the/ledger \
   --review-type gate --strategy FULL --json
