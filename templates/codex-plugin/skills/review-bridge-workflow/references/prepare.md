@@ -81,7 +81,9 @@ After a verdict, load [Handle findings](findings.md) for findings or
 9. Start a fresh reviewer context for every new `review_id`. For
    `CLAUDE_DESKTOP`, use a fresh Claude conversation. For `CODEX_TASK`, create
    a new Codex task rather than forking this task, and send it only the review
-   ID and a request to follow the packaged reviewer skill; to launch that task
+   ID and a request to follow the packaged reviewer skill. Set its reasoning
+   effort to `high` unless the operator explicitly requests another level;
+   keep the operator's configured model. To launch that task
    from this session's shell, follow [Dispatching a CODEX_TASK review](codex-task.md). For
    `HERMES`, start
    a fresh, independent Hermes reviewer context in the packaged Hermes reviewer
