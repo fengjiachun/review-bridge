@@ -29,6 +29,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   literal option names such as `--store` can be searched, while preserving
   missing-value and duplicate-option checks.
 
+### Internal
+
+- (#161) Release 0.16.0.
+
 ## 0.15.3 - 2026-09-19
 
 ### Fixed
