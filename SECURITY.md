@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the latest `0.15.x` release receives security fixes.
+Only the latest `0.16.x` release receives security fixes.
 
 ## Reporting a vulnerability
 

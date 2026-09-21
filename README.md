@@ -38,10 +38,10 @@ from a commit to `MERGE_READY`. Build it from a clone at a release tag:
 ```bash
 git clone https://github.com/fengjiachun/review-bridge.git
 cd review-bridge
-git checkout v0.15.3
+git checkout v0.16.0
 npm ci
 npm run build
-codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.15.3/codex-marketplace"
+codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.16.0/codex-marketplace"
 ```
 
 Restart the Codex desktop app, open Plugins, select **Review Bridge Local**, and
@@ -170,7 +170,7 @@ npm run build
 npm run verify:build
 ```
 
-`npm run build` writes to `dist/review-bridge-v0.15.3/`; set
+`npm run build` writes to `dist/review-bridge-v0.16.0/`; set
 `REVIEW_BRIDGE_OUTPUT_ROOT` to write elsewhere. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the pull request process,
 [docs/rfcs/](docs/rfcs/) for design records, and [CHANGELOG.md](CHANGELOG.md)

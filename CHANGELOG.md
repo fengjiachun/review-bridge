@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.16.0 - 2026-09-21
 
 ### Added
 
@@ -28,6 +28,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - (#160) Accept `--option=value` in the historical finding-search CLI so
   literal option names such as `--store` can be searched, while preserving
   missing-value and duplicate-option checks.
+
+### Internal
+
+- (#161) Release 0.16.0.
 
 ## 0.15.3 - 2026-09-19
 
