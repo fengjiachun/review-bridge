@@ -27,8 +27,10 @@ State-changing tools can also return structured concurrency and durability
 errors. See [Troubleshooting](troubleshooting.md) for what each one means and
 whether retrying is safe.
 
-For a `CODEX_TASK` review, create a new Codex task. Do not fork the author task
-or include its chat history. Give the new task only this request:
+For a `CODEX_TASK` review, create a new Codex task and select `high` reasoning
+effort unless you explicitly want another level. Keep your configured model.
+Do not fork the author task or include its chat history. Give the new task only
+this request:
 
 > Independently review Review Bridge task `<review_id>` using the packaged
 > reviewer skill. Submit every actionable finding and do not modify the code.
@@ -68,6 +70,10 @@ next action is `FINALIZE_LOCAL_GATE`; there is nothing to answer and
 Otherwise, back in Codex:
 
 > Read the reviewer's findings, address each one, and prepare round two.
+
+For a `CODEX_TASK` rereview, create another new task with the same review ID
+and a request to rereview the author's resolutions. Select `high` unless you
+explicitly want another level, keeping your configured model.
 
 Resume the same reviewer context for round two where the provider allows it. A
 `DEEPSEEK_HARNESS` reviewer cannot: every headless run starts a fresh session,

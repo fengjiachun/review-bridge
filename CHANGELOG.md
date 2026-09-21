@@ -13,6 +13,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - (#162) Default Codex review launches and task creation to `high` reasoning
   effort, preserving the configured model and explicit effort overrides.
+  Persist the selected effort in autonomous task dispatches for recovery, and
+  document the default for manual initial reviews and rereviews.
 
 ## 0.16.0 - 2026-09-21
 

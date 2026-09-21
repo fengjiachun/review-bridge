@@ -889,6 +889,7 @@ test("Codex task dispatch is marker-bound and cannot skip action states", async 
   assert.match(planned.dispatch.marker, /^rbwf-dispatch-[0-9a-f]{32}$/);
   assert.match(planned.dispatch.title, new RegExp(planned.dispatch.marker));
   assert.match(planned.dispatch.prompt, new RegExp(planned.dispatch.marker));
+  assert.equal(planned.dispatch.reasoning_effort, "high");
   const reloaded = await getAutonomousWorkflow(
     state.store,
     workflow.workflow_id,
@@ -990,6 +991,31 @@ test("Codex task dispatch is marker-bound and cannot skip action states", async 
   );
   assert.equal(audit[0].previous_event_sha256, null);
   assert.match(audit.at(-1).event_sha256, /^[0-9a-f]{64}$/);
+});
+
+test("Codex task dispatch preserves an effort override after recovery", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const planned = await planCodexTaskDispatch(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    review.id,
+    "medium",
+  );
+  await markWorkflowActionExecuting(
+    state.store,
+    workflow.workflow_id,
+    planned.workflow.revision,
+    planned.action.action_id,
+  );
+  const reloaded = await getAutonomousWorkflow(state.store, workflow.workflow_id);
+  const summary = await getAutonomousWorkflowSummary(state.store, workflow.workflow_id);
+  assert.equal(reloaded.active_action.target.reasoning_effort, "medium");
+  assert.equal(reloaded.active_action.dispatch.reasoning_effort, "medium");
+  assert.equal(summary.active_action.dispatch.reasoning_effort, "medium");
+  assert.equal(summary.active_action.status, "EXECUTING");
 });
 
 test("change-size warning reports headroom without blocking dispatch", async (t) => {

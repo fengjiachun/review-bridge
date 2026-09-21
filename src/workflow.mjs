@@ -482,6 +482,9 @@ export const ACTION_KIND_SPECS = {
     dispatch(action) {
       const marker = action.correlation_marker;
       return {
+        ...(action.target.reasoning_effort === undefined
+          ? {}
+          : { reasoning_effort: action.target.reasoning_effort }),
         marker,
         title: `Review Bridge ${marker}`,
         prompt: [
@@ -4201,7 +4204,9 @@ export async function planCodexTaskDispatch(
   workflowId,
   expectedRevision,
   reviewId,
+  reasoningEffort = "high",
 ) {
+  assertString(reasoningEffort, "reasoning_effort", { max: 64 });
   const preflight = await withWorkflowLock(
     storeRoot,
     workflowId,
@@ -4277,7 +4282,11 @@ export async function planCodexTaskDispatch(
             "Codex task dispatch is not currently plannable",
           );
         }
-        return { review_id: reviewId, reviewer_provider: "CODEX_TASK" };
+        return {
+          review_id: reviewId,
+          reviewer_provider: "CODEX_TASK",
+          reasoning_effort: reasoningEffort,
+        };
       },
     },
   );
