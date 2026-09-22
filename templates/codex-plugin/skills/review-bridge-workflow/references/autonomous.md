@@ -67,16 +67,22 @@ gap returns the ready pull request to draft before any repair.
    task has been dispatched. Only an explicit decision may call
    `extend_change_size_budget`; resume separately after the new budget admits
    the measured total.
-5. For `PLAN_CODEX_TASK_DISPATCH`, call `plan_codex_task_dispatch`. Persist
+5. For `PLAN_CODEX_TASK_DISPATCH`, call `plan_codex_task_dispatch`, passing
+   `reasoning_effort` when the operator explicitly requests another level;
+   it defaults to `high`. Persist
    `EXECUTING` with `mark_workflow_action_executing` immediately before task
    creation. Create a fresh non-forked Codex task whose title and prompt equal
-   the returned dispatch payload. Enumerate the exact opaque marker and call
+   the returned dispatch payload. Set its reasoning effort to the returned
+   `dispatch.reasoning_effort`; keep the operator's
+   configured model. Enumerate the exact opaque marker and call
    `record_codex_task_observation` only when exactly one matching task exists;
    then call `complete_workflow_action`. After an indeterminate create,
    reconcile the marker before creating anything else. After a restart,
-   recover the exact title and prompt from `active_action.dispatch` in
+   recover the exact title, prompt, and reasoning effort from `active_action.dispatch` in
    `get_autonomous_workflow` or `get_autonomous_workflow_summary`; never
-   reconstruct the strings or call `plan_codex_task_dispatch` again.
+   reconstruct the strings or call `plan_codex_task_dispatch` again. A legacy
+   dispatch without `reasoning_effort` uses `high` unless the operator explicitly
+   requests another level.
 6. If the client cannot create, discover, or wait for that independent task,
    call `pause_autonomous_workflow` with
    `TASK_ORCHESTRATION_UNAVAILABLE`. If creation may have succeeded but

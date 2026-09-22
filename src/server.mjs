@@ -497,11 +497,12 @@ if (role === "author") {
     {
       title: "Plan Codex reviewer task dispatch",
       description:
-        "Persist a single CREATE_CODEX_REVIEWER_TASK intent and return its exact opaque marker, task title, and prompt.",
+        "Persist a single CREATE_CODEX_REVIEWER_TASK intent and return its exact opaque marker, task title, prompt, and reasoning effort (default high).",
       inputSchema: {
         workflow_id: z.string(),
         expected_revision: z.number().int().positive(),
         review_id: z.string(),
+        reasoning_effort: z.string().min(1).max(64).optional(),
       },
     },
     (input) =>
@@ -510,6 +511,7 @@ if (role === "author") {
         input.workflow_id,
         input.expected_revision,
         input.review_id,
+        input.reasoning_effort,
       ),
   );
 

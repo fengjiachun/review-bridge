@@ -7,6 +7,15 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Fixed
+
+- (#162) Default Codex review launches and task creation to `high` reasoning
+  effort, preserving the configured model and explicit effort overrides.
+  Persist the selected effort in autonomous task dispatches for recovery, and
+  document the default for manual initial reviews and rereviews.
+
 ## 0.16.0 - 2026-09-21
 
 ### Added

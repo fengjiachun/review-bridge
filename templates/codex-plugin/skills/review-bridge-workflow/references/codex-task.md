@@ -16,6 +16,7 @@ launch between them.
 
    ```bash
    codex exec --skip-git-repo-check --sandbox workspace-write \
+     -c 'model_reasoning_effort="high"' \
      -c 'sandbox_workspace_write.network_access=false' \
      -c 'sandbox_workspace_write.writable_roots=[]' \
      -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
@@ -32,6 +33,10 @@ launch between them.
    > Independently review Review Bridge task `<review_id>` using the packaged
    > Review Bridge reviewer skill. Require `reviewer_provider: CODEX_TASK`,
    > follow the review strategy, and submit every actionable finding.
+
+   Use `high` reasoning effort for both review rounds unless the operator
+   explicitly requests another level. The launch sets it independently of the
+   host configuration; keep the operator's configured model.
 
    Single-quote that request: it contains backticks, and a double-quoted shell
    string would execute them instead of passing them through. Pass it as one
@@ -228,6 +233,7 @@ resolutions with the packaged reviewer skill:
 
 ```bash
 codex exec --skip-git-repo-check --sandbox workspace-write \
+  -c 'model_reasoning_effort="high"' \
   -c 'sandbox_workspace_write.network_access=false' \
   -c 'sandbox_workspace_write.writable_roots=[]' \
   -c 'sandbox_workspace_write.exclude_slash_tmp=true' \

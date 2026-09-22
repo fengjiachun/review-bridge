@@ -68,7 +68,9 @@ Commit the change on a topic branch. Then, in a Codex task:
 > "...", the implementation scope is "...", and the base ref is `origin/main`.
 
 Codex returns a `review_id` and waits in `WAITING_FOR_REVIEW`. Create a **new**
-Codex task — not a fork of the author task — and give it only this request:
+Codex task — not a fork of the author task — select `high` reasoning effort
+unless you explicitly want another level, keep your configured model, and
+give it only this request:
 
 > Independently review Review Bridge task `<review_id>` using the packaged
 > reviewer skill. Submit every actionable finding and do not modify the code.
@@ -79,7 +81,8 @@ in the author task:
 > Read the reviewer's findings, address each one, and prepare round two.
 
 and start another new Codex task with the same review ID and a request to
-rereview the author's resolutions. Round two ends in one of three
+rereview the author's resolutions. Select `high` again unless you explicitly
+want another level, keeping your configured model. Round two ends in one of three
 states: `CLEAN`, `CONTINUABLE_FINDINGS` (a new issue, addressed in a fresh full
 review), or `HUMAN_REQUIRED` (a prior finding still contested). Once the review
 is `CLEAN`, the author task finalizes it to `LOCAL_GATE_PASSED`, which re-checks
