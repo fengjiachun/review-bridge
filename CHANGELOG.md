@@ -32,6 +32,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   Persist the selected effort in autonomous task dispatches for recovery, and
   document the default for manual initial reviews and rereviews.
 
+### Internal
+
+- (#166) Release 0.17.0.
+
 ## 0.16.0 - 2026-09-21
 
 ### Added
