@@ -9,6 +9,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Added
+
+- (#165) Let author MCP clients discover local Codex reviewer models and
+  reasoning efforts, explicitly select a supported pair, and preserve it across
+  rereviews and recovery. Reject unavailable choices or runtime changes before
+  launch, include the reviewer skill in every client package, and report
+  requested settings separately from unavailable remote identity.
+
 ### Fixed
 
 - (#162) Default Codex review launches and task creation to `high` reasoning
