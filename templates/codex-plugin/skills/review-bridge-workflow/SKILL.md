@@ -32,7 +32,8 @@ load [Lock contention](references/lock-contention.md) before deciding to retry.
 
 - Before every commit, apply the pre-commit cleanup: remove comments that do
   not state a constraint the code cannot express and remove tests that no
-  behavior change can turn red. This includes fix commits before rereview.
+  behavior change can turn red. Apply the test-quality criteria below to
+  preparation and fix commits before rereview.
 - Keep the user's requirement and scope faithful. Bind review to the exact
   repository, immutable base SHA, captured head and snapshot, and chosen
   provider. A changed head needs the applicable fresh review or authorization.
@@ -56,6 +57,26 @@ load [Lock contention](references/lock-contention.md) before deciding to retry.
   full review. Advisory reviews end in a report and never a local gate.
 - Honor terminal states and operator stops. An autonomous workflow ends at
   MERGE_READY and never merges; AWAIT_OPERATOR is not an instruction to poll.
+
+## Test quality in pre-commit cleanup
+
+- **Necessity:** Identify the concrete behavior or realistic regression protected
+  and the gap in existing coverage. Extend an existing case when clear; do not
+  require a new test for every low-impact change.
+- **Clarity:** Make setup, action, and expected result easy to follow. Helpers,
+  fixtures, and parameterization should reduce reading cost, not build a
+  framework for a single case.
+- **Reliability:** Ensure failures expose the intended defect, not an earlier
+  unrelated error; retain a valid baseline where relevant. Prefer deterministic
+  control over fixed sleeps, shared mutable state, and external dependencies.
+- **Maintenance cost:** Prefer observable behavior over copying implementation
+  logic or overspecifying internal calls. Use source-text assertions when the
+  text itself is the contract, not as a substitute for behavioral checks.
+
+Delete, merge, or simplify tests when that addresses concrete duplication,
+brittleness, misleading failures, or avoidable maintenance cost. Preserve
+justified boundary, regression, and integration coverage. Test length, count,
+and style alone do not justify removal; keep cleanup within the change's scope.
 
 ## Waiting and retries
 
