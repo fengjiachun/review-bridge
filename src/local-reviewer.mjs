@@ -18,6 +18,7 @@ export function codexReviewerArguments(reviewId, requested, storeRoot, prompt) {
     "memories.generate_memories": false,
     "mcp_servers.review-bridge-author.command": "node",
     "mcp_servers.review-bridge-author.enabled": false,
+    "mcp_servers.review-bridge-reviewer.enabled": true,
     "mcp_servers.review-bridge-reviewer.command": process.execPath,
     "mcp_servers.review-bridge-reviewer.args": [server, "--role", "reviewer", "--reviewer-provider", "CODEX_TASK"],
     "mcp_servers.review-bridge-reviewer.env.REVIEW_BRIDGE_HOME": path.resolve(storeRoot),

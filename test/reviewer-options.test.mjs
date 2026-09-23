@@ -75,6 +75,8 @@ test("author MCP discovers pages, separates selection from launch, persists expl
   assert.equal(executed.args[executed.args.indexOf("--model") + 1], "second-model");
   assert.ok(executed.args.includes('model_reasoning_effort="medium"'));
   assert.ok(executed.args.includes('memories.use_memories=false'));
+  assert.ok(executed.args.includes('mcp_servers.review-bridge-reviewer.enabled=true'));
+  assert.ok(executed.args.includes('mcp_servers.review-bridge-author.enabled=false'));
   assert.ok(executed.args.includes('sandbox_workspace_write.network_access=false'));
   assert.equal(executed.stdin, "");
   assert.equal((await loadReview(store, review.id)).status, "WAITING_FOR_REVIEW");
