@@ -1,6 +1,6 @@
 # Install the DeepSeek Harness reviewer profile
 
-Describes Review Bridge v0.16.0.
+Describes Review Bridge v0.17.0.
 
 DeepSeek Harness is a supported local reviewer provider. The build output
 contains `deepseek-harness/`, which packages the same server runtime plus:
@@ -21,7 +21,7 @@ neither the machine's other skills nor the author's guidance.
 Pin `@deepseek-ai/dsh@0.1.0-rc.6`, the release these snippets were verified
 against; its plugin configuration is a developer preview and will move. Run
 `npm run verify:build`, then render `__REVIEW_BRIDGE_RELEASE_PATH__` to the
-absolute, versioned `review-bridge-v0.16.0/deepseek-harness` directory and
+absolute, versioned `review-bridge-v0.17.0/deepseek-harness` directory and
 `__REVIEW_BRIDGE_HOME__` to one explicit absolute shared store. Append each
 snippet's entries to only its matching profile's `cordis.patch.yml`. The
 packaged `deepseek-harness/README.md` gives the complete install, profile tool

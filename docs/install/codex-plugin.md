@@ -1,6 +1,6 @@
 # Install the Codex plugin
 
-Describes Review Bridge v0.16.0.
+Describes Review Bridge v0.17.0.
 
 Clone the repository and check out the release tag matching the extension you
 installed, then build the local marketplace and register it:
@@ -8,10 +8,10 @@ installed, then build the local marketplace and register it:
 ```bash
 git clone https://github.com/fengjiachun/review-bridge.git
 cd review-bridge
-git checkout v0.16.0
+git checkout v0.17.0
 npm ci
 npm run build
-codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.16.0/codex-marketplace"
+codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.17.0/codex-marketplace"
 ```
 
 Build from a Git clone, not from the release's source archive: `scripts/build.mjs`

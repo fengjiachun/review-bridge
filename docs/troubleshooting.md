@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Describes Review Bridge v0.16.0.
+Describes Review Bridge v0.17.0.
 
 State-changing tools return structured errors. Whether a retry is safe depends
 on `details`:

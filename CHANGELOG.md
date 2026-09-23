@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.17.0 - 2026-09-23
 
 ### Added
 
@@ -17,12 +17,22 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   launch, include the reviewer skill in every client package, and report
   requested settings separately from unavailable remote identity.
 
+### Changed
+
+- (#164) Require authors and reviewers to assess test value, clarity, and
+  reliability, favor focused coverage, and question redundant or
+  implementation-mirroring tests.
+
 ### Fixed
 
 - (#162) Default Codex review launches and task creation to `high` reasoning
   effort, preserving the configured model and explicit effort overrides.
   Persist the selected effort in autonomous task dispatches for recovery, and
   document the default for manual initial reviews and rereviews.
+
+### Internal
+
+- (#166) Release 0.17.0.
 
 ## 0.16.0 - 2026-09-21
 
