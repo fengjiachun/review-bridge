@@ -99,8 +99,9 @@ plus structured verdict submission.
   text itself is the contract, not as a substitute for behavioral checks.
 
 Recommend deleting, merging, or simplifying tests as well as filling coverage
-gaps. Each finding must identify concrete duplication, a brittle dependency,
-a misleading failure, or avoidable maintenance cost and suggest a proportionate
-remedy. Test length, count, and style alone are not actionable findings. Keep
+gaps. A finding recommending deletion, merging, or simplification must identify
+concrete duplication, a brittle dependency, a misleading failure, or avoidable
+maintenance cost and suggest a proportionate remedy. Test length, count, and
+style alone are not actionable findings. Keep
 cleanup within the reviewed change; preserve justified boundary, regression,
 and integration coverage.
