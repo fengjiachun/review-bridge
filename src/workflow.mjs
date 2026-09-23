@@ -4300,6 +4300,7 @@ export async function planCodexTaskDispatch(
           reviewer_provider: "CODEX_TASK",
           reasoning_effort: configuration.requested.reasoning_effort,
           reviewer_configuration: configuration,
+          launch_mode: "LOCAL_PROCESS",
         };
       },
     },
@@ -5332,6 +5333,26 @@ export async function abandonWorkflowAction(
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
     const action = workflow.active_action;
+    if (action?.action_id === actionId && action.kind === "CREATE_CODEX_REVIEWER_TASK" &&
+        action.target.launch_mode === "LOCAL_PROCESS" && ["PLANNED", "EXECUTING"].includes(action.status)) {
+      return getReviewSnapshot(storeRoot, action.target.review_id, async ({ review }) => {
+        const attempted = review.history.some((event) =>
+          event.event === "REVIEWER_DISPATCH_REQUESTED" && event.marker === action.correlation_marker);
+        if (review.status !== "WAITING_FOR_REVIEW" || review.rounds.at(-1).reviewer_dispatch || attempted) {
+          fail("WORKFLOW_ACTION_NOT_ABANDONABLE", "a launched or indeterminate reviewer attempt must be reconciled, not abandoned");
+        }
+        return publicWorkflow(await saveActionMutation(paths, workflow, "ACTION_ABANDONED", async (next) => {
+          next.active_action = null;
+          next.phase = "DISPATCH_CODEX_REVIEWER";
+          next.current_review.state_version = review.state_version;
+        }, {
+          abandoned_action_id: action.action_id,
+          abandoned_kind: action.kind,
+          requested: action.target.reviewer_configuration.requested,
+          evidence: "NO_LOCAL_LAUNCH_ATTEMPT",
+        }));
+      });
+    }
     const spec =
       action == null ? null : ACTION_KIND_SPECS[action.kind];
     if (

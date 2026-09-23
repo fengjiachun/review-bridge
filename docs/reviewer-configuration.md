@@ -29,7 +29,11 @@ from the author client or the public API catalog. The opaque `environment_id`
 binds host, runtime, Codex home, account and effective configuration; raw account
 and configuration responses are not saved. Selection and start both re-query the
 runtime, so environment changes or unsupported pairs cause explicit failures.
-No automatic downgrade or replacement is performed.
+No automatic downgrade or replacement is performed. Every integration package
+ships the matching CODEX_TASK reviewer skill with its server. The launcher passes
+that skill as process-local developer instructions, so a Claude/Hermes/DeepSeek
+author does not need a separately installed Codex plugin. Global configuration
+is not modified.
 
 [OpenAI's app-server contract](https://learn.chatgpt.com/docs/app-server#list-models-modellist)
 provides `model/list` with `supportedReasoningEfforts`, `defaultReasoningEffort`,
@@ -52,9 +56,11 @@ The autonomous controller stores the selected configuration in its dispatch
 intent. Select before binding the review. After marking the action EXECUTING,
 `launch_codex_task_dispatch` starts the same runtime and returns its task identity,
 title and prompt for the existing observation/completion protocol. Repeating it
-recovers the recorded identity instead of launching a duplicate. Legacy dispatch
-intents without selection remain readable but must be reconciled or abandoned
-before a new selected intent can execute. Round-two launch uses
+recovers the recorded identity instead of launching a duplicate. If validation fails before any launch attempt, `abandon_workflow_action` can
+release that local intent after checking the ledger; reselect explicitly and plan
+a new intent. Attempted, live or indeterminate launches are never abandoned this
+way. Legacy intents without the local-launch contract remain readable but need
+reconciliation or workflow cancellation before replacement. Round-two launch uses
 `launch_local_reviewer` after the controller advances to WAIT_LOCAL_REREVIEW.
 
 Requested configuration is a launch record. Observed remote model identity is

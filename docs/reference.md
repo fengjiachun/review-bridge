@@ -11,7 +11,7 @@ The server started with `--role author`. The summary is the first sentence of ea
 
 | Tool | Summary | Required inputs |
 | --- | --- | --- |
-| `abandon_workflow_action` | Drop an executing action that the publication has since observed in a state that settles it. | `workflow_id`, `expected_revision`, `action_id` |
+| `abandon_workflow_action` | Abandon a planned/executing LOCAL_PROCESS Codex dispatch only when the review ledger proves no launch was attempted; reselect explicitly and plan a new intent. | `workflow_id`, `expected_revision`, `action_id` |
 | `acknowledge_change_size_warning` | Record the explicit split decision a crossed change-size warning demands before the workflow may prepare its next review round: continue with a stated reason, or split with the intended cut. | `workflow_id`, `expected_revision`, `decision`, `rationale`, `operator_label` |
 | `acknowledge_codex_review_ambiguity` | Record a direct human NO_FURTHER_RESULTS_EXPECTED decision for the exact complete request and ambiguous-result closure sets. | `review_id`, `expected_revision`, `head_sha`, `request_refs`, `ambiguous_results`, `acknowledgement`, `operator_label`, `rationale` |
 | `advance_local_workflow` | Re-read the bound local-review ledger, refresh each newly captured snapshot's change size, and advance the matching two-round CODEX_TASK state, continue uncontested new findings, or pause when required. | `workflow_id`, `expected_revision` |
@@ -106,6 +106,7 @@ A code chosen at run time from a variable is not seen.
 | `AUDIT_EVENT_TOO_LARGE` | `src/publication.mjs` |
 | `AUDIT_STATE_INVALID` | `src/publication.mjs` |
 | `AUDIT_WRITE_FAILED` | `src/publication.mjs` |
+| `DISPATCH_INDETERMINATE` | `src/local-reviewer.mjs` |
 | `EVIDENCE_FUTURE` | `src/publication.mjs` |
 | `EVIDENCE_NOT_ATOMIC` | `src/publication.mjs` |
 | `EVIDENCE_STALE` | `src/publication.mjs` |

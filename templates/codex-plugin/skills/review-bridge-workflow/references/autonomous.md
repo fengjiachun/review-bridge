@@ -80,8 +80,10 @@ gap returns the ready pull request to draft before any repair.
    the catalog. After restart, recover from `active_action.dispatch`; calling
    `launch_codex_task_dispatch` again returns the same task identity without
    spawning another reviewer. Never reconstruct the strings or silently substitute
-   a model. Legacy intents without a model remain readable; reconcile or abandon
-   the old intent before selecting and planning a new one.
+   a model. If environment drift rejects a launch before any attempt, use
+   `abandon_workflow_action`, explicitly reselect, then plan again. It refuses
+   attempted or indeterminate launches. Legacy intents without the local-launch
+   contract remain readable; reconcile them or cancel the workflow.
 6. If the client cannot create, discover, or wait for that independent task,
    call `pause_autonomous_workflow` with
    `TASK_ORCHESTRATION_UNAVAILABLE`. If creation may have succeeded but

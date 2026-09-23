@@ -78,6 +78,9 @@ test("author MCP discovers pages, separates selection from launch, persists expl
   assert.ok(executed.args.includes('mcp_servers.review-bridge-reviewer.enabled=true'));
   assert.ok(executed.args.includes('mcp_servers.review-bridge-author.enabled=false'));
   assert.ok(executed.args.includes('sandbox_workspace_write.network_access=false'));
+  const instructions = executed.args.find((value) => value.startsWith("developer_instructions="));
+  assert.equal(JSON.parse(instructions.slice("developer_instructions=".length)),
+    await fsp.readFile("templates/codex-plugin/skills/review-bridge-reviewer/SKILL.md", "utf8"));
   assert.equal(executed.stdin, "");
   assert.equal((await loadReview(store, review.id)).status, "WAITING_FOR_REVIEW");
   const other = await call(client, "discover_reviewer_options", { repository_path: repository, reviewer_provider: "CLAUDE_DESKTOP" });

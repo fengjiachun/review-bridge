@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
@@ -1147,6 +1147,17 @@ const trackedFiles = run(
   .filter(Boolean)
   .sort();
 assert.deepEqual(archiveFiles, trackedFiles);
+
+const sourceReviewerSkill = await fsp.readFile(
+  path.join(projectRoot, "templates/codex-plugin/skills/review-bridge-reviewer/SKILL.md"), "utf8",
+);
+for (const root of [pluginRoot, reviewerRoot, hermesIntegration, deepseekHarness]) {
+  assert.equal(await fsp.readFile(path.join(root, "server", "reviewer-skill.md"), "utf8"), sourceReviewerSkill);
+  const { codexReviewerArguments } = await import(pathToFileURL(path.join(root, "server", "local-reviewer.mjs")));
+  const args = codexReviewerArguments("package-check", { model: "fixture", reasoning_effort: "high" }, root);
+  const instructions = args.find((value) => value.startsWith("developer_instructions="));
+  assert.equal(JSON.parse(instructions.slice("developer_instructions=".length)), sourceReviewerSkill);
+}
 
 const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-build-"));
 try {

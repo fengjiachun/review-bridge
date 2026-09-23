@@ -7,7 +7,11 @@ import { fileURLToPath } from "node:url";
 const server = fileURLToPath(new URL("./server.mjs", import.meta.url));
 
 export function codexReviewerArguments(reviewId, requested, storeRoot, prompt) {
+  const packagedSkill = fileURLToPath(new URL("./reviewer-skill.md", import.meta.url));
+  const skill = fs.existsSync(packagedSkill) ? packagedSkill :
+    fileURLToPath(new URL("../templates/codex-plugin/skills/review-bridge-reviewer/SKILL.md", import.meta.url));
   const settings = {
+    developer_instructions: fs.readFileSync(skill, "utf8"),
     model_reasoning_effort: requested.reasoning_effort,
     "sandbox_workspace_write.network_access": false,
     "sandbox_workspace_write.writable_roots": [],
