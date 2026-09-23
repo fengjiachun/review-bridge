@@ -67,22 +67,21 @@ gap returns the ready pull request to draft before any repair.
    task has been dispatched. Only an explicit decision may call
    `extend_change_size_budget`; resume separately after the new budget admits
    the measured total.
-5. For `PLAN_CODEX_TASK_DISPATCH`, call `plan_codex_task_dispatch`, passing
-   `reasoning_effort` when the operator explicitly requests another level;
-   it defaults to `high`. Persist
-   `EXECUTING` with `mark_workflow_action_executing` immediately before task
-   creation. Create a fresh non-forked Codex task whose title and prompt equal
-   the returned dispatch payload. Set its reasoning effort to the returned
-   `dispatch.reasoning_effort`; keep the operator's
-   configured model. Enumerate the exact opaque marker and call
-   `record_codex_task_observation` only when exactly one matching task exists;
-   then call `complete_workflow_action`. After an indeterminate create,
-   reconcile the marker before creating anything else. After a restart,
-   recover the exact title, prompt, and reasoning effort from `active_action.dispatch` in
-   `get_autonomous_workflow` or `get_autonomous_workflow_summary`; never
-   reconstruct the strings or call `plan_codex_task_dispatch` again. A legacy
-   dispatch without `reasoning_effort` uses `high` unless the operator explicitly
-   requests another level.
+5. Before binding the review, use the preauthorized model/effort choice with
+   `discover_reviewer_options` and `select_reviewer_configuration`. Missing
+   unattended choices stop for configuration; never wait for interactive input.
+   For `PLAN_CODEX_TASK_DISPATCH`, call `plan_codex_task_dispatch`; it revalidates
+   the persisted selection and stores `dispatch.model`, `dispatch.reasoning_effort`,
+   and `dispatch.reviewer_configuration` with the exact opaque marker, title and
+   prompt. Persist `EXECUTING` with `mark_workflow_action_executing`, then call
+   `launch_codex_task_dispatch` on that action. Use its returned task ID, exact
+   title and prompt with `record_codex_task_observation`, then
+   `complete_workflow_action`. The launch uses the same runtime that supplied
+   the catalog. After restart, recover from `active_action.dispatch`; calling
+   `launch_codex_task_dispatch` again returns the same task identity without
+   spawning another reviewer. Never reconstruct the strings or silently substitute
+   a model. Legacy intents without a model remain readable; reconcile or abandon
+   the old intent before selecting and planning a new one.
 6. If the client cannot create, discover, or wait for that independent task,
    call `pause_autonomous_workflow` with
    `TASK_ORCHESTRATION_UNAVAILABLE`. If creation may have succeeded but
@@ -114,8 +113,11 @@ gap returns the ready pull request to draft before any repair.
    authoritative `head_sha` values with `git diff --name-only` to derive the
    actual fix files, and narrate those files with the latest `head_sha` as the
    fix commit. For a rebuttal-only
-   rereview, state that no code commit was required. Round two
-   reuses the same reviewer task. When its result arrives, call `get_review`
+   rereview, state that no code commit was required. After advancing to
+   `WAIT_LOCAL_REREVIEW`, call `launch_local_reviewer` with the current review
+   state version and inherited selection; it records a separate round-two
+   process. After a restart inspect `get_review_summary.reviewer_dispatch`
+   before launching; a live or indeterminate dispatch blocks duplicates. When its result arrives, call `get_review`
    again and narrate every per-finding decision and any new finding from its
    `rereview_decisions` and `findings`. A contested `HUMAN_REQUIRED`
    review pauses the workflow; state the escalation and why it needs a human.

@@ -27,3 +27,12 @@ Then, in Claude Desktop:
 Claude Desktop is a local application, but that does not imply local model
 inference. Apply your Anthropic account and organization data policy before
 reviewing confidential code.
+
+## Use Claude as an author
+
+The reviewer extension above only exposes reviewer tools. For authoring, render
+and install the separate [author MCP entry](../../templates/claude-extension/author/mcp.json)
+and follow its [local review instructions](../../templates/claude-extension/author/README.md).
+It exposes discovery, explicit selection and Codex launch on the MCP server host;
+no shell or computer use in Claude is required. Keep author and reviewer contexts
+separate. The entry is included under `claude-extension-source/author` in builds.

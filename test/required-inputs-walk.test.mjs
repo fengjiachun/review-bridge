@@ -1,3 +1,4 @@
+import { prepareConfiguredReview as prepareReview } from "./helpers/configured-review.mjs";
 // The mechanical reachability walk over required_inputs (#92).
 //
 // Every finding of the #82 review was one defect: a summary declared a call
@@ -21,7 +22,6 @@ import {
   finalizeLocalGate,
   getReviewSummary,
   prepareRereview,
-  prepareReview,
   submitInitialReview,
   submitRereview,
   submitResolutions,

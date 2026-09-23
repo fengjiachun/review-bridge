@@ -69,8 +69,19 @@ After a verdict, load [Handle findings](findings.md) for findings or
    binding first: each review is immutably bound to one provider, and a
    `CLAUDE_DESKTOP`, `CODEX_TASK`, `HERMES`, or `DEEPSEEK_HARNESS` reviewer
    cannot list or open a review bound to any of the other providers.
+   Before preparation, call `discover_reviewer_options` for the repository and
+   selected provider. This queries the reviewer host/runtime/account, independently
+   of the author conversation. Show the returned visible models and their efforts,
+   with `suggested` preselected when present. Use a structured choice if the client
+   supports one; otherwise ask in conversation. Explicit user choices need no repeat
+   question. A suggestion or displayed catalog is not a selection or permission to
+   start. Unattended work needs a preauthorized choice; missing choices stop without
+   waiting for interaction. Other providers report their discovery/control limits.
 7. Call `prepare_review` with the base SHA captured in step 1, the selected
    provider, and the optional verified parent from step 5.
+   For `CODEX_TASK`, call `select_reviewer_configuration` with the explicitly
+   selected `model`, `reasoning_effort`, and catalog `environment_id`, using the
+   prepared review's `state_version`. Do this before binding an autonomous workflow.
 8. Call `get_review_summary`, record its `state_version`, and report the
    returned `review_id`, `reviewer_provider`, `review_strategy`, and state
    `WAITING_FOR_REVIEW`. Also report `current_snapshot.change_size`: manual
@@ -81,10 +92,8 @@ After a verdict, load [Handle findings](findings.md) for findings or
 9. Start a fresh reviewer context for every new `review_id`. For
    `CLAUDE_DESKTOP`, use a fresh Claude conversation. For `CODEX_TASK`, create
    a new Codex task rather than forking this task, and send it only the review
-   ID and a request to follow the packaged reviewer skill. Set its reasoning
-   effort to `high` unless the operator explicitly requests another level;
-   keep the operator's configured model. To launch that task
-   from this session's shell, follow [Dispatching a CODEX_TASK review](codex-task.md). For
+   ID and a request to follow the packaged reviewer skill. Use the persisted reviewer configuration. To launch on the same runtime
+   that supplied the catalog, follow [Dispatching a CODEX_TASK review](codex-task.md). For
    `HERMES`, start
    a fresh, independent Hermes reviewer context in the packaged Hermes reviewer
    profile, and send it only the review ID and a request to follow the packaged

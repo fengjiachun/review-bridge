@@ -1216,6 +1216,35 @@ try {
   run("git", ["add", "."], repository);
   run("git", ["commit", "-m", "change value"], repository);
 
+  const claudeAuthorConfig = await readJson(path.join(reviewerRoot, "author", "mcp.json"));
+  const claudeAuthorEntry = claudeAuthorConfig.mcpServers["review-bridge-author"];
+  const claudeAuthorTransport = new StdioClientTransport({
+    command: claudeAuthorEntry.command,
+    args: claudeAuthorEntry.args.map((value) => value.replace("__REVIEW_BRIDGE_RELEASE_PATH__", reviewerRoot)),
+    env: {
+      ...process.env,
+      REVIEW_BRIDGE_HOME: path.join(temporary, "claude-author-store"),
+      REVIEW_BRIDGE_CODEX_COMMAND: path.join(projectRoot, "test", "fixtures", "codex-runtime.mjs"),
+    },
+    stderr: "pipe",
+  });
+  const claudeAuthor = new Client({ name: "claude-author-smoke", version: releaseVersion });
+  await claudeAuthor.connect(claudeAuthorTransport);
+  try {
+    const options = await call(claudeAuthor, "discover_reviewer_options", { repository_path: repository, reviewer_provider: "CODEX_TASK" });
+    assert.deepEqual(options.models.map((entry) => entry.model), ["review-model", "second-model"]);
+    const pending = await call(claudeAuthor, "prepare_review", {
+      repository_path: repository, base_ref: baseSha, requirement: "Package author smoke", implementation_scope: "value.js", reviewer_provider: "CODEX_TASK",
+    });
+    const selected = await call(claudeAuthor, "select_reviewer_configuration", {
+      review_id: pending.id, expected_state_version: pending.state_version, ...options.suggested,
+    });
+    assert.equal(selected.reviewer_configuration.requested.model, options.suggested.model);
+    assert.equal(selected.reviewer_configuration.observed.status, "unavailable");
+  } finally {
+    await claudeAuthor.close();
+  }
+
   const author = await connect(authorServer, "author", store);
   const reviewer = await connect(
     reviewerServer,

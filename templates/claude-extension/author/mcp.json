@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "review-bridge-author": {
+      "command": "node",
+      "args": ["__REVIEW_BRIDGE_RELEASE_PATH__/server/server.mjs", "--role", "author"],
+      "env": {"REVIEW_BRIDGE_HOME": "__REVIEW_BRIDGE_HOME__", "REVIEW_BRIDGE_CODEX_COMMAND": "__CODEX_EXECUTABLE__"}
+    }
+  }
+}

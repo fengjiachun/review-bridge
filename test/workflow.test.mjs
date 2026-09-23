@@ -1,3 +1,4 @@
+import { prepareConfiguredReview as prepareReview } from "./helpers/configured-review.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -9,8 +10,8 @@ import {
   finalizeLocalGate,
   getReviewSummary,
   openReview,
+  selectReviewerConfiguration,
   prepareRereview,
-  prepareReview,
   submitInitialReview,
   submitRereview,
   submitResolutions,
@@ -31,6 +32,7 @@ import {
   markWorkflowActionExecuting,
   pauseAutonomousWorkflow,
   planCodexTaskDispatch,
+  launchCodexTaskDispatch,
   planDraftPullRequest,
   planWorkflowPush,
   recordCodexTaskObservation,
@@ -997,6 +999,9 @@ test("Codex task dispatch preserves an effort override after recovery", async (t
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const { workflow, review } = await prepareBoundWorkflow(state);
+  await selectReviewerConfiguration(state.store, review.id, review.state_version, {
+    ...review.reviewer_configuration.requested, reasoning_effort: "medium",
+  });
   const planned = await planCodexTaskDispatch(
     state.store,
     workflow.workflow_id,
@@ -1015,6 +1020,7 @@ test("Codex task dispatch preserves an effort override after recovery", async (t
   assert.equal(reloaded.active_action.target.reasoning_effort, "medium");
   assert.equal(reloaded.active_action.dispatch.reasoning_effort, "medium");
   assert.equal(summary.active_action.dispatch.reasoning_effort, "medium");
+  assert.equal(summary.active_action.dispatch.model, "review-model");
   assert.equal(summary.active_action.status, "EXECUTING");
 });
 
@@ -5795,4 +5801,31 @@ test("an active workflow cannot carry released claims", async (t) => {
     getAutonomousWorkflow(state.store, workflow.workflow_id),
     /WORKFLOW_CLAIMS_INVALID/,
   );
+});
+
+
+test("controller launch recovers the selected runtime task and completes its intent", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const planned = await planCodexTaskDispatch(state.store, workflow.workflow_id, workflow.revision, review.id);
+  const executing = await markWorkflowActionExecuting(state.store, workflow.workflow_id, planned.workflow.revision, planned.action.action_id);
+  const launched = await launchCodexTaskDispatch(state.store, workflow.workflow_id, executing.revision, planned.action.action_id);
+  const recovered = await launchCodexTaskDispatch(state.store, workflow.workflow_id, executing.revision, planned.action.action_id);
+  assert.equal(recovered.task_id, launched.task_id);
+  assert.equal(recovered.requested.model, "review-model");
+  const observed = await recordCodexTaskObservation(state.store, workflow.workflow_id, executing.revision, planned.action.action_id, {
+    matchingTaskIds: [launched.task_id], taskId: launched.task_id, title: launched.title, prompt: launched.prompt,
+  });
+  const completed = await completeWorkflowAction(state.store, workflow.workflow_id, observed.revision, planned.action.action_id);
+  assert.equal(completed.phase, "WAIT_LOCAL_REVIEW");
+  for (let i = 0; i < 100; i++) {
+    const summary = await getReviewSummary(state.store, review.id);
+    if (summary.reviewer_dispatch.exit) {
+      assert.equal(summary.reviewer_dispatch.exit.code, 0);
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  assert.fail("fake reviewer did not exit");
 });
