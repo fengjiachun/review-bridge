@@ -9,6 +9,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+## 0.17.0 - 2026-09-23
+
 ### Added
 
 - (#165) Let author MCP clients discover local Codex reviewer models and
@@ -16,6 +18,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   rereviews and recovery. Reject unavailable choices or runtime changes before
   launch, include the reviewer skill in every client package, and report
   requested settings separately from unavailable remote identity.
+
+### Changed
+
+- (#164) Require authors and reviewers to assess test value, clarity, and
+  reliability, favor focused coverage, and question redundant or
+  implementation-mirroring tests.
 
 ### Fixed
 
