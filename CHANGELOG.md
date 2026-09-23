@@ -7,8 +7,6 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
-
 ## 0.17.0 - 2026-09-23
 
 ### Added
