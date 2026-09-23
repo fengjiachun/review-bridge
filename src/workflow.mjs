@@ -9,6 +9,8 @@ import {
   continuationFindingFingerprint,
   DEFAULT_CHANGE_SIZE_BUDGET,
   getReviewSnapshot,
+  loadReview,
+  launchLocalReviewer,
   patchChangeSize,
 } from "./core.mjs";
 import {
@@ -39,6 +41,8 @@ import {
   WORKFLOW_ID_RE,
 } from "./workflow-binding.mjs";
 import { isFullSha } from "./object-id.mjs";
+import { readDispatchReceipt } from "./local-reviewer.mjs";
+import { validateReviewerSelection } from "./reviewer-options.mjs";
 import { workflowRequiredInputs } from "./tool-inputs.mjs";
 
 export const AUTONOMOUS_CAPABILITIES = Object.freeze([
@@ -485,6 +489,10 @@ export const ACTION_KIND_SPECS = {
         ...(action.target.reasoning_effort === undefined
           ? {}
           : { reasoning_effort: action.target.reasoning_effort }),
+        ...(action.target.reviewer_configuration == null ? {} : {
+          model: action.target.reviewer_configuration.requested.model,
+          reviewer_configuration: action.target.reviewer_configuration,
+        }),
         marker,
         title: `Review Bridge ${marker}`,
         prompt: [
@@ -4204,9 +4212,9 @@ export async function planCodexTaskDispatch(
   workflowId,
   expectedRevision,
   reviewId,
-  reasoningEffort = "high",
+  reasoningEffort,
 ) {
-  assertString(reasoningEffort, "reasoning_effort", { max: 64 });
+  if (reasoningEffort !== undefined) assertString(reasoningEffort, "reasoning_effort", { max: 64 });
   const preflight = await withWorkflowLock(
     storeRoot,
     workflowId,
@@ -4275,17 +4283,24 @@ export async function planCodexTaskDispatch(
     {
       planPhases: ["DISPATCH_CODEX_REVIEWER"],
       invalidMessage: "Codex task dispatch is not currently plannable",
-      target: (workflow) => {
+      target: async (workflow) => {
         if (workflow.current_review?.review_id !== reviewId) {
           fail(
             "WORKFLOW_PHASE_INVALID",
             "Codex task dispatch is not currently plannable",
           );
         }
+        const review = await loadReview(storeRoot, reviewId);
+        const configuration = await validateReviewerSelection(storeRoot, review.rounds.at(-1)?.reviewer_configuration?.requested);
+        if (reasoningEffort !== undefined && reasoningEffort !== configuration.requested.reasoning_effort) {
+          throw new Error("Select the changed reasoning effort before planning dispatch");
+        }
         return {
           review_id: reviewId,
           reviewer_provider: "CODEX_TASK",
-          reasoning_effort: reasoningEffort,
+          reasoning_effort: configuration.requested.reasoning_effort,
+          reviewer_configuration: configuration,
+          launch_mode: "LOCAL_PROCESS",
         };
       },
     },
@@ -4297,10 +4312,9 @@ export async function planCodexTaskDispatch(
 // state_version while changing nothing the workflow bound. Such drift is
 // explainable from the summary alone: the review still waits for its initial
 // review on the identical snapshot, head, strategy, and change size with no
-// findings, and errata evidence exists to have moved. WAITING_FOR_REVIEW
-// admits no other ledger mutation, so anything outside this shape keeps the
-// strict refusal.
-function reviewDriftExplainedByErrata(summary, boundReview) {
+// findings. A matching launch record also explains operational metadata
+// changes without allowing a verdict to predate dispatch completion.
+function reviewDriftExplainedByErrata(summary, boundReview, action = null) {
   const changeSize = summary.current_snapshot?.change_size;
   return (
     boundReview.status === "WAITING_FOR_REVIEW" &&
@@ -4318,7 +4332,12 @@ function reviewDriftExplainedByErrata(summary, boundReview) {
         changeSize.deleted_lines === boundReview.change_size.deleted_lines &&
         changeSize.total_lines === boundReview.change_size.total_lines)) &&
     (summary.errata_watermark > 0 ||
-      summary.last_opened_errata_watermark > 0)
+      summary.last_opened_errata_watermark > 0 ||
+      (action?.target.reviewer_configuration != null &&
+        summary.reviewer_dispatch?.status === "STARTED" &&
+        summary.reviewer_dispatch?.marker === action.correlation_marker &&
+        canonicalJson(summary.reviewer_configuration?.requested) ===
+          canonicalJson(action.target.reviewer_configuration.requested)))
   );
 }
 
@@ -5314,6 +5333,26 @@ export async function abandonWorkflowAction(
     requireRevision(workflow, expectedRevision);
     requireActive(workflow);
     const action = workflow.active_action;
+    if (action?.action_id === actionId && action.kind === "CREATE_CODEX_REVIEWER_TASK" &&
+        action.target.launch_mode === "LOCAL_PROCESS" && ["PLANNED", "EXECUTING"].includes(action.status)) {
+      return getReviewSnapshot(storeRoot, action.target.review_id, async ({ review }) => {
+        const attempted = review.history.some((event) =>
+          event.event === "REVIEWER_DISPATCH_REQUESTED" && event.marker === action.correlation_marker);
+        if (review.status !== "WAITING_FOR_REVIEW" || review.rounds.at(-1).reviewer_dispatch || attempted) {
+          fail("WORKFLOW_ACTION_NOT_ABANDONABLE", "a launched or indeterminate reviewer attempt must be reconciled, not abandoned");
+        }
+        return publicWorkflow(await saveActionMutation(paths, workflow, "ACTION_ABANDONED", async (next) => {
+          next.active_action = null;
+          next.phase = "DISPATCH_CODEX_REVIEWER";
+          next.current_review.state_version = review.state_version;
+        }, {
+          abandoned_action_id: action.action_id,
+          abandoned_kind: action.kind,
+          requested: action.target.reviewer_configuration.requested,
+          evidence: "NO_LOCAL_LAUNCH_ATTEMPT",
+        }));
+      });
+    }
     const spec =
       action == null ? null : ACTION_KIND_SPECS[action.kind];
     if (
@@ -5485,11 +5524,9 @@ export async function recordDraftPullRequestObservation(
 }
 
 async function completeCodexTaskDispatch(storeRoot, workflow, paths, action) {
-  // The bound review must still be exactly the state that was bound before
-  // dispatch, and it must stay that way until ACTION_COMPLETED is
-  // persisted: the check and the completion commit share the review
-  // mutation lock, so a verdict can never slip in between them and predate
-  // the completed reviewer task.
+  // A recorded local process may finish while its controller is disconnected.
+  // Only the matching durable launch may adopt that verdict; legacy external
+  // task observations retain the stricter pending-review check.
   return getReviewSnapshot(
     storeRoot,
     action.target.review_id,
@@ -5499,10 +5536,25 @@ async function completeCodexTaskDispatch(storeRoot, workflow, paths, action) {
         workflow,
         action.target.review_id,
       );
+      const dispatch = summary.reviewer_dispatch;
+      const recordedLaunch = action.target.reviewer_configuration != null &&
+        dispatch?.status === "STARTED" && dispatch.marker === action.correlation_marker &&
+        dispatch.task_id === action.provider_response.task_id &&
+        canonicalJson(dispatch.requested) === canonicalJson(action.target.reviewer_configuration.requested) &&
+        await readDispatchReceipt(dispatch.attempt_root, "started.json");
+      if (dispatch && action.target.reviewer_configuration != null && !recordedLaunch) {
+        throw new Error("Reviewer dispatch has no matching durable started-process receipt");
+      }
+      const completedBeforeRecovery = recordedLaunch && summary.current_round === 1 &&
+        ["CLEAN", "REVIEW_SUBMITTED"].includes(summary.status) &&
+        summary.current_snapshot?.snapshot_hash === workflow.current_review.snapshot_hash &&
+        summary.current_snapshot?.head_sha === workflow.current_review.head_sha &&
+        canonicalJson(summary.review_strategy) === canonicalJson(workflow.current_review.strategy);
       if (
+        !completedBeforeRecovery &&
         (summary.status !== "WAITING_FOR_REVIEW" ||
           summary.state_version !== workflow.current_review.state_version) &&
-        !reviewDriftExplainedByErrata(summary, workflow.current_review)
+        !reviewDriftExplainedByErrata(summary, workflow.current_review, action)
       ) {
         fail(
           "WORKFLOW_REVIEW_TRANSITION_INVALID",
@@ -7358,5 +7410,25 @@ export async function releaseWorkflowClaims(
       },
     );
     return publicWorkflow(next);
+  });
+}
+
+export async function launchCodexTaskDispatch(storeRoot, workflowId, expectedRevision, actionId) {
+  return withWorkflowLock(storeRoot, workflowId, async (workflow) => {
+    requireRevision(workflow, expectedRevision);
+    requireActive(workflow);
+    requireCapability(workflow, "CREATE_CODEX_REVIEWER_TASKS");
+    const action = workflow.active_action;
+    if (action?.action_id !== actionId || action.kind !== "CREATE_CODEX_REVIEWER_TASK" || action.status !== "EXECUTING") {
+      throw new Error("Codex dispatch requires the current EXECUTING action");
+    }
+    if (!action.target.reviewer_configuration) throw new Error("Legacy dispatch has no model selection; reconcile or abandon before selecting a new intent");
+    const review = await loadReview(storeRoot, action.target.review_id);
+    const configuration = review.rounds.at(-1)?.reviewer_configuration;
+    if (canonicalJson(configuration?.requested) !== canonicalJson(action.target.reviewer_configuration.requested)) {
+      throw new Error("Reviewer configuration changed after dispatch was planned");
+    }
+    const launched = await launchLocalReviewer(storeRoot, review.id, review.state_version, action.dispatch);
+    return { ...launched.reviewer_dispatch, title: action.dispatch.title, prompt: action.dispatch.prompt };
   });
 }

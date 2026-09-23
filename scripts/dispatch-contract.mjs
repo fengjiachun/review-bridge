@@ -632,7 +632,7 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "only the autonomous state machine is CODEX_TASK-only",
       /autonomous workflow's own state machine dispatches `CODEX_TASK` and no other provider/,
     ],
-    ["nothing verifies the dispatch", /observes nothing about how the task was started/],
+    ["remote identity is not authenticated", /does not authenticate the remote model identity/],
     // The one boundary this launch must never be read as loosening: an
     // unattended Codex launch is cleared, a programmatic Claude launch never is.
     [
@@ -662,15 +662,15 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // the launch blocks on EOF.
     [
       "match",
-      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'model_reasoning_effort="high"' \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'memories\.use_memories=false' \\\n *-c 'memories\.generate_memories=false' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
-      "launch is not the sandboxed one-shot form with the git-repo check skipped, high reasoning effort, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, memories pinned off, the author server disabled, and stdin closed",
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write --model <selected-model> \\\n *-c 'model_reasoning_effort="<selected-effort>"' \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'memories\.use_memories=false' \\\n *-c 'memories\.generate_memories=false' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
+      "launch is not the sandboxed one-shot form with the git-repo check skipped, selected model and reasoning effort, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, memories pinned off, the author server disabled, and stdin closed",
     ],
     // Round two is another launch, not a resume, and needs its own runnable
     // form in the same shape.
     [
       "match",
-      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'model_reasoning_effort="high"' \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'memories\.use_memories=false' \\\n *-c 'memories\.generate_memories=false' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
-      "round-two launch form with the git-repo check skipped, high reasoning effort, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, memories pinned off, the author server disabled, and stdin closed",
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write --model <selected-model> \\\n *-c 'model_reasoning_effort="<selected-effort>"' \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'memories\.use_memories=false' \\\n *-c 'memories\.generate_memories=false' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
+      "round-two launch form with the git-repo check skipped, selected model and reasoning effort, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, memories pinned off, the author server disabled, and stdin closed",
     ],
     [
       "doesNotMatch",

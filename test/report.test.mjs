@@ -1647,11 +1647,7 @@ test("the brief reports an advisory review's findings instead of calling them op
   assert.doesNotMatch(gated, /reported \(advisory/);
 });
 
-// The format number is the one line the bump is allowed to move. Everything
-// else in the full tier is pinned to the document this renderer produced
-// before the brief existed, so a change to a shared helper that alters the
-// full rendering fails here rather than passing unnoticed.
-test("the full tier still renders the document it rendered before the brief, format number aside", async () => {
+test("legacy full reports retain their contents and mark reviewer configuration unavailable", async () => {
   const baseline = await fsp.readFile(
     new URL("./fixtures/report-full-baseline.md", import.meta.url),
     "utf8",
@@ -1661,11 +1657,12 @@ test("the full tier still renders the document it rendered before the brief, for
     ledgerDirectory: BRIEF_LEDGER_DIRECTORY,
   });
   const withoutFormat = (markdown) => markdown.replace(/-f\d+`/g, "-f<format>`");
-  assert.equal(withoutFormat(rendered), withoutFormat(baseline));
-  // The baseline was captured at format 1; the bump is what the brief is for.
+  assert.equal(withoutFormat(rendered.replace(/^- Round \d+ reviewer requested:.*\n/gm, "")), withoutFormat(baseline));
+  assert.match(rendered, /Round 1 reviewer requested: unavailable; observed: unavailable/);
+  // The stored baseline retains its original rendering identity.
   assert.ok(baseline.includes("- Report revision: `9-f1`"));
   assert.ok(rendered.includes(`- Report revision: \`9-f${REPORT_FORMAT}\``));
-  assert.equal(REPORT_FORMAT, 3);
+  assert.equal(REPORT_FORMAT, 4);
 });
 
 test("the brief opens with the terminal state and where the review goes next", () => {
@@ -1700,7 +1697,7 @@ test("the brief puts what is still open before what is settled, and counts both 
   // resolved, one as a sustained rebuttal, two still open, one carried in.
   assert.ok(markdown.includes("| Findings | 5 — 1 major, 2 minor, 2 nit; 1 finding carried in from an earlier review |"));
   assert.ok(markdown.includes("| Outcome | 2 fixed and verified · 2 open · 1 rebutted |"));
-  assert.ok(markdown.includes("| Reviewer | `CODEX_TASK`, `FULL` strategy, 2 rounds |"));
+  assert.ok(markdown.includes("| Reviewer | `CODEX_TASK`, `FULL` strategy, 2 rounds, requested unavailable; observed unavailable |"));
   assert.ok(markdown.includes("| Reviewed | `docs/rfcs/0007-object-store-wal.md` (+224 −6 in round 1, +244 −31 in round 2) |"));
   // Wall time is summed from each round's prepared event to its own verdict,
   // and the span is the first head to the last verdict, which is longer.
@@ -1802,7 +1799,7 @@ test("a review still in progress is briefed as in progress, and an advisory one 
     continuableInTwoRounds({ status: "REVIEW_SUBMITTED", advisory: true }),
   );
   assert.match(advisory.split("\n")[2], /\(advisory: the findings are reported and there is no author loop to close them\)\.$/);
-  assert.ok(advisory.includes("| Reviewer | `CODEX_TASK` (advisory: attests nothing), `FULL` strategy, 2 rounds |"));
+  assert.ok(advisory.includes("| Reviewer | `CODEX_TASK` (advisory: attests nothing), `FULL` strategy, 2 rounds, requested unavailable; observed unavailable |"));
 });
 
 test("free text from the ledger cannot shape the brief or break out of a table cell", () => {
@@ -1996,7 +1993,7 @@ test("the five places that carry the report's identity agree, renderer format in
   // 1. reportRevision, where the identity is minted.
   const revision = reportRevision(review, publication, publicationSummary);
   assert.equal(revision, `${review.state_version}-f${REPORT_FORMAT}`);
-  assert.equal(REPORT_FORMAT, 3);
+  assert.equal(REPORT_FORMAT, 4);
 
   const receipt = await writeReviewReport(state.store, state.reviewId);
   // 2. the file name, and 3. the tool receipt.

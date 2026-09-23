@@ -11,7 +11,7 @@ The server started with `--role author`. The summary is the first sentence of ea
 
 | Tool | Summary | Required inputs |
 | --- | --- | --- |
-| `abandon_workflow_action` | Drop an executing action that the publication has since observed in a state that settles it. | `workflow_id`, `expected_revision`, `action_id` |
+| `abandon_workflow_action` | Abandon a planned/executing LOCAL_PROCESS Codex dispatch only when the review ledger proves no launch was attempted; reselect explicitly and plan a new intent. | `workflow_id`, `expected_revision`, `action_id` |
 | `acknowledge_change_size_warning` | Record the explicit split decision a crossed change-size warning demands before the workflow may prepare its next review round: continue with a stated reason, or split with the intended cut. | `workflow_id`, `expected_revision`, `decision`, `rationale`, `operator_label` |
 | `acknowledge_codex_review_ambiguity` | Record a direct human NO_FURTHER_RESULTS_EXPECTED decision for the exact complete request and ambiguous-result closure sets. | `review_id`, `expected_revision`, `head_sha`, `request_refs`, `ambiguous_results`, `acknowledgement`, `operator_label`, `rationale` |
 | `advance_local_workflow` | Re-read the bound local-review ledger, refresh each newly captured snapshot's change size, and advance the matching two-round CODEX_TASK state, continue uncontested new findings, or pause when required. | `workflow_id`, `expected_revision` |
@@ -22,6 +22,7 @@ The server started with `--role author`. The summary is the first sentence of ea
 | `bind_workflow_review` | Bind one new CODEX_TASK review only when its repository, requirement, scope, base, and head equal the workflow, report warning-threshold headroom, and pause before dispatch when its immutable change size exceeds the workflow budget. | `workflow_id`, `expected_revision`, `review_id` |
 | `cancel_autonomous_workflow` | Explicitly stop future workflow writes while retaining branches, reviews, audit evidence, and ownership claims. | `workflow_id`, `expected_revision`, `operator_label`, `rationale` |
 | `complete_workflow_action` | Complete a uniquely observed action and advance the workflow without performing another provider write. | `workflow_id`, `expected_revision`, `action_id` |
+| `discover_reviewer_options` | Query the reviewer runtime on this MCP host, not the author's model. | `repository_path`, `reviewer_provider` |
 | `export_human_arbitration` | Read a HUMAN_REQUIRED review at an exact state version and return structured canonical ledger data plus deterministic copyable Markdown without changing review state. | `review_id`, `expected_state_version` |
 | `extend_change_size_budget` | Explicitly raise an exceeded autonomous change-size budget without resuming the workflow or changing its authorization digest. | `workflow_id`, `expected_revision`, `new_budget`, `operator_label`, `rationale` |
 | `extend_local_cycle_budget` | Explicitly raise an exhausted autonomous local-cycle budget without resuming the workflow or changing its authorization digest. | `workflow_id`, `expected_revision`, `new_budget`, `operator_label`, `rationale` |
@@ -38,11 +39,13 @@ The server started with `--role author`. The summary is the first sentence of ea
 | `get_review` | Read findings, author resolutions, decisions, errata, and state. | `review_id` |
 | `get_review_summary` | Read current state, next action, snapshot identity, and compact finding counts without returning the full review ledger. | `review_id` |
 | `get_thread_resolution_plan` | Per-thread eligibility verdicts for the publication's recorded observation: refusal reasons for ineligible threads; addressed-by commits, comment IDs, exact comment watermark, and eligibility digest for eligible ones. | `review_id` |
+| `launch_codex_task_dispatch` | Execute the current EXECUTING Codex dispatch on its discovered runtime. | `workflow_id`, `expected_revision`, `action_id` |
+| `launch_local_reviewer` | After selection and authorization to start, launch Codex on the same host/runtime used for discovery. | `review_id`, `expected_state_version` |
 | `list_autonomous_workflows` | List compact autonomous workflow states, each with the required_inputs of its own next action, without advancing them. |  |
 | `list_reviews` | List Review Bridge tasks and their current states. |  |
 | `mark_workflow_action_executing` | Durably record EXECUTING immediately before the planned external write; a push additionally requires the pinned URL resolved to the authorized repository ID, a thread resolution requires the immediately preceding thread pre-read (thread ID, resolved flag, and -- while unresolved -- the exact comment watermark), a compensating unresolve requires the exact authorized pull request, thread, invalidated watermark, and resolved flag, and a mark-ready requires the immediately preceding pull-request pre-read (repository, number, both branches, head SHA, and draft flag). | `workflow_id`, `expected_revision`, `action_id` |
 | `pause_autonomous_workflow` | Fail closed when task orchestration, action reconciliation, authorization, permission, or progress evidence is unavailable, or when a required check, a base merge, or a history rewrite needs a judgement the server cannot derive. | `workflow_id`, `expected_revision`, `reason_code`, `blocked_action`, `evidence` |
-| `plan_codex_task_dispatch` | Persist a single CREATE_CODEX_REVIEWER_TASK intent and return its exact opaque marker, task title, prompt, and reasoning effort (default high). | `workflow_id`, `expected_revision`, `review_id` |
+| `plan_codex_task_dispatch` | Persist a single CREATE_CODEX_REVIEWER_TASK intent and return its exact opaque marker, task title, prompt, and selected model/reasoning configuration. | `workflow_id`, `expected_revision`, `review_id` |
 | `plan_draft_pull_request` | Persist a single CREATE_DRAFT_PULL_REQUEST intent pinned to the authenticated creator and return the exact body marker that binds the created pull request. | `workflow_id`, `expected_revision`, `creator_actor_id`, `creator_actor_type` |
 | `plan_mark_pull_request_ready` | Persist the MARK_PR_READY intent for the workflow-owned pull request. | `workflow_id`, `expected_revision` |
 | `plan_return_to_draft` | Persist the RETURN_PR_TO_DRAFT intent for the workflow-owned pull request. | `workflow_id`, `expected_revision` |
@@ -68,6 +71,7 @@ The server started with `--role author`. The summary is the first sentence of ea
 | `release_workflow_claims` | Release every active claim only after exact caller-supplied reconciliation proves each branch and head ref absent and each bound pull request closed. | `workflow_id`, `expected_revision`, `operator_label`, `rationale`, `reconciled_claims` |
 | `render_review_report` | Render a human-readable Markdown report of a review from its ledger and, when present, its publication ledger -- or, for a REMOTE_ONLY publication with no review ledger, from the publication and its authorization alone -- and write it to reviews/<review_id>/report-r<state_version>[-p<revision>-s<summary digest>]-f<renderer format>.md (report-p<revision>-s<summary digest>-f<renderer format>.md when remote-only) beside them; the summary digest covers the publication summary fields the report prints, so a gate appearing or evidence expiring writes a new report, and the renderer format version means an upgrade that changes the Markdown writes a new report beside the old one rather than colliding with it. | `review_id` |
 | `resume_autonomous_workflow` | Resume a transiently paused workflow at its audited prior phase after the blocking condition is cleared. | `workflow_id`, `expected_revision`, `operator_label`, `rationale` |
+| `select_reviewer_configuration` | Persist an explicit user selection (or preauthorized unattended selection) for this pending round. | `review_id`, `expected_state_version`, `model`, `reasoning_effort`, `environment_id` |
 | `start_autonomous_workflow` | Create an opt-in workflow ledger at an immutable clean base, bind the exact capability set, and atomically claim the local branch and GitHub head ref. | `repository_path`, `base_ref`, `base_sha`, `requirement`, `implementation_scope`, `topic_branch`, `operator_label`, `capabilities`, `publication_target` |
 | `start_publication` | Bind a local review gate or explicit remote-only authorization to one pull request, pinned Codex Bot actor, trigger policy, and fresh complete preexisting Codex baseline. | `review_id`, `repository_id`, `owner`, `repo`, `pr_number`, `base_branch`, `head_branch`, `codex_actor_id`, `codex_actor_type`, `codex_actor_login`, `codex_trigger_mode`, `codex_review_baseline` |
 | `submit_resolutions` | Answer every open finding as fixed, rejected with evidence, or human_required. | `review_id`, `resolutions` |
@@ -102,6 +106,7 @@ A code chosen at run time from a variable is not seen.
 | `AUDIT_EVENT_TOO_LARGE` | `src/publication.mjs` |
 | `AUDIT_STATE_INVALID` | `src/publication.mjs` |
 | `AUDIT_WRITE_FAILED` | `src/publication.mjs` |
+| `DISPATCH_INDETERMINATE` | `src/local-reviewer.mjs` |
 | `EVIDENCE_FUTURE` | `src/publication.mjs` |
 | `EVIDENCE_NOT_ATOMIC` | `src/publication.mjs` |
 | `EVIDENCE_STALE` | `src/publication.mjs` |

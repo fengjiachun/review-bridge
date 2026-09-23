@@ -1,3 +1,5 @@
+import { discoverReviewerOptions } from "../src/reviewer-options.mjs";
+import { prepareConfiguredReview as prepareReview } from "./helpers/configured-review.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -9,14 +11,15 @@ import {
   finalizeLocalGate,
   getReviewSummary,
   openReview,
+  selectReviewerConfiguration,
   prepareRereview,
-  prepareReview,
   submitInitialReview,
   submitRereview,
   submitResolutions,
 } from "../src/core.mjs";
 import {
   acknowledgeChangeSizeWarning,
+  abandonWorkflowAction,
   advanceLocalWorkflow,
   AUTONOMOUS_CAPABILITIES,
   bindWorkflowReview,
@@ -31,6 +34,7 @@ import {
   markWorkflowActionExecuting,
   pauseAutonomousWorkflow,
   planCodexTaskDispatch,
+  launchCodexTaskDispatch,
   planDraftPullRequest,
   planWorkflowPush,
   recordCodexTaskObservation,
@@ -997,6 +1001,9 @@ test("Codex task dispatch preserves an effort override after recovery", async (t
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const { workflow, review } = await prepareBoundWorkflow(state);
+  await selectReviewerConfiguration(state.store, review.id, review.state_version, {
+    ...review.reviewer_configuration.requested, reasoning_effort: "medium",
+  });
   const planned = await planCodexTaskDispatch(
     state.store,
     workflow.workflow_id,
@@ -1015,6 +1022,7 @@ test("Codex task dispatch preserves an effort override after recovery", async (t
   assert.equal(reloaded.active_action.target.reasoning_effort, "medium");
   assert.equal(reloaded.active_action.dispatch.reasoning_effort, "medium");
   assert.equal(summary.active_action.dispatch.reasoning_effort, "medium");
+  assert.equal(summary.active_action.dispatch.model, "review-model");
   assert.equal(summary.active_action.status, "EXECUTING");
 });
 
@@ -5795,4 +5803,102 @@ test("an active workflow cannot carry released claims", async (t) => {
     getAutonomousWorkflow(state.store, workflow.workflow_id),
     /WORKFLOW_CLAIMS_INVALID/,
   );
+});
+
+
+test("controller recovery completes after its recorded reviewer submitted a verdict", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const planned = await planCodexTaskDispatch(state.store, workflow.workflow_id, workflow.revision, review.id);
+  const executing = await markWorkflowActionExecuting(state.store, workflow.workflow_id, planned.workflow.revision, planned.action.action_id);
+  const launched = await launchCodexTaskDispatch(state.store, workflow.workflow_id, executing.revision, planned.action.action_id);
+  const reviewPath = path.join(state.store, "reviews", review.id, "review.json");
+  const interrupted = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  interrupted.rounds.at(-1).reviewer_dispatch.status = "STARTING";
+  delete interrupted.rounds.at(-1).reviewer_dispatch.pid;
+  await fsp.writeFile(reviewPath, JSON.stringify(interrupted));
+  await submitInitialReview(state.store, review.id, [], "CODEX_TASK");
+  const recovered = await launchCodexTaskDispatch(state.store, workflow.workflow_id, executing.revision, planned.action.action_id);
+  assert.equal(recovered.task_id, launched.task_id);
+  assert.equal(recovered.pid, launched.pid);
+  assert.equal(recovered.requested.model, "review-model");
+  const observed = await recordCodexTaskObservation(state.store, workflow.workflow_id, executing.revision, planned.action.action_id, {
+    matchingTaskIds: [launched.task_id], taskId: launched.task_id, title: launched.title, prompt: launched.prompt,
+  });
+  const completed = await completeWorkflowAction(state.store, workflow.workflow_id, observed.revision, planned.action.action_id);
+  assert.equal(completed.phase, "WAIT_LOCAL_REVIEW");
+  const advanced = await advanceLocalWorkflow(state.store, workflow.workflow_id, completed.revision);
+  assert.equal(advanced.phase, "FINALIZE_LOCAL_GATE");
+  for (let i = 0; i < 100; i++) {
+    const summary = await getReviewSummary(state.store, review.id);
+    if (summary.reviewer_dispatch.exit) {
+      assert.equal(summary.reviewer_dispatch.exit.code, 0);
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  assert.fail("fake reviewer did not exit");
+});
+
+
+test("controller recovery refuses unstarted and failed intents instead of adopting their IDs", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const planned = await planCodexTaskDispatch(state.store, workflow.workflow_id, workflow.revision, review.id);
+  const executing = await markWorkflowActionExecuting(state.store, workflow.workflow_id, planned.workflow.revision, planned.action.action_id);
+  const file = path.join(state.store, "reviews", review.id, "review.json");
+  const stored = JSON.parse(await fsp.readFile(file, "utf8"));
+  const attempt = path.join(state.root, "unstarted");
+  await fsp.mkdir(attempt);
+  stored.state_version++;
+  stored.rounds.at(-1).reviewer_dispatch = {
+    status: "STARTING", attempt_root: attempt, task_id: "unstarted-task", marker: planned.dispatch.marker,
+    requested: review.reviewer_configuration.requested,
+  };
+  await fsp.writeFile(file, JSON.stringify(stored));
+  await assert.rejects(launchCodexTaskDispatch(state.store, workflow.workflow_id, executing.revision, planned.action.action_id), /no started process receipt/);
+  stored.rounds.at(-1).reviewer_dispatch.status = "FAILED";
+  await fsp.writeFile(file, JSON.stringify(stored));
+  await fsp.writeFile(path.join(attempt, "exit.json"), JSON.stringify({ error: "spawn failed" }));
+  await assert.rejects(launchCodexTaskDispatch(state.store, workflow.workflow_id, executing.revision, planned.action.action_id), /launch failed/);
+  const observed = await recordCodexTaskObservation(state.store, workflow.workflow_id, executing.revision, planned.action.action_id, {
+    matchingTaskIds: ["unstarted-task"], taskId: "unstarted-task", title: planned.dispatch.title, prompt: planned.dispatch.prompt,
+  });
+  await assert.rejects(completeWorkflowAction(state.store, workflow.workflow_id, observed.revision, planned.action.action_id), /no matching durable started-process receipt/);
+});
+
+
+test("an unlaunched dispatch can be auditedly replaced after environment drift", async (t) => {
+  const state = await fixture();
+  const catalog = path.join(state.root, "catalog.json");
+  await fsp.writeFile(catalog, "{}");
+  process.env.RB_TEST_CATALOG = catalog;
+  t.after(async () => { delete process.env.RB_TEST_CATALOG; await fsp.rm(state.root, { recursive: true, force: true }); });
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const planned = await planCodexTaskDispatch(state.store, workflow.workflow_id, workflow.revision, review.id);
+  const executing = await markWorkflowActionExecuting(state.store, workflow.workflow_id, planned.workflow.revision, planned.action.action_id);
+  await fsp.writeFile(catalog, JSON.stringify({ account: "changed-account" }));
+  await assert.rejects(launchCodexTaskDispatch(state.store, workflow.workflow_id, executing.revision, planned.action.action_id), /environment changed/);
+  assert.equal((await getReviewSummary(state.store, review.id)).reviewer_dispatch, null);
+  const options = await discoverReviewerOptions(state.store, state.repository, "CODEX_TASK");
+  await selectReviewerConfiguration(state.store, review.id, review.state_version, options.suggested);
+  const abandoned = await abandonWorkflowAction(state.store, workflow.workflow_id, executing.revision, planned.action.action_id);
+  assert.equal(abandoned.active_action, null);
+  const replacement = await planCodexTaskDispatch(state.store, workflow.workflow_id, abandoned.revision, review.id);
+  assert.notEqual(replacement.action.action_id, planned.action.action_id);
+  assert.equal(replacement.dispatch.reviewer_configuration.requested.environment_id, options.environment_id);
+  const ready = await markWorkflowActionExecuting(state.store, workflow.workflow_id, replacement.workflow.revision, replacement.action.action_id);
+  const launched = await launchCodexTaskDispatch(state.store, workflow.workflow_id, ready.revision, replacement.action.action_id);
+  await assert.rejects(abandonWorkflowAction(state.store, workflow.workflow_id, ready.revision, replacement.action.action_id), /must be reconciled/);
+  await submitInitialReview(state.store, review.id, [], "CODEX_TASK");
+  const observed = await recordCodexTaskObservation(state.store, workflow.workflow_id, ready.revision, replacement.action.action_id, {
+    matchingTaskIds: [launched.task_id], taskId: launched.task_id, title: launched.title, prompt: launched.prompt,
+  });
+  const completed = await completeWorkflowAction(state.store, workflow.workflow_id, observed.revision, replacement.action.action_id);
+  assert.equal(completed.phase, "WAIT_LOCAL_REVIEW");
+  const audit = await fsp.readFile(path.join(state.store, "workflows", workflow.workflow_id, "action-audit.jsonl"), "utf8");
+  assert.ok(audit.includes(planned.dispatch.reviewer_configuration.requested.environment_id));
+  assert.ok(audit.includes("NO_LOCAL_LAUNCH_ATTEMPT"));
 });

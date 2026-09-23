@@ -105,6 +105,10 @@ async function copyServer(target) {
   for (const name of entries) {
     await fsp.copyFile(path.join(source, name), path.join(serverTarget, name));
   }
+  await fsp.copyFile(
+    path.join(projectRoot, "templates/codex-plugin/skills/review-bridge-reviewer/SKILL.md"),
+    path.join(serverTarget, "reviewer-skill.md"),
+  );
 }
 
 await fsp.rm(outputRoot, { recursive: true, force: true });

@@ -1,3 +1,4 @@
+import { prepareConfiguredReview as prepareReview } from "./helpers/configured-review.mjs";
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import fsp from "node:fs/promises";
@@ -5,7 +6,6 @@ import path from "node:path";
 import test from "node:test";
 import {
   finalizeLocalGate,
-  prepareReview,
   submitInitialReview,
 } from "../src/core.mjs";
 import {

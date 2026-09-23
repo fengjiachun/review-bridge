@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
@@ -1148,6 +1148,17 @@ const trackedFiles = run(
   .sort();
 assert.deepEqual(archiveFiles, trackedFiles);
 
+const sourceReviewerSkill = await fsp.readFile(
+  path.join(projectRoot, "templates/codex-plugin/skills/review-bridge-reviewer/SKILL.md"), "utf8",
+);
+for (const root of [pluginRoot, reviewerRoot, hermesIntegration, deepseekHarness]) {
+  assert.equal(await fsp.readFile(path.join(root, "server", "reviewer-skill.md"), "utf8"), sourceReviewerSkill);
+  const { codexReviewerArguments } = await import(pathToFileURL(path.join(root, "server", "local-reviewer.mjs")));
+  const args = codexReviewerArguments("package-check", { model: "fixture", reasoning_effort: "high" }, root);
+  const instructions = args.find((value) => value.startsWith("developer_instructions="));
+  assert.equal(JSON.parse(instructions.slice("developer_instructions=".length)), sourceReviewerSkill);
+}
+
 const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-build-"));
 try {
   const repository = path.join(temporary, "repo");
@@ -1215,6 +1226,35 @@ try {
   );
   run("git", ["add", "."], repository);
   run("git", ["commit", "-m", "change value"], repository);
+
+  const claudeAuthorConfig = await readJson(path.join(reviewerRoot, "author", "mcp.json"));
+  const claudeAuthorEntry = claudeAuthorConfig.mcpServers["review-bridge-author"];
+  const claudeAuthorTransport = new StdioClientTransport({
+    command: claudeAuthorEntry.command,
+    args: claudeAuthorEntry.args.map((value) => value.replace("__REVIEW_BRIDGE_RELEASE_PATH__", reviewerRoot)),
+    env: {
+      ...process.env,
+      REVIEW_BRIDGE_HOME: path.join(temporary, "claude-author-store"),
+      REVIEW_BRIDGE_CODEX_COMMAND: path.join(projectRoot, "test", "fixtures", "codex-runtime.mjs"),
+    },
+    stderr: "pipe",
+  });
+  const claudeAuthor = new Client({ name: "claude-author-smoke", version: releaseVersion });
+  await claudeAuthor.connect(claudeAuthorTransport);
+  try {
+    const options = await call(claudeAuthor, "discover_reviewer_options", { repository_path: repository, reviewer_provider: "CODEX_TASK" });
+    assert.deepEqual(options.models.map((entry) => entry.model), ["review-model", "second-model"]);
+    const pending = await call(claudeAuthor, "prepare_review", {
+      repository_path: repository, base_ref: baseSha, requirement: "Package author smoke", implementation_scope: "value.js", reviewer_provider: "CODEX_TASK",
+    });
+    const selected = await call(claudeAuthor, "select_reviewer_configuration", {
+      review_id: pending.id, expected_state_version: pending.state_version, ...options.suggested,
+    });
+    assert.equal(selected.reviewer_configuration.requested.model, options.suggested.model);
+    assert.equal(selected.reviewer_configuration.observed.status, "unavailable");
+  } finally {
+    await claudeAuthor.close();
+  }
 
   const author = await connect(authorServer, "author", store);
   const reviewer = await connect(

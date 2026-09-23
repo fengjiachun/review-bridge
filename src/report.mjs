@@ -205,6 +205,7 @@ function identitySection(review) {
       `- Base → head: ${code(first?.base_sha)} → ${code(latest?.head_sha)}`,
       `- Reviewer provider: ${code(review.reviewer_provider ?? "CLAUDE_DESKTOP")}${review.advisory === true ? " (advisory: attests nothing)" : ""}`,
       `- Review strategy: ${strategyLine(review)}`,
+      ...rounds.map((round) => `- Round ${round.round} reviewer requested: ${round.reviewer_configuration ? code(JSON.stringify(round.reviewer_configuration.requested)) : "unavailable"}; observed: unavailable (remote model identity is not authenticated by launch logs).`),
     ].join("\n"),
     "### Requirement",
     block(review.requirement),
@@ -769,7 +770,7 @@ export function summaryDigest(summary) {
 // Raise it by one in any change that alters the Markdown this module renders
 // -- wording, ordering, a new line, a heading -- so the reports the previous
 // version wrote stay readable at their own names.
-export const REPORT_FORMAT = 3;
+export const REPORT_FORMAT = 4;
 
 // `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
 // `p<revision>-s<summary digest>-f<format>` without one.
@@ -949,6 +950,7 @@ function reviewerRow(review) {
       ? "no round prepared"
       : `${modes.map(cellCode).join(" then ")} strategy`,
     count(rounds.length, "round"),
+    `requested ${rounds.at(-1)?.reviewer_configuration ? cellCode(JSON.stringify(rounds.at(-1).reviewer_configuration.requested)) : "unavailable"}; observed unavailable`,
   ].join(", ");
 }
 
