@@ -41,6 +41,7 @@ import {
   WORKFLOW_ID_RE,
 } from "./workflow-binding.mjs";
 import { isFullSha } from "./object-id.mjs";
+import { readDispatchReceipt } from "./local-reviewer.mjs";
 import { validateReviewerSelection } from "./reviewer-options.mjs";
 import { workflowRequiredInputs } from "./tool-inputs.mjs";
 
@@ -4332,6 +4333,7 @@ function reviewDriftExplainedByErrata(summary, boundReview, action = null) {
     (summary.errata_watermark > 0 ||
       summary.last_opened_errata_watermark > 0 ||
       (action?.target.reviewer_configuration != null &&
+        summary.reviewer_dispatch?.status === "STARTED" &&
         summary.reviewer_dispatch?.marker === action.correlation_marker &&
         canonicalJson(summary.reviewer_configuration?.requested) ===
           canonicalJson(action.target.reviewer_configuration.requested)))
@@ -5501,11 +5503,9 @@ export async function recordDraftPullRequestObservation(
 }
 
 async function completeCodexTaskDispatch(storeRoot, workflow, paths, action) {
-  // The bound review must still be exactly the state that was bound before
-  // dispatch, and it must stay that way until ACTION_COMPLETED is
-  // persisted: the check and the completion commit share the review
-  // mutation lock, so a verdict can never slip in between them and predate
-  // the completed reviewer task.
+  // A recorded local process may finish while its controller is disconnected.
+  // Only the matching durable launch may adopt that verdict; legacy external
+  // task observations retain the stricter pending-review check.
   return getReviewSnapshot(
     storeRoot,
     action.target.review_id,
@@ -5515,7 +5515,22 @@ async function completeCodexTaskDispatch(storeRoot, workflow, paths, action) {
         workflow,
         action.target.review_id,
       );
+      const dispatch = summary.reviewer_dispatch;
+      const recordedLaunch = action.target.reviewer_configuration != null &&
+        dispatch?.status === "STARTED" && dispatch.marker === action.correlation_marker &&
+        dispatch.task_id === action.provider_response.task_id &&
+        canonicalJson(dispatch.requested) === canonicalJson(action.target.reviewer_configuration.requested) &&
+        await readDispatchReceipt(dispatch.attempt_root, "started.json");
+      if (dispatch && action.target.reviewer_configuration != null && !recordedLaunch) {
+        throw new Error("Reviewer dispatch has no matching durable started-process receipt");
+      }
+      const completedBeforeRecovery = recordedLaunch && summary.current_round === 1 &&
+        ["CLEAN", "REVIEW_SUBMITTED"].includes(summary.status) &&
+        summary.current_snapshot?.snapshot_hash === workflow.current_review.snapshot_hash &&
+        summary.current_snapshot?.head_sha === workflow.current_review.head_sha &&
+        canonicalJson(summary.review_strategy) === canonicalJson(workflow.current_review.strategy);
       if (
+        !completedBeforeRecovery &&
         (summary.status !== "WAITING_FOR_REVIEW" ||
           summary.state_version !== workflow.current_review.state_version) &&
         !reviewDriftExplainedByErrata(summary, workflow.current_review, action)

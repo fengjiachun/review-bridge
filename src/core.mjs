@@ -12,7 +12,7 @@ import {
 import { reviewRequiredInputs } from "./tool-inputs.mjs";
 
 import { validateReviewerSelection, rememberReviewerSelection } from "./reviewer-options.mjs";
-import { codexReviewerArguments, startLocalReviewer } from "./local-reviewer.mjs";
+import { codexReviewerArguments, startLocalReviewer, readDispatchReceipt } from "./local-reviewer.mjs";
 
 export const MAX_ROUNDS = 2;
 export const DEFAULT_CHANGE_SIZE_BUDGET = 2000;
@@ -2821,16 +2821,29 @@ export async function launchLocalReviewer(storeRoot, reviewId, expectedStateVers
     if (review.state_version !== expectedStateVersion) throw new Error("review state_version mismatch");
     if (reviewerProviderFor(review) !== "CODEX_TASK") throw new Error("Automatic launch unavailable for this provider");
     assertNotAdvisory(review, "Advisory review requires its dedicated isolation launcher");
-    if (!["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"].includes(review.status)) throw new Error("Review is not pending");
     const round = review.rounds.at(-1);
     const prior = round.reviewer_dispatch;
     if (prior) {
-      if (workflowDispatch && prior.marker === workflowDispatch.marker) return publicReview(review);
+      if (workflowDispatch && prior.marker === workflowDispatch.marker) {
+        const started = await readDispatchReceipt(prior.attempt_root, "started.json");
+        const exited = await readDispatchReceipt(prior.attempt_root, "exit.json");
+        if (prior.status === "FAILED" || exited?.error) throw new Error("Reviewer launch failed; do not adopt this attempt");
+        if (!started) throw new Error("Reviewer startup is indeterminate; no started process receipt exists");
+        if (exited && ["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"].includes(review.status)) {
+          throw new Error("Reviewer exited without a verdict; reconcile the failed attempt before replacing it");
+        }
+        if (prior.status !== "STARTED") {
+          Object.assign(prior, started, { status: "STARTED" });
+          await saveReview(storeRoot, review);
+        }
+        return publicReview(review);
+      }
       let exited;
       try { exited = await loadJson(path.join(prior.attempt_root, "exit.json")); }
       catch (error) { if (error.code !== "ENOENT") throw error; }
       if (!exited) throw new Error("Reviewer dispatch is running or indeterminate; do not launch a concurrent replacement");
     }
+    if (!["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"].includes(review.status)) throw new Error("Review is not pending");
     const configuration = await validateReviewerSelection(storeRoot, round.reviewer_configuration?.requested);
     const attemptRoot = path.join(roundDirectory(storeRoot, reviewId, review.current_round), `dispatch-${crypto.randomUUID()}`);
     await fsp.mkdir(attemptRoot, { recursive: true, mode: 0o700 });
@@ -2843,6 +2856,7 @@ export async function launchLocalReviewer(storeRoot, reviewId, expectedStateVers
       const process = await startLocalReviewer(configuration.runtime, codexReviewerArguments(reviewId, configuration.requested, storeRoot, workflowDispatch?.prompt), attemptRoot);
       Object.assign(dispatch, process, { status: "STARTED" });
     } catch (error) {
+      if (error.code === "DISPATCH_INDETERMINATE") throw error;
       dispatch.status = "FAILED";
       await atomicWriteJson(path.join(attemptRoot, "exit.json"), { error: error.message });
       await saveReview(storeRoot, review);

@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { startLocalReviewer } from "../src/local-reviewer.mjs";
 import { discoverReviewerOptions, queryCodexModels } from "../src/reviewer-options.mjs";
 import { loadReview, prepareRereview, submitInitialReview, submitResolutions } from "../src/core.mjs";
 
@@ -97,4 +98,13 @@ test("rereview retains selection and allows a new choice without rewriting the f
 
 test("discovery process failure is explicit and bounded", async () => {
   await assert.rejects(queryCodexModels({ command: "/does-not-exist/codex", cwd: os.tmpdir() }), /ENOENT/);
+});
+
+
+test("a failed executable spawn cannot produce a started-process receipt", async (t) => {
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "reviewer-spawn-failure-"));
+  t.after(() => fsp.rm(directory, { recursive: true, force: true }));
+  await assert.rejects(startLocalReviewer({ command: "/does-not-exist/codex", cwd: directory }, [], directory), /Reviewer failed to start/);
+  await assert.rejects(fsp.access(path.join(directory, "started.json")));
+  assert.match(JSON.parse(await fsp.readFile(path.join(directory, "exit.json"))).error, /ENOENT/);
 });

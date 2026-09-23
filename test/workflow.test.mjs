@@ -5804,21 +5804,30 @@ test("an active workflow cannot carry released claims", async (t) => {
 });
 
 
-test("controller launch recovers the selected runtime task and completes its intent", async (t) => {
+test("controller recovery completes after its recorded reviewer submitted a verdict", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const { workflow, review } = await prepareBoundWorkflow(state);
   const planned = await planCodexTaskDispatch(state.store, workflow.workflow_id, workflow.revision, review.id);
   const executing = await markWorkflowActionExecuting(state.store, workflow.workflow_id, planned.workflow.revision, planned.action.action_id);
   const launched = await launchCodexTaskDispatch(state.store, workflow.workflow_id, executing.revision, planned.action.action_id);
+  const reviewPath = path.join(state.store, "reviews", review.id, "review.json");
+  const interrupted = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  interrupted.rounds.at(-1).reviewer_dispatch.status = "STARTING";
+  delete interrupted.rounds.at(-1).reviewer_dispatch.pid;
+  await fsp.writeFile(reviewPath, JSON.stringify(interrupted));
+  await submitInitialReview(state.store, review.id, [], "CODEX_TASK");
   const recovered = await launchCodexTaskDispatch(state.store, workflow.workflow_id, executing.revision, planned.action.action_id);
   assert.equal(recovered.task_id, launched.task_id);
+  assert.equal(recovered.pid, launched.pid);
   assert.equal(recovered.requested.model, "review-model");
   const observed = await recordCodexTaskObservation(state.store, workflow.workflow_id, executing.revision, planned.action.action_id, {
     matchingTaskIds: [launched.task_id], taskId: launched.task_id, title: launched.title, prompt: launched.prompt,
   });
   const completed = await completeWorkflowAction(state.store, workflow.workflow_id, observed.revision, planned.action.action_id);
   assert.equal(completed.phase, "WAIT_LOCAL_REVIEW");
+  const advanced = await advanceLocalWorkflow(state.store, workflow.workflow_id, completed.revision);
+  assert.equal(advanced.phase, "FINALIZE_LOCAL_GATE");
   for (let i = 0; i < 100; i++) {
     const summary = await getReviewSummary(state.store, review.id);
     if (summary.reviewer_dispatch.exit) {
@@ -5828,4 +5837,32 @@ test("controller launch recovers the selected runtime task and completes its int
     await new Promise(resolve => setTimeout(resolve, 30));
   }
   assert.fail("fake reviewer did not exit");
+});
+
+
+test("controller recovery refuses unstarted and failed intents instead of adopting their IDs", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { workflow, review } = await prepareBoundWorkflow(state);
+  const planned = await planCodexTaskDispatch(state.store, workflow.workflow_id, workflow.revision, review.id);
+  const executing = await markWorkflowActionExecuting(state.store, workflow.workflow_id, planned.workflow.revision, planned.action.action_id);
+  const file = path.join(state.store, "reviews", review.id, "review.json");
+  const stored = JSON.parse(await fsp.readFile(file, "utf8"));
+  const attempt = path.join(state.root, "unstarted");
+  await fsp.mkdir(attempt);
+  stored.state_version++;
+  stored.rounds.at(-1).reviewer_dispatch = {
+    status: "STARTING", attempt_root: attempt, task_id: "unstarted-task", marker: planned.dispatch.marker,
+    requested: review.reviewer_configuration.requested,
+  };
+  await fsp.writeFile(file, JSON.stringify(stored));
+  await assert.rejects(launchCodexTaskDispatch(state.store, workflow.workflow_id, executing.revision, planned.action.action_id), /no started process receipt/);
+  stored.rounds.at(-1).reviewer_dispatch.status = "FAILED";
+  await fsp.writeFile(file, JSON.stringify(stored));
+  await fsp.writeFile(path.join(attempt, "exit.json"), JSON.stringify({ error: "spawn failed" }));
+  await assert.rejects(launchCodexTaskDispatch(state.store, workflow.workflow_id, executing.revision, planned.action.action_id), /launch failed/);
+  const observed = await recordCodexTaskObservation(state.store, workflow.workflow_id, executing.revision, planned.action.action_id, {
+    matchingTaskIds: ["unstarted-task"], taskId: "unstarted-task", title: planned.dispatch.title, prompt: planned.dispatch.prompt,
+  });
+  await assert.rejects(completeWorkflowAction(state.store, workflow.workflow_id, observed.revision, planned.action.action_id), /no matching durable started-process receipt/);
 });
