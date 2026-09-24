@@ -7,7 +7,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B%20%7C%20Linux-lightgrey.svg)](#platform-support)
 
 A code-review handoff between an author task and an explicitly bound
-reviewer: Claude Desktop, a fresh Codex task, a Hermes profile, a DeepSeek
+reviewer: Claude Desktop, an independent Codex session, a Hermes profile, a DeepSeek
 Harness profile, or GitHub Codex in remote-only publication mode. Review Bridge
 captures an **immutable snapshot** of a change, hands it to a reviewer that
 had no part in writing it, and records every verdict in a ledger that later
@@ -32,8 +32,9 @@ authenticated [GitHub CLI](https://cli.github.com/) (`gh auth status`).
 ## Install the Codex plugin
 
 The Codex plugin alone carries the author tools and the `CODEX_TASK` reviewer,
-so with the Codex GitHub App on the repository it is enough to take a change
-from a commit to `MERGE_READY`. Build it from a clone at a release tag:
+so it is enough for local review. Publishing through the GitHub gate also
+requires GitHub CLI authentication and the Codex GitHub App on the repository.
+Build the plugin from a clone at a release tag:
 
 ```bash
 git clone https://github.com/fengjiachun/review-bridge.git
@@ -54,39 +55,44 @@ Every process shares one store, by default
 `~/Library/Application Support/ReviewBridge`; set `REVIEW_BRIDGE_HOME` to
 override it. Pin every participant to the same release tag.
 
+Already installed? Follow the [upgrade guide](docs/install/upgrade.md).
+
 Other clients:
 
-- [Claude Desktop reviewer extension](docs/install/claude-desktop.md)
+- [Claude author connection and Desktop reviewer extension](docs/install/claude-desktop.md)
 - [Hermes reviewer and author profiles](docs/install/hermes.md)
 - [DeepSeek Harness reviewer and author profiles](docs/install/deepseek-harness.md)
 
-## From a commit to `MERGE_READY`
+## Run your first local review
 
-Commit the change on a topic branch. Then, in a Codex task:
+Commit the change on a topic branch. In the author conversation, ask:
 
-> Prepare the current changes for a `CODEX_TASK` review. The requirement is
+> Review this change with Review Bridge using `CODEX_TASK`. The requirement is
 > "...", the implementation scope is "...", and the base ref is `origin/main`.
+> Show me the available reviewer models and reasoning levels before starting.
 
-Codex returns a `review_id` and waits in `WAITING_FOR_REVIEW`. Create a **new**
-Codex task — not a fork of the author task — select `high` reasoning effort
-unless you explicitly want another level, keep your configured model, and
-give it only this request:
+The author queries the Codex runtime on the MCP host and presents its available
+choices. Choose a pair and authorize the review, for example:
 
-> Independently review Review Bridge task `<review_id>` using the packaged
-> reviewer skill. Submit every actionable finding and do not modify the code.
+> Use `<model from the list>` with `<supported reasoning level>` and start.
 
-If the reviewer submitted no findings, the review is `CLEAN`. Otherwise, back
-in the author task:
+Review Bridge captures the snapshot, records your selection, and launches an
+independent Codex process. The author conversation's model does not choose the
+reviewer. A client may present a picker or ask in conversation; Review Bridge
+does not provide its own selection window. Follow progress in the author
+conversation using the returned `review_id`.
 
-> Read the reviewer's findings, address each one, and prepare round two.
+If there are findings, ask the author to address them and prepare round two.
+Rereview inherits your selected model and effort. When the ledger reports
+`CLEAN`, the author finalizes the local gate, rechecking that the working tree
+still matches the reviewed snapshot. `LOCAL_GATE_PASSED` completes local review;
+you can stop here without publishing anything to GitHub.
 
-and start another new Codex task with the same review ID and a request to
-rereview the author's resolutions. Select `high` again unless you explicitly
-want another level, keeping your configured model. Round two ends in one of three
-states: `CLEAN`, `CONTINUABLE_FINDINGS` (a new issue, addressed in a fresh full
-review), or `HUMAN_REQUIRED` (a prior finding still contested). Once the review
-is `CLEAN`, the author task finalizes it to `LOCAL_GATE_PASSED`, which re-checks
-that the working tree still matches the reviewed snapshot.
+See [local review](docs/local-review.md) for manual reviewer sessions, other
+providers, and handling unresolved findings. [Reviewer configuration](docs/reviewer-configuration.md)
+explains the same selection flow from Codex, Claude, Hermes, and DeepSeek Harness.
+
+## From local review to `MERGE_READY`
 
 Then ask the author task to publish:
 
@@ -112,9 +118,12 @@ and explains why each step exists.
 | Page | For |
 | --- | --- |
 | [How Review Bridge reviews a change](docs/review-flow.md) | The narrative: commit to merge-ready, and why |
+| [Choose reviewer model and reasoning](docs/reviewer-configuration.md) | Cross-client selection, launch, and runtime limitations |
+| [Upgrade an existing installation](docs/install/upgrade.md) | Switch clients together and verify the new runtime |
 | [Run a local review](docs/local-review.md) | Every provider's request, round two, successor reviews, the state machine |
 | [GitHub publication gate](docs/publication-gate.md) | `LOCAL_GATE` and `REMOTE_ONLY` publication |
 | [Search historical findings](docs/finding-search.md) | Read-only CLI filters, provenance, and ledger diagnostics |
+| [Review statistics](docs/publication-gate.md#review-statistics) | Monthly rebuttal outcomes and filtering rules |
 | [Autonomous workflow](docs/autonomous-workflow.md) | The authorized end-to-end workflow |
 | [Reference](docs/reference.md) | Every tool and error code, generated from the source |
 | [Troubleshooting](docs/troubleshooting.md) | Structured errors and build failures |
