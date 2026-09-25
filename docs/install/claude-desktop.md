@@ -1,6 +1,6 @@
 # Install the Claude Desktop extension
 
-Describes Review Bridge v0.17.0. For an existing setup, see [upgrading](upgrade.md).
+Describes Review Bridge v0.18.0. For an existing setup, see [upgrading](upgrade.md).
 
 Choose the role you need: the extension below lets Claude **review** a snapshot;
 the separate [author connection](#use-claude-as-an-author) lets Claude **request

@@ -68,7 +68,7 @@ export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
   }, timeoutMs);
   try {
     const initialized = await request("initialize", {
-      clientInfo: { name: "review_bridge", version: "0.17.0" },
+      clientInfo: { name: "review_bridge", version: "0.18.0" },
     });
     child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
     const account = await request("account/read", { refreshToken: false });

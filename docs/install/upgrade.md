@@ -1,6 +1,6 @@
 # Upgrade an existing installation
 
-Describes upgrading to Review Bridge v0.17.0. For a first installation, use the
+Describes upgrading to Review Bridge v0.18.0. For a first installation, use the
 [Codex](codex-plugin.md), [Claude](claude-desktop.md), [Hermes](hermes.md), or
 [DeepSeek Harness](deepseek-harness.md) instructions.
 
@@ -27,17 +27,17 @@ succeed on an older CLI even though its first reviewer MCP call is cancelled.
 2. Record the current runtime paths, shared store path, and enabled roles. Back
    up client configuration files privately; they may contain credentials.
 3. Build in a new directory, keeping the previous installation intact. For
-   example, from a parent directory where `review-bridge-v0.17.0` does not exist:
+   example, from a parent directory where `review-bridge-v0.18.0` does not exist:
 
    ```bash
-   git clone --branch v0.17.0 https://github.com/fengjiachun/review-bridge.git review-bridge-v0.17.0
-   cd review-bridge-v0.17.0
+   git clone --branch v0.18.0 https://github.com/fengjiachun/review-bridge.git review-bridge-v0.18.0
+   cd review-bridge-v0.18.0
    npm ci
    npm run build
    npm run verify:build
    ```
 
-Keep this checkout and its `dist/review-bridge-v0.17.0` output in a permanent
+Keep this checkout and its `dist/review-bridge-v0.18.0` output in a permanent
 location. Use absolute paths in client configurations; do not overwrite the old
 runtime or retarget a shared symlink beneath running processes.
 
@@ -56,7 +56,7 @@ and install the plugin from the new one:
 
 ```bash
 codex plugin marketplace remove review-bridge-local
-codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.17.0/codex-marketplace"
+codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.18.0/codex-marketplace"
 codex plugin add review-bridge@review-bridge-local
 ```
 
@@ -87,7 +87,7 @@ lists even when the files on disk are new.
 
 - Check the installed plugin/extension version and each configured runtime
   path. Where the client exposes MCP initialization details, its server version
-  should be `0.17.0`.
+  should be `0.18.0`.
 - An author connection should expose `discover_reviewer_options`,
   `select_reviewer_configuration`, and `launch_local_reviewer`. A reviewer
   connection should expose reviewer tools, without author/publication tools.

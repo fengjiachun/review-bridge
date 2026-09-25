@@ -1,6 +1,6 @@
 # Install the Codex plugin
 
-Describes Review Bridge v0.17.0.
+Describes Review Bridge v0.18.0.
 
 For an existing installation, follow the [upgrade guide](upgrade.md).
 
@@ -11,10 +11,10 @@ the local marketplace:
 ```bash
 git clone https://github.com/fengjiachun/review-bridge.git
 cd review-bridge
-git checkout v0.17.0
+git checkout v0.18.0
 npm ci
 npm run build
-codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.17.0/codex-marketplace"
+codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.18.0/codex-marketplace"
 ```
 
 Build from a Git clone, not from the release's source archive: `scripts/build.mjs`

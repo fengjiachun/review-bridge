@@ -1,6 +1,6 @@
 # Install the Hermes reviewer profile
 
-Describes Review Bridge v0.17.0.
+Describes Review Bridge v0.18.0.
 
 Hermes is a supported local reviewer provider. The build output contains
 `hermes-integration/`, which packages the same server runtime plus:
@@ -19,7 +19,7 @@ author/publication server to the reviewer profile, and never add a reviewer
 provider binding to the author profile.
 
 Run `npm run verify:build`, then render `__REVIEW_BRIDGE_RELEASE_PATH__` to the
-absolute, versioned `review-bridge-v0.17.0/hermes-integration` directory and
+absolute, versioned `review-bridge-v0.18.0/hermes-integration` directory and
 `__REVIEW_BRIDGE_HOME__` to one explicit absolute shared store. Merge each
 snippet's server entry into only its matching profile's top-level `mcp_servers`
 mapping.

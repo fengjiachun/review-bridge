@@ -41,10 +41,10 @@ Build the plugin from a clone at a release tag:
 ```bash
 git clone https://github.com/fengjiachun/review-bridge.git
 cd review-bridge
-git checkout v0.17.0
+git checkout v0.18.0
 npm ci
 npm run build
-codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.17.0/codex-marketplace"
+codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.18.0/codex-marketplace"
 ```
 
 Restart the Codex desktop app, open Plugins, select **Review Bridge Local**, and
@@ -184,7 +184,7 @@ npm run build
 npm run verify:build
 ```
 
-`npm run build` writes to `dist/review-bridge-v0.17.0/`; set
+`npm run build` writes to `dist/review-bridge-v0.18.0/`; set
 `REVIEW_BRIDGE_OUTPUT_ROOT` to write elsewhere. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the pull request process,
 [docs/rfcs/](docs/rfcs/) for design records, and [CHANGELOG.md](CHANGELOG.md)

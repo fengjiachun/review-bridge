@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.18.0 - 2026-09-25
 
 ### Changed
 
@@ -29,6 +29,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   exemption. Pre-flight now also discovers squash-merged pull requests from
   their `(#N)` commit subjects, so both claim directions cover them. Closes
   issue #137.
+
+### Internal
+
+- (#170) Release 0.18.0.
 
 ## 0.17.0 - 2026-09-23
 
