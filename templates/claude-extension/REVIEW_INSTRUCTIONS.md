@@ -76,9 +76,9 @@ When the user asks to review a pending Codex task:
       length, not whether the verification is true. `verification` is optional
       for `resolved` and `still_open` decisions.
     - `still_open`: the concern remains.
-11. Report new findings separately. A prior `still_open` finding sends the task
-    to human arbitration. If all prior findings are accepted, new findings are
-    carried as scope hints into a fresh full review.
+11. Report new findings separately. A `still_open` decision on a rebuttal sends
+    the task to human arbitration. Otherwise a `still_open` fix and any new
+    findings are carried as scope hints into a fresh full review.
 
 Never modify repository files or publish code. Your role is read-only review
 plus structured verdict submission.

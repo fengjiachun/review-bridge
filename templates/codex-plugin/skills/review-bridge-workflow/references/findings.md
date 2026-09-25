@@ -11,9 +11,17 @@ continuation review and [Finish](finish.md) for CLEAN or human arbitration.
    finding from the ledger's `findings` with its ID, severity, one-line summary,
    and location.
 2. Address every open finding. For each finding choose exactly one:
-   - `fixed`: change the code and verify the fix.
-   - `rejected`: provide concrete technical evidence.
+   - `fixed`: every location and every clause the finding names is done at the
+     new head, including any test or documentation it asks for. Check the
+     finding's text item by item, not from memory. Do not mark a finding fixed
+     without verification evidence, and do not claim a check you did not run.
+   - `rejected`: provide concrete technical evidence. A remedy that differs
+     from the recommendation is `rejected`, not `fixed`: explain with evidence
+     why it satisfies the finding, and let the rereviewer decide.
    - `human_required`: stop and request human arbitration.
+
+   A fix the rereviewer judges incomplete moves the review to
+   `CONTINUABLE_FINDINGS`, and the finding is carried into the next full review.
 3. Call `submit_resolutions` with one entry for every finding, then call
    `get_review` again. Present every persisted disposition from its
    `resolutions`, including its rationale and evidence.
@@ -38,10 +46,10 @@ continuation review and [Finish](finish.md) for CLEAN or human arbitration.
    completes, call `get_review` again. Present every per-finding decision and
    any new finding from its `rereview_decisions` and `findings`. If it reaches
    `HUMAN_REQUIRED`, state the concrete escalation reason from the full ledger.
-   If it reaches `CONTINUABLE_FINDINGS`, present the source ledger's `OPEN`
-   `findings` before starting the fresh full review. After creating that review,
-   read its `carried_findings` as the continuation scope.
+   If it reaches `CONTINUABLE_FINDINGS`, present the source ledger's `OPEN` and
+   `STILL_OPEN` `findings` before starting the fresh full review. After
+   creating that review, read its `carried_findings` as the continuation scope.
 
-Keep fixes surgical. Do not mark a finding fixed without verification evidence.
+Keep fixes surgical.
 Session narration is operator observability only. Never use it as review
 evidence or as a substitute for reading and mutating the ledger.

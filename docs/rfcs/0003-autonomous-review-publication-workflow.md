@@ -661,8 +661,8 @@ IMPLEMENTING
        │               -> COMMIT_AND_VERIFY_LOCAL_FIXES
        │               -> PREPARE_REREVIEW
        │               -> WAIT_LOCAL_REREVIEW
-       ├─ prior still open after round two -> PAUSED_HUMAN
-       ├─ only new after round two -> ADDRESS_LOCAL_FINDINGS
+       ├─ rebuttal still open after round two -> PAUSED_HUMAN
+       ├─ fix judged incomplete, or only new -> ADDRESS_LOCAL_FINDINGS
        │                              -> NEW_FULL_REVIEW
        └─ CLEAN -> FINALIZE_LOCAL_GATE
                     -> PUBLISH_GATED_HEAD
@@ -733,10 +733,11 @@ The existing two-round protocol remains unchanged:
 - any code changed while addressing findings must be committed, and the
   working tree must be clean, before `prepare_rereview`;
 - round two reuses the same reviewer task;
-- any prior finding that remains open after round two becomes
+- any `rejected` finding that remains open after round two becomes
   `HUMAN_REQUIRED`;
-- if every prior finding is resolved or its rebuttal is accepted and round two
-  reports only new findings, the review becomes `CONTINUABLE_FINDINGS`; and
+- if no rebuttal remains open and round two judges a `fixed` finding
+  incomplete or reports new findings, the review becomes
+  `CONTINUABLE_FINDINGS`; and
 - the controller does not create a third model round for that `review_id`.
 
 `HUMAN_REQUIRED` pauses the workflow and exports the exact arbitration packet.

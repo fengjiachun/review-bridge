@@ -62,9 +62,9 @@ ledger — so an admitted workflow can always persist an operator cancellation.
 
 The compact workflow summary is the controller's source of truth for the next
 action. A missing or ambiguous Codex task pauses rather than falling back to
-the author task. A contested round-two finding becomes `HUMAN_REQUIRED` and
-pauses. Uncontested new round-two findings become `CONTINUABLE_FINDINGS`: the
-workflow records their IDs and fingerprints, enters `ADDRESS_LOCAL_FINDINGS`,
+the author task. A rebuttal the rereview keeps open becomes `HUMAN_REQUIRED`
+and pauses. Otherwise fixes judged incomplete and new round-two findings
+become `CONTINUABLE_FINDINGS`: the workflow records their IDs and fingerprints, enters `ADDRESS_LOCAL_FINDINGS`,
 requires a changed committed head, and binds a new `FULL` review carrying only
 the source finding descriptions as scope hints. No review ID receives a third
 model round. Cancellation retains claims until an explicit,

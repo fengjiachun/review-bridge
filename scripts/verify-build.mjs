@@ -543,7 +543,7 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /`CONTINUABLE_FINDINGS`, present the source ledger's `OPEN`\s+`findings`/,
+  /`CONTINUABLE_FINDINGS`, present the source ledger's `OPEN` and\s+`STILL_OPEN` `findings`/,
 );
 assert.match(workflowSkill, /read its `carried_findings` as the continuation scope/);
 assert.match(

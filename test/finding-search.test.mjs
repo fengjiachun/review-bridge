@@ -193,13 +193,14 @@ test("escalated authors and unresolved rereviews retain their recorded outcomes"
   await writeReview(store, escalated);
   const unresolved = continuableInTwoRounds({ id: REVIEW_B, status: "HUMAN_REQUIRED" });
   unresolved.findings[0].status = "STILL_OPEN";
+  unresolved.resolutions[0].disposition = "rejected";
   unresolved.rereview_decisions[0].decision = "still_open";
   unresolved.history.at(-1).event = "REREVIEW_UNRESOLVED";
   await writeReview(store, unresolved);
   const human = await searchFindings(store, { severity: "blocker", disposition: "human_required", decision: "missing" });
   assert.deepEqual(resultIds(human), [`${REVIEW_A}/F-001`]);
   assert.equal(human.results[0].author_resolution.response_round, 1);
-  const contested = await searchFindings(store, { disposition: "fixed", decision: "still_open" });
+  const contested = await searchFindings(store, { disposition: "rejected", decision: "still_open" });
   assert.deepEqual(resultIds(contested), [`${REVIEW_B}/F-001`]);
   assert.equal(contested.results[0].rereview_decision.round, 2);
   assert.equal(contested.results[0].rereview_decision.snapshot.head_sha, HEAD_TWO);

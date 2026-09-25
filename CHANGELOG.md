@@ -13,6 +13,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - (#167) Update the user guides for reviewer model selection and launch,
   multi-client upgrades, troubleshooting, and monthly review statistics.
+- (#169) A `fixed` finding the rereview keeps `still_open` now moves the
+  review to `CONTINUABLE_FINDINGS` and is carried into the next full review.
+  Only a `rejected` finding the rereview keeps open escalates to
+  `HUMAN_REQUIRED`. `REREVIEW_CONTINUABLE_FINDINGS` records an
+  `incomplete_fixes` count, and the author guidance defines `fixed` as every
+  named location and clause done.
 
 ### Fixed
 
