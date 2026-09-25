@@ -20,7 +20,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   range contains, instead of deferring it to the final phase, so an issue
   number written as a pull request no longer ships in a release entry. The
   release pull request named with `--release-pull-request` stays the only
-  exemption. Closes issue #137.
+  exemption. Pre-flight now also discovers squash-merged pull requests from
+  their `(#N)` commit subjects, so both claim directions cover them. Closes
+  issue #137.
 
 ## 0.17.0 - 2026-09-23
 

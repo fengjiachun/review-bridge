@@ -123,7 +123,7 @@ test("pre-flight verifies a release pull request from the repository alone", asy
   );
 });
 
-test("pre-flight fails a merge in the range that no entry claims", async (t) => {
+test("pre-flight fails merge and squash commits in the range that no entry claims", async (t) => {
   const fixture = await releaseRepository();
   t.after(() => fsp.rm(fixture.root, { recursive: true, force: true }));
   git(fixture.repository, "switch", "-c", "unclaimed");
@@ -139,12 +139,26 @@ test("pre-flight fails a merge in the range that no entry claims", async (t) => 
     "Merge pull request #8 from owner/unclaimed",
     "unclaimed",
   );
+  await fsp.writeFile(path.join(fixture.repository, "squashed.txt"), "work\n");
+  git(fixture.repository, "add", ".");
+  git(fixture.repository, "commit", "-m", "A squashed change (#9)");
   const unclaimed = runVerifier(["--pre"], fixture.repository);
   assert.equal(unclaimed.status, 1, unclaimed.stdout + unclaimed.stderr);
   assert.deepEqual(
     unclaimed.report.failures.map((entry) => [entry.code, entry.pull_request]),
-    [["UNCLAIMED_MERGE", 8]],
+    [
+      ["UNCLAIMED_MERGE", 8],
+      ["UNCLAIMED_MERGE", 9],
+    ],
   );
+
+  await fsp.writeFile(
+    path.join(fixture.repository, "CHANGELOG.md"),
+    `${changelog({ entry: "- A shipped thing (#7)\n- A merged change (#8)\n- A squashed change (#9)" })}\n`,
+  );
+  git(fixture.repository, "commit", "-am", "claim both changes");
+  const claimed = runVerifier(["--pre"], fixture.repository);
+  assert.equal(claimed.status, 0, claimed.stdout + claimed.stderr);
 });
 
 test("pre-flight refuses an Added entry whose range changed no documentation text", async (t) => {

@@ -103,12 +103,14 @@ verifier runs in two modes sharing one requirement list:
     same cutoff as a fresh release, and the record pins the cutoff it
     applied so a replay classifies entries exactly as the original run did.
 
-    Local discovery reads first-parent merge commits, the merge-commit
-    history the merge-integrity check below already requires, so both
+    Local discovery reads the commits GitHub writes on the first-parent
+    history when it merges a pull request: a merge commit's
+    `Merge pull request #N` subject, or a squash commit subject ending in
+    `(#N)`. A rebase merge carries no number and is invisible to it. Both
     comparison directions fail in pre-flight as they do in the final phase:
     a locally visible merge that no entry claims fails, and so does a claim
-    that local discovery cannot find, because under that history it names
-    no merge in the range — an issue number written as a pull request, or a
+    that local discovery cannot find, because it names no pull request
+    merged in the range — an issue number written as a pull request, or a
     pull request not yet merged. The only pre-flight exemption is the
     release pull request's own claim, which the operator names with
     `--release-pull-request`. The final phase reruns the reconciliation

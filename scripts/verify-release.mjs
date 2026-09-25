@@ -189,27 +189,32 @@ function defaultBranchChangelog(repositoryPath) {
   );
 }
 
-// Pre-flight discovery reads first-parent merge commits, the history the
-// merge-integrity check already requires, so a claim it cannot find names no
-// merge in the range and fails here as it would in the final phase.
+// Pre-flight discovery reads the first-parent history GitHub writes when it
+// merges a pull request: a merge commit subject "Merge pull request #N ...",
+// or a squash commit whose subject ends in "(#N)". A claim it cannot find
+// names no pull request merged in the range, so it fails here as it would in
+// the final phase. A rebase merge carries no number and is not discovered.
 function localMergedPullRequests(repositoryPath, range) {
   const revisions =
     range.kind === "ROOT" ? ["HEAD"] : [`${range.tag}..HEAD`];
   const log = git(repositoryPath, [
     "log",
     "--first-parent",
-    "--merges",
     "--format=%H %P%x09%s",
     ...revisions,
   ]);
   const pullRequests = [];
   for (const line of log.split("\n").filter(Boolean)) {
     const [shas, subject] = line.split("\t");
-    const number = /^Merge pull request #(\d+) /.exec(subject ?? "")?.[1];
+    const [mergeSha, ...parents] = shas.split(" ");
+    const number = (
+      parents.length > 1
+        ? /^Merge pull request #(\d+) /
+        : / \(#(\d+)\)$/
+    ).exec(subject ?? "")?.[1];
     if (number == null) {
       continue;
     }
-    const [mergeSha, ...parents] = shas.split(" ");
     pullRequests.push({
       number: Number(number),
       merge_sha: mergeSha,

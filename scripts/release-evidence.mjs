@@ -127,10 +127,10 @@ function bulletsOf(lines) {
  * Reconcile the CHANGELOG claims of a release range against the pull requests
  * discovered in it.
  *
- * Both directions fail in both phases. Pre-flight discovery reads the
- * first-parent merge history the merge-integrity check already requires, so
- * a merge it shows that no entry claims is unclaimed, and a claim it cannot
- * find names no merge in the range: an issue number written as a pull
+ * Both directions fail in both phases. Pre-flight discovery reads the merge
+ * and squash commits GitHub writes on the first-parent history, so a merge it
+ * shows that no entry claims is unclaimed, and a claim it cannot find names
+ * no pull request merged in the range: an issue number written as a pull
  * request, or a pull request not yet merged. The one exception is the
  * release pull request's own claim at pre-flight, below.
  */
