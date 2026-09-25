@@ -11,7 +11,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Fixed
 
-- (#PRNUM) Fail release pre-flight on a CHANGELOG claim that no merge in the
+- (#168) Fail release pre-flight on a CHANGELOG claim that no merge in the
   range contains, instead of deferring it to the final phase, so an issue
   number written as a pull request no longer ships in a release entry. The
   release pull request named with `--release-pull-request` stays the only
