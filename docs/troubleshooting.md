@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Describes Review Bridge v0.17.0.
+Describes Review Bridge v0.18.0.
 
 ## Models, launch, and upgrades
 
