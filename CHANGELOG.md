@@ -30,6 +30,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   their `(#N)` commit subjects, so both claim directions cover them. Closes
   issue #137.
 
+### Internal
+
+- (#170) Release 0.18.0.
+
 ## 0.17.0 - 2026-09-23
 
 ### Added
