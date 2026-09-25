@@ -103,15 +103,16 @@ verifier runs in two modes sharing one requirement list:
     same cutoff as a fresh release, and the record pins the cutoff it
     applied so a replay classifies entries exactly as the original run did.
 
-    Local discovery reads merge commits, so it assumes the merge-commit
-    history the merge-integrity check below already requires; a squash- or
-    rebase-merged pull request is invisible to it. The two comparison
-    directions therefore carry different weight in pre-flight: a locally
-    visible merge that no entry claims fails, because a local merge commit
-    is ground truth for presence — but a claimed pull request that local
-    discovery cannot find is deferred, not failed, because local history
-    cannot prove absence. The final phase settles deferred claims from
-    GitHub's facts, which is the authoritative reconciliation.
+    Local discovery reads first-parent merge commits, the merge-commit
+    history the merge-integrity check below already requires, so both
+    comparison directions fail in pre-flight as they do in the final phase:
+    a locally visible merge that no entry claims fails, and so does a claim
+    that local discovery cannot find, because under that history it names
+    no merge in the range — an issue number written as a pull request, or a
+    pull request not yet merged. The only pre-flight exemption is the
+    release pull request's own claim, which the operator names with
+    `--release-pull-request`. The final phase reruns the reconciliation
+    against GitHub's facts, which is the authoritative reconciliation.
 - **Final** (`--final`), after tag and release are published — requires the
   authenticated GitHub CLI and the store, so it runs on the operator's
   machine only:

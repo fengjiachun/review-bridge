@@ -7,6 +7,16 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Fixed
+
+- (#PRNUM) Fail release pre-flight on a CHANGELOG claim that no merge in the
+  range contains, instead of deferring it to the final phase, so an issue
+  number written as a pull request no longer ships in a release entry. The
+  release pull request named with `--release-pull-request` stays the only
+  exemption. Closes issue #137.
+
 ## 0.17.0 - 2026-09-23
 
 ### Added

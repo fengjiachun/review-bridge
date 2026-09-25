@@ -156,7 +156,7 @@ test("UNCLAIMED_MERGE when a merged pull request is in no entry", () => {
   );
 });
 
-test("UNFOUND_CLAIM fails in the final phase and defers in pre-flight", () => {
+test("UNFOUND_CLAIM fails in the final phase", () => {
   const claimsNine = files({
     text: changelog({ entry: "- A shipped thing (#7)\n- Another one (#9)" }),
   });
@@ -167,32 +167,6 @@ test("UNFOUND_CLAIM fails in the final phase and defers in pre-flight", () => {
       .map((entry) => entry.pull_request),
     [9],
   );
-  const pre = verifyRelease(
-    input({ phase: "PRE", files: claimsNine, observation: undefined }),
-  );
-  assert.deepEqual(pre.failures, []);
-  assert.equal(pre.status, "PASSED");
-  assert.deepEqual(
-    pre.deferred.map((entry) => [entry.code, entry.pull_request]),
-    [["UNFOUND_CLAIM", 9]],
-  );
-});
-
-test("a locally visible merge no entry claims still fails in pre-flight", () => {
-  const result = verifyRelease(
-    input({
-      phase: "PRE",
-      observation: undefined,
-      mergedPullRequests: [
-        {
-          number: 8,
-          merge_sha: MERGE_SHA,
-          merge_parents: [FIRST_PARENT_SHA, ATTESTED_HEAD_SHA],
-        },
-      ],
-    }),
-  );
-  assert.deepEqual(codes(result), ["UNCLAIMED_MERGE"]);
 });
 
 test("a range containing a pre-convention entry is reported, not reconciled", () => {

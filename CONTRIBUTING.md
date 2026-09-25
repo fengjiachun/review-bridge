@@ -17,7 +17,8 @@ small workflow changes.
 
 4. Open a pull request describing the behavior change and verification.
 5. Add a CHANGELOG bullet under `## Unreleased` naming your pull request, for
-   example `(#63)`. A merge that deliberately stays out of the prose still
+   example `(#63)`. The `(#N)` form is only for merged pull requests; write an
+   issue as `issue #N`. A merge that deliberately stays out of the prose still
    belongs in the entry, under an `### Internal` heading. Release verification
    compares the entry's pull-request numbers against the merges GitHub reports
    for the range in both directions, so an unnamed merge and a claim with no
@@ -43,9 +44,9 @@ The release entry claims the release pull request itself, so that tagging its
 merge commit puts that merge inside the range the entry describes and no later
 release inherits the line. That merge does not exist during pre-flight, so the
 flag exempts that one number from `UNFOUND_CLAIM` and reports it back as
-`release_pull_request`. Every other unfound claim is still reported, and the
-final phase accepts no exemption: by then the merge exists, and a claim still
-unfound is the tag sitting on the wrong commit.
+`release_pull_request`. Every other claim the range's merges do not contain
+fails pre-flight, and the final phase accepts no exemption: by then the merge
+exists, and a claim still unfound is the tag sitting on the wrong commit.
 
 After the tag and release are published, from a clean checkout of the tag:
 

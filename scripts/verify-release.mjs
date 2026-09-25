@@ -46,7 +46,7 @@ passing final run appends releases/<repository-id>/<version>.json to the store.
                         describes. That merge does not exist yet at pre-flight,
                         so this exempts that one number from UNFOUND_CLAIM and
                         reports it back as release_pull_request. Every other
-                        number is still reported.
+                        claim the range does not contain fails pre-flight.
 `;
 
 const MAX_RECORD_BYTES = 1024 * 1024;
@@ -189,10 +189,9 @@ function defaultBranchChangelog(repositoryPath) {
   );
 }
 
-// Pre-flight discovery reads merge commits, so it assumes the merge-commit
-// history the merge-integrity check already requires; a squash- or
-// rebase-merged pull request is invisible to it, which is why an unfound claim
-// is deferred rather than failed in this phase.
+// Pre-flight discovery reads first-parent merge commits, the history the
+// merge-integrity check already requires, so a claim it cannot find names no
+// merge in the range and fails here as it would in the final phase.
 function localMergedPullRequests(repositoryPath, range) {
   const revisions =
     range.kind === "ROOT" ? ["HEAD"] : [`${range.tag}..HEAD`];
@@ -472,7 +471,6 @@ process.stdout.write(
       status: result.status,
       reconciliation: result.reconciliation ?? null,
       failures: result.failures,
-      deferred: result.deferred,
       notes: result.notes,
       release_pull_request: result.releasePullRequest ?? null,
       record: recordOutcome,

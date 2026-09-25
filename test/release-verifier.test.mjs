@@ -115,11 +115,35 @@ test("pre-flight verifies a release pull request from the repository alone", asy
     `${changelog({ entry: "- A shipped thing (#7)\n- An unmerged claim (#99)" })}\n`,
   );
   git(fixture.repository, "commit", "-am", "claim a pull request");
-  const deferring = runVerifier(["--pre"], fixture.repository);
-  assert.equal(deferring.status, 0);
+  const unfound = runVerifier(["--pre"], fixture.repository);
+  assert.equal(unfound.status, 1, unfound.stdout + unfound.stderr);
   assert.deepEqual(
-    deferring.report.deferred.map((entry) => entry.pull_request),
-    [99],
+    unfound.report.failures.map((entry) => [entry.code, entry.pull_request]),
+    [["UNFOUND_CLAIM", 99]],
+  );
+});
+
+test("pre-flight fails a merge in the range that no entry claims", async (t) => {
+  const fixture = await releaseRepository();
+  t.after(() => fsp.rm(fixture.root, { recursive: true, force: true }));
+  git(fixture.repository, "switch", "-c", "unclaimed");
+  await fsp.writeFile(path.join(fixture.repository, "unclaimed.txt"), "work\n");
+  git(fixture.repository, "add", ".");
+  git(fixture.repository, "commit", "-m", "an unclaimed change");
+  git(fixture.repository, "switch", "main");
+  git(
+    fixture.repository,
+    "merge",
+    "--no-ff",
+    "-m",
+    "Merge pull request #8 from owner/unclaimed",
+    "unclaimed",
+  );
+  const unclaimed = runVerifier(["--pre"], fixture.repository);
+  assert.equal(unclaimed.status, 1, unclaimed.stdout + unclaimed.stderr);
+  assert.deepEqual(
+    unclaimed.report.failures.map((entry) => [entry.code, entry.pull_request]),
+    [["UNCLAIMED_MERGE", 8]],
   );
 });
 
@@ -160,10 +184,13 @@ test("pre-flight exempts only the named release pull request from its own claim"
   git(fixture.repository, "commit", "-am", "claim the release pull request");
 
   const unnamed = runVerifier(["--pre"], fixture.repository);
-  assert.equal(unnamed.status, 0, unnamed.stdout + unnamed.stderr);
+  assert.equal(unnamed.status, 1, unnamed.stdout + unnamed.stderr);
   assert.deepEqual(
-    unnamed.report.deferred.map((entry) => entry.pull_request),
-    [42, 99],
+    unnamed.report.failures.map((entry) => [entry.code, entry.pull_request]),
+    [
+      ["UNFOUND_CLAIM", 42],
+      ["UNFOUND_CLAIM", 99],
+    ],
   );
   assert.equal(unnamed.report.release_pull_request, null);
 
@@ -171,11 +198,11 @@ test("pre-flight exempts only the named release pull request from its own claim"
     ["--pre", "--release-pull-request", "42"],
     fixture.repository,
   );
-  assert.equal(named.status, 0, named.stdout + named.stderr);
-  // The exemption is one declared number, not a class: #99 is still reported.
+  assert.equal(named.status, 1, named.stdout + named.stderr);
+  // The exemption is one declared number, not a class: #99 still fails.
   assert.deepEqual(
-    named.report.deferred.map((entry) => entry.pull_request),
-    [99],
+    named.report.failures.map((entry) => [entry.code, entry.pull_request]),
+    [["UNFOUND_CLAIM", 99]],
   );
   // The report carries the number back, so the exemption is never silent.
   assert.equal(named.report.release_pull_request, 42);
