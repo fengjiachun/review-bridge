@@ -41,10 +41,13 @@ node scripts/verify-release.mjs --pre --release-pull-request <n>
 ```
 
 Pre-flight finds merged pull requests on the release branch's first-parent
-history. Cut the release branch from the current `main`, and when `main` moves,
-rebase the branch onto it instead of merging `main` in. A pull request that
-reaches the branch only through a merge of `main` is invisible to pre-flight,
-so its claim fails.
+history, from GitHub's `Merge pull request #N` merge commits and from squash
+commits whose subject ends in `(#N)`. Changes reach `main` only through pull
+requests, and that subject suffix is reserved for GitHub's squash merge, so do
+not end a direct commit's subject with `(#N)`. Cut the release branch from the
+current `main`, and when `main` moves, rebase the branch onto it instead of
+merging `main` in. A pull request that reaches the branch only through a merge
+of `main` is invisible to pre-flight, so its claim fails.
 
 The release entry claims the release pull request itself, so that tagging its
 merge commit puts that merge inside the range the entry describes and no later

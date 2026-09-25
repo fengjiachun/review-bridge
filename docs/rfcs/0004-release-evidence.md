@@ -109,7 +109,12 @@ verifier runs in two modes sharing one requirement list:
     `(#N)`. A rebase merge carries no number and is invisible to it, and so
     is a pull request that reaches the release branch only through a merge
     of the default branch into it, so the release branch is cut from the
-    current default branch and rebased onto it when it moves. Both
+    current default branch and rebased onto it when it moves. Changes reach
+    the default branch only through pull requests and the `(#N)` suffix is
+    reserved for GitHub's squash merge, so a single-parent commit carrying
+    it is read as pull request N. A direct commit that borrows the suffix
+    breaks that convention, and the final phase, which reads GitHub's merged
+    pull requests, still fails a claim resting on it. Both
     comparison directions fail in pre-flight as they do in the final phase:
     a locally visible merge that no entry claims fails, and so does a claim
     that local discovery cannot find, because it names no pull request
