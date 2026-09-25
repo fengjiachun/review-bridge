@@ -106,7 +106,10 @@ verifier runs in two modes sharing one requirement list:
     Local discovery reads the commits GitHub writes on the first-parent
     history when it merges a pull request: a merge commit's
     `Merge pull request #N` subject, or a squash commit subject ending in
-    `(#N)`. A rebase merge carries no number and is invisible to it. Both
+    `(#N)`. A rebase merge carries no number and is invisible to it, and so
+    is a pull request that reaches the release branch only through a merge
+    of the default branch into it, so the release branch is cut from the
+    current default branch and rebased onto it when it moves. Both
     comparison directions fail in pre-flight as they do in the final phase:
     a locally visible merge that no entry claims fails, and so does a claim
     that local discovery cannot find, because it names no pull request
