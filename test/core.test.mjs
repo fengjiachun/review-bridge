@@ -1346,8 +1346,8 @@ test("rereview rebuttals require verification without breaking old ledgers", asy
   await submitResolutions(store, prepared.id, [
     {
       finding_id: "F-001",
-      disposition: "fixed",
-      rationale: "Added the focused assertion.",
+      disposition: "rejected",
+      rationale: "The existing suite already covers the value.",
     },
     {
       finding_id: "F-002",
@@ -1714,6 +1714,118 @@ test("unresolved round-two finding escalates to a human", async (t) => {
       result.state_version - 1,
     ),
     /review state_version mismatch/,
+  );
+});
+
+test("an incomplete fix is carried into a fresh full review", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "first change");
+  const source = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  });
+  await submitInitialReview(store, source.id, [
+    {
+      severity: "major",
+      title: "Missing tests",
+      explanation: "Neither export has a test.",
+      recommendation: "Test both exports.",
+      path: "app.js",
+      line: 1,
+    },
+  ]);
+  await submitResolutions(store, source.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added tests." },
+  ]);
+  await prepareRereview(store, source.id);
+  const result = await submitRereview(
+    store,
+    source.id,
+    [
+      {
+        finding_id: "F-001",
+        decision: "still_open",
+        rationale: "Only one export is tested.",
+      },
+    ],
+    [],
+  );
+  assert.equal(result.status, "CONTINUABLE_FINDINGS");
+  assert.equal(result.findings[0].status, "STILL_OPEN");
+  const event = result.history.at(-1);
+  assert.equal(event.event, "REREVIEW_CONTINUABLE_FINDINGS");
+  assert.equal(event.new_findings, 0);
+  assert.equal(event.incomplete_fixes, 1);
+
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "finish the fix");
+  const continued = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    forceFullReview: true,
+    continuedFromReviewId: source.id,
+  });
+  const [carried, ...rest] = (await openReview(store, continued.id))
+    .carried_findings;
+  assert.equal(rest.length, 0);
+  assert.equal(carried.continued_from_review_id, source.id);
+  assert.equal(carried.finding_id, "F-001");
+  assert.match(carried.fingerprint_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(carried.severity, "major");
+  assert.equal(carried.title, "Missing tests");
+  assert.equal(carried.path, "app.js");
+  const carriedText = JSON.stringify(carried);
+  assert.equal(carriedText.includes("Added tests."), false);
+  assert.equal(carriedText.includes("Only one export is tested."), false);
+});
+
+test("a disputed rebuttal escalates beside an incomplete fix", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  });
+  await submitInitialReview(store, prepared.id, [
+    { severity: "major", title: "Undocumented export", explanation: "Document it." },
+    { severity: "major", title: "Missing tests", explanation: "Test it." },
+  ]);
+  await submitResolutions(store, prepared.id, [
+    { finding_id: "F-001", disposition: "rejected", rationale: "It is internal." },
+    { finding_id: "F-002", disposition: "fixed", rationale: "Added tests." },
+  ]);
+  await prepareRereview(store, prepared.id);
+  const result = await submitRereview(
+    store,
+    prepared.id,
+    [
+      { finding_id: "F-001", decision: "still_open", rationale: "It is public." },
+      { finding_id: "F-002", decision: "still_open", rationale: "Half tested." },
+    ],
+    [],
+  );
+  assert.equal(result.status, "HUMAN_REQUIRED");
+  assert.equal(result.history.at(-1).event, "REREVIEW_UNRESOLVED");
+  const exported = await exportHumanArbitration(
+    store,
+    prepared.id,
+    result.state_version,
+  );
+  assert.deepEqual(
+    exported.arbitration.active_findings.map(({ finding }) => finding.id),
+    ["F-001", "F-002"],
   );
 });
 
@@ -4018,10 +4130,15 @@ const WAIT_TRANSITION_FINDING = {
   explanation: "No test asserts the zero-divisor branch.",
 };
 
-async function driveToWaitingRereview(store, repository, reviewId) {
+async function driveToWaitingRereview(
+  store,
+  repository,
+  reviewId,
+  disposition = "fixed",
+) {
   await submitInitialReview(store, reviewId, [WAIT_TRANSITION_FINDING]);
   await submitResolutions(store, reviewId, [
-    { finding_id: "F-001", disposition: "fixed", rationale: "Added it." },
+    { finding_id: "F-001", disposition, rationale: "Added it." },
   ]);
   await fsp.writeFile(
     path.join(repository, "app.test.js"),
@@ -4123,7 +4240,8 @@ const WAIT_TRANSITIONS = [
   ],
   [
     "rereview contested",
-    driveToWaitingRereview,
+    (store, repository, id) =>
+      driveToWaitingRereview(store, repository, id, "rejected"),
     (store, repository, id) =>
       submitRereview(
         store,

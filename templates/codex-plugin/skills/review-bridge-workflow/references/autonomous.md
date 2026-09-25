@@ -121,16 +121,18 @@ gap returns the ready pull request to draft before any repair.
    process. After a restart inspect `get_review_summary.reviewer_dispatch`
    before launching; a live or indeterminate dispatch blocks duplicates. When its result arrives, call `get_review`
    again and narrate every per-finding decision and any new finding from its
-   `rereview_decisions` and `findings`. A contested `HUMAN_REQUIRED`
-   review pauses the workflow; state the escalation and why it needs a human.
+   `rereview_decisions` and `findings`. A rebuttal the rereview keeps open
+   makes the review `HUMAN_REQUIRED` and pauses the workflow;
+   state the escalation and why it needs a human.
    Any author `human_required` resolution moves directly to `HUMAN_REQUIRED`
    without capturing a rereview round. Narrate the persisted resolutions and
    escalation reason, then stop for human arbitration. If the same submission
    also contains a fixed resolution, state that its files and commit are not
    yet bound in the ledger; never infer them from the workspace or session
    text.
-   New uncontested round-two findings enter `ADDRESS_LOCAL_FINDINGS`; present
-   the source ledger's `OPEN` findings, address them on a changed committed
+   Fixes judged incomplete and new uncontested round-two findings enter
+   `ADDRESS_LOCAL_FINDINGS`; present the source ledger's `OPEN` and
+   `STILL_OPEN` findings, address them on a changed committed
    head after the same pre-commit cleanup, and let the next new `FULL` review
    inspect its `carried_findings` independently. Never add a third model round to the
    same review ID. If the

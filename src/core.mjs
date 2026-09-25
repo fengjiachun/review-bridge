@@ -1107,9 +1107,16 @@ export function continuationFindingFingerprint(finding) {
   );
 }
 
+// A continuation carries every finding still open: one never answered, and
+// one whose fix the rereview judged incomplete. The carried entry is the bare
+// finding description; the next reviewer judges the new head on its own.
+export function isContinuationFinding(finding) {
+  return ["OPEN", "STILL_OPEN"].includes(finding.status);
+}
+
 function continuationFindings(review) {
   return review.findings
-    .filter((finding) => finding.status === "OPEN")
+    .filter(isContinuationFinding)
     .map((finding) => ({
       continued_from_review_id: review.id,
       finding_id: finding.id,
@@ -2262,7 +2269,10 @@ async function submitRereviewWhileLocked(
   if (byId.size !== awaiting.length || decisionInputs.length !== awaiting.length) {
     throw new Error("provide exactly one rereview decision for every author response");
   }
+  // Only a rebuttal the reviewer still rejects is a dispute for a human. A
+  // fix the reviewer judges incomplete is carried into the next full review.
   let contested = false;
+  let incompleteFixes = 0;
   for (const finding of awaiting) {
     const input = byId.get(finding.id);
     if (!input) {
@@ -2299,9 +2309,12 @@ async function submitRereviewWhileLocked(
       finding.status = "RESOLVED";
     } else if (decision === "rebuttal_accepted") {
       finding.status = "REBUTTAL_ACCEPTED";
-    } else {
+    } else if (finding.status === "AUTHOR_REJECTED") {
       finding.status = "STILL_OPEN";
       contested = true;
+    } else {
+      finding.status = "STILL_OPEN";
+      incompleteFixes += 1;
     }
   }
 
@@ -2325,13 +2338,14 @@ async function submitRereviewWhileLocked(
       new_findings: newFindings.length,
       errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
-  } else if (newFindings.length > 0) {
+  } else if (newFindings.length > 0 || incompleteFixes > 0) {
     review.status = "CONTINUABLE_FINDINGS";
     review.history.push({
       at: now(),
       event: "REREVIEW_CONTINUABLE_FINDINGS",
       round: review.current_round,
       new_findings: newFindings.length,
+      incomplete_fixes: incompleteFixes,
       errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
   } else {

@@ -9,6 +9,7 @@ import {
   continuationFindingFingerprint,
   DEFAULT_CHANGE_SIZE_BUDGET,
   getReviewSnapshot,
+  isContinuationFinding,
   loadReview,
   launchLocalReviewer,
   patchChangeSize,
@@ -6178,7 +6179,7 @@ export async function advanceLocalWorkflow(
         }
         if (summary.status === "CONTINUABLE_FINDINGS") {
           const findings = review.findings
-            .filter((finding) => finding.status === "OPEN")
+            .filter(isContinuationFinding)
             .map((finding) => ({
               finding_id: finding.id,
               fingerprint_sha256: continuationFindingFingerprint(finding),

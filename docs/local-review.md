@@ -91,6 +91,9 @@ Otherwise, back in the author conversation:
 
 > Read the reviewer's findings, address each one, and prepare round two.
 
+Mark a finding `fixed` only when every location and clause it names is done at
+the new head; a different remedy is a `rejected` answer with evidence.
+
 For a Codex review started with `launch_local_reviewer`, prepare rereview and
 call the launcher again with the current state version. Round two inherits the
 selected pair; change it explicitly before launch if needed. For manual Codex
@@ -110,11 +113,13 @@ every round-one finding and every author resolution. Rereview ends in `CLEAN`,
   not test results: the deterministic check gate lives in the publication
   layer, where a failing required check blocks `MERGE_READY` on provider
   evidence rather than on the author's word.
-- `CONTINUABLE_FINDINGS`: all prior findings were accepted, but round two found
-  a new issue. Commit a changed head and call `prepare_review` with
+- `CONTINUABLE_FINDINGS`: no rebuttal is still disputed, but round two judged
+  a fix incomplete or found a new issue. Commit a changed head and call `prepare_review` with
   `continued_from_review_id` and `force_full_review: true`; the fresh reviewer
   receives only the bare finding descriptions as scope hints.
-- `HUMAN_REQUIRED`: a prior finding remains contested after round two.
+- `HUMAN_REQUIRED`: round two kept a rejected finding open, so the rebuttal is
+  disputed. Any incomplete fix from the same round goes into the same
+  arbitration packet.
 
 For `HUMAN_REQUIRED`, call `get_review_summary`, then pass its exact
 `state_version` to `export_human_arbitration`. The read-only export fails if the
@@ -224,8 +229,8 @@ WAITING_FOR_REVIEW
                    └─ fixed/rejected -> AUTHOR_RESPONDED
                                           -> WAITING_FOR_REREVIEW
                                                ├─ all accepted, no new -> CLEAN
-                                               ├─ only new -> CONTINUABLE_FINDINGS
-                                               └─ prior still open -> HUMAN_REQUIRED
+                                               ├─ fix judged incomplete, or only new -> CONTINUABLE_FINDINGS
+                                               └─ rebuttal still open -> HUMAN_REQUIRED
 
 CLEAN -> snapshot recheck -> LOCAL_GATE_PASSED
 ```

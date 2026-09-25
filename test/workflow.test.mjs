@@ -4449,7 +4449,7 @@ test("a resolved round-two review reaches the local gate on the fixed head", asy
   assert.equal(gated.current_review.status, "LOCAL_GATE_PASSED");
 });
 
-test("uncontested rereview findings continue through a FULL review and obey the local budget", async (t) => {
+test("incomplete fixes and uncontested rereview findings continue through a FULL review and obey the local budget", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   const started = await startAutonomousWorkflow(
@@ -4536,8 +4536,8 @@ test("uncontested rereview findings continue through a FULL review and obey the 
   await submitRereview(
     state.store,
     source.id,
-    [{ finding_id: "F-001", decision: "resolved", rationale: "Verified." }],
-    Array.from({ length: 100 }, (_, index) => ({
+    [{ finding_id: "F-001", decision: "still_open", rationale: "Half fixed." }],
+    Array.from({ length: 99 }, (_, index) => ({
       severity: "minor",
       title: `New edge case ${index + 1}`,
       explanation: `The rereview found separate edge case ${index + 1}.`,
@@ -4567,7 +4567,7 @@ test("uncontested rereview findings continue through a FULL review and obey the 
     source.id,
   );
   assert.equal(workflow.local_review_cycles[0].findings.length, 100);
-  assert.equal(workflow.local_review_cycles[0].findings[0].finding_id, "F-002");
+  assert.equal(workflow.local_review_cycles[0].findings[0].finding_id, "F-001");
   // The head about to be recorded closes this continuation cycle and moves the
   // phase itself, so the summary must not also name the advance that the phase
   // it lands in refuses.
@@ -4610,7 +4610,7 @@ test("uncontested rereview findings continue through a FULL review and obey the 
   const opened = await openReview(state.store, followup.id, "CODEX_TASK");
   assert.equal(opened.review_strategy.mode, "FULL");
   assert.equal(opened.carried_findings.length, 100);
-  assert.equal(opened.carried_findings[0].finding_id, "F-002");
+  assert.equal(opened.carried_findings[0].finding_id, "F-001");
   assert.equal("rationale" in opened.carried_findings[0], false);
   workflow = await bindWorkflowReview(
     state.store,
@@ -5019,8 +5019,8 @@ test("round-two unresolved findings pause without creating a third round", async
   await submitResolutions(state.store, review.id, [
     {
       finding_id: "F-001",
-      disposition: "fixed",
-      rationale: "Updated the contract-bearing value.",
+      disposition: "rejected",
+      rationale: "The value carries no public contract.",
       evidence: "fixture verification",
     },
   ]);
