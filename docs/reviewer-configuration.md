@@ -1,5 +1,41 @@
 # Local reviewer configuration
 
+## Choose and start from your author client
+
+Ask in the conversation where you authored the change:
+
+> Use Review Bridge to review this change with Codex. Show the available models
+> and reasoning levels first. Use `origin/main` as the base; the requirement is
+> "..." and the implementation scope is "...".
+
+After seeing the choices, reply:
+
+> Use `<model from the list>` with `<supported reasoning level>` and start.
+
+The reviewer runs as an independent Codex process on the MCP host. It need not
+appear as a new task window in the author app. Ask the author for the review's
+status or findings; [local review](local-review.md) explains the next steps.
+
+| Author client | Connection needed |
+| --- | --- |
+| Codex | [Review Bridge plugin](install/codex-plugin.md) with author tools |
+| Claude | Separate [author MCP connection](install/claude-desktop.md#use-claude-as-an-author); the Desktop reviewer extension alone cannot launch Codex |
+| Hermes | [Author profile](install/hermes.md), separate from the reviewer profile |
+| DeepSeek Harness | [Author profile](install/deepseek-harness.md), separate from the reviewer profile |
+
+The MCP host needs an authenticated Codex CLI **0.153.4 or newer**. Check
+`codex --version` on that host before launching (or check the executable set by
+`REVIEW_BRIDGE_CODEX_COMMAND`). Older versions such as 0.145.0 can cancel the
+reviewer's first MCP call even when discovery succeeds; see the
+[launcher compatibility notes](../templates/codex-plugin/skills/review-bridge-workflow/references/codex-task.md).
+Upgrade the CLI before using automatic launch. Selection controls
+local `CODEX_TASK` reviews; it does not choose the model used by GitHub's Codex
+review or by the other reviewer providers. A picker depends on the author
+client; ordinary conversation works when no picker is available. If you already
+specified a valid pair and authorized starting, the author need not ask again.
+
+## Tool sequence and defaults
+
 The author conversation's model does not select the reviewer. Every author MCP
 connection (Codex, Claude, Hermes, DeepSeek Harness) uses the same tools:
 
@@ -19,6 +55,8 @@ and execution environment. Otherwise suggest the runtime's default model with
 default effort. A suggestion never authorizes a start. Unattended drivers require
 a preauthorized pair; missing or invalid configuration stops without waiting for
 an interactive answer.
+
+## Runtime availability
 
 Discovery starts the Codex CLI on the MCP host, using that process's account,
 configuration, environment and neutral cwd. `REVIEW_BRIDGE_CODEX_COMMAND` may name
@@ -44,6 +82,8 @@ a force-network-refresh parameter. Review Bridge neither caches model lists nor
 claims a network refresh: `freshness` explicitly says upstream source and age are
 unavailable. Discovery failure is an error and can be retried; stored preferences
 are never used as availability evidence.
+
+## Rereview and launch recovery
 
 Round two inherits the requested pair. Explicit changes before dispatch preserve
 prior rounds; after an exited failed launch, changing selection preserves the

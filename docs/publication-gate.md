@@ -92,6 +92,8 @@ The packaged Codex plugin also includes
 `scripts/inspect-publication-audit.mjs <review_id>` for read-only, full-chain
 offline audit validation.
 
+## Review statistics
+
 `scripts/review-scorecard.mjs` aggregates the ledgers already in the configured
 store into one report: findings by severity, author dispositions crossed with
 reviewer decisions, rebuttal outcomes before and after the verification
@@ -101,6 +103,18 @@ markdown, or JSON with `--json`, and states every counting rule in the report
 itself so a number can be replayed against the ledgers it came from. It reads
 one store, writes nothing, sends nothing anywhere, and lists a ledger it cannot
 parse as skipped rather than repairing it.
+
+For example, to summarize September 2026 reviews by reviewer provider, including
+recorded rebuttal outcomes:
+
+```bash
+node dist/review-bridge-v0.17.0/codex-marketplace/plugins/review-bridge/scripts/review-scorecard.mjs \
+  --since 2026-09-01 --until 2026-10-01
+```
+
+Replace the dates for another month. The period selects **reviews created in
+that month**, not rebuttal events occurring in that month. Groups are reviewer
+providers such as `CODEX_TASK`, not a ranking of individual models.
 
 Use review filters together to compare the same period, repository, review
 type, and strategy:
@@ -161,6 +175,8 @@ These are recorded outcomes, not model accuracy: `fixed`/`resolved` does not
 establish accuracy, and `rebuttal_accepted` does not establish a false
 positive. A strategy's `parent_review_id` is not evidence of a continuation
 or rework chain.
+
+## Read one review report
 
 The author tool `render_review_report` and the packaged
 `scripts/review-report.mjs <review_id> [--full] [--json] [--store <path>]`

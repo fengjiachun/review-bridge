@@ -2,19 +2,30 @@
 
 Describes Review Bridge v0.17.0.
 
-The manual local review, step by step: the requests to give each reviewer,
+Local review, step by step: selecting and starting Codex, manual reviewer requests,
 the states a review ends in, successor reviews, and the state machine. For
 why each step exists, see [How Review Bridge reviews a change](review-flow.md);
 for every tool and error code, see the [reference](reference.md).
 
 ## Prepare and dispatch
 
-In the author Codex task, choose the reviewer provider explicitly:
+Use an author connection in Codex, Claude, Hermes, or DeepSeek Harness. For an
+independent Codex reviewer, ask:
 
-> Prepare the current changes for a `CODEX_TASK` review. The requirement is
-> "...", the implementation scope is "...", and the base ref is `origin/main`.
+> Review the current change using `CODEX_TASK`. The requirement is "...", the
+> implementation scope is "...", and the base ref is `origin/main`. Show the
+> available reviewer models and reasoning levels before starting.
 
-Codex returns a `review_id` and waits in `WAITING_FOR_REVIEW`.
+Choose from the returned options and authorize the start. The author calls
+`discover_reviewer_options`, captures the snapshot with `prepare_review`, saves
+your choice with `select_reviewer_configuration`, then calls
+`launch_local_reviewer`. Selection requires the discovered `environment_id` and
+the current review `state_version`; launch uses the new state version returned
+after selection. See [reviewer configuration](reviewer-configuration.md) for
+client setup and runtime limits. The launcher starts an independent process;
+you follow it from the author conversation rather than creating a UI task.
+
+The pending review has a `review_id` and starts in `WAITING_FOR_REVIEW`.
 Use `get_review_summary` for the compact state, next action, current snapshot,
 and active versus all-time finding counts. Pass its `state_version` to
 `wait_for_review_state`; the tool waits 25 seconds by default, configurable up
@@ -27,8 +38,15 @@ State-changing tools can also return structured concurrency and durability
 errors. See [Troubleshooting](troubleshooting.md) for what each one means and
 whether retrying is safe.
 
-For a `CODEX_TASK` review, create a new Codex task and select `high` reasoning
-effort unless you explicitly want another level. Keep your configured model.
+## Start a reviewer manually
+
+If you choose manual dispatch instead of `launch_local_reviewer`, prepare the
+review for the desired provider and pass its ID to the matching reviewer below.
+Do not also launch a process for the same round.
+
+For a `CODEX_TASK` review, create a new Codex task and select the model and
+reasoning effort in that client. Use `high` when supported unless you explicitly
+want another level.
 Do not fork the author task or include its chat history. Give the new task only
 this request:
 
@@ -63,23 +81,29 @@ DeepSeek Harness profile registers the tools of every MCP server it configures.
 A DeepSeek Harness reviewer profile must also scope its skill and
 workspace-instruction roots, which the packaged snippet does.
 
+## Resolve findings and finish
+
 If the reviewer submitted no findings, the review is already `CLEAN` and its
 next action is `FINALIZE_LOCAL_GATE`; there is nothing to answer and
 `prepare_rereview` will reject the state. Skip ahead and finalize.
 
-Otherwise, back in Codex:
+Otherwise, back in the author conversation:
 
 > Read the reviewer's findings, address each one, and prepare round two.
 
-For a `CODEX_TASK` rereview, create another new task with the same review ID
-and a request to rereview the author's resolutions. Select `high` unless you
-explicitly want another level, keeping your configured model.
+For a Codex review started with `launch_local_reviewer`, prepare rereview and
+call the launcher again with the current state version. Round two inherits the
+selected pair; change it explicitly before launch if needed. For manual Codex
+dispatch, create another new task with the same review ID and request a rereview
+of the author's resolutions, retaining your selected model and effort.
 
-Resume the same reviewer context for round two where the provider allows it. A
-`DEEPSEEK_HARNESS` reviewer cannot: every headless run starts a fresh session,
+For other providers, resume the same reviewer context for round two where
+allowed. A `DEEPSEEK_HARNESS` reviewer cannot: every headless run starts a fresh session,
 so launch a new one with the same review ID and a request to rereview the
 author's resolutions. It rebuilds the round from `open_review`, which serves
-every round-one finding and every author resolution. The final state is one of:
+every round-one finding and every author resolution. Rereview ends in `CLEAN`,
+`CONTINUABLE_FINDINGS`, or `HUMAN_REQUIRED`. Finalize `CLEAN` with
+`finalize_local_gate` to reach `LOCAL_GATE_PASSED`:
 
 - `LOCAL_GATE_PASSED`: the reviewer found no remaining issue and the working tree
   still matches the reviewed snapshot. The gate attests snapshot consistency,
@@ -127,9 +151,9 @@ state.
 ## Successor reviews
 
 Start a fresh reviewer context for each new `review_id`; a round-two rereview
-may stay in the same context. A `CODEX_TASK` reviewer must be a newly created
-task, not a fork of the author task. This prevents authoring history and
-unrelated reviews from consuming the new task's context window.
+may stay in the same context. A `CODEX_TASK` reviewer must use an independent
+process or a newly created task, not a fork of the author task. This prevents
+authoring history and unrelated reviews from consuming the new context window.
 
 When a committed change continues a prior `LOCAL_GATE_PASSED` task for the same
 repository, base SHA, and requirement, that task is the parent. Leave
