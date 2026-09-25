@@ -2,8 +2,11 @@
 
 Describes Review Bridge v0.17.0.
 
-Clone the repository and check out the release tag matching the extension you
-installed, then build the local marketplace and register it:
+For an existing installation, follow the [upgrade guide](upgrade.md).
+
+The plugin supports local Codex review by itself. If you also use a reviewer
+extension or profile, install the same release everywhere. Build and register
+the local marketplace:
 
 ```bash
 git clone https://github.com/fengjiachun/review-bridge.git
@@ -29,3 +32,7 @@ to build from a working tree with any modified or untracked file, and it runs
 `npm install` for the packaged runtime, so it needs network access. A fresh
 clone at a release tag satisfies both. See [Develop](../../README.md#develop) for the full
 build and verification loop.
+
+Start a new author task and follow [your first local review](../../README.md#run-your-first-local-review).
+The author connection offers model discovery, selection, and launch; see
+[reviewer configuration](../reviewer-configuration.md).

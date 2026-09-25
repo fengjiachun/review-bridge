@@ -56,11 +56,12 @@ reviewer that had no part in writing it. The reviewer reads the snapshot,
 never your live working tree, and submits structured findings. No findings
 means `CLEAN`.
 
-The autonomous workflow always dispatches this review to a brand-new **Codex
-task**, reconciled by a correlation marker. On the manual path you choose the
-reviewer — a fresh Claude Desktop conversation, a new Codex task, or an
+The autonomous workflow dispatches an independent **Codex reviewer** using the
+[explicitly selected model and effort](reviewer-configuration.md). The local
+launcher starts a Codex process and records its identity for reconciliation.
+On the manual path you choose the reviewer — a fresh Claude Desktop conversation, a new Codex task, or an
 isolated Hermes or DeepSeek Harness profile — though a change headed for
-publication takes the new Codex task by default, with any other provider read
+publication takes a Codex review by default, with any other provider read
 as a second opinion beside that gate rather than in place of it. A manual
 snapshot may also capture uncommitted working-tree state; the workflow never
 has any, since step 1 required a clean tree.

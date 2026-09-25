@@ -9,6 +9,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Changed
+
+- (#167) Update the user guides for reviewer model selection and launch,
+  multi-client upgrades, troubleshooting, and monthly review statistics.
+
 ### Fixed
 
 - (#168) Fail release pre-flight on a CHANGELOG claim that no merge in the
