@@ -127,12 +127,12 @@ function bulletsOf(lines) {
  * Reconcile the CHANGELOG claims of a release range against the pull requests
  * discovered in it.
  *
- * The two comparison directions carry different weight before the tag exists:
- * a merge the local history shows is ground truth for presence, so an
- * unclaimed one fails in both phases, while a claimed pull request local
- * discovery cannot find is deferred in pre-flight -- local merge-commit
- * history cannot prove absence, and only the final phase's GitHub facts can
- * settle it.
+ * Both directions fail in both phases. Pre-flight discovery reads the merge
+ * and squash commits GitHub writes on the first-parent history, so a merge it
+ * shows that no entry claims is unclaimed, and a claim it cannot find names
+ * no pull request merged in the range: an issue number written as a pull
+ * request, or a pull request not yet merged. The one exception is the
+ * release pull request's own claim at pre-flight, below.
  */
 export function reconcileClaims({
   entries,
@@ -144,7 +144,6 @@ export function reconcileClaims({
   releasePullRequest = null,
 }) {
   const failures = [];
-  const deferred = [];
   const inRange = entries.filter(
     (entry) =>
       entry.version != null &&
@@ -212,22 +211,18 @@ export function reconcileClaims({
       if (phase === "PRE" && number === releasePullRequest) {
         continue;
       }
-      const unfound = failure(
-        "UNFOUND_CLAIM",
-        `CHANGELOG claims pull request #${number}, which the range's merged pull requests do not contain`,
-        { pull_request: number },
+      failures.push(
+        failure(
+          "UNFOUND_CLAIM",
+          `CHANGELOG claims pull request #${number}, which the range's merged pull requests do not contain`,
+          { pull_request: number },
+        ),
       );
-      if (phase === "PRE") {
-        deferred.push(unfound);
-      } else {
-        failures.push(unfound);
-      }
     }
   }
   return {
     status,
     failures,
-    deferred,
     entries: inRange.map((entry) => ({
       version: entry.version,
       sha256: entry.sha256,
@@ -696,7 +691,6 @@ export function verifyRelease(input) {
           `${input.observation.tag.name} does not exist, so release ${input.version} cannot be recorded`,
         ),
       ],
-      deferred: [],
       notes,
     };
   }
@@ -734,7 +728,6 @@ export function verifyRelease(input) {
       phase,
       status: failures.length === 0 ? "PASSED" : "FAILED",
       failures,
-      deferred: reconciliation.deferred,
       notes,
       reconciliation: reconciliation.status,
       releasePullRequest: input.releasePullRequest ?? null,
@@ -775,7 +768,6 @@ export function verifyRelease(input) {
     phase,
     status: failures.length === 0 ? "PASSED" : "FAILED",
     failures,
-    deferred: [],
     notes,
     reconciliation: reconciliation.status,
     record:

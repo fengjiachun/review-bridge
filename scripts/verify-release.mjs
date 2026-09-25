@@ -46,7 +46,7 @@ passing final run appends releases/<repository-id>/<version>.json to the store.
                         describes. That merge does not exist yet at pre-flight,
                         so this exempts that one number from UNFOUND_CLAIM and
                         reports it back as release_pull_request. Every other
-                        number is still reported.
+                        claim the range does not contain fails pre-flight.
 `;
 
 const MAX_RECORD_BYTES = 1024 * 1024;
@@ -189,28 +189,32 @@ function defaultBranchChangelog(repositoryPath) {
   );
 }
 
-// Pre-flight discovery reads merge commits, so it assumes the merge-commit
-// history the merge-integrity check already requires; a squash- or
-// rebase-merged pull request is invisible to it, which is why an unfound claim
-// is deferred rather than failed in this phase.
+// Pre-flight discovery reads the first-parent history GitHub writes when it
+// merges a pull request: a merge commit subject "Merge pull request #N ...",
+// or a squash commit whose subject ends in "(#N)". A claim it cannot find
+// names no pull request merged in the range, so it fails here as it would in
+// the final phase. A rebase merge carries no number and is not discovered.
 function localMergedPullRequests(repositoryPath, range) {
   const revisions =
     range.kind === "ROOT" ? ["HEAD"] : [`${range.tag}..HEAD`];
   const log = git(repositoryPath, [
     "log",
     "--first-parent",
-    "--merges",
     "--format=%H %P%x09%s",
     ...revisions,
   ]);
   const pullRequests = [];
   for (const line of log.split("\n").filter(Boolean)) {
     const [shas, subject] = line.split("\t");
-    const number = /^Merge pull request #(\d+) /.exec(subject ?? "")?.[1];
+    const [mergeSha, ...parents] = shas.split(" ");
+    const number = (
+      parents.length > 1
+        ? /^Merge pull request #(\d+) /
+        : / \(#(\d+)\)$/
+    ).exec(subject ?? "")?.[1];
     if (number == null) {
       continue;
     }
-    const [mergeSha, ...parents] = shas.split(" ");
     pullRequests.push({
       number: Number(number),
       merge_sha: mergeSha,
@@ -472,7 +476,6 @@ process.stdout.write(
       status: result.status,
       reconciliation: result.reconciliation ?? null,
       failures: result.failures,
-      deferred: result.deferred,
       notes: result.notes,
       release_pull_request: result.releasePullRequest ?? null,
       record: recordOutcome,

@@ -14,6 +14,16 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - (#167) Update the user guides for reviewer model selection and launch,
   multi-client upgrades, troubleshooting, and monthly review statistics.
 
+### Fixed
+
+- (#168) Fail release pre-flight on a CHANGELOG claim that no merge in the
+  range contains, instead of deferring it to the final phase, so an issue
+  number written as a pull request no longer ships in a release entry. The
+  release pull request named with `--release-pull-request` stays the only
+  exemption. Pre-flight now also discovers squash-merged pull requests from
+  their `(#N)` commit subjects, so both claim directions cover them. Closes
+  issue #137.
+
 ## 0.17.0 - 2026-09-23
 
 ### Added
