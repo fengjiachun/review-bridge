@@ -7,6 +7,13 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Changed
+
+- (#167) Update the user guides for reviewer model selection and launch,
+  multi-client upgrades, troubleshooting, and monthly review statistics.
+
 ## 0.17.0 - 2026-09-23
 
 ### Added
