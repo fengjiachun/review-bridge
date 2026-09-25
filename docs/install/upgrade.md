@@ -9,6 +9,16 @@ version. Keep `REVIEW_BRIDGE_HOME` unchanged: it holds review history, not the
 installed runtime. Update the clients you actually use, including both author
 and reviewer connections where installed.
 
+## Check the Codex CLI
+
+Automatic `CODEX_TASK` launch requires an authenticated Codex CLI **0.153.4 or
+newer** on the MCP host. Run `codex --version` there before switching clients.
+If `REVIEW_BRIDGE_CODEX_COMMAND` points to a specific executable, check that
+executable instead of the one on your shell's PATH. Update an older CLI through
+its installation method before launching a reviewer; updating Review Bridge or
+the Codex desktop app alone does not verify the CLI used by MCP. Discovery can
+succeed on an older CLI even though its first reviewer MCP call is cancelled.
+
 ## Prepare the new runtime
 
 1. Finish active reviews or stop and reconcile their running processes before

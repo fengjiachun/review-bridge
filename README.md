@@ -32,7 +32,9 @@ authenticated [GitHub CLI](https://cli.github.com/) (`gh auth status`).
 ## Install the Codex plugin
 
 The Codex plugin alone carries the author tools and the `CODEX_TASK` reviewer,
-so it is enough for local review. Publishing through the GitHub gate also
+so it is enough for local review. Automatic reviewer launch requires an
+authenticated Codex CLI **0.153.4 or newer** on the MCP host; check with
+`codex --version` before following the quick start. Publishing through the GitHub gate also
 requires GitHub CLI authentication and the Codex GitHub App on the repository.
 Build the plugin from a clone at a release tag:
 

@@ -23,7 +23,12 @@ status or findings; [local review](local-review.md) explains the next steps.
 | Hermes | [Author profile](install/hermes.md), separate from the reviewer profile |
 | DeepSeek Harness | [Author profile](install/deepseek-harness.md), separate from the reviewer profile |
 
-The MCP host needs an installed, authenticated Codex CLI. Selection controls
+The MCP host needs an authenticated Codex CLI **0.153.4 or newer**. Check
+`codex --version` on that host before launching (or check the executable set by
+`REVIEW_BRIDGE_CODEX_COMMAND`). Older versions such as 0.145.0 can cancel the
+reviewer's first MCP call even when discovery succeeds; see the
+[launcher compatibility notes](../templates/codex-plugin/skills/review-bridge-workflow/references/codex-task.md).
+Upgrade the CLI before using automatic launch. Selection controls
 local `CODEX_TASK` reviews; it does not choose the model used by GitHub's Codex
 review or by the other reviewer providers. A picker depends on the author
 client; ordinary conversation works when no picker is available. If you already
