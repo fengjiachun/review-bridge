@@ -174,6 +174,15 @@ const findingSchema = z.object({
   recommendation: z.string().optional(),
   path: z.string().optional(),
   line: z.number().int().positive().optional(),
+  constraint: z
+    .discriminatedUnion("kind", [
+      z.object({ kind: z.literal("documented"), source: z.string() }).strict(),
+      z.object({ kind: z.literal("undocumented") }).strict(),
+    ])
+    .optional()
+    .describe(
+      "Only for a finding that breaks a project rule: documented with the guidance file that states it, or undocumented when no guidance file does.",
+    ),
 });
 
 const verificationSchema = z

@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   appendReviewErratum,
   buildPatchIndex,
+  continuationFindingFingerprint,
   exportHumanArbitration,
   finalizeLocalGate,
   getReview,
@@ -1546,6 +1547,7 @@ test("carried findings are reviewer scope hints without author rationale", async
         recommendation: "Cover the edge case.",
         path: "app.js",
         line: 1,
+        constraint: { kind: "undocumented" },
       },
     ],
   );
@@ -1617,7 +1619,56 @@ test("carried findings are reviewer scope hints without author rationale", async
   assert.equal(opened.carried_findings[0].continued_from_review_id, source.id);
   assert.equal(opened.carried_findings[0].finding_id, "F-002");
   assert.equal(opened.carried_findings[0].title, "New edge case");
+  assert.deepEqual(opened.carried_findings[0].constraint, { kind: "undocumented" });
   assert.equal("rationale" in opened.carried_findings[0], false);
+});
+
+test("a finding's constraint is documented with a source or undocumented without one", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  });
+  const finding = (constraint) => ({
+    severity: "minor",
+    title: "Breaks a project rule",
+    explanation: "The change violates a repository invariant.",
+    constraint,
+  });
+  for (const [constraint, error] of [
+    [{ kind: "documented" }, /finding\.constraint\.source must be a non-empty string/],
+    [{ kind: "undocumented", source: "AGENTS.md" }, /undocumented finding\.constraint has no source/],
+    [{ kind: "implicit" }, /finding\.constraint\.kind must be documented or undocumented/],
+  ]) {
+    await assert.rejects(
+      submitInitialReview(store, prepared.id, [finding(constraint)]),
+      error,
+    );
+  }
+  const review = await submitInitialReview(store, prepared.id, [
+    finding({ kind: "documented", source: "./.agents/architecture-invariants.md" }),
+  ]);
+  assert.deepEqual(review.findings[0].constraint, {
+    kind: "documented",
+    source: ".agents/architecture-invariants.md",
+  });
+});
+
+test("a finding's constraint does not change its continuation fingerprint", () => {
+  const finding = {
+    severity: "minor",
+    title: "Breaks a project rule",
+    explanation: "The change violates a repository invariant.",
+    path: "app.js",
+  };
+  assert.equal(
+    continuationFindingFingerprint({ ...finding, constraint: { kind: "undocumented" } }),
+    continuationFindingFingerprint(finding),
+  );
 });
 
 test("unresolved round-two finding escalates to a human", async (t) => {

@@ -15,6 +15,11 @@ continuation review and [Finish](finish.md) for CLEAN or human arbitration.
      new head, including any test or documentation it asks for. Check the
      finding's text item by item, not from memory. Do not mark a finding fixed
      without verification evidence, and do not claim a check you did not run.
+     For a finding whose `constraint` is `undocumented`, fixed also means
+     writing the rule into the repository's agent guidance (the invariants
+     file or the affected module's `AGENTS.md`) in the same pull request. If
+     the rule does not hold or is not this change's to set, answer `rejected`
+     with evidence.
    - `rejected`: provide concrete technical evidence. A remedy that differs
      from the recommendation is `rejected`, not `fixed`: explain with evidence
      why it satisfies the finding, and let the rereviewer decide.

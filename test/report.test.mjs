@@ -1662,7 +1662,22 @@ test("legacy full reports retain their contents and mark reviewer configuration 
   // The stored baseline retains its original rendering identity.
   assert.ok(baseline.includes("- Report revision: `9-f1`"));
   assert.ok(rendered.includes(`- Report revision: \`9-f${REPORT_FORMAT}\``));
-  assert.equal(REPORT_FORMAT, 4);
+  assert.equal(REPORT_FORMAT, 5);
+});
+
+test("a finding's heading names the constraint it records", () => {
+  const review = continuableInTwoRounds();
+  review.findings[0].constraint = { kind: "documented", source: ".agents/architecture-invariants.md" };
+  review.carried_findings[0].constraint = { kind: "undocumented" };
+  review.findings[3].constraint = { kind: "undocumented" };
+  assert.match(brief(review), /^\*\*F-004 · minor · .+ · undocumented constraint — /m);
+  const markdown = renderReviewReport(review, {
+    renderedAt: BASELINE_RENDERED_AT,
+    ledgerDirectory: BRIEF_LEDGER_DIRECTORY,
+  });
+  assert.match(markdown, /^#### F-001 · major · .+ · documented: \.agents\/architecture-invariants\.md$/m);
+  assert.match(markdown, /^#### F-009 carried from .+ · major · .+ · undocumented constraint$/m);
+  assert.match(markdown, /^#### F-002 · minor · [^·]+$/m);
 });
 
 test("the brief opens with the terminal state and where the review goes next", () => {
@@ -1993,7 +2008,7 @@ test("the five places that carry the report's identity agree, renderer format in
   // 1. reportRevision, where the identity is minted.
   const revision = reportRevision(review, publication, publicationSummary);
   assert.equal(revision, `${review.state_version}-f${REPORT_FORMAT}`);
-  assert.equal(REPORT_FORMAT, 4);
+  assert.equal(REPORT_FORMAT, 5);
 
   const receipt = await writeReviewReport(state.store, state.reviewId);
   // 2. the file name, and 3. the tool receipt.

@@ -301,6 +301,13 @@ function roundsSection(review) {
   ];
 }
 
+function constraintLabel(finding) {
+  if (finding.constraint == null) return "";
+  return finding.constraint.kind === "documented"
+    ? ` · documented: ${inline(finding.constraint.source)}`
+    : " · undocumented constraint";
+}
+
 // The finding's one-line facts, then each long field as a labelled fenced
 // block. A decision's verification is the obligation: a sustained rebuttal
 // must say what the rereviewer checked; other decisions carry one only when
@@ -319,7 +326,7 @@ function findingSections(finding, resolution, decision) {
       : `- Rereview decision: ${code(decision.decision)}${decision.submitted_at ? ` at ${inline(decision.submitted_at)}` : ""}`,
   ];
   const sections = [
-    `#### ${inline(finding.id)} · ${inline(finding.severity)} · ${location}`,
+    `#### ${inline(finding.id)} · ${inline(finding.severity)} · ${location}${constraintLabel(finding)}`,
     facts.join("\n"),
     "Explanation:",
     block(finding.explanation),
@@ -360,7 +367,7 @@ function carriedSection(review) {
       const location =
         entry.path == null ? "no location" : inline(findingLocation(entry));
       const sections = [
-        `#### ${inline(entry.finding_id)} carried from ${inline(entry.continued_from_review_id)} · ${inline(entry.severity)} · ${location}`,
+        `#### ${inline(entry.finding_id)} carried from ${inline(entry.continued_from_review_id)} · ${inline(entry.severity)} · ${location}${constraintLabel(entry)}`,
         `- Title: ${inline(entry.title)}`,
         "Explanation:",
         block(entry.explanation),
@@ -770,7 +777,7 @@ export function summaryDigest(summary) {
 // Raise it by one in any change that alters the Markdown this module renders
 // -- wording, ordering, a new line, a heading -- so the reports the previous
 // version wrote stay readable at their own names.
-export const REPORT_FORMAT = 4;
+export const REPORT_FORMAT = 5;
 
 // `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
 // `p<revision>-s<summary digest>-f<format>` without one.
@@ -1095,7 +1102,7 @@ function verdictLines(review, publication, summary, partition) {
 function findingHeadline(finding) {
   const where =
     finding.path == null ? "no location" : code(findingLocation(finding));
-  return `**${inline(finding.id)} · ${inline(finding.severity)} · ${where} — ${inline(finding.title)}**`;
+  return `**${inline(finding.id)} · ${inline(finding.severity)} · ${where}${constraintLabel(finding)} — ${inline(finding.title)}**`;
 }
 
 // Unresolved first, and a review with none says so on one line instead of

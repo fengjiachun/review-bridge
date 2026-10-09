@@ -1666,3 +1666,30 @@ test("the scorecard CLI rejects invalid, missing, unknown and repeated value opt
   assert.match(help.stdout, /\[--review-type gate\|advisory\]/);
   assert.match(help.stdout, /\[--strategy FULL\|SUCCESSOR\]/);
 });
+
+test("the undocumented share counts only findings that record a constraint", async (t) => {
+  const store = await emptyStore(t);
+  await writeReview(store, "rb-2026-10-01T000000-000Z-c0a51001", reviewLedger({
+    id: "rb-2026-10-01T000000-000Z-c0a51001",
+    status: "WAITING_FOR_REVIEW",
+    findings: [
+      { ...finding("F-001", "major", "OPEN"), constraint: { kind: "documented", source: "AGENTS.md" } },
+      { ...finding("F-002", "minor", "OPEN"), constraint: { kind: "undocumented" } },
+      finding("F-003", "nit", "OPEN"),
+    ],
+  }));
+  await writeReview(store, "rb-2026-10-01T000000-000Z-c0a51002", reviewLedger({
+    id: "rb-2026-10-01T000000-000Z-c0a51002",
+    status: "WAITING_FOR_REVIEW",
+    provider: "HERMES",
+    findings: [finding("F-001", "nit", "OPEN")],
+  }));
+  const scorecard = await buildScorecard(store, { generatedAt: "2026-10-09T00:00:00.000Z" });
+  assert.deepEqual(scorecard.providers.CLAUDE_DESKTOP.findings_by_constraint, {
+    documented: 1,
+    undocumented: 1,
+  });
+  const markdown = renderScorecardMarkdown(scorecard);
+  assert.match(markdown, /^\| CLAUDE_DESKTOP \| 3 \| 1 \| 1 \| 50\.0% \|$/m);
+  assert.match(markdown, /^\| HERMES \| 1 \| 0 \| 0 \| - \|$/m);
+});

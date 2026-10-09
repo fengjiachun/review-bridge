@@ -17,6 +17,7 @@ const USAGE = `Usage: review-findings.mjs [filters] [--limit <n>] [--json] [--st
   --keyword <text>       Case-insensitive literal substring of finding content,
                          author rationale/evidence, or rereview rationale/verification.
   --severity <value>     blocker, major, minor, nit
+  --constraint <value>   documented, undocumented, missing
   --disposition <value>  fixed, rejected, human_required, missing
   --decision <value>     resolved, rebuttal_accepted, still_open, missing
   --limit <n>            Return at most n findings (default 20, range 1..1000).
@@ -59,7 +60,7 @@ try {
       json = true;
       continue;
     }
-    if (!["--repository", "--file", "--keyword", "--severity", "--disposition", "--decision", "--limit", "--store"].includes(arg)) {
+    if (!["--repository", "--file", "--keyword", "--severity", "--constraint", "--disposition", "--decision", "--limit", "--store"].includes(arg)) {
       throw new Error(`unknown argument ${arg}`);
     }
     const value = equals < 0 ? argv[++index] : token.slice(equals + 1);

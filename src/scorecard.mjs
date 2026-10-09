@@ -7,6 +7,7 @@ import { DEFAULT_CHANGE_SIZE_BUDGET } from "./workflow.mjs";
 export const SCORECARD_SCHEMA_VERSION = 2;
 
 const SEVERITIES = ["blocker", "major", "minor", "nit"];
+const CONSTRAINT_KINDS = ["documented", "undocumented"];
 const DISPOSITIONS = ["fixed", "rejected", "human_required"];
 const DECISIONS = ["resolved", "rebuttal_accepted", "still_open"];
 const DECISION_COLUMNS = [...DECISIONS, "undecided"];
@@ -71,6 +72,7 @@ function emptyStats() {
     not_clean: 0,
     findings: 0,
     findings_by_severity: zeroCounts(SEVERITIES),
+    findings_by_constraint: zeroCounts(CONSTRAINT_KINDS),
     disposition_outcomes: Object.fromEntries(
       DISPOSITIONS.map((disposition) => [
         disposition,
@@ -189,6 +191,12 @@ function reviewDefect(review, directoryName) {
   for (const finding of review.findings) {
     if (!SEVERITIES.includes(finding?.severity)) {
       return `unknown finding severity ${JSON.stringify(finding?.severity)}`;
+    }
+    if (
+      finding.constraint != null &&
+      !CONSTRAINT_KINDS.includes(finding.constraint.kind)
+    ) {
+      return `unknown finding constraint ${JSON.stringify(finding.constraint)}`;
     }
   }
   for (const resolution of review.resolutions) {
@@ -410,6 +418,9 @@ function countReview(stats, review) {
   for (const finding of review.findings) {
     stats.findings += 1;
     stats.findings_by_severity[finding.severity] += 1;
+    if (finding.constraint != null) {
+      stats.findings_by_constraint[finding.constraint.kind] += 1;
+    }
     const resolution = resolutionByFinding.get(finding.id);
     if (resolution == null) continue;
     const decision = decisionByFinding.get(finding.id);
@@ -826,6 +837,12 @@ const COUNTING_RULES = [
   "  decision record written before it has no `verification` key at all, and",
   "  every record written after it has one, empty when the decision did not",
   "  require it. No cutoff timestamp is involved.",
+  "- A finding's constraint is recorded only when the reviewer judged it a broken",
+  "  project rule: `documented` names the guidance file stating it, `undocumented`",
+  "  means none does. A finding without one has no recorded constraint kind — not",
+  "  an ordinary defect, since older ledgers never had the field — so the",
+  "  undocumented share is undocumented / (documented + undocumented) and is `-`",
+  "  when both are zero.",
   "- Size-warning crossings are not persisted; they are recomputed as",
   "  `total_lines >= ceil(change_size_budget * 0.75)` over each distinct review",
   "  snapshot in a workflow's committed audit log, against the budget in force",
@@ -942,6 +959,23 @@ export function renderScorecardMarkdown(scorecard) {
           ...SEVERITIES.map((severity) => stats.findings_by_severity[severity]),
         ],
       ]),
+    ),
+    "## Findings by constraint",
+    table(
+      ["Provider", "Findings", ...CONSTRAINT_KINDS, "Undocumented share"],
+      providerRows(scorecard, (provider, stats) => {
+        const { documented, undocumented } = stats.findings_by_constraint;
+        const recorded = documented + undocumented;
+        return [
+          [
+            provider,
+            stats.findings,
+            documented,
+            undocumented,
+            recorded === 0 ? "-" : percent(undocumented / recorded),
+          ],
+        ];
+      }),
     ),
     "## Disposition outcomes",
     table(

@@ -59,6 +59,13 @@ reviewer task.
    code cannot express, or a test that no behavior change can turn red. Treat
    every actionable finding as blocking the clean verdict; do not waive
    lower-severity findings.
+   A finding that breaks a project rule — specific to this repository and
+   costly to get wrong, not a general best practice — sets `constraint`: look
+   for the rule with `search_snapshot` in the agent guidance (`AGENTS.md`,
+   `.agents/`, `CLAUDE.md`, `CONTRIBUTING`, style or invariants files under
+   `docs/`); found is `{kind: "documented", source: <path>}`, otherwise
+   `{kind: "undocumented"}`. Leave it unset on other findings. An undocumented
+   finding is `resolved` only once the guidance states the rule.
 7. For round one call `submit_review`. Use an empty findings array only when no
    actionable issue remains.
 8. For round two call `submit_rereview`, deciding every previous finding as

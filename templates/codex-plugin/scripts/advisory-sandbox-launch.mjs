@@ -792,6 +792,7 @@ function submitPayload(staged) {
     };
     if (finding?.path != null) payload.path = finding.path;
     if (finding?.line != null) payload.line = finding.line;
+    if (finding?.constraint != null) payload.constraint = finding.constraint;
     return payload;
   });
 }
