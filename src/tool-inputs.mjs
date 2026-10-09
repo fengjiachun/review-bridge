@@ -274,10 +274,7 @@ export const WORKFLOW_ACTION_INPUTS = {
         "implementation_scope",
         "get_autonomous_workflow implementation_scope",
       ],
-      [
-        "rationale",
-        "optional, get_autonomous_workflow rationale or your design rationale for the current head",
-      ],
+      ["rationale", "optional, your design rationale for the current head"],
       ["reviewer_provider", "CODEX_TASK"],
       [
         "continued_from_review_id",

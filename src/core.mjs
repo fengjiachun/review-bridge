@@ -1062,10 +1062,10 @@ function publicReview(review) {
 }
 
 // The reviewer must submit its first-round findings before it reads the
-// author's account of the design, so that it reconstructs the intent from the
-// code alone and can then compare the two. The reviewer tools therefore serve
-// the rationale only once the author has answered a finding; an advisory review
-// has no author loop, records no resolution, and never serves it.
+// author's account of the design, so those findings form from the code alone.
+// The reviewer tools therefore serve the rationale only once the author has
+// answered a finding; an advisory review has no author loop, records no
+// resolution, and never serves it.
 function rationaleVisibleToReviewer(review) {
   return review.resolutions.length > 0;
 }
@@ -1212,7 +1212,7 @@ function reviewSummary(review) {
     max_rounds: review.max_rounds,
     action_required: action,
     required_inputs: reviewRequiredInputs(action),
-    rationale: review.rationale ?? null,
+    has_rationale: review.rationale != null,
     reviewer_provider: reviewerProviderFor(review),
     reviewer_configuration: review.rounds?.at(-1)?.reviewer_configuration ?? null,
     reviewer_dispatch: review.rounds?.at(-1)?.reviewer_dispatch ?? null,

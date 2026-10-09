@@ -233,14 +233,13 @@ if (role === "author") {
     {
       title: "Start autonomous local workflow",
       description:
-        "Create an opt-in workflow ledger at an immutable clean base, bind the exact capability set, and atomically claim the local branch and GitHub head ref. An optional rationale is kept on the ledger for the driver to pass to prepare_review.",
+        "Create an opt-in workflow ledger at an immutable clean base, bind the exact capability set, and atomically claim the local branch and GitHub head ref.",
       inputSchema: {
         repository_path: z.string(),
         base_ref: z.string(),
         base_sha: z.string(),
         requirement: z.string(),
         implementation_scope: z.string(),
-        rationale: z.string().optional(),
         topic_branch: z.string(),
         operator_label: z.string(),
         capabilities: z.array(z.enum(AUTONOMOUS_CAPABILITIES)),
@@ -257,7 +256,6 @@ if (role === "author") {
         baseSha: input.base_sha,
         requirement: input.requirement,
         implementationScope: input.implementation_scope,
-        rationale: input.rationale ?? null,
         topicBranch: input.topic_branch,
         operatorLabel: input.operator_label,
         capabilities: input.capabilities,

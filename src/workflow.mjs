@@ -1686,9 +1686,6 @@ function validateWorkflow(workflow) {
   assertString(workflow.base_ref, "workflow.base_ref", { max: 1024 });
   assertString(workflow.requirement, "workflow.requirement");
   assertString(workflow.implementation_scope, "workflow.implementation_scope");
-  if (workflow.rationale !== undefined) {
-    assertString(workflow.rationale, "workflow.rationale");
-  }
   assertString(workflow.topic_branch, "workflow.topic_branch", { max: 1024 });
   assertObject(workflow.authorization, "workflow.authorization");
   assertCapabilities(workflow.authorization.capabilities);
@@ -3510,7 +3507,6 @@ export async function startAutonomousWorkflow(
     baseSha,
     requirement,
     implementationScope,
-    rationale = null,
     topicBranch,
     operatorLabel,
     capabilities,
@@ -3523,9 +3519,6 @@ export async function startAutonomousWorkflow(
   assertString(baseRef, "base_ref", { max: 1024 });
   assertString(requirement, "requirement");
   assertString(implementationScope, "implementation_scope");
-  if (rationale != null) {
-    assertString(rationale, "rationale");
-  }
   assertString(topicBranch, "topic_branch", { max: 1024 });
   assertString(operatorLabel, "operator_label", { max: 1024 });
   const normalizedCapabilities = assertCapabilities(capabilities);
@@ -3618,7 +3611,6 @@ export async function startAutonomousWorkflow(
     repository,
     requirement,
     implementation_scope: implementationScope,
-    ...(rationale == null ? {} : { rationale }),
     base_ref: baseRef,
     base_sha: baseSha,
     topic_branch: topicBranch,

@@ -4400,7 +4400,9 @@ const ONE_FINDING = [
 test("the reviewer reads the rationale only after the author answers a finding", async (t) => {
   const { store, prepared } = await rationaleFixture(t);
   assert.equal((await getReview(store, prepared.id)).rationale, RATIONALE);
-  assert.equal((await getReviewSummary(store, prepared.id)).rationale, RATIONALE);
+  const summary = await getReviewSummary(store, prepared.id);
+  assert.equal(summary.has_rationale, true);
+  assert.equal(JSON.stringify(summary).includes("Result type"), false);
 
   const [pending] = await listPendingReviews(store, "CLAUDE_DESKTOP");
   assert.equal(Object.hasOwn(pending, "rationale"), false);
@@ -4435,6 +4437,7 @@ test("the rationale stays out of the snapshot", async (t) => {
     implementationScope: "Change app.js.",
   });
   assert.equal(without.rationale, null);
+  assert.equal((await getReviewSummary(store, without.id)).has_rationale, false);
   assert.equal(prepared.rounds[0].snapshot_hash, without.rounds[0].snapshot_hash);
   const manifest = async (id) => {
     const text = await readAll((offset) =>
