@@ -68,12 +68,15 @@ async function installRuntime(target) {
     version: releaseVersion,
     private: true,
     type: "module",
+    // The runtime pins the same SDK, zod, and @hono/node-server versions as
+    // the root package, read from it so a dependency upgrade has one carrier.
     dependencies: {
-      "@modelcontextprotocol/sdk": "1.29.0",
-      zod: "3.25.76",
+      "@modelcontextprotocol/sdk":
+        rootPackage.dependencies["@modelcontextprotocol/sdk"],
+      zod: rootPackage.dependencies.zod,
     },
     overrides: {
-      "@hono/node-server": "2.0.11",
+      "@hono/node-server": rootPackage.overrides["@hono/node-server"],
     },
     engines: { node: ">=18" },
   };

@@ -7,6 +7,16 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Fixed
+
+- (#172) Upgrade `@modelcontextprotocol/sdk` to 1.32.1 and move `proxy-addr`,
+  `ip-address`, and `fast-uri` to their patched versions, clearing the four
+  production advisories published between 2026-09-28 and 2026-10-06 so the
+  CI audit passes again. Review Bridge uses the stdio transport only; the
+  SDK's HTTP-side behavior changes do not apply.
+
 ## 0.18.0 - 2026-09-25
 
 ### Changed

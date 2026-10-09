@@ -20,7 +20,7 @@
     "verify:build": "node scripts/verify-build.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "zod": "3.25.76"
   },
   "overrides": {
