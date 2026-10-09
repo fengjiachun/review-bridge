@@ -1,6 +1,6 @@
 # How Review Bridge reviews a change
 
-Describes Review Bridge v0.18.0.
+Describes Review Bridge v0.19.0.
 
 This is the narrative introduction: what happens to one change from commit to
 merge-ready, and why each step exists. For installation, see the
