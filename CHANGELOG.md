@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.19.0 - 2026-10-09
 
 ### Added
 
@@ -33,6 +33,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   production advisories published between 2026-09-28 and 2026-10-06 so the
   CI audit passes again. Review Bridge uses the stdio transport only; the
   SDK's HTTP-side behavior changes do not apply.
+
+### Internal
+
+- (#175) Release 0.19.0.
 
 ## 0.18.0 - 2026-09-25
 
