@@ -1127,6 +1127,7 @@ function continuationFindings(review) {
       recommendation: finding.recommendation ?? "",
       ...(finding.path == null ? {} : { path: finding.path }),
       ...(finding.line == null ? {} : { line: finding.line }),
+      ...(finding.constraint == null ? {} : { constraint: finding.constraint }),
     }));
 }
 
@@ -1928,7 +1929,32 @@ function normalizeFinding(input, id, round) {
     }
     finding.line = input.line;
   }
+  if (input.constraint != null) {
+    finding.constraint = normalizeConstraint(input.constraint);
+  }
   return finding;
+}
+
+// Which kind of project rule a finding says the change broke: one written in
+// the repository's agent guidance, or one only the reviewer knew. Only the
+// shape is checked; whether `source` exists is the reviewer's claim.
+function normalizeConstraint(input) {
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("finding.constraint must be an object");
+  }
+  if (input.kind === "documented") {
+    return {
+      kind: "documented",
+      source: safeRelativePath(input.source, "finding.constraint.source"),
+    };
+  }
+  if (input.kind === "undocumented") {
+    if (input.source != null) {
+      throw new Error("an undocumented finding.constraint has no source");
+    }
+    return { kind: "undocumented" };
+  }
+  throw new Error("finding.constraint.kind must be documented or undocumented");
 }
 
 export async function submitInitialReview(

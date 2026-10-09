@@ -4,6 +4,7 @@ import { loadReview, MAX_ROUNDS } from "./core.mjs";
 import { isLocalObjectId } from "./object-id.mjs";
 
 const SEVERITIES = ["blocker", "major", "minor", "nit"];
+const CONSTRAINT_KINDS = ["documented", "undocumented"];
 const DISPOSITIONS = ["fixed", "rejected", "human_required"];
 const DECISIONS = ["resolved", "rebuttal_accepted", "still_open"];
 const REVIEW_ID = /^rb-[0-9TZ-]+-[a-f0-9]{8}$/;
@@ -22,7 +23,7 @@ export function validateFindingFilters(options = {}) {
   const filters = {};
   for (const [key, value] of Object.entries(options)) {
     requireValue(
-      ["repository", "file", "keyword", "severity", "disposition", "decision", "limit"].includes(key),
+      ["repository", "file", "keyword", "severity", "constraint", "disposition", "decision", "limit"].includes(key),
       `unknown filter ${key}`,
     );
     if (key === "limit") continue;
@@ -31,6 +32,7 @@ export function validateFindingFilters(options = {}) {
   }
   for (const [key, allowed] of [
     ["severity", SEVERITIES],
+    ["constraint", [...CONSTRAINT_KINDS, "missing"]],
     ["disposition", [...DISPOSITIONS, "missing"]],
     ["decision", [...DECISIONS, "missing"]],
   ]) {
@@ -75,6 +77,7 @@ function queryIndexes(review, id) {
     for (const key of ["title", "explanation"]) requireValue(nonempty(finding[key]), `${finding.id} has no ${key}`);
     for (const key of ["recommendation", "path"]) requireValue(finding[key] == null || typeof finding[key] === "string", `${finding.id} has an invalid ${key}`);
     requireValue(finding.line == null || (Number.isInteger(finding.line) && finding.line > 0), `${finding.id} has an invalid line`);
+    requireValue(finding.constraint == null || CONSTRAINT_KINDS.includes(finding.constraint.kind), `${finding.id} has an invalid constraint`);
   }
   for (const [records, key, allowed, parents, optionalText] of [
     [resolutions, "disposition", DISPOSITIONS, findings, "evidence"],
@@ -138,6 +141,7 @@ function matches(row, filters) {
   if (filters.repository != null && filters.repository !== row.repository_path) return false;
   if (filters.file != null && !(finding.path ?? "").includes(filters.file)) return false;
   if (filters.severity != null && filters.severity !== finding.severity) return false;
+  if (filters.constraint != null && filters.constraint !== (finding.constraint?.kind ?? "missing")) return false;
   if (filters.disposition != null && filters.disposition !== (resolution?.disposition ?? "missing")) return false;
   if (filters.decision != null && filters.decision !== (decision?.decision ?? "missing")) return false;
   if (filters.keyword != null) {
@@ -212,7 +216,7 @@ export function renderFindingSearch(result) {
   ];
   for (const row of result.results) {
     const { finding, author_resolution: resolution, rereview_decision: decision } = row;
-    lines.push("", `${row.review_id} / ${brief(row.finding_id)} [${finding.severity}] ${brief(finding.title)}`);
+    lines.push("", `${row.review_id} / ${brief(row.finding_id)} [${finding.severity}${finding.constraint == null ? "" : `, ${finding.constraint.kind}`}] ${brief(finding.title)}`);
     lines.push(`  Repository: ${brief(row.repository_path, 4096)}`);
     lines.push(`  File: ${brief(finding.path ?? "not recorded", 4096)}${finding.line == null ? "" : `:${finding.line}`}`);
     lines.push(`  Finding: round ${row.introduced_round}, head ${row.snapshot.head_sha}, snapshot ${row.snapshot.snapshot_hash}`);

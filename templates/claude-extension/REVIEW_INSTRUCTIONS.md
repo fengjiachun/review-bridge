@@ -60,6 +60,13 @@ When the user asks to review a pending Codex task:
    findings, typically `nit` or `minor`: a comment that states nothing the
    code cannot express, or a test that no behavior change can turn red. Do not
    focus on cosmetic style unless it creates a real maintenance risk.
+   A finding that breaks a project rule — specific to this repository and
+   costly to get wrong, not a general best practice — sets `constraint`: look
+   for the rule with `search_snapshot` in the agent guidance (`AGENTS.md`,
+   `.agents/`, `CLAUDE.md`, `CONTRIBUTING`, style or invariants files under
+   `docs/`); found is `{kind: "documented", source: <path>}`, otherwise
+   `{kind: "undocumented"}`. Leave it unset on other findings. An undocumented
+   finding is `resolved` only once the guidance states the rule.
 9. On round one, call `submit_review`. Use an empty findings array only when no
    actionable issue remains.
 10. On round two, decide every previous finding:

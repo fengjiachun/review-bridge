@@ -30,6 +30,7 @@ duplicate-option checks; `--keyword --json` still reports a missing value.
 | `--file <text>` | Case-sensitive literal substring of the finding's path. |
 | `--keyword <text>` | Case-insensitive literal substring of title, explanation, recommendation, author rationale/evidence, or rereview rationale/verification. |
 | `--severity <value>` | `blocker`, `major`, `minor`, `nit`. |
+| `--constraint <value>` | `documented`, `undocumented`, or `missing` for a finding with no recorded constraint kind. |
 | `--disposition <value>` | `fixed`, `rejected`, `human_required`, or `missing` for no author response. |
 | `--decision <value>` | `resolved`, `rebuttal_accepted`, `still_open`, or `missing` for no rereview decision. |
 | `--limit <n>` | Integer from 1 to 1000; default 20. |

@@ -74,6 +74,20 @@ test("combined filters select persisted repository paths even after worktrees di
   await assert.rejects(fsp.stat(repository), { code: "ENOENT" });
 });
 
+test("the constraint filter separates documented, undocumented, and unrecorded findings", async (t) => {
+  const store = await temporaryDirectory(t);
+  const review = continuableInTwoRounds();
+  review.findings[0].constraint = { kind: "documented", source: "AGENTS.md" };
+  review.findings[1].constraint = { kind: "undocumented" };
+  await writeReview(store, review);
+  assert.deepEqual(resultIds(await searchFindings(store, { constraint: "missing" })), [
+    `${REVIEW_A}/F-003`, `${REVIEW_A}/F-004`, `${REVIEW_A}/F-005`,
+  ]);
+  const undocumented = await searchFindings(store, { constraint: "undocumented" });
+  assert.deepEqual(resultIds(undocumented), [`${REVIEW_A}/F-002`]);
+  assert.match(renderFindingSearch(undocumented), /F-002 \[minor, undocumented\]/);
+});
+
 test("keyword search includes finding, author, and rereviewer text as literal substrings", async (t) => {
   const store = await temporaryDirectory(t);
   const review = continuableInTwoRounds();

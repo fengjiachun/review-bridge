@@ -9,6 +9,16 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Added
+
+- (#PR) A finding may carry an optional `constraint` saying whether it breaks
+  a project rule the repository's agent guidance already states
+  (`documented`, with its `source` file) or one it does not (`undocumented`).
+  The reviewer guides say when to set it, and the author guide makes writing
+  the rule down part of fixing an undocumented one. The scorecard adds
+  Findings by constraint with the undocumented share, the finding search adds
+  `--constraint`, and the report headings name the kind.
+
 ### Fixed
 
 - (#172) Upgrade `@modelcontextprotocol/sdk` to 1.32.1 and move `proxy-addr`,

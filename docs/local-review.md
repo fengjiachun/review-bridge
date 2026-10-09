@@ -94,6 +94,12 @@ Otherwise, back in the author conversation:
 Mark a finding `fixed` only when every location and clause it names is done at
 the new head; a different remedy is a `rejected` answer with evidence.
 
+A finding that breaks a project rule may carry a `constraint`:
+`{kind: "documented", source: "<guidance file>"}` when the repository's agent
+guidance already states the rule, or `{kind: "undocumented"}` when it does not.
+Fixing an undocumented one includes writing the rule into that guidance in the
+same change. Findings without it record no constraint kind.
+
 For a Codex review started with `launch_local_reviewer`, prepare rereview and
 call the launcher again with the current state version. Round two inherits the
 selected pair; change it explicitly before launch if needed. For manual Codex
