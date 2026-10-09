@@ -1063,9 +1063,9 @@ function publicReview(review) {
 
 // The reviewer must submit its first-round findings before it reads the
 // author's account of the design, so that it reconstructs the intent from the
-// code alone and can then compare the two. The rationale therefore reaches the
-// reviewer only once the author has answered a finding; an advisory review has
-// no author loop, records no resolution, and never shows it.
+// code alone and can then compare the two. The reviewer tools therefore serve
+// the rationale only once the author has answered a finding; an advisory review
+// has no author loop, records no resolution, and never serves it.
 function rationaleVisibleToReviewer(review) {
   return review.resolutions.length > 0;
 }

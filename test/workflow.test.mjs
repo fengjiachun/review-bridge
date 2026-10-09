@@ -432,6 +432,14 @@ test("a workflow rationale travels to the review the driver prepares", async (t)
   );
   assert.equal(bound.current_review.review_id, review.id);
   assert.equal((await getReviewSummary(state.store, review.id)).rationale, rationale);
+
+  const workflowPath = path.join(state.store, "workflows", workflow.workflow_id, "workflow.json");
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  await fsp.writeFile(workflowPath, `${canonicalJson({ ...stored, rationale: 42 })}\n`, { mode: 0o600 });
+  await assert.rejects(
+    getAutonomousWorkflow(state.store, workflow.workflow_id),
+    /workflow\.rationale must be a non-empty string/,
+  );
 });
 
 test("workflow start rejects a ledger that cannot reserve its cancellation", async (t) => {

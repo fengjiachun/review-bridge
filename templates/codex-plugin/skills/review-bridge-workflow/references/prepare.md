@@ -81,7 +81,7 @@ After a verdict, load [Handle findings](findings.md) for findings or
    provider, and the optional verified parent from step 5.
    Pass `rationale` written from your own session context: the key design
    decisions and why, the alternatives you considered and dropped and why, the
-   parts you ask the reviewer not to suggest changing, and where you are unsure.
+   parts that are intentionally fixed and why, and where you are unsure.
    Write factual decisions and trade-offs, not arguments that the code is
    correct: "chose A over B because B touches X" belongs, "no race here
    because..." does not. State your uncertainty plainly; the reviewer checks it

@@ -1686,6 +1686,9 @@ function validateWorkflow(workflow) {
   assertString(workflow.base_ref, "workflow.base_ref", { max: 1024 });
   assertString(workflow.requirement, "workflow.requirement");
   assertString(workflow.implementation_scope, "workflow.implementation_scope");
+  if (workflow.rationale !== undefined) {
+    assertString(workflow.rationale, "workflow.rationale");
+  }
   assertString(workflow.topic_branch, "workflow.topic_branch", { max: 1024 });
   assertObject(workflow.authorization, "workflow.authorization");
   assertCapabilities(workflow.authorization.capabilities);
