@@ -3507,6 +3507,7 @@ export async function startAutonomousWorkflow(
     baseSha,
     requirement,
     implementationScope,
+    rationale = null,
     topicBranch,
     operatorLabel,
     capabilities,
@@ -3519,6 +3520,9 @@ export async function startAutonomousWorkflow(
   assertString(baseRef, "base_ref", { max: 1024 });
   assertString(requirement, "requirement");
   assertString(implementationScope, "implementation_scope");
+  if (rationale != null) {
+    assertString(rationale, "rationale");
+  }
   assertString(topicBranch, "topic_branch", { max: 1024 });
   assertString(operatorLabel, "operator_label", { max: 1024 });
   const normalizedCapabilities = assertCapabilities(capabilities);
@@ -3611,6 +3615,7 @@ export async function startAutonomousWorkflow(
     repository,
     requirement,
     implementation_scope: implementationScope,
+    ...(rationale == null ? {} : { rationale }),
     base_ref: baseRef,
     base_sha: baseSha,
     topic_branch: topicBranch,

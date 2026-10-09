@@ -211,6 +211,9 @@ function identitySection(review) {
     block(review.requirement),
     "### Implementation scope",
     block(review.implementation_scope),
+    ...(review.rationale == null
+      ? []
+      : ["### Author rationale", block(review.rationale)]),
   ];
 }
 
@@ -777,7 +780,7 @@ export function summaryDigest(summary) {
 // Raise it by one in any change that alters the Markdown this module renders
 // -- wording, ordering, a new line, a heading -- so the reports the previous
 // version wrote stay readable at their own names.
-export const REPORT_FORMAT = 5;
+export const REPORT_FORMAT = 6;
 
 // `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
 // `p<revision>-s<summary digest>-f<format>` without one.

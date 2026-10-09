@@ -79,6 +79,14 @@ After a verdict, load [Handle findings](findings.md) for findings or
    waiting for interaction. Other providers report their discovery/control limits.
 7. Call `prepare_review` with the base SHA captured in step 1, the selected
    provider, and the optional verified parent from step 5.
+   Pass `rationale` written from your own session context: the key design
+   decisions and why, the alternatives you considered and dropped and why, the
+   parts you ask the reviewer not to suggest changing, and where you are unsure.
+   Write factual decisions and trade-offs, not arguments that the code is
+   correct: "chose A over B because B touches X" belongs, "no race here
+   because..." does not. State your uncertainty plainly; the reviewer checks it
+   first in round two. The rationale is frozen before any finding exists and
+   the reviewer does not see it in round one.
    For `CODEX_TASK`, call `select_reviewer_configuration` with the explicitly
    selected `model`, `reasoning_effort`, and catalog `environment_id`, using the
    prepared review's `state_version`. Do this before binding an autonomous workflow.

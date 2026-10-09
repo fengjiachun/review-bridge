@@ -400,6 +400,40 @@ test("workflow repository paths normalize to the worktree root", async (t) => {
   assert.equal(bound.current_review.review_id, review.id);
 });
 
+test("a workflow rationale travels to the review the driver prepares", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const rationale = "Kept the ledger flat; unsure about the claim order.";
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha, { rationale }),
+  );
+  const read = await getAutonomousWorkflow(state.store, workflow.workflow_id);
+  assert.equal(read.rationale, rationale);
+  const recorded = await recordWorkflowHead(
+    state.store,
+    workflow.workflow_id,
+    workflow.revision,
+    await commitImplementation(state.repository),
+  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: read.requirement,
+    implementationScope: read.implementation_scope,
+    rationale: read.rationale,
+    reviewerProvider: "CODEX_TASK",
+  });
+  const bound = await bindWorkflowReview(
+    state.store,
+    workflow.workflow_id,
+    recorded.revision,
+    review.id,
+  );
+  assert.equal(bound.current_review.review_id, review.id);
+  assert.equal((await getReviewSummary(state.store, review.id)).rationale, rationale);
+});
+
 test("workflow start rejects a ledger that cannot reserve its cancellation", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

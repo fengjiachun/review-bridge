@@ -642,6 +642,15 @@ test("free text from the ledger is rendered literally and cannot shape the docum
   assert.ok(markdown.indexOf("````text\nbefore") < footers[0].index && footers[0].index < markdown.indexOf("\nafter\n````"));
 });
 
+test("the author rationale renders after the implementation scope, and only when recorded", () => {
+  const markdown = render(cleanInTwoRounds({ rationale: "Kept one guard.\n# not a heading" }));
+  assert.match(
+    markdown,
+    /### Implementation scope\n\n```text\n[^`]*\n```\n\n### Author rationale\n\n```text\nKept one guard\.\n# not a heading\n```\n/,
+  );
+  assert.equal(render(cleanInTwoRounds()).includes("### Author rationale"), false);
+});
+
 // Fenced text never wraps in a renderer, so the block is wrapped before it is
 // fenced: the reader never scrolls sideways, and the fence rule is unchanged.
 function requirementBlock(markdown) {
@@ -1662,7 +1671,7 @@ test("legacy full reports retain their contents and mark reviewer configuration 
   // The stored baseline retains its original rendering identity.
   assert.ok(baseline.includes("- Report revision: `9-f1`"));
   assert.ok(rendered.includes(`- Report revision: \`9-f${REPORT_FORMAT}\``));
-  assert.equal(REPORT_FORMAT, 5);
+  assert.equal(REPORT_FORMAT, 6);
 });
 
 test("a finding's heading names the constraint it records", () => {
@@ -2008,7 +2017,7 @@ test("the five places that carry the report's identity agree, renderer format in
   // 1. reportRevision, where the identity is minted.
   const revision = reportRevision(review, publication, publicationSummary);
   assert.equal(revision, `${review.state_version}-f${REPORT_FORMAT}`);
-  assert.equal(REPORT_FORMAT, 5);
+  assert.equal(REPORT_FORMAT, 6);
 
   const receipt = await writeReviewReport(state.store, state.reviewId);
   // 2. the file name, and 3. the tool receipt.
