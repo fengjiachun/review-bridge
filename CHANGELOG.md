@@ -34,6 +34,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   CI audit passes again. Review Bridge uses the stdio transport only; the
   SDK's HTTP-side behavior changes do not apply.
 
+### Internal
+
+- (#175) Release 0.19.0.
+
 ## 0.18.0 - 2026-09-25
 
 ### Changed
