@@ -1669,6 +1669,8 @@ test("a finding's heading names the constraint it records", () => {
   const review = continuableInTwoRounds();
   review.findings[0].constraint = { kind: "documented", source: ".agents/architecture-invariants.md" };
   review.carried_findings[0].constraint = { kind: "undocumented" };
+  review.findings[3].constraint = { kind: "undocumented" };
+  assert.match(brief(review), /^\*\*F-004 · minor · .+ · undocumented constraint — /m);
   const markdown = renderReviewReport(review, {
     renderedAt: BASELINE_RENDERED_AT,
     ledgerDirectory: BRIEF_LEDGER_DIRECTORY,

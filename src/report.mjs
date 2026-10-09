@@ -1102,7 +1102,7 @@ function verdictLines(review, publication, summary, partition) {
 function findingHeadline(finding) {
   const where =
     finding.path == null ? "no location" : code(findingLocation(finding));
-  return `**${inline(finding.id)} · ${inline(finding.severity)} · ${where} — ${inline(finding.title)}**`;
+  return `**${inline(finding.id)} · ${inline(finding.severity)} · ${where}${constraintLabel(finding)} — ${inline(finding.title)}**`;
 }
 
 // Unresolved first, and a review with none says so on one line instead of
