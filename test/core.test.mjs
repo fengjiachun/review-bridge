@@ -14,6 +14,7 @@ import {
   getReview,
   getReviewSnapshot,
   getReviewSummary,
+  listPendingReviews,
   listReviews,
   openReview,
   prepareRereview,
@@ -4369,4 +4370,128 @@ test("a ledger without the transition stamp wakes on any change until its next t
   // The next transition writes the stamp and the new semantics take over.
   const clean = await submitInitialReview(store, prepared.id, []);
   assert.equal(clean.last_transition_state_version, clean.state_version);
+});
+
+const RATIONALE =
+  "Chose a guard clause over a Result type because callers already throw.\nUnsure: the error text.";
+
+async function rationaleFixture(t, input = {}) {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "change");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    rationale: RATIONALE,
+    ...input,
+  });
+  return { repository, store, baseSha, prepared };
+}
+
+const ONE_FINDING = [
+  { severity: "major", title: "Missing tests", explanation: "No test covers value." },
+];
+
+test("the reviewer reads the rationale only after the author answers a finding", async (t) => {
+  const { store, prepared } = await rationaleFixture(t);
+  assert.equal((await getReview(store, prepared.id)).rationale, RATIONALE);
+  const summary = await getReviewSummary(store, prepared.id);
+  assert.equal(summary.has_rationale, true);
+  assert.equal(JSON.stringify(summary).includes("Result type"), false);
+
+  const [pending] = await listPendingReviews(store, "CLAUDE_DESKTOP");
+  assert.equal(Object.hasOwn(pending, "rationale"), false);
+  assert.equal(Object.hasOwn(await openReview(store, prepared.id), "rationale"), false);
+  const submitted = await submitInitialReview(store, prepared.id, ONE_FINDING);
+  assert.equal(Object.hasOwn(submitted, "rationale"), false);
+
+  await submitResolutions(store, prepared.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added a test." },
+  ]);
+  await prepareRereview(store, prepared.id);
+  assert.equal((await openReview(store, prepared.id)).rationale, RATIONALE);
+  const [rereview] = await listPendingReviews(store, "CLAUDE_DESKTOP");
+  assert.equal(rereview.status, "WAITING_FOR_REREVIEW");
+  assert.equal(Object.hasOwn(rereview, "rationale"), false);
+});
+
+test("an advisory review never shows the reviewer its rationale", async (t) => {
+  const { store, prepared } = await rationaleFixture(t, { advisory: true });
+  assert.equal((await getReview(store, prepared.id)).rationale, RATIONALE);
+  assert.equal(Object.hasOwn(await openReview(store, prepared.id), "rationale"), false);
+  const submitted = await submitInitialReview(store, prepared.id, ONE_FINDING);
+  assert.equal(Object.hasOwn(submitted, "rationale"), false);
+});
+
+test("the rationale stays out of the snapshot", async (t) => {
+  const { repository, store, baseSha, prepared } = await rationaleFixture(t);
+  const without = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  });
+  assert.equal(without.rationale, null);
+  assert.equal((await getReviewSummary(store, without.id)).has_rationale, false);
+  assert.equal(prepared.rounds[0].snapshot_hash, without.rounds[0].snapshot_hash);
+  const manifest = async (id) => {
+    const text = await readAll((offset) =>
+      readReviewArtifact(store, id, 1, "manifest.json", offset, 65536),
+    );
+    assert.equal(text.includes("Result type"), false);
+    const { captured_at, ...rest } = JSON.parse(text);
+    return rest;
+  };
+  assert.deepEqual(await manifest(prepared.id), await manifest(without.id));
+});
+
+test("a continuation records its own rationale for the new head", async (t) => {
+  const { repository, store, baseSha, prepared } = await rationaleFixture(t);
+  await submitInitialReview(store, prepared.id, ONE_FINDING);
+  await submitResolutions(store, prepared.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added a test." },
+  ]);
+  await prepareRereview(store, prepared.id);
+  await submitRereview(
+    store,
+    prepared.id,
+    [{ finding_id: "F-001", decision: "still_open", rationale: "Still untested." }],
+    [],
+  );
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "finish");
+  const continued = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    rationale: "Kept the constant; the test now pins it.",
+    forceFullReview: true,
+    continuedFromReviewId: prepared.id,
+  });
+  assert.equal(continued.rationale, "Kept the constant; the test now pins it.");
+});
+
+test("human arbitration exports carry the author rationale", async (t) => {
+  const { store, prepared } = await rationaleFixture(t);
+  await submitInitialReview(store, prepared.id, ONE_FINDING);
+  const escalated = await submitResolutions(store, prepared.id, [
+    { finding_id: "F-001", disposition: "human_required", rationale: "Contested." },
+  ]);
+  const exported = await exportHumanArbitration(
+    store,
+    prepared.id,
+    escalated.state_version,
+  );
+  assert.equal(exported.arbitration.rationale, RATIONALE);
+  assert.match(
+    exported.markdown,
+    /## Author rationale\n\n {4}Chose a guard clause[^\n]*\n {4}Unsure: the error text\.\n/,
+  );
 });

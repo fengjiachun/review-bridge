@@ -1033,6 +1033,7 @@ function publicReview(review) {
     base_ref: review.base_ref,
     requirement: review.requirement,
     implementation_scope: review.implementation_scope,
+    rationale: review.rationale ?? null,
     reviewer_provider: reviewerProviderFor(review),
     reviewer_configuration: review.rounds?.at(-1)?.reviewer_configuration ?? null,
     reviewer_dispatch: review.rounds?.at(-1)?.reviewer_dispatch ?? null,
@@ -1058,6 +1059,20 @@ function publicReview(review) {
     clean_snapshot_hash: review.clean_snapshot_hash ?? null,
     history: review.history,
   };
+}
+
+// The reviewer must submit its first-round findings before it reads the
+// author's account of the design, so those findings form from the code alone.
+// The reviewer tools therefore serve the rationale only once the author has
+// answered a finding; an advisory review has no author loop, records no
+// resolution, and never serves it.
+function rationaleVisibleToReviewer(review) {
+  return review.resolutions.length > 0;
+}
+
+function reviewerReview(review) {
+  const { rationale, ...rest } = publicReview(review);
+  return rationaleVisibleToReviewer(review) ? { ...rest, rationale } : rest;
 }
 
 function actionRequired(status, advisory = false) {
@@ -1197,6 +1212,7 @@ function reviewSummary(review) {
     max_rounds: review.max_rounds,
     action_required: action,
     required_inputs: reviewRequiredInputs(action),
+    has_rationale: review.rationale != null,
     reviewer_provider: reviewerProviderFor(review),
     reviewer_configuration: review.rounds?.at(-1)?.reviewer_configuration ?? null,
     reviewer_dispatch: review.rounds?.at(-1)?.reviewer_dispatch ?? null,
@@ -1460,6 +1476,7 @@ export async function prepareReview(
     baseRef,
     requirement,
     implementationScope,
+    rationale = null,
     parentReviewId = null,
     forceFullReview = false,
     continuedFromReviewId = null,
@@ -1470,6 +1487,9 @@ export async function prepareReview(
   assertString(baseRef, "base_ref", { max: 1024 });
   assertString(requirement, "requirement");
   assertString(implementationScope, "implementation_scope");
+  if (rationale != null) {
+    assertString(rationale, "rationale");
+  }
   if (parentReviewId != null) {
     assertReviewId(parentReviewId);
   }
@@ -1578,6 +1598,7 @@ export async function prepareReview(
       base_ref: baseRef,
       requirement,
       implementation_scope: implementationScope,
+      ...(rationale == null ? {} : { rationale }),
       reviewer_provider: reviewerProvider,
       advisory,
       review_strategy: successorResult.strategy,
@@ -1642,6 +1663,17 @@ export async function listReviews(
     }
   }
   return result.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+}
+
+// A reviewer's queue carries no rationale: open_review alone decides when the
+// reviewer may read it.
+export async function listPendingReviews(storeRoot, reviewerProvider) {
+  const reviews = await listReviews(
+    storeRoot,
+    ["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"],
+    reviewerProvider,
+  );
+  return reviews.map(({ rationale, ...rest }) => rest);
 }
 
 export async function getReview(storeRoot, reviewId) {
@@ -1743,6 +1775,10 @@ function renderHumanArbitrationMarkdown(arbitration) {
     markdownLiteral(arbitration.requirement),
     "## Implementation scope",
     markdownLiteral(arbitration.implementation_scope),
+    "## Author rationale",
+    arbitration.rationale == null
+      ? "No rationale was recorded."
+      : markdownLiteral(arbitration.rationale),
     "## Immutable snapshot identity",
     markdownLiteral(prettySortedJson(arbitration.snapshots)),
     "## Why human arbitration is required",
@@ -1825,6 +1861,7 @@ export async function exportHumanArbitration(
     },
     requirement: review.requirement,
     implementation_scope: review.implementation_scope,
+    rationale: review.rationale ?? null,
     current_round: review.current_round,
     max_rounds: review.max_rounds,
     snapshots: review.rounds.map((round) => ({
@@ -2021,7 +2058,7 @@ async function submitInitialReviewWhileLocked(
     });
   }
   await saveReviewTransition(storeRoot, review);
-  return publicReview(review);
+  return reviewerReview(review);
 }
 
 export async function submitResolutions(storeRoot, reviewId, inputs) {
@@ -2391,7 +2428,7 @@ async function submitRereviewWhileLocked(
     });
   }
   await saveReviewTransition(storeRoot, review);
-  return publicReview(review);
+  return reviewerReview(review);
 }
 
 export async function finalizeLocalGate(storeRoot, reviewId) {
@@ -2797,7 +2834,7 @@ export async function openReview(
       review,
       current,
     );
-    const { rounds, ...rest } = publicReview(review);
+    const { rounds, ...rest } = reviewerReview(review);
     return {
       ...rest,
       rounds: rounds.map(roundDescriptor),

@@ -24,6 +24,8 @@ the current review `state_version`; launch uses the new state version returned
 after selection. See [reviewer configuration](reviewer-configuration.md) for
 client setup and runtime limits. The launcher starts an independent process;
 you follow it from the author conversation rather than creating a UI task.
+`prepare_review` also takes an optional `rationale`: the author's design
+decisions, dropped alternatives, and doubts, written before any finding exists.
 
 The pending review has a `review_id` and starts in `WAITING_FOR_REVIEW`.
 Use `get_review_summary` for the compact state, next action, current snapshot,
@@ -110,7 +112,8 @@ For other providers, resume the same reviewer context for round two where
 allowed. A `DEEPSEEK_HARNESS` reviewer cannot: every headless run starts a fresh session,
 so launch a new one with the same review ID and a request to rereview the
 author's resolutions. It rebuilds the round from `open_review`, which serves
-every round-one finding and every author resolution. Rereview ends in `CLEAN`,
+every round-one finding and every author resolution. Only now does
+`open_review` show the reviewer the author's `rationale`. Rereview ends in `CLEAN`,
 `CONTINUABLE_FINDINGS`, or `HUMAN_REQUIRED`. Finalize `CLEAN` with
 `finalize_local_gate` to reach `LOCAL_GATE_PASSED`:
 

@@ -138,6 +138,7 @@ export const REVIEW_ACTION_INPUTS = {
       ["base_ref", "get_review base_ref"],
       ["requirement", "get_review requirement"],
       ["implementation_scope", "get_review implementation_scope"],
+      ["rationale", "optional, your design rationale for the new head"],
       ["reviewer_provider", "reviewer_provider"],
       ["continued_from_review_id", "id"],
       ["force_full_review", "true, required with continued_from_review_id"],
@@ -273,6 +274,7 @@ export const WORKFLOW_ACTION_INPUTS = {
         "implementation_scope",
         "get_autonomous_workflow implementation_scope",
       ],
+      ["rationale", "optional, your design rationale for the current head"],
       ["reviewer_provider", "CODEX_TASK"],
       [
         "continued_from_review_id",

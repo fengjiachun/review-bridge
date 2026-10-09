@@ -208,7 +208,10 @@ every read rather than stored where it could drift.
 files findings, the author answers every one (`fixed`, `rejected`, or
 `human_required`, each with a rationale), and the reviewer re-checks against a
 new snapshot, dispatching each prior finding as resolved, rebuttal-accepted,
-or still open. A rebuttal that stays open escalates to a human. A fix judged
+or still open. Round two is also when the reviewer first reads the author's
+design rationale, after round one formed its findings from the code alone, so
+a mismatch between the two shows where the code does not carry its intent.
+A rebuttal that stays open escalates to a human. A fix judged
 incomplete, or a new issue, goes back to the author, who addresses it and
 starts a fresh full review carrying only the bare finding as a scope hint. There is no third round for the same review ID.
 

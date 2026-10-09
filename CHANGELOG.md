@@ -18,6 +18,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   the rule down part of fixing an undocumented one. The scorecard adds
   Findings by constraint with the undocumented share, the finding search adds
   `--constraint`, and the report headings name the kind.
+- (#174) `prepare_review` takes an optional author `rationale`: design
+  decisions, dropped alternatives, parts intentionally fixed, and doubts,
+  written before any finding. The reviewer reads it in round two, once the
+  author has answered a finding, and checks it against its round-one findings
+  and snapshot. It stays out of the snapshot; `get_review`, the review report,
+  and the human arbitration export carry it, and the compact summary reports
+  only `has_rationale`.
 
 ### Fixed
 
