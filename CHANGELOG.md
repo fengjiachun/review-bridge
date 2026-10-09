@@ -11,7 +11,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Added
 
-- (#PR) A finding may carry an optional `constraint` saying whether it breaks
+- (#173) A finding may carry an optional `constraint` saying whether it breaks
   a project rule the repository's agent guidance already states
   (`documented`, with its `source` file) or one it does not (`undocumented`).
   The reviewer guides say when to set it, and the author guide makes writing
