@@ -88,7 +88,7 @@ flowchart LR
 flowchart LR
   A["1 盲审<br/>只看快照、需求、范围"] --> B["2 意见<br/>findings 进账本，不可改"]
   B --> C["3 回应<br/>作者逐条 fixed / rejected"]
-  C --> D["4 对照<br/>同一评审者核每条回应"]
+  C --> D["4 对照<br/>同一提供方核每条回应"]
   D --> E["5 裁决<br/>resolved · still_open · 驳回成立"]
   classDef n fill:#ffffff,stroke:#57606a,stroke-width:1px,color:#111111;
   class A,B,C,D,E n;
@@ -100,7 +100,7 @@ flowchart LR
 - `rejected`：给出理由，并按 skill 的要求附具体的技术证据，由复审者判驳回是否成立；判成立的复审者要附可重放的验证。
 - `human_required`：直接停下交人仲裁。
 
-第二轮由同一评审者（Codex 新任务和 DeepSeek Harness 不续用进程，会新开一个）对照新快照逐条裁决：`resolved`、`rebuttal_accepted`、`still_open`，也可以报新意见。同一个 review ID 没有第三轮。
+第二轮由同一评审者提供方和配置对照新快照逐条裁决（Hermes 续用会话；Codex 新任务和 DeepSeek Harness 新开进程，从账本重建这条评审）：`resolved`、`rebuttal_accepted`、`still_open`，也可以报新意见。同一个 review ID 没有第三轮。
 
 ### 4.3 规矩分类与设计理由
 
@@ -137,7 +137,7 @@ CLEAN -> 再核工作树等于快照 -> LOCAL_GATE_PASSED
 ```
 
 - `CLEAN` → `LOCAL_GATE_PASSED`：所有意见都接受。`finalize_local_gate` 再核一次工作树等于快照。这道门禁证明的是快照一致性，不是测试结果；测试由发布阶段的 CI 证据把关。
-- `CONTINUABLE_FINDINGS`：没有争议的驳回，但第二轮判某条修复不完整，或发现了新问题。作者提交新 head，用 `continued_from_review_id` 开一条新的全量评审，未完的意见原样携带进去作为范围提示，不带双方的理由。
+- `CONTINUABLE_FINDINGS`：没有争议的驳回，但第二轮判某条修复不完整，或发现了新问题。作者提交新 head，用 `continued_from_review_id` 开一条新的全量评审，未完的意见原样携带进去作为范围提示（标题、位置、解释、建议、规矩分类），不带作者的回应和复审裁决。
 - `HUMAN_REQUIRED`：作者直接把某条意见标为 `human_required`，或者作者驳回而复审者仍不认。只有直接升级和真争议才交给人。`export_human_arbitration` 导出一份确定性的仲裁包（需求、范围、rationale、各轮快照身份、意见与双方说法），导出不改账本、不消耗轮次。
 
 这个路由是根据账本数据改的：曾进入 HUMAN_REQUIRED 的评审里，绝大多数在十几分钟内于同仓库同 base 重开了新评审，争议意见在新评审里几乎不再出现。也就是说「修了但没修完」在实践里的含义是继续，不是仲裁，状态名应该说实话。
@@ -193,7 +193,7 @@ flowchart LR
 
 每个版本从 release tag 的干净 clone 构建：`npm ci && npm run build && npm run verify:build`，产物包含 Codex marketplace、Claude 扩展源码、Hermes 与 DeepSeek 的集成目录，以及 `.mcpb` / `.dxt` / 源码包和 `SHA256SUMS.txt`。所有参与者钉在同一个发布版本上。升级是在新目录构建新运行时，然后逐个切换客户端的路径：Codex marketplace 同名换源要先 remove 再 add；Hermes 的 reviewer skill 是拷进 profile 的，若在版本间改过要拷新文件；DeepSeek Harness 从发布目录加载 skill，重新渲染路径即可。见 [install/upgrade.md](install/upgrade.md)。
 
-发版本身也留证据：`node scripts/verify-release.mjs --pre` 在打 tag 前核对 changelog 的 PR 认领与范围内的合并双向对账（支持 merge commit 和 squash 两种历史），`--final` 在发布后对照 GitHub 的事实与资产哈希，通过后把发布记录写进 store。
+发版本身也留证据：`node scripts/verify-release.mjs --pre`（发版 PR 自己的 changelog 认领要加 `--release-pull-request <n>`）在打 tag 前核对 changelog 的 PR 认领与范围内的合并双向对账（支持 merge commit 和 squash 两种历史），`--final` 在发布后对照 GitHub 的事实与资产哈希，通过后把发布记录写进 store。
 
 ## 8. 报告与统计
 

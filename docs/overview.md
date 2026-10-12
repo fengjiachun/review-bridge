@@ -158,7 +158,7 @@ profile, given only the review request and the `review_id`. See
 flowchart LR
   A["1 Blind review<br/>snapshot, requirement, scope only"] --> B["2 Findings<br/>into the ledger, immutable"]
   B --> C["3 Responses<br/>author answers each: fixed / rejected"]
-  C --> D["4 Comparison<br/>same reviewer verifies each answer"]
+  C --> D["4 Comparison<br/>same provider verifies each answer"]
   D --> E["5 Verdicts<br/>resolved · still_open · rebuttal accepted"]
   classDef n fill:#ffffff,stroke:#57606a,stroke-width:1px,color:#111111;
   class A,B,C,D,E n;
@@ -178,9 +178,10 @@ finding with exactly one disposition:
   replayable verification from the reviewer.
 - `human_required`: stop and hand the finding to a person.
 
-Round two is the same reviewer (a Codex task and DeepSeek Harness do not
-resume a process, so a new one is started) deciding each finding against the
-new snapshot: `resolved`, `rebuttal_accepted`, or `still_open`, with new
+Round two is the same reviewer provider and configuration deciding each
+finding against the new snapshot (Hermes resumes its session; a Codex task
+and DeepSeek Harness start a fresh process that rebuilds the review from the
+ledger): `resolved`, `rebuttal_accepted`, or `still_open`, with new
 findings allowed. There is no third round for the same review ID.
 
 ### 4.3 Rule kinds and the author's rationale
@@ -240,7 +241,9 @@ CLEAN -> working tree re-checked against the snapshot -> LOCAL_GATE_PASSED
 - `CONTINUABLE_FINDINGS`: no rebuttal is disputed, but round two judged a fix
   incomplete or found a new issue. The author commits a new head and opens a
   fresh full review with `continued_from_review_id`; the unfinished findings
-  are carried in verbatim as scope hints, without either side's reasoning.
+  are carried in verbatim as scope hints (title, location, explanation,
+  recommendation, rule kind), without the author's responses or the rereview
+  decisions.
 - `HUMAN_REQUIRED`: the author answered a finding with `human_required`, or
   rejected one and the rereviewer still disagrees. Only a direct escalation or
   a real dispute goes to a person. `export_human_arbitration` produces a
@@ -416,7 +419,9 @@ new files copied when it changed between releases; DeepSeek Harness loads the
 skill from the release directory, so re-rendering the path is enough. See
 [install/upgrade.md](install/upgrade.md).
 
-Releasing leaves evidence too: `node scripts/verify-release.mjs --pre` reconciles the
+Releasing leaves evidence too: `node scripts/verify-release.mjs --pre`
+(with `--release-pull-request <n>` for the release pull request's own
+changelog claim) reconciles the
 changelog's pull-request claims against the merges in the range in both
 directions before the tag (merge commits and squash merges alike), and
 `--final` checks the published release and asset hashes against GitHub's facts
