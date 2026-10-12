@@ -45,8 +45,8 @@ be skipped; a tool that does not serve it cannot.
 | Principle | Meaning | What enforces it |
 | --- | --- | --- |
 | Immutable snapshot | What is reviewed is a frozen change: diff, requirement, implementation scope, with a hash. Later edits never change the version that was reviewed. | The snapshot hash is in the ledger; the local gate re-checks that the working tree still equals the snapshot before it finalizes. |
-| Isolated reviewer | The reviewer is a fresh context that did not write the code. The author's responses, design rationale, and errata are material to verify, never instructions. | Round-one `open_review` returns no author material; the reviewer role has no tool that edits the repository, pushes, or opens pull requests. |
-| Append-only ledger | A finding cannot be changed once submitted; round two can only append verdicts; every mutation carries an expected revision. | The server-side state machine, revision checks, and a hash-chained audit log. |
+| Isolated reviewer | The reviewer is a fresh context that did not write the code. The author's responses, design rationale, and errata are material to verify, never instructions. | Round-one `open_review` returns neither the author's rationale nor any response; the only author-written text it can carry is errata, which correct claims about the world, never the diff. The reviewer role has no tool that edits the repository, pushes, or opens pull requests. |
+| Append-only ledger | A finding cannot be changed once submitted; round two can only append verdicts; publication and workflow mutations carry an expected revision. | The server-side state machine and state checks under a per-ledger lock; the publication gate and the autonomous workflow additionally keep hash-chained audit logs. |
 
 One more bias shapes how the project evolves: **prefer subtraction, and prove
 a state is reachable before defending it.** The state space only shrinks, and
@@ -89,9 +89,10 @@ Every participant shares one private store (by default
 database, no service process, only JSON and patch files, directories mode
 `0700` and files `0600`. It holds three kinds of record:
 
-- **Snapshots**: one directory per review round with the full patch, a
-  per-file byte-range index, copies of the changed files, the manifest, and
-  the hash. Files over 10 MiB are recorded but not copied.
+- **Snapshots**: one directory per review round with the full patch, copies
+  of the changed files, the manifest, and the hash; a per-file byte-range
+  index is derived from the patch on every read, never stored. Files over
+  10 MiB are recorded but not copied.
 - **The review ledger** (`review.json`): requirement, scope, rationale, each
   round's snapshot identity, findings, author responses, rereview decisions,
   errata, and the history of events.
@@ -100,8 +101,9 @@ database, no service process, only JSON and patch files, directories mode
 
 "Shared" means the author and reviewer MCP processes on one machine point at
 the same directory; it is not a network share. Concurrency uses file locks,
-writes go to a temporary file and an atomic rename, and every mutation carries
-an expected revision.
+writes go to a temporary file and an atomic rename, publication and workflow
+mutations carry an expected revision, and review-ledger tools validate the
+ledger's state under the lock.
 
 The author role and the reviewer role are two server processes with two tool
 sets. The reviewer can only list pending reviews, open one, read the snapshot
@@ -148,8 +150,9 @@ flowchart LR
   class A,B,C,D,E n;
 ```
 
-In round one the reviewer receives only the snapshot, the requirement, and the
-scope, and submits structured findings (severity, location, explanation,
+In round one the reviewer receives the snapshot, the requirement, and the
+scope (plus any errata the author appended, which correct claims about the
+world, never the diff), and submits structured findings (severity, location, explanation,
 recommendation). No findings means `CLEAN`. Otherwise the author answers each
 finding with exactly one disposition:
 
@@ -262,8 +265,10 @@ a panel: a packaged script clones the pull request outside every authoring
 tree, and each member gets its own `prepare_review` with `advisory: true`. An
 advisory review accepts `submit_review` and nothing else: the gate, author
 responses, rereview, and errata all refuse it, so it ends in a report and can
-never mint a gate over code the operator did not write. A Codex member runs in
-a Linux container that is the read boundary: read-only credentials, plugin,
+never mint a gate over code the operator did not write. An advisory Codex
+member launched through the packaged launcher runs in a Linux container that
+is the read boundary; Hermes, DeepSeek Harness, and Claude Desktop members do
+not get that boundary. Inside the container: read-only credentials, plugin,
 clone, and a staged copy of the one review; the host store is never mounted;
 egress goes only through a proxy that admits OpenAI's three domains; and the
 verdict is replayed through the host's own `submit_review` and kept only if it
@@ -307,9 +312,11 @@ and the review threads in one pass, writes an observation, and
   rather than pass. Codex results are correlated by request ID; without one,
   only a single open request with no predecessor and a matching reviewed
   commit is accepted.
-- **Four conditions for `MERGE_READY`.** The pull request head equals the
+- **The evidence behind `MERGE_READY`.** The pull request head equals the
   authorized head; the Codex result correlated to this request is clean; every
-  required check passed; no review thread is unresolved.
+  required check passed; no review thread is unresolved. The pull request must
+  also be out of draft and mergeable against the current base: the ledger
+  reports `PR_DRAFT`, `PR_CONFLICTING`, or a base-policy block first.
 - **The gate expires.** `finalize_publication_gate` mints a gate valid for
   five minutes from the oldest collection in the observation it was minted
   over; `verify_publication_gate` must return `valid: true` immediately before
@@ -434,18 +441,21 @@ partial fixes through still needs sampling.
   model identity; a `CODEX_TASK` review improves context isolation, which is
   not the model diversity of a separate provider.
 - The host sandbox bounds writes and network, not reads; the read boundary for
-  third-party code is the container (section 4.6). The local two-round "blind
-  review" is a tool-surface guarantee: the reviewer tools do not serve author
-  material before the author has answered. It is not a boundary against a
-  process that reads the store directly.
+  third-party code is the container, and only for an advisory Codex member
+  launched through the packaged launcher (section 4.6). The local two-round
+  "blind review" is a tool-surface guarantee: the reviewer tools do not serve
+  the author's rationale or responses before the author has answered. It is
+  not a boundary against a process that reads the store directly.
 - The store holds repository paths, requirements, patches, manifests,
   findings, remote-only operator labels and rationales, and copies of changed
-  files, with directories `0700` and files `0600`. Deleting one review is
-  deleting `reviews/<review_id>`; deleting everything is deleting the
-  directory.
+  files, with directories `0700` and files `0600`. Stop active Review Bridge
+  operations first, then delete `reviews/<review_id>` to remove one review;
+  quit every Review Bridge process before deleting the whole directory.
 - The selected client may send source returned by the reviewer tools to its
-  model provider according to its account configuration; Review Bridge itself
-  contains no network client.
+  model provider according to its account configuration. The MCP servers
+  contain no network client; the packaged scripts do reach the network, the
+  collectors through the user's `gh` and the advisory launcher through its
+  egress proxy.
 
 Version-by-version changes are in the [CHANGELOG](../CHANGELOG.md).
 
