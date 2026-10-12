@@ -1142,8 +1142,9 @@ test("a transport failure is retried once as a fresh request for the same resour
 test("an HTTP answer or a non-transport failure is not retried", () => {
   for (const failure of [
     { status: 1, stderr: "gh: Not Found (HTTP 404)\n", stdout: "" },
-    // A gateway timeout is still GitHub's answer, despite the word.
-    { status: 1, stderr: "gh: HTTP 504: Gateway Timeout (HTTP 504)\n", stdout: "" },
+    // A server error is GitHub's answer even when its message reads like a
+    // transport failure.
+    { status: 1, stderr: "gh: upstream connection reset (HTTP 502)\n", stdout: "" },
     {
       status: 1,
       stderr: "gh: unexpected EOF\n",
