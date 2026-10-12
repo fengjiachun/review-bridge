@@ -89,10 +89,12 @@ Every participant shares one private store (by default
 database, no service process, only JSON and patch files, directories mode
 `0700` and files `0600`. It holds three kinds of record:
 
-- **Snapshots**: one directory per review round with the full patch, copies
-  of the changed files, the manifest, and the hash; a per-file byte-range
-  index is derived from the patch on every read, never stored. Files over
-  10 MiB are recorded but not copied.
+- **Snapshots**: one directory per review round with the full patch, the
+  manifest, and the hash. Committed files are read back from Git by the
+  recorded head; only dirty or untracked working-tree overlays are copied
+  into the round, and overlays over 10 MiB are recorded but not copied. A
+  per-file byte-range index is derived from the patch on every read, never
+  stored.
 - **The review ledger** (`review.json`): requirement, scope, rationale, each
   round's snapshot identity, findings, author responses, rereview decisions,
   errata, and the history of events.
@@ -226,18 +228,18 @@ CLEAN -> working tree re-checked against the snapshot -> LOCAL_GATE_PASSED
   incomplete or found a new issue. The author commits a new head and opens a
   fresh full review with `continued_from_review_id`; the unfinished findings
   are carried in verbatim as scope hints, without either side's reasoning.
-- `HUMAN_REQUIRED`: the author rejected a finding and the rereviewer still
-  disagrees. Only a real dispute goes to a person. `export_human_arbitration`
-  produces a deterministic packet (requirement, scope, rationale, each round's
-  snapshot identity, the findings with both sides' statements) without
-  changing the ledger or consuming a round.
+- `HUMAN_REQUIRED`: the author answered a finding with `human_required`, or
+  rejected one and the rereviewer still disagrees. Only a direct escalation or
+  a real dispute goes to a person. `export_human_arbitration` produces a
+  deterministic packet (requirement, scope, rationale, each round's snapshot
+  identity, the findings with both sides' statements) without changing the
+  ledger or consuming a round.
 
-This routing came from ledger data: across the reviews that had reached
-`HUMAN_REQUIRED`, the arbitration export was never called once, most were
-followed within minutes by a new review on the same repository and base, and
-the disputed finding almost never reappeared there. In practice "fixed but
-incomplete" meant "keep going", not "a human must decide", so the state name
-was made to say so.
+This routing came from ledger data: most reviews that had reached
+`HUMAN_REQUIRED` were followed within minutes by a new review on the same
+repository and base, and the disputed finding almost never reappeared there.
+In practice "fixed but incomplete" meant "keep going", not "a human must
+decide", so the state name was made to say so.
 
 ### 4.5 Successor reviews and the patch index
 
@@ -250,8 +252,9 @@ expanding to the full patch only when the delta changes a contract used
 outside it, touches a security or compatibility surface, or the proof fails
 to verify. If any precondition fails, the review records a `FULL` fallback.
 
-The full patch is a cumulative base-to-head diff. `open_review` returns a
-`patch_index` with it: the byte offset and length of each file's section in
+The full patch is a cumulative diff from the base to the snapshot: the head
+for a clean committed round, the working tree when a manual review captured
+uncommitted changes. `open_review` returns a `patch_index` with it: the byte offset and length of each file's section in
 `patch.diff`, so a reviewer reads what the reviewed behavior depends on and
 reports what it skipped. The index is never stored; it is derived on every
 read from the same immutable patch, after checking that the patch still
@@ -320,8 +323,12 @@ and the review threads in one pass, writes an observation, and
 - **The gate expires.** `finalize_publication_gate` mints a gate valid for
   five minutes from the oldest collection in the observation it was minted
   over; `verify_publication_gate` must return `valid: true` immediately before
-  the merge. A new commit invalidates the ledger; a Codex finding means a fix
-  commit, a new head, a new ledger, and a new request.
+  the merge, and the merge itself must be pinned to the `head_sha` that
+  verification returned (for example `gh pr merge --match-head-commit`),
+  because verification reads the ledger, not GitHub, and a head pushed after
+  the last observation would otherwise slip through. A new commit
+  invalidates the ledger; a Codex finding means a fix commit, a new head, a
+  new ledger, and a new request.
 
 Neither the observation nor the ledger passes through a model's context: the
 collector writes the observation beside the ledger and prints a receipt.
@@ -425,7 +432,7 @@ One investigation of the "human required" reviews gave two conclusions and
 changed the product directly. First, the reviewers were right about nine
 times in ten: of 136 findings the author called fixed and the reviewer kept
 open, 74 were partial fixes and 17 made verification claims that did not hold,
-caught by the blind review. Second, operators never exported the arbitration
+caught when the rereview checked them against the new snapshot. Second, operators never exported the arbitration
 packet; they reopened a review instead. So the author guide tightened the
 definition of `fixed`, and the routing sends those findings to
 `CONTINUABLE_FINDINGS`. One observation remains open: the Codex task rejects
