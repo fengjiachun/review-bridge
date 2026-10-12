@@ -11,10 +11,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Changed
 
-- (#176) Add `docs/overview.zh.md`, a Chinese product overview of the
-  problem, design principles, store layout, local review, publication gate,
-  autonomous workflow, clients, reports, and anonymized usage data, linked
-  from the README documentation table.
+- (#176) Add `docs/overview.md`, a product overview of the problem, design
+  principles, store layout, local review, publication gate, autonomous
+  workflow, clients, reports, and anonymized usage data, with a Chinese
+  edition in `docs/overview.zh.md`, both linked from the README
+  documentation table.
 
 ## 0.19.0 - 2026-10-09
 

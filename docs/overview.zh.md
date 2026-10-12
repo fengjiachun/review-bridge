@@ -1,5 +1,7 @@
 # Review Bridge 产品说明
 
+[English](overview.md)
+
 Review Bridge 是一个代码评审交接工具，服务于由 AI agent 写代码的场景。它把一次改动冻结成**不可变快照**，交给一个**没参与写代码的评审者**，把每条意见、每次回应、每个裁决写进**只追加的账本**，再由一道**发布门禁**把 PR、CI 检查和远端评审绑到同一个 head 之后才给出 `MERGE_READY`。任何一步都不会在没有操作者指令时自己启动，合并始终是人的决定。
 
 支持 macOS 13 以上和 Linux，Node.js 18 以上。它以 MCP 服务器的形式运行，作者和评审者是两个角色、两个进程、两套工具；Codex、Claude、Hermes、DeepSeek Harness 都可以作为作者或评审者接入，GitHub 上的 Codex App 则承担远端评审。安装与升级见 [README](../README.md) 和 [install/](install/)；每个工具和错误码见 [reference.md](reference.md)。
