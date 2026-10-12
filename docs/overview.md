@@ -121,8 +121,8 @@ sees neither the publication tools nor the author tools, so a panel over a
 third party's pull request can never mint a gate. The MCP server holds no
 GitHub credentials and never opens a network connection or runs `gh`; GitHub
 is read by the packaged collector through the user's own `gh`, and the writes
-are the author agent's own `gh` and `git` calls, each planned and reconciled
-through the ledger.
+are the author agent's own `gh` and `git` calls, which the autonomous
+workflow plans and reconciles through its action trail.
 
 ## 4. Local review
 
@@ -156,7 +156,7 @@ profile, given only the review request and the `review_id`. See
 
 ```mermaid
 flowchart LR
-  A["1 Blind review<br/>snapshot, requirement, scope only"] --> B["2 Findings<br/>into the ledger, immutable"]
+  A["1 Blind review<br/>snapshot, requirement, scope, errata"] --> B["2 Findings<br/>into the ledger, immutable"]
   B --> C["3 Responses<br/>author answers each: fixed / rejected"]
   C --> D["4 Comparison<br/>same provider verifies each answer"]
   D --> E["5 Verdicts<br/>resolved · still_open · rebuttal accepted"]
@@ -178,8 +178,9 @@ finding with exactly one disposition:
   replayable verification from the reviewer.
 - `human_required`: stop and hand the finding to a person.
 
-Round two is the same reviewer provider and configuration deciding each
-finding against the new snapshot (Hermes resumes its session; a Codex task
+Round two is the same reviewer provider, keeping the round-one configuration
+unless the operator reselects one, deciding each finding against the new
+snapshot (Hermes resumes its session; a Codex task
 and DeepSeek Harness start a fresh process that rebuilds the review from the
 ledger): `resolved`, `rebuttal_accepted`, or `still_open`, with new
 findings allowed. There is no third round for the same review ID.
@@ -240,7 +241,7 @@ CLEAN -> working tree re-checked against the snapshot -> LOCAL_GATE_PASSED
   publication stage.
 - `CONTINUABLE_FINDINGS`: no rebuttal is disputed, but round two judged a fix
   incomplete or found a new issue. The author commits a new head and opens a
-  fresh full review with `continued_from_review_id`; the unfinished findings
+  fresh full review with `continued_from_review_id` and `force_full_review`; the unfinished findings
   are carried in verbatim as scope hints (title, location, explanation,
   recommendation, rule kind), without the author's responses or the rereview
   decisions.
@@ -283,7 +284,8 @@ with the served bytes cannot exist.
 
 To review someone else's pull request, several independent reviewers can form
 a panel: a packaged script makes a fresh clone of the pull request into a path the
-operator places outside every authoring tree, and each member gets its own `prepare_review` with `advisory: true`. An
+operator places outside every authoring tree, and each member gets its own `prepare_review` with `advisory: true` and
+`force_full_review: true`, so no member is narrowed to a successor delta. An
 advisory review accepts `submit_review` and no other mutation: the gate,
 author responses, rereview, and errata all refuse it, so it ends in a report and can
 never mint a gate over code the operator did not write. An advisory Codex
@@ -331,9 +333,9 @@ and the review threads in one pass, writes an observation, and
   the collection.
 - **A fail-closed adapter.** A standalone comment, a reaction, silence, an
   unbound request, incomplete pagination, or an ambiguous result all fail
-  rather than pass. Codex results are correlated by request ID; without one,
-  only a single open request with no predecessor and a matching reviewed
-  commit is accepted.
+  rather than pass. Codex results are correlated by request ID carried in the review or in a
+  `Codex Review:` clean comment; a result without one is accepted only for a
+  single open bound request and only when the reviewed commit matches.
 - **The evidence behind `MERGE_READY`.** The pull request head equals the
   authorized head; the Codex result correlated to this request is clean; every
   required check passed; no review thread is unresolved. The pull request must
@@ -363,7 +365,8 @@ response does return the updated ledger, so the model still sees the result. Det
 
 `start_autonomous_workflow` binds the repository, base, requirement, branch,
 publication target, capability set, and authorization digest into a workflow
-ledger, then walks RFC 0003's path on its own: commit a clean head → bind a
+ledger and claims the targets; the author-side driver then follows
+`next_action` along RFC 0003's path: commit a clean head → bind a
 Codex review → local rounds → local gate → fast-forward push of the gated head
 → draft pull request → publication ledger → observe → mark ready → record the
 terminal `MERGE_READY` and **stop**. It does not merge.
@@ -380,10 +383,11 @@ the `@codex review` comment, is posted first and then bound by
 `record_codex_review_request`; a crash between the two is caught as an unbound
 request in the next observation. "Look once more"
 also catches the world moving between planning and acting: the pre-read
-rechecks what the action depends on (the pull request's identity, head, and
-draft state for a draft toggle; the resolved remote and the draft flag for a
-push; the thread's watermark and resolved flag for a reply or resolution), and
-the server-side checkpoint re-derives readiness from the ledger, so a regression
+rechecks what the action depends on (identity, head, and draft state before
+mark-ready; identity, branches, and draft state before a return to draft; the
+resolved remote and the draft flag before a push; the thread's watermark and
+resolved flag before a resolution or unresolution), and the server-side
+checkpoint re-derives readiness from the ledger, so a regression
 already recorded there refuses the action. A CI change that no observation
 has recorded yet is caught by the next observation, not by this step.
 
@@ -534,5 +538,5 @@ source; this is an overview grouped by purpose.
 | continuation | A fresh full review opened from `CONTINUABLE_FINDINGS`, carrying the unfinished findings as scope hints. |
 | baseline | The complete state of the three Codex feeds before a request; earlier comments are never an answer. |
 | observation | The collector's one-pass reading of the pull request, checks, Codex feeds, and threads. |
-| gate | The credential minted by finalize, valid for minutes, verified immediately before a merge. |
+| gate | Local gate: the record `finalize_local_gate` writes for a CLEAN review, later used as publication authorization. Publication gate: the credential `finalize_publication_gate` mints, valid for minutes, verified immediately before a merge. |
 | advisory review | A review that can only produce a report, never a gate, used for someone else's pull request. |
