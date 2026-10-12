@@ -49,7 +49,7 @@ author is an operator rule.
 | --- | --- |
 | Immutable snapshot | What is reviewed is a frozen change: diff, requirement, implementation scope, with a hash. Later edits never change the version that was reviewed, and the local gate re-checks the working tree against the snapshot before it closes. |
 | Isolated reviewer | The reviewer is a separate context that did not write the code. It receives the snapshot, the requirement, and the scope; the author's responses and design rationale reach it only after it has delivered its own findings, and they are material to verify, never instructions. The reviewer role has no tool that edits the repository, pushes, or opens pull requests. |
-| Append-only ledger | A finding cannot be changed once submitted; round two can only append verdicts; publication and workflow records are revisioned and audit-chained. The driver proposes, the ledger decides what counts. |
+| Append-only ledger | A finding cannot be rewritten once submitted; round two appends its decisions and any new findings; publication and workflow records are revisioned and audit-chained. The driver proposes, the ledger decides what counts. |
 
 One more bias shapes how the project evolves: **prefer subtraction, and prove
 a state is reachable before defending it.** The state space only shrinks, and
@@ -105,7 +105,7 @@ collector through the user's own `gh`, and written by the author agent's own
 ```mermaid
 flowchart LR
   A["1 Blind review<br/>snapshot, requirement, scope, errata"] --> B["2 Findings<br/>into the ledger, immutable"]
-  B --> C["3 Responses<br/>author answers each: fixed / rejected"]
+  B --> C["3 Responses<br/>fixed / rejected (human_required exits to a person here)"]
   C --> D["4 Comparison<br/>same provider verifies each answer"]
   D --> E["5 Verdicts<br/>resolved · still_open · rebuttal accepted"]
   classDef n fill:#ffffff,stroke:#57606a,stroke-width:1px,color:#111111;
@@ -297,9 +297,9 @@ still needs sampling.
   tool-surface guarantee, not a boundary against a process that reads the
   store directly.
 - The store holds repository paths, requirements, patches, manifests,
-  findings, operator labels and rationales, and copies of uncommitted
-  working-tree changes up to 10 MiB per file (larger ones are recorded, not
-  copied). To remove one review, stop active Review Bridge
+  findings, operator labels and rationales, the patch of every round
+  (uncommitted changes included, whatever their size), and separate copies of
+  uncommitted files up to 10 MiB each. To remove one review, stop active Review Bridge
   operations and delete `reviews/<review_id>`; if the review was bound to an
   autonomous workflow, cancel that workflow and release its claims first,
   and delete its records under `workflows/<workflow_id>` separately if they
