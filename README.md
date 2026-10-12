@@ -120,6 +120,7 @@ and explains why each step exists.
 | Page | For |
 | --- | --- |
 | [How Review Bridge reviews a change](docs/review-flow.md) | The narrative: commit to merge-ready, and why |
+| [产品说明（中文）](docs/overview.zh.md) | Chinese overview: problem, principles, architecture, local review, publication gate, workflow, data |
 | [Choose reviewer model and reasoning](docs/reviewer-configuration.md) | Cross-client selection, launch, and runtime limitations |
 | [Upgrade an existing installation](docs/install/upgrade.md) | Switch clients together and verify the new runtime |
 | [Run a local review](docs/local-review.md) | Every provider's request, round two, successor reviews, the state machine |
