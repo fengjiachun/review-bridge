@@ -324,10 +324,12 @@ own `gh`, writes an observation beside the ledger, and
   verification returned (for example `gh pr merge --match-head-commit`),
   because verification reads the ledger, not GitHub.
 
-The observation does not need to pass through a model's context: the
-collector writes it beside the ledger and prints a receipt, and the record
-tool reads it by path. Retyping tens of thousands of tokens would cost the
-same bytes twice and add a transcription failure mode. Details are in
+The observation does not need to pass through a model's context on its way
+in: the collector writes it beside the ledger and prints a receipt, and the
+record tool reads it by path. Retyping tens of thousands of tokens would cost
+the same bytes twice and add a transcription failure mode. The record tool's
+response does return the updated ledger, observation included, so the model
+still sees the result. Details are in
 [publication-gate.md](publication-gate.md).
 
 ## 6. The autonomous workflow
@@ -342,8 +344,11 @@ terminal `MERGE_READY` and **stop**. It does not merge.
 
 External actions (dispatching a reviewer, pushing, creating the pull
 request, replying to a thread, resolving it, toggling draft state) go through
-the same four steps: record the intent → look once more, then act → reconcile
-the result → record completion, in a hash-chained action audit. The driver
+the same four steps: record the intent → act → reconcile the result → record
+completion, in a hash-chained action audit. For pushes, draft toggles, and
+thread resolutions the second step also takes a fresh look at the provider
+before acting; [autonomous-workflow.md](autonomous-workflow.md) lists which
+actions carry that proof. The driver
 model can crash at any point; after a restart it reads the ledger and knows
 where it stopped. Stopped at step one, nothing external happened; stopped at
 step two, it reconciles against the provider instead of firing again, which is
@@ -405,7 +410,9 @@ afterwards and writes the release record into the store.
   obligation, rounds to `CLEAN`, continuations, workflow budget events,
   arbitration escalations, and rule kinds. Every counting rule is stated in
   the report so a number can be replayed against the ledgers. Filters cover
-  time, repository, gate or advisory type, and `FULL` or `SUCCESSOR` strategy.
+  time, repository, gate or advisory type, and `FULL` or `SUCCESSOR` strategy;
+  they apply to the review metrics only, and a filtered report omits the
+  workflow statistics.
 - **Finding search.** `review-findings.mjs` filters historical findings by
   repository, file, keyword, severity, author disposition, rereview decision,
   and rule kind, keeping each finding's original snapshot and ledger location.
@@ -456,8 +463,11 @@ partial fixes through still needs sampling.
   findings, remote-only operator labels and rationales, and copies of dirty
   or untracked working-tree overlays (a clean committed review copies no
   files; it reads them from Git), with directories `0700` and files `0600`. Stop active Review Bridge
-  operations first, then delete `reviews/<review_id>` to remove one review;
-  quit every Review Bridge process before deleting the whole directory.
+  operations first, then delete `reviews/<review_id>` to remove one review; a
+  review bound to an autonomous workflow also leaves that workflow's ledger
+  and claims under `workflows/`, which cancelling and releasing the workflow
+  clears. Quit every Review Bridge process before deleting the whole
+  directory.
 - The selected client may send source returned by the reviewer tools to its
   model provider according to its account configuration. The MCP server
   processes never open a network connection; the packaged scripts do reach the network, the
