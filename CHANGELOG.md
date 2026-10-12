@@ -7,6 +7,16 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Changed
+
+- (#176) Add `docs/overview.md`, a product overview of the problem, design
+  principles, store layout, local review, publication gate, autonomous
+  workflow, clients, reports, and anonymized usage data, with a Chinese
+  edition in `docs/overview.zh.md`, both linked from the README
+  documentation table.
+
 ## 0.19.0 - 2026-10-09
 
 ### Added
