@@ -19,7 +19,7 @@ Review Bridge 的回答只有一句话：**每一步都留下机器能核的证�
 
 ## 2. 设计原则
 
-三条原则贯穿整个设计。每一条都由工具本身承担，而不是靠参与者遵守的规矩。
+三条原则贯穿整个设计。每一条都在工具够得着的范围内由工具本身承担：`CODEX_TASK` 评审者由服务端另起进程，手动派发的评审者则由服务端核对绑定的提供方，其上下文与作者分开是操作者的规矩。
 
 | 原则 | 含义 |
 | --- | --- |
@@ -94,7 +94,7 @@ WAITING_FOR_REVIEW
 CLEAN -> 再核工作树等于快照 -> LOCAL_GATE_PASSED
 ```
 
-三个出口。`CLEAN` 在再核一次工作树等于快照之后成为 `LOCAL_GATE_PASSED`；这道门禁证明的是快照一致性，不是测试结果。`CONTINUABLE_FINDINGS` 是没有争议的驳回、但某条修复被判不完整或出现了新问题：作者提交新 head，开一条新评审，未完的意见作为范围提示携带进去。`HUMAN_REQUIRED` 只留给直接升级和复审者仍不认的驳回；可以为人导出一份仲裁包，不动账本。这个路由是根据账本数据改的：曾进入 HUMAN_REQUIRED 的评审绝大多数在十几分钟内于同仓库同 base 重开了新评审，于是「修了但没修完」被改成了「继续」。
+三个出口。`CLEAN` 在再核一次工作树等于快照之后成为 `LOCAL_GATE_PASSED`；这道门禁证明的是快照一致性，不是测试结果。`CONTINUABLE_FINDINGS` 是不存在仍有争议的驳回、但某条修复被判不完整或出现了新问题：作者提交新 head，开一条新评审，未完的意见作为范围提示携带进去。`HUMAN_REQUIRED` 只留给直接升级和复审者仍不认的驳回；可以为人导出一份仲裁包，不动账本。这个路由是根据账本数据改的：曾进入 HUMAN_REQUIRED 的评审绝大多数在十几分钟内于同仓库同 base 重开了新评审，于是「修了但没修完」被改成了「继续」。
 
 随改动一起交给评审者的还有两样。**规矩分类**：违反项目规矩的 finding 会标明这条规矩是否已写在仓库的 agent 指导文件里（`documented` 并注明出处，或 `undocumented`）；修一条 undocumented 的意见包括把规矩写下来。**设计理由**：作者可以在任何意见出现之前记下关键设计决策、放弃的方案和自己没把握的地方；评审者只在作者回应过第一轮之后才看到它，而且只当作又一份待核材料。
 
@@ -119,7 +119,7 @@ flowchart LR
 
 `start_autonomous_workflow` 把仓库、base、需求、分支和发布目标绑成一个工作流账本，之后由作者侧的驱动按账本的 `next_action` 沿 RFC 0003 的路径走：提交干净 head → 绑定 Codex 评审 → 本地两轮 → 本地门禁 → 推送门禁过的 head → 开草稿 PR → 发布账本 → 观察 → 标记 ready → 记录终态 `MERGE_READY` 然后**停下**。它不合并。
 
-每个对外动作在发生前后都写进哈希链的动作审计，所以驱动崩溃后可以从账本接着走，不会重复评论、重复推送。Codex 结果歧义、合并冲突、PR 被人关掉、或者一次尝试毫无进展，都是带着证据暂停，而不是猜。分支、远端 head ref 和 PR 的所有权一次只属于一个工作流。细节见 [autonomous-workflow.md](autonomous-workflow.md)。
+除 Codex 评审请求评论之外，每个对外动作在发生前后都写进哈希链的动作审计，所以驱动崩溃后可以从账本接着走，不会重复评论、重复推送；请求评论是先发出去再绑定，两步之间崩溃会在下一次观测里显形为未绑定请求。Codex 结果歧义、合并冲突、PR 被人关掉、或者一次尝试毫无进展，都是带着证据暂停，而不是猜。分支、远端 head ref 和 PR 的所有权一次只属于一个工作流。细节见 [autonomous-workflow.md](autonomous-workflow.md)。
 
 ## 7. 客户端、安装与升级
 
@@ -134,7 +134,7 @@ flowchart LR
 
 ## 8. 报告与统计
 
-- **评审报告。**`render_review_report` 把一条评审的账本（连同发布账本）渲染成 Markdown；打包的 `review-report.mjs` 默认打印摘要，`--full` 打印全文。报告是账本的投影，不是证据。
+- **评审报告。**`render_review_report` 把一条评审的账本连同发布账本，或 REMOTE_ONLY 发布的账本和授权，渲染成 Markdown；打包的 `review-report.mjs` 默认打印摘要，`--full` 打印全文。报告是账本的投影，不是证据。
 - **scorecard。**`review-scorecard.mjs` 只读 store，按评审者提供方汇总：各严重度意见数、作者回应与复审裁决的交叉、驳回成立率、到 CLEAN 的轮数、继续评审、升级、规矩分类。每条计数规则写在报告里。
 - **意见检索。**`review-findings.mjs` 按仓库、文件、关键词、严重度、回应、裁决、规矩分类筛历史意见。见 [finding-search.md](finding-search.md)。
 
@@ -157,7 +157,7 @@ flowchart LR
 
 - 本地、远端和发布门禁都是工作流层面的证明，不是 Git 或 GitHub 的安全边界。Review Bridge 不装 `pre-push` 钩子。提供方绑定和独立 Codex 任务都不是经过认证的人或模型身份；`CODEX_TASK` 评审改善的是上下文隔离，不等于换一家提供方带来的模型多样性。
 - 宿主沙箱限制写和网络，不限制读；审第三方代码的读边界是通过打包 launcher 拉起的顾问 Codex 成员所在的容器。两轮「盲审」是工具面上的保证，挡不住直接读 store 的进程。
-- store 里有仓库路径、需求、patch、manifest、意见、操作者标签与理由，以及未提交的工作树改动的副本。删一条评审：先停掉进行中的 Review Bridge 操作，再删 `reviews/<review_id>`；工作流自己的记录单独放在 `workflows/` 下。删整个目录前要先退出所有 Review Bridge 进程。保留与权限见 [README](../README.md#data-handling-and-cleanup)。
+- store 里有仓库路径、需求、patch、manifest、意见、操作者标签与理由，以及未提交的工作树改动的副本。删一条评审：先停掉进行中的 Review Bridge 操作，再删 `reviews/<review_id>`；若这条评审绑定过自治工作流，先取消该工作流并释放它的认领，它在 `workflows/<workflow_id>` 下的记录要删的话另行删除。删整个目录前要先退出所有 Review Bridge 进程。保留与权限见 [README](../README.md#data-handling-and-cleanup)。
 - 所选客户端可能按其账号配置把评审工具返回的源码发给模型提供方。MCP 服务器进程不打开网络连接；打包的脚本通过用户的 `gh` 访问 GitHub，顾问 launcher 通过它的出口代理联网。
 
 逐版本的变更见 [CHANGELOG](../CHANGELOG.md)。

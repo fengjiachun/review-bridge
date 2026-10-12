@@ -40,7 +40,10 @@ hold up.
 ## 2. Design principles
 
 Three principles run through the whole design. Each is carried by the tools
-themselves rather than by a rule the participants are asked to follow.
+themselves as far as the tools reach: a `CODEX_TASK` reviewer is launched by
+the server as a separate process, while for a reviewer dispatched by hand the
+server checks the bound provider and keeping that context separate from the
+author is an operator rule.
 
 | Principle | Meaning |
 | --- | --- |
@@ -210,9 +213,11 @@ follows the ledger's `next_action` along RFC 0003's path: commit a clean head
 draft pull request → publication ledger → observe → mark ready → record the
 terminal `MERGE_READY` and **stop**. It does not merge.
 
-Every external action is recorded in a hash-chained action audit before and
-after it happens, so a driver that crashes resumes from the ledger without
-duplicating a comment or a push. An ambiguous Codex result, a merge
+Every external action except the Codex review request comment is recorded
+in a hash-chained action audit before and after it happens, so a driver that
+crashes resumes from the ledger without duplicating a comment or a push; the
+request comment is posted first and then bound, and a crash in between shows
+up as an unbound request in the next observation. An ambiguous Codex result, a merge
 conflict, a pull request someone closed, or an attempt that makes no progress
 pauses the run with the evidence rather than guessing. Ownership of the
 branch, the remote head ref, and the pull request belongs to one workflow at
@@ -237,8 +242,9 @@ before the tag and checks the published assets afterwards. See
 
 ## 8. Reports and statistics
 
-- **Review report.** `render_review_report` renders a review's ledger (and
-  its publication ledger) as Markdown; the packaged `review-report.mjs`
+- **Review report.** `render_review_report` renders a review's ledger and its
+  publication ledger, or a remote-only publication's ledger and authorization
+  alone, as Markdown; the packaged `review-report.mjs`
   prints a brief by default and the full rendering with `--full`. The report
   is a projection of the ledger, not evidence.
 - **Scorecard.** `review-scorecard.mjs` reads one store and aggregates per
@@ -293,8 +299,10 @@ still needs sampling.
 - The store holds repository paths, requirements, patches, manifests,
   findings, operator labels and rationales, and copies of uncommitted
   working-tree changes. To remove one review, stop active Review Bridge
-  operations and delete `reviews/<review_id>`; a workflow's own records live
-  separately under `workflows/`. Quit every Review Bridge process before
+  operations and delete `reviews/<review_id>`; if the review was bound to an
+  autonomous workflow, cancel that workflow and release its claims first,
+  and delete its records under `workflows/<workflow_id>` separately if they
+  should go too. Quit every Review Bridge process before
   deleting the whole directory. Retention and permissions are in the
   [README](../README.md#data-handling-and-cleanup).
 - The selected client may send source returned by the reviewer tools to its
