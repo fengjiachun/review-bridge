@@ -144,7 +144,7 @@ CLEAN -> 再核工作树等于快照 -> LOCAL_GATE_PASSED
 
 同一分支上的后续提交可以作为 successor 继承上一条 `LOCAL_GATE_PASSED` 的评审。服务器记录精确的父到子 delta，评审者只读 delta 及相关调用方、契约和测试，仅在 delta 改了对外契约、触及安全或兼容面、或证明无法核实时展开全量 patch。继承的前置条件不成立时，评审记录为 `FULL` 回退；前置条件列在 [local-review.md](local-review.md)。
 
-全量 patch 是从 base 到快照的累计 diff。`open_review` 随快照返回 `patch_index`：每个文件在 patch 里的字节偏移和长度，评审者按需读取并报告跳过了什么。索引每次按同一份不可变 patch 现算，从不存储。
+全量 patch 是从 base 到快照的累计 diff。`open_review` 随快照返回 `patch_index`：每个文件在 patch 里的字节偏移和长度（超过几百段后其余合并为一条需全文读的余项），评审者按需读取并报告跳过了什么。索引每次按同一份不可变 patch 现算，从不存储。
 
 ### 4.6 顾问面板
 
@@ -154,7 +154,7 @@ CLEAN -> 再核工作树等于快照 -> LOCAL_GATE_PASSED
 
 ```mermaid
 flowchart LR
-  A["1 推送本地评审过的<br/>head，开 PR"] --> B["2 先记 Codex 基线，<br/>再发带请求 ID 的 @codex review"]
+  A["1 推送已授权的<br/>head，开 PR"] --> B["2 先记 Codex 基线，<br/>再发带请求 ID 的 @codex review"]
   B --> C["3 一次原子观测：<br/>PR、检查、评审、线程"]
   C --> D["4 账本推导出 MERGE_READY，<br/>封门后校验再合并"]
   classDef n fill:#ffffff,stroke:#57606a,stroke-width:1px,color:#111111;
@@ -195,7 +195,7 @@ flowchart LR
 
 ## 8. 报告与统计
 
-- **评审报告。**`render_review_report` 把一条评审的账本（有发布账本则一并）渲染成 Markdown 写在账本旁；打包的 `review-report.mjs` 默认打印摘要（终态、下一步、事实表、仍开放的意见、各轮事实），`--full` 打印全文。报告是账本的投影，不是证据，不动账本、不消耗轮次。
+- **评审报告。**`render_review_report` 把一条评审的账本（有发布账本则一并）渲染成 Markdown 写在账本旁，REMOTE_ONLY 发布则只凭发布账本和授权渲染；打包的 `review-report.mjs` 默认打印摘要（终态、下一步、事实表、仍开放的意见、各轮事实），`--full` 打印全文。报告是账本的投影，不是证据，不动账本、不消耗轮次。
 - **scorecard。**`review-scorecard.mjs` 只读 store，按评审者提供方汇总：各严重度意见数、作者回应与复审裁决的交叉、驳回在验证义务前后的成立率、到 CLEAN 的轮数、继续评审、工作流预算事件、仲裁升级、规矩分类。每条计数规则写在报告里，可以对着账本重放。支持按时间、仓库、门禁/顾问类型、FULL/SUCCESSOR 策略过滤；过滤只作用于评审指标，带过滤的报告不含工作流统计。
 - **历史意见检索。**`review-findings.mjs` 按仓库、文件、关键词、严重度、作者回应、复审裁决、规矩分类过滤，保留每条意见的原始快照和账本位置。见 [finding-search.md](finding-search.md)。
 
@@ -218,7 +218,7 @@ flowchart LR
 
 - 本地、远端和发布门禁是工作流层面的证明，不是 Git 或 GitHub 的安全边界。Review Bridge 不装 `pre-push` 钩子。提供方绑定和独立的 Codex 任务不是经过认证的人或模型身份；`CODEX_TASK` 评审改善的是上下文隔离，不等于换一家模型的多样性。
 - 宿主沙箱限制写和网络，不限制读；审第三方代码时的读边界由容器提供，且只覆盖通过打包 launcher 拉起的顾问 Codex 成员（第 4.6 节）。本地两轮评审的「盲审」是工具面上的保证：评审工具在作者回应之前不端出作者的设计理由和回应；它不是对一个能直接读 store 的进程的边界。
-- store 里有仓库路径、需求、patch、manifest、意见、远端授权的操作者标签与理由，以及未提交或未跟踪的工作树改动的副本（干净的已提交评审不复制任何文件，而是从 Git 读），目录 0700、文件 0600。删除前先停掉进行中的 Review Bridge 操作：删一条评审就删 `reviews/<review_id>`，绑定过自治工作流的评审在 `workflows/` 下还留有该工作流的账本和认领，要先取消并释放那个工作流；删整个目录前要先退出所有 Review Bridge 进程。
+- store 里有仓库路径、需求、patch、manifest、意见、远端授权的操作者标签与理由，以及未提交或未跟踪的工作树改动的副本（干净的已提交评审不复制任何文件，而是从 Git 读），目录 0700、文件 0600。删除前先停掉进行中的 Review Bridge 操作：删一条评审就删 `reviews/<review_id>`，绑定过自治工作流的评审在 `workflows/<workflow_id>` 下还留有该工作流的账本和动作审计，不删不会消失；先取消并释放那个工作流，它的认领才不会挡住后来的工作流；删整个目录前要先退出所有 Review Bridge 进程。
 - 所选客户端可能按其账号配置把评审工具返回的源码发给模型提供方。MCP 服务器进程从不打开网络连接；打包的脚本会联网：收集器通过用户自己的 `gh`，顾问 launcher 通过它的出口代理。
 
 版本变化见 [CHANGELOG.md](../CHANGELOG.md)。
@@ -243,11 +243,11 @@ flowchart LR
 
 | 术语 | 含义 |
 | --- | --- |
-| 快照 snapshot | 一轮评审所冻结的改动：patch、manifest、哈希，外加未提交或未跟踪的工作树改动的副本。 |
+| 快照 snapshot | 一轮评审所冻结的改动：patch、manifest、哈希，外加未提交或未跟踪的工作树改动的副本（单个不超过 10 MiB）。 |
 | 账本 ledger | 服务器端的记录，只追加；驱动提议，账本决定什么算数。 |
 | finding | 评审者提交的一条结构化意见：严重度、标题、解释，通常还有位置和建议，可选规矩分类。 |
 | resolution | 作者对一条意见的回应：fixed / rejected / human_required，附理由，证据可选。 |
-| rationale | 作者在评审前写下的设计理由，第二轮才给评审者。 |
+| rationale | 作者在评审前写下的设计理由，作者记录回应之后才给评审者。 |
 | successor | 继承上一条已门禁评审的任务，评审单位是 delta。 |
 | 继续评审 continuation | 从 CONTINUABLE_FINDINGS 开的新全量评审，携带未完意见作为范围提示。 |
 | 基线 baseline | 发起 Codex 请求前三个 feed 的完整快照，请求之前存在的评论不算答复。 |

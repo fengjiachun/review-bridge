@@ -260,8 +260,9 @@ for a successor do not hold, the review records a `FULL` fallback;
 
 The full patch is a cumulative diff from the base to the snapshot.
 `open_review` returns a `patch_index` with it: the byte offset and length of
-each file's section, so a reviewer reads what the reviewed behavior depends
-on and reports what it skipped. The index is derived from the immutable patch
+each file's section (beyond a few hundred sections the rest is one remainder
+entry to be read in full), so a reviewer reads what the reviewed behavior
+depends on and reports what it skipped. The index is derived from the immutable patch
 on every read, never stored.
 
 ### 4.6 Advisory panels
@@ -283,7 +284,7 @@ and kept only if it equals the container's ledger.
 
 ```mermaid
 flowchart LR
-  A["1 Push the locally reviewed<br/>head, open the PR"] --> B["2 Record the Codex baseline,<br/>then post @codex review with a request ID"]
+  A["1 Push the authorized<br/>head, open the PR"] --> B["2 Record the Codex baseline,<br/>then post @codex review with a request ID"]
   B --> C["3 One atomic observation:<br/>PR, checks, review, threads"]
   C --> D["4 The ledger derives MERGE_READY;<br/>finalize, verify, then merge"]
   classDef n fill:#ffffff,stroke:#57606a,stroke-width:1px,color:#111111;
@@ -399,7 +400,9 @@ afterwards and writes the release record into the store.
 ## 8. Reports and statistics
 
 - **Review report.** `render_review_report` writes one review's ledger, and
-  its publication ledger where there is one, as Markdown beside the ledger.
+  its publication ledger where there is one, as Markdown beside the ledger;
+  a remote-only publication renders from its publication ledger and
+  authorization alone.
   The packaged `review-report.mjs` prints a brief by default (terminal state,
   next step, a fact table, the open findings, the round-level facts) and the
   full rendering with `--full`. The report is a projection of the ledger, not
@@ -465,8 +468,9 @@ partial fixes through still needs sampling.
   files; it reads them from Git), with directories `0700` and files `0600`. Stop active Review Bridge
   operations first, then delete `reviews/<review_id>` to remove one review; a
   review bound to an autonomous workflow also leaves that workflow's ledger
-  and claims under `workflows/`, which cancelling and releasing the workflow
-  clears. Quit every Review Bridge process before deleting the whole
+  and action audit under `workflows/<workflow_id>`, which stay until deleted;
+  cancel and release the workflow first so its claims do not block a later
+  one. Quit every Review Bridge process before deleting the whole
   directory.
 - The selected client may send source returned by the reviewer tools to its
   model provider according to its account configuration. The MCP server
@@ -499,11 +503,11 @@ source; this is an overview grouped by purpose.
 
 | Term | Meaning |
 | --- | --- |
-| snapshot | The change frozen for one review round: patch, manifest, hash, plus copies of any dirty or untracked working-tree overlays. |
+| snapshot | The change frozen for one review round: patch, manifest, hash, plus copies of dirty or untracked working-tree overlays up to 10 MiB each. |
 | ledger | The server-side record, append-only; the driver proposes, the ledger decides what counts. |
 | finding | One structured reviewer comment: severity, title, explanation, usually a location and recommendation, optional rule kind. |
 | resolution | The author's answer to a finding: fixed, rejected, or human_required, with a rationale and optional evidence. |
-| rationale | The author's design account, written before review and served only in round two. |
+| rationale | The author's design account, written before review and served only after the author has recorded responses. |
 | successor | A review that continues a previous gated review; the reviewed unit is the delta. |
 | continuation | A fresh full review opened from `CONTINUABLE_FINDINGS`, carrying the unfinished findings as scope hints. |
 | baseline | The complete state of the three Codex feeds before a request; earlier comments are never an answer. |
