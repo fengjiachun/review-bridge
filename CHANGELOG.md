@@ -9,6 +9,23 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Added
+
+- (#177) `start_publication` and `get_publication_summary` report
+  `prior_ledgers_for_pull_request`, the number of other publication ledgers in
+  the store for the same `repository_id` and `pr_number`. It is derived at call
+  time, never stored, and decides nothing, so a remote-only loop driven by
+  hand can see how many heads came before. The scorecard adds a Ledgers per
+  pull request section with a distribution and the top three, omitted under
+  review filters as workflow statistics are.
+
+### Fixed
+
+- (#177) The GitHub observation collector retries a gh call once, after a
+  second, when it failed with no HTTP response at all: a connection reset,
+  EOF, timeout, TLS handshake, or gh's "error connecting to". HTTP errors and
+  parse failures are not retried, and nothing new is recorded.
+
 ### Changed
 
 - (#176) Add `docs/overview.md`, a product overview of the problem, design
