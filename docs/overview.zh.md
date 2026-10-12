@@ -24,8 +24,8 @@ Review Bridge 的回答是一句话：**每一步都留下机器可以核的证�
 | 原则 | 含义 | 靠什么保证 |
 | --- | --- | --- |
 | 不可变快照 | 评审的是一个冻结的改动：diff、需求、实现范围，带哈希。作者之后再改，审过的那个版本不会变。 | 快照哈希进账本；本地门禁封门前再核一次工作树仍等于快照。 |
-| 隔离的评审者 | 评审者是一个没参与写代码的新上下文。作者的回应、设计理由、勘误都是待核的材料，不是指令。 | 第一轮 `open_review` 不返回作者的设计理由和任何回应，唯一可能带的作者文本是勘误，而勘误只修正关于外部世界的说法，不改 diff；评审者角色没有改仓库、推代码、开 PR 的工具。 |
-| 只追加的账本 | 意见提交后不能改；第二轮只能追加裁决；发布和工作流的变更带期望修订号。 | 服务器端状态机和锁内的状态校验；发布门禁与自治工作流另有哈希链审计日志。 |
+| 隔离的评审者 | 评审者是一个没参与写代码的新上下文。作者的回应、设计理由、勘误都是待核的材料，不是指令。 | 第一轮 `open_review` 不返回作者的设计理由和任何回应，唯一可能带的作者文本是勘误，而勘误只修正关于外部世界的说法，不改 diff；评审者角色没有改仓库、推代码、开 PR 的工具。「新上下文」本身只对 `CODEX_TASK` 有机械保证，因为那是服务端另起的进程；其它提供方服务端只核对绑定的提供方，评审者上下文与作者分开是操作者和 skill 的规矩。 |
+| 只追加的账本 | 意见提交后不能改；第二轮只能追加裁决；对已有发布账本和工作流账本的每次变更都带期望修订号。 | 服务器端状态机和锁内的状态校验；发布门禁与自治工作流另有哈希链审计日志。 |
 
 另有一条取向贯穿演进：**优先减法，先证明一个状态可达再给它加防御。**状态空间只会收缩，不会为一次性的观测添加格式。
 
@@ -34,7 +34,7 @@ Review Bridge 的回答是一句话：**每一步都留下机器可以核的证�
 ```mermaid
 flowchart LR
   subgraph author["作者侧"]
-    A["作者 agent<br/>Codex / Claude / Hermes"]
+    A["作者 agent<br/>Codex / Claude / Hermes / DeepSeek Harness"]
     G["GitHub<br/>PR · 检查 · Codex App"]
   end
   subgraph store["私有 store"]
@@ -60,15 +60,15 @@ flowchart LR
   class A,G,S,L,P,R1,R2,R3,R4 n;
 ```
 
-所有参与者共用一个私有 store（默认 `~/Library/Application Support/ReviewBridge`，可用 `REVIEW_BRIDGE_HOME` 覆盖）。它是本地文件系统上的一个目录，没有数据库，没有服务进程，全部是 JSON 和 patch 文件，目录 0700、文件 0600。里面有三类记录：
+所有参与者共用一个私有 store（默认 `~/Library/Application Support/ReviewBridge`，可用 `REVIEW_BRIDGE_HOME` 覆盖）。它是本地文件系统上的一个目录，没有数据库，没有服务进程，只有文件（JSON 账本、patch、复制的工作树改动、渲染出的 Markdown 报告、JSONL 审计日志），目录 0700、文件 0600。里面有三类记录：
 
 - **快照**：每轮评审一个目录，含完整 patch、manifest 和哈希。已提交的文件按记录的 head 从 Git 读回；只有未提交或未跟踪的工作树改动会被复制进本轮目录，超过 10 MiB 的这类副本只记录不复制。按文件的字节范围索引每次读取时从 patch 现算，从不存储。
 - **评审账本**（`review.json`）：需求、范围、rationale、每轮快照身份、findings、作者回应、复审裁决、勘误、历史事件。
 - **发布账本**：授权、Codex 基线、请求与结果的关联、GitHub 观测、门禁与审计链。
 
-「共用」指同一台机器上作者和评审者的几个 MCP 进程指向同一个目录，不是网络共享。并发靠文件锁，写入是先写临时文件再原子重命名；发布和工作流的变更带期望修订号，评审账本的工具则在锁内校验账本状态。
+「共用」指同一台机器上作者和评审者的几个 MCP 进程指向同一个目录，不是网络共享。并发靠文件锁，写入是先写临时文件再原子重命名；对已有发布账本和工作流账本的每次变更都带期望修订号，评审账本的工具则在锁内校验账本状态。
 
-作者角色和评审者角色是两个服务器进程、两套工具。评审者只能列出待审任务、打开任务、读快照和 patch、搜索快照、提交意见与复审裁决；它看不到发布工具和作者工具，所以一个面板审第三方 PR 永远铸不出门禁。MCP 服务器本身不持有 GitHub 凭据，也没有任何网络客户端或遥测；对 GitHub 的读写由打包的脚本通过用户自己配置的 `gh` 完成。
+作者角色和评审者角色是两个服务器进程、两套工具。评审者只能列出待审任务、打开任务、读快照和 patch、搜索快照、提交意见与复审裁决；它看不到发布工具和作者工具，所以一个面板审第三方 PR 永远铸不出门禁。MCP 服务器本身不持有 GitHub 凭据，从不打开网络连接也不跑 `gh`；读 GitHub 由打包的收集器通过用户自己配置的 `gh` 完成，写 GitHub 是作者 agent 自己的 `gh` 和 `git` 调用，每一步经账本计划与对照。
 
 ## 4. 本地评审
 
@@ -92,10 +92,10 @@ flowchart LR
   class A,B,C,D,E n;
 ```
 
-第一轮评审者拿到快照、需求和范围（以及作者追加过的勘误，勘误只修正关于外部世界的说法，不改 diff），提交结构化的 findings（严重度、位置、解释、建议）。没有意见直接 `CLEAN`。有意见则作者逐条回应，每条只能选一种：
+第一轮评审者拿到快照、需求和范围（以及作者追加过的勘误，勘误只修正关于外部世界的说法，不改 diff），提交结构化的 findings（严重度、标题、解释，通常还有位置和建议）。没有意见直接 `CLEAN`。有意见则作者逐条回应，每条只能选一种：
 
 - `fixed`：finding 点名的**每个位置、每个子句**在新 head 都做完了，包括它要求的测试或文档。采用与建议不同的方案不是 fixed。
-- `rejected`：给出具体的技术证据，由复审者判驳回是否成立；判成立的复审者要附可重放的验证。
+- `rejected`：给出理由，并按 skill 的要求附具体的技术证据，由复审者判驳回是否成立；判成立的复审者要附可重放的验证。
 - `human_required`：直接停下交人仲裁。
 
 第二轮由同一评审者（Codex 新任务和 DeepSeek Harness 不续用进程，会新开一个）对照新快照逐条裁决：`resolved`、`rebuttal_accepted`、`still_open`，也可以报新意见。同一个 review ID 没有第三轮。
@@ -114,7 +114,7 @@ flowchart LR
   class A,P,S,L,R1,R2 n;
 ```
 
-**规矩分类。**评审发现的问题里有一类是「违反了项目规矩」。评审者先在快照里搜仓库的 agent 指导文件（`AGENTS.md`、`.agents/`、`CLAUDE.md`、invariants 文件等）：规矩写了，finding 标 `constraint: {kind: "documented", source: <文件>}`；没写，标 `{kind: "undocumented"}`；不是规矩类的不标。修一条 undocumented 的意见，包括在同一个 PR 里把规矩写进仓库的指导文件，复审者会核。scorecard 据此统计两类各多少，以及未写入仓库的规矩所占比例。
+**规矩分类。**评审发现的问题里有一类是「违反了项目规矩」。评审者先在快照里搜仓库的 agent 指导文件（`AGENTS.md`、`.agents/`、`CLAUDE.md`、invariants 文件等）：规矩写了，finding 标 `constraint: {kind: "documented", source: <文件>}`；没写，标 `{kind: "undocumented"}`；不是规矩类的不标。修一条 undocumented 的意见，包括在同一个 PR 里把规矩写进仓库的指导文件，复审者会核。scorecard 据此统计两类各多少，以及带分类的意见里 undocumented 所占比例（同一条规矩被撞几次就算几次）。
 
 **设计理由。**`prepare_review` 可以附一段 `rationale`：关键设计决策、放弃的方案及原因、有意固定的部分、自己没把握的地方。它由作者 agent 在任何意见出现之前写下，只写事实性的取舍，不写论证；它不进快照，第一轮评审者看不到，作者回应过第一轮意见之后 `open_review` 才带上。评审者先重读自己第一轮的 findings，再拿 rationale 对照第一轮快照，它和其它作者材料一样只是待核的材料。
 
@@ -142,13 +142,13 @@ CLEAN -> 再核工作树等于快照 -> LOCAL_GATE_PASSED
 
 ### 4.5 继承评审与阅读索引
 
-同一分支上的后续提交可以继承上一条 `LOCAL_GATE_PASSED` 的评审：服务器自动寻找父任务（同仓库、同 base、已门禁的 head 是当前 head 的严格祖先），生成 `successor.json` 和精确的父到子 delta，评审者只读 delta 及相关调用方、契约和测试，仅在 delta 改了对外契约、触及安全或兼容面、或证明无法核实时展开全量 patch。任何前置条件不成立就记录为 `FULL` 回退。
+同一分支上的后续提交可以继承上一条 `LOCAL_GATE_PASSED` 的评审：服务器自动寻找父任务（同仓库、同 base SHA、同一条需求、两边都截自干净的已提交工作树、已门禁的 head 是当前 head 的祖先且不是同一个 head），生成 `successor.json` 和精确的父到子 delta，评审者只读 delta 及相关调用方、契约和测试，仅在 delta 改了对外契约、触及安全或兼容面、或证明无法核实时展开全量 patch。任何前置条件不成立就记录为 `FULL` 回退。
 
 全量 patch 是从 base 到快照的累计 diff：干净的已提交轮次就是到 head，手动评审截了未提交改动时则是到工作树。`open_review` 随快照返回 `patch_index`：每个文件在 `patch.diff` 里的字节偏移和长度，评审者按需读取并报告跳过了什么。索引从不存储，每次按同一份不可变 patch 现算，并先核对 patch 仍等于本轮提交的快照哈希，所以索引不可能与实际字节不一致。
 
 ### 4.6 顾问面板
 
-审别人的 PR 时可以组一个顾问面板：打包脚本把 PR 克隆到任何写作目录之外，每位成员各自 `prepare_review` 并带 `advisory: true`。顾问评审只接受 `submit_review`，门禁、回应、复审、勘误全部拒绝，所以它只能产出报告，永远不能给操作者没写的代码铸门禁。通过打包 launcher 拉起的顾问 Codex 成员在 Linux 容器里跑，容器就是读边界；Hermes、DeepSeek Harness 和 Claude Desktop 成员没有这层边界。容器内：只挂载只读的凭据、只读的插件、只读的克隆和这一条评审的副本，不挂载宿主 store，出口只放行 OpenAI 的三个域名，裁决通过宿主的 `submit_review` 重放且必须和容器内账本一致才保留。
+审别人的 PR 时可以组一个顾问面板：打包脚本把 PR 新鲜克隆到操作者指定的、任何写作目录之外的路径，每位成员各自 `prepare_review` 并带 `advisory: true`。顾问评审只接受 `submit_review` 这一种变更，门禁、回应、复审、勘误全部拒绝，所以它只能产出报告，永远不能给操作者没写的代码铸门禁。通过打包 launcher 拉起的顾问 Codex 成员在 Linux 容器里跑，容器就是读边界；Hermes、DeepSeek Harness 和 Claude Desktop 成员没有这层边界。容器内：只挂载只读的凭据、只读的插件、只读的克隆，外加这一条评审的可写副本（单独一个卷），不挂载宿主 store，出口只放行 OpenAI 的三个域名，裁决通过宿主的 `submit_review` 重放且必须和容器内账本一致才保留。
 
 ## 5. 发布门禁
 
@@ -161,24 +161,24 @@ flowchart LR
   class A,B,C,D n;
 ```
 
-发布到 GitHub 需要一次明确授权，两种模式：`LOCAL_GATE` 以通过的本地评审为授权，是默认；`REMOTE_ONLY` 仅当操作者直接选择跳过本地评审时可用，`authorize_remote_publication` 记录 `LOCAL_REVIEW_SKIPPED` 确认、操作者标签、理由、干净的本地仓库和 base / head。无论哪种，作者工具都把授权、PR、必需检查、带服务器签发请求 ID 的 Codex 请求、钉死的 Codex Bot actor、结果和评审线程绑到**一个 head**。
+发布到 GitHub 需要一次明确授权，两种模式：`LOCAL_GATE` 是常规路径，以通过的本地评审为授权；`REMOTE_ONLY` 要求操作者明确确认跳过本地评审，`authorize_remote_publication` 记录 `LOCAL_REVIEW_SKIPPED` 确认、操作者标签、理由、干净的本地仓库和 base / head。无论哪种，作者工具都把授权、PR、带服务器签发请求 ID 的 Codex 请求、钉死的 Codex Bot actor 和触发策略绑到**一个 head**；分支策略、必需检查、Codex 结果和评审线程则在每次观测里对着这个 head 重新读取。
 
 流程：先记一份 Codex 三个 feed 的**基线**（请求之前就存在的评论不算答复），再原样发出服务器组好的 `@codex review` 评论并立即绑定；之后打包的只读收集器用 `gh` 一次性读取 PR、分支策略、检查运行、提交状态、三个 Codex feed 和评审线程，写成观测交给 `record_github_snapshot`，账本从观测推导状态。要点：
 
 - **原子读。**分页的读取不描述同一时刻，所以检查运行、提交状态、线程这类单值决定去留的资源各用一次请求读完，出现第二页就让收集失败。
 - **fail-closed 适配器。**孤立的评论、表情、沉默、未绑定的请求、分页不完整、歧义结果，全部判失败而不是通过。Codex 的回复靠请求 ID 关联，没带 ID 时只接受唯一一条无前驱的开放请求并核对所评审的 commit。
-- **`MERGE_READY` 背后的证据。**PR 的 head 等于授权的 head；关联到本次请求的 Codex 结果是干净的；所有必需检查通过；没有未 resolve 的评审线程。此外 PR 还必须已离开草稿、对当前 base 可合并：账本会先报 `PR_DRAFT`、`PR_CONFLICTING` 或 base 策略阻塞。
+- **`MERGE_READY` 背后的证据。**PR 的 head 等于授权的 head；关联到本次请求的 Codex 结果是干净的；所有必需检查通过；没有未 resolve 的评审线程。此外 PR 还必须已离开草稿、对当前 base 可合并：账本在看检查、Codex 结果和线程之前会先报 `PR_DRAFT`、`PR_STATE_PENDING`、`PR_CONFLICTING` 或 `PR_UPDATE_REQUIRED`（严格 base 策略）。
 - **门票会过期。**`finalize_publication_gate` 签发一张门票，有效期是观测里最早一次采集之后五分钟；`verify_publication_gate` 必须在合并前立刻返回 `valid: true`，而且合并操作要钉在校验返回的 `head_sha` 上（例如 `gh pr merge --match-head-commit`），因为校验读的是账本不是 GitHub，最后一次观测之后推上来的 head 否则会漏过去。新 commit 让账本失效；Codex 发了意见就得修、推新 head、新开账本重新请求。
 
-观测和账本都不经过模型的上下文：收集器把观测写在账本旁边，只打印回执；重打一遍几万 token 既花钱又多一个抄错的失败模式。细节见 [publication-gate.md](publication-gate.md)。
+观测进账本的路上可以不经过模型的上下文：收集器带 `--review-id` 运行时把观测写在账本旁边，只打印回执，记录工具按 `observation_path` 去读（工具也接受内联的观测，但 skill 禁止这么做）；重打一遍几万 token 既花钱又多一个抄错的失败模式。记录工具的返回值会带回更新后的账本，模型仍然看得到结果。细节见 [publication-gate.md](publication-gate.md)。
 
 ## 6. 自治工作流
 
 `start_autonomous_workflow` 把仓库、base、需求、分支、发布目标、能力集和授权摘要绑成一个工作流账本，然后沿 RFC 0003 的路径自动走完：提交干净 head → 绑定 Codex 评审 → 本地两轮 → 本地门禁 → 快进推送门禁过的 head → 开草稿 PR → 发布账本 → 观察 → 标记 ready → 记录终态 `MERGE_READY` 然后**停下**。它不合并。
 
-每个对外动作（派发评审、推送、建 PR、回复线程、resolve 线程、切换草稿状态）都走同样的四步：记录意图 → 再看一眼再动手 → 对照结果 → 记录完成，写进哈希链的动作审计。驱动模型随时可能崩溃，重启后读账本就知道停在哪一步：停在第一步什么都没发生，停在第二步就去对照提供方而不是重放，这就是不会重复评论、不会重复推送的原因。「再看一眼」还会抓住计划与执行之间世界的变化：CI 在这期间红了，动作就拒绝执行。
+每个对外动作（派发评审、推送、建 PR、回复线程、resolve 线程、切换草稿状态）都走同样的四步：记录意图 → 再看一眼再动手 → 对照结果 → 记录完成，写进哈希链的动作审计。驱动模型随时可能崩溃，重启后读账本就知道停在哪一步：停在第一步什么都没发生，停在第二步就去对照提供方而不是重放，这就是不会重复评论、不会重复推送的原因。「再看一眼」还会抓住计划与执行之间世界的变化：预读会重查 PR 的身份、head 和草稿状态，服务端检查点按账本重新推导是否就绪，账本里已经记下的回退会让动作拒绝执行；账本还没记到的 CI 变化要等下一次观测才抓得到，不是这一步。
 
-其它规则：PR 一旦离开草稿就不再推新 commit，要改先回草稿，三处分别拦；线程先回复再 resolve，回复要出现在观测里才允许关；Codex 结果歧义、合并冲突、PR 被人关掉，一律暂停并附证据，不猜；重复出现同样 blocker 和同样 head 的尝试判 `NO_PROGRESS` 暂停。store 范围内对本地分支、远端 head ref 和 PR 的所有权一次只给一个活跃或暂停的工作流。细节见 [autonomous-workflow.md](autonomous-workflow.md)。
+其它规则：PR 一旦离开草稿就不再推新 commit，要改先回草稿，三处分别拦；线程先回复再 resolve，回复要出现在观测里才允许关；Codex 结果歧义、合并冲突、PR 被人关掉，一律暂停并附证据，不猜；重复出现同样 blocker 和同样 head 的尝试判 `NO_PROGRESS` 暂停。store 范围内对本地分支、远端 head ref 和 PR 的所有权一次只给一个工作流；被取消的工作流在 `release_workflow_claims` 成功前仍持有所有权，单靠取消不会释放目标。细节见 [autonomous-workflow.md](autonomous-workflow.md)。
 
 ## 7. 客户端、安装与升级
 
@@ -189,9 +189,9 @@ flowchart LR
 | Hermes | 作者与评审者两个 profile，打包的配置片段带 `trust: full`，可无人值守。 |
 | DeepSeek Harness | cordis patch 装评审者 profile，连不上评审工具就不启动；每次都是新 session，复审会新开一个。 |
 
-每个版本从 release tag 的干净 clone 构建：`npm ci && npm run build && npm run verify:build`，产物包含 Codex marketplace、Claude 扩展源码、Hermes 与 DeepSeek 的集成目录，以及 `.mcpb` / `.dxt` / 源码包和 SHA256SUMS。所有参与者钉在同一个发布版本上。升级是在新目录构建新运行时，然后逐个切换客户端的路径：Codex marketplace 同名换源要先 remove 再 add；Hermes 和 DeepSeek 的 reviewer skill 若在版本间改过，要拷新文件而不只是改路径。见 [install/upgrade.md](install/upgrade.md)。
+每个版本从 release tag 的干净 clone 构建：`npm ci && npm run build && npm run verify:build`，产物包含 Codex marketplace、Claude 扩展源码、Hermes 与 DeepSeek 的集成目录，以及 `.mcpb` / `.dxt` / 源码包和 `SHA256SUMS.txt`。所有参与者钉在同一个发布版本上。升级是在新目录构建新运行时，然后逐个切换客户端的路径：Codex marketplace 同名换源要先 remove 再 add；Hermes 的 reviewer skill 是拷进 profile 的，若在版本间改过要拷新文件；DeepSeek Harness 从发布目录加载 skill，重新渲染路径即可。见 [install/upgrade.md](install/upgrade.md)。
 
-发版本身也留证据：`verify-release --pre` 在打 tag 前核对 changelog 的 PR 认领与范围内的合并双向对账（支持 merge commit 和 squash 两种历史），`--final` 在发布后对照 GitHub 的事实与资产哈希，通过后把发布记录写进 store。
+发版本身也留证据：`node scripts/verify-release.mjs --pre` 在打 tag 前核对 changelog 的 PR 认领与范围内的合并双向对账（支持 merge commit 和 squash 两种历史），`--final` 在发布后对照 GitHub 的事实与资产哈希，通过后把发布记录写进 store。
 
 ## 8. 报告与统计
 
@@ -212,14 +212,14 @@ flowchart LR
 
 「需要人」含 `CONTINUABLE_FINDINGS` 落地前的 37 条历史遗留。
 
-对「需要人」的一次调查给了两条结论，并直接改了产品：第一，评审者九成有理，136 条「作者说修了、评审者说没修」里 74 条是只修了一部分，17 条是作者声称的验证不属实，由复审对照新快照核出；第二，操作者从不导出仲裁包，而是立刻重开评审。于是作者指导里收紧了 `fixed` 的定义，路由上把这类意见改走 `CONTINUABLE_FINDINGS`。另一个未定的观察：Codex 复审驳回「已修」的比例约 19.5%，其它三家都在 5% 以下，抽样看 Codex 多半有理；其它三家是否放过了没修完的修复，还需要抽样核实。
+对「需要人」的一次调查给了两条结论，并直接改了产品：第一，评审者九成有理，136 条「作者说修了、评审者说没修」里 74 条是只修了一部分，17 条是作者声称的验证不属实，由复审对照新快照核出；第二，这些评审绝大多数在十几分钟内于同仓库同 base 重开了新评审。于是作者指导里收紧了 `fixed` 的定义，路由上把这类意见改走 `CONTINUABLE_FINDINGS`。另一个未定的观察：Codex 复审驳回「已修」的比例约 19.5%，其它三家都在 5% 以下，抽样看 Codex 多半有理；其它三家是否放过了没修完的修复，还需要抽样核实。
 
 ## 10. 安全边界与数据
 
 - 本地、远端和发布门禁是工作流层面的证明，不是 Git 或 GitHub 的安全边界。Review Bridge 不装 `pre-push` 钩子。提供方绑定和独立的 Codex 任务不是经过认证的人或模型身份；`CODEX_TASK` 评审改善的是上下文隔离，不等于换一家模型的多样性。
 - 宿主沙箱限制写和网络，不限制读；审第三方代码时的读边界由容器提供，且只覆盖通过打包 launcher 拉起的顾问 Codex 成员（第 4.6 节）。本地两轮评审的「盲审」是工具面上的保证：评审工具在作者回应之前不端出作者的设计理由和回应；它不是对一个能直接读 store 的进程的边界。
-- store 里有仓库路径、需求、patch、manifest、意见、远端授权的操作者标签与理由，以及变更文件的副本，目录 0700、文件 0600。删除前先停掉进行中的 Review Bridge 操作：删一条评审就删 `reviews/<review_id>`；删整个目录前要先退出所有 Review Bridge 进程。
-- 所选客户端可能按其账号配置把评审工具返回的源码发给模型提供方。MCP 服务器不含网络客户端；打包的脚本会联网：收集器通过用户自己的 `gh`，顾问 launcher 通过它的出口代理。
+- store 里有仓库路径、需求、patch、manifest、意见、远端授权的操作者标签与理由，以及未提交或未跟踪的工作树改动的副本（干净的已提交评审不复制任何文件，而是从 Git 读），目录 0700、文件 0600。删除前先停掉进行中的 Review Bridge 操作：删一条评审就删 `reviews/<review_id>`；删整个目录前要先退出所有 Review Bridge 进程。
+- 所选客户端可能按其账号配置把评审工具返回的源码发给模型提供方。MCP 服务器进程从不打开网络连接；打包的脚本会联网：收集器通过用户自己的 `gh`，顾问 launcher 通过它的出口代理。
 
 版本变化见 [CHANGELOG.md](../CHANGELOG.md)。
 
@@ -243,10 +243,10 @@ flowchart LR
 
 | 术语 | 含义 |
 | --- | --- |
-| 快照 snapshot | 一轮评审所冻结的改动：patch、变更文件副本、manifest、哈希。 |
+| 快照 snapshot | 一轮评审所冻结的改动：patch、manifest、哈希，外加未提交或未跟踪的工作树改动的副本。 |
 | 账本 ledger | 服务器端的记录，只追加；驱动提议，账本决定什么算数。 |
-| finding | 评审者提交的一条结构化意见：严重度、位置、解释、建议，可选规矩分类。 |
-| resolution | 作者对一条意见的回应：fixed / rejected / human_required，附理由与证据。 |
+| finding | 评审者提交的一条结构化意见：严重度、标题、解释，通常还有位置和建议，可选规矩分类。 |
+| resolution | 作者对一条意见的回应：fixed / rejected / human_required，附理由，证据可选。 |
 | rationale | 作者在评审前写下的设计理由，第二轮才给评审者。 |
 | successor | 继承上一条已门禁评审的任务，评审单位是 delta。 |
 | 继续评审 continuation | 从 CONTINUABLE_FINDINGS 开的新全量评审，携带未完意见作为范围提示。 |
