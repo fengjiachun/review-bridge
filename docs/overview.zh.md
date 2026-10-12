@@ -134,7 +134,7 @@ flowchart LR
 
 ## 8. 报告与统计
 
-- **评审报告。**`render_review_report` 把一条评审的账本连同发布账本，或 REMOTE_ONLY 发布的账本和授权，渲染成 Markdown；打包的 `review-report.mjs` 默认打印摘要，`--full` 打印全文。报告是账本的投影，不是证据。
+- **评审报告。**`render_review_report` 把一条评审的账本（有发布账本则一并），或 REMOTE_ONLY 发布的账本和授权，渲染成 Markdown；打包的 `review-report.mjs` 默认打印摘要，`--full` 打印全文。报告是账本的投影，不是证据。
 - **scorecard。**`review-scorecard.mjs` 只读 store，按评审者提供方汇总：各严重度意见数、作者回应与复审裁决的交叉、驳回成立率、到 CLEAN 的轮数、继续评审、升级、规矩分类。每条计数规则写在报告里。
 - **意见检索。**`review-findings.mjs` 按仓库、文件、关键词、严重度、回应、裁决、规矩分类筛历史意见。见 [finding-search.md](finding-search.md)。
 
@@ -157,7 +157,7 @@ flowchart LR
 
 - 本地、远端和发布门禁都是工作流层面的证明，不是 Git 或 GitHub 的安全边界。Review Bridge 不装 `pre-push` 钩子。提供方绑定和独立 Codex 任务都不是经过认证的人或模型身份；`CODEX_TASK` 评审改善的是上下文隔离，不等于换一家提供方带来的模型多样性。
 - 宿主沙箱限制写和网络，不限制读；审第三方代码的读边界是通过打包 launcher 拉起的顾问 Codex 成员所在的容器。两轮「盲审」是工具面上的保证，挡不住直接读 store 的进程。
-- store 里有仓库路径、需求、patch、manifest、意见、操作者标签与理由，以及未提交的工作树改动的副本。删一条评审：先停掉进行中的 Review Bridge 操作，再删 `reviews/<review_id>`；若这条评审绑定过自治工作流，先取消该工作流并释放它的认领，它在 `workflows/<workflow_id>` 下的记录要删的话另行删除。删整个目录前要先退出所有 Review Bridge 进程。保留与权限见 [README](../README.md#data-handling-and-cleanup)。
+- store 里有仓库路径、需求、patch、manifest、意见、操作者标签与理由，以及未提交的工作树改动的副本（单个文件不超过 10 MiB，更大的只记录不复制）。删一条评审：先停掉进行中的 Review Bridge 操作，再删 `reviews/<review_id>`；若这条评审绑定过自治工作流，先取消该工作流并释放它的认领，它在 `workflows/<workflow_id>` 下的记录要删的话另行删除。删整个目录前要先退出所有 Review Bridge 进程。保留与权限见 [README](../README.md#data-handling-and-cleanup)。
 - 所选客户端可能按其账号配置把评审工具返回的源码发给模型提供方。MCP 服务器进程不打开网络连接；打包的脚本通过用户的 `gh` 访问 GitHub，顾问 launcher 通过它的出口代理联网。
 
 逐版本的变更见 [CHANGELOG](../CHANGELOG.md)。

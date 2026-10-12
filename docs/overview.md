@@ -242,9 +242,9 @@ before the tag and checks the published assets afterwards. See
 
 ## 8. Reports and statistics
 
-- **Review report.** `render_review_report` renders a review's ledger and its
-  publication ledger, or a remote-only publication's ledger and authorization
-  alone, as Markdown; the packaged `review-report.mjs`
+- **Review report.** `render_review_report` renders a review's ledger (with its
+  publication ledger when one exists), or a remote-only publication's ledger
+  and authorization alone, as Markdown; the packaged `review-report.mjs`
   prints a brief by default and the full rendering with `--full`. The report
   is a projection of the ledger, not evidence.
 - **Scorecard.** `review-scorecard.mjs` reads one store and aggregates per
@@ -298,7 +298,8 @@ still needs sampling.
   store directly.
 - The store holds repository paths, requirements, patches, manifests,
   findings, operator labels and rationales, and copies of uncommitted
-  working-tree changes. To remove one review, stop active Review Bridge
+  working-tree changes up to 10 MiB per file (larger ones are recorded, not
+  copied). To remove one review, stop active Review Bridge
   operations and delete `reviews/<review_id>`; if the review was bound to an
   autonomous workflow, cancel that workflow and release its claims first,
   and delete its records under `workflows/<workflow_id>` separately if they
