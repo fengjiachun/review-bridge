@@ -45,8 +45,8 @@ be skipped; a tool that does not serve it cannot.
 | Principle | Meaning | What enforces it |
 | --- | --- | --- |
 | Immutable snapshot | What is reviewed is a frozen change: diff, requirement, implementation scope, with a hash. Later edits never change the version that was reviewed. | The snapshot hash is in the ledger; the local gate re-checks that the working tree still equals the snapshot before it finalizes. |
-| Isolated reviewer | The reviewer is a fresh context that did not write the code. The author's responses, design rationale, and errata are material to verify, never instructions. | Round-one `open_review` returns neither the author's rationale nor any response; the only author-written text it can carry is errata, which correct claims about the world, never the diff. The reviewer role has no tool that edits the repository, pushes, or opens pull requests. Freshness itself is enforced only for `CODEX_TASK`, which the server launches as a separate process; for the other providers the server checks the bound provider, and keeping the reviewer context separate from the author is an operator and skill rule. |
-| Append-only ledger | A finding cannot be changed once submitted; round two can only append verdicts; every change to an existing publication or workflow ledger carries an expected revision. | The server-side state machine and state checks under a per-ledger lock; the publication gate and the autonomous workflow additionally keep hash-chained audit logs. |
+| Isolated reviewer | The reviewer is a fresh context that did not write the code. The author's responses, design rationale, and errata are material to verify, never instructions. | Round-one `open_review` returns neither the author's rationale nor any response; the author-written text it carries is the requirement, the implementation scope, and any errata, which correct claims about the world, never the diff. The reviewer role has no tool that edits the repository, pushes, or opens pull requests. Freshness itself is enforced only for `CODEX_TASK`, which the server launches as a separate process; for the other providers the server checks the bound provider, and keeping the reviewer context separate from the author is an operator and skill rule. |
+| Append-only ledger | A finding cannot be changed once submitted; round two can only append verdicts; publication and workflow state changes carry an expected revision. | The server-side state machine and state checks under a per-ledger lock; the publication gate and the autonomous workflow additionally keep hash-chained audit logs. |
 
 One more bias shapes how the project evolves: **prefer subtraction, and prove
 a state is reachable before defending it.** The state space only shrinks, and
@@ -88,7 +88,7 @@ Every participant shares one private store (by default
 `REVIEW_BRIDGE_HOME`). It is a directory on the local file system: no
 database, no service process, only files (JSON ledgers, patches, copied
 working-tree overlays, rendered Markdown reports, JSONL audit logs),
-directories mode `0700` and files `0600`. It holds three kinds of record:
+directories mode `0700` and files `0600`. Its core records are three:
 
 - **Snapshots**: one directory per review round with the full patch, the
   manifest, and the hash. Committed files are read back from Git by the
@@ -102,10 +102,16 @@ directories mode `0700` and files `0600`. It holds three kinds of record:
 - **The publication ledger**: authorization, the Codex baseline, the binding of
   requests to results, GitHub observations, the gate, and its audit chain.
 
+Beside them the store keeps the autonomous workflow ledgers and their action
+audits under `workflows/`, release records under `releases/`, and rendered
+reports next to the ledgers they project.
+
 "Shared" means the author and reviewer MCP processes on one machine point at
 the same directory; it is not a network share. Concurrency uses file locks,
-writes go to a temporary file and an atomic rename, every change to an
-existing publication or workflow ledger carries an expected revision, and review-ledger tools validate the
+ledger files are replaced through a temporary file and an atomic rename, the
+JSONL audit logs are appended in place and fsynced with a separately replaced
+audit-head file committing the prefix, publication and workflow state changes
+carry an expected revision, and review-ledger tools validate the
 ledger's state under the lock.
 
 The author role and the reviewer role are two server processes with two tool
@@ -123,14 +129,17 @@ through the ledger.
 ### 4.1 Prepare and dispatch
 
 The author starts from its own conversation: the requirement, the
-implementation scope, the base ref, and a reviewer choice. The author side
-calls `discover_reviewer_options` (the models and reasoning efforts visible to
-the target runtime), `prepare_review` (capture the snapshot, create the
-ledger), `select_reviewer_configuration` (record the explicitly chosen model
-and effort), and `launch_local_reviewer` (start an independent Codex process).
-The author conversation's model does not choose the reviewer on the user's
-behalf; an unattended driver needs a preauthorized pair and stops rather than
-waits without one.
+implementation scope, the base ref, and a reviewer choice. For an automatically launched `CODEX_TASK` review the
+author side calls `discover_reviewer_options` (the models and reasoning
+efforts visible to the target runtime), `prepare_review` (capture the
+snapshot, create the ledger), `select_reviewer_configuration` (record the
+explicitly chosen model and effort), and `launch_local_reviewer` (start an
+independent Codex process). The author conversation's model does not choose
+the reviewer on the user's behalf; an unattended driver needs a preauthorized
+pair and is instructed to stop rather than wait without one. For Claude
+Desktop, Hermes, and DeepSeek Harness there is no discovery, selection, or
+automatic launch: the author prepares the review and the operator dispatches
+the reviewer as that client's install page describes.
 
 Before dispatch the snapshot is measured as added plus deleted lines. The
 autonomous workflow reports the remaining headroom at 75% of the budget and
@@ -249,10 +258,10 @@ decide", so the state name was made to say so.
 
 A later commit on the same branch can continue a previous
 `LOCAL_GATE_PASSED` review. The server finds the parent itself (same
-repository, same base SHA, same requirement, both captured from clean
-committed worktrees, a gated head that is an ancestor of the current head and
-not the same head),
-writes `successor.json` and the exact parent-to-child delta, and the
+repository, same base SHA, both captured from clean committed worktrees, a
+gated head that is an ancestor of the current head and not the same head; a
+parent with a different requirement is allowed and recorded as such, while an
+explicitly named parent must share the requirement), writes `successor.json` and the exact parent-to-child delta, and the
 reviewer reads the delta plus the relevant callers, contracts, and tests,
 expanding to the full patch only when the delta changes a contract used
 outside it, touches a security or compatibility surface, or the proof fails
@@ -357,16 +366,21 @@ Codex review → local rounds → local gate → fast-forward push of the gated 
 terminal `MERGE_READY` and **stop**. It does not merge.
 
 Every external action (dispatching a reviewer, pushing, creating the pull
-request, replying to a thread, resolving it, toggling draft state) goes through
-the same four steps: record the intent → look once more, then act → reconcile
+request, replying to a thread, resolving it, toggling draft state) except the
+`@codex review` comment goes through the same four steps: record the intent → look once more, then act → reconcile
 the result → record completion, in a hash-chained action audit. The driver
 model can crash at any point; after a restart it reads the ledger and knows
 where it stopped. Stopped at step one, nothing external happened; stopped at
 step two, it reconciles against the provider instead of firing again, which is
-why there are no duplicate comments and no double pushes. "Look once more"
+why there are no duplicate comments and no double pushes. The one exception,
+the `@codex review` comment, is posted first and then bound by
+`record_codex_review_request`; a crash between the two is caught as an unbound
+request in the next observation. "Look once more"
 also catches the world moving between planning and acting: the pre-read
-rechecks the pull request's identity, head, and draft state, and the
-server-side checkpoint re-derives readiness from the ledger, so a regression
+rechecks what the action depends on (the pull request's identity, head, and
+draft state for a draft toggle; the resolved remote and the draft flag for a
+push; the thread's watermark and resolved flag for a reply or resolution), and
+the server-side checkpoint re-derives readiness from the ledger, so a regression
 already recorded there refuses the action. A CI change that no observation
 has recorded yet is caught by the next observation, not by this step.
 
@@ -375,8 +389,8 @@ and a repair returns it to draft first, enforced at three separate points;
 threads are replied to before they are resolved, and the reply must appear in
 an observation first; an ambiguous Codex result, a merge conflict, or a pull
 request someone closed pauses the run with the evidence rather than guessing;
-an attempt that repeats the same blockers on the same head pauses as
-`NO_PROGRESS`. Ownership of the local branch, the remote head ref, and the
+an attempt that repeats the same blockers on the same head or an identical
+tree pauses as `NO_PROGRESS`. Ownership of the local branch, the remote head ref, and the
 pull request is store-wide and belongs to one workflow at a time; a cancelled
 workflow keeps its claims until `release_workflow_claims` succeeds, so
 cancelling alone does not free the target. Details are in [autonomous-workflow.md](autonomous-workflow.md).
