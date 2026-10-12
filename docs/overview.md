@@ -129,26 +129,18 @@ workflow plans and reconciles through its action trail.
 ### 4.1 Prepare and dispatch
 
 The author starts from its own conversation: the requirement, the
-implementation scope, the base ref, and a reviewer choice. For an automatically launched `CODEX_TASK` review the
-author side calls `discover_reviewer_options` (the models and reasoning
-efforts visible to the target runtime), `prepare_review` (capture the
-snapshot, create the ledger), `select_reviewer_configuration` (record the
-explicitly chosen model and effort), and `launch_local_reviewer` (start an
-independent Codex process). The author conversation's model does not choose
-the reviewer on the user's behalf; an unattended driver needs a preauthorized
-pair and is instructed to stop rather than wait without one. For Claude
-Desktop, Hermes, and DeepSeek Harness there is no discovery, selection, or
-automatic launch: the author prepares the review and the operator dispatches
-the reviewer as that client's install page describes.
+implementation scope, the base ref, and a reviewer choice. `prepare_review`
+captures the snapshot and creates the ledger. For a `CODEX_TASK` review the
+author side can discover the runtime's models and reasoning efforts, record
+the operator's explicit choice, and launch an independent Codex process; the
+author conversation's model does not choose the reviewer on the user's
+behalf. Every other provider is dispatched by the operator: a fresh Claude
+Desktop conversation, or an isolated Hermes or DeepSeek Harness profile,
+given only the review request and the `review_id`.
 
 Before dispatch the snapshot is measured as added plus deleted lines. The
-autonomous workflow reports the remaining headroom at 75% of the budget and
-pauses for an operator decision above the default 2000 lines; a manual review
-reports the number and proceeds.
-
-Dispatch can also be manual: a new Codex task (not a fork of the author task),
-a fresh Claude Desktop conversation, or an isolated Hermes or DeepSeek Harness
-profile, given only the review request and the `review_id`. See
+autonomous workflow pauses for an operator decision above its budget; a
+manual review reports the number and proceeds. See
 [local-review.md](local-review.md) and
 [reviewer-configuration.md](reviewer-configuration.md).
 
@@ -165,25 +157,24 @@ flowchart LR
 ```
 
 In round one the reviewer receives the snapshot, the requirement, and the
-scope (plus any errata the author appended, which correct claims about the
-world, never the diff), and submits structured findings (severity, title, explanation, and usually a
-location and recommendation). No findings means `CLEAN`. Otherwise the author answers each
-finding with exactly one disposition:
+scope, plus any errata the author appended (errata correct claims about the
+world, never the diff), and submits structured findings. No findings means
+`CLEAN`. Otherwise the author answers each finding with exactly one
+disposition:
 
 - `fixed`: **every location and every clause** the finding names is done at
   the new head, including any test or documentation it asks for. A different
   remedy than the one recommended is not `fixed`.
-- `rejected`: a rationale and, as the skill requires, concrete technical
-  evidence, which the rereviewer judges; a sustained rebuttal requires
-  replayable verification from the reviewer.
+- `rejected`: a rationale with technical evidence, which the rereviewer
+  judges; a sustained rebuttal requires replayable verification from the
+  reviewer.
 - `human_required`: stop and hand the finding to a person.
 
-Round two is the same reviewer provider, keeping the round-one configuration
-unless the operator reselects one, deciding each finding against the new
-snapshot (Hermes resumes its session; a Codex task
-and DeepSeek Harness start a fresh process that rebuilds the review from the
-ledger): `resolved`, `rebuttal_accepted`, or `still_open`, with new
-findings allowed. There is no third round for the same review ID.
+Round two is the same reviewer provider deciding each finding against the
+new snapshot: `resolved`, `rebuttal_accepted`, or `still_open`, with new
+findings allowed. There is no third round for the same review ID. Whether
+round two resumes a session or starts a fresh process depends on the
+provider; [local-review.md](local-review.md) says which does what.
 
 ### 4.3 Rule kinds and the author's rationale
 
@@ -206,8 +197,7 @@ written down, the finding carries `constraint: {kind: "documented", source:
 <file>}`; if it is not, `{kind: "undocumented"}`; ordinary defects carry
 nothing. Fixing an undocumented one includes writing the rule into that
 guidance in the same pull request, and the rereviewer checks that it was. The
-scorecard counts both kinds and the undocumented share of the findings that
-carry a classification (one rule hit several times counts several times).
+scorecard reports both counts.
 
 **Rationale.** `prepare_review` takes an optional `rationale`: the key design
 decisions, the alternatives dropped and why, the parts intentionally left
@@ -241,9 +231,8 @@ CLEAN -> working tree re-checked against the snapshot -> LOCAL_GATE_PASSED
   publication stage.
 - `CONTINUABLE_FINDINGS`: no rebuttal is disputed, but round two judged a fix
   incomplete or found a new issue. The author commits a new head and opens a
-  fresh full review with `continued_from_review_id` and `force_full_review`; the unfinished findings
-  are carried in verbatim as scope hints (title, location, explanation,
-  recommendation, rule kind), without the author's responses or the rereview
+  fresh full review that continues this one; the unfinished findings are
+  carried in as scope hints, without the author's responses or the rereview
   decisions.
 - `HUMAN_REQUIRED`: the author answered a finding with `human_required`, or
   rejected one and the rereviewer still disagrees. Only a direct escalation or
@@ -261,41 +250,34 @@ decide", so the state name was made to say so.
 ### 4.5 Successor reviews and the patch index
 
 A later commit on the same branch can continue a previous
-`LOCAL_GATE_PASSED` review. The server finds the parent itself (same
-repository, same base SHA, both captured from clean committed worktrees, a
-gated head that is an ancestor of the current head and not the same head; a
-parent with a different requirement is allowed and recorded as such, while an
-explicitly named parent must share the requirement), writes `successor.json` and the exact parent-to-child delta, and the
-reviewer reads the delta plus the relevant callers, contracts, and tests,
-expanding to the full patch only when the delta changes a contract used
-outside it, touches a security or compatibility surface, or the proof fails
-to verify. If any precondition fails, the review records a `FULL` fallback.
+`LOCAL_GATE_PASSED` review as a successor. The server records the exact
+parent-to-child delta, and the reviewer reads the delta plus the relevant
+callers, contracts, and tests, expanding to the full patch only when the
+delta changes a contract used outside it, touches a security or
+compatibility surface, or the proof fails to verify. When the preconditions
+for a successor do not hold, the review records a `FULL` fallback;
+[local-review.md](local-review.md) lists them.
 
-The full patch is a cumulative diff from the base to the snapshot: the head
-for a clean committed round, the working tree when a manual review captured
-uncommitted changes. `open_review` returns a `patch_index` with it: the byte offset and length of each file's section in
-`patch.diff`, so a reviewer reads what the reviewed behavior depends on and
-reports what it skipped. The index is never stored; it is derived on every
-read from the same immutable patch, after checking that the patch still
-reproduces the round's committed snapshot hash, so an index that disagrees
-with the served bytes cannot exist.
+The full patch is a cumulative diff from the base to the snapshot.
+`open_review` returns a `patch_index` with it: the byte offset and length of
+each file's section, so a reviewer reads what the reviewed behavior depends
+on and reports what it skipped. The index is derived from the immutable patch
+on every read, never stored.
 
 ### 4.6 Advisory panels
 
 To review someone else's pull request, several independent reviewers can form
-a panel: a packaged script makes a fresh clone of the pull request into a path the
-operator places outside every authoring tree, and each member gets its own `prepare_review` with `advisory: true` and
-`force_full_review: true`, so no member is narrowed to a successor delta. An
-advisory review accepts `submit_review` and no other mutation: the gate,
-author responses, rereview, and errata all refuse it, so it ends in a report and can
-never mint a gate over code the operator did not write. An advisory Codex
-member launched through the packaged launcher runs in a Linux container that
-is the read boundary; Hermes, DeepSeek Harness, and Claude Desktop members do
-not get that boundary. Inside the container: read-only credentials, plugin, and
-clone, plus a writable staged copy of the one review in its own volume; the host store is never mounted;
-egress goes only through a proxy that admits OpenAI's three domains; and the
-verdict is replayed through the host's own `submit_review` and kept only if it
-equals the container's ledger.
+a panel over a fresh clone, each with its own `prepare_review` marked
+`advisory: true` (and `force_full_review: true`, so no member is narrowed to
+a delta). An advisory review can only produce a report: the gate, author
+responses, rereview, and errata all refuse it, so it never mints a gate over
+code the operator did not write. An advisory Codex member launched through
+the packaged launcher runs in a Linux container with no host store mounted
+and egress limited to an allowlist of OpenAI domains; that container is the
+read boundary, and Hermes, DeepSeek Harness, and Claude Desktop members do
+not get it. The verdict is replayed through the host's own `submit_review`
+and kept only if it equals the container's ledger.
+[local-review.md](local-review.md) describes the panel.
 
 ## 5. The publication gate
 
@@ -309,56 +291,43 @@ flowchart LR
 ```
 
 Publishing to GitHub needs an explicit authorization in one of two modes.
-`LOCAL_GATE`, the normal path, takes a passed local review as the
-authorization. `REMOTE_ONLY` requires the operator's explicit acknowledgement
-that local review is skipped: `authorize_remote_publication` records the
-`LOCAL_REVIEW_SKIPPED` acknowledgement, the operator label, the rationale, a
-clean local repository, and the base and head. Either way the author tools
-bind the authorization, the pull request, the Codex request with its
-server-issued request ID, the pinned Codex Bot actor, and the trigger policy
-to **one head**; branch policy, required checks, the Codex result, and the
-review threads are then read fresh against that head in every observation.
+`LOCAL_GATE` takes a passed local review as the authorization. `REMOTE_ONLY`
+requires the operator's explicit acknowledgement that local review is
+skipped, recorded with the operator label, the rationale, and the base and
+head. Either way the publication ledger is bound to **one head**: a new
+commit invalidates it, and a Codex finding means a fix commit, a new head, a
+new ledger, and a new request.
 
 The sequence: first record a **baseline** of the three Codex feeds (comments
 that existed before the request are never an answer), then post the
-server-composed `@codex review` comment verbatim and bind it immediately.
-Afterwards the packaged read-only collector uses `gh` to read the pull
-request, branch policy, check runs, commit statuses, the three Codex feeds,
-and the review threads in one pass, writes an observation, and
-`record_github_snapshot` derives the status from it. The points that matter:
+server-composed `@codex review` comment verbatim and bind it. Afterwards the
+packaged read-only collector reads the pull request, branch policy, checks,
+the three Codex feeds, and the review threads in one pass through the user's
+own `gh`, writes an observation beside the ledger, and
+`record_github_snapshot` derives the status from it. The design points:
 
 - **Atomic reads.** A paginated read does not describe one moment, so the
-  resources where a single value decides the outcome (check runs, commit
-  statuses, threads) are each read in one request, and a second page fails
-  the collection.
-- **A fail-closed adapter.** A standalone comment, a reaction, silence, an
-  unbound request, incomplete pagination, or an ambiguous result all fail
-  rather than pass. Codex results are correlated by request ID carried in the review or in a
-  `Codex Review:` clean comment; a result without one is accepted only for a
-  single open bound request and only when the reviewed commit matches.
+  resources where a single value decides the outcome are each read in one
+  request, and a second page fails the collection.
+- **A fail-closed adapter.** A reaction, silence, an unbound request,
+  incomplete pagination, or an ambiguous result all fail rather than pass. A
+  Codex result counts only when it correlates to the recorded request;
+  [publication-gate.md](publication-gate.md) states the correlation rules.
 - **The evidence behind `MERGE_READY`.** The pull request head equals the
   authorized head; the Codex result correlated to this request is clean; every
-  required check passed; no review thread is unresolved. The pull request must
-  also be out of draft and mergeable against the current base: the ledger
-  reports `PR_DRAFT`, `PR_STATE_PENDING`, `PR_CONFLICTING`, or
-  `PR_UPDATE_REQUIRED` (strict base policy) before it consults checks, the
-  Codex result, or threads.
+  required check passed; no review thread is unresolved; the pull request is
+  out of draft and mergeable against the current base.
 - **The gate expires.** `finalize_publication_gate` mints a gate valid for
   five minutes from the oldest collection in the observation it was minted
   over; `verify_publication_gate` must return `valid: true` immediately before
   the merge, and the merge itself must be pinned to the `head_sha` that
   verification returned (for example `gh pr merge --match-head-commit`),
-  because verification reads the ledger, not GitHub, and a head pushed after
-  the last observation would otherwise slip through. A new commit
-  invalidates the ledger; a Codex finding means a fix commit, a new head, a
-  new ledger, and a new request.
+  because verification reads the ledger, not GitHub.
 
-The observation need not pass through a model's context on its way in: run
-with `--review-id`, the collector writes it beside the ledger and prints a
-receipt, and the record tool reads it by `observation_path` (an inline
-observation is accepted by the tool, and forbidden by the skill). Retyping tens of thousands of tokens would cost the
-same bytes twice and add a transcription failure mode. The record tool's
-response does return the updated ledger, so the model still sees the result. Details are in
+The observation does not need to pass through a model's context: the
+collector writes it beside the ledger and prints a receipt, and the record
+tool reads it by path. Retyping tens of thousands of tokens would cost the
+same bytes twice and add a transcription failure mode. Details are in
 [publication-gate.md](publication-gate.md).
 
 ## 6. The autonomous workflow
@@ -371,36 +340,27 @@ Codex review → local rounds → local gate → fast-forward push of the gated 
 → draft pull request → publication ledger → observe → mark ready → record the
 terminal `MERGE_READY` and **stop**. It does not merge.
 
-Every external action (dispatching a reviewer, pushing, creating the pull
-request, replying to a thread, resolving it, toggling draft state) except the
-`@codex review` comment goes through the same four steps: record the intent → look once more, then act → reconcile
+External actions (dispatching a reviewer, pushing, creating the pull
+request, replying to a thread, resolving it, toggling draft state) go through
+the same four steps: record the intent → look once more, then act → reconcile
 the result → record completion, in a hash-chained action audit. The driver
 model can crash at any point; after a restart it reads the ledger and knows
 where it stopped. Stopped at step one, nothing external happened; stopped at
 step two, it reconciles against the provider instead of firing again, which is
-why there are no duplicate comments and no double pushes. The one exception,
-the `@codex review` comment, is posted first and then bound by
-`record_codex_review_request`; a crash between the two is caught as an unbound
-request in the next observation. "Look once more"
-also catches the world moving between planning and acting: the pre-read
-rechecks what the action depends on (identity, head, and draft state before
-mark-ready; identity, branches, and draft state before a return to draft; the
-resolved remote and the draft flag before a push; the thread's watermark and
-resolved flag before a resolution or unresolution), and the server-side
-checkpoint re-derives readiness from the ledger, so a regression
-already recorded there refuses the action. A CI change that no observation
-has recorded yet is caught by the next observation, not by this step.
+why there are no duplicate comments and no double pushes. The one exception
+is the `@codex review` comment, which is posted first and then bound; a crash
+between the two shows up as an unbound request in the next observation. The
+ledger, not the driver, decides what a completed action counts for.
 
 Other rules: once a pull request leaves draft, no new commits are pushed to it,
-and a repair returns it to draft first, enforced at three separate points;
-threads are replied to before they are resolved, and the reply must appear in
-an observation first; an ambiguous Codex result, a merge conflict, or a pull
-request someone closed pauses the run with the evidence rather than guessing;
-an attempt that repeats the same blockers on the same head or an identical
-tree pauses as `NO_PROGRESS`. Ownership of the local branch, the remote head ref, and the
-pull request is store-wide and belongs to one workflow at a time; a cancelled
-workflow keeps its claims until `release_workflow_claims` succeeds, so
-cancelling alone does not free the target. Details are in [autonomous-workflow.md](autonomous-workflow.md).
+and a repair returns it to draft first; threads are replied to before they are
+resolved, and the reply must appear in an observation first; an ambiguous
+Codex result, a merge conflict, or a pull request someone closed pauses the
+run with the evidence rather than guessing; an attempt that repeats the same
+blockers without a new head or tree pauses as `NO_PROGRESS`. Ownership of the
+local branch, the remote head ref, and the pull request is store-wide and
+belongs to one workflow at a time until its claims are released. Details are
+in [autonomous-workflow.md](autonomous-workflow.md).
 
 ## 7. Clients, installation, and upgrades
 

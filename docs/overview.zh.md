@@ -76,11 +76,9 @@ flowchart LR
 
 ### 4.1 准备与派发
 
-作者在自己的会话里发起：说明需求、实现范围、base ref，选择评审者。自动拉起的 `CODEX_TASK` 评审，作者侧依次调用 `discover_reviewer_options`（查询目标运行时可见的模型与推理强度）、`prepare_review`（截快照、建账本）、`select_reviewer_configuration`（记录明确选择的模型与强度）、`launch_local_reviewer`（拉起一个独立的 Codex 进程）。作者会话的模型不替用户选评审者；无人值守的驱动必须预先授权一对配置，否则按指示停下而不是等待。Claude Desktop、Hermes 和 DeepSeek Harness 没有发现、选择和自动拉起：作者只准备评审，由操作者按该客户端安装页的说明派发评审者。
+作者在自己的会话里发起：说明需求、实现范围、base ref，选择评审者。`prepare_review` 截快照、建账本。`CODEX_TASK` 评审可以由作者侧查询运行时可见的模型与推理强度、记录操作者的明确选择、拉起一个独立的 Codex 进程；作者会话的模型不替用户选评审者。其它提供方都由操作者派发：一个新的 Claude Desktop 对话，或一个独立的 Hermes / DeepSeek Harness profile，只给它评审请求和 `review_id`。
 
-快照在派发前按「新增加删除行数」计量。自治工作流在达到预算的 75% 时报告余量，超过默认 2000 行时暂停等操作者决定拆不拆；手动评审只报数不拦。
-
-也可以手动派发：新开一个 Codex 任务（不是作者任务的分支）、一个新的 Claude Desktop 对话、或一个独立的 Hermes / DeepSeek Harness profile，只给它评审请求和 `review_id`。细节见 [local-review.md](local-review.md) 和 [reviewer-configuration.md](reviewer-configuration.md)。
+快照在派发前按「新增加删除行数」计量。自治工作流超过预算时暂停等操作者决定；手动评审只报数不拦。细节见 [local-review.md](local-review.md) 和 [reviewer-configuration.md](reviewer-configuration.md)。
 
 ### 4.2 两轮评审
 
@@ -94,13 +92,13 @@ flowchart LR
   class A,B,C,D,E n;
 ```
 
-第一轮评审者拿到快照、需求和范围（以及作者追加过的勘误，勘误只修正关于外部世界的说法，不改 diff），提交结构化的 findings（严重度、标题、解释，通常还有位置和建议）。没有意见直接 `CLEAN`。有意见则作者逐条回应，每条只能选一种：
+第一轮评审者拿到快照、需求和范围，以及作者追加过的勘误（勘误只修正关于外部世界的说法，不改 diff），提交结构化的 findings。没有意见直接 `CLEAN`。有意见则作者逐条回应，每条只能选一种：
 
 - `fixed`：finding 点名的**每个位置、每个子句**在新 head 都做完了，包括它要求的测试或文档。采用与建议不同的方案不是 fixed。
-- `rejected`：给出理由，并按 skill 的要求附具体的技术证据，由复审者判驳回是否成立；判成立的复审者要附可重放的验证。
+- `rejected`：给出理由和技术证据，由复审者判驳回是否成立；判成立的复审者要附可重放的验证。
 - `human_required`：直接停下交人仲裁。
 
-第二轮由同一评审者提供方（沿用第一轮的配置，除非操作者重新选择）对照新快照逐条裁决（Hermes 续用会话；Codex 新任务和 DeepSeek Harness 新开进程，从账本重建这条评审）：`resolved`、`rebuttal_accepted`、`still_open`，也可以报新意见。同一个 review ID 没有第三轮。
+第二轮由同一评审者提供方对照新快照逐条裁决：`resolved`、`rebuttal_accepted`、`still_open`，也可以报新意见。同一个 review ID 没有第三轮。第二轮是续用会话还是新开进程取决于提供方，[local-review.md](local-review.md) 逐家说明。
 
 ### 4.3 规矩分类与设计理由
 
@@ -116,7 +114,7 @@ flowchart LR
   class A,P,S,L,R1,R2 n;
 ```
 
-**规矩分类。**评审发现的问题里有一类是「违反了项目规矩」。评审者先在快照里搜仓库的 agent 指导文件（`AGENTS.md`、`.agents/`、`CLAUDE.md`、invariants 文件等）：规矩写了，finding 标 `constraint: {kind: "documented", source: <文件>}`；没写，标 `{kind: "undocumented"}`；不是规矩类的不标。修一条 undocumented 的意见，包括在同一个 PR 里把规矩写进仓库的指导文件，复审者会核。scorecard 据此统计两类各多少，以及带分类的意见里 undocumented 所占比例（同一条规矩被撞几次就算几次）。
+**规矩分类。**评审发现的问题里有一类是「违反了项目规矩」。评审者先在快照里搜仓库的 agent 指导文件（`AGENTS.md`、`.agents/`、`CLAUDE.md`、invariants 文件等）：规矩写了，finding 标 `constraint: {kind: "documented", source: <文件>}`；没写，标 `{kind: "undocumented"}`；不是规矩类的不标。修一条 undocumented 的意见，包括在同一个 PR 里把规矩写进仓库的指导文件，复审者会核。scorecard 据此统计两类各多少。
 
 **设计理由。**`prepare_review` 可以附一段 `rationale`：关键设计决策、放弃的方案及原因、有意固定的部分、自己没把握的地方。它由作者 agent 在任何意见出现之前写下，只写事实性的取舍，不写论证；它不进快照，第一轮评审者看不到，作者回应过第一轮意见之后 `open_review` 才带上。评审者先重读自己第一轮的 findings，再拿 rationale 对照第一轮快照，它和其它作者材料一样只是待核的材料。
 
@@ -137,20 +135,20 @@ CLEAN -> 再核工作树等于快照 -> LOCAL_GATE_PASSED
 ```
 
 - `CLEAN` → `LOCAL_GATE_PASSED`：所有意见都接受。`finalize_local_gate` 再核一次工作树等于快照。这道门禁证明的是快照一致性，不是测试结果；测试由发布阶段的 CI 证据把关。
-- `CONTINUABLE_FINDINGS`：没有争议的驳回，但第二轮判某条修复不完整，或发现了新问题。作者提交新 head，用 `continued_from_review_id` 加 `force_full_review` 开一条新的全量评审，未完的意见原样携带进去作为范围提示（标题、位置、解释、建议、规矩分类），不带作者的回应和复审裁决。
+- `CONTINUABLE_FINDINGS`：没有争议的驳回，但第二轮判某条修复不完整，或发现了新问题。作者提交新 head，开一条接续这条的新全量评审，未完的意见携带进去作为范围提示，不带作者的回应和复审裁决。
 - `HUMAN_REQUIRED`：作者直接把某条意见标为 `human_required`，或者作者驳回而复审者仍不认。只有直接升级和真争议才交给人。`export_human_arbitration` 导出一份确定性的仲裁包（需求、范围、rationale、各轮快照身份、意见与双方说法），导出不改账本、不消耗轮次。
 
 这个路由是根据账本数据改的：曾进入 HUMAN_REQUIRED 的评审里，绝大多数在十几分钟内于同仓库同 base 重开了新评审，争议意见在新评审里几乎不再出现。也就是说「修了但没修完」在实践里的含义是继续，不是仲裁，状态名应该说实话。
 
 ### 4.5 继承评审与阅读索引
 
-同一分支上的后续提交可以继承上一条 `LOCAL_GATE_PASSED` 的评审：服务器自动寻找父任务（同仓库、同 base SHA、两边都截自干净的已提交工作树、已门禁的 head 是当前 head 的祖先且不是同一个 head；父任务需求不同也允许并如实记录，显式指定的父任务则必须同一条需求），生成 `successor.json` 和精确的父到子 delta，评审者只读 delta 及相关调用方、契约和测试，仅在 delta 改了对外契约、触及安全或兼容面、或证明无法核实时展开全量 patch。任何前置条件不成立就记录为 `FULL` 回退。
+同一分支上的后续提交可以作为 successor 继承上一条 `LOCAL_GATE_PASSED` 的评审。服务器记录精确的父到子 delta，评审者只读 delta 及相关调用方、契约和测试，仅在 delta 改了对外契约、触及安全或兼容面、或证明无法核实时展开全量 patch。继承的前置条件不成立时，评审记录为 `FULL` 回退；前置条件列在 [local-review.md](local-review.md)。
 
-全量 patch 是从 base 到快照的累计 diff：干净的已提交轮次就是到 head，手动评审截了未提交改动时则是到工作树。`open_review` 随快照返回 `patch_index`：每个文件在 `patch.diff` 里的字节偏移和长度，评审者按需读取并报告跳过了什么。索引从不存储，每次按同一份不可变 patch 现算，并先核对 patch 仍等于本轮提交的快照哈希，所以索引不可能与实际字节不一致。
+全量 patch 是从 base 到快照的累计 diff。`open_review` 随快照返回 `patch_index`：每个文件在 patch 里的字节偏移和长度，评审者按需读取并报告跳过了什么。索引每次按同一份不可变 patch 现算，从不存储。
 
 ### 4.6 顾问面板
 
-审别人的 PR 时可以组一个顾问面板：打包脚本把 PR 新鲜克隆到操作者指定的、任何写作目录之外的路径，每位成员各自 `prepare_review` 并带 `advisory: true` 和 `force_full_review: true`，不会被收窄成 successor delta。顾问评审只接受 `submit_review` 这一种变更，门禁、回应、复审、勘误全部拒绝，所以它只能产出报告，永远不能给操作者没写的代码铸门禁。通过打包 launcher 拉起的顾问 Codex 成员在 Linux 容器里跑，容器就是读边界；Hermes、DeepSeek Harness 和 Claude Desktop 成员没有这层边界。容器内：只挂载只读的凭据、只读的插件、只读的克隆，外加这一条评审的可写副本（单独一个卷），不挂载宿主 store，出口只放行 OpenAI 的三个域名，裁决通过宿主的 `submit_review` 重放且必须和容器内账本一致才保留。
+审别人的 PR 时可以组一个顾问面板：在一份新鲜的克隆上，每位成员各自 `prepare_review` 并带 `advisory: true`（以及 `force_full_review: true`，不会被收窄成 delta）。顾问评审只能产出报告：门禁、回应、复审、勘误全部拒绝，所以它永远不能给操作者没写的代码铸门禁。通过打包 launcher 拉起的顾问 Codex 成员在 Linux 容器里跑，不挂载宿主 store，出口只放行 OpenAI 域名白名单；容器就是读边界，Hermes、DeepSeek Harness 和 Claude Desktop 成员没有这层边界。裁决通过宿主的 `submit_review` 重放，且必须和容器内账本一致才保留。面板的用法见 [local-review.md](local-review.md)。
 
 ## 5. 发布门禁
 
@@ -163,24 +161,24 @@ flowchart LR
   class A,B,C,D n;
 ```
 
-发布到 GitHub 需要一次明确授权，两种模式：`LOCAL_GATE` 是常规路径，以通过的本地评审为授权；`REMOTE_ONLY` 要求操作者明确确认跳过本地评审，`authorize_remote_publication` 记录 `LOCAL_REVIEW_SKIPPED` 确认、操作者标签、理由、干净的本地仓库和 base / head。无论哪种，作者工具都把授权、PR、带服务器签发请求 ID 的 Codex 请求、钉死的 Codex Bot actor 和触发策略绑到**一个 head**；分支策略、必需检查、Codex 结果和评审线程则在每次观测里对着这个 head 重新读取。
+发布到 GitHub 需要一次明确授权，两种模式：`LOCAL_GATE` 以通过的本地评审为授权；`REMOTE_ONLY` 要求操作者明确确认跳过本地评审，连同操作者标签、理由和 base / head 一起记录。无论哪种，发布账本都绑在**一个 head** 上：新 commit 让账本失效，Codex 发了意见就得修、推新 head、新开账本重新请求。
 
-流程：先记一份 Codex 三个 feed 的**基线**（请求之前就存在的评论不算答复），再原样发出服务器组好的 `@codex review` 评论并立即绑定；之后打包的只读收集器用 `gh` 一次性读取 PR、分支策略、检查运行、提交状态、三个 Codex feed 和评审线程，写成观测交给 `record_github_snapshot`，账本从观测推导状态。要点：
+流程：先记一份 Codex 三个 feed 的**基线**（请求之前就存在的评论不算答复），再原样发出服务器组好的 `@codex review` 评论并绑定；之后打包的只读收集器通过用户自己的 `gh` 一次性读取 PR、分支策略、检查、三个 Codex feed 和评审线程，把观测写在账本旁边，`record_github_snapshot` 从观测推导状态。设计要点：
 
-- **原子读。**分页的读取不描述同一时刻，所以检查运行、提交状态、线程这类单值决定去留的资源各用一次请求读完，出现第二页就让收集失败。
-- **fail-closed 适配器。**孤立的评论、表情、沉默、未绑定的请求、分页不完整、歧义结果，全部判失败而不是通过。Codex 的回复靠评审或 `Codex Review:` 干净评论里带的请求 ID 关联，没带 ID 时只在仅有一条已绑定的开放请求且所评审的 commit 相符时才接受。
-- **`MERGE_READY` 背后的证据。**PR 的 head 等于授权的 head；关联到本次请求的 Codex 结果是干净的；所有必需检查通过；没有未 resolve 的评审线程。此外 PR 还必须已离开草稿、对当前 base 可合并：账本在看检查、Codex 结果和线程之前会先报 `PR_DRAFT`、`PR_STATE_PENDING`、`PR_CONFLICTING` 或 `PR_UPDATE_REQUIRED`（严格 base 策略）。
-- **门票会过期。**`finalize_publication_gate` 签发一张门票，有效期是观测里最早一次采集之后五分钟；`verify_publication_gate` 必须在合并前立刻返回 `valid: true`，而且合并操作要钉在校验返回的 `head_sha` 上（例如 `gh pr merge --match-head-commit`），因为校验读的是账本不是 GitHub，最后一次观测之后推上来的 head 否则会漏过去。新 commit 让账本失效；Codex 发了意见就得修、推新 head、新开账本重新请求。
+- **原子读。**分页的读取不描述同一时刻，所以单值决定去留的资源各用一次请求读完，出现第二页就让收集失败。
+- **fail-closed 适配器。**表情、沉默、未绑定的请求、分页不完整、歧义结果，全部判失败而不是通过。Codex 结果只有关联到记录在案的请求才算数；关联规则见 [publication-gate.md](publication-gate.md)。
+- **`MERGE_READY` 背后的证据。**PR 的 head 等于授权的 head；关联到本次请求的 Codex 结果是干净的；所有必需检查通过；没有未 resolve 的评审线程；PR 已离开草稿、对当前 base 可合并。
+- **门票会过期。**`finalize_publication_gate` 签发一张门票，有效期是观测里最早一次采集之后五分钟；`verify_publication_gate` 必须在合并前立刻返回 `valid: true`，而且合并操作要钉在校验返回的 `head_sha` 上（例如 `gh pr merge --match-head-commit`），因为校验读的是账本不是 GitHub。
 
-观测进账本的路上可以不经过模型的上下文：收集器带 `--review-id` 运行时把观测写在账本旁边，只打印回执，记录工具按 `observation_path` 去读（工具也接受内联的观测，但 skill 禁止这么做）；重打一遍几万 token 既花钱又多一个抄错的失败模式。记录工具的返回值会带回更新后的账本，模型仍然看得到结果。细节见 [publication-gate.md](publication-gate.md)。
+观测不必经过模型的上下文：收集器把观测写在账本旁边，只打印回执，记录工具按路径去读；重打一遍几万 token 既花钱又多一个抄错的失败模式。细节见 [publication-gate.md](publication-gate.md)。
 
 ## 6. 自治工作流
 
 `start_autonomous_workflow` 把仓库、base、需求、分支、发布目标、能力集和授权摘要绑成一个工作流账本并认领目标，之后由作者侧的驱动按 `next_action` 沿 RFC 0003 的路径走：提交干净 head → 绑定 Codex 评审 → 本地两轮 → 本地门禁 → 快进推送门禁过的 head → 开草稿 PR → 发布账本 → 观察 → 标记 ready → 记录终态 `MERGE_READY` 然后**停下**。它不合并。
 
-每个对外动作（派发评审、推送、建 PR、回复线程、resolve 线程、切换草稿状态），除了 `@codex review` 这条评论，都走同样的四步：记录意图 → 再看一眼再动手 → 对照结果 → 记录完成，写进哈希链的动作审计。驱动模型随时可能崩溃，重启后读账本就知道停在哪一步：停在第一步什么都没发生，停在第二步就去对照提供方而不是重放，这就是不会重复评论、不会重复推送的原因。唯一的例外是 `@codex review` 评论：先发出去，再由 `record_codex_review_request` 绑定，两步之间崩溃会在下一次观测里被当作未绑定请求抓出来。「再看一眼」还会抓住计划与执行之间世界的变化：预读会重查这个动作所依赖的东西（标记 ready 前查 PR 的身份、head 和草稿状态，回草稿前查身份、分支和草稿状态，推送前查解析出的远端和草稿标志，resolve 或 unresolve 线程前查线程的水位和 resolved 标志），服务端检查点按账本重新推导是否就绪，账本里已经记下的回退会让动作拒绝执行；账本还没记到的 CI 变化要等下一次观测才抓得到，不是这一步。
+对外动作（派发评审、推送、建 PR、回复线程、resolve 线程、切换草稿状态）都走同样的四步：记录意图 → 再看一眼再动手 → 对照结果 → 记录完成，写进哈希链的动作审计。驱动模型随时可能崩溃，重启后读账本就知道停在哪一步：停在第一步什么都没发生，停在第二步就去对照提供方而不是重放，这就是不会重复评论、不会重复推送的原因。唯一的例外是 `@codex review` 评论：先发出去再绑定，两步之间崩溃会在下一次观测里显形为未绑定请求。一个动作算不算完成，由账本说了算，不由驱动说了算。
 
-其它规则：PR 一旦离开草稿就不再推新 commit，要改先回草稿，三处分别拦；线程先回复再 resolve，回复要出现在观测里才允许关；Codex 结果歧义、合并冲突、PR 被人关掉，一律暂停并附证据，不猜；重复出现同样 blocker 和同样 head（或同样 tree）的尝试判 `NO_PROGRESS` 暂停。store 范围内对本地分支、远端 head ref 和 PR 的所有权一次只给一个工作流；被取消的工作流在 `release_workflow_claims` 成功前仍持有所有权，单靠取消不会释放目标。细节见 [autonomous-workflow.md](autonomous-workflow.md)。
+其它规则：PR 一旦离开草稿就不再推新 commit，要改先回草稿；线程先回复再 resolve，回复要出现在观测里才允许关；Codex 结果歧义、合并冲突、PR 被人关掉，一律暂停并附证据，不猜；没有新 head 或新 tree 却重复撞上同样 blocker 的尝试判 `NO_PROGRESS` 暂停。store 范围内对本地分支、远端 head ref 和 PR 的所有权一次只给一个工作流，直到它的认领被释放。细节见 [autonomous-workflow.md](autonomous-workflow.md)。
 
 ## 7. 客户端、安装与升级
 
