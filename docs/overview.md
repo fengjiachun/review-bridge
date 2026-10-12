@@ -15,7 +15,8 @@ server with two roles: the author and the reviewer are two processes with two
 tool sets. Codex, Claude, Hermes, and DeepSeek Harness can each act as author
 or reviewer; the Codex GitHub App provides the remote review. Installation and
 upgrades are in the [README](../README.md) and under [install/](install/);
-every tool and error code is in [reference.md](reference.md).
+every tool and error code is in [reference.md](reference.md). This page says
+what the product does and why; the pages it links to say how.
 
 ## 1. The problem
 
@@ -38,15 +39,14 @@ hold up.
 
 ## 2. Design principles
 
-Three principles run through the whole design. Each is a mechanism, not a
-discipline: a skill rule that says "do not read the author's account yet" can
-be skipped; a tool that does not serve it cannot.
+Three principles run through the whole design. Each is carried by the tools
+themselves rather than by a rule the participants are asked to follow.
 
-| Principle | Meaning | What enforces it |
-| --- | --- | --- |
-| Immutable snapshot | What is reviewed is a frozen change: diff, requirement, implementation scope, with a hash. Later edits never change the version that was reviewed. | The snapshot hash is in the ledger; the local gate re-checks that the working tree still equals the snapshot before it finalizes. |
-| Isolated reviewer | The reviewer is a fresh context that did not write the code. The author's responses, design rationale, and errata are material to verify, never instructions. | Round-one `open_review` returns neither the author's rationale nor any response; the author-written text it carries is the requirement, the implementation scope, and any errata, which correct claims about the world, never the diff. The reviewer role has no tool that edits the repository, pushes, or opens pull requests. Freshness itself is enforced only for `CODEX_TASK`, which the server launches as a separate process; for the other providers the server checks the bound provider, and keeping the reviewer context separate from the author is an operator and skill rule. |
-| Append-only ledger | A finding cannot be changed once submitted; round two can only append verdicts; publication and workflow state changes carry an expected revision. | The server-side state machine and state checks under a per-ledger lock; the publication gate and the autonomous workflow additionally keep hash-chained audit logs. |
+| Principle | Meaning |
+| --- | --- |
+| Immutable snapshot | What is reviewed is a frozen change: diff, requirement, implementation scope, with a hash. Later edits never change the version that was reviewed, and the local gate re-checks the working tree against the snapshot before it closes. |
+| Isolated reviewer | The reviewer is a separate context that did not write the code. It receives the snapshot, the requirement, and the scope; the author's responses and design rationale reach it only after it has delivered its own findings, and they are material to verify, never instructions. The reviewer role has no tool that edits the repository, pushes, or opens pull requests. |
+| Append-only ledger | A finding cannot be changed once submitted; round two can only append verdicts; publication and workflow records are revisioned and audit-chained. The driver proposes, the ledger decides what counts. |
 
 One more bias shapes how the project evolves: **prefer subtraction, and prove
 a state is reachable before defending it.** The state space only shrinks, and
@@ -83,68 +83,21 @@ flowchart LR
   class A,G,S,L,P,R1,R2,R3,R4 n;
 ```
 
-Every participant shares one private store (by default
+Every participant on one machine shares one private store (by default
 `~/Library/Application Support/ReviewBridge`, overridable with
-`REVIEW_BRIDGE_HOME`). It is a directory on the local file system: no
-database, no service process, only files (JSON ledgers, patches, copied
-working-tree overlays, rendered Markdown reports, JSONL audit logs),
-directories mode `0700` and files `0600`. Its core records are three:
-
-- **Snapshots**: one directory per review round with the full patch, the
-  manifest, and the hash. Committed files are read back from Git by the
-  recorded head; only dirty or untracked working-tree overlays are copied
-  into the round, and overlays over 10 MiB are recorded but not copied. A
-  per-file byte-range index is derived from the patch on every read, never
-  stored.
-- **The review ledger** (`review.json`): requirement, scope, rationale, each
-  round's snapshot identity, findings, author responses, rereview decisions,
-  errata, and the history of events.
-- **The publication ledger**: authorization, the Codex baseline, the binding of
-  requests to results, GitHub observations, the gate, and its audit chain.
-
-Beside them the store keeps the autonomous workflow ledgers and their action
-audits under `workflows/`, release records under `releases/`, and rendered
-reports next to the ledgers they project.
-
-"Shared" means the author and reviewer MCP processes on one machine point at
-the same directory; it is not a network share. Concurrency uses file locks,
-ledger files are replaced through a temporary file and an atomic rename, the
-JSONL audit logs are appended in place and fsynced with a separately replaced
-audit-head file committing the prefix, publication and workflow state changes
-carry an expected revision, and review-ledger tools validate the
-ledger's state under the lock.
+`REVIEW_BRIDGE_HOME`): a directory of files, no database and no service
+process. Its core records are the snapshots, the review ledger, and the
+publication ledger; the autonomous workflow keeps its own ledgers beside
+them. Concurrent processes coordinate through file locks.
 
 The author role and the reviewer role are two server processes with two tool
-sets. The reviewer can only list pending reviews, open one, read the snapshot
-and patch, search the snapshot, and submit findings and rereview decisions; it
-sees neither the publication tools nor the author tools, so a panel over a
-third party's pull request can never mint a gate. The MCP server holds no
-GitHub credentials and never opens a network connection or runs `gh`; GitHub
-is read by the packaged collector through the user's own `gh`, and the writes
-are the author agent's own `gh` and `git` calls, which the autonomous
-workflow plans and reconciles through its action trail.
+sets. The reviewer can list pending reviews, open one, read and search the
+snapshot, and submit findings and rereview decisions, and nothing else. The
+MCP server holds no GitHub credentials; GitHub is read by a packaged
+collector through the user's own `gh`, and written by the author agent's own
+`gh` and `git`.
 
 ## 4. Local review
-
-### 4.1 Prepare and dispatch
-
-The author starts from its own conversation: the requirement, the
-implementation scope, the base ref, and a reviewer choice. `prepare_review`
-captures the snapshot and creates the ledger. For a `CODEX_TASK` review the
-author side can discover the runtime's models and reasoning efforts, record
-the operator's explicit choice, and launch an independent Codex process; the
-author conversation's model does not choose the reviewer on the user's
-behalf. Every other provider is dispatched by the operator: a fresh Claude
-Desktop conversation, or an isolated Hermes or DeepSeek Harness profile,
-given only the review request and the `review_id`.
-
-Before dispatch the snapshot is measured as added plus deleted lines. The
-autonomous workflow pauses for an operator decision above its budget; a
-manual review reports the number and proceeds. See
-[local-review.md](local-review.md) and
-[reviewer-configuration.md](reviewer-configuration.md).
-
-### 4.2 Two rounds
 
 ```mermaid
 flowchart LR
@@ -156,60 +109,22 @@ flowchart LR
   class A,B,C,D,E n;
 ```
 
-In round one the reviewer receives the snapshot, the requirement, and the
-scope, plus any errata the author appended (errata correct claims about the
-world, never the diff), and submits structured findings. No findings means
-`CLEAN`. Otherwise the author answers each finding with exactly one
-disposition:
+The author states the requirement, the implementation scope, the base ref,
+and a reviewer choice; `prepare_review` captures the snapshot and creates the
+ledger. A `CODEX_TASK` reviewer is launched by the server as a separate
+process with the model and reasoning effort the operator chose; the other
+providers are dispatched by the operator as their install pages describe.
 
-- `fixed`: **every location and every clause** the finding names is done at
-  the new head, including any test or documentation it asks for. A different
-  remedy than the one recommended is not `fixed`.
-- `rejected`: a rationale with technical evidence, which the rereviewer
-  judges; a sustained rebuttal requires replayable verification from the
-  reviewer.
-- `human_required`: stop and hand the finding to a person.
-
-Round two is the same reviewer provider deciding each finding against the
-new snapshot: `resolved`, `rebuttal_accepted`, or `still_open`, with new
-findings allowed. There is no third round for the same review ID. Whether
-round two resumes a session or starts a fresh process depends on the
-provider; [local-review.md](local-review.md) says which does what.
-
-### 4.3 Rule kinds and the author's rationale
-
-```mermaid
-flowchart LR
-  A["Author agent"] --> P["prepare_review<br/>rationale written before the snapshot"]
-  P --> S["Immutable snapshot<br/>diff · requirement · scope"]
-  P --> L["Ledger<br/>rationale stays out of the snapshot"]
-  S --> R1["Round one, blind<br/>snapshot + the repository's rules"]
-  L -- "served only after the author has answered" --> R2["Round two, comparison<br/>responses + rationale"]
-  R1 --> R2
-  classDef n fill:#ffffff,stroke:#57606a,stroke-width:1px,color:#111111;
-  class A,P,S,L,R1,R2 n;
-```
-
-**Rule kinds.** Some findings are violations of a project rule. The reviewer
-first searches the snapshot for the repository's agent guidance (`AGENTS.md`,
-`.agents/`, `CLAUDE.md`, invariants files, and the like). If the rule is
-written down, the finding carries `constraint: {kind: "documented", source:
-<file>}`; if it is not, `{kind: "undocumented"}`; ordinary defects carry
-nothing. Fixing an undocumented one includes writing the rule into that
-guidance in the same pull request, and the rereviewer checks that it was. The
-scorecard reports both counts.
-
-**Rationale.** `prepare_review` takes an optional `rationale`: the key design
-decisions, the alternatives dropped and why, the parts intentionally left
-fixed, and the author's own doubts. The author agent writes it before any
-finding exists, as factual trade-offs rather than arguments. It stays out of
-the snapshot, the round-one reviewer never sees it, and `open_review` serves
-it only after the author has answered the round-one findings. The reviewer
-rereads its own round-one findings first, then compares the rationale against
-the round-one snapshot; like every other author material, it is something to
-verify.
-
-### 4.4 Three exits and the state machine
+In round one the reviewer sees the snapshot, the requirement, and the scope
+(plus any errata the author appended, which correct claims about the world,
+never the diff) and submits structured findings. No findings means `CLEAN`.
+Otherwise the author answers each finding with exactly one disposition:
+`fixed` (every location and every clause the finding names is done at the
+new head), `rejected` (with a rationale and evidence for the rereviewer to
+judge), or `human_required` (hand it to a person). Round two is the same
+reviewer provider checking each answer against the new snapshot: `resolved`,
+`rebuttal_accepted`, or `still_open`, with new findings allowed. There is no
+third round for the same review ID.
 
 ```text
 WAITING_FOR_REVIEW
@@ -225,60 +140,35 @@ WAITING_FOR_REVIEW
 CLEAN -> working tree re-checked against the snapshot -> LOCAL_GATE_PASSED
 ```
 
-- `CLEAN` → `LOCAL_GATE_PASSED`: every finding accepted. `finalize_local_gate`
-  re-checks that the working tree still equals the snapshot. This gate attests
-  snapshot consistency, not test results; tests are provider evidence at the
-  publication stage.
-- `CONTINUABLE_FINDINGS`: no rebuttal is disputed, but round two judged a fix
-  incomplete or found a new issue. The author commits a new head and opens a
-  fresh full review that continues this one; the unfinished findings are
-  carried in as scope hints, without the author's responses or the rereview
-  decisions.
-- `HUMAN_REQUIRED`: the author answered a finding with `human_required`, or
-  rejected one and the rereviewer still disagrees. Only a direct escalation or
-  a real dispute goes to a person. `export_human_arbitration` produces a
-  deterministic packet (requirement, scope, rationale, each round's snapshot
-  identity, the findings with both sides' statements) without changing the
-  ledger or consuming a round.
+Three exits. `CLEAN` becomes `LOCAL_GATE_PASSED` once the working tree is
+re-checked against the snapshot; this gate attests snapshot consistency, not
+test results. `CONTINUABLE_FINDINGS` means a fix was judged incomplete or a
+new issue appeared with no disputed rebuttal: the author commits a new head
+and opens a fresh review that carries the unfinished findings in as scope
+hints. `HUMAN_REQUIRED` is reserved for a direct escalation or a rebuttal the
+rereviewer still disagrees with; an arbitration packet can be exported for a
+person without touching the ledger. This routing came from ledger data: most
+reviews that had reached `HUMAN_REQUIRED` were followed within minutes by a
+new review on the same repository and base, so "fixed but incomplete" was
+made to mean "keep going".
 
-This routing came from ledger data: most reviews that had reached
-`HUMAN_REQUIRED` were followed within minutes by a new review on the same
-repository and base, and the disputed finding almost never reappeared there.
-In practice "fixed but incomplete" meant "keep going", not "a human must
-decide", so the state name was made to say so.
+Two things the reviewer may be given with the change. **Rule kinds**: a
+finding that violates a project rule says whether the rule was already
+written in the repository's agent guidance (`documented`, with its source) or
+not (`undocumented`); fixing an undocumented one includes writing the rule
+down. **Rationale**: the author may record its key design decisions, dropped
+alternatives, and doubts before any finding exists; the reviewer sees it only
+after the author has answered round one, as one more thing to verify.
 
-### 4.5 Successor reviews and the patch index
-
-A later commit on the same branch can continue a previous
-`LOCAL_GATE_PASSED` review as a successor. The server records the exact
-parent-to-child delta, and the reviewer reads the delta plus the relevant
-callers, contracts, and tests, expanding to the full patch only when the
-delta changes a contract used outside it, touches a security or
-compatibility surface, or the proof fails to verify. When the preconditions
-for a successor do not hold, the review records a `FULL` fallback;
-[local-review.md](local-review.md) lists them.
-
-The full patch is a cumulative diff from the base to the snapshot.
-`open_review` returns a `patch_index` with it: the byte offset and length of
-each file's section (beyond a few hundred sections the rest is one remainder
-entry to be read in full), so a reviewer reads what the reviewed behavior
-depends on and reports what it skipped. The index is derived from the immutable patch
-on every read, never stored.
-
-### 4.6 Advisory panels
-
-To review someone else's pull request, several independent reviewers can form
-a panel over a fresh clone, each with its own `prepare_review` marked
-`advisory: true` (and `force_full_review: true`, so no member is narrowed to
-a delta). An advisory review can only produce a report: the gate, author
-responses, rereview, and errata all refuse it, so it never mints a gate over
-code the operator did not write. An advisory Codex member launched through
-the packaged launcher runs in a Linux container with no host store mounted
-and egress limited to an allowlist of OpenAI domains; that container is the
-read boundary, and Hermes, DeepSeek Harness, and Claude Desktop members do
-not get it. The verdict is replayed through the host's own `submit_review`
-and kept only if it equals the container's ledger.
-[local-review.md](local-review.md) describes the panel.
+Two variants. A later commit on the same branch can continue a previous
+`LOCAL_GATE_PASSED` review as a **successor**, where the reviewed unit is the
+parent-to-child delta plus whatever it touches. Several independent reviewers
+can form an **advisory panel** over someone else's pull request; an advisory
+review can only produce a report, never a gate, and an advisory Codex member
+launched through the packaged launcher runs in a container that serves as
+the read boundary. Both are described in [local-review.md](local-review.md),
+with every provider's dispatch in
+[reviewer-configuration.md](reviewer-configuration.md).
 
 ## 5. The publication gate
 
@@ -291,82 +181,42 @@ flowchart LR
   class A,B,C,D n;
 ```
 
-Publishing to GitHub needs an explicit authorization in one of two modes.
-`LOCAL_GATE` takes a passed local review as the authorization. `REMOTE_ONLY`
-requires the operator's explicit acknowledgement that local review is
-skipped, recorded with the operator label, the rationale, and the base and
-head. Either way the publication ledger is bound to **one head**: a new
-commit invalidates it, and a Codex finding means a fix commit, a new head, a
+Publishing to GitHub needs an explicit authorization: `LOCAL_GATE`, a passed
+local review, or `REMOTE_ONLY`, the operator's recorded acknowledgement that
+local review is skipped. The publication ledger is bound to one head; a new
+commit invalidates it, so a Codex finding means a fix commit, a new head, a
 new ledger, and a new request.
 
-The sequence: first record a **baseline** of the three Codex feeds (comments
-that existed before the request are never an answer), then post the
-server-composed `@codex review` comment verbatim and bind it. Afterwards the
-packaged read-only collector reads the pull request, branch policy, checks,
-the three Codex feeds, and the review threads in one pass through the user's
-own `gh`, writes an observation beside the ledger, and
-`record_github_snapshot` derives the status from it. The design points:
-
-- **Atomic reads.** A paginated read does not describe one moment, so the
-  resources where a single value decides the outcome are each read in one
-  request, and a second page fails the collection.
-- **A fail-closed adapter.** A reaction, silence, an unbound request,
-  incomplete pagination, or an ambiguous result all fail rather than pass. A
-  Codex result counts only when it correlates to the recorded request;
-  [publication-gate.md](publication-gate.md) states the correlation rules.
-- **The evidence behind `MERGE_READY`.** The pull request head equals the
-  authorized head; the Codex result correlated to this request is clean; every
-  required check passed; no review thread is unresolved; the pull request is
-  out of draft and mergeable against the current base.
-- **The gate expires.** `finalize_publication_gate` mints a gate valid for
-  five minutes from the oldest collection in the observation it was minted
-  over; `verify_publication_gate` must return `valid: true` immediately before
-  the merge, and the merge itself must be pinned to the `head_sha` that
-  verification returned (for example `gh pr merge --match-head-commit`),
-  because verification reads the ledger, not GitHub.
-
-The observation does not need to pass through a model's context on its way
-in: the collector writes it beside the ledger and prints a receipt, and the
-record tool reads it by path. Retyping tens of thousands of tokens would cost
-the same bytes twice and add a transcription failure mode. The record tool's
-response does return the updated ledger, observation included, so the model
-still sees the result. Details are in
-[publication-gate.md](publication-gate.md).
+The sequence: record a **baseline** of the Codex feeds (anything that existed
+before the request is never an answer), post the server-composed review
+request with its server-issued request ID, then let the packaged read-only
+collector read the pull request, its checks, the Codex feeds, and the review
+threads in one pass and hand the observation to the ledger. The adapter fails
+closed: a reaction, silence, an unbound request, incomplete pagination, or an
+ambiguous result never counts as a pass. `MERGE_READY` means the pull request
+head equals the authorized head, the Codex result correlated to this request
+is clean, every required check passed, no review thread is unresolved, and
+the pull request is out of draft and mergeable. Finalizing then mints a gate
+that expires within minutes; verification must succeed immediately before
+the merge, and the merge is pinned to the verified head. The rules in full
+are in [publication-gate.md](publication-gate.md).
 
 ## 6. The autonomous workflow
 
 `start_autonomous_workflow` binds the repository, base, requirement, branch,
-publication target, capability set, and authorization digest into a workflow
-ledger and claims the targets; the author-side driver then follows
-`next_action` along RFC 0003's path: commit a clean head → bind a
-Codex review → local rounds → local gate → fast-forward push of the gated head
-→ draft pull request → publication ledger → observe → mark ready → record the
+and publication target into a workflow ledger; the author-side driver then
+follows the ledger's `next_action` along RFC 0003's path: commit a clean head
+→ bind a Codex review → local rounds → local gate → push the gated head →
+draft pull request → publication ledger → observe → mark ready → record the
 terminal `MERGE_READY` and **stop**. It does not merge.
 
-External actions (dispatching a reviewer, pushing, creating the pull
-request, replying to a thread, resolving it, toggling draft state) go through
-the same four steps: record the intent → act → reconcile the result → record
-completion, in a hash-chained action audit. For pushes, draft toggles, and
-thread resolutions the second step also takes a fresh look at the provider
-before acting; [autonomous-workflow.md](autonomous-workflow.md) lists which
-actions carry that proof. The driver
-model can crash at any point; after a restart it reads the ledger and knows
-where it stopped. Stopped at step one, nothing external happened; stopped at
-step two, it reconciles against the provider instead of firing again, which is
-why there are no duplicate comments and no double pushes. The one exception
-is the `@codex review` comment, which is posted first and then bound; a crash
-between the two shows up as an unbound request in the next observation. The
-ledger, not the driver, decides what a completed action counts for.
-
-Other rules: once a pull request leaves draft, no new commits are pushed to it,
-and a repair returns it to draft first; threads are replied to before they are
-resolved, and the reply must appear in an observation first; an ambiguous
-Codex result, a merge conflict, or a pull request someone closed pauses the
-run with the evidence rather than guessing; an attempt that repeats the same
-blockers without a new head or tree pauses as `NO_PROGRESS`. Ownership of the
-local branch, the remote head ref, and the pull request is store-wide and
-belongs to one workflow at a time until its claims are released. Details are
-in [autonomous-workflow.md](autonomous-workflow.md).
+Every external action is recorded in a hash-chained action audit before and
+after it happens, so a driver that crashes resumes from the ledger without
+duplicating a comment or a push. An ambiguous Codex result, a merge
+conflict, a pull request someone closed, or an attempt that makes no progress
+pauses the run with the evidence rather than guessing. Ownership of the
+branch, the remote head ref, and the pull request belongs to one workflow at
+a time. Details are in [autonomous-workflow.md](autonomous-workflow.md).
 
 ## 7. Clients, installation, and upgrades
 
@@ -377,48 +227,26 @@ in [autonomous-workflow.md](autonomous-workflow.md).
 | Hermes | Separate author and reviewer profiles; the packaged configuration snippet carries `trust: full` for unattended runs. |
 | DeepSeek Harness | A cordis patch installs the reviewer profile, which refuses to start when the reviewer tools cannot connect; every run is a fresh session, so rereview starts a new one. |
 
-Each release is built from a clean clone at the release tag with
-`npm ci && npm run build && npm run verify:build`. The output contains the
-Codex marketplace, the Claude extension source, the Hermes and DeepSeek
-integration directories, the `.mcpb` and `.dxt` packages, the source archive,
-and `SHA256SUMS.txt`. Every participant is pinned to the same release. An upgrade
-builds the new runtime in a new directory and then switches each client's
-path: the Codex marketplace needs `remove` before `add` under the same name,
-and the Hermes reviewer skill, which is copied into the profile, needs its
-new files copied when it changed between releases; DeepSeek Harness loads the
-skill from the release directory, so re-rendering the path is enough. See
-[install/upgrade.md](install/upgrade.md).
-
-Releasing leaves evidence too: `node scripts/verify-release.mjs --pre`
-(with `--release-pull-request <n>` for the release pull request's own
-changelog claim) reconciles the
-changelog's pull-request claims against the merges in the range in both
-directions before the tag (merge commits and squash merges alike), and
-`--final` checks the published release and asset hashes against GitHub's facts
-afterwards and writes the release record into the store.
+Each release is built from a clean clone at the release tag, every
+participant is pinned to the same release, and an upgrade builds the new
+runtime in a new directory and then switches each client's path. Releases
+leave evidence too: a verifier reconciles the changelog against the merges
+before the tag and checks the published assets afterwards. See
+[install/upgrade.md](install/upgrade.md) and
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## 8. Reports and statistics
 
-- **Review report.** `render_review_report` writes one review's ledger, and
-  its publication ledger where there is one, as Markdown beside the ledger;
-  a remote-only publication renders from its publication ledger and
-  authorization alone.
-  The packaged `review-report.mjs` prints a brief by default (terminal state,
-  next step, a fact table, the open findings, the round-level facts) and the
-  full rendering with `--full`. The report is a projection of the ledger, not
-  evidence; it changes no ledger and consumes no round.
+- **Review report.** `render_review_report` renders a review's ledger (and
+  its publication ledger) as Markdown; the packaged `review-report.mjs`
+  prints a brief by default and the full rendering with `--full`. The report
+  is a projection of the ledger, not evidence.
 - **Scorecard.** `review-scorecard.mjs` reads one store and aggregates per
   reviewer provider: findings by severity, author dispositions crossed with
-  reviewer decisions, rebuttal outcomes before and after the verification
-  obligation, rounds to `CLEAN`, continuations, workflow budget events,
-  arbitration escalations, and rule kinds. Every counting rule is stated in
-  the report so a number can be replayed against the ledgers. Filters cover
-  time, repository, gate or advisory type, and `FULL` or `SUCCESSOR` strategy;
-  they apply to the review metrics only, and a filtered report omits the
-  workflow statistics.
+  reviewer decisions, rebuttal outcomes, rounds to `CLEAN`, continuations,
+  escalations, and rule kinds. Every counting rule is stated in the report.
 - **Finding search.** `review-findings.mjs` filters historical findings by
-  repository, file, keyword, severity, author disposition, rereview decision,
-  and rule kind, keeping each finding's original snapshot and ledger location.
+  repository, file, keyword, severity, disposition, decision, and rule kind.
   See [finding-search.md](finding-search.md).
 
 ## 9. Usage data
@@ -444,10 +272,11 @@ open, 74 were partial fixes and 17 made verification claims that did not hold,
 caught when the rereview checked them against the new snapshot. Second, most
 of those reviews were followed within minutes by a new review on the same
 repository and base. So the author guide tightened the definition of
-`fixed`, and the routing sends those findings to `CONTINUABLE_FINDINGS`. One observation remains open: the Codex task rejects
-"fixed" claims about 19.5% of the time while the other three providers stay
-under 5%; sampling suggests Codex is usually right, and whether the others let
-partial fixes through still needs sampling.
+`fixed`, and the routing sends those findings to `CONTINUABLE_FINDINGS`. One
+observation remains open: the Codex task rejects "fixed" claims about 19.5%
+of the time while the other three providers stay under 5%; sampling suggests
+Codex is usually right, and whether the others let partial fixes through
+still needs sampling.
 
 ## 10. Security boundaries and data
 
@@ -457,26 +286,21 @@ partial fixes through still needs sampling.
   model identity; a `CODEX_TASK` review improves context isolation, which is
   not the model diversity of a separate provider.
 - The host sandbox bounds writes and network, not reads; the read boundary for
-  third-party code is the container, and only for an advisory Codex member
-  launched through the packaged launcher (section 4.6). The local two-round
-  "blind review" is a tool-surface guarantee: the reviewer tools do not serve
-  the author's rationale or responses before the author has answered. It is
-  not a boundary against a process that reads the store directly.
+  third-party code is the container of an advisory Codex member launched
+  through the packaged launcher. The two-round "blind review" is a
+  tool-surface guarantee, not a boundary against a process that reads the
+  store directly.
 - The store holds repository paths, requirements, patches, manifests,
-  findings, remote-only operator labels and rationales, and copies of dirty
-  or untracked working-tree overlays (a clean committed review copies no
-  files; it reads them from Git), with directories `0700` and files `0600`. Stop active Review Bridge
-  operations first, then delete `reviews/<review_id>` to remove one review; a
-  review bound to an autonomous workflow also leaves that workflow's ledger
-  and action audit under `workflows/<workflow_id>`, which stay until deleted;
-  cancel and release the workflow first so its claims do not block a later
-  one. Quit every Review Bridge process before deleting the whole
-  directory.
+  findings, operator labels and rationales, and copies of uncommitted
+  working-tree changes. To remove one review, stop active Review Bridge
+  operations and delete `reviews/<review_id>`; a workflow's own records live
+  separately under `workflows/`. Quit every Review Bridge process before
+  deleting the whole directory. Retention and permissions are in the
+  [README](../README.md#data-handling-and-cleanup).
 - The selected client may send source returned by the reviewer tools to its
   model provider according to its account configuration. The MCP server
-  processes never open a network connection; the packaged scripts do reach the network, the
-  collectors through the user's `gh` and the advisory launcher through its
-  egress proxy.
+  processes open no network connection; the packaged scripts reach GitHub
+  through the user's `gh`, and the advisory launcher through its egress proxy.
 
 Version-by-version changes are in the [CHANGELOG](../CHANGELOG.md).
 
@@ -503,14 +327,14 @@ source; this is an overview grouped by purpose.
 
 | Term | Meaning |
 | --- | --- |
-| snapshot | The change frozen for one review round: patch, manifest, hash, plus copies of dirty or untracked working-tree overlays up to 10 MiB each. |
+| snapshot | The change frozen for one review round, identified by a hash. |
 | ledger | The server-side record, append-only; the driver proposes, the ledger decides what counts. |
-| finding | One structured reviewer comment: severity, title, explanation, usually a location and recommendation, optional rule kind. |
-| resolution | The author's answer to a finding: fixed, rejected, or human_required, with a rationale and optional evidence. |
-| rationale | The author's design account, written before review and served only after the author has recorded responses. |
+| finding | One structured reviewer comment: severity, title, explanation, and usually a location and recommendation. |
+| resolution | The author's answer to a finding: fixed, rejected, or human_required, with a rationale. |
+| rationale | The author's design account, written before review and served only after the author has answered. |
 | successor | A review that continues a previous gated review; the reviewed unit is the delta. |
 | continuation | A fresh full review opened from `CONTINUABLE_FINDINGS`, carrying the unfinished findings as scope hints. |
-| baseline | The complete state of the three Codex feeds before a request; earlier comments are never an answer. |
+| baseline | The state of the Codex feeds before a request; earlier comments are never an answer. |
 | observation | The collector's one-pass reading of the pull request, checks, Codex feeds, and threads. |
-| gate | Local gate: the record `finalize_local_gate` writes for a CLEAN review, later used as publication authorization. Publication gate: the credential `finalize_publication_gate` mints, valid for minutes, verified immediately before a merge. |
+| gate | The record a finalize step writes; the publication gate expires and is verified immediately before a merge. |
 | advisory review | A review that can only produce a report, never a gate, used for someone else's pull request. |
