@@ -49,7 +49,7 @@ author is an operator rule.
 | --- | --- |
 | Immutable snapshot | What is reviewed is a frozen change: diff, requirement, implementation scope, with a hash. Later edits never change the version that was reviewed, and the local gate re-checks the working tree against the snapshot before it closes. |
 | Isolated reviewer | The reviewer is a separate context that did not write the code. It receives the snapshot, the requirement, and the scope; the author's responses and design rationale reach it only after it has delivered its own findings, and they are material to verify, never instructions. The reviewer role has no tool that edits the repository, pushes, or opens pull requests. |
-| Append-only ledger | A finding cannot be rewritten once submitted; round two appends its decisions and any new findings; publication and workflow records are revisioned and audit-chained. The driver proposes, the ledger decides what counts. |
+| Append-only ledger | A finding cannot be rewritten once submitted; round two appends its decisions and any new findings; publication records are revisioned, and the gate's finalization and verification events and the autonomous workflow's action trail are hash-chained. The driver proposes, the ledger decides what counts. |
 
 One more bias shapes how the project evolves: **prefer subtraction, and prove
 a state is reachable before defending it.** The state space only shrinks, and
@@ -286,7 +286,7 @@ still needs sampling.
 
 ## 10. Security boundaries and data
 
-- The local, remote, and publication gates are workflow attestations, not Git
+- The local, remote-only, and publication gates are workflow attestations, not Git
   or GitHub security boundaries. Review Bridge installs no `pre-push` hook.
   Provider binding and separate Codex tasks are not authenticated human or
   model identity; a `CODEX_TASK` review improves context isolation, which is
