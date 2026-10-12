@@ -61,7 +61,18 @@ driver never has to discover a schema by sending empty arguments. When
 `POST_AND_RECORD_CODEX_REVIEW_REQUEST`, post the returned
 `codex_review_request.body` unchanged and bind the post with its
 `codex_review_request.request_id` when present. Adapter-version-1 ledgers
-return the legacy exact body without an ID. For a fresh snapshot, run the
+return the legacy exact body without an ID.
+
+Every fix pushed during a remote-only loop is a new head and so a new ledger.
+`start_publication` and `get_publication_summary` both report
+`prior_ledgers_for_pull_request`: how many other publication ledgers in the
+store target the same `repository_id` and `pr_number`. It is counted from the
+store at call time and never written to the ledger. It is a signal for the
+operator only and never changes `status`, `blocking_reason`, or
+`next_action`. The autonomous workflow has a remote cycle budget; this is the
+manual path's only sign of how many heads came before.
+
+For a fresh snapshot, run the
 packaged read-only collector against the review ID:
 
 ```bash
@@ -98,7 +109,10 @@ offline audit validation.
 store into one report: findings by severity, author dispositions crossed with
 reviewer decisions, rebuttal outcomes before and after the verification
 obligation, rounds to CLEAN, continuations, workflow budget events, and human
-arbitration escalations, each per reviewer provider and overall. It prints
+arbitration escalations, each per reviewer provider and overall. A
+ledgers-per-pull-request section groups publication ledgers by `repository_id`
+and `pr_number`, bins the pull requests at 1, 2, 3-5, 6-10 and more than 10
+ledgers, and lists the three with the most. It prints
 markdown, or JSON with `--json`, and states every counting rule in the report
 itself so a number can be replayed against the ledgers it came from. It reads
 one store, writes nothing, sends nothing anywhere, and lists a ledger it cannot
@@ -157,7 +171,10 @@ JSON `workflows`, corpus workflow/audit counts, and workflow/audit diagnostic
 lists are null, and
 `scope.workflow_omission_reason` explains their omission. Markdown gives the
 same explanation. With no filters, existing workflow statistics remain
-included over the whole store.
+included over the whole store. Publication ledgers follow the same rule: a
+review filter does not select them, so with any filter enabled JSON
+`publications`, `skipped_publications`, and the corpus publication counts are
+null, and `scope.publication_omission_reason` says why.
 
 The JSON schema is version 2. It preserves existing unfiltered counters and
 adds `filters`, `scope`, `metric_semantics`, `corpus.reviews_filtered_out`, and

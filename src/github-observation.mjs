@@ -1017,10 +1017,7 @@ export function normalizeGithubObservation(publicationInput, rawInput) {
 }
 
 function runGh(args) {
-  const result = spawnSync("gh", args, {
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  const result = spawnGh(args);
   if (result.status !== 0) {
     throw new Error(
       `gh ${args.join(" ")} failed: ${result.stderr.trim() || result.stdout.trim()}`,
@@ -1034,10 +1031,7 @@ function runGh(args) {
 // answers that in the Link header, which is the only evidence of exhaustion
 // there is, so the transport has to keep it rather than parse the body away.
 function runGhWithHeaders(args) {
-  const result = spawnSync("gh", ["api", "-i", ...args], {
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  const result = spawnGh(["api", "-i", ...args]);
   if (result.status !== 0) {
     throw new Error(
       `gh api -i ${args.join(" ")} failed: ${result.stderr.trim() || result.stdout.trim()}`,
@@ -1234,11 +1228,45 @@ export function normalizeOauthAdminProofResponse(
   );
 }
 
-function spawnGh(args) {
+function spawnGhOnce(args) {
   return spawnSync("gh", args, {
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
   });
+}
+
+// What Go's net/http and gh print when no HTTP response arrived at all.
+const GH_TRANSPORT_FAILURE =
+  /connection reset|\bEOF\b|i\/o timeout|TLS handshake|Client\.Timeout exceeded|context deadline exceeded|error connecting to/i;
+const GH_RETRY_DELAY_MS = 1_000;
+
+// A failure that carries an HTTP status is GitHub's answer and is never
+// retried; only a failure where no answer arrived is.
+function isGhTransportFailure(result) {
+  const stderr = String(result.stderr ?? "");
+  return (
+    result.status !== 0 &&
+    GH_TRANSPORT_FAILURE.test(stderr) &&
+    !/\(HTTP \d{3}\)/.test(stderr) &&
+    !/^HTTP\/[0-9.]+ \d{3}/m.test(String(result.stdout ?? ""))
+  );
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// A transport failure costs a whole collection run, since the gate's window
+// runs from the oldest collection. One retry is a fresh request for the same
+// resource, not a continuation, so each read stays a single atomic page; its
+// result is simply the result, and nothing about the first attempt is kept.
+export function spawnGh(args, { spawn = spawnGhOnce, sleep = sleepSync } = {}) {
+  const first = spawn(args);
+  if (!isGhTransportFailure(first)) {
+    return first;
+  }
+  sleep(GH_RETRY_DELAY_MS);
+  return spawn(args);
 }
 
 function getOauthAdminProof(
@@ -1426,10 +1454,7 @@ export function collectGithubObservation(publicationInput) {
     // or a broken gh would quietly turn every descent proof into UNKNOWN and
     // label the collection a success. The status line decides which is which.
     let value;
-    const result = spawnSync("gh", ["api", "-i", endpoint], {
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-    });
+    const result = spawnGh(["api", "-i", endpoint]);
     if (result.status === 0) {
       value = JSON.parse(splitGhResponse(result.stdout, `GET ${endpoint}`).body);
     } else if (/^HTTP\/[0-9.]+ 404 /m.test(result.stdout)) {

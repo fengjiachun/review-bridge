@@ -1469,7 +1469,7 @@ if (role === "author") {
     {
       title: "Start GitHub publication ledger",
       description:
-        "Bind a local review gate or explicit remote-only authorization to one pull request, pinned Codex Bot actor, trigger policy, and fresh complete preexisting Codex baseline.",
+        "Bind a local review gate or explicit remote-only authorization to one pull request, pinned Codex Bot actor, trigger policy, and fresh complete preexisting Codex baseline. The result is the new ledger plus prior_ledgers_for_pull_request, the number of other publication ledgers in this store for the same repository_id and pr_number; it is derived at call time, not stored, and decides nothing.",
       inputSchema: {
         review_id: z.string(),
         repository_id: z.number().int().positive(),
@@ -1551,7 +1551,7 @@ if (role === "author") {
     {
       title: "Get compact GitHub publication status",
       description:
-        "Read the current revision, blocking reason, next action, gate state, remaining seconds on a finalized gate, and exact ambiguity acknowledgement sets without returning the full publication ledger or accessing GitHub. required_inputs names the calls next_action implies as {tool: [[field, source], ...]}; call them from it instead of probing schemas with empty arguments.",
+        "Read the current revision, blocking reason, next action, gate state, remaining seconds on a finalized gate, and exact ambiguity acknowledgement sets without returning the full publication ledger or accessing GitHub. required_inputs names the calls next_action implies as {tool: [[field, source], ...]}; call them from it instead of probing schemas with empty arguments. prior_ledgers_for_pull_request counts the other publication ledgers in this store for the same repository_id and pr_number, so a hand-driven loop can see how many heads came before; it never changes status, blocking_reason, or next_action.",
       inputSchema: { review_id: z.string() },
     },
     (input) => getPublicationSummary(storeRoot, input.review_id),
