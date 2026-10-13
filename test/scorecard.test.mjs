@@ -1693,3 +1693,87 @@ test("the undocumented share counts only findings that record a constraint", asy
   assert.match(markdown, /^\| CLAUDE_DESKTOP \| 3 \| 1 \| 1 \| 50\.0% \|$/m);
   assert.match(markdown, /^\| HERMES \| 1 \| 0 \| 0 \| - \|$/m);
 });
+
+async function writePublication(storeRoot, id, { repositoryId, owner = "owner", repo = "repo", prNumber, createdAt }) {
+  const directory = path.join(storeRoot, "reviews", id);
+  await fsp.mkdir(directory, { recursive: true });
+  await fsp.writeFile(
+    path.join(directory, "publication.json"),
+    `${JSON.stringify({
+      version: 2,
+      review_id: id,
+      created_at: createdAt,
+      target: { repository_id: repositoryId, owner, repo, pr_number: prNumber },
+    })}\n`,
+  );
+}
+
+test("publication ledgers are counted per pull request and binned", async (t) => {
+  const store = await emptyStore(t);
+  let serial = 0;
+  const publish = async (target, count) => {
+    for (let index = 0; index < count; index += 1) {
+      serial += 1;
+      const id = `rb-2026-10-01T000000-000Z-${String(serial).padStart(8, "0")}`;
+      await writePublication(store, id, {
+        ...target,
+        createdAt: `2026-10-01T00:00:${String(serial).padStart(2, "0")}.000Z`,
+      });
+    }
+  };
+  // Five pull requests, one per bin. The same number in another repository is
+  // another pull request, and a renamed repository is the same one.
+  await publish({ repositoryId: 1, prNumber: 1 }, 1);
+  await publish({ repositoryId: 2, prNumber: 1 }, 2);
+  await publish({ repositoryId: 1, prNumber: 3 }, 4);
+  await publish({ repositoryId: 1, prNumber: 4 }, 6);
+  await publish({ repositoryId: 1, prNumber: 4, repo: "renamed" }, 1);
+  await publish({ repositoryId: 1, prNumber: 5 }, 11);
+  // A local review that was never published has no publication ledger.
+  await writeReview(store, "local", reviewLedger({ id: "local", status: "CLEAN" }));
+  await writePublication(store, "elsewhere", {
+    repositoryId: 1,
+    prNumber: 5,
+    createdAt: "2026-10-02T00:00:00.000Z",
+  });
+  await fsp.writeFile(
+    path.join(store, "reviews", "elsewhere", "publication.json"),
+    `${JSON.stringify({ review_id: "moved", target: {} })}\n`,
+  );
+
+  const scorecard = await buildScorecard(store);
+  assert.deepEqual(scorecard.publications, {
+    ledgers: 25,
+    pull_requests: 5,
+    distribution: { 1: 1, 2: 1, "3-5": 1, "6-10": 1, ">10": 1 },
+    top: [
+      { repository: "owner/repo", repository_id: 1, pr_number: 5, ledgers: 11 },
+      { repository: "owner/renamed", repository_id: 1, pr_number: 4, ledgers: 7 },
+      { repository: "owner/repo", repository_id: 1, pr_number: 3, ledgers: 4 },
+    ],
+  });
+  assert.equal(scorecard.corpus.publications_counted, 25);
+  assert.equal(scorecard.corpus.publications_skipped, 1);
+  assert.deepEqual(scorecard.skipped_publications, [
+    { id: "elsewhere", reason: "review ID does not match its store directory" },
+  ]);
+  assert.equal(scorecard.scope.publications, "all_valid_publication_ledgers");
+  const markdown = renderScorecardMarkdown(scorecard);
+  assert.match(markdown, /## Ledgers per pull request/);
+  assert.match(markdown, /25 publication ledgers across 5 pull requests\./);
+  assert.match(markdown, /\| >10 \| 1 \|/);
+  assert.match(markdown, /\| owner\/renamed \| 4 \| 7 \|/);
+  assert.match(markdown, /groups publication ledgers by\n {2}`target\.repository_id` and `target\.pr_number`/);
+  assert.match(markdown, /\| reviews\/elsewhere\/publication\.json \| review ID does not match/);
+
+  // A review selection does not select publications, as with workflows.
+  const filtered = await buildScorecard(store, { since: "2026-09-01" });
+  assert.equal(filtered.publications, null);
+  assert.equal(filtered.skipped_publications, null);
+  assert.equal(filtered.corpus.publications_counted, null);
+  assert.equal(filtered.scope.publications, "omitted");
+  assert.match(
+    renderScorecardMarkdown(filtered),
+    /## Ledgers per pull request\n\nReview filters do not define a publication-ledger cohort/,
+  );
+});

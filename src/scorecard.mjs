@@ -26,6 +26,15 @@ const REVIEW_TYPES = ["gate", "advisory"];
 const REVIEW_STRATEGIES = ["FULL", "SUCCESSOR"];
 const WORKFLOW_OMISSION_REASON =
   "Review filters do not define a workflow or audit-log cohort; workflow statistics are omitted.";
+const PUBLICATION_OMISSION_REASON =
+  "Review filters do not define a publication-ledger cohort; ledgers-per-pull-request statistics are omitted.";
+const LEDGER_COUNT_BINS = [
+  ["1", (n) => n === 1],
+  ["2", (n) => n === 2],
+  ["3-5", (n) => n >= 3 && n <= 5],
+  ["6-10", (n) => n >= 6 && n <= 10],
+  [">10", (n) => n > 10],
+];
 const METRIC_SEMANTICS = {
   not_clean:
     "Counts statuses other than CLEAN/LOCAL_GATE_PASSED; it is not a failure count.",
@@ -268,6 +277,82 @@ function workflowDefect(workflow, directoryName) {
     }
   }
   return null;
+}
+
+// Only the fields the grouping reads: which pull request the ledger targets,
+// the name it is shown under, and when it was created.
+function publicationDefect(ledger, directoryName) {
+  if (ledger == null || typeof ledger !== "object") return "not a JSON object";
+  if (ledger.review_id !== directoryName) {
+    return "review ID does not match its store directory";
+  }
+  const target = ledger.target;
+  if (
+    !Number.isSafeInteger(target?.repository_id) ||
+    target.repository_id < 1 ||
+    !Number.isSafeInteger(target.pr_number) ||
+    target.pr_number < 1
+  ) {
+    return "target does not name a repository_id and pr_number";
+  }
+  if (!isName(target.owner) || !isName(target.repo)) {
+    return "target does not name an owner and repo";
+  }
+  if (!isTimestamp(ledger.created_at)) {
+    return `created_at is not a timestamp: ${JSON.stringify(ledger.created_at)}`;
+  }
+  return null;
+}
+
+function countPublications(ledgers) {
+  const pullRequests = new Map();
+  for (const ledger of ledgers) {
+    const { repository_id: repositoryId, pr_number: prNumber } = ledger.target;
+    const key = `${repositoryId}:${prNumber}`;
+    const at = Date.parse(ledger.created_at);
+    const entry = pullRequests.get(key);
+    if (entry == null) {
+      pullRequests.set(key, {
+        repository: `${ledger.target.owner}/${ledger.target.repo}`,
+        repository_id: repositoryId,
+        pr_number: prNumber,
+        ledgers: 1,
+        at,
+      });
+      continue;
+    }
+    entry.ledgers += 1;
+    // A renamed repository keeps its ID; it is shown under its latest name.
+    if (at > entry.at) {
+      entry.at = at;
+      entry.repository = `${ledger.target.owner}/${ledger.target.repo}`;
+    }
+  }
+  const counts = [...pullRequests.values()];
+  return {
+    ledgers: ledgers.length,
+    pull_requests: counts.length,
+    distribution: Object.fromEntries(
+      LEDGER_COUNT_BINS.map(([bin, contains]) => [
+        bin,
+        counts.filter((entry) => contains(entry.ledgers)).length,
+      ]),
+    ),
+    top: counts
+      .sort(
+        (a, b) =>
+          b.ledgers - a.ledgers ||
+          a.repository.localeCompare(b.repository) ||
+          a.pr_number - b.pr_number,
+      )
+      .slice(0, 3)
+      .map(({ repository, repository_id, pr_number, ledgers: count }) => ({
+        repository,
+        repository_id,
+        pr_number,
+        ledgers: count,
+      })),
+  };
 }
 
 // Each entry counts as one repair cycle simply by existing, and three of its
@@ -718,6 +803,18 @@ export async function buildScorecard(storeRoot, options = {}) {
     countWorkflowAudit(workflows, audit.events);
   }
 
+  const publicationLedgers = filtered
+    ? null
+    : await readJsonLedgers(path.join(storeRoot, "reviews"), "publication.json");
+  const skippedPublications = filtered ? null : [...publicationLedgers.skipped];
+  const validPublications = [];
+  for (const { id, record } of publicationLedgers?.records ?? []) {
+    const defect = publicationDefect(record, id);
+    if (defect != null) skippedPublications.push({ id, reason: defect });
+    else validPublications.push(record);
+  }
+  const publications = filtered ? null : countPublications(validPublications);
+
   return {
     schema_version: SCORECARD_SCHEMA_VERSION,
     generated_at: options.generatedAt ?? new Date().toISOString(),
@@ -729,6 +826,8 @@ export async function buildScorecard(storeRoot, options = {}) {
       review_diagnostics: "all_review_directories_in_store",
       workflows: filtered ? "omitted" : "all_valid_workflow_ledgers",
       workflow_omission_reason: filtered ? WORKFLOW_OMISSION_REASON : null,
+      publications: filtered ? "omitted" : "all_valid_publication_ledgers",
+      publication_omission_reason: filtered ? PUBLICATION_OMISSION_REASON : null,
     },
     metric_semantics: { ...METRIC_SEMANTICS },
     corpus: {
@@ -740,6 +839,8 @@ export async function buildScorecard(storeRoot, options = {}) {
       workflows_skipped: skippedWorkflows?.length ?? null,
       workflow_directories_without_ledger: workflowLedgers?.absent ?? null,
       audit_logs_skipped: skippedAuditLogs?.length ?? null,
+      publications_counted: publications?.ledgers ?? null,
+      publications_skipped: skippedPublications?.length ?? null,
       earliest_review_created_at: earliest?.text ?? null,
       latest_review_created_at: latest?.text ?? null,
     },
@@ -747,9 +848,11 @@ export async function buildScorecard(storeRoot, options = {}) {
       [...providers].sort(([a], [b]) => a.localeCompare(b)),
     ),
     workflows,
+    publications,
     skipped,
     skipped_workflows: skippedWorkflows,
     skipped_audit_logs: skippedAuditLogs,
+    skipped_publications: skippedPublications,
   };
 }
 
@@ -800,7 +903,8 @@ function providerRows(scorecard, build) {
 
 const COUNTING_RULES = [
   "Reviews are read from `<store>/reviews/*/review.json`. Without filters,",
-  "workflows are read from `<store>/workflows/*/workflow.json`. Nothing is written.",
+  "workflows are read from `<store>/workflows/*/workflow.json` and publication",
+  "ledgers from `<store>/reviews/*/publication.json`. Nothing is written.",
   "",
   "- A review is attributed to `reviewer_provider`; a ledger written before that",
   "  field existed counts as `CLAUDE_DESKTOP`, which is the server's own default.",
@@ -855,6 +959,15 @@ const COUNTING_RULES = [
   "  workflow numbers are not split by provider.",
   "  With any review filter, workflow ledgers and audit logs are not read and",
   "  their statistics are omitted: a review selection does not select workflows.",
+  "- Ledgers per pull request groups publication ledgers by",
+  "  `target.repository_id` and `target.pr_number`; every published head starts",
+  "  its own ledger, so the count is how many heads were published for that pull",
+  "  request. A pull request is shown under the `owner/repo` of its most recent",
+  "  ledger by `created_at`. Pull requests are binned at 1, 2, 3-5, 6-10 and",
+  "  more than 10 ledgers; the top three sort by count, then repository, then",
+  "  pull request number. With any review filter, publication ledgers are not",
+  "  read and this section is omitted, as workflow statistics are: a review",
+  "  selection does not select publications.",
   "- Audit logs are read only up to `action-audit-head.json`'s `committed_bytes`,",
   "  measured in bytes, so an uncommitted append never reaches the counts. The",
   "  hash chain is not verified here. An audit log that does not parse, is",
@@ -872,7 +985,7 @@ const COUNTING_RULES = [
 ].join("\n");
 
 export function renderScorecardMarkdown(scorecard) {
-  const { corpus, workflows } = scorecard;
+  const { corpus, workflows, publications } = scorecard;
   const sections = [
     "# Review Bridge scorecard",
     `Generated ${scorecard.generated_at} from \`${scorecard.store_root}\`. Read-only: this report never writes to the store.`,
@@ -904,6 +1017,14 @@ export function renderScorecardMarkdown(scorecard) {
             corpus.workflows_counted,
             corpus.workflows_skipped,
             corpus.workflow_directories_without_ledger,
+          ],
+        ]),
+        ...(publications == null ? [] : [
+          [
+            "Publications",
+            corpus.publications_counted,
+            corpus.publications_skipped,
+            "-",
           ],
         ]),
       ],
@@ -1083,6 +1204,28 @@ export function renderScorecardMarkdown(scorecard) {
         ["Remote repair attempts diverted", workflows.remote_attempts.diverted],
       ],
     ),
+    "## Ledgers per pull request",
+    ...(publications == null
+      ? [scorecard.scope.publication_omission_reason]
+      : [
+          `${publications.ledgers} publication ledgers across ${publications.pull_requests} pull requests.`,
+          table(
+            ["Ledgers per pull request", "Pull requests"],
+            LEDGER_COUNT_BINS.map(([bin]) => [bin, publications.distribution[bin]]),
+          ),
+          ...(publications.top.length === 0
+            ? []
+            : [
+                table(
+                  ["Repository", "Pull request", "Ledgers"],
+                  publications.top.map((entry) => [
+                    entry.repository,
+                    entry.pr_number,
+                    entry.ledgers,
+                  ]),
+                ),
+              ]),
+        ]),
   ];
   const skippedRows = [
     ...scorecard.skipped.map(({ id, reason }) => [`reviews/${id}`, reason]),
@@ -1092,6 +1235,10 @@ export function renderScorecardMarkdown(scorecard) {
     ]),
     ...(scorecard.skipped_audit_logs ?? []).map(({ id, reason }) => [
       `workflows/${id}/action-audit.jsonl`,
+      reason,
+    ]),
+    ...(scorecard.skipped_publications ?? []).map(({ id, reason }) => [
+      `reviews/${id}/publication.json`,
       reason,
     ]),
   ];

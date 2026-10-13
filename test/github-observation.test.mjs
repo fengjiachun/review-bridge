@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { collectClassicProtection, exceedsSinglePage, linkHasNext, normalizeClassicProtectionResponse, normalizeGithubObservation, normalizeOauthAdminProofResponse, splitGhResponse } from "../src/github-observation.mjs";
+import { collectClassicProtection, exceedsSinglePage, linkHasNext, normalizeClassicProtectionResponse, normalizeGithubObservation, normalizeOauthAdminProofResponse, spawnGh, splitGhResponse } from "../src/github-observation.mjs";
 
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
@@ -1092,5 +1092,71 @@ test("the normalizer derives descent from the provider status alone", () => {
       descends,
       status,
     );
+  }
+});
+
+// A scripted gh: each call returns the next result and records its arguments.
+function scriptedGh(results) {
+  const calls = [];
+  const sleeps = [];
+  return {
+    calls,
+    sleeps,
+    options: {
+      spawn(args) {
+        calls.push(args);
+        return results.shift();
+      },
+      sleep(ms) {
+        sleeps.push(ms);
+      },
+    },
+  };
+}
+
+test("a transport failure is retried once as a fresh request for the same resource", () => {
+  const args = ["api", "-i", "/repos/owner/repo/pulls/7"];
+  const success = { status: 0, stderr: "", stdout: 'HTTP/2 200 OK\n\n{"number":7}' };
+  const gh = scriptedGh([
+    {
+      status: 1,
+      stderr:
+        'Get "https://api.github.com/repos/owner/repo/pulls/7": read tcp 10.0.0.2:50000->140.82.112.6:443: read: connection reset by peer\n',
+      stdout: "",
+    },
+    success,
+  ]);
+  assert.equal(spawnGh(args, gh.options), success);
+  assert.deepEqual(gh.calls, [args, args]);
+  assert.equal(gh.sleeps.length, 1);
+
+  // A second transport failure is the answer; there is no third attempt.
+  const twice = scriptedGh([
+    { status: 1, stderr: "error connecting to api.github.com\n", stdout: "" },
+    { status: 1, stderr: "net/http: TLS handshake timeout\n", stdout: "" },
+  ]);
+  assert.match(spawnGh(args, twice.options).stderr, /TLS handshake/);
+  assert.equal(twice.calls.length, 2);
+});
+
+test("an HTTP answer or a non-transport failure is not retried", () => {
+  for (const failure of [
+    { status: 1, stderr: "gh: Not Found (HTTP 404)\n", stdout: "" },
+    // A server error is GitHub's answer even when its message reads like a
+    // transport failure.
+    { status: 1, stderr: "gh: upstream connection reset (HTTP 502)\n", stdout: "" },
+    {
+      status: 1,
+      stderr: "gh: unexpected EOF\n",
+      stdout: "HTTP/2.0 502 Bad Gateway\n\n",
+    },
+    { status: 1, stderr: "gh: To get started with GitHub CLI, please run:  gh auth login\n", stdout: "" },
+    // A successful exit whose body will not parse is the caller's failure.
+    { status: 0, stderr: "", stdout: "{not json" },
+  ]) {
+    const gh = scriptedGh([failure, { status: 0, stderr: "", stdout: "{}" }]);
+    assert.equal(spawnGh(["api", "/repos/owner/repo"], gh.options), failure);
+    assert.equal(gh.calls.length, 1);
+    assert.deepEqual(gh.sleeps, []);
   }
 });

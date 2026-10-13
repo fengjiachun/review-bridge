@@ -300,6 +300,73 @@ async function reachReady(state, startedAt = Date.now()) {
   return { ready, requestAt, observedAt };
 }
 
+test("start and summary count the other ledgers for the same pull request", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  const first = await start(state, startedAt);
+  assert.equal(first.prior_ledgers_for_pull_request, 0);
+  // The count is a derivation, never part of the stored ledger.
+  assert.equal(
+    "prior_ledgers_for_pull_request" in
+      (await getPublication(state.store, state.reviewId)),
+    false,
+  );
+  const alone = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(alone.prior_ledgers_for_pull_request, 0);
+
+  const second = await sameHeadSuccessorFixture(state);
+  assert.equal(
+    (await start(second, startedAt + 1_000)).prior_ledgers_for_pull_request,
+    1,
+  );
+  // Another pull request, and the same number in another repository, are
+  // not the same pull request.
+  for (const [repositoryId, prNumber] of [
+    [42, 8],
+    [43, 7],
+  ]) {
+    const other = await sameHeadSuccessorFixture(state);
+    const created = await startPublication(
+      other.store,
+      {
+        reviewId: other.reviewId,
+        repositoryId,
+        owner: "owner",
+        repo: "repo",
+        prNumber,
+        baseBranch: "main",
+        headBranch: "agent/change",
+        codexActorId: 99,
+        codexActorType: "Bot",
+        codexActorLogin: "chatgpt-codex-connector[bot]",
+        codexTriggerMode: "EXPLICIT_ONLY",
+        baseline: baseline(startedAt + 1_900),
+      },
+      { clock: () => startedAt + 2_000 },
+    );
+    assert.equal(created.prior_ledgers_for_pull_request, 0);
+    assert.equal(
+      (await getPublicationSummary(other.store, other.reviewId))
+        .prior_ledgers_for_pull_request,
+      0,
+    );
+  }
+
+  const later = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(later.prior_ledgers_for_pull_request, 1);
+  assert.equal(
+    (await getPublicationSummary(second.store, second.reviewId))
+      .prior_ledgers_for_pull_request,
+    1,
+  );
+  // A pure signal: nothing else in the summary moves with it.
+  assert.deepEqual(
+    { ...later, prior_ledgers_for_pull_request: 0 },
+    alone,
+  );
+});
+
 test("publication summary reports compact next actions and gate state", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -332,6 +399,7 @@ test("publication summary reports compact next actions and gate state", async (t
     required_ambiguous_results: [],
     required_inputs:
       PUBLICATION_ACTION_INPUTS.POST_AND_RECORD_CODEX_REVIEW_REQUEST,
+    prior_ledgers_for_pull_request: 0,
     gate_state: "ABSENT",
     gate_expires_in_seconds: null,
   });

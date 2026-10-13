@@ -3361,6 +3361,52 @@ async function findBaselineIssuances(
   );
 }
 
+// How many other publication ledgers in this store target the same pull
+// request. A manual remote-only loop mints one ledger per head, and this is the
+// only signal it has of how many heads came before. It is derived at read time
+// and never stored, so it can inform an operator without deciding anything.
+// An unreadable neighbour is skipped, as the baseline issuance scan skips it.
+async function priorLedgersForPullRequest(storeRoot, currentReviewId, target) {
+  let entries;
+  try {
+    entries = await fsp.readdir(path.join(storeRoot, "reviews"), {
+      withFileTypes: true,
+    });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return 0;
+    }
+    throw error;
+  }
+  let count = 0;
+  for (const entry of entries) {
+    if (
+      !entry.isDirectory() ||
+      entry.name === currentReviewId ||
+      !/^rb-[0-9TZ-]+-[a-f0-9]{8}$/.test(entry.name)
+    ) {
+      continue;
+    }
+    let ledger;
+    try {
+      ledger = await loadPublicationFile(
+        pathsFor(storeRoot, entry.name),
+        entry.name,
+        { allowMissing: true },
+      );
+    } catch {
+      continue;
+    }
+    if (
+      ledger?.target.repository_id === target.repository_id &&
+      ledger.target.pr_number === target.pr_number
+    ) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 function requireRevision(ledger, expectedRevision) {
   assertRevision(expectedRevision);
   if (ledger.revision !== expectedRevision) {
@@ -6382,7 +6428,14 @@ export async function startPublication(
     assertLedgerSize(ledger);
     await initializeAudit(paths, reviewId);
     await saveLedger(paths, ledger);
-    return ledger;
+    return {
+      ...ledger,
+      prior_ledgers_for_pull_request: await priorLedgersForPullRequest(
+        storeRoot,
+        reviewId,
+        ledger.target,
+      ),
+    };
   });
 }
 
@@ -6823,6 +6876,11 @@ export async function getPublicationSummary(
             required_request_refs: clone(closure.requests),
             required_ambiguous_results: clone(closure.results),
             required_inputs: publicationRequiredInputs(nextAction),
+            prior_ledgers_for_pull_request: await priorLedgersForPullRequest(
+              storeRoot,
+              ledger.review_id,
+              ledger.target,
+            ),
             gate_state: gate.state,
             // Rounded down, so the reported window is never wider than the
             // one the expiry comparison enforces.
