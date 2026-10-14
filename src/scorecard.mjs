@@ -44,6 +44,8 @@ const METRIC_SEMANTICS = {
     "Counts advisory REVIEW_SUBMITTED: findings have been reported and the review is terminal. Advisory CLEAN is also terminal and is included in the clean counts.",
   author_loop:
     "Disposition, rebuttal and continuation metrics describe the gate author/rereview loop; advisory reviews have no such loop.",
+  intent:
+    "Counts reviews with a recorded reconstructed_intent and round twos with a recorded intent_comparison, once per review. Missing fields count as zero; no free text is aggregated.",
 };
 const HUMAN_REQUIRED_EVENTS = [
   "AUTHOR_ESCALATED",
@@ -74,6 +76,8 @@ function zeroCounts(keys) {
 function emptyStats() {
   return {
     reviews: 0,
+    reconstructed_intent_recorded: 0,
+    intent_comparison_recorded: 0,
     reviews_by_type: zeroCounts(REVIEW_TYPES),
     reviews_by_status: zeroCounts(REVIEW_STATUSES),
     advisory_reported: 0,
@@ -174,6 +178,11 @@ function reviewDefect(review, directoryName) {
   }
   if (review.repository_path != null && !isName(review.repository_path)) {
     return "repository_path is not a non-empty string";
+  }
+  for (const key of ["reconstructed_intent", "intent_comparison"]) {
+    if (review[key] != null && (typeof review[key] !== "string" || review[key].trim() === "")) {
+      return `${key} is not a non-empty string`;
+    }
   }
   for (const key of ["findings", "resolutions", "rereview_decisions", "history"]) {
     if (!Array.isArray(review[key])) return `${key} is not an array`;
@@ -470,6 +479,8 @@ function humanRequiredReason(review) {
 
 function countReview(stats, review) {
   stats.reviews += 1;
+  if (review.reconstructed_intent != null) stats.reconstructed_intent_recorded += 1;
+  if (review.current_round === 2 && review.intent_comparison != null) stats.intent_comparison_recorded += 1;
   stats.reviews_by_type[review.advisory === true ? "advisory" : "gate"] += 1;
   stats.reviews_by_status[review.status] += 1;
   if (review.advisory === true && review.status === "REVIEW_SUBMITTED") {
@@ -1069,6 +1080,14 @@ export function renderScorecardMarkdown(scorecard) {
           ],
         ];
       }),
+    ),
+    "## Intent checks",
+    METRIC_SEMANTICS.intent,
+    table(
+      ["Provider", "Reconstructed intent recorded", "Round-two intent comparison recorded"],
+      providerRows(scorecard, (provider, stats) => [
+        [provider, stats.reconstructed_intent_recorded, stats.intent_comparison_recorded],
+      ]),
     ),
     "## Findings by severity",
     table(

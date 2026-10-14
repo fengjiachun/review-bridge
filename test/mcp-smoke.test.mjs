@@ -6,7 +6,8 @@ import path from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { REVIEWER_PROVIDERS } from "../src/core.mjs";
+import { REVIEWER_PROVIDERS, prepareReview, prepareRereview, submitResolutions } from "../src/core.mjs";
+import { fixture, git } from "./helpers/repository-fixture";
 import { AUTONOMOUS_PAUSE_REASON_CODES } from "../src/workflow.mjs";
 
 const serverPath = path.resolve("src/server.mjs");
@@ -574,4 +575,61 @@ test("record_github_snapshot takes an observation file instead of an inline payl
     JSON.parse(read.content[0].text).code ?? "",
     /^OBSERVATION_FILE_/,
   );
+});
+
+test("MCP preserves immutable intent texts and only serves the reconstruction in round two", async (t) => {
+  const { root, repository, store, baseSha } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "change value");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Export the new value.",
+    implementationScope: "app.js",
+    rationale: "Consumers need value 2.",
+  });
+  const reviewer = await connectClient("reviewer", store);
+  const author = await connectClient("author", store);
+  t.after(async () => { await reviewer.close(); await author.close(); });
+  const call = async (client, name, args = {}) => {
+    const result = await client.callTool({ name, arguments: { review_id: prepared.id, ...args } });
+    assert.notEqual(result.isError, true, JSON.stringify(result));
+    return JSON.parse(result.content[0].text);
+  };
+  const opened = await call(reviewer, "open_review");
+  assert.equal(Object.hasOwn(opened, "rationale"), false);
+  assert.equal(Object.hasOwn(opened, "reconstructed_intent"), false);
+  const intent = "  Clearly exports 2.\nInferred: consumers need a new constant.  ";
+  const findings = [{ severity: "major", title: "Missing coverage", explanation: "The exported value has no test." }];
+  await call(reviewer, "submit_review", { findings, reconstructed_intent: intent });
+  const afterInitial = await call(author, "get_review");
+  assert.equal(afterInitial.reconstructed_intent, intent);
+  assert.equal(Object.hasOwn(await call(reviewer, "open_review"), "reconstructed_intent"), false);
+  const repeated = await reviewer.callTool({
+    name: "submit_review", arguments: { review_id: prepared.id, findings: [], reconstructed_intent: "Changed reading" },
+  });
+  assert.equal(repeated.isError, true);
+  assert.match(JSON.parse(repeated.content[0].text).error, /not waiting for its initial review/);
+  assert.deepEqual(await call(author, "get_review"), afterInitial);
+
+  await submitResolutions(store, prepared.id, [{ finding_id: "F-001", disposition: "fixed", rationale: "Added coverage." }]);
+  await prepareRereview(store, prepared.id);
+  const reopened = await call(reviewer, "open_review");
+  assert.equal(reopened.reconstructed_intent, intent);
+  assert.equal(reopened.rationale, "Consumers need value 2.");
+  assert.equal(reopened.resolutions[0].finding_id, "F-001");
+  const comparison = "  Agrees on the new constant.\nConsumer motivation was inferred.  ";
+  const decisions = [{ finding_id: "F-001", decision: "resolved", rationale: "Coverage now exists." }];
+  await call(reviewer, "submit_rereview", { decisions, new_findings: [], intent_comparison: comparison });
+  const complete = await call(author, "get_review");
+  assert.equal(complete.status, "CLEAN");
+  assert.equal(complete.reconstructed_intent, intent);
+  assert.equal(complete.intent_comparison, comparison);
+  const repeatedRereview = await reviewer.callTool({
+    name: "submit_rereview", arguments: { review_id: prepared.id, decisions, new_findings: [], intent_comparison: "Changed comparison" },
+  });
+  assert.equal(repeatedRereview.isError, true);
+  assert.deepEqual(await call(author, "get_review"), complete);
 });

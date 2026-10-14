@@ -301,6 +301,14 @@ function roundsSection(review) {
       rows,
     ),
     ...roundStrategySections(review),
+    ...(review.reconstructed_intent == null ? [] : [
+      "#### Round 1 reconstructed intent",
+      block(review.reconstructed_intent),
+    ]),
+    ...(review.intent_comparison == null ? [] : [
+      "#### Round 2 intent comparison",
+      block(review.intent_comparison),
+    ]),
   ];
 }
 
@@ -780,7 +788,7 @@ export function summaryDigest(summary) {
 // Raise it by one in any change that alters the Markdown this module renders
 // -- wording, ordering, a new line, a heading -- so the reports the previous
 // version wrote stay readable at their own names.
-export const REPORT_FORMAT = 6;
+export const REPORT_FORMAT = 7;
 
 // `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
 // `p<revision>-s<summary digest>-f<format>` without one.

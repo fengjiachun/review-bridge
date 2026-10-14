@@ -1777,3 +1777,34 @@ test("publication ledgers are counted per pull request and binned", async (t) =>
     /## Ledgers per pull request\n\nReview filters do not define a publication-ledger cohort/,
   );
 });
+
+test("intent coverage counts recordings per provider and respects review filters", async (t) => {
+  const store = await emptyStore(t);
+  const intent = "Clearly exports a constant; motivation is inferred.";
+  for (const [id, provider, currentRound, fields] of [
+    ["legacy", "CLAUDE_DESKTOP", 2, {}],
+    ["first", "CODEX_TASK", 1, { reconstructed_intent: intent }],
+    ["both", "CODEX_TASK", 2, { reconstructed_intent: intent, intent_comparison: "Agrees." }],
+    ["comparison-only", "HERMES", 2, { intent_comparison: "No recorded round-one intent." }],
+  ]) {
+    await writeReview(store, id, { ...reviewLedger({ id, provider, currentRound, status: "CLEAN" }), ...fields });
+  }
+  const scorecard = await buildScorecard(store);
+  const counts = (provider) => [provider.reconstructed_intent_recorded, provider.intent_comparison_recorded];
+  assert.deepEqual(counts(scorecard.providers.ALL), [2, 2]);
+  assert.deepEqual(counts(scorecard.providers.CODEX_TASK), [2, 1]);
+  assert.deepEqual(counts(scorecard.providers.CLAUDE_DESKTOP), [0, 0]);
+  assert.deepEqual(counts(scorecard.providers.HERMES), [0, 1]);
+  assert.equal(JSON.stringify(scorecard).includes(intent), false);
+  const markdown = renderScorecardMarkdown(scorecard);
+  assert.match(markdown, /## Intent checks/);
+  assert.match(markdown, /\| CODEX_TASK \| 2 \| 1 \|/);
+  const filtered = await buildScorecard(store, { reviewType: "advisory" });
+  assert.deepEqual(counts(filtered.providers.ALL), [0, 0]);
+  await writeReview(store, "invalid", {
+    ...reviewLedger({ id: "invalid", status: "CLEAN" }), reconstructed_intent: 42,
+  });
+  const malformed = await buildScorecard(store);
+  assert.deepEqual(counts(malformed.providers.ALL), [2, 2]);
+  assert.equal(malformed.skipped[0].reason, "reconstructed_intent is not a non-empty string");
+});
