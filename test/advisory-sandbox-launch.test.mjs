@@ -220,7 +220,7 @@ if (!args.includes("codex")) {
   if (variant === "subagent-answered") call("search_snapshot", { outcome: "transport" });
   const tamper = process.env.FAKE_TAMPER || "";
   if (tamper !== "no-verdict") {
-    await submitInitialReview(staged, reviewId, [{ severity: "major", title: "one", explanation: "first", path: "app.js", line: 1, constraint: { kind: "documented", source: "AGENTS.md" } }], "CODEX_TASK");
+    await submitInitialReview(staged, reviewId, [{ severity: "major", title: "one", explanation: "first", path: "app.js", line: 1, constraint: { kind: "documented", source: "AGENTS.md" } }], "CODEX_TASK", "Clearly exports a constant; motivation is inferred.");
     if (process.env.FAKE_BIG) for (let i = 0; i < 40000; i += 1) process.stdout.write("codex\\nfiller line " + i + " ".repeat(60) + "\\n");
     // A reviewer that never stops writing: 70 MB, past the transcript's bound.
     if (process.env.FAKE_HUGE) { const megabyte = "x".repeat(1024 * 1024 - 1) + "\\n"; for (let i = 0; i < 70; i += 1) process.stdout.write(megabyte); }
@@ -543,6 +543,7 @@ test("with a stand-in docker the launcher stages the review, runs, validates, an
     line: 1,
     constraint: { kind: "documented", source: "AGENTS.md" },
   });
+  assert.equal(ledger.reconstructed_intent, "Clearly exports a constant; motivation is inferred.");
   assert.equal(ledger.advisory, true);
   assert.equal(ledger.history.at(-1).event, "FINDINGS_SUBMITTED");
   // The scratch directory named in the output holds the staged copy.

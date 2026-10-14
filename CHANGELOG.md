@@ -11,6 +11,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Added
 
+- Record optional round-one reconstructed intent and round-two intent comparison
+  in the review ledger, report, and scorecard; guide all four reviewer providers
+  through the comparison while keeping round one blind (issue #178).
+
 - (#177) `start_publication` and `get_publication_summary` report
   `prior_ledgers_for_pull_request`, the number of other publication ledgers in
   the store for the same `repository_id` and `pr_number`. It is derived at call

@@ -818,7 +818,7 @@ async function replayAndCopyBack(inputs, stage, before, scratch, api) {
         recursive: true,
         filter: (entry) => !LOCK_ARTIFACTS.has(path.basename(entry)),
       });
-      await submitInitialReview(replayStore, inputs.reviewId, submitPayload(staged), "CODEX_TASK");
+      await submitInitialReview(replayStore, inputs.reviewId, submitPayload(staged), "CODEX_TASK", staged.reconstructed_intent);
       const replayed = await loadReview(replayStore, inputs.reviewId);
       const expected = comparableLedger(replayed);
       const actual = comparableLedger(staged);

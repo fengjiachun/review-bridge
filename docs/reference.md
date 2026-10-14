@@ -90,7 +90,7 @@ The server started with `--role reviewer`. The summary is the first sentence of 
 | `read_snapshot_file` | Read a repository file exactly as it existed in the selected review round. | `review_id`, `round`, `path` |
 | `search_snapshot` | Search text across the reviewed Git tree and captured working-tree overlays. | `review_id`, `round`, `pattern` |
 | `submit_rereview` | Decide every prior finding and report any new findings. | `review_id`, `decisions`, `new_findings` |
-| `submit_review` | Submit structured initial findings. | `review_id`, `findings` |
+| `submit_review` | Submit structured initial findings and optional reconstructed_intent: what the code appears to do, distinguishing clear behavior from inference. | `review_id`, `findings` |
 
 ## Error codes
 

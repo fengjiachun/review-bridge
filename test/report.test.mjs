@@ -1671,7 +1671,7 @@ test("legacy full reports retain their contents and mark reviewer configuration 
   // The stored baseline retains its original rendering identity.
   assert.ok(baseline.includes("- Report revision: `9-f1`"));
   assert.ok(rendered.includes(`- Report revision: \`9-f${REPORT_FORMAT}\``));
-  assert.equal(REPORT_FORMAT, 6);
+  assert.equal(REPORT_FORMAT, 7);
 });
 
 test("a finding's heading names the constraint it records", () => {
@@ -2017,7 +2017,7 @@ test("the five places that carry the report's identity agree, renderer format in
   // 1. reportRevision, where the identity is minted.
   const revision = reportRevision(review, publication, publicationSummary);
   assert.equal(revision, `${review.state_version}-f${REPORT_FORMAT}`);
-  assert.equal(REPORT_FORMAT, 6);
+  assert.equal(REPORT_FORMAT, 7);
 
   const receipt = await writeReviewReport(state.store, state.reviewId);
   // 2. the file name, and 3. the tool receipt.
@@ -2039,4 +2039,18 @@ test("the five places that carry the report's identity agree, renderer format in
     written.replace(renderTime, ""),
     run(state.reviewId, "--full", "--store", state.store).replace(renderTime, ""),
   );
+});
+
+test("round sections print both intent texts as literal reviewer material", () => {
+  const review = cleanInTwoRounds({
+    reconstructed_intent: "Clearly exports a constant.\n```\n## forged heading",
+    intent_comparison: "Agrees on behavior; consumer motivation was inferred.",
+  });
+  const markdown = render(review);
+  assert.ok(markdown.includes("#### Round 1 reconstructed intent\n\n````text\n" + review.reconstructed_intent + "\n````"));
+  assert.ok(markdown.includes("#### Round 2 intent comparison\n\n```text\n" + review.intent_comparison + "\n```"));
+  assert.ok(markdown.indexOf("#### Round 1 reconstructed intent") > markdown.indexOf("### Rounds"));
+  const legacy = render(cleanInTwoRounds());
+  assert.equal(legacy.includes("reconstructed intent"), false);
+  assert.equal(legacy.includes("intent comparison"), false);
 });

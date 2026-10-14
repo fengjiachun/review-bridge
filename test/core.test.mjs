@@ -4495,3 +4495,30 @@ test("human arbitration exports carry the author rationale", async (t) => {
     /## Author rationale\n\n {4}Chose a guard clause[^\n]*\n {4}Unsure: the error text\.\n/,
   );
 });
+
+test("intent submissions validate free text without mutating the ledger on failure", async (t) => {
+  const { store, prepared } = await rationaleFixture(t);
+  for (const invalid of [null, 42, "", " \n", "x".repeat(200_001)]) {
+    await assert.rejects(
+      submitInitialReview(store, prepared.id, ONE_FINDING, "CLAUDE_DESKTOP", invalid),
+      /reconstructed_intent (must be a non-empty string|exceeds)/,
+    );
+    assert.deepEqual(await getReview(store, prepared.id), prepared);
+  }
+  await submitInitialReview(store, prepared.id, ONE_FINDING);
+  await submitResolutions(store, prepared.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added coverage." },
+  ]);
+  const roundTwo = await prepareRereview(store, prepared.id);
+  const decisions = [{ finding_id: "F-001", decision: "resolved", rationale: "Verified coverage." }];
+  for (const invalid of [null, 42, "", " \n", "x".repeat(200_001)]) {
+    await assert.rejects(
+      submitRereview(store, prepared.id, decisions, [], "CLAUDE_DESKTOP", invalid),
+      /intent_comparison (must be a non-empty string|exceeds)/,
+    );
+    assert.deepEqual(await getReview(store, prepared.id), roundTwo);
+  }
+  const complete = await submitRereview(store, prepared.id, decisions, []);
+  assert.equal(Object.hasOwn(complete, "reconstructed_intent"), false);
+  assert.equal(Object.hasOwn(complete, "intent_comparison"), false);
+});

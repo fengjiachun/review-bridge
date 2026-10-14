@@ -26,6 +26,11 @@ client setup and runtime limits. The launcher starts an independent process;
 you follow it from the author conversation rather than creating a UI task.
 `prepare_review` also takes an optional `rationale`: the author's design
 decisions, dropped alternatives, and doubts, written before any finding exists.
+Before listing round-one findings, the reviewer writes `reconstructed_intent`:
+what the code appears to do, separating clear behavior from inference. The
+optional free text is submitted with `submit_review`, stored unchanged, and
+cannot be replaced by another submission. Round-one `open_review` serves
+neither the rationale nor a reconstructed intent.
 
 The pending review has a `review_id` and starts in `WAITING_FOR_REVIEW`.
 Use `get_review_summary` for the compact state, next action, current snapshot,
@@ -113,7 +118,15 @@ allowed. A `DEEPSEEK_HARNESS` reviewer cannot: every headless run starts a fresh
 so launch a new one with the same review ID and a request to rereview the
 author's resolutions. It rebuilds the round from `open_review`, which serves
 every round-one finding and every author resolution. Only now does
-`open_review` show the reviewer the author's `rationale`. Rereview ends in `CLEAN`,
+`open_review` show the reviewer the author's `rationale` and its own round-one
+`reconstructed_intent`, when recorded. After rereading its findings and before
+deciding on them, the reviewer writes `intent_comparison` in `submit_rereview`:
+where those accounts agree or diverge. Material divergence is also a new
+finding. Both fields are optional non-empty text (at most 200,000 characters);
+old ledgers need no migration. Reports display the texts under their rounds,
+and the scorecard counts recordings without aggregating their contents.
+A first-round CLEAN review ends without a round-two comparison.
+Rereview ends in `CLEAN`,
 `CONTINUABLE_FINDINGS`, or `HUMAN_REQUIRED`. Finalize `CLEAN` with
 `finalize_local_gate` to reach `LOCAL_GATE_PASSED`:
 

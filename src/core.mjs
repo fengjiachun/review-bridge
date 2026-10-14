@@ -1034,6 +1034,8 @@ function publicReview(review) {
     requirement: review.requirement,
     implementation_scope: review.implementation_scope,
     rationale: review.rationale ?? null,
+    ...(review.reconstructed_intent == null ? {} : { reconstructed_intent: review.reconstructed_intent }),
+    ...(review.intent_comparison == null ? {} : { intent_comparison: review.intent_comparison }),
     reviewer_provider: reviewerProviderFor(review),
     reviewer_configuration: review.rounds?.at(-1)?.reviewer_configuration ?? null,
     reviewer_dispatch: review.rounds?.at(-1)?.reviewer_dispatch ?? null,
@@ -1071,8 +1073,12 @@ function rationaleVisibleToReviewer(review) {
 }
 
 function reviewerReview(review) {
-  const { rationale, ...rest } = publicReview(review);
-  return rationaleVisibleToReviewer(review) ? { ...rest, rationale } : rest;
+  const { rationale, reconstructed_intent, ...rest } = publicReview(review);
+  return {
+    ...rest,
+    ...(rationaleVisibleToReviewer(review) ? { rationale } : {}),
+    ...(review.current_round === 2 && reconstructed_intent != null ? { reconstructed_intent } : {}),
+  };
 }
 
 function actionRequired(status, advisory = false) {
@@ -1673,7 +1679,7 @@ export async function listPendingReviews(storeRoot, reviewerProvider) {
     ["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"],
     reviewerProvider,
   );
-  return reviews.map(({ rationale, ...rest }) => rest);
+  return reviews.map(({ rationale, reconstructed_intent, intent_comparison, ...rest }) => rest);
 }
 
 export async function getReview(storeRoot, reviewId) {
@@ -1999,6 +2005,7 @@ export async function submitInitialReview(
   reviewId,
   findingsInput,
   reviewerProvider = "CLAUDE_DESKTOP",
+  reconstructedIntent,
 ) {
   return withReviewMutationLock(storeRoot, reviewId, () =>
     submitInitialReviewWhileLocked(
@@ -2006,6 +2013,7 @@ export async function submitInitialReview(
       reviewId,
       findingsInput,
       reviewerProvider,
+      reconstructedIntent,
     ),
   );
 }
@@ -2015,6 +2023,7 @@ async function submitInitialReviewWhileLocked(
   reviewId,
   findingsInput,
   reviewerProvider,
+  reconstructedIntent,
 ) {
   const review = await loadReview(storeRoot, reviewId);
   requireReviewerProvider(review, reviewerProvider);
@@ -2032,6 +2041,9 @@ async function submitInitialReviewWhileLocked(
     normalizeFinding(finding, `F-${String(index + 1).padStart(3, "0")}`, 1),
   );
   review.findings = findings;
+  if (reconstructedIntent !== undefined) {
+    review.reconstructed_intent = assertString(reconstructedIntent, "reconstructed_intent");
+  }
   // Each verdict records the errata watermark the server last witnessed
   // being served to the reviewer through open_review, so which decision
   // weighed which corrections stays replayable; an erratum appended after
@@ -2295,6 +2307,7 @@ export async function submitRereview(
   decisionInputs,
   newFindingInputs,
   reviewerProvider = "CLAUDE_DESKTOP",
+  intentComparison,
 ) {
   return withReviewMutationLock(storeRoot, reviewId, () =>
     submitRereviewWhileLocked(
@@ -2303,6 +2316,7 @@ export async function submitRereview(
       decisionInputs,
       newFindingInputs,
       reviewerProvider,
+      intentComparison,
     ),
   );
 }
@@ -2313,11 +2327,15 @@ async function submitRereviewWhileLocked(
   decisionInputs,
   newFindingInputs,
   reviewerProvider,
+  intentComparison,
 ) {
   const review = await loadReview(storeRoot, reviewId);
   requireReviewerProvider(review, reviewerProvider);
   if (review.status !== "WAITING_FOR_REREVIEW") {
     throw new Error(`review is not waiting for rereview (status=${review.status})`);
+  }
+  if (intentComparison !== undefined) {
+    review.intent_comparison = assertString(intentComparison, "intent_comparison");
   }
   if (!Array.isArray(decisionInputs) || !Array.isArray(newFindingInputs)) {
     throw new Error("decisions and new_findings must be arrays");
