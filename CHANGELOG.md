@@ -7,11 +7,11 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.20.0 - 2026-10-14
 
 ### Added
 
-- Record optional round-one reconstructed intent and round-two intent comparison
+- (#179) Record optional round-one reconstructed intent and round-two intent comparison
   in the review ledger, report, and scorecard; guide all four reviewer providers
   through the comparison while keeping round one blind (issue #178).
 
@@ -37,6 +37,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   workflow, clients, reports, and anonymized usage data, with a Chinese
   edition in `docs/overview.zh.md`, both linked from the README
   documentation table.
+
+### Internal
+
+- (#180) Release 0.20.0.
 
 ## 0.19.0 - 2026-10-09
 
