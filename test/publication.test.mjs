@@ -1216,6 +1216,55 @@ test("a markerless clean reply keeps the request it answered out of the closure"
   assert.deepEqual(requested.codex_review_ambiguity_acknowledgements, []);
 });
 
+// Since 2026-10-16 the Codex app opens its result comments with a receipt
+// marker. A clean reply and a failure notice must classify exactly as they
+// did without it; only the stored body hash differs.
+test("Codex result comments opened by the receipt marker classify as before", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt, baselineV2(startedAt - 100));
+
+  const { cleanReply, adapt, record } = codexFeeds(state);
+  const a = await record(1, 100, startedAt + 1_000);
+  const receipt = (comment) => ({
+    ...comment,
+    body: `<!-- codex-review-receipt:v1 -->\n\n${comment.body}`,
+  });
+  const failure = (id, at) => ({
+    ...cleanReply(id, at),
+    body: "Codex Review: Something went wrong. Try again later.\n\n```\nAn unknown error occurred\n```",
+  });
+  const classify = (observation) =>
+    observation.codex_review.results.map(
+      ({ result_id, association, format, verdict, reviewed_head_sha }) => ({
+        result_id,
+        association,
+        format,
+        verdict,
+        reviewed_head_sha,
+      }),
+    );
+  for (const reply of [cleanReply, failure]) {
+    const plain = reply(101, startedAt + 1_100);
+    const marked = receipt(plain);
+    const before = await adapt(startedAt + 2_000, [a.comment, plain]);
+    const after = await adapt(startedAt + 2_000, [a.comment, marked]);
+    assert.equal(after.codex_review.results.length, 1);
+    assert.deepEqual(classify(after), classify(before));
+    assert.notEqual(
+      after.codex_review.results[0].body_sha256,
+      before.codex_review.results[0].body_sha256,
+    );
+  }
+  const clean = await adapt(startedAt + 2_000, [
+    a.comment,
+    receipt(cleanReply(101, startedAt + 1_100)),
+  ]);
+  assert.equal(clean.codex_review.results[0].verdict, "CLEAN");
+  assert.equal(clean.codex_review.results[0].reviewed_head_sha, state.headSha);
+});
+
 test("a request posted after a markerless answer is still superseded", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));

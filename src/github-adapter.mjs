@@ -22,6 +22,13 @@ const APP_NOTICE_MARKERS = [
   },
 ];
 const CLEAN_PREFIX = "Codex Review: Didn't find any major issues.";
+// Since 2026-10-16 the Codex app opens its result comments and reviews with
+// this receipt marker. The verdict text follows it, so prefix checks read the
+// body past the marker; the stored body hash still covers the whole body.
+const RECEIPT_MARKER = /^<!-- codex-review-receipt:v1 -->\s*/;
+function bodyPastReceipt(body) {
+  return body.replace(RECEIPT_MARKER, "");
+}
 const COMMIT_PREFIX = "[0-9a-f]{10,40}";
 const CLEAN_MARKER = new RegExp(
   `\\*\\*Reviewed commit:\\*\\*\\s*\`(${COMMIT_PREFIX})\``,
@@ -268,7 +275,7 @@ function makeResult(kind, object, comments, expectedActor, adapterVersion) {
   }
   if (kind === "ISSUE_COMMENT") {
     const markers = [...body.matchAll(CLEAN_MARKER)];
-    if (body.startsWith(CLEAN_PREFIX) && markers.length === 1) {
+    if (bodyPastReceipt(body).startsWith(CLEAN_PREFIX) && markers.length === 1) {
       result.commit_binding = {
         ...COMMIT_BINDINGS.ISSUE_COMMENT,
         prefix: markers[0][1],
@@ -304,7 +311,7 @@ function makeResult(kind, object, comments, expectedActor, adapterVersion) {
 function resultLooksCodex(kind, object) {
   const body = String(object.body ?? "");
   return (
-    (kind === "ISSUE_COMMENT" && body.startsWith("Codex Review:")) ||
+    (kind === "ISSUE_COMMENT" && bodyPastReceipt(body).startsWith("Codex Review:")) ||
     (kind === "PULL_REQUEST_REVIEW" && FINDINGS_PREFIX.test(body))
   );
 }
