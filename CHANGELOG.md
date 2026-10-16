@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.21.0 - 2026-10-16
 
 ### Changed
 
@@ -38,6 +38,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `<!-- codex-review-receipt:v1 -->` marker classifies as the same comment
   without it, so a clean answer binds as `CLEAN` again instead of leaving the
   publication at `GITHUB_REVIEW_UNKNOWN` (issue #184).
+
+### Internal
+
+- (#186) Release 0.21.0.
 
 ## 0.20.0 - 2026-10-14
 
