@@ -4,8 +4,7 @@ import { defaultStoreRoot } from "../server/core.mjs";
 import { buildScorecard, renderScorecardMarkdown } from "../server/scorecard.mjs";
 
 const USAGE = `Usage: review-scorecard.mjs [--json] [--since <time>] [--until <time>]
-                            [--repository <path>] [--review-type gate|advisory]
-                            [--strategy FULL|SUCCESSOR]
+                            [--repository <path>] [--strategy FULL|SUCCESSOR]
 
   Aggregate the review and workflow ledgers in the configured store into one
   report: findings by severity, author dispositions crossed with reviewer
@@ -22,7 +21,6 @@ const USAGE = `Usage: review-scorecard.mjs [--json] [--since <time>] [--until <t
                        When both are set, since must be earlier than until.
   --repository <path>  Match the persisted repository_path string exactly;
                        no path resolution or existing worktree is required.
-  --review-type <type> Select gate or advisory; missing advisory means gate.
   --strategy <mode>    Select FULL or SUCCESSOR; missing strategy means FULL.
 
   Filters combine with AND and apply only to reviews. With any filter,
@@ -39,7 +37,6 @@ const valueOptions = new Map([
   ["--since", "since"],
   ["--until", "until"],
   ["--repository", "repository"],
-  ["--review-type", "reviewType"],
   ["--strategy", "strategy"],
 ]);
 try {

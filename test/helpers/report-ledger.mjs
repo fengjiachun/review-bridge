@@ -87,7 +87,6 @@ export function continuableInTwoRounds(overrides = {}) {
     requirement: "Describe the write-ahead log as it is implemented.",
     implementation_scope: "docs/rfcs/0007-object-store-wal.md only",
     reviewer_provider: "CODEX_TASK",
-    advisory: false,
     review_strategy: {
       mode: "FULL",
       parent_review_id: null,

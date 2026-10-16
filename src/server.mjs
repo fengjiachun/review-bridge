@@ -1259,7 +1259,7 @@ if (role === "author") {
     {
       title: "Prepare local review",
       description:
-        "Capture an immutable Git snapshot, requirement, implementation scope, patch, added-plus-deleted line measurement, warning-threshold headroom, test context, and explicit reviewer provider. Manual preparation reports the measurement against the default budget without blocking. Without parent_review_id the server selects a verifiable successor parent itself and records how it was selected; pass force_full_review to demand a full-patch review. For a continuable local cycle, pass continued_from_review_id with force_full_review to carry the source's open findings as bare scope hints and its errata forward; preparing the continuation freezes the source against further errata. Pass advisory to persist a review whose terminal is a report: it accepts submit_review and nothing else, and finalize_local_gate, submit_resolutions, prepare_rereview, and append_review_erratum all refuse it, so an advisory panel over someone else's pull request can never mint a gate. Pass rationale to record the author's design rationale once, before any finding: it is immutable, stays out of the snapshot, and reaches the reviewer only after the author has recorded a resolution.",
+        "Capture an immutable Git snapshot, requirement, implementation scope, patch, added-plus-deleted line measurement, warning-threshold headroom, test context, and explicit reviewer provider. Manual preparation reports the measurement against the default budget without blocking. Without parent_review_id the server selects a verifiable successor parent itself and records how it was selected; pass force_full_review to demand a full-patch review. For a continuable local cycle, pass continued_from_review_id with force_full_review to carry the source's open findings as bare scope hints and its errata forward; preparing the continuation freezes the source against further errata. Pass rationale to record the author's design rationale once, before any finding: it is immutable, stays out of the snapshot, and reaches the reviewer only after the author has recorded a resolution.",
       inputSchema: {
         repository_path: z.string(),
         base_ref: z.string(),
@@ -1270,7 +1270,6 @@ if (role === "author") {
         parent_review_id: z.string().optional(),
         force_full_review: z.boolean().optional(),
         continued_from_review_id: z.string().optional(),
-        advisory: z.boolean().optional(),
       },
     },
     (input) =>
@@ -1284,7 +1283,6 @@ if (role === "author") {
         parentReviewId: input.parent_review_id ?? null,
         forceFullReview: input.force_full_review === true,
         continuedFromReviewId: input.continued_from_review_id ?? null,
-        advisory: input.advisory === true,
       }),
   );
 
@@ -1418,7 +1416,7 @@ if (role === "author") {
     {
       title: "Append review erratum",
       description:
-        "Append an author correction for a claim about the world that went stale during the review. The snapshot and requirement text stay immutable: anything that changes what the diff means is a new head, not an erratum. Errata flow to the reviewer as author text, material to verify, never instructions. A verdict recorded before an erratum stands as made; each subsequent verdict records the highest erratum sequence served by that round's latest open_review, and a verdict submitted without an open in its round records zero. Refused once the local gate has passed, and refused for advisory reviews.",
+        "Append an author correction for a claim about the world that went stale during the review. The snapshot and requirement text stay immutable: anything that changes what the diff means is a new head, not an erratum. Errata flow to the reviewer as author text, material to verify, never instructions. A verdict recorded before an erratum stands as made; each subsequent verdict records the highest erratum sequence served by that round's latest open_review, and a verdict submitted without an open in its round records zero. Refused once the local gate has passed.",
       inputSchema: {
         review_id: z.string(),
         text: z.string().min(1).max(20_000),

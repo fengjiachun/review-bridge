@@ -22,6 +22,16 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   launcher built are tagged `review-bridge-advisory-codex:<version>-<hash>`
   and can be removed with `docker image rm`.
 
+- (#183) Remove advisory mode from the server. `prepare_review` no longer
+  takes `advisory`, review outputs no longer carry it, and the refusals it
+  armed are gone. `get_review_summary` drops `current_snapshot.worktree_clean`,
+  which only the panel read. The report loses its advisory wording, so
+  `REPORT_FORMAT` is 8. The scorecard drops `--review-type`,
+  `reviews_by_type`, and `advisory_reported`, and its JSON schema is version
+  3. A ledger an earlier version wrote with `advisory: true` is now read as an
+  ordinary review; delete its `reviews/<review_id>` directory if it should not
+  be counted or continued.
+
 ## 0.20.0 - 2026-10-14
 
 ### Added

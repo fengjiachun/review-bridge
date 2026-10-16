@@ -130,14 +130,14 @@ Replace the dates for another month. The period selects **reviews created in
 that month**, not rebuttal events occurring in that month. Groups are reviewer
 providers such as `CODEX_TASK`, not a ranking of individual models.
 
-Use review filters together to compare the same period, repository, review
-type, and strategy:
+Use review filters together to compare the same period, repository, and
+strategy:
 
 ```bash
 node dist/review-bridge-v0.20.0/codex-marketplace/plugins/review-bridge/scripts/review-scorecard.mjs \
   --since 2026-09-01 --until 2026-10-01 \
   --repository /path/persisted/in/the/ledger \
-  --review-type gate --strategy FULL --json
+  --strategy FULL --json
 ```
 
 Run the packaged helper from the repository root after `npm run build`.
@@ -151,11 +151,10 @@ Set `REVIEW_BRIDGE_HOME` to select another store. Every supplied filter must mat
 - `--repository` matches the ledger's persisted `repository_path` string
   exactly. It does not resolve a filesystem path, normalize it, or combine
   matching basenames, and the recorded worktree need not still exist.
-- `--review-type` accepts `gate` or `advisory`; `--strategy` accepts `FULL` or
-  `SUCCESSOR`. Strategy means the review's current `review_strategy.mode`,
-  not a separate selection of its historical rounds. Missing/null legacy
-  fields follow core compatibility defaults: provider `CLAUDE_DESKTOP`,
-  review type `gate`, and strategy `FULL`.
+- `--strategy` accepts `FULL` or `SUCCESSOR`. Strategy means the review's
+  current `review_strategy.mode`, not a separate selection of its historical
+  rounds. Missing/null legacy fields follow core compatibility defaults:
+  provider `CLAUDE_DESKTOP` and strategy `FULL`.
 
 All review counters, denominators, and the corpus's earliest/latest
 `created_at` come from the same selected valid reviews. Read/validation
@@ -176,17 +175,12 @@ review filter does not select them, so with any filter enabled JSON
 `publications`, `skipped_publications`, and the corpus publication counts are
 null, and `scope.publication_omission_reason` says why.
 
-The JSON schema is version 2. It preserves existing unfiltered counters and
-adds `filters`, `scope`, `metric_semantics`, `corpus.reviews_filtered_out`, and
-each provider's `reviews_by_type` and `advisory_reported`. Consumers should
-check `schema_version` and handle the null workflow fields in filtered
-reports. The raw `not_clean` counter means a status other than `CLEAN` or
-`LOCAL_GATE_PASSED`; it is not a failure count. An advisory review reaches a
-terminal report at `REVIEW_SUBMITTED` (counted in `advisory_reported`) or
-`CLEAN` (counted in the existing clean totals). Markdown excludes reported
-advisory reviews from its in-flight count. Author disposition, rebuttal, and
-continuation metrics describe the gate author/rereview loop; advisory reviews
-have no author loop, and advisory `CLEAN` does not attest a gate.
+The JSON schema is version 3. Version 2 added `filters`, `scope`,
+`metric_semantics`, and `corpus.reviews_filtered_out`; version 3 removes the
+review-type filter and each provider's `reviews_by_type` and
+`advisory_reported`. Consumers should check `schema_version` and handle the
+null workflow fields in filtered reports. The raw `not_clean` counter means a
+status other than `CLEAN` or `LOCAL_GATE_PASSED`; it is not a failure count.
 
 These are recorded outcomes, not model accuracy: `fixed`/`resolved` does not
 establish accuracy, and `rebuttal_accepted` does not establish a false

@@ -4,7 +4,7 @@ import { MAX_ROUNDS, REVIEWER_PROVIDERS } from "./core.mjs";
 import { isFullSha } from "./object-id.mjs";
 import { DEFAULT_CHANGE_SIZE_BUDGET } from "./workflow.mjs";
 
-export const SCORECARD_SCHEMA_VERSION = 2;
+export const SCORECARD_SCHEMA_VERSION = 3;
 
 const SEVERITIES = ["blocker", "major", "minor", "nit"];
 const CONSTRAINT_KINDS = ["documented", "undocumented"];
@@ -22,7 +22,6 @@ const REVIEW_STATUSES = [
   "CONTINUABLE_FINDINGS",
 ];
 const CLEAN_STATUSES = ["CLEAN", "LOCAL_GATE_PASSED"];
-const REVIEW_TYPES = ["gate", "advisory"];
 const REVIEW_STRATEGIES = ["FULL", "SUCCESSOR"];
 const WORKFLOW_OMISSION_REASON =
   "Review filters do not define a workflow or audit-log cohort; workflow statistics are omitted.";
@@ -39,11 +38,7 @@ const METRIC_SEMANTICS = {
   not_clean:
     "Counts statuses other than CLEAN/LOCAL_GATE_PASSED; it is not a failure count.",
   rounds_to_clean:
-    "Counts current_round for CLEAN/LOCAL_GATE_PASSED. Advisory CLEAN is a completed report, not a gate attestation.",
-  advisory_reported:
-    "Counts advisory REVIEW_SUBMITTED: findings have been reported and the review is terminal. Advisory CLEAN is also terminal and is included in the clean counts.",
-  author_loop:
-    "Disposition, rebuttal and continuation metrics describe the gate author/rereview loop; advisory reviews have no such loop.",
+    "Counts current_round for CLEAN/LOCAL_GATE_PASSED.",
   intent:
     "Counts reviews with a recorded reconstructed_intent and round twos with a recorded intent_comparison, once per review. Missing fields count as zero; no free text is aggregated.",
 };
@@ -78,9 +73,7 @@ function emptyStats() {
     reviews: 0,
     reconstructed_intent_recorded: 0,
     intent_comparison_recorded: 0,
-    reviews_by_type: zeroCounts(REVIEW_TYPES),
     reviews_by_status: zeroCounts(REVIEW_STATUSES),
-    advisory_reported: 0,
     rounds_to_clean: {},
     not_clean: 0,
     findings: 0,
@@ -166,9 +159,6 @@ function reviewDefect(review, directoryName) {
     !REVIEWER_PROVIDERS.includes(review.reviewer_provider)
   ) {
     return `unknown reviewer_provider ${JSON.stringify(review.reviewer_provider)}`;
-  }
-  if (review.advisory != null && typeof review.advisory !== "boolean") {
-    return `advisory is not a boolean: ${JSON.stringify(review.advisory)}`;
   }
   if (
     review.review_strategy != null &&
@@ -420,12 +410,11 @@ function filterTimestamp(value, option) {
   return new Date(value).toISOString();
 }
 
-function scorecardFilters({ since, until, repository, reviewType, strategy }) {
+function scorecardFilters({ since, until, repository, strategy }) {
   const filters = {
     since: filterTimestamp(since, "since"),
     until: filterTimestamp(until, "until"),
     repository: repository ?? null,
-    review_type: reviewType ?? null,
     strategy: strategy ?? null,
   };
   if (
@@ -437,9 +426,6 @@ function scorecardFilters({ since, until, repository, reviewType, strategy }) {
   }
   if (repository != null && !isName(repository)) {
     throw new Error("--repository must be a non-empty repository_path string");
-  }
-  if (reviewType != null && !REVIEW_TYPES.includes(reviewType)) {
-    throw new Error("--review-type must be gate or advisory");
   }
   if (strategy != null && !REVIEW_STRATEGIES.includes(strategy)) {
     throw new Error("--strategy must be FULL or SUCCESSOR");
@@ -454,8 +440,6 @@ function matchesFilters(review, filters) {
     (filters.until == null || at < Date.parse(filters.until)) &&
     (filters.repository == null ||
       review.repository_path === filters.repository) &&
-    (filters.review_type == null ||
-      (review.advisory === true ? "advisory" : "gate") === filters.review_type) &&
     (filters.strategy == null ||
       (review.review_strategy?.mode ?? "FULL") === filters.strategy)
   );
@@ -481,11 +465,7 @@ function countReview(stats, review) {
   stats.reviews += 1;
   if (review.reconstructed_intent != null) stats.reconstructed_intent_recorded += 1;
   if (review.current_round === 2 && review.intent_comparison != null) stats.intent_comparison_recorded += 1;
-  stats.reviews_by_type[review.advisory === true ? "advisory" : "gate"] += 1;
   stats.reviews_by_status[review.status] += 1;
-  if (review.advisory === true && review.status === "REVIEW_SUBMITTED") {
-    stats.advisory_reported += 1;
-  }
   if (CLEAN_STATUSES.includes(review.status)) {
     const round = String(review.current_round);
     stats.rounds_to_clean[round] = (stats.rounds_to_clean[round] ?? 0) + 1;
@@ -925,15 +905,11 @@ const COUNTING_RULES = [
   "  same selected valid reviews; `ALL` counts each selected review once.",
   "- Repository matching is exact against persisted `repository_path`, without",
   "  resolving paths or checking whether a worktree still exists. Missing paths",
-  "  do not match a repository filter. Missing/null advisory means gate and",
-  "  missing/null strategy means FULL, matching the core compatibility defaults.",
+  "  do not match a repository filter. Missing/null strategy means FULL,",
+  "  matching the core compatibility default.",
   "- Rounds-to-CLEAN counts `current_round` for reviews whose status is `CLEAN`",
   "  or `LOCAL_GATE_PASSED`. Every other review counts as `not_clean`: this is",
-  "  a status count, not a failure count. Advisory `REVIEW_SUBMITTED` and `CLEAN`",
-  "  are terminal reports; advisory CLEAN attests no gate. Advisory reported",
-  "  counts REVIEW_SUBMITTED and is excluded from In flight. Disposition,",
-  "  rebuttal and continuation metrics describe the gate author/rereview loop;",
-  "  advisory reviews have no such loop.",
+  "  a status count, not a failure count.",
   "- A finding's outcome is the author's disposition crossed with the reviewer's",
   "  round-two decision; `undecided` means no round-two decision was recorded.",
   "- A **rebuttal** is a finding the author dispositioned `rejected`. It is",
@@ -1049,12 +1025,9 @@ export function renderScorecardMarkdown(scorecard) {
       [
         "Provider",
         "Reviews",
-        "Gate",
-        "Advisory",
         "Clean",
         "Clean in round 1",
         "Clean in round 2",
-        "Advisory reported",
         "Human required",
         "Continuable",
         "In flight",
@@ -1068,15 +1041,12 @@ export function renderScorecardMarkdown(scorecard) {
           [
             provider,
             stats.reviews,
-            stats.reviews_by_type.gate,
-            stats.reviews_by_type.advisory,
             clean,
             stats.rounds_to_clean["1"] ?? 0,
             stats.rounds_to_clean["2"] ?? 0,
-            stats.advisory_reported,
             stats.human_required,
             stats.continuable_findings,
-            stats.reviews - clean - stats.human_required - stats.continuable_findings - stats.advisory_reported,
+            stats.reviews - clean - stats.human_required - stats.continuable_findings,
           ],
         ];
       }),

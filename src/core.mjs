@@ -74,23 +74,6 @@ function reviewerProviderFor(review) {
   );
 }
 
-// A ledger written before advisory mode existed carries no field, and a review
-// without one is an ordinary gated review.
-function isAdvisory(review) {
-  return review.advisory === true;
-}
-
-// The mechanical fence. An advisory review reports on code this operator did
-// not author and cannot answer for, so its terminal is a report: no gate, no
-// author loop, no second round. Each refusal is evaluated before the state
-// check it precedes, so the advisory reason is the one returned rather than a
-// state-machine message that says nothing about why the path is closed.
-function assertNotAdvisory(review, refusal) {
-  if (isAdvisory(review)) {
-    throw new Error(refusal);
-  }
-}
-
 function requireReviewerProvider(review, expectedProvider) {
   const provider = assertReviewerProvider(expectedProvider);
   const boundProvider = reviewerProviderFor(review);
@@ -1039,7 +1022,6 @@ function publicReview(review) {
     reviewer_provider: reviewerProviderFor(review),
     reviewer_configuration: review.rounds?.at(-1)?.reviewer_configuration ?? null,
     reviewer_dispatch: review.rounds?.at(-1)?.reviewer_dispatch ?? null,
-    advisory: isAdvisory(review),
     review_strategy: review.review_strategy ?? {
       mode: "FULL",
       parent_review_id: null,
@@ -1066,8 +1048,7 @@ function publicReview(review) {
 // The reviewer must submit its first-round findings before it reads the
 // author's account of the design, so those findings form from the code alone.
 // The reviewer tools therefore serve the rationale only once the author has
-// answered a finding; an advisory review has no author loop, records no
-// resolution, and never serves it.
+// answered a finding.
 function rationaleVisibleToReviewer(review) {
   return review.resolutions.length > 0;
 }
@@ -1081,14 +1062,7 @@ function reviewerReview(review) {
   };
 }
 
-function actionRequired(status, advisory = false) {
-  // An advisory review that has been reviewed is finished: both states it can
-  // reach after `WAITING_FOR_REVIEW` are terminal reports. Advertising the
-  // gated successors here would send a driver at the three paths the fence
-  // refuses.
-  if (advisory && ["REVIEW_SUBMITTED", "CLEAN"].includes(status)) {
-    return "REPORT_ADVISORY_FINDINGS";
-  }
+function actionRequired(status) {
   const actions = {
     WAITING_FOR_REVIEW: "REVIEWER_INITIAL_REVIEW",
     REVIEW_SUBMITTED: "AUTHOR_RESOLUTIONS",
@@ -1207,7 +1181,7 @@ function reviewSummary(review) {
   const activeFindings = review.findings.filter(
     (finding) => !RESOLVED_FINDING_STATUSES.has(finding.status),
   );
-  const action = actionRequired(review.status, isAdvisory(review));
+  const action = actionRequired(review.status);
   return {
     id: review.id,
     status: review.status,
@@ -1222,7 +1196,6 @@ function reviewSummary(review) {
     reviewer_provider: reviewerProviderFor(review),
     reviewer_configuration: review.rounds?.at(-1)?.reviewer_configuration ?? null,
     reviewer_dispatch: review.rounds?.at(-1)?.reviewer_dispatch ?? null,
-    advisory: isAdvisory(review),
     review_strategy: review.review_strategy ?? {
       mode: "FULL",
       parent_review_id: null,
@@ -1237,13 +1210,6 @@ function reviewSummary(review) {
             base_sha: currentSnapshot.base_sha,
             head_sha: currentSnapshot.head_sha,
             snapshot_hash: currentSnapshot.snapshot_hash,
-            // Equal hashes prove two snapshots are the same bytes, not that
-            // those bytes are the committed head: preparations that all capture
-            // one dirty worktree agree with each other. A caller comparing
-            // snapshots before dispatch needs both, so the flag travels with
-            // the hash. A round that records none reads as dirty, which refuses
-            // rather than admits.
-            worktree_clean: currentSnapshot.worktree_clean === true,
             changed_file_count: currentSnapshot.changed_files.length,
             deleted_file_count: currentSnapshot.deleted_files.length,
             overlay_count: currentSnapshot.overlays.length,
@@ -1487,7 +1453,6 @@ export async function prepareReview(
     forceFullReview = false,
     continuedFromReviewId = null,
     reviewerProvider = "CLAUDE_DESKTOP",
-    advisory = false,
   },
 ) {
   assertString(baseRef, "base_ref", { max: 1024 });
@@ -1509,11 +1474,6 @@ export async function prepareReview(
     }
   }
   assertReviewerProvider(reviewerProvider);
-  // Anything but a boolean is refused rather than read as false: a mode whose
-  // whole purpose is to close the gate must never be switched off by a typo.
-  if (typeof advisory !== "boolean") {
-    throw new Error("advisory must be a boolean");
-  }
   const repositoryRoot = await resolveRepositoryRoot(repositoryPath);
   const continuedReview =
     continuedFromReviewId == null
@@ -1606,7 +1566,6 @@ export async function prepareReview(
       implementation_scope: implementationScope,
       ...(rationale == null ? {} : { rationale }),
       reviewer_provider: reviewerProvider,
-      advisory,
       review_strategy: successorResult.strategy,
       status: "WAITING_FOR_REVIEW",
       current_round: 1,
@@ -2081,10 +2040,6 @@ export async function submitResolutions(storeRoot, reviewId, inputs) {
 
 async function submitResolutionsWhileLocked(storeRoot, reviewId, inputs) {
   const review = await loadReview(storeRoot, reviewId);
-  assertNotAdvisory(
-    review,
-    "an advisory review has no author loop: its findings are reported to the external author on GitHub, outside this protocol, and no resolution recorded here would answer for their code",
-  );
   if (review.status !== "REVIEW_SUBMITTED") {
     throw new Error(
       `review is not waiting for author resolutions (status=${review.status})`,
@@ -2160,10 +2115,6 @@ export async function appendReviewErratum(storeRoot, reviewId, text) {
 
 async function appendReviewErratumWhileLocked(storeRoot, reviewId, text) {
   const review = await loadReview(storeRoot, reviewId);
-  assertNotAdvisory(
-    review,
-    "an advisory review has no author loop: its requirement quotes a third party's unverified claims, and no correction recorded here could speak for their intent",
-  );
   // A continued source is frozen: its errata were copied forward when the
   // continuation was prepared, and a correction recorded here now would
   // never reach the continuation's reviewer.
@@ -2221,10 +2172,6 @@ export async function prepareRereview(storeRoot, reviewId) {
 
 async function prepareRereviewWhileLocked(storeRoot, reviewId) {
   const review = await loadReview(storeRoot, reviewId);
-  assertNotAdvisory(
-    review,
-    "an advisory review is a single round by design: a new push to the pull request is a new panel, not a second round on this review",
-  );
   if (review.status !== "AUTHOR_RESPONDED") {
     throw new Error(`review is not ready for rereview (status=${review.status})`);
   }
@@ -2457,10 +2404,6 @@ export async function finalizeLocalGate(storeRoot, reviewId) {
 
 async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
   const review = await loadReview(storeRoot, reviewId);
-  assertNotAdvisory(
-    review,
-    "an advisory review is a report, not a gate: it can never attest LOCAL_GATE_PASSED for code this operator did not author",
-  );
   if (review.status !== "CLEAN") {
     throw new Error(`only a CLEAN review can be finalized (status=${review.status})`);
   }
@@ -2888,7 +2831,6 @@ export async function selectReviewerConfiguration(storeRoot, reviewId, expectedS
     const review = await loadReview(storeRoot, reviewId);
     if (review.state_version !== expectedStateVersion) throw new Error("review state_version mismatch");
     if (reviewerProviderFor(review) !== "CODEX_TASK") throw new Error("Provider configuration control unavailable");
-    assertNotAdvisory(review, "Advisory container runtime discovery is unavailable; host selections cannot configure that runtime");
     const round = review.rounds.at(-1);
     if (!["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"].includes(review.status)) {
       throw new Error("Reviewer configuration can only change before dispatch of a pending round");
@@ -2915,7 +2857,6 @@ export async function launchLocalReviewer(storeRoot, reviewId, expectedStateVers
     const review = await loadReview(storeRoot, reviewId);
     if (review.state_version !== expectedStateVersion) throw new Error("review state_version mismatch");
     if (reviewerProviderFor(review) !== "CODEX_TASK") throw new Error("Automatic launch unavailable for this provider");
-    assertNotAdvisory(review, "Advisory review requires its dedicated isolation launcher");
     const round = review.rounds.at(-1);
     const prior = round.reviewer_dispatch;
     if (prior) {

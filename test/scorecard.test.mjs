@@ -1348,7 +1348,7 @@ test("time filters compare UTC instants with inclusive since and exclusive until
     since: "2026-09-01T01:00:00+01:00",
     until: "2026-09-02",
   });
-  assert.equal(scorecard.schema_version, 2);
+  assert.equal(scorecard.schema_version, 3);
   assert.equal(scorecard.filters.since, "2026-09-01T00:00:00.000Z");
   assert.equal(scorecard.filters.until, "2026-09-02T00:00:00.000Z");
   assert.equal(scorecard.corpus.reviews_counted, 2);
@@ -1371,7 +1371,6 @@ test("filter validation rejects ambiguous dates, invalid calendar dates and inve
     [{ since: "2026-09-01", until: "2026-09-01T08:00:00+08:00" }, /earlier than/],
     [{ repository: "" }, /--repository/],
     [{ repository: 1 }, /--repository/],
-    [{ reviewType: "GATE" }, /--review-type/],
     [{ strategy: "full" }, /--strategy/],
   ];
   for (const [options, message] of invalid) {
@@ -1435,7 +1434,6 @@ test("combined filters keep every metric and the corpus window on the selected r
       history: [{ event: "REREVIEW_UNRESOLVED" }],
     }),
     repository_path: repository,
-    advisory: false,
     review_strategy: { mode: "SUCCESSOR" },
   };
   const clean = {
@@ -1451,7 +1449,6 @@ test("combined filters keep every metric and the corpus window on the selected r
     { id: "too-early", created_at: "2026-08-31T00:00:00Z" },
     { id: "too-late", created_at: "2026-09-04T00:00:00Z" },
     { id: "other-repository", repository_path: "/elsewhere/project" },
-    { id: "advisory", advisory: true },
     { id: "full", review_strategy: { mode: "FULL" } },
   ];
   for (const excluded of exclusions) {
@@ -1461,7 +1458,6 @@ test("combined filters keep every metric and the corpus window on the selected r
     since: "2026-09-01",
     until: "2026-09-04",
     repository,
-    reviewType: "gate",
     strategy: "SUCCESSOR",
   });
   const selectedOnly = await buildScorecard(selectedStore);
@@ -1484,10 +1480,9 @@ test("legacy absent and null mode fields retain core compatibility defaults", as
   const store = await emptyStore(t);
   const records = [
     { id: "absent" },
-    { id: "null", advisory: null, review_strategy: null, reviewer_provider: null },
-    { id: "explicit", advisory: false, review_strategy: { mode: "FULL" } },
-    { id: "successor", advisory: false, review_strategy: { mode: "SUCCESSOR" } },
-    { id: "advisory", advisory: true, review_strategy: { mode: "FULL" } },
+    { id: "null", review_strategy: null, reviewer_provider: null },
+    { id: "explicit", review_strategy: { mode: "FULL" } },
+    { id: "successor", review_strategy: { mode: "SUCCESSOR" } },
   ];
   for (const fields of records) {
     await writeReview(store, fields.id, {
@@ -1495,46 +1490,35 @@ test("legacy absent and null mode fields retain core compatibility defaults", as
       ...fields,
     });
   }
-  const legacy = await buildScorecard(store, { reviewType: "gate", strategy: "FULL" });
+  const legacy = await buildScorecard(store, { strategy: "FULL" });
   assert.equal(legacy.corpus.reviews_counted, 3);
   assert.equal(legacy.corpus.reviews_skipped, 0);
-  assert.deepEqual(legacy.providers.CLAUDE_DESKTOP.reviews_by_type, { gate: 3, advisory: 0 });
+  assert.equal(legacy.providers.CLAUDE_DESKTOP.reviews, 3);
   assert.equal((await buildScorecard(store, { strategy: "SUCCESSOR" })).corpus.reviews_counted, 1);
-  assert.equal((await buildScorecard(store, { reviewType: "advisory" })).corpus.reviews_counted, 1);
 });
 
-test("advisory reported and clean are terminal while status counts retain their original facts", async (t) => {
+test("review outcomes count clean reviews and leave the rest in flight", async (t) => {
   const store = await emptyStore(t);
-  for (const advisory of [false, true]) {
-    for (const status of ["REVIEW_SUBMITTED", "CLEAN", "WAITING_FOR_REVIEW"]) {
-      const id = `${advisory}-${status}`;
-      await writeReview(store, id, { ...reviewLedger({ id, status }), advisory });
-    }
+  for (const status of ["REVIEW_SUBMITTED", "CLEAN", "WAITING_FOR_REVIEW"]) {
+    await writeReview(store, status, reviewLedger({ id: status, status }));
   }
-  const scorecard = await buildScorecard(store, { reviewType: "advisory" });
+  const scorecard = await buildScorecard(store);
   const stats = scorecard.providers.ALL;
-  assert.deepEqual(stats.reviews_by_type, { gate: 0, advisory: 3 });
   assert.equal(stats.reviews_by_status.REVIEW_SUBMITTED, 1);
   assert.equal(stats.reviews_by_status.CLEAN, 1);
   assert.equal(stats.reviews_by_status.WAITING_FOR_REVIEW, 1);
   assert.equal(stats.not_clean, 2);
-  assert.equal(stats.advisory_reported, 1);
   assert.deepEqual(stats.rounds_to_clean, { 1: 1 });
   assert.match(scorecard.metric_semantics.not_clean, /not a failure count/);
-  assert.match(scorecard.metric_semantics.advisory_reported, /terminal/);
-  assert.match(scorecard.metric_semantics.author_loop, /advisory reviews have no such loop/);
-  const markdown = renderScorecardMarkdown(scorecard);
-  assert.match(markdown, /\| ALL \| 3 \| 0 \| 3 \| 1 \| 1 \| 0 \| 1 \| 0 \| 0 \| 1 \|/);
-  assert.match(markdown, /Advisory `REVIEW_SUBMITTED` and `CLEAN`\s+are terminal reports/);
-  const gate = await buildScorecard(store, { reviewType: "gate" });
-  assert.equal(gate.providers.ALL.advisory_reported, 0);
-  assert.match(renderScorecardMarkdown(gate), /\| ALL \| 3 \| 3 \| 0 \| 1 \| 1 \| 0 \| 0 \| 0 \| 0 \| 2 \|/);
+  assert.match(
+    renderScorecardMarkdown(scorecard),
+    /\| Provider \| Reviews \| Clean \| Clean in round 1 \| Clean in round 2 \| Human required \| Continuable \| In flight \|\n[^\n]*\n\| ALL \| 3 \| 1 \| 1 \| 0 \| 0 \| 0 \| 2 \|/,
+  );
 });
 
 test("invalid mode and repository fields are skipped before filtering and diagnostics cover the scan", async (t) => {
   const store = await emptyStore(t);
   const defects = [
-    { advisory: "false" },
     { review_strategy: {} },
     { review_strategy: { mode: "OTHER" } },
     { repository_path: 42 },
@@ -1555,7 +1539,7 @@ test("invalid mode and repository fields are skipped before filtering and diagno
   assert.equal(scorecard.corpus.review_directories_without_ledger, 1);
   assert.equal(scorecard.skipped.length, defects.length);
   assert.equal(scorecard.scope.review_diagnostics, "all_review_directories_in_store");
-  assert.match(scorecard.skipped.map(({ reason }) => reason).join("\n"), /advisory[\s\S]*review_strategy[\s\S]*repository_path[\s\S]*reviewer_provider[\s\S]*created_at/);
+  assert.match(scorecard.skipped.map(({ reason }) => reason).join("\n"), /review_strategy[\s\S]*repository_path[\s\S]*reviewer_provider[\s\S]*created_at/);
 });
 
 test("every filter omits workflow reads and empty selections distinguish zero from unknown", async (t) => {
@@ -1568,7 +1552,6 @@ test("every filter omits workflow reads and empty selections distinguish zero fr
     { since: "2026-09-01" },
     { until: "2026-01-01" },
     { repository: "/missing" },
-    { reviewType: "advisory" },
     { strategy: "SUCCESSOR" },
   ]) {
     const scorecard = await buildScorecard(store, options);
@@ -1614,11 +1597,10 @@ test("the scorecard CLI passes combined filters through JSON and states scope in
   await writeReview(store, "selected", {
     ...reviewLedger({ id: "selected", status: "REVIEW_SUBMITTED", createdAt: "2026-09-02T00:00:00Z" }),
     repository_path: repository,
-    advisory: true,
     review_strategy: { mode: "SUCCESSOR" },
   });
   const run = await scorecardScript(t, store);
-  const args = ["--since", "2026-09-01", "--until", "2026-09-03", "--repository", repository, "--review-type", "advisory", "--strategy", "SUCCESSOR"];
+  const args = ["--since", "2026-09-01", "--until", "2026-09-03", "--repository", repository, "--strategy", "SUCCESSOR"];
   const result = run("--json", ...args);
   assert.equal(result.status, 0, result.stderr);
   const scorecard = JSON.parse(result.stdout);
@@ -1626,7 +1608,6 @@ test("the scorecard CLI passes combined filters through JSON and states scope in
     since: "2026-09-01T00:00:00.000Z",
     until: "2026-09-03T00:00:00.000Z",
     repository,
-    review_type: "advisory",
     strategy: "SUCCESSOR",
   });
   assert.equal(scorecard.corpus.reviews_counted, 1);
@@ -1634,7 +1615,7 @@ test("the scorecard CLI passes combined filters through JSON and states scope in
   const markdown = run(...args);
   assert.equal(markdown.status, 0, markdown.stderr);
   assert.match(markdown.stdout, /workflow statistics are omitted/);
-  assert.match(markdown.stdout, /- review_type: <code>"advisory"<\/code>/);
+  assert.match(markdown.stdout, /- strategy: <code>"SUCCESSOR"<\/code>/);
   const unfiltered = run("--json");
   assert.equal(unfiltered.status, 0, unfiltered.stderr);
   assert.equal(JSON.parse(unfiltered.stdout).workflows.workflows, 0);
@@ -1650,7 +1631,6 @@ test("the scorecard CLI rejects invalid, missing, unknown and repeated value opt
     ["--until", "--json"],
     ["--since", "2026-02-29"],
     ["--since", "2026-09-02", "--until", "2026-09-01"],
-    ["--review-type", "unknown"],
     ["--strategy", "full"],
     ["--repository", ""],
     ["--repository", "/one", "--repository", "/two"],
@@ -1663,7 +1643,6 @@ test("the scorecard CLI rejects invalid, missing, unknown and repeated value opt
   }
   const help = run("--help");
   assert.equal(help.status, 0, help.stderr);
-  assert.match(help.stdout, /\[--review-type gate\|advisory\]/);
   assert.match(help.stdout, /\[--strategy FULL\|SUCCESSOR\]/);
 });
 
@@ -1799,7 +1778,7 @@ test("intent coverage counts recordings per provider and respects review filters
   const markdown = renderScorecardMarkdown(scorecard);
   assert.match(markdown, /## Intent checks/);
   assert.match(markdown, /\| CODEX_TASK \| 2 \| 1 \|/);
-  const filtered = await buildScorecard(store, { reviewType: "advisory" });
+  const filtered = await buildScorecard(store, { strategy: "SUCCESSOR" });
   assert.deepEqual(counts(filtered.providers.ALL), [0, 0]);
   await writeReview(store, "invalid", {
     ...reviewLedger({ id: "invalid", status: "CLEAN" }), reconstructed_intent: 42,
