@@ -10,7 +10,6 @@ import { REVIEWER_PROVIDERS } from "../src/core.mjs";
 import { readWorkflowSkill } from "../scripts/workflow-skill.mjs";
 import * as mcpSnippets from "../scripts/mcp-snippets.mjs";
 import {
-  ADVISORY_PANEL_CONTRACT,
   assertAuthorServerDisabledInLaunches,
   assertDispatchContract,
   assertThirdPartyMaterialBoundary,
@@ -628,7 +627,7 @@ test("publish-bound work states its gate provider and its review strategy", asyn
       "successor must be stated as the default review strategy",
     ],
     [
-      "`force_full_review: true` is the deliberate exception, and two scenarios name it.",
+      "`force_full_review: true` is the deliberate exception, and one scenario names it.",
       "a full-patch review must read as the exception, with its scenarios named",
     ],
     [
@@ -921,16 +920,9 @@ test("verify-build validates packaged Hermes artifacts, HERMES binding, isolatio
   assert.match(verify, /assertDispatchContract\(\s*workflowSkill/);
   assert.match(verify, /assertDispatchContract\(\s*hermesReadme/);
   assert.match(verify, /assertDispatchContract\(\s*deepseekReadme/);
-  // Both new #71 contracts land on packaged copies too: the panel section and
-  // the third-party boundary on all four reviewer surfaces.
-  assert.match(verify, /ADVISORY_PANEL_CONTRACT/);
-  // The advisory sandbox launcher is checked on the packaged copy too: it
-  // exists, its --help states the launch, and the packaged skill names it.
-  assert.match(verify, /advisory-sandbox-launch\.mjs/);
-  assert.match(verify, /advisoryLauncher, "--help"/);
-  assert.match(verify, /advisory-panel-checkout\.mjs/);
-  assert.match(verify, /advisoryPanel, "--help"/);
   assert.match(verify, /REVIEW_REPORT_CONTRACT/);
+  // The reviewed-material boundary lands on all four packaged reviewer
+  // surfaces too.
   for (const surface of [
     "reviewerSkill",
     "reviewInstructions",
@@ -1217,22 +1209,9 @@ test("the DeepSeek Harness template is packaged and documented like the others",
   assert.match(install, /`DEEPSEEK_HARNESS`/);
 });
 
-// The advisory panel contract lives in scripts/dispatch-contract.mjs beside the
-// launch contracts, shared with scripts/verify-build.mjs so the release check
-// can never drift weaker than this one. This is the source template; that
-// script asserts the same contract against the packaged copy.
-test("the advisory panel section pins the fence, the dispatch asymmetry, and the report", async () => {
-  assertDispatchContract(
-    await readWorkflowSkill(path.join(projectRoot, WORKFLOW_SKILL)),
-    "## Advisory panel review of an external pull request",
-    "Codex workflow skill (advisory panel)",
-    ADVISORY_PANEL_CONTRACT,
-  );
-});
-
 // The report step lives in two sections of the skill, Finish and Publish, and
-// the contract beside the advisory one holds both to the same sentences so
-// neither can drift into treating the report as a gate or as evidence.
+// one contract holds both to the same sentences so neither can drift into
+// treating the report as a gate or as evidence.
 test("the Finish and Publish steps pin the report render, its trigger, and the Plannotator gate", async () => {
   const skill = await readWorkflowSkill(path.join(projectRoot, WORKFLOW_SKILL));
   for (const heading of ["## Finish", "## Publish through GitHub"]) {
@@ -1245,9 +1224,9 @@ test("the Finish and Publish steps pin the report render, its trigger, and the P
   }
 });
 
-// Every reviewer surface is a panel member, so every one has to carry the
-// boundary. Naming three of four would leave whichever provider was left out
-// reading a stranger's diff with no rule about what that text is.
+// Every reviewer surface has to carry the boundary. Naming three of four would
+// leave whichever provider was left out reading the diff with no rule about
+// what that text is.
 const REVIEWER_SURFACES = [
   path.join(
     "templates",

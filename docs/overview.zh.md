@@ -98,7 +98,7 @@ CLEAN -> 再核工作树等于快照 -> LOCAL_GATE_PASSED
 
 随改动一起交给评审者的还有两样。**规矩分类**：违反项目规矩的 finding 会标明这条规矩是否已写在仓库的 agent 指导文件里（`documented` 并注明出处，或 `undocumented`）；修一条 undocumented 的意见包括把规矩写下来。**设计理由**：作者可以在任何意见出现之前记下关键设计决策、放弃的方案和自己没把握的地方；评审者只在作者回应过第一轮之后才看到它，而且只当作又一份待核材料。
 
-两个变体。同一分支上的后续提交可以作为 **successor** 继承上一条 `LOCAL_GATE_PASSED` 的评审，评审单位是父到子的 delta 及其波及之处。几个独立的评审者可以组成**顾问面板**审别人的 PR；顾问评审只能产出报告、不能铸门禁，通过打包 launcher 拉起的顾问 Codex 成员跑在容器里，容器就是读边界。两者见 [local-review.md](local-review.md)，各提供方的派发方式见 [reviewer-configuration.md](reviewer-configuration.md)。
+同一分支上的后续提交可以作为 **successor** 继承上一条 `LOCAL_GATE_PASSED` 的评审，评审单位是父到子的 delta 及其波及之处，见 [local-review.md](local-review.md)；各提供方的派发方式见 [reviewer-configuration.md](reviewer-configuration.md)。
 
 ## 5. 发布门禁
 
@@ -156,9 +156,9 @@ flowchart LR
 ## 10. 安全边界与数据
 
 - 本地、REMOTE_ONLY 和发布门禁都是工作流层面的证明，不是 Git 或 GitHub 的安全边界。Review Bridge 不装 `pre-push` 钩子。提供方绑定和独立 Codex 任务都不是经过认证的人或模型身份；`CODEX_TASK` 评审改善的是上下文隔离，不等于换一家提供方带来的模型多样性。
-- 宿主沙箱限制写和网络，不限制读；审第三方代码的读边界是通过打包 launcher 拉起的顾问 Codex 成员所在的容器。两轮「盲审」是工具面上的保证，挡不住直接读 store 的进程。
+- 宿主沙箱限制写和网络，不限制读，所以挡不住能操纵评审者的文本。两轮「盲审」是工具面上的保证，挡不住直接读 store 的进程。
 - store 里有仓库路径、需求、patch、manifest、意见、操作者标签与理由，每一轮的 patch（含未提交改动，不限大小），以及未提交文件的单独副本（单个不超过 10 MiB）。删一条评审：先停掉进行中的 Review Bridge 操作，再删 `reviews/<review_id>`；若这条评审绑定过自治工作流，先取消该工作流并释放它的认领，它在 `workflows/<workflow_id>` 下的记录要删的话另行删除。删整个目录前要先退出所有 Review Bridge 进程。保留与权限见 [README](../README.md#data-handling-and-cleanup)。
-- 所选客户端可能按其账号配置把评审工具返回的源码发给模型提供方。MCP 服务器进程不打开网络连接；打包的脚本通过用户的 `gh` 访问 GitHub，顾问 launcher 通过它的出口代理联网。
+- 所选客户端可能按其账号配置把评审工具返回的源码发给模型提供方。MCP 服务器进程不打开网络连接；打包的脚本通过用户的 `gh` 访问 GitHub。
 
 逐版本的变更见 [CHANGELOG](../CHANGELOG.md)。
 
@@ -192,4 +192,3 @@ flowchart LR
 | 基线 baseline | 发起 Codex 请求前各 feed 的状态，请求之前存在的评论不算答复。 |
 | 观测 observation | 收集器一次性读取的 PR、检查、Codex feed、线程状态。 |
 | 门票 gate | 封门步骤写下的记录；发布门票会过期，合并前必须立刻校验。 |
-| 顾问评审 advisory | 只产出报告、不能铸门禁的评审，用于审他人的 PR。 |

@@ -32,13 +32,11 @@ After a verdict, load [Handle findings](findings.md) for findings or
    A verified `SUCCESSOR` is the default and stands: on a long-lived branch its
    delta is a small fraction of the cumulative patch, and re-reviewing
    already-gated code costs the reviewer far more context than it buys.
-   `force_full_review: true` is the deliberate exception, and two scenarios
-   name it. A continuation from `CONTINUABLE_FINDINGS` passes it beside
-   `continued_from_review_id`, which the server requires. An advisory panel
-   over an external pull request passes it because the reviewed unit is that
-   whole pull request and this store's own gates are no parent for it. Outside
-   those two, demanding a full patch buys a re-review of gated code, so state
-   the reason in the session before passing it.
+   `force_full_review: true` is the deliberate exception, and one scenario
+   names it. A continuation from `CONTINUABLE_FINDINGS` passes it beside
+   `continued_from_review_id`, which the server requires. Outside it,
+   demanding a full patch buys a re-review of gated code, so state the reason
+   in the session before passing it.
 6. Choose `reviewer_provider` explicitly:
    - `CLAUDE_DESKTOP` for a fresh Claude Desktop conversation.
    - `CODEX_TASK` for a newly created Codex task that is not a fork of the
@@ -55,8 +53,7 @@ After a verdict, load [Handle findings](findings.md) for findings or
    to repair; the same defect found at the local gate costs one local round.
    `DEEPSEEK_HARNESS` is the verification-shape second opinion beside that
    gate — pins that match a substring, fixtures that do not cover the case, a
-   refusal test passing on a neighbour's message — which is the local
-   counterpart of the [advisory panel](advisory-panel.md). Run it in addition to the
+   refusal test passing on a neighbour's message. Run it in addition to the
    `CODEX_TASK` gate when the risk in a change is how it is verified; never as
    the sole gate on a publication path.
 

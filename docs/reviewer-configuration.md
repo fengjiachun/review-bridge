@@ -108,8 +108,7 @@ Requested configuration is a launch record. Observed remote model identity is
 ledgers stay readable and report unavailable rather than acquiring invented
 historical defaults. Reports retain per-round requested identity. Other reviewer
 providers currently have no discovery/control adapter and return that limitation
-with no fabricated options. Advisory reviews keep their dedicated isolation
-launcher and are not eligible for the ordinary local launch tool.
+with no fabricated options.
 
 The Claude author connection is shipped separately from the reviewer extension;
 see [installation](install/claude-desktop.md#use-claude-as-an-author). No computer

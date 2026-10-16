@@ -240,9 +240,15 @@ names never runs. Verify the pair the way its effect is observable:
 the reviewer server `enabled`, and an author tool invoked from such a run
 returns no tool rather than a result.
 
-An `advisory: true` review does not take this launch. The sandbox bounds
-writes and network, not reads. For an advisory member, load only the
-[Advisory CODEX_TASK sandbox](codex-advisory.md) launch instead.
+This launch reviews the operator's own changes. The sandbox bounds writes and
+network, not reads: the reviewer's shell reads the whole host, so text in the
+material under review can steer the reviewer into reading the operator's
+credentials and carrying them out through `submit_review` or its own model
+context. Every other MCP server the host's `~/.codex/config.toml` enables is
+reachable from the same run as well, and sits outside the sandbox altogether;
+this launch does not shrink that set. For attacker-controllable input the
+sandbox is therefore not an isolation boundary, so never point this launch at
+code someone else wrote.
 
 A round-two rereview uses `launch_local_reviewer` again with the inherited
 selection and current state version. Its process has the same

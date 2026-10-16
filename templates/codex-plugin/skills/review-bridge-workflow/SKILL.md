@@ -19,7 +19,6 @@ not a list to preload.
 | Finish a CLEAN review or escalate HUMAN_REQUIRED | [Finish](references/finish.md) | Publication only if authorized |
 | Publish through LOCAL_GATE or explicitly authorized REMOTE_ONLY | [Publish through GitHub](references/publication.md) | Prepare if a local gate is required |
 | Run an explicitly authorized autonomous workflow | [Autonomous workflow](references/autonomous.md) | Publication at START_PUBLICATION; use the server's task dispatch |
-| Review an external pull request with an advisory panel | [Advisory panel](references/advisory-panel.md) | Only each selected member's provider; CODEX_TASK uses its sandbox route |
 
 For a manual local review, select the provider in Prepare and load only
 [CODEX_TASK](references/codex-task.md), [HERMES](references/hermes.md),
@@ -54,7 +53,7 @@ load [Lock contention](references/lock-contention.md) before deciding to retry.
 - Preserve review and change-size budgets. Extend them only on the explicit
   decisions required by the selected route. Never add a third round to a review
   ID. HUMAN_REQUIRED stops for arbitration; CONTINUABLE_FINDINGS uses a fresh
-  full review. Advisory reviews end in a report and never a local gate.
+  full review.
 - Honor terminal states and operator stops. An autonomous workflow ends at
   MERGE_READY and never merges; AWAIT_OPERATOR is not an instruction to poll.
 
