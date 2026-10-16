@@ -203,7 +203,7 @@ function identitySection(review) {
       `- Repository: ${code(review.repository_path)}`,
       `- Base ref: ${code(review.base_ref)}`,
       `- Base → head: ${code(first?.base_sha)} → ${code(latest?.head_sha)}`,
-      `- Reviewer provider: ${code(review.reviewer_provider ?? "CLAUDE_DESKTOP")}${review.advisory === true ? " (advisory: attests nothing)" : ""}`,
+      `- Reviewer provider: ${code(review.reviewer_provider ?? "CLAUDE_DESKTOP")}`,
       `- Review strategy: ${strategyLine(review)}`,
       ...rounds.map((round) => `- Round ${round.round} reviewer requested: ${round.reviewer_configuration ? code(JSON.stringify(round.reviewer_configuration.requested)) : "unavailable"}; observed: unavailable (remote model identity is not authenticated by launch logs).`),
     ].join("\n"),
@@ -468,22 +468,12 @@ function changesSection(review) {
   ];
 }
 
-// An advisory review reports on code this operator did not author: the writer
-// refuses the author loop and the rereview, so a submitted advisory review is
-// as finished as it can be. Saying it is still in progress would name a next
-// step the store would refuse.
-function advisoryReported(review) {
-  return review.advisory === true && review.status === "REVIEW_SUBMITTED";
-}
-
 function outcomeSection(review) {
   const history = review.history ?? [];
   const lines = [
-    advisoryReported(review)
-      ? `- Terminal state: ${code(review.status)} (advisory: findings reported, no author loop)`
-      : TERMINAL_STATUSES.includes(review.status)
-        ? `- Terminal state: ${code(review.status)}`
-        : `- Current status: ${code(review.status)} (not terminal: the review is still in progress)`,
+    TERMINAL_STATUSES.includes(review.status)
+      ? `- Terminal state: ${code(review.status)}`
+      : `- Current status: ${code(review.status)} (not terminal: the review is still in progress)`,
   ];
   if (CLEAN_STATUSES.includes(review.status)) {
     lines.push(`- Rounds to CLEAN: ${review.current_round}`);
@@ -788,7 +778,7 @@ export function summaryDigest(summary) {
 // Raise it by one in any change that alters the Markdown this module renders
 // -- wording, ordering, a new line, a heading -- so the reports the previous
 // version wrote stay readable at their own names.
-export const REPORT_FORMAT = 7;
+export const REPORT_FORMAT = 8;
 
 // `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
 // `p<revision>-s<summary digest>-f<format>` without one.
@@ -832,18 +822,11 @@ function count(number, singular, plural = `${singular}s`) {
   return `${number} ${number === 1 ? singular : plural}`;
 }
 
-// An advisory review that has submitted its findings is finished: there is no
-// author loop, so its findings are reported, not open. They keep the OPEN
-// status in the ledger because nothing will ever move them, and the brief
-// must not read that as "awaiting an author".
 function partitionFindings(review) {
   const findings = review.findings ?? [];
-  const unsettled = findings.filter((finding) => !SETTLED_STATUSES.has(finding.status));
-  const reported = advisoryReported(review);
   return {
     all: findings,
-    open: reported ? [] : unsettled,
-    reported: reported ? unsettled : [],
+    open: findings.filter((finding) => !SETTLED_STATUSES.has(finding.status)),
     resolved: findings.filter((finding) => finding.status === "RESOLVED"),
     rebutted: findings.filter((finding) => finding.status === "REBUTTAL_ACCEPTED"),
   };
@@ -963,7 +946,7 @@ function reviewerRow(review) {
   const rounds = review.rounds ?? [];
   const modes = [...new Set(rounds.map((round) => roundMode(history, round)))];
   return [
-    `${cellCode(review.reviewer_provider ?? "CLAUDE_DESKTOP")}${review.advisory === true ? " (advisory: attests nothing)" : ""}`,
+    cellCode(review.reviewer_provider ?? "CLAUDE_DESKTOP"),
     modes.length === 0
       ? "no round prepared"
       : `${modes.map(cellCode).join(" then ")} strategy`,
@@ -1005,9 +988,7 @@ function localFacts(review, publication, summary, partition, timings) {
     ["Findings", findingsFact(review, partition)],
     [
       "Outcome",
-      partition.reported.length > 0
-        ? `${partition.reported.length} reported (advisory: no author loop)`
-        : `${partition.resolved.length} fixed and verified · ${partition.open.length} open · ${partition.rebutted.length} rebutted`,
+      `${partition.resolved.length} fixed and verified · ${partition.open.length} open · ${partition.rebutted.length} rebutted`,
     ],
     ["Wall time", wallTimeRow(timings)],
   ];
@@ -1066,13 +1047,9 @@ function destinationSentence(review, publication, summary) {
   if (review?.status === "LOCAL_GATE_PASSED") {
     return `The local gate passed over snapshot ${code(review.clean_snapshot_hash)}; no publication ledger was rendered, so nothing here is merged.`;
   }
-  const next = advisoryReported(review)
-    ? "the findings are reported and nothing further is owed on this review"
-    : review?.advisory === true && review?.status === "CLEAN"
-      ? "the advisory review found nothing and nothing further is owed on it"
-      : Object.hasOwn(LOCAL_NEXT_STEP, review?.status)
-        ? LOCAL_NEXT_STEP[review.status]
-        : `its status ${code(review?.status)} names no next step here; inspect the ledger`;
+  const next = Object.hasOwn(LOCAL_NEXT_STEP, review?.status)
+    ? LOCAL_NEXT_STEP[review.status]
+    : `its status ${code(review?.status)} names no next step here; inspect the ledger`;
   return `Next: ${next}. No publication ledger was rendered, so nothing here is merged or gated.`;
 }
 
@@ -1090,20 +1067,16 @@ function verdictLines(review, publication, summary, partition) {
   const standing =
     total === 0
       ? "no finding was raised"
-      : partition.reported.length > 0
-        ? `${count(partition.reported.length, "finding")} reported`
-        : open === 0
-          ? `${count(total, "finding")} raised, none still open`
-          : `${open} of ${count(total, "finding")} still open`;
+      : open === 0
+        ? `${count(total, "finding")} raised, none still open`
+        : `${open} of ${count(total, "finding")} still open`;
   const carried =
     review.continued_by_review_id == null
       ? ""
       : `, carried into ${code(review.continued_by_review_id)}`;
-  const qualifier = advisoryReported(review)
-    ? " (advisory: the findings are reported and there is no author loop to close them)"
-    : TERMINAL_STATUSES.includes(review.status)
-      ? ""
-      : " (not a terminal state: the review is still in progress)";
+  const qualifier = TERMINAL_STATUSES.includes(review.status)
+    ? ""
+    : " (not a terminal state: the review is still in progress)";
   return [
     `**${inline(review.status)}** — ${standing}${carried}${qualifier}.`,
     destinationSentence(review, publication, summary),
@@ -1125,17 +1098,6 @@ function openFindingsSection(review, partition) {
       carried.length === 0
         ? "No finding was raised in this review, so nothing is open."
         : `No finding was raised in this review; ${count(carried.length, "finding")} carried in from an earlier review and the full report renders each.`,
-    ];
-  }
-  if (partition.reported.length > 0) {
-    return [
-      "## Reported — advisory, so no author loop will close these",
-      ...partition.reported.map((finding) =>
-        [
-          findingHeadline(finding),
-          `Round ${inline(finding.introduced_round ?? "n/a")} reported it. ${inline(finding.explanation)}`,
-        ].join("\n"),
-      ),
     ];
   }
   if (partition.open.length === 0) {

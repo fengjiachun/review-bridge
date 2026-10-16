@@ -113,7 +113,6 @@ function cleanInTwoRounds(overrides = {}) {
     requirement: "Implement the thing.\nSecond requirement line.",
     implementation_scope: "src/a.mjs only",
     reviewer_provider: "CODEX_TASK",
-    advisory: false,
     review_strategy: {
       mode: "FULL",
       parent_review_id: null,
@@ -571,12 +570,9 @@ test("a review still in progress is rendered with its current status, not a term
   assert.match(render(cleanInTwoRounds()), /- Terminal state: `CLEAN`/);
 });
 
-// An advisory review has no author loop and no rereview: once its findings
-// are submitted it is as finished as the store will let it be, and the line
-// says why it stops there.
-test("an advisory review that reported findings is terminal, and says why", () => {
+// A review whose findings are submitted is waiting for the author, not done.
+test("a review that submitted findings is not terminal", () => {
   const submitted = {
-    advisory: true,
     status: "REVIEW_SUBMITTED",
     current_round: 1,
     state_version: 2,
@@ -590,18 +586,9 @@ test("an advisory review that reported findings is terminal, and says why", () =
     ],
     clean_snapshot_hash: null,
   };
-  const advisory = render(cleanInTwoRounds(submitted));
-  assert.match(advisory, /### Outcome\n\n- Terminal state: `REVIEW_SUBMITTED` \(advisory: findings reported, no author loop\)\n/);
-  assert.doesNotMatch(advisory, /not terminal/);
-  // The same ledger without the advisory flag is an ordinary review waiting
-  // for the author.
-  const gated = render(cleanInTwoRounds({ ...submitted, advisory: undefined }));
+  const gated = render(cleanInTwoRounds(submitted));
   assert.match(gated, /- Current status: `REVIEW_SUBMITTED` \(not terminal: the review is still in progress\)\n/);
   assert.doesNotMatch(gated, /Terminal state/);
-  // An advisory review that found nothing reaches CLEAN and reads as before.
-  const clean = render(cleanInTwoRounds({ advisory: true }));
-  assert.match(clean, /- Terminal state: `CLEAN`\n- Rounds to CLEAN: 2/);
-  assert.doesNotMatch(clean, /advisory: findings reported/);
 });
 
 test("a rebuttal sustained before the verification obligation says the verification is not recorded", () => {
@@ -1607,23 +1594,14 @@ test("the brief's second line names the next local step when no publication exis
     seen.add(second);
   }
   assert.equal(seen.size, Object.keys(expected).length, "each status gets its own destination");
-  // The advisory terminal states owe nothing further, and say so instead of
-  // pointing at an author loop that does not exist.
-  const reported = brief(cleanInTwoRounds({ advisory: true, status: "REVIEW_SUBMITTED" }));
-  assert.match(reported.split("\n").find((line) => line.startsWith("Next: ")), /^Next: the findings are reported and nothing further is owed/);
-  const clean = brief(cleanInTwoRounds({ advisory: true, status: "CLEAN" }));
-  assert.match(clean.split("\n").find((line) => line.startsWith("Next: ")), /^Next: the advisory review found nothing and nothing further is owed/);
   // A status the table does not know is not silently generic.
   const odd = brief(cleanInTwoRounds({ status: "SOMETHING_NEW" }));
   assert.match(odd.split("\n").find((line) => line.startsWith("Next: ")), /names no next step here; inspect the ledger/);
 });
 
-// An advisory review's findings stay OPEN in the ledger forever: there is no
-// author to answer them. The brief must call them reported, not open, and
-// must not open the "still open" section over them.
-test("the brief reports an advisory review's findings instead of calling them open", () => {
+// Submitted findings with no author response are open, and the brief says so.
+test("the brief calls submitted findings open and awaiting the author", () => {
   const submitted = {
-    advisory: true,
     status: "REVIEW_SUBMITTED",
     current_round: 1,
     state_version: 2,
@@ -1640,20 +1618,11 @@ test("the brief reports an advisory review's findings instead of calling them op
     ],
     clean_snapshot_hash: null,
   };
-  const advisory = brief(cleanInTwoRounds(submitted));
-  assert.match(advisory, /^\*\*REVIEW_SUBMITTED\*\* — 2 findings reported.*advisory/m);
-  assert.match(advisory, /\| Outcome \| 2 reported \(advisory: no author loop\) \|/);
-  assert.match(advisory, /^## Reported — advisory, so no author loop will close these$/m);
-  assert.match(advisory, /Round 1 reported it\./);
-  assert.doesNotMatch(advisory, /still open/i);
-  assert.doesNotMatch(advisory, /no author response yet/);
-  // The same ledger without the advisory flag is an ordinary review whose
-  // findings really are open and awaiting the author.
-  const gated = brief(cleanInTwoRounds({ ...submitted, advisory: undefined }));
+  const gated = brief(cleanInTwoRounds(submitted));
   assert.match(gated, /2 of 2 findings still open/);
+  assert.match(gated, /\| Outcome \| 0 fixed and verified · 2 open · 0 rebutted \|/);
   assert.match(gated, /^## Still open — what the next reader inherits$/m);
   assert.match(gated, /no author response yet/);
-  assert.doesNotMatch(gated, /reported \(advisory/);
 });
 
 test("legacy full reports retain their contents and mark reviewer configuration unavailable", async () => {
@@ -1671,7 +1640,7 @@ test("legacy full reports retain their contents and mark reviewer configuration 
   // The stored baseline retains its original rendering identity.
   assert.ok(baseline.includes("- Report revision: `9-f1`"));
   assert.ok(rendered.includes(`- Report revision: \`9-f${REPORT_FORMAT}\``));
-  assert.equal(REPORT_FORMAT, 7);
+  assert.equal(REPORT_FORMAT, 8);
 });
 
 test("a finding's heading names the constraint it records", () => {
@@ -1816,14 +1785,10 @@ test("a finding restated in a later round is named as a repeat, by the rule the 
   assert.ok(markdown.includes("- Repeated across rounds, compared by title and location: `F-001` = `F-004`."));
 });
 
-test("a review still in progress is briefed as in progress, and an advisory one as reported", () => {
+test("a review still in progress is briefed as in progress", () => {
   const running = brief(continuableInTwoRounds({ status: "AUTHOR_RESPONDED" }));
   assert.match(running.split("\n")[2], /\(not a terminal state: the review is still in progress\)\.$/);
-  const advisory = brief(
-    continuableInTwoRounds({ status: "REVIEW_SUBMITTED", advisory: true }),
-  );
-  assert.match(advisory.split("\n")[2], /\(advisory: the findings are reported and there is no author loop to close them\)\.$/);
-  assert.ok(advisory.includes("| Reviewer | `CODEX_TASK` (advisory: attests nothing), `FULL` strategy, 2 rounds, requested unavailable; observed unavailable |"));
+  assert.ok(running.includes("| Reviewer | `CODEX_TASK`, `FULL` strategy, 2 rounds, requested unavailable; observed unavailable |"));
 });
 
 test("free text from the ledger cannot shape the brief or break out of a table cell", () => {
@@ -2017,7 +1982,7 @@ test("the five places that carry the report's identity agree, renderer format in
   // 1. reportRevision, where the identity is minted.
   const revision = reportRevision(review, publication, publicationSummary);
   assert.equal(revision, `${review.state_version}-f${REPORT_FORMAT}`);
-  assert.equal(REPORT_FORMAT, 7);
+  assert.equal(REPORT_FORMAT, 8);
 
   const receipt = await writeReviewReport(state.store, state.reviewId);
   // 2. the file name, and 3. the tool receipt.
