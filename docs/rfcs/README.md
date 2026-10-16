@@ -3,6 +3,12 @@
 RFCs describe substantial protocol, state-machine, security-boundary, or
 cross-client changes before implementation.
 
+## Draft proposals
+
+- [RFC 0005: Peer Review and PR Handoff](0005-peer-review-handoff.md) proposes
+  colleague review after the local gate, with GitHub feedback and separate
+  machine, human, and repository-policy status.
+
 ## Lifecycle
 
 1. Create the next numbered RFC as `NNNN-short-title.md`.
