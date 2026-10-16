@@ -405,6 +405,16 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "for attacker-controllable input the sandbox is not an isolation boundary",
       /For attacker-controllable input the sandbox is therefore not an isolation boundary/,
     ],
+    // The bar those premises uphold: the launch reviews only the operator's
+    // own changes, so it is never pointed at someone else's code.
+    [
+      "the launch reviews only the operator's own changes",
+      /This launch reviews the operator's own changes/,
+    ],
+    [
+      "the launch is never pointed at someone else's code",
+      /never point this launch at code someone else wrote/,
+    ],
     // Corrected by the #108 Codex P2. The section used to justify the
     // from-ledger round two by claiming the CLI could not resume, which is
     // false: `codex exec resume` takes a session id and `codex exec` prints
@@ -746,8 +756,6 @@ export function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// The body between a `## ` heading and the next one, or the end of the
-// document when the section is last.
 // The report step the Finish and Publish sections each carry (#123). Both
 // sections say the same thing, so one contract holds both: the render is the
 // driver's call after the gate, never the gate's; Plannotator is optional and
@@ -812,6 +820,8 @@ export function assertThirdPartyMaterialBoundary(document, label) {
   }
 }
 
+// The body between a `## ` heading and the next one, or the end of the
+// document when the section is last.
 export function extractMarkdownSection(document, heading) {
   const match = document.match(
     new RegExp(
