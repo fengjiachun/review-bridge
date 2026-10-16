@@ -1,8 +1,7 @@
 ## Dispatching a DEEPSEEK_HARNESS review
 
-Use [Prepare](prepare.md) for a local review or [Advisory panel](advisory-panel.md)
-for an advisory member. After a local verdict, load [Handle findings](findings.md)
-or [Finish](finish.md) as its state requires.
+Use [Prepare](prepare.md) for a local review. After a local verdict, load
+[Handle findings](findings.md) or [Finish](finish.md) as its state requires.
 
 This driver session can dispatch the `DEEPSEEK_HARNESS` reviewer itself rather
 than asking the operator to start it by hand. Nothing else moves: Prepare,

@@ -19,12 +19,11 @@ test("manual preparation routes to each provider without loading other playbooks
   for (const provider of ["codex-task", "hermes", "deepseek-harness", "claude-desktop"]) {
     assert.ok(prepare.includes(`](${provider}.md)`));
     const route = `${entry}\n${prepare}\n${docs.get(`references/${provider}.md`)}`;
-    assert.doesNotMatch(route, /start_autonomous_workflow|start_publication|```bash\nnode .*advisory-sandbox-launch/);
+    assert.doesNotMatch(route, /start_autonomous_workflow|start_publication/);
     for (const [other, launch] of [["codex-task", "codex exec --"], ["hermes", "hermes -p"], ["deepseek-harness", "dsh --profile"]]) {
       if (provider !== other) assert.ok(!route.includes(launch), `${provider} loads ${other}'s launch`);
     }
   }
-  assert.match(docs.get("references/advisory-panel.md"), /\[CODEX_TASK sandbox\]\(codex-advisory\.md\)/);
   assert.match(docs.get("references/autonomous.md"), /\[Publish through GitHub\]\(publication\.md\)/);
   for (const [name, text] of docs) {
     for (const [, helper] of text.matchAll(/\.\.\/\.\.\/scripts\/([\w-]+\.mjs)/g)) {

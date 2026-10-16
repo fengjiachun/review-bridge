@@ -163,14 +163,10 @@ down. **Rationale**: the author may record its key design decisions, dropped
 alternatives, and doubts before any finding exists; the reviewer sees it only
 after the author has answered round one, as one more thing to verify.
 
-Two variants. A later commit on the same branch can continue a previous
+A later commit on the same branch can continue a previous
 `LOCAL_GATE_PASSED` review as a **successor**, where the reviewed unit is the
-parent-to-child delta plus whatever it touches. Several independent reviewers
-can form an **advisory panel** over someone else's pull request; an advisory
-review can only produce a report, never a gate, and an advisory Codex member
-launched through the packaged launcher runs in a container that serves as
-the read boundary. Both are described in [local-review.md](local-review.md),
-with every provider's dispatch in
+parent-to-child delta plus whatever it touches. It is described in
+[local-review.md](local-review.md), with every provider's dispatch in
 [reviewer-configuration.md](reviewer-configuration.md).
 
 ## 5. The publication gate
@@ -291,9 +287,8 @@ still needs sampling.
   Provider binding and separate Codex tasks are not authenticated human or
   model identity; a `CODEX_TASK` review improves context isolation, which is
   not the model diversity of a separate provider.
-- The host sandbox bounds writes and network, not reads; the read boundary for
-  third-party code is the container of an advisory Codex member launched
-  through the packaged launcher. The two-round "blind review" is a
+- The host sandbox bounds writes and network, not reads, so it is no isolation
+  boundary for text that can steer a reviewer. The two-round "blind review" is a
   tool-surface guarantee, not a boundary against a process that reads the
   store directly.
 - The store holds repository paths, requirements, patches, manifests,
@@ -309,7 +304,7 @@ still needs sampling.
 - The selected client may send source returned by the reviewer tools to its
   model provider according to its account configuration. The MCP server
   processes open no network connection; the packaged scripts reach GitHub
-  through the user's `gh`, and the advisory launcher through its egress proxy.
+  through the user's `gh`.
 
 Version-by-version changes are in the [CHANGELOG](../CHANGELOG.md).
 
@@ -346,4 +341,3 @@ source; this is an overview grouped by purpose.
 | baseline | The state of the Codex feeds before a request; earlier comments are never an answer. |
 | observation | The collector's one-pass reading of the pull request, checks, Codex feeds, and threads. |
 | gate | The record a finalize step writes; the publication gate expires and is verified immediately before a merge. |
-| advisory review | A review that can only produce a report, never a gate, used for someone else's pull request. |

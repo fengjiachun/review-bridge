@@ -236,32 +236,11 @@ again once a publication reads `MERGE_READY`, and opens it in Plannotator when
 that tool is on PATH. Rendering changes no ledger, consumes no round, and
 touches no gate; the report is a projection of the ledger, not evidence.
 
-**An advisory panel reviews someone else's pull request.** A panel is several
-independent reviewers over one set of frozen bytes: a packaged script clones
-the pull request outside every authoring tree, and each member gets its own
-`prepare_review` with `advisory: true` over the same base. An advisory review
-accepts `submit_review` and nothing else — `finalize_local_gate`,
-`submit_resolutions`, `prepare_rereview`, and `append_review_erratum` each
-refuse it — so it ends in a report and can never mint a local gate over code
-this operator did not author.
-
-**A `CODEX_TASK` panel member runs in a container.** The host sandbox bounds
-writes and network, not reads, and a third party's diff is text that can steer
-a reviewer. So an advisory `CODEX_TASK` member is launched only through the
-packaged `scripts/advisory-sandbox-launch.mjs`, which runs the reviewer in a
-Linux container that is the read boundary. Inside it are the operator's
-`auth.json` read-only, the packaged plugin read-only, a fresh clone of the
-checkout read-only, and a staged copy of the one review; the host store is
-never mounted. Egress goes only through a proxy that admits `chatgpt.com`,
-`api.openai.com`, and `auth.openai.com`. The verdict is replayed through the host's own
-`submit_review` and kept only if the replay equals the staged ledger. The
-launcher fails closed without Docker.
-
 **The workflow skill loads one route at a time.** The packaged
 `review-bridge-workflow` skill is a router: a table maps the current task —
-prepare a manual review, handle findings, finish, publish, run the autonomous
-workflow, or run an advisory panel — to one reference page, and the agent reads
-only that page and the references it calls for at the current step. A manual
+prepare a manual review, handle findings, finish, publish, or run the
+autonomous workflow — to one reference page, and the agent reads only that
+page and the references it calls for at the current step. A manual
 review loads only its selected provider's dispatch page. The boundaries that
 hold in every mode stay in the skill itself.
 
@@ -276,7 +255,7 @@ it; a small script importing the modules directly works too.
 ## What works today
 
 Everything above is implemented and tested: local review with four isolated
-reviewer providers, advisory panels, publication with baseline and atomic
+reviewer providers, publication with baseline and atomic
 observations, the thread reply-and-resolve loop with its compensating
 unresolve, mark-ready, return-to-draft, and the terminal record. RFC 0003 is
 `Implemented`.

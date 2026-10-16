@@ -7,6 +7,21 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Changed
+
+- (#182) Remove the advisory panel route: the workflow skill's advisory panel
+  and advisory `CODEX_TASK` sandbox references, the packaged
+  `advisory-sandbox-launch.mjs`, `advisory-panel-checkout.mjs`, and
+  `isolated-git.mjs` scripts, and the dispatch contracts and release checks
+  that pinned them. The route went nearly unused. The `CODEX_TASK` dispatch
+  reference keeps the statement that its sandbox bounds writes and network,
+  not reads, so it is never pointed at code someone else wrote. The four
+  reviewer instructions no longer mention advisory reviews. Images the
+  launcher built are tagged `review-bridge-advisory-codex:<version>-<hash>`
+  and can be removed with `docker image rm`.
+
 ## 0.20.0 - 2026-10-14
 
 ### Added
