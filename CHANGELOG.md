@@ -32,6 +32,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   ordinary review; delete its `reviews/<review_id>` directory if it should not
   be counted or continued.
 
+### Fixed
+
+- (#185) A Codex result comment that opens with the app's
+  `<!-- codex-review-receipt:v1 -->` marker classifies as the same comment
+  without it, so a clean answer binds as `CLEAN` again instead of leaving the
+  publication at `GITHUB_REVIEW_UNKNOWN` (issue #184).
+
 ## 0.20.0 - 2026-10-14
 
 ### Added
