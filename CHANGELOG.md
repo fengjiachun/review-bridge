@@ -7,6 +7,15 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Fixed
+
+- (#187) The `submit_resolutions` description no longer says a rejection
+  comes with evidence: `evidence` is optional for every disposition and the
+  server never required it. What evidence each disposition needs stays in the
+  workflow skill's findings route.
+
 ## 0.21.0 - 2026-10-16
 
 ### Changed

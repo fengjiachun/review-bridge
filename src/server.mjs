@@ -1383,7 +1383,7 @@ if (role === "author") {
     {
       title: "Submit author resolutions",
       description:
-        "Answer every open finding as fixed, rejected with evidence, or human_required.",
+        "Answer every open finding as fixed, rejected, or human_required.",
       inputSchema: {
         review_id: z.string(),
         resolutions: z.array(
