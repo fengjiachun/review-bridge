@@ -142,6 +142,7 @@ for (const [name, value] of [
   ["literal multiline scalar", "|"],
   ["folded multiline scalar", ">"],
   ["flow list", "[one, two]"],
+  ["flow list with a blank entry", "[ ]"],
   ["flow mapping", "{one: two}"],
   ["directive", "%name"],
   ["reserved at sign", "@name"],
@@ -154,6 +155,12 @@ for (const [name, value] of [
     assert.throws(() => parseMcpSnippet(`value: ${value}\n`));
   });
 }
+
+test("MCP snippet parser reads an explicit empty list and nothing else in flow form", () => {
+  assert.deepEqual(parseMcpSnippet("platform_toolsets:\n  cli: []\n"), {
+    platform_toolsets: { cli: [] },
+  });
+});
 
 test("MCP snippet parser reads mappings nested in block sequences", () => {
   // The cordis patch shape the DeepSeek Harness snippets use: an entry array
@@ -372,6 +379,10 @@ test("Hermes reviewer MCP snippet binds HERMES with an exact release path and on
     path.join("templates", "hermes", "mcp", "reviewer.config.yaml"),
   );
   const parsed = parseMcpSnippet(yaml);
+  assert.deepEqual(Object.keys(parsed), ["mcp_servers", "platform_toolsets"]);
+  // Hermes reads only an explicit list for the platform's toolsets; an empty
+  // one leaves the profile with no built-in terminal, file, or web tools.
+  assert.deepEqual(parsed.platform_toolsets, { cli: [] });
   const servers = parsed.mcp_servers;
   assert.deepEqual(Object.keys(servers), ["review-bridge-reviewer"]);
   const server = servers["review-bridge-reviewer"];

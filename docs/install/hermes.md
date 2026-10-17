@@ -22,7 +22,8 @@ Run `npm run verify:build`, then render `__REVIEW_BRIDGE_RELEASE_PATH__` to the
 absolute, versioned `review-bridge-v0.21.0/hermes-integration` directory and
 `__REVIEW_BRIDGE_HOME__` to one explicit absolute shared store. Merge each
 snippet's server entry into only its matching profile's top-level `mcp_servers`
-mapping.
+mapping, and give the reviewer profile the snippet's `platform_toolsets` so it
+carries no built-in toolsets.
 All participants share that one `REVIEW_BRIDGE_HOME` and one exact Review
 Bridge version. The packaged `hermes-integration/README.md` gives the complete
 install, profile tool checks, and atomic upgrade procedure.
