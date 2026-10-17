@@ -11,6 +11,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import {
   assertAuthorServerDisabledInLaunches,
   assertDispatchContract,
+  assertDeletionLens,
   assertThirdPartyMaterialBoundary,
   CODEX_TASK_DISPATCH_CONTRACT,
   DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
@@ -781,6 +782,7 @@ assert.match(reviewerSkill, /must not be a fork of the author task/);
 assert.match(reviewerSkill, /Require `reviewer_provider: CODEX_TASK`/);
 assert.match(reviewerSkill, /Treat\s+every\s+actionable\s+finding\s+as\s+blocking/);
 assertThirdPartyMaterialBoundary(reviewerSkill, "packaged Codex reviewer skill");
+assertDeletionLens(reviewerSkill, "packaged Codex reviewer skill");
 
 const extension = await readJson(path.join(reviewerRoot, "manifest.json"));
 assert.equal(extension.manifest_version, "0.3");
@@ -813,6 +815,7 @@ assertThirdPartyMaterialBoundary(
   reviewInstructions,
   "packaged Claude review instructions",
 );
+assertDeletionLens(reviewInstructions, "packaged Claude review instructions");
 
 // Hermes profile integration artifact.
 const hermesRuntimePackage = await readJson(
@@ -928,6 +931,7 @@ assert.match(hermesSkill, /submit tools update the review\s+ledger/is);
 assert.doesNotMatch(hermesSkill, /read-only Review Bridge reviewer tools/i);
 assert.doesNotMatch(hermesSkill, /\bprepare_review\b|\bstart_publication\b/);
 assertThirdPartyMaterialBoundary(hermesSkill, "packaged Hermes reviewer skill");
+assertDeletionLens(hermesSkill, "packaged Hermes reviewer skill");
 const hermesReadme = await fsp.readFile(
   path.join(hermesIntegration, "README.md"),
   "utf8",
@@ -1064,6 +1068,7 @@ assertThirdPartyMaterialBoundary(
   deepseekSkill,
   "packaged DeepSeek Harness reviewer skill",
 );
+assertDeletionLens(deepseekSkill, "packaged DeepSeek Harness reviewer skill");
 const deepseekReadme = await fsp.readFile(
   path.join(deepseekHarness, "README.md"),
   "utf8",

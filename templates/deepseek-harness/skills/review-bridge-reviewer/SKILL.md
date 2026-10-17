@@ -43,8 +43,7 @@ build and is not a patch to a DeepSeek Harness bundled skill.
    - `FULL`: read `patch.diff` through `current_snapshot.patch_index`, which
      gives each file's byte offset and length. Read the sections the reviewed
      behavior depends on and skip sections that cannot affect it, such as
-     generated lockfiles or prose documents, unless the requirement is about
-     that content. Report which sections you skipped. Read every `path: null`
+     generated lockfiles, unless the requirement is about that content. Report which sections you skipped. Read every `path: null`
      entry in full — the remainder entry when `patch_index_truncated` is true,
      and any section whose filename could not be decoded — because a section
      without a path cannot be ruled out by path. If `patch_index` itself is
@@ -68,6 +67,16 @@ build and is not a patch to a DeepSeek Harness bundled skill.
    code cannot express, or a test that no behavior change can turn red. Treat
    every actionable finding as blocking the clean verdict; do not waive
    lower-severity findings.
+   Apply a deletion test to what the change adds. For each new state, record
+   field, gate, refusal, fallback, or defensive check, ask whether deleting it
+   would make a required, reachable behavior fail; if it would not, report it
+   as a finding that recommends deleting it. Changed prose that asserts
+   behavior is read even though it cannot affect the code: documentation,
+   changelog entries, instructions, tool descriptions, and comments. Each
+   claim needs code or a test in the snapshot that carries it; a claim
+   stronger than its carrier is a finding. Small is not a finding: do not ask
+   for abstractions, layers, or extension points the change does not need,
+   and do not manufacture objections.
    A finding that breaks a project rule — specific to this repository and
    costly to get wrong, not a general best practice — sets `constraint`: look
    for the rule with `search_snapshot` in the agent guidance (`AGENTS.md`,
