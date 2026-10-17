@@ -18,7 +18,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   under a `FULL` review instead of being skippable, and a claim with no
   carrier in the code or tests is a finding. Size alone is not a finding, and
   reviewers are told not to manufacture objections. The paragraph is pinned
-  on the source and packaged copies like the reviewed-material boundary.
+  on the source and packaged copies like the reviewed-material boundary, and
+  the reviewer server's initialization instructions no longer let a `FULL`
+  review skip changed prose either.
 
 ### Fixed
 

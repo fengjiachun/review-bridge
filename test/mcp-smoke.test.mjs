@@ -633,3 +633,16 @@ test("MCP preserves immutable intent texts and only serves the reconstruction in
   assert.equal(repeatedRereview.isError, true);
   assert.deepEqual(await call(author, "get_review"), complete);
 });
+
+// The reviewer's initialization instructions reach every reviewer client, so
+// they must not grant the prose skip the reviewer surfaces withdrew.
+test("reviewer instructions read changed prose under a FULL review", async (t) => {
+  const store = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-instructions-"));
+  t.after(() => fsp.rm(store, { recursive: true, force: true }));
+  const reviewer = await connectClient("reviewer", store);
+  t.after(() => reviewer.close());
+  assert.match(
+    reviewer.getInstructions(),
+    /skipping sections whose behavior the review does not depend on, except changed prose that asserts behavior, which is read and checked against the code/,
+  );
+});
