@@ -530,6 +530,17 @@ export const HERMES_DISPATCH_CONTRACT = {
       /Independently review Review Bridge task `<review_id>` using the packaged Hermes reviewer skill\. Require `reviewer_provider: HERMES`, follow the review strategy, and submit every actionable finding\./,
     ],
     ["chat -q answers no prompt itself", /`chat -q` does not auto-approve tool prompts/],
+    // The reviewer profile carries no built-in toolsets, skills included, so
+    // the skill reaches the session only through the launch's preload, and a
+    // resumed session does not keep it: both launches must pass it.
+    [
+      "both launches preload the reviewer skill",
+      /both launches preload it with `-s review-bridge-reviewer`/,
+    ],
+    [
+      "a resumed session does not keep the preload",
+      /a resumed session does not keep a preload/,
+    ],
     // What makes the unattended claim true for this runtime, measured on
     // 2026-09-10: Hermes gates an MCP call behind its approval prompt only on
     // a `trust: untrusted` server, and the packaged snippet names `trust:
@@ -603,7 +614,7 @@ export const HERMES_DISPATCH_CONTRACT = {
     // neither hand it the reviewer request nor reach the wait while it blocks.
     [
       "match",
-      /```bash\n *hermes -p <reviewer-profile> chat -q '<the reviewer request below>' < \/dev\/null/,
+      /```bash\n *hermes -p <reviewer-profile> chat -s review-bridge-reviewer -q '<the reviewer request below>' < \/dev\/null/,
       "launch is not the non-interactive single-query form with stdin closed",
     ],
     [
@@ -614,7 +625,7 @@ export const HERMES_DISPATCH_CONTRACT = {
     // Round two resumes the same instance, and needs a runnable form for it.
     [
       "match",
-      /```bash\n *hermes -p <reviewer-profile> chat --resume <session-id> -q '<rereview request>' < \/dev\/null/,
+      /```bash\n *hermes -p <reviewer-profile> chat --resume <session-id> -s review-bridge-reviewer -q '<rereview request>' < \/dev\/null/,
       "round-two resume form with stdin closed",
     ],
   ],
