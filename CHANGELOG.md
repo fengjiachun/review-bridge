@@ -22,6 +22,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   the reviewer server's initialization instructions no longer let a `FULL`
   review skip changed prose either.
 
+- (#190) The packaged Hermes reviewer snippet sets `platform_toolsets.cli` to
+  an empty list, so the reviewer profile carries no built-in terminal, file,
+  web, or code-execution toolsets beside the Review Bridge reviewer server.
+  Existing reviewer profiles need the key added; `hermes -p <reviewer-profile>
+  tools list` should show every built-in toolset disabled. The snippet parser
+  accepts that one empty list.
+
 ### Fixed
 
 - (#187) The `submit_resolutions` description no longer says a rejection
