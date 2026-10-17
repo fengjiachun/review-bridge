@@ -74,7 +74,7 @@ The server started with `--role author`. The summary is the first sentence of ea
 | `select_reviewer_configuration` | Persist an explicit user selection (or preauthorized unattended selection) for this pending round. | `review_id`, `expected_state_version`, `model`, `reasoning_effort`, `environment_id` |
 | `start_autonomous_workflow` | Create an opt-in workflow ledger at an immutable clean base, bind the exact capability set, and atomically claim the local branch and GitHub head ref. | `repository_path`, `base_ref`, `base_sha`, `requirement`, `implementation_scope`, `topic_branch`, `operator_label`, `capabilities`, `publication_target` |
 | `start_publication` | Bind a local review gate or explicit remote-only authorization to one pull request, pinned Codex Bot actor, trigger policy, and fresh complete preexisting Codex baseline. | `review_id`, `repository_id`, `owner`, `repo`, `pr_number`, `base_branch`, `head_branch`, `codex_actor_id`, `codex_actor_type`, `codex_actor_login`, `codex_trigger_mode`, `codex_review_baseline` |
-| `submit_resolutions` | Answer every open finding as fixed, rejected with evidence, or human_required. | `review_id`, `resolutions` |
+| `submit_resolutions` | Answer every open finding as fixed, rejected, or human_required. | `review_id`, `resolutions` |
 | `verify_publication_gate` | Immediately before merge, cross-check the committed gate, current ledger revision and freshness, then durably audit the verdict. | `review_id` |
 | `wait_for_review_state` | Wait 25 seconds by default, configurable up to 30 seconds, for the review's state machine to move past a known state_version. | `review_id`, `known_state_version` |
 
