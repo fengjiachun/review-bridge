@@ -813,6 +813,35 @@ const THIRD_PARTY_MATERIAL_SENTENCES = [
   ],
 ];
 
+// The deletion lens on every reviewer surface: what a change adds must be
+// needed by a reachable behavior, a claim in changed prose must have a
+// carrier in the code, and size alone is never the objection.
+const DELETION_LENS_SENTENCES = [
+  [
+    "an added mechanism no reachable behavior needs is a finding",
+    "For each new state, record field, gate, refusal, fallback, or defensive check, ask whether deleting it would make a required, reachable behavior fail; if it would not, report it as a finding that recommends deleting it.",
+  ],
+  [
+    "changed prose that asserts behavior is read",
+    "Changed prose that asserts behavior is read even though it cannot affect the code",
+  ],
+  [
+    "a claim stronger than its carrier is a finding",
+    "Each claim needs code or a test in the snapshot that carries it; a claim stronger than its carrier is a finding.",
+  ],
+  [
+    "small is not a finding",
+    "Small is not a finding: do not ask for abstractions, layers, or extension points the change does not need, and do not manufacture objections.",
+  ],
+];
+
+export function assertDeletionLens(document, label) {
+  const prose = document.replace(/\s+/g, " ");
+  for (const [claim, sentence] of DELETION_LENS_SENTENCES) {
+    assert.ok(prose.includes(sentence), `${label} does not state that ${claim}`);
+  }
+}
+
 export function assertThirdPartyMaterialBoundary(document, label) {
   const prose = document.replace(/\s+/g, " ");
   for (const [claim, sentence] of THIRD_PARTY_MATERIAL_SENTENCES) {

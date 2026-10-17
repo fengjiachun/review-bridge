@@ -9,6 +9,19 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Changed
+
+- (#188) All four reviewer instruction surfaces apply a deletion test to what
+  a change adds: a new state, record field, gate, refusal, fallback, or
+  defensive check that no required, reachable behavior needs is a finding
+  that recommends deleting it. Changed prose that asserts behavior is now read
+  under a `FULL` review instead of being skippable, and a claim with no
+  carrier in the code or tests is a finding. Size alone is not a finding, and
+  reviewers are told not to manufacture objections. The paragraph is pinned
+  on the source and packaged copies like the reviewed-material boundary, and
+  the reviewer server's initialization instructions no longer let a `FULL`
+  review skip changed prose either.
+
 ### Fixed
 
 - (#187) The `submit_resolutions` description no longer says a rejection

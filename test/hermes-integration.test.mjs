@@ -12,6 +12,7 @@ import * as mcpSnippets from "../scripts/mcp-snippets.mjs";
 import {
   assertAuthorServerDisabledInLaunches,
   assertDispatchContract,
+  assertDeletionLens,
   assertThirdPartyMaterialBoundary,
   CODEX_TASK_DISPATCH_CONTRACT,
   DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
@@ -934,6 +935,11 @@ test("verify-build validates packaged Hermes artifacts, HERMES binding, isolatio
       new RegExp(`assertThirdPartyMaterialBoundary\\(\\s*${surface}`),
       `verify-build does not bound third-party material on ${surface}`,
     );
+    assert.match(
+      verify,
+      new RegExp(`assertDeletionLens\\(\\s*${surface}`),
+      `verify-build does not pin the deletion lens on ${surface}`,
+    );
   }
   // The DeepSeek Harness artifact is checked on release builds too, or its
   // packaged snippets ship unverified while the source templates pass CI.
@@ -1249,6 +1255,18 @@ const REVIEWER_SURFACES = [
 test("every reviewer surface bounds third-party material", async () => {
   for (const file of REVIEWER_SURFACES) {
     assertThirdPartyMaterialBoundary(await readRequired(file), file);
+  }
+});
+
+test("every reviewer surface carries the deletion lens and reads changed prose", async () => {
+  for (const file of REVIEWER_SURFACES) {
+    const surface = await readRequired(file);
+    assertDeletionLens(surface, file);
+    assert.doesNotMatch(
+      surface.replace(/\s+/g, " "),
+      /lockfiles or prose documents/,
+      `${file} still lets a FULL review skip prose`,
+    );
   }
 });
 

@@ -25,8 +25,8 @@ When the user asks to review a pending Codex task:
    - `FULL`: read `patch.diff` through `current_snapshot.patch_index`, which
      gives the byte offset and length of every file's section. Read the
      sections the reviewed behavior depends on; skip sections whose content
-     cannot affect it, such as generated lockfiles or prose documents, unless
-     the requirement is about that content. Say which sections you skipped.
+     cannot affect it, such as generated lockfiles, unless the requirement is
+     about that content. Say which sections you skipped.
      Read every entry whose `path` is null in full — the final remainder
      entry when `patch_index_truncated` is true, and any section whose
      filename could not be decoded — because a section without a path cannot
@@ -59,6 +59,16 @@ When the user asks to review a pending Codex task:
    findings, typically `nit` or `minor`: a comment that states nothing the
    code cannot express, or a test that no behavior change can turn red. Do not
    focus on cosmetic style unless it creates a real maintenance risk.
+   Apply a deletion test to what the change adds. For each new state, record
+   field, gate, refusal, fallback, or defensive check, ask whether deleting it
+   would make a required, reachable behavior fail; if it would not, report it
+   as a finding that recommends deleting it. Changed prose that asserts
+   behavior is read even though it cannot affect the code: documentation,
+   changelog entries, instructions, tool descriptions, and comments. Each
+   claim needs code or a test in the snapshot that carries it; a claim
+   stronger than its carrier is a finding. Small is not a finding: do not ask
+   for abstractions, layers, or extension points the change does not need,
+   and do not manufacture objections.
    A finding that breaks a project rule — specific to this repository and
    costly to get wrong, not a general best practice — sets `constraint`: look
    for the rule with `search_snapshot` in the agent guidance (`AGENTS.md`,
