@@ -39,6 +39,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   server never required it. What evidence each disposition needs stays in the
   workflow skill's findings route.
 
+### Internal
+
+- (#189) The fake reviewer in `test/reviewer-options.test.mjs` waits on a
+  hold file instead of a fixed delay, so the concurrent-replacement refusal
+  no longer depends on timing.
+
 ## 0.21.0 - 2026-10-16
 
 ### Changed
