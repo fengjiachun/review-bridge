@@ -46,7 +46,7 @@ async function fixture(t) {
 }
 
 test("author MCP discovers pages, separates selection from launch, persists explicit parameters and reports limitations", async (t) => {
-  const { client, review, repository, store, catalogFile, connect } = await fixture(t);
+  const { client, review, repository, root, store, catalogFile, connect } = await fixture(t);
   const options = await call(client, "discover_reviewer_options", { repository_path: repository, reviewer_provider: "CODEX_TASK" });
   assert.deepEqual(options.models.map(m => m.model), ["review-model", "second-model"]);
   assert.match(options.freshness, /not a forced network refresh/);
@@ -65,9 +65,12 @@ test("author MCP discovers pages, separates selection from launch, persists expl
   await assert.rejects(call(client, "launch_local_reviewer", { review_id: review.id, expected_state_version: selected.state_version }), /selection unavailable/);
   await fsp.writeFile(catalogFile, JSON.stringify({ account: "changed" }));
   await assert.rejects(call(client, "launch_local_reviewer", { review_id: review.id, expected_state_version: selected.state_version }), /environment changed/);
-  await fsp.writeFile(catalogFile, JSON.stringify({ delay: 400 }));
+  const holdFile = path.join(root, "hold");
+  await fsp.writeFile(holdFile, "");
+  await fsp.writeFile(catalogFile, JSON.stringify({ hold: holdFile }));
   const launched = await call(resumedClient, "launch_local_reviewer", { review_id: review.id, expected_state_version: selected.state_version });
   await assert.rejects(call(client, "launch_local_reviewer", { review_id: review.id, expected_state_version: launched.state_version }), /concurrent replacement/);
+  await fsp.rm(holdFile);
   const exitFile = path.join(launched.reviewer_dispatch.attempt_root, "exit.json");
   for (let i = 0; i < 100; i++) { try { await fsp.access(exitFile); break; } catch { await new Promise(r => setTimeout(r, 30)); } }
   assert.equal(JSON.parse(await fsp.readFile(exitFile)).code, 0);

@@ -4,7 +4,10 @@ import { createInterface } from "node:readline";
 const config = () => process.env.RB_TEST_CATALOG ? JSON.parse(fs.readFileSync(process.env.RB_TEST_CATALOG)) : {};
 if (process.argv[2] === "exec") {
   fs.writeFileSync("executed.json", JSON.stringify({ args: process.argv.slice(2), stdin: fs.readFileSync(0, "utf8") }));
-  setTimeout(() => process.exit(0), config().delay ?? 0);
+  // Waits while the configured hold file exists, so removing the fixture root also ends it.
+  const { hold } = config();
+  const exitWhenReleased = () => hold && fs.existsSync(hold) ? setTimeout(exitWhenReleased, 10) : process.exit(0);
+  exitWhenReleased();
 } else if (process.argv[2] === "app-server") {
   createInterface({ input: process.stdin }).on("line", (line) => {
     const { id, method, params } = JSON.parse(line);
