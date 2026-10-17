@@ -87,6 +87,10 @@ function parseScalar(value, line) {
   }
   if (value === "true") return true;
   if (value === "false") return false;
+  // The one flow form accepted: an explicit empty list. Hermes reads only an
+  // explicit list for platform_toolsets.<platform>, and a block sequence
+  // cannot be empty.
+  if (value === "[]") return [];
   if (NUMBER.test(value)) {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) {

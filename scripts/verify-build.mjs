@@ -827,7 +827,13 @@ const hermesReviewerConfig = await fsp.readFile(
   "utf8",
 );
 const parsedHermesReviewer = parseMcpSnippet(hermesReviewerConfig);
-assert.deepEqual(Object.keys(parsedHermesReviewer), ["mcp_servers"]);
+assert.deepEqual(Object.keys(parsedHermesReviewer), [
+  "mcp_servers",
+  "platform_toolsets",
+]);
+// An explicit empty cli list is what keeps Hermes' built-in toolsets out of
+// the reviewer profile; without the key Hermes falls back to all of them.
+assert.deepEqual(parsedHermesReviewer.platform_toolsets, { cli: [] });
 assert.deepEqual(Object.keys(parsedHermesReviewer.mcp_servers), [
   "review-bridge-reviewer",
 ]);

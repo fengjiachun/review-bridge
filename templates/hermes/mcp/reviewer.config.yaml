@@ -1,7 +1,8 @@
 # Review Bridge Hermes reviewer profile MCP config snippet.
 #
 # Merge this snippet's server entry into the reviewer Hermes profile's
-# top-level mcp_servers mapping. Render the placeholder paths within one
+# top-level mcp_servers mapping, and set the profile's top-level
+# platform_toolsets to the value below. Render the placeholder paths within one
 # exact Review Bridge release/build (v0.21.0) before use:
 #   - __REVIEW_BRIDGE_RELEASE_PATH__ -> absolute path of the versioned
 #     hermes-integration directory, for example
@@ -41,3 +42,10 @@ mcp_servers:
         - submit_rereview
       resources: false
       prompts: false
+# Hermes enables its built-in cli toolsets (terminal, file, web, browser,
+# code execution, and more) unless the profile saves an explicit list for the
+# platform. An explicit empty list leaves only the MCP servers, so the
+# reviewer reads the change only through the seven tools above. A top-level
+# `toolsets` key does not do this: Hermes does not read it for chat.
+platform_toolsets:
+  cli: []

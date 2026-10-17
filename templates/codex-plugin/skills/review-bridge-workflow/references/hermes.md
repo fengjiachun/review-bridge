@@ -15,7 +15,7 @@ shell launch between them.
    handing it the reviewer request below as its single query:
 
    ```bash
-   hermes -p <reviewer-profile> chat -q '<the reviewer request below>' < /dev/null
+   hermes -p <reviewer-profile> chat -s review-bridge-reviewer -q '<the reviewer request below>' < /dev/null
    ```
 
    > Independently review Review Bridge task `<review_id>` using the packaged
@@ -53,7 +53,7 @@ A round-two rereview of the same `review_id` resumes the instance that
 produced round one, in the same shape as the launch:
 
 ```bash
-hermes -p <reviewer-profile> chat --resume <session-id> -q '<rereview request>' < /dev/null
+hermes -p <reviewer-profile> chat --resume <session-id> -s review-bridge-reviewer -q '<rereview request>' < /dev/null
 ```
 
 Send it the same review ID and a request to rereview the author's resolutions
@@ -111,12 +111,14 @@ same server marked `trust: untrusted` the same call raised the prompt —
 end-of-file from the closed stdin, and was denied without running. `full` is
 also what Hermes assumes for a server with no `trust` key; the snippet names
 it so the launch rests on packaged configuration rather than on a default.
-One prompt remains outside the snippet's reach: a shell command Hermes classes
-as dangerous, from any built-in toolset the reviewer profile carries beside
-the server. The reviewer skill gives the reviewer no reason to run one, and
-by Hermes' approval code every prompt path is bounded by `approvals.timeout`,
-300 s by default, and denies when it expires — read from the source, not
-measured here — so even that prompt ends in a denial rather than a wait.
+The snippet also sets `platform_toolsets.cli` to an empty list, so the
+reviewer profile carries no built-in toolset beside the server: no terminal,
+file, web, or code-execution tool, and so no shell-command approval prompt
+either. A plugin toolset that turns itself on by default would still load;
+`hermes -p <reviewer-profile> tools list` shows what the profile carries.
+Without the skills toolset the reviewer cannot load its skill itself, so both
+launches preload it with `-s review-bridge-reviewer`; a resumed session does
+not keep a preload, which is why the round-two resume passes it again.
 
 Review Bridge records the review's `HERMES` binding; it observes nothing about
 how the instance was started, and this section adds no mechanism that would.
