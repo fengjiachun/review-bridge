@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.22.0 - 2026-10-18
 
 ### Changed
 
@@ -52,6 +52,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - (#189) The fake reviewer in `test/reviewer-options.test.mjs` waits on a
   hold file instead of a fixed delay, so the concurrent-replacement refusal
   no longer depends on timing.
+- (#192) Release 0.22.0.
 
 ## 0.21.0 - 2026-10-16
 
