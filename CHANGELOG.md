@@ -32,6 +32,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   a resumed session does not keep a preload. The snippet parser accepts that
   one empty list.
 
+- (#191) `list_reviews` and `list_pending_reviews` return one five-field row
+  per review instead of the whole ledger: `id`, `status`, `repository_path`,
+  the latest round's `head_sha`, and `updated_at`, newest first. The
+  unfiltered `list_reviews` result had passed the 10 MB stdio message limit
+  and closed the connection. Callers read details with `get_review_summary`
+  or `get_review`. Pending-review rows no longer carry the requirement text;
+  a reviewer reads it from `open_review`.
+
 ### Fixed
 
 - (#187) The `submit_resolutions` description no longer says a rejection

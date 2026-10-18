@@ -1290,7 +1290,8 @@ if (role === "author") {
     "list_reviews",
     {
       title: "List local reviews",
-      description: "List Review Bridge tasks and their current states.",
+      description:
+        "List reviews newest first, one row each with id, status, repository_path, the latest round's head_sha, and updated_at; read one with get_review_summary or get_review.",
       inputSchema: {
         statuses: z.array(z.string()).optional(),
       },
