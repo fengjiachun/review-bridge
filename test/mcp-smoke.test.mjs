@@ -458,6 +458,50 @@ test("reviewer processes list only tasks bound to their provider", async (t) => 
   }
 });
 
+test("list_reviews returns one five-field row per review, newest first", async (t) => {
+  const store = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-mcp-"));
+  t.after(() => fsp.rm(store, { recursive: true, force: true }));
+  // Neither id order is the update order, so only updated_at sorts the rows.
+  const reviews = [["a", 26], ["b", 28], ["c", 27]].map(([letter, day]) => ({
+    id: `rb-2026-07-26T000000-000Z-${letter}0000000`,
+    status: "WAITING_FOR_REVIEW",
+    repository_path: "/repository",
+    updated_at: `2026-07-${day}T00:00:00.000Z`,
+    rounds: [
+      { round: 1, head_sha: "0".repeat(40) },
+      { round: 2, head_sha: letter.repeat(40) },
+    ],
+  }));
+  for (const review of reviews) {
+    const reviewRoot = path.join(store, "reviews", review.id);
+    await fsp.mkdir(reviewRoot, { recursive: true, mode: 0o700 });
+    await fsp.writeFile(
+      path.join(reviewRoot, "review.json"),
+      `${JSON.stringify(review)}\n`,
+      { mode: 0o600 },
+    );
+  }
+
+  const author = await connectClient("author", store);
+  t.after(() => author.close());
+  const result = await author.callTool({ name: "list_reviews", arguments: {} });
+  const rows = JSON.parse(result.content[0].text);
+  assert.deepEqual(
+    rows.map((row) => [row.id, row.head_sha]),
+    [reviews[1], reviews[2], reviews[0]].map((review) => [
+      review.id,
+      review.rounds[1].head_sha,
+    ]),
+  );
+  assert.deepEqual(Object.keys(rows[0]).sort(), [
+    "head_sha",
+    "id",
+    "repository_path",
+    "status",
+    "updated_at",
+  ]);
+});
+
 test("reviewer CLI diagnostics enumerate all three reviewer providers", async (t) => {
   const store = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-mcp-"));
   t.after(() => fsp.rm(store, { recursive: true, force: true }));

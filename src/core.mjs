@@ -1621,7 +1621,13 @@ export async function listReviews(
         (providerFilter == null ||
           reviewerProviderFor(review) === providerFilter)
       ) {
-        result.push(publicReview(review));
+        result.push({
+          id: review.id,
+          status: review.status,
+          repository_path: review.repository_path,
+          head_sha: review.rounds?.at(-1)?.head_sha ?? null,
+          updated_at: review.updated_at,
+        });
       }
     } catch {
       // Ignore incomplete directories; normal writes are atomic.
@@ -1633,12 +1639,11 @@ export async function listReviews(
 // A reviewer's queue carries no rationale: open_review alone decides when the
 // reviewer may read it.
 export async function listPendingReviews(storeRoot, reviewerProvider) {
-  const reviews = await listReviews(
+  return listReviews(
     storeRoot,
     ["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"],
     reviewerProvider,
   );
-  return reviews.map(({ rationale, reconstructed_intent, intent_comparison, ...rest }) => rest);
 }
 
 export async function getReview(storeRoot, reviewId) {
