@@ -175,8 +175,10 @@ const findingSchema = z.object({
   recommendation: z.string().optional(),
   path: z.string().optional(),
   line: z.number().int().positive().optional(),
+  // Plain unions, not discriminatedUnion: zod 4 publishes those as oneOf,
+  // and these tool schemas keep the anyOf shape they had under zod 3.
   constraint: z
-    .discriminatedUnion("kind", [
+    .union([
       z.object({ kind: z.literal("documented"), source: z.string() }).strict(),
       z.object({ kind: z.literal("undocumented") }).strict(),
     ])
@@ -197,7 +199,7 @@ const rereviewDecisionFields = {
   finding_id: z.string(),
   rationale: z.string(),
 };
-const rereviewDecisionSchema = z.discriminatedUnion("decision", [
+const rereviewDecisionSchema = z.union([
   z.object({
     ...rereviewDecisionFields,
     decision: z.literal("resolved"),
