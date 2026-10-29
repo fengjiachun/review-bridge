@@ -1,6 +1,6 @@
 # GitHub publication gate
 
-Describes Review Bridge v0.22.0.
+Describes Review Bridge v0.23.0.
 
 Publishing to GitHub requires an explicit authorization, in one of two modes:
 
@@ -76,7 +76,7 @@ For a fresh snapshot, run the
 packaged read-only collector against the review ID:
 
 ```bash
-node dist/review-bridge-v0.22.0/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id>
+node dist/review-bridge-v0.23.0/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id>
 ```
 
 Run that command from the repository root after `npm run build`. Inside an
@@ -122,7 +122,7 @@ For example, to summarize September 2026 reviews by reviewer provider, including
 recorded rebuttal outcomes:
 
 ```bash
-node dist/review-bridge-v0.22.0/codex-marketplace/plugins/review-bridge/scripts/review-scorecard.mjs \
+node dist/review-bridge-v0.23.0/codex-marketplace/plugins/review-bridge/scripts/review-scorecard.mjs \
   --since 2026-09-01 --until 2026-10-01
 ```
 
@@ -134,7 +134,7 @@ Use review filters together to compare the same period, repository, and
 strategy:
 
 ```bash
-node dist/review-bridge-v0.22.0/codex-marketplace/plugins/review-bridge/scripts/review-scorecard.mjs \
+node dist/review-bridge-v0.23.0/codex-marketplace/plugins/review-bridge/scripts/review-scorecard.mjs \
   --since 2026-09-01 --until 2026-10-01 \
   --repository /path/persisted/in/the/ledger \
   --strategy FULL --json

@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.23.0 - 2026-10-29
 
 ### Fixed
 
@@ -24,6 +24,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 ### Internal
 
 - (#193) Upgrade `hono` to 4.13.13.
+- (#201) Release 0.23.0.
 
 ## 0.22.0 - 2026-10-18
 
