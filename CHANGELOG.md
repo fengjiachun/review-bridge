@@ -7,6 +7,24 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Fixed
+
+- (#200) Upgrade `zod` to 4.6.7 and move `@hono/node-server`, `body-parser`,
+  `fast-uri`, and `qs` to their patched versions, clearing the production
+  advisories against those five packages published after 2026-10-21 so the
+  CI audit passes again; `ip-address` moves to 10.7.5 alongside. No zod 3
+  release carries the zod fix. The two tagged unions
+  in the reviewer tool schemas are plain unions now, because zod 4 publishes
+  a discriminated union as `oneOf`; the published schemas keep `anyOf`.
+  Review Bridge uses the stdio transport only; the HTTP-side advisories do
+  not apply.
+
+### Internal
+
+- (#193) Upgrade `hono` to 4.13.13.
+
 ## 0.22.0 - 2026-10-18
 
 ### Changed
