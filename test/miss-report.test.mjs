@@ -26,7 +26,7 @@ async function setup(t) {
   return paths;
 }
 
-async function writeReview(store, id, repositoryPath, heads, extra = {}) {
+async function writeReview(store, id, repositoryPath, heads) {
   const directory = path.join(store, "reviews", id);
   await fsp.mkdir(directory, { recursive: true });
   await fsp.writeFile(
@@ -41,7 +41,6 @@ async function writeReview(store, id, repositoryPath, heads, extra = {}) {
         snapshot_hash: `hash-${id}-${index + 1}`,
       })),
       findings: [{ id: "F1" }],
-      ...extra,
     }),
   );
 }
@@ -54,7 +53,6 @@ function comment(id, login, head, extra = {}) {
     path: "src/a|b.js",
     line: 12,
     original_commit_id: head,
-    created_at: "2026-11-11T00:00:00Z",
     body: `body ${id}`,
     ...extra,
   };
@@ -63,13 +61,12 @@ function comment(id, login, head, extra = {}) {
 function fakeApi(pages, reviewComments) {
   const calls = [];
   const api = (endpoint, options = {}) => {
-    calls.push({ endpoint, paginate: options.paginate === true });
+    calls.push([endpoint, options.paginate === true]);
     return endpoint.includes("/comments")
       ? pages
       : {
           number: 7,
           html_url: "https://example.invalid/pull/7",
-          title: "A change",
           user: { login: "author" },
           head: { sha: HEAD_B },
           review_comments: reviewComments,
@@ -115,41 +112,27 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
   });
 
   assert.deepEqual(calls, [
-    { endpoint: "repos/owner/name/pulls/7", paginate: false },
-    {
-      endpoint: "repos/owner/name/pulls/7/comments?per_page=100",
-      paginate: true,
-    },
+    ["repos/owner/name/pulls/7", false],
+    ["repos/owner/name/pulls/7/comments?per_page=100", true],
   ]);
   assert.deepEqual(
     report.threads.map((thread) => [thread.id, thread.line, thread.head]),
-    [
-      [1, 12, HEAD_A],
-      [4, 30, HEAD_B],
-    ],
+    [[1, 12, HEAD_A], [4, 30, HEAD_B]],
   );
   assert.deepEqual(
     report.threads[0].replies.map((reply) => [reply.id, reply.author]),
-    [
-      [3, "author"],
-      [5, "reviewer"],
-    ],
+    [[3, "author"], [5, "reviewer"]],
   );
+  const match = (review_id, repository_verified) => ({
+    review_id,
+    status: "CLEAN",
+    findings: 1,
+    snapshot_hash: `hash-${review_id}-1`,
+    repository_verified,
+  });
   assert.deepEqual(report.threads[0].matches, [
-    {
-      review_id: "rb-gone",
-      status: "CLEAN",
-      findings: 1,
-      snapshot_hash: "hash-rb-gone-1",
-      repository_verified: false,
-    },
-    {
-      review_id: "rb-match",
-      status: "CLEAN",
-      findings: 1,
-      snapshot_hash: "hash-rb-match-1",
-      repository_verified: true,
-    },
+    match("rb-gone", false),
+    match("rb-match", true),
   ]);
   assert.deepEqual(report.threads[1].matches, []);
   assert.deepEqual(report.skipped_reviews, ["rb-damaged"]);

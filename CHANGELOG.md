@@ -11,14 +11,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Added
 
-- (#205) `scripts/miss-report.mjs` pairs a pull request's GitHub review
-  threads with the local reviews for the heads they were written against. It
-  lists every thread the pull request's author did not open beside the
-  reviews in the store whose round captured that head in the same repository,
-  as a table or, with `--json`, as a corpus carrying the full threads and
-  each matching review's id and snapshot hash. A head with no local ledger is
-  listed and marked. The script is read-only; its output is a projection for
-  analysis and no gate reads it. (#203)
+- (#205) `scripts/miss-report.mjs` lists the GitHub review threads a pull
+  request's author did not open, each beside the local reviews whose round
+  captured the thread's head in the same repository, as a table or, with
+  `--json`, as a corpus with the full threads and each matching review's id
+  and snapshot hash. A head with no local ledger is listed and marked. It is
+  read-only, and its output is a projection no gate reads. (#203)
 
 ## 0.23.0 - 2026-10-29
 

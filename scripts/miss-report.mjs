@@ -1,41 +1,34 @@
 #!/usr/bin/env node
 // Pairs a pull request's remote review threads with the local review ledgers
-// for the heads those threads were written against (#203). Read-only: it
-// fetches from GitHub and reads the store. The output is a projection for
-// analysis, not evidence, and no gate reads it.
+// for the heads those threads were written against (#203). Read-only. The
+// output is a projection for analysis, not evidence, and no gate reads it.
 
 import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { parseArgs } from "node:util";
 import { defaultStoreRoot, repositoryIdentity } from "../src/core.mjs";
 
 const USAGE = `Usage: miss-report.mjs <owner/name> <pull-request> --repository <path>
                        [--store <path>] [--json]
 
   List the review threads on a pull request that its author did not open,
-  each beside the local reviews whose round captured the head the thread was
-  written against.
+  each beside the local reviews whose round captured the thread's head.
 
-  --repository <path>  Local checkout of <owner/name>. A review matches only
-                       when its repository_path is a worktree of the same
-                       repository; one whose path no longer exists is kept
-                       and marked unverified.
+  --repository <path>  Local checkout of <owner/name>. A review matches when
+                       its repository_path is a worktree of that repository;
+                       one whose path is gone is kept and marked unverified.
   --store <path>       Store root. Defaults to the store the servers use.
-  --json               Emit the corpus (pull request, full threads, matching
-                       review ids and snapshot hashes) instead of the table.
-
-  Read-only: nothing is written to the store or to GitHub.
+  --json               Emit the corpus (full threads, matching review ids
+                       and snapshot hashes) instead of the table.
 `;
 
 function ghApi(endpoint, { paginate = false } = {}) {
   const args = paginate
     ? ["api", "--paginate", "--slurp", endpoint]
     : ["api", endpoint];
-  const result = spawnSync("gh", args, {
-    encoding: "utf8",
-    maxBuffer: 256 * 1024 * 1024,
-  });
+  const result = spawnSync("gh", args, { encoding: "utf8", maxBuffer: 2 ** 28 });
   if (result.status !== 0) {
     throw new Error(
       `gh ${args.join(" ")} failed: ${(result.stderr || result.stdout || "").trim()}`,
@@ -48,27 +41,17 @@ async function readReviews(storeRoot) {
   const root = path.join(storeRoot, "reviews");
   const reviews = [];
   const skipped = [];
-  let ids = [];
-  try {
-    ids = (await fsp.readdir(root)).sort();
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
-  for (const id of ids) {
-    let text;
+  for (const id of (await fsp.readdir(root)).sort()) {
     try {
-      text = await fsp.readFile(path.join(root, id, "review.json"), "utf8");
-    } catch (error) {
-      // A directory without a review ledger: a remote-only publication.
-      if (error.code === "ENOENT") continue;
-      throw error;
-    }
-    try {
-      const review = JSON.parse(text);
+      const review = JSON.parse(
+        await fsp.readFile(path.join(root, id, "review.json"), "utf8"),
+      );
       if (!Array.isArray(review.rounds)) throw new Error("no rounds");
       reviews.push({ id, review });
-    } catch {
-      skipped.push(id);
+    } catch (error) {
+      // An entry without a review ledger is a remote-only publication or a
+      // stray file, not a damaged review.
+      if (!["ENOENT", "ENOTDIR"].includes(error.code)) skipped.push(id);
     }
   }
   return { reviews, skipped };
@@ -94,19 +77,6 @@ export async function buildMissReport({
   }
   const identity = await repositoryIdentity(repositoryPath);
   const { reviews, skipped } = await readReviews(storeRoot);
-  const identities = new Map();
-  const sameRepository = async (ledgerPath) => {
-    if (!identities.has(ledgerPath)) {
-      identities.set(
-        ledgerPath,
-        await repositoryIdentity(ledgerPath).then(
-          (found) => found === identity,
-          () => null,
-        ),
-      );
-    }
-    return identities.get(ledgerPath);
-  };
 
   const threads = [];
   for (const root of comments) {
@@ -118,7 +88,11 @@ export async function buildMissReport({
     for (const { id, review } of reviews) {
       const round = review.rounds.find((entry) => entry.head_sha === head);
       if (round == null) continue;
-      const same = await sameRepository(review.repository_path);
+      // null: the ledger's checkout is gone, so its identity cannot be read.
+      const same = await repositoryIdentity(review.repository_path).then(
+        (found) => found === identity,
+        () => null,
+      );
       if (same === false) continue;
       matches.push({
         review_id: id,
@@ -135,14 +109,12 @@ export async function buildMissReport({
       path: root.path,
       line: root.line ?? root.original_line ?? null,
       head,
-      created_at: root.created_at,
       body: root.body,
       replies: comments
         .filter((reply) => reply.in_reply_to_id === root.id)
         .map((reply) => ({
           id: reply.id,
           author: reply.user?.login ?? null,
-          created_at: reply.created_at,
           body: reply.body,
         })),
       matches,
@@ -154,16 +126,12 @@ export async function buildMissReport({
       number: pull.number,
       url: pull.html_url,
       author: pull.user.login,
-      title: pull.title,
       head: pull.head.sha,
-      review_comments: pull.review_comments,
     },
     threads,
     skipped_reviews: skipped,
   };
 }
-
-const cell = (text) => String(text).replaceAll("|", "\\|");
 
 export function renderMissReportMarkdown(report) {
   const lines = [
@@ -188,9 +156,9 @@ export function renderMissReportMarkdown(report) {
             )
             .join("<br>");
     lines.push(
-      `| [${thread.id}](${thread.url}) | ${cell(thread.author)} | ${cell(
-        `${thread.path}:${thread.line ?? "?"}`,
-      )} | \`${thread.head.slice(0, 10)}\` | ${cell(matches)} |`,
+      `| [${thread.id}](${thread.url}) | ${thread.author} | ${`${thread.path}:${
+        thread.line ?? "?"
+      }`.replaceAll("|", "\\|")} | \`${thread.head.slice(0, 10)}\` | ${matches} |`,
     );
   }
   if (report.skipped_reviews.length > 0) {
@@ -202,67 +170,51 @@ export function renderMissReportMarkdown(report) {
   return `${lines.join("\n")}\n`;
 }
 
-function parseArgs(argv) {
-  const options = { json: false, positional: [] };
-  const values = new Map([
-    ["--repository", "repositoryPath"],
-    ["--store", "storeRoot"],
-  ]);
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--json") {
-      options.json = true;
-    } else if (values.has(arg)) {
-      const value = argv[++index];
-      if (value == null || value.startsWith("--")) {
-        throw new Error(`${arg} needs a value`);
-      }
-      options[values.get(arg)] = value;
-    } else if (arg.startsWith("--")) {
-      throw new Error(`unknown argument ${arg}`);
-    } else {
-      options.positional.push(arg);
-    }
-  }
-  const [repository, pullRequest] = options.positional;
-  if (
-    options.positional.length !== 2 ||
-    !/^[^/\s]+\/[^/\s]+$/.test(repository) ||
-    !/^[1-9]\d*$/.test(pullRequest)
-  ) {
-    throw new Error("expected <owner/name> and a pull request number");
-  }
-  if (options.repositoryPath == null) throw new Error("--repository is required");
-  return {
-    repository,
-    pullRequest: Number(pullRequest),
-    repositoryPath: options.repositoryPath,
-    ...(options.storeRoot == null ? {} : { storeRoot: options.storeRoot }),
-    json: options.json,
-  };
-}
-
 if (
   process.argv[1] != null &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
-  const argv = process.argv.slice(2);
-  if (argv.includes("--help")) {
-    process.stdout.write(USAGE);
-  } else {
-    let options;
-    try {
-      options = parseArgs(argv);
-    } catch (error) {
-      process.stderr.write(`${error.message}\n${USAGE}`);
-      process.exit(2);
+  let input;
+  try {
+    const { values, positionals } = parseArgs({
+      allowPositionals: true,
+      options: {
+        repository: { type: "string" },
+        store: { type: "string" },
+        json: { type: "boolean" },
+        help: { type: "boolean" },
+      },
+    });
+    if (values.help) {
+      process.stdout.write(USAGE);
+      process.exit(0);
     }
-    const { json, ...input } = options;
-    const report = await buildMissReport(input);
-    process.stdout.write(
-      json
-        ? `${JSON.stringify(report, null, 2)}\n`
-        : renderMissReportMarkdown(report),
-    );
+    const [repository, pullRequest] = positionals;
+    if (
+      positionals.length !== 2 ||
+      !/^[^/\s]+\/[^/\s]+$/.test(repository) ||
+      !/^[1-9]\d*$/.test(pullRequest) ||
+      values.repository == null
+    ) {
+      throw new Error(
+        "expected <owner/name>, a pull request number, and --repository",
+      );
+    }
+    input = {
+      repository,
+      pullRequest: Number(pullRequest),
+      repositoryPath: values.repository,
+      storeRoot: values.store ?? defaultStoreRoot(),
+      json: values.json === true,
+    };
+  } catch (error) {
+    process.stderr.write(`${error.message}\n${USAGE}`);
+    process.exit(2);
   }
+  const report = await buildMissReport(input);
+  process.stdout.write(
+    input.json
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : renderMissReportMarkdown(report),
+  );
 }
