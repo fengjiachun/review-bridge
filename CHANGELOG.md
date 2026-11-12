@@ -11,7 +11,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Changed
 
-- (#202) The author workflow skill says where a human ruling goes: a ruling
+- (#206) The author workflow skill says where a human ruling goes: a ruling
   that changes what the code should do is a requirement change, so the next
   review prepared after it states the ruled behavior in the requirement,
   not in the rationale or the implementation scope. All four reviewer
