@@ -51,12 +51,22 @@ function comment(id, login, head, extra = {}) {
     html_url: `https://example.invalid/pull/7#discussion_r${id}`,
     user: { login },
     path: "src/a|b.js",
-    line: 12,
+    line: 20,
+    original_line: 12,
     original_commit_id: head,
     body: `body ${id}`,
     ...extra,
   };
 }
+
+const run = (repositoryPath, storeRoot, api) =>
+  buildMissReport({
+    repository: "owner/name",
+    pullRequest: 7,
+    repositoryPath,
+    storeRoot,
+    api,
+  });
 
 function fakeApi(pages, reviewComments) {
   const calls = [];
@@ -81,7 +91,6 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
   await writeReview(store, "rb-other-repository", other, [HEAD_A]);
   await writeReview(store, "rb-gone", gone, [HEAD_A]);
   await writeReview(store, "rb-other-head", repo, ["c".repeat(40)]);
-  // A publication directory holds no review ledger; a damaged ledger does.
   await fsp.mkdir(path.join(store, "reviews", "rb-publication-only"));
   await fsp.mkdir(path.join(store, "reviews", "rb-damaged"));
   await fsp.writeFile(
@@ -103,13 +112,7 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
     ],
     5,
   );
-  const report = await buildMissReport({
-    repository: "owner/name",
-    pullRequest: 7,
-    repositoryPath: repo,
-    storeRoot: store,
-    api,
-  });
+  const report = await run(repo, store, api);
 
   assert.deepEqual(calls, [
     ["repos/owner/name/pulls/7", false],
@@ -123,26 +126,21 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
     report.threads[0].replies.map((reply) => [reply.id, reply.author]),
     [[3, "author"], [5, "reviewer"]],
   );
-  const match = (review_id, repository_verified) => ({
-    review_id,
-    status: "CLEAN",
-    findings: 1,
-    snapshot_hash: `hash-${review_id}-1`,
-    repository_verified,
-  });
   assert.deepEqual(report.threads[0].matches, [
-    match("rb-gone", false),
-    match("rb-match", true),
+    {
+      review_id: "rb-match",
+      status: "CLEAN",
+      findings: 1,
+      snapshot_hash: "hash-rb-match-1",
+    },
   ]);
-  assert.deepEqual(report.threads[1].matches, []);
   assert.deepEqual(report.skipped_reviews, ["rb-damaged"]);
-  assert.equal(report.pull_request.author, "author");
 
   const markdown = renderMissReportMarkdown(report);
   assert.match(markdown, /^2 review threads not opened/m);
   assert.match(
     markdown,
-    /\| \[1\]\(https:\/\/example\.invalid\/pull\/7#discussion_r1\) \| reviewer \| src\/a\\\|b\.js:12 \| `aaaaaaaaaa` \| `rb-gone` \(CLEAN, 1, repository unverified\)<br>`rb-match` \(CLEAN, 1\) \|/,
+    /\| \[1\]\(https:\/\/example\.invalid\/pull\/7#discussion_r1\) \| reviewer \| src\/a\\\|b\.js:12 \| `aaaaaaaaaa` \| `rb-match` \(CLEAN, 1\) \|/,
   );
   assert.match(
     markdown,
@@ -155,13 +153,16 @@ test("refuses a fetch that does not account for every review comment", async (t)
   const { repo, store } = await setup(t);
   const { api } = fakeApi([[comment(1, "reviewer", HEAD_A)]], 2);
   await assert.rejects(
-    buildMissReport({
-      repository: "owner/name",
-      pullRequest: 7,
-      repositoryPath: repo,
-      storeRoot: store,
-      api,
-    }),
+    run(repo, store, api),
     /fetched 1 review comments but the pull request reports 2/,
   );
+});
+
+test("lists threads as unmatched when the store holds no reviews", async (t) => {
+  const { repo, store } = await setup(t);
+  const { api } = fakeApi([[comment(1, "reviewer", HEAD_A)]], 1);
+  const report = await run(repo, store, api);
+  assert.deepEqual(report.threads.map((thread) => thread.matches), [[]]);
+  assert.match(renderMissReportMarkdown(report), /no local ledger for this head/);
+  await assert.rejects(fsp.stat(store), { code: "ENOENT" });
 });

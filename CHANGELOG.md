@@ -14,9 +14,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - (#205) `scripts/miss-report.mjs` lists the GitHub review threads a pull
   request's author did not open, each beside the local reviews whose round
   captured the thread's head in the same repository, as a table or, with
-  `--json`, as a corpus with the full threads and each matching review's id
-  and snapshot hash. A head with no local ledger is listed and marked. It is
-  read-only, and its output is a projection no gate reads. (#203)
+  `--json`, as a corpus with the full threads. A head with no local ledger is
+  listed and marked. Read-only; no gate reads it. Closes issue #203.
 
 ## 0.23.0 - 2026-10-29
 

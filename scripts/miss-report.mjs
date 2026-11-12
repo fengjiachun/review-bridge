@@ -17,8 +17,7 @@ const USAGE = `Usage: miss-report.mjs <owner/name> <pull-request> --repository <
   each beside the local reviews whose round captured the thread's head.
 
   --repository <path>  Local checkout of <owner/name>. A review matches when
-                       its repository_path is a worktree of that repository;
-                       one whose path is gone is kept and marked unverified.
+                       its repository_path is a worktree of that repository.
   --store <path>       Store root. Defaults to the store the servers use.
   --json               Emit the corpus (full threads, matching review ids
                        and snapshot hashes) instead of the table.
@@ -41,7 +40,11 @@ async function readReviews(storeRoot) {
   const root = path.join(storeRoot, "reviews");
   const reviews = [];
   const skipped = [];
-  for (const id of (await fsp.readdir(root)).sort()) {
+  const ids = await fsp.readdir(root).catch((error) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  for (const id of ids.sort()) {
     try {
       const review = JSON.parse(
         await fsp.readFile(path.join(root, id, "review.json"), "utf8"),
@@ -65,7 +68,6 @@ export async function buildMissReport({
   api = ghApi,
 }) {
   const pull = api(`repos/${repository}/pulls/${pullRequest}`);
-  // --paginate --slurp yields one array per page.
   const comments = api(
     `repos/${repository}/pulls/${pullRequest}/comments?per_page=100`,
     { paginate: true },
@@ -88,18 +90,17 @@ export async function buildMissReport({
     for (const { id, review } of reviews) {
       const round = review.rounds.find((entry) => entry.head_sha === head);
       if (round == null) continue;
-      // null: the ledger's checkout is gone, so its identity cannot be read.
+      // A ledger whose checkout is gone has no readable identity: no match.
       const same = await repositoryIdentity(review.repository_path).then(
         (found) => found === identity,
-        () => null,
+        () => false,
       );
-      if (same === false) continue;
+      if (!same) continue;
       matches.push({
         review_id: id,
         status: review.status,
         findings: Array.isArray(review.findings) ? review.findings.length : 0,
         snapshot_hash: round.snapshot_hash,
-        repository_verified: same === true,
       });
     }
     threads.push({
@@ -107,7 +108,8 @@ export async function buildMissReport({
       url: root.html_url,
       author: root.user?.login ?? null,
       path: root.path,
-      line: root.line ?? root.original_line ?? null,
+      // The position at `head`; `line` follows the comment across later commits.
+      line: root.original_line ?? null,
       head,
       body: root.body,
       replies: comments
@@ -150,9 +152,7 @@ export function renderMissReportMarkdown(report) {
         : thread.matches
             .map(
               (match) =>
-                `\`${match.review_id}\` (${match.status}, ${match.findings}${
-                  match.repository_verified ? "" : ", repository unverified"
-                })`,
+                `\`${match.review_id}\` (${match.status}, ${match.findings})`,
             )
             .join("<br>");
     lines.push(
