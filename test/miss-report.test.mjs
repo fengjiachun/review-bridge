@@ -11,6 +11,7 @@ import { git } from "./helpers/repository-fixture";
 
 const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);
+const HEAD_D = "d".repeat(40);
 
 async function setup(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-miss-"));
@@ -90,6 +91,7 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
   await writeReview(store, "rb-match", repo, [HEAD_A, HEAD_A]);
   await writeReview(store, "rb-other-repository", other, [HEAD_A]);
   await writeReview(store, "rb-gone", gone, [HEAD_A]);
+  await writeReview(store, "rb-gone-only", gone, [HEAD_D]);
   await writeReview(store, "rb-other-head", repo, ["c".repeat(40)]);
   await fsp.mkdir(path.join(store, "reviews", "rb-publication-only"));
   await fsp.mkdir(path.join(store, "reviews", "rb-damaged"));
@@ -108,9 +110,10 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
       [
         comment(4, "reviewer", HEAD_B, { line: null, original_line: 30 }),
         comment(5, "reviewer", HEAD_A, { in_reply_to_id: 1 }),
+        comment(6, "reviewer", HEAD_D, { path: "src/`x`.py" }),
       ],
     ],
-    5,
+    6,
   );
   const report = await run(repo, store, api);
 
@@ -120,7 +123,7 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
   ]);
   assert.deepEqual(
     report.threads.map((thread) => [thread.id, thread.line, thread.head]),
-    [[1, 12, HEAD_A], [4, 30, HEAD_B]],
+    [[1, 12, HEAD_A], [4, 30, HEAD_B], [6, 12, HEAD_D]],
   );
   assert.deepEqual(
     report.threads[0].replies.map((reply) => [reply.id, reply.author]),
@@ -135,10 +138,14 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
   assert.deepEqual(report.threads[0].matches, [entry("rb-match", 2)]);
   assert.deepEqual(report.threads[0].unverified_matches, [entry("rb-gone", 1)]);
   assert.deepEqual(report.threads[1].unverified_matches, []);
+  assert.deepEqual(report.threads[2].matches, []);
+  assert.deepEqual(report.threads[2].unverified_matches, [
+    entry("rb-gone-only", 1),
+  ]);
   assert.deepEqual(report.skipped_reviews, ["rb-damaged"]);
 
   const markdown = renderMissReportMarkdown(report);
-  assert.match(markdown, /^2 review threads not opened/m);
+  assert.match(markdown, /^3 review threads not opened/m);
   assert.match(
     markdown,
     /\| \[1\]\(https:\/\/example\.invalid\/pull\/7#discussion_r1\) \| reviewer \| `src\/a\\\|b\.js:12` \| `aaaaaaaaaa` \| `rb-match` \(CLEAN, 1\)<br>`rb-gone` \(CLEAN, 1, repository unverified\) \|/,
@@ -147,6 +154,11 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
     markdown,
     /\| reviewer \| `src\/a\\\|b\.js:30` \| `bbbbbbbbbb` \| no local ledger for this head \|/,
   );
+  assert.match(
+    markdown,
+    /\| `` src\/`x`\.py:12 `` \| `dddddddddd` \| `rb-gone-only` \(CLEAN, 1, repository unverified\) \|/,
+  );
+  assert.equal(markdown.match(/no local ledger/g).length, 1);
   assert.match(markdown, /Skipped 1 unreadable review ledgers: rb-damaged\./);
 });
 

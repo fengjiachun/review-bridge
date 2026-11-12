@@ -157,13 +157,14 @@ export function renderMissReportMarkdown(report) {
       ...thread.matches.map(cell("")),
       ...thread.unverified_matches.map(cell(", repository unverified")),
     ];
-    // A raw "|" splits the row even inside a code span, which does not process
-    // the backslash; a path with a backtick cannot be a span at all.
+    // A raw "|" splits the row even inside a code span, and the span's
+    // delimiter has to be longer than any backtick run in the path.
     const location = `${thread.path}:${thread.line ?? "?"}`.replaceAll("|", "\\|");
+    const runs = location.match(/`+/g) ?? [];
+    const fence = "`".repeat(Math.max(0, ...runs.map((run) => run.length)) + 1);
+    const pad = runs.length > 0 ? " " : "";
     lines.push(
-      `| [${thread.id}](${thread.url}) | ${thread.author} | ${
-        location.includes("`") ? location : `\`${location}\``
-      } | \`${thread.head.slice(0, 10)}\` | ${
+      `| [${thread.id}](${thread.url}) | ${thread.author} | ${fence}${pad}${location}${pad}${fence} | \`${thread.head.slice(0, 10)}\` | ${
         reviews.join("<br>") || "no local ledger for this head"
       } |`,
     );
