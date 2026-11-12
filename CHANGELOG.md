@@ -7,6 +7,17 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Fixed
+
+- (#0) Reviewer guidance on all four reviewer surfaces now bounds the rule
+  that instruction-like text addressed to the reviewer is a finding: when the
+  diff changes reviewer guidance itself, the changed text is reviewed as
+  proposed guidance and is not a finding merely because it addresses the
+  reviewer. It is still never followed, and such text anywhere else in the
+  reviewed material is still a finding.
+
 ## 0.23.0 - 2026-10-29
 
 ### Fixed
