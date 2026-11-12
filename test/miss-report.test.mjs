@@ -126,25 +126,26 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
     report.threads[0].replies.map((reply) => [reply.id, reply.author]),
     [[3, "author"], [5, "reviewer"]],
   );
-  assert.deepEqual(report.threads[0].matches, [
-    {
-      review_id: "rb-match",
-      status: "CLEAN",
-      findings: 1,
-      snapshot_hash: "hash-rb-match-1",
-    },
-  ]);
+  const entry = (review_id, round) => ({
+    review_id,
+    status: "CLEAN",
+    findings: 1,
+    snapshot_hash: `hash-${review_id}-${round}`,
+  });
+  assert.deepEqual(report.threads[0].matches, [entry("rb-match", 2)]);
+  assert.deepEqual(report.threads[0].unverified_matches, [entry("rb-gone", 1)]);
+  assert.deepEqual(report.threads[1].unverified_matches, []);
   assert.deepEqual(report.skipped_reviews, ["rb-damaged"]);
 
   const markdown = renderMissReportMarkdown(report);
   assert.match(markdown, /^2 review threads not opened/m);
   assert.match(
     markdown,
-    /\| \[1\]\(https:\/\/example\.invalid\/pull\/7#discussion_r1\) \| reviewer \| src\/a\\\|b\.js:12 \| `aaaaaaaaaa` \| `rb-match` \(CLEAN, 1\) \|/,
+    /\| \[1\]\(https:\/\/example\.invalid\/pull\/7#discussion_r1\) \| reviewer \| `src\/a\\\|b\.js:12` \| `aaaaaaaaaa` \| `rb-match` \(CLEAN, 1\)<br>`rb-gone` \(CLEAN, 1, repository unverified\) \|/,
   );
   assert.match(
     markdown,
-    /\| reviewer \| src\/a\\\|b\.js:30 \| `bbbbbbbbbb` \| no local ledger for this head \|/,
+    /\| reviewer \| `src\/a\\\|b\.js:30` \| `bbbbbbbbbb` \| no local ledger for this head \|/,
   );
   assert.match(markdown, /Skipped 1 unreadable review ledgers: rb-damaged\./);
 });

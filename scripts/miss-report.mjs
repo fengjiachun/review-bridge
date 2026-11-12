@@ -17,7 +17,8 @@ const USAGE = `Usage: miss-report.mjs <owner/name> <pull-request> --repository <
   each beside the local reviews whose round captured the thread's head.
 
   --repository <path>  Local checkout of <owner/name>. A review matches when
-                       its repository_path is a worktree of that repository.
+                       its repository_path is a worktree of that repository;
+                       one whose path is gone is listed apart as unverified.
   --store <path>       Store root. Defaults to the store the servers use.
   --json               Emit the corpus (full threads, matching review ids
                        and snapshot hashes) instead of the table.
@@ -87,16 +88,19 @@ export async function buildMissReport({
     }
     const head = root.original_commit_id;
     const matches = [];
+    // Ledgers for this head whose checkout is gone: their repository cannot be
+    // read, so they are not matches, but the head was not unreviewed either.
+    const unverified = [];
     for (const { id, review } of reviews) {
-      const round = review.rounds.find((entry) => entry.head_sha === head);
+      // The last round for the head: status and findings are the ledger's end.
+      const round = review.rounds.findLast((entry) => entry.head_sha === head);
       if (round == null) continue;
-      // A ledger whose checkout is gone has no readable identity: no match.
       const same = await repositoryIdentity(review.repository_path).then(
         (found) => found === identity,
-        () => false,
+        () => null,
       );
-      if (!same) continue;
-      matches.push({
+      if (same === false) continue;
+      (same ? matches : unverified).push({
         review_id: id,
         status: review.status,
         findings: Array.isArray(review.findings) ? review.findings.length : 0,
@@ -120,6 +124,7 @@ export async function buildMissReport({
           body: reply.body,
         })),
       matches,
+      unverified_matches: unverified,
     });
   }
   return {
@@ -146,19 +151,21 @@ export function renderMissReportMarkdown(report) {
     "| --- | --- | --- | --- | --- |",
   ];
   for (const thread of report.threads) {
-    const matches =
-      thread.matches.length === 0
-        ? "no local ledger for this head"
-        : thread.matches
-            .map(
-              (match) =>
-                `\`${match.review_id}\` (${match.status}, ${match.findings})`,
-            )
-            .join("<br>");
+    const cell = (note) => (match) =>
+      `\`${match.review_id}\` (${match.status}, ${match.findings}${note})`;
+    const reviews = [
+      ...thread.matches.map(cell("")),
+      ...thread.unverified_matches.map(cell(", repository unverified")),
+    ];
+    // A raw "|" splits the row even inside a code span, which does not process
+    // the backslash; a path with a backtick cannot be a span at all.
+    const location = `${thread.path}:${thread.line ?? "?"}`.replaceAll("|", "\\|");
     lines.push(
-      `| [${thread.id}](${thread.url}) | ${thread.author} | ${`${thread.path}:${
-        thread.line ?? "?"
-      }`.replaceAll("|", "\\|")} | \`${thread.head.slice(0, 10)}\` | ${matches} |`,
+      `| [${thread.id}](${thread.url}) | ${thread.author} | ${
+        location.includes("`") ? location : `\`${location}\``
+      } | \`${thread.head.slice(0, 10)}\` | ${
+        reviews.join("<br>") || "no local ledger for this head"
+      } |`,
     );
   }
   if (report.skipped_reviews.length > 0) {
