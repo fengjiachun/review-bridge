@@ -720,7 +720,7 @@ async function snapshotHashFromReviewRound(
   return hash.digest("hex");
 }
 
-async function repositoryIdentity(repositoryPath) {
+export async function repositoryIdentity(repositoryPath) {
   const commonDirectory = runGit(
     repositoryPath,
     ["rev-parse", "--git-common-dir"],
