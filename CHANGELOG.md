@@ -7,6 +7,19 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Added
+
+- (#205) `scripts/miss-report.mjs` pairs a pull request's GitHub review
+  threads with the local reviews for the heads they were written against. It
+  lists every thread the pull request's author did not open beside the
+  reviews in the store whose round captured that head in the same repository,
+  as a table or, with `--json`, as a corpus carrying the full threads and
+  each matching review's id and snapshot hash. A head with no local ledger is
+  listed and marked. The script is read-only; its output is a projection for
+  analysis and no gate reads it. (#203)
+
 ## 0.23.0 - 2026-10-29
 
 ### Fixed
