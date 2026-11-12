@@ -33,9 +33,12 @@ load [Lock contention](references/lock-contention.md) before deciding to retry.
   not state a constraint the code cannot express and remove tests that no
   behavior change can turn red. Apply the test-quality criteria below to
   preparation and fix commits before rereview.
-- Keep the user's requirement and scope faithful. Bind review to the exact
-  repository, immutable base SHA, captured head and snapshot, and chosen
-  provider. A changed head needs the applicable fresh review or authorization.
+- Keep the user's requirement and scope faithful to what the user currently
+  asks for. After a human ruling that changes what the code should do, that
+  is the ruled behavior, and the next review's requirement states it. Bind
+  review to the exact repository, immutable base SHA, captured head and
+  snapshot, and chosen provider. A changed head needs the applicable fresh
+  review or authorization.
 - Never call reviewer tools from the author task. Each new review ID needs a
   fresh independent reviewer with only the review ID and the reviewer request,
   no authoring history or other reviewer's findings. Never run two reviewers

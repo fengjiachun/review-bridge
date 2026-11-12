@@ -7,6 +7,21 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Changed
+
+- (#202) The author workflow skill says where a human ruling goes: a ruling
+  that changes what the code should do is a requirement change, so the next
+  review prepared after it states the ruled behavior in the requirement,
+  not in the rationale or the implementation scope. All four reviewer
+  instruction surfaces gain a `Conventions and upkeep` section listing
+  naming precedent, positive predicates, module dependency direction and
+  duplicated helpers, documentation agreement, logging on paths that wait or
+  give up, what a long-running task holds across awaits, and whether each new
+  condition has a test that fails without it. The section is pinned whole on
+  the source and packaged copies.
+
 ## 0.23.0 - 2026-10-29
 
 ### Fixed

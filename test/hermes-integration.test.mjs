@@ -12,6 +12,7 @@ import * as mcpSnippets from "../scripts/mcp-snippets.mjs";
 import {
   assertAuthorServerDisabledInLaunches,
   assertDispatchContract,
+  assertConventionsSection,
   assertDeletionLens,
   assertThirdPartyMaterialBoundary,
   CODEX_TASK_DISPATCH_CONTRACT,
@@ -951,6 +952,11 @@ test("verify-build validates packaged Hermes artifacts, HERMES binding, isolatio
       new RegExp(`assertDeletionLens\\(\\s*${surface}`),
       `verify-build does not pin the deletion lens on ${surface}`,
     );
+    assert.match(
+      verify,
+      new RegExp(`assertConventionsSection\\(\\s*${surface}`),
+      `verify-build does not pin the conventions section on ${surface}`,
+    );
   }
   // The DeepSeek Harness artifact is checked on release builds too, or its
   // packaged snippets ship unverified while the source templates pass CI.
@@ -1278,6 +1284,12 @@ test("every reviewer surface carries the deletion lens and reads changed prose",
       /lockfiles or prose documents/,
       `${file} still lets a FULL review skip prose`,
     );
+  }
+});
+
+test("every reviewer surface carries the conventions section", async () => {
+  for (const file of REVIEWER_SURFACES) {
+    assertConventionsSection(await readRequired(file), file);
   }
 });
 

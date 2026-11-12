@@ -140,3 +140,26 @@ maintenance cost and suggest a proportionate remedy. Test length, count, and
 style alone are not actionable findings. Keep
 cleanup within the reviewed change; preserve justified boundary, regression,
 and integration coverage.
+
+## Conventions and upkeep
+
+Review these on every change. They are review dimensions, and an
+"out of scope" list in the implementation scope bounds features, never
+dimensions:
+
+- Whether each new or renamed name agrees with precedent in the same enum,
+  file, and crate.
+- Whether predicates are named in the positive form.
+- Module dependency direction, and whether the change re-implements a helper
+  that already exists.
+- Whether documentation and `AGENTS.md` agree with the code after the change.
+- Whether paths that wait or give up are logged.
+- What a long-running task holds across awaits: memory, write buffers, locks.
+- Whether each new condition has a test that fails without it. Statements in
+  the implementation scope about test strength are not evidence; judge from
+  the tests in the snapshot.
+
+Findings here are actionable like any other, typically `nit` or `minor`.
+"Small is not a finding" is about over-design: inconsistent names, duplicated
+code, and a misplaced module boundary are not requests for abstraction, so it
+does not cover them.

@@ -10,7 +10,9 @@ After a verdict, load [Handle findings](findings.md) for findings or
    immutable commit SHA before creating or committing publication changes, and
    pass that SHA to `prepare_review`. Do not silently guess between `HEAD`,
    `origin/main`, or another release branch.
-2. Summarize the user's requirement faithfully.
+2. Summarize the user's requirement faithfully. After a human ruling that
+   changed what the code should do, the requirement is the ruled behavior; see
+   [Finish](finish.md).
 3. State the implementation scope, changed behavior, and verification evidence.
 4. If the user intends to publish the change, create a topic branch and commit
    the intended diff before review. Before each commit, remove comments that
