@@ -17,6 +17,15 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `--json`, as a corpus with the full threads. A head with no local ledger is
   listed and marked. Read-only; no gate reads it. Closes issue #203.
 
+### Fixed
+
+- (#207) Reviewer guidance on all four reviewer surfaces now bounds the rule
+  that instruction-like text addressed to the reviewer is a finding: when the
+  diff changes reviewer guidance itself, the changed text is reviewed as
+  proposed guidance and is not a finding merely because it addresses the
+  reviewer. It is still never followed, and such text anywhere else in the
+  reviewed material is still a finding.
+
 ## 0.23.0 - 2026-10-29
 
 ### Fixed
