@@ -35,7 +35,10 @@ load [Lock contention](references/lock-contention.md) before deciding to retry.
   preparation and fix commits before rereview.
 - Keep the user's requirement and scope faithful to what the user currently
   asks for. After a human ruling that changes what the code should do, that
-  is the ruled behavior, and the next review's requirement states it. Bind
+  is the ruled behavior, and the next review's requirement states it. An
+  autonomous workflow's requirement is fixed when the workflow starts and
+  every review bound to it must repeat it exactly, so a ruled requirement
+  needs a workflow started with it. Bind
   review to the exact repository, immutable base SHA, captured head and
   snapshot, and chosen provider. A changed head needs the applicable fresh
   review or authorization.
