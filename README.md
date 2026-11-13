@@ -127,6 +127,7 @@ and explains why each step exists.
 | [Run a local review](docs/local-review.md) | Every provider's request, round two, successor reviews, the state machine |
 | [GitHub publication gate](docs/publication-gate.md) | `LOCAL_GATE` and `REMOTE_ONLY` publication |
 | [Search historical findings](docs/finding-search.md) | Read-only CLI filters, provenance, and ledger diagnostics |
+| [Pair remote review threads with local reviews](docs/miss-report.md) | Read-only CLI listing a pull request's GitHub threads beside the local reviews of the same head |
 | [Review statistics](docs/publication-gate.md#review-statistics) | Monthly rebuttal outcomes and filtering rules |
 | [Autonomous workflow](docs/autonomous-workflow.md) | The authorized end-to-end workflow |
 | [Reference](docs/reference.md) | Every tool and error code, generated from the source |
