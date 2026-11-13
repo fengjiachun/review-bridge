@@ -2,8 +2,8 @@
 
 `scripts/miss-report.mjs` answers one question about a pull request: for each
 review thread someone other than its author opened on GitHub, which local
-reviews had already looked at that head? Run it with Node from a checkout of
-this repository; it is not part of the packaged client runtimes.
+review ledgers have a round that captured that head? Run it with Node from a
+checkout of this repository; it is not part of the packaged client runtimes.
 
 ```bash
 node scripts/miss-report.mjs GreptimeTeam/greptimedb 10342 --repository ~/code/greptimedb
@@ -44,8 +44,9 @@ neither kind exists the thread reads `no local ledger for this head`.
 
 The default output is a Markdown table: thread link, author, location, the
 head's first ten characters, and each listed review with its status and
-finding count. Review directories whose `review.json` cannot be parsed or has no
-rounds are named below the table.
+finding count. Review directories whose `review.json` is not valid JSON or has no
+`rounds` array are named below the table; a directory without a `review.json`
+is passed over.
 
 `--json` prints the corpus instead: the pull request, every thread with its
 full body and replies, and for each listed review its id, status, finding
@@ -53,6 +54,8 @@ count, and the snapshot hash of the last round that captured the head.
 Matches are under `matches` and unverified reviews under
 `unverified_matches`.
 
-The command pairs threads with reviews by head only. It does not compare a
-thread with a review's findings, so a listed review means that head was
-reviewed locally, not that the thread's point was raised there.
+The command pairs threads with reviews by head only. A listed review is a
+ledger with a round that captured the head, whatever its status: the listing
+does not show that the review was completed, nor that it came before the
+thread. It does not compare a thread with a review's findings either, so it
+does not show that the thread's point was raised there.
