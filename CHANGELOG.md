@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.24.0 - 2026-11-13
 
 ### Added
 
@@ -46,6 +46,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   2026-11-13 so the CI audit passes again. Both arrive through
   `@modelcontextprotocol/sdk`. Review Bridge uses the stdio transport only;
   the HTTP-side advisories do not apply.
+
+### Internal
+
+- (#210) Release 0.24.0.
 
 ## 0.23.0 - 2026-10-29
 
