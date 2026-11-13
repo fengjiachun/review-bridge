@@ -9,6 +9,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Added
+
+- (#205) `scripts/miss-report.mjs` lists the GitHub review threads a pull
+  request's author did not open, each beside the local reviews whose round
+  captured the thread's head in the same repository, as a table or, with
+  `--json`, as a corpus with the full threads. A head with no local ledger is
+  listed and marked. Read-only; no gate reads it. Closes issue #203.
+
 ### Changed
 
 - (#206) The author workflow skill says where a human ruling goes: a ruling
@@ -21,6 +29,15 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   give up, what a long-running task holds across awaits, and whether each new
   condition has a test that fails without it. The section is pinned whole on
   the source and packaged copies.
+
+### Fixed
+
+- (#207) Reviewer guidance on all four reviewer surfaces now bounds the rule
+  that instruction-like text addressed to the reviewer is a finding: when the
+  diff changes reviewer guidance itself, the changed text is reviewed as
+  proposed guidance and is not a finding merely because it addresses the
+  reviewer. It is still never followed, and such text anywhere else in the
+  reviewed material is still a finding.
 
 ## 0.23.0 - 2026-10-29
 
