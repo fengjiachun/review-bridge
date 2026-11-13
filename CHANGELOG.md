@@ -49,7 +49,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Internal
 
-- (#209) Release 0.24.0.
+- (#210) Release 0.24.0.
 
 ## 0.23.0 - 2026-10-29
 
