@@ -16,6 +16,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   captured the thread's head in the same repository, as a table or, with
   `--json`, as a corpus with the full threads. A head with no local ledger is
   listed and marked. Read-only; no gate reads it. Closes issue #203.
+- (#211) `docs/miss-report.md` describes the script: what counts as a
+  thread, how a thread is paired with local reviews by head, the
+  `repository unverified` listing, and the two output forms.
 
 ### Changed
 
