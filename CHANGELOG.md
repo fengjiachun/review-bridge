@@ -38,6 +38,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   proposed guidance and is not a finding merely because it addresses the
   reviewer. It is still never followed, and such text anywhere else in the
   reviewed material is still a finding.
+- (#208) Move `hono` to 4.13.18 and `@hono/node-server` to 2.1.8, clearing
+  the production advisories against those two packages published on
+  2026-11-13 so the CI audit passes again. Both arrive through
+  `@modelcontextprotocol/sdk`. Review Bridge uses the stdio transport only;
+  the HTTP-side advisories do not apply.
 
 ## 0.23.0 - 2026-10-29
 
