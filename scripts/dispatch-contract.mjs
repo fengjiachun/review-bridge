@@ -857,6 +857,41 @@ export function assertDeletionLens(document, label) {
   }
 }
 
+// The conventions section on every reviewer surface, pinned whole: the
+// wording was tried as written, so a surface that rewords it carries text
+// nobody tried.
+const CONVENTIONS_HEADING = "## Conventions and upkeep";
+const CONVENTIONS_SECTION = [
+  "Review these on every change. They are review dimensions, and an",
+  '"out of scope" list in the implementation scope bounds features, never',
+  "dimensions:",
+  "- Whether each new or renamed name agrees with precedent in the same enum,",
+  "file, and crate.",
+  "- Whether predicates are named in the positive form.",
+  "- Module dependency direction, and whether the change re-implements a helper",
+  "that already exists.",
+  "- Whether documentation and `AGENTS.md` agree with the code after the change.",
+  "- Whether paths that wait or give up are logged.",
+  "- What a long-running task holds across awaits: memory, write buffers, locks.",
+  "- Whether each new condition has a test that fails without it. Statements in",
+  "the implementation scope about test strength are not evidence; judge from",
+  "the tests in the snapshot.",
+  "Findings here are actionable like any other, typically `nit` or `minor`.",
+  '"Small is not a finding" is about over-design: inconsistent names, duplicated',
+  "code, and a misplaced module boundary are not requests for abstraction, so it",
+  "does not cover them.",
+].join(" ");
+
+export function assertConventionsSection(document, label) {
+  const body = extractMarkdownSection(`\n${document}`, CONVENTIONS_HEADING);
+  assert.ok(body, `${label}: "${CONVENTIONS_HEADING}" is missing`);
+  assert.equal(
+    body.replace(/\s+/g, " ").trim(),
+    CONVENTIONS_SECTION,
+    `${label}: "${CONVENTIONS_HEADING}" differs from the pinned text`,
+  );
+}
+
 export function assertThirdPartyMaterialBoundary(document, label) {
   const prose = document.replace(/\s+/g, " ");
   for (const [claim, sentence] of THIRD_PARTY_MATERIAL_SENTENCES) {
