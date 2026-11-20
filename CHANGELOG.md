@@ -16,7 +16,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   the repository's resolved top-level path, as `prepare_review` returned it.
   An unfiltered call over the whole store had grown past the client's
   result size limit again.
-- (#PRNUM) The author tools that change a review -- `prepare_review`,
+- (#213) The author tools that change a review -- `prepare_review`,
   `select_reviewer_configuration`, `launch_local_reviewer`,
   `submit_resolutions`, `prepare_rereview`, and `append_review_erratum` --
   return the compact review summary instead of the full ledger, and
