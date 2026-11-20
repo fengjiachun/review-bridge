@@ -7,6 +7,16 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Changed
+
+- (#PRNUM) `list_reviews` requires `repository_path` and returns only the
+  reviews whose stored `repository_path` equals it exactly. Callers must pass
+  the repository's resolved top-level path, as `prepare_review` returned it.
+  An unfiltered call over the whole store had grown past the client's
+  result size limit again.
+
 ## 0.24.0 - 2026-11-13
 
 ### Added
