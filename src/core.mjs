@@ -1176,7 +1176,7 @@ async function freezeContinuationSource(storeRoot, sourceReviewId, continuationI
   });
 }
 
-function reviewSummary(review) {
+export function reviewSummary(review) {
   const currentSnapshot = review.rounds.at(-1) ?? null;
   const activeFindings = review.findings.filter(
     (finding) => !RESOLVED_FINDING_STATUSES.has(finding.status),

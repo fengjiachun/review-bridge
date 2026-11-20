@@ -1275,6 +1275,8 @@ try {
     });
     assert.equal(summary.action_required, "REVIEWER_INITIAL_REVIEW");
     assert.equal(summary.reviewer_provider, "CLAUDE_DESKTOP");
+    // State-changing tools answer with the summary, never the ledger.
+    assert.deepEqual(prepared, summary);
     const timedOut = await call(author, "wait_for_review_state", {
       review_id: prepared.id,
       known_state_version: summary.state_version,
@@ -1317,7 +1319,7 @@ try {
     const observed = await observedPromise;
     assert.equal(observed.changed, true);
     assert.equal(observed.summary.status, "REVIEW_SUBMITTED");
-    await call(author, "submit_resolutions", {
+    const responded = await call(author, "submit_resolutions", {
       review_id: prepared.id,
       resolutions: [
         {
@@ -1334,7 +1336,15 @@ try {
     );
     run("git", ["add", "."], repository);
     run("git", ["commit", "-m", "add focused test"], repository);
-    await call(author, "prepare_rereview", { review_id: prepared.id });
+    assert.deepEqual(
+      responded,
+      await call(author, "get_review_summary", { review_id: prepared.id }),
+    );
+    const rereview = await call(author, "prepare_rereview", { review_id: prepared.id });
+    assert.deepEqual(
+      rereview,
+      await call(author, "get_review_summary", { review_id: prepared.id }),
+    );
     const clean = await call(reviewer, "submit_rereview", {
       review_id: prepared.id,
       decisions: [
@@ -1351,6 +1361,10 @@ try {
       review_id: prepared.id,
     });
     assert.equal(finalized.gate.status, "LOCAL_GATE_PASSED");
+    assert.deepEqual(
+      finalized.review,
+      await call(author, "get_review_summary", { review_id: prepared.id }),
+    );
     const headSha = finalized.gate.head_sha;
     const startedAt = Date.now();
     const publication = await call(author, "start_publication", {
