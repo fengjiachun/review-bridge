@@ -99,7 +99,8 @@ test("rereview retains selection and allows a new choice without rewriting the f
   await submitResolutions(store, review.id, [{ finding_id: findings[0].id, disposition: "fixed", rationale: "Corrected", evidence: "file.txt" }]);
   const roundTwo = await prepareRereview(store, review.id);
   assert.deepEqual(roundTwo.reviewer_configuration.requested, options.suggested);
-  const changed = await call(client, "select_reviewer_configuration", { review_id: review.id, expected_state_version: roundTwo.state_version, ...options.suggested, model: "second-model" });
+  await call(client, "select_reviewer_configuration", { review_id: review.id, expected_state_version: roundTwo.state_version, ...options.suggested, model: "second-model" });
+  const changed = await call(client, "get_review", { review_id: review.id });
   assert.equal(changed.rounds[0].reviewer_configuration.requested.model, "review-model");
   assert.equal(changed.rounds[1].reviewer_configuration.requested.model, "second-model");
 });
