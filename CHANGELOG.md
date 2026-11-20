@@ -11,7 +11,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Changed
 
-- (#PRNUM) `list_reviews` requires `repository_path` and returns only the
+- (#212) `list_reviews` requires `repository_path` and returns only the
   reviews whose stored `repository_path` equals it exactly. Callers must pass
   the repository's resolved top-level path, as `prepare_review` returned it.
   An unfiltered call over the whole store had grown past the client's
