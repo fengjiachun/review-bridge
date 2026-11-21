@@ -41,6 +41,16 @@ polling. A timed-out wait is expected while a human-paced review is still in
 progress; call it again with the same `state_version`, or resume when the user
 confirms the review is complete.
 
+The tools that change the review -- `prepare_review`,
+`select_reviewer_configuration`, `launch_local_reviewer`, `submit_resolutions`,
+`prepare_rereview`, `append_review_erratum`, and `finalize_local_gate` (under
+its `review` key, beside `gate`) -- also answer with that compact summary, not
+the full ledger. Their summary is built from the ledger they just wrote, so it
+never carries `reviewer_dispatch.exit`; only `get_review_summary` adds that
+exit receipt once a launched reviewer has exited. Call `get_review` when you
+need the requirement, finding text, resolutions, rereview decisions, carried
+findings, or errata.
+
 State-changing tools can also return structured concurrency and durability
 errors. See [Troubleshooting](troubleshooting.md) for what each one means and
 whether retrying is safe.

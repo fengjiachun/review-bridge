@@ -13,9 +13,18 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - (#212) `list_reviews` requires `repository_path` and returns only the
   reviews whose stored `repository_path` equals it exactly. Callers must pass
-  the repository's resolved top-level path, as `prepare_review` returned it.
+  the repository's resolved top-level path, as `prepare_review` stores it
+  and `get_review` reports it.
   An unfiltered call over the whole store had grown past the client's
   result size limit again.
+- (#213) The author tools that change a review -- `prepare_review`,
+  `select_reviewer_configuration`, `launch_local_reviewer`,
+  `submit_resolutions`, `prepare_rereview`, and `append_review_erratum` --
+  return the compact review summary instead of the full ledger, and
+  `finalize_local_gate` returns that summary under `review` beside `gate`.
+  The summary is the `get_review_summary` shape without the dispatch exit
+  record. Call `get_review` for the requirement, finding text, resolutions,
+  decisions, or errata.
 
 ## 0.24.0 - 2026-11-13
 
