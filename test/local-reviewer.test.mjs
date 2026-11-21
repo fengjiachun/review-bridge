@@ -183,14 +183,16 @@ test("runtime lookup skips non-directory PATH entries and a directory named code
   process.env.PATH = entries.join(path.delimiter);
   await assert.rejects(reviewerRuntime(path.join(root, "store")), /git could not be started/);
   await fsp.mkdir(path.join(root, "untrusted-git"));
-  await fsp.writeFile(path.join(root, "untrusted-git", "git"), `#!/bin/sh\n/usr/bin/env > probe-env\necho \"fatal: detected dubious ownership in repository at '/srv/not a git repository/x'\" >&2\nexit 128\n`, { mode: 0o755 });
+  await fsp.writeFile(path.join(root, "untrusted-git", "git"), `#!/bin/sh\necho "$LC_ALL|\${GIT_CEILING_DIRECTORIES+set}" > probe-env\necho \"fatal: detected dubious ownership in repository at '/srv/not a git repository/x'\" >&2\nexit 128\n`, { mode: 0o755 });
   process.env.PATH = [...entries, path.join(root, "untrusted-git")].join(path.delimiter);
   Object.assign(process.env, { LC_ALL: "de_DE.UTF-8", GIT_CEILING_DIRECTORIES: root });
   await assert.rejects(reviewerRuntime(path.join(root, "store")), /dubious ownership/);
   // The fake git writes into its working directory, the runtime directory.
-  const seen = (await fsp.readFile(path.join(root, "store", "codex-runtime", "probe-env"), "utf8")).split("\n");
-  assert.ok(seen.includes("LC_ALL=C"));
-  assert.deepEqual(seen.filter((line) => line.startsWith("GIT_")), []);
+  assert.equal(await fsp.readFile(path.join(root, "store", "codex-runtime", "probe-env"), "utf8"), "C|\n");
+  for (const diagnostic of ["(or any of the parent directories): .git", "(or any parent up to mount point /Volumes)\nStopping at filesystem boundary"]) {
+    await fsp.writeFile(path.join(root, "untrusted-git", "git"), `#!/bin/sh\nprintf 'fatal: not a git repository ${diagnostic}\\n' >&2\nexit 128\n`, { mode: 0o755 });
+    assert.equal((await reviewerRuntime(path.join(root, "store"))).command, await fsp.realpath(path.join(root, "second", "codex")));
+  }
   await fsp.writeFile(path.join(root, "untrusted-git", "git"), "#!/bin/sh\necho 'fatal: not a git repository (or any of the parent directories): .git' >&2\nkill -9 $$\n", { mode: 0o755 });
   await assert.rejects(reviewerRuntime(path.join(root, "store")), /Cannot verify the reviewer runtime/);
   await fsp.writeFile(path.join(root, "untrusted-git", "git"), "#!/bin/sh\necho 'fatal: not a git repository (or any ' >&2\nexit 128\n", { mode: 0o755 });
