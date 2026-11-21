@@ -1,10 +1,45 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const server = fileURLToPath(new URL("./server.mjs", import.meta.url));
+
+// The reviewer model follows the operator's Codex configuration; only the
+// reasoning effort is pinned, so a lighter everyday default cannot weaken reviews.
+export const REVIEWER_REQUESTED = Object.freeze({ reasoning_effort: "high" });
+
+export async function reviewerRuntime(storeRoot) {
+  let cwd = path.join(storeRoot, "codex-runtime");
+  await fsp.mkdir(cwd, { recursive: true, mode: 0o700 });
+  cwd = await fsp.realpath(cwd);
+  // Inherited GIT_* variables such as GIT_DIR would answer for another repository.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+  const git = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"], env: { ...env, LC_ALL: "C" } });
+  if (git.error) throw new Error("Cannot verify the reviewer runtime is outside a Git repository: git could not be started");
+  if (git.status !== 0 && (git.status !== 128 ||
+      !/^fatal: not a git repository \((or any of the parent directories\): \.git|or any parent up to mount point [^\n]+\))\n/.test(git.stderr ?? ""))) {
+    throw new Error(`Cannot verify the reviewer runtime is outside a Git repository: ${(git.stderr ?? "").trim() || `git exited with ${git.status ?? git.signal}`}`);
+  }
+  if (git.status === 0) {
+    throw new Error("Reviewer runtime must be outside a Git repository; choose an external REVIEW_BRIDGE_HOME");
+  }
+  const name = process.env.REVIEW_BRIDGE_CODEX_COMMAND || "codex";
+  const candidates = path.isAbsolute(name) ? [name] :
+    (process.env.PATH ?? "").split(path.delimiter).map((directory) => path.resolve(directory, name));
+  for (const candidate of candidates) {
+    try {
+      await fsp.access(candidate, 1);
+      // A searchable directory passes the execute check; keep looking.
+      if (!(await fsp.stat(candidate)).isFile()) continue;
+      return { command: await fsp.realpath(candidate), cwd };
+    } catch (error) {
+      if (!["ENOENT", "EACCES", "ENOTDIR"].includes(error.code)) throw error;
+    }
+  }
+  throw new Error(`Codex executable unavailable: ${name}`);
+}
 
 export function codexReviewerArguments(reviewId, requested, storeRoot, prompt) {
   const packagedSkill = fileURLToPath(new URL("./reviewer-skill.md", import.meta.url));
@@ -28,7 +63,10 @@ export function codexReviewerArguments(reviewId, requested, storeRoot, prompt) {
     "mcp_servers.review-bridge-reviewer.env.REVIEW_BRIDGE_HOME": path.resolve(storeRoot),
   };
   return [
-    "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--model", requested.model,
+    "exec", "--skip-git-repo-check", "--sandbox", "workspace-write",
+    // A dispatch planned before the model followed the Codex configuration
+    // runs with the model it recorded.
+    ...(requested.model == null ? [] : ["--model", requested.model]),
     ...Object.entries(settings).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`]),
     "-c", "approval_policy={granular={rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false}}",
     prompt ?? `Independently review Review Bridge task ${reviewId} using the packaged Review Bridge reviewer skill. Require reviewer_provider: CODEX_TASK, follow the review strategy, and submit every actionable finding.`,

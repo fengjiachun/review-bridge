@@ -172,6 +172,17 @@ function list(values) {
   return values.length === 0 ? "none" : values.map(code).join(", ");
 }
 
+// A request that names a model was selected by the author, or comes from a
+// workflow dispatch planned before the upgrade; one without leaves the model
+// to the host's Codex configuration.
+function requestedConfiguration(round, format) {
+  const requested = round?.reviewer_configuration?.requested;
+  if (requested == null) return "unavailable";
+  return requested.model == null
+    ? `${format(JSON.stringify(requested))}, model from the Codex configuration`
+    : format(JSON.stringify(requested));
+}
+
 // A ledger older than the strategy field has none to print; the validator
 // requires the field on every ledger whose prepared events record a mode, so
 // "not recorded" is only ever an old ledger, never a stripped one.
@@ -205,7 +216,7 @@ function identitySection(review) {
       `- Base → head: ${code(first?.base_sha)} → ${code(latest?.head_sha)}`,
       `- Reviewer provider: ${code(review.reviewer_provider ?? "CLAUDE_DESKTOP")}`,
       `- Review strategy: ${strategyLine(review)}`,
-      ...rounds.map((round) => `- Round ${round.round} reviewer requested: ${round.reviewer_configuration ? code(JSON.stringify(round.reviewer_configuration.requested)) : "unavailable"}; observed: unavailable (remote model identity is not authenticated by launch logs).`),
+      ...rounds.map((round) => `- Round ${round.round} reviewer requested: ${requestedConfiguration(round, code)}; observed: unavailable (remote model identity is not authenticated by launch logs).`),
     ].join("\n"),
     "### Requirement",
     block(review.requirement),
@@ -778,7 +789,7 @@ export function summaryDigest(summary) {
 // Raise it by one in any change that alters the Markdown this module renders
 // -- wording, ordering, a new line, a heading -- so the reports the previous
 // version wrote stay readable at their own names.
-export const REPORT_FORMAT = 8;
+export const REPORT_FORMAT = 9;
 
 // `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
 // `p<revision>-s<summary digest>-f<format>` without one.
@@ -951,7 +962,7 @@ function reviewerRow(review) {
       ? "no round prepared"
       : `${modes.map(cellCode).join(" then ")} strategy`,
     count(rounds.length, "round"),
-    `requested ${rounds.at(-1)?.reviewer_configuration ? cellCode(JSON.stringify(rounds.at(-1).reviewer_configuration.requested)) : "unavailable"}; observed unavailable`,
+    `requested ${requestedConfiguration(rounds.at(-1), cellCode)}; observed unavailable`,
   ].join(", ");
 }
 

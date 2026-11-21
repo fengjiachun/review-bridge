@@ -42,8 +42,7 @@ import {
   WORKFLOW_ID_RE,
 } from "./workflow-binding.mjs";
 import { isFullSha } from "./object-id.mjs";
-import { readDispatchReceipt } from "./local-reviewer.mjs";
-import { validateReviewerSelection } from "./reviewer-options.mjs";
+import { REVIEWER_REQUESTED, readDispatchReceipt } from "./local-reviewer.mjs";
 import { workflowRequiredInputs } from "./tool-inputs.mjs";
 
 export const AUTONOMOUS_CAPABILITIES = Object.freeze([
@@ -490,8 +489,12 @@ export const ACTION_KIND_SPECS = {
         ...(action.target.reasoning_effort === undefined
           ? {}
           : { reasoning_effort: action.target.reasoning_effort }),
-        ...(action.target.reviewer_configuration == null ? {} : {
+        // Intents planned before the model followed the Codex configuration
+        // recorded the selected model; their stored dispatch keeps it.
+        ...(action.target.reviewer_configuration?.requested.model === undefined ? {} : {
           model: action.target.reviewer_configuration.requested.model,
+        }),
+        ...(action.target.reviewer_configuration == null ? {} : {
           reviewer_configuration: action.target.reviewer_configuration,
         }),
         marker,
@@ -4213,9 +4216,7 @@ export async function planCodexTaskDispatch(
   workflowId,
   expectedRevision,
   reviewId,
-  reasoningEffort,
 ) {
-  if (reasoningEffort !== undefined) assertString(reasoningEffort, "reasoning_effort", { max: 64 });
   const preflight = await withWorkflowLock(
     storeRoot,
     workflowId,
@@ -4284,23 +4285,18 @@ export async function planCodexTaskDispatch(
     {
       planPhases: ["DISPATCH_CODEX_REVIEWER"],
       invalidMessage: "Codex task dispatch is not currently plannable",
-      target: async (workflow) => {
+      target: (workflow) => {
         if (workflow.current_review?.review_id !== reviewId) {
           fail(
             "WORKFLOW_PHASE_INVALID",
             "Codex task dispatch is not currently plannable",
           );
         }
-        const review = await loadReview(storeRoot, reviewId);
-        const configuration = await validateReviewerSelection(storeRoot, review.rounds.at(-1)?.reviewer_configuration?.requested);
-        if (reasoningEffort !== undefined && reasoningEffort !== configuration.requested.reasoning_effort) {
-          throw new Error("Select the changed reasoning effort before planning dispatch");
-        }
         return {
           review_id: reviewId,
           reviewer_provider: "CODEX_TASK",
-          reasoning_effort: configuration.requested.reasoning_effort,
-          reviewer_configuration: configuration,
+          reasoning_effort: REVIEWER_REQUESTED.reasoning_effort,
+          reviewer_configuration: { requested: { ...REVIEWER_REQUESTED } },
           launch_mode: "LOCAL_PROCESS",
         };
       },
@@ -7423,12 +7419,8 @@ export async function launchCodexTaskDispatch(storeRoot, workflowId, expectedRev
     if (action?.action_id !== actionId || action.kind !== "CREATE_CODEX_REVIEWER_TASK" || action.status !== "EXECUTING") {
       throw new Error("Codex dispatch requires the current EXECUTING action");
     }
-    if (!action.target.reviewer_configuration) throw new Error("Legacy dispatch has no model selection; reconcile or abandon before selecting a new intent");
+    if (!action.target.reviewer_configuration) throw new Error("Legacy dispatch has no model selection; reconcile the existing task or cancel the workflow");
     const review = await loadReview(storeRoot, action.target.review_id);
-    const configuration = review.rounds.at(-1)?.reviewer_configuration;
-    if (canonicalJson(configuration?.requested) !== canonicalJson(action.target.reviewer_configuration.requested)) {
-      throw new Error("Reviewer configuration changed after dispatch was planned");
-    }
     const launched = await launchLocalReviewer(storeRoot, review.id, review.state_version, action.dispatch);
     return { ...launched.reviewer_dispatch, title: action.dispatch.title, prompt: action.dispatch.prompt };
   });
