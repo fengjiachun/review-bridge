@@ -540,7 +540,7 @@ assert.match(
   workflowSkill,
   /`CONTINUABLE_FINDINGS`, present the source ledger's `OPEN` and\s+`STILL_OPEN` `findings`/,
 );
-assert.match(workflowSkill, /read its `carried_findings` as the continuation scope/);
+assert.match(workflowSkill, /call `get_review` with its new ID and read its\s+`carried_findings` as the continuation scope/);
 assert.match(
   workflowSkill,
   /When a round reports findings, call `get_review`/,
@@ -1275,7 +1275,6 @@ try {
     });
     assert.equal(summary.action_required, "REVIEWER_INITIAL_REVIEW");
     assert.equal(summary.reviewer_provider, "CLAUDE_DESKTOP");
-    // State-changing tools answer with the summary, never the ledger.
     assert.deepEqual(prepared, summary);
     const timedOut = await call(author, "wait_for_review_state", {
       review_id: prepared.id,

@@ -56,6 +56,8 @@ test("author MCP discovers pages, separates selection from launch, persists expl
   await assert.rejects(call(client, "select_reviewer_configuration", { review_id: review.id, expected_state_version: review.state_version, ...options.suggested, reasoning_effort: "invented" }), /unavailable/);
   const selected = await call(client, "select_reviewer_configuration", { review_id: review.id, expected_state_version: review.state_version, ...options.suggested, model: "second-model", reasoning_effort: "medium" });
   assert.equal(selected.reviewer_configuration.observed.status, "unavailable");
+  assert.equal(selected.action_required, "REVIEWER_INITIAL_REVIEW");
+  assert.equal(selected.requirement, undefined);
   const resumedClient = await connect();
   const suggested = await call(resumedClient, "discover_reviewer_options", { repository_path: repository, reviewer_provider: "CODEX_TASK" });
   assert.equal(suggested.suggested.model, "second-model");
@@ -74,6 +76,15 @@ test("author MCP discovers pages, separates selection from launch, persists expl
   const exitFile = path.join(launched.reviewer_dispatch.attempt_root, "exit.json");
   for (let i = 0; i < 100; i++) { try { await fsp.access(exitFile); break; } catch { await new Promise(r => setTimeout(r, 30)); } }
   assert.equal(JSON.parse(await fsp.readFile(exitFile)).code, 0);
+  assert.equal(launched.action_required, "REVIEWER_INITIAL_REVIEW");
+  assert.equal(launched.requirement, undefined);
+  const corrected = await call(client, "append_review_erratum", { review_id: review.id, text: "The scope claim is stale." });
+  assert.equal(corrected.errata_watermark, 1);
+  assert.equal(corrected.requirement, undefined);
+  assert.equal(corrected.reviewer_dispatch.exit, undefined);
+  const polled = await call(client, "get_review_summary", { review_id: review.id });
+  assert.equal(polled.state_version, corrected.state_version);
+  assert.equal(polled.reviewer_dispatch.exit.code, 0);
   const executed = JSON.parse(await fsp.readFile(path.join(store, "codex-runtime", "executed.json")));
   assert.equal(executed.args[executed.args.indexOf("--model") + 1], "second-model");
   assert.ok(executed.args.includes('model_reasoning_effort="medium"'));
