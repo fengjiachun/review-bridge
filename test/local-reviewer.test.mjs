@@ -168,8 +168,11 @@ test("a failed executable spawn cannot produce a started-process receipt", async
 
 test("runtime lookup skips non-directory PATH entries and a directory named codex, and needs git to start", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "reviewer-path-"));
-  const saved = { PATH: process.env.PATH, command: process.env.REVIEW_BRIDGE_CODEX_COMMAND, LC_ALL: process.env.LC_ALL };
-  t.after(async () => { process.env.PATH = saved.PATH; process.env.REVIEW_BRIDGE_CODEX_COMMAND = saved.command; await fsp.rm(root, { recursive: true, force: true }); });
+  const saved = Object.fromEntries(["PATH", "REVIEW_BRIDGE_CODEX_COMMAND", "LC_ALL", "GIT_DIR", "GIT_CEILING_DIRECTORIES"].map((key) => [key, process.env[key]]));
+  t.after(async () => {
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    await fsp.rm(root, { recursive: true, force: true });
+  });
   await fsp.mkdir(path.join(root, "first", "codex"), { recursive: true });
   await fsp.mkdir(path.join(root, "second"));
   await fsp.writeFile(path.join(root, "second", "codex"), "#!/bin/sh\n", { mode: 0o755 });
@@ -180,15 +183,18 @@ test("runtime lookup skips non-directory PATH entries and a directory named code
   process.env.PATH = entries.join(path.delimiter);
   await assert.rejects(reviewerRuntime(path.join(root, "store")), /git could not be started/);
   await fsp.mkdir(path.join(root, "untrusted-git"));
-  const probeEnv = path.join(root, "probe-env");
-  await fsp.writeFile(path.join(root, "untrusted-git", "git"), `#!/bin/sh\n/usr/bin/env > '${probeEnv}'\necho \"fatal: detected dubious ownership in repository at '/srv/not a git repository/x'\" >&2\nexit 128\n`, { mode: 0o755 });
+  await fsp.writeFile(path.join(root, "untrusted-git", "git"), `#!/bin/sh\n/usr/bin/env > probe-env\necho \"fatal: detected dubious ownership in repository at '/srv/not a git repository/x'\" >&2\nexit 128\n`, { mode: 0o755 });
   process.env.PATH = [...entries, path.join(root, "untrusted-git")].join(path.delimiter);
   Object.assign(process.env, { LC_ALL: "de_DE.UTF-8", GIT_CEILING_DIRECTORIES: root });
-  t.after(() => { delete process.env.GIT_CEILING_DIRECTORIES; if (saved.LC_ALL === undefined) delete process.env.LC_ALL; else process.env.LC_ALL = saved.LC_ALL; });
   await assert.rejects(reviewerRuntime(path.join(root, "store")), /dubious ownership/);
-  const seen = (await fsp.readFile(probeEnv, "utf8")).split("\n");
+  // The fake git writes into its working directory, the runtime directory.
+  const seen = (await fsp.readFile(path.join(root, "store", "codex-runtime", "probe-env"), "utf8")).split("\n");
   assert.ok(seen.includes("LC_ALL=C"));
   assert.deepEqual(seen.filter((line) => line.startsWith("GIT_")), []);
+  await fsp.writeFile(path.join(root, "untrusted-git", "git"), "#!/bin/sh\necho 'fatal: not a git repository (or any of the parent directories): .git' >&2\nkill -9 $$\n", { mode: 0o755 });
+  await assert.rejects(reviewerRuntime(path.join(root, "store")), /Cannot verify the reviewer runtime/);
+  await fsp.writeFile(path.join(root, "untrusted-git", "git"), "#!/bin/sh\necho 'fatal: not a git repository (or any ' >&2\nexit 128\n", { mode: 0o755 });
+  await assert.rejects(reviewerRuntime(path.join(root, "store")), /Cannot verify the reviewer runtime/);
   process.env.PATH = [...entries, gitDirectory].join(path.delimiter);
   const runtime = await reviewerRuntime(path.join(root, "store"));
   assert.equal(runtime.command, await fsp.realpath(path.join(root, "second", "codex")));
@@ -197,6 +203,5 @@ test("runtime lookup skips non-directory PATH entries and a directory named code
   await fsp.mkdir(enclosing);
   runGit(enclosing, "init");
   process.env.GIT_DIR = path.join(root, "missing");
-  t.after(() => { delete process.env.GIT_DIR; });
   await assert.rejects(reviewerRuntime(path.join(enclosing, "store")), /must be outside a Git repository/);
 });

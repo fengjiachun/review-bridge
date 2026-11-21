@@ -18,7 +18,8 @@ export async function reviewerRuntime(storeRoot) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
   const git = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"], env: { ...env, LC_ALL: "C" } });
   if (git.error) throw new Error("Cannot verify the reviewer runtime is outside a Git repository: git could not be started");
-  if (git.status !== 0 && !/^fatal: not a git repository \(or any /.test(git.stderr ?? "")) {
+  if (git.status !== 0 && (git.status !== 128 ||
+      !/^fatal: not a git repository \((or any of the parent directories\): \.git|or any parent up to mount point [^\n]+\))\n/.test(git.stderr ?? ""))) {
     throw new Error(`Cannot verify the reviewer runtime is outside a Git repository: ${(git.stderr ?? "").trim() || `git exited with ${git.status ?? git.signal}`}`);
   }
   if (git.status === 0) {
