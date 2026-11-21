@@ -4,23 +4,28 @@ Describes Review Bridge v0.24.0.
 
 ## Models, launch, and upgrades
 
-**No model picker appears** — Review Bridge supplies options through author MCP
-tools; the client supplies the UI. Ask the author to list available
-`CODEX_TASK` models and reasoning levels, then choose in conversation if the
-client has no picker. An already explicit valid choice does not need another
-confirmation. See [reviewer configuration](reviewer-configuration.md).
+**The reviewer runs on the wrong model** — a `CODEX_TASK` reviewer started by
+`launch_local_reviewer` or `launch_codex_task_dispatch` uses the model in the
+MCP host's Codex configuration, not a choice made in the author conversation.
+Change `model` in that host's `~/.codex/config.toml` (or the file under
+`CODEX_HOME`); reasoning effort is `high`. A workflow dispatch planned before
+the upgrade that recorded a model instead runs with the model and effort in
+its `reviewer_configuration.requested`, whatever the host configuration says. A
+task you start yourself ([manual dispatch](local-review.md#start-a-reviewer-manually))
+uses the model and effort set in the client that creates it. See
+[reviewer configuration](reviewer-configuration.md).
 
-**A new model is missing, or the list differs from the author app** — discovery
-uses the Codex CLI on the MCP host, with that process's account and configuration.
-Check the executable and account used there. `REVIEW_BRIDGE_CODEX_COMMAND` can
-pin an absolute executable when a desktop app has a different PATH. The query
-time is not the upstream catalog's age, and discovery cannot force a network
-refresh. Retry after correcting the runtime; do not substitute a guessed model.
-
-**Selection or launch says the model, effort, or environment is unavailable** —
-query the runtime again and explicitly select a supported pair. An environment
-change between discovery and launch requires a new selection; Review Bridge
-never silently downgrades the model or reasoning effort.
+**The reviewer exits at once with a model error** — the Codex CLI on the MCP
+host rejected its configured model for that account, or the model does not
+support `high` reasoning effort. Read the attempt's `process.log`; if its
+message does not say which, check both. For a new launch, configure a model
+that the account can use at `high`, check the executable and account used on
+that host (`REVIEW_BRIDGE_CODEX_COMMAND` can pin an absolute executable when a
+desktop app has a different PATH), and launch again. A workflow dispatch
+planned before the upgrade fails on its recorded model and effort instead,
+which the host configuration does not change. A reviewer launched by a
+workflow dispatch must be reconciled, or the workflow cancelled, before it is
+replaced.
 
 **No new reviewer task window appears** — `launch_local_reviewer` starts an
 independent Codex process on the MCP host. Follow its `review_id` from the author
@@ -39,7 +44,7 @@ reviewer connection, restart clients, and open new sessions. Check the runtime
 paths and MCP server version as described in the [upgrade guide](install/upgrade.md).
 The Claude Desktop reviewer extension alone does not provide author tools;
 install the separate [author connection](install/claude-desktop.md#use-claude-as-an-author)
-to select and launch a Codex reviewer from Claude.
+to launch a Codex reviewer from Claude.
 
 **Codex marketplace is “already added from a different source”** — replace the
 old marketplace registration using the [Codex upgrade steps](install/upgrade.md#codex-plugin).

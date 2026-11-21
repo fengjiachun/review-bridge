@@ -1132,10 +1132,12 @@ const sourceReviewerSkill = await fsp.readFile(
 );
 for (const root of [pluginRoot, reviewerRoot, hermesIntegration, deepseekHarness]) {
   assert.equal(await fsp.readFile(path.join(root, "server", "reviewer-skill.md"), "utf8"), sourceReviewerSkill);
-  const { codexReviewerArguments } = await import(pathToFileURL(path.join(root, "server", "local-reviewer.mjs")));
-  const args = codexReviewerArguments("package-check", { model: "fixture", reasoning_effort: "high" }, root);
+  const { REVIEWER_REQUESTED, codexReviewerArguments } = await import(pathToFileURL(path.join(root, "server", "local-reviewer.mjs")));
+  const args = codexReviewerArguments("package-check", REVIEWER_REQUESTED, root);
   const instructions = args.find((value) => value.startsWith("developer_instructions="));
   assert.equal(JSON.parse(instructions.slice("developer_instructions=".length)), sourceReviewerSkill);
+  assert.ok(!args.includes("--model") && !args.some((value) => value.startsWith("model=")));
+  assert.ok(args.includes('model_reasoning_effort="high"'));
 }
 
 const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-build-"));
@@ -1221,16 +1223,18 @@ try {
   const claudeAuthor = new Client({ name: "claude-author-smoke", version: releaseVersion });
   await claudeAuthor.connect(claudeAuthorTransport);
   try {
-    const options = await call(claudeAuthor, "discover_reviewer_options", { repository_path: repository, reviewer_provider: "CODEX_TASK" });
-    assert.deepEqual(options.models.map((entry) => entry.model), ["review-model", "second-model"]);
     const pending = await call(claudeAuthor, "prepare_review", {
       repository_path: repository, base_ref: baseSha, requirement: "Package author smoke", implementation_scope: "value.js", reviewer_provider: "CODEX_TASK",
     });
-    const selected = await call(claudeAuthor, "select_reviewer_configuration", {
-      review_id: pending.id, expected_state_version: pending.state_version, ...options.suggested,
+    const launched = await call(claudeAuthor, "launch_local_reviewer", {
+      review_id: pending.id, expected_state_version: pending.state_version,
     });
-    assert.equal(selected.reviewer_configuration.requested.model, options.suggested.model);
-    assert.equal(selected.reviewer_configuration.observed.status, "unavailable");
+    assert.deepEqual(launched.reviewer_configuration.requested, { reasoning_effort: "high" });
+    assert.equal(launched.reviewer_configuration.observed.status, "unavailable");
+    const { waitForExit } = await import(pathToFileURL(path.join(projectRoot, "test", "helpers", "codex-runtime.mjs")));
+    assert.equal((await waitForExit(launched.reviewer_dispatch.attempt_root)).code, 0);
+    const executed = JSON.parse(await fsp.readFile(path.join(temporary, "claude-author-store", "codex-runtime", "executed.json"), "utf8"));
+    assert.ok(executed.args.includes('model_reasoning_effort="high"') && !executed.args.includes("--model"));
   } finally {
     await claudeAuthor.close();
   }

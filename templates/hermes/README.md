@@ -234,13 +234,8 @@ Every participant sharing that store must run one exact Review Bridge version.
 - Remote GitHub Codex publication is performed by the author/publication side
   only after the local HERMES reviewer gate has passed.
 
-## Select a local reviewer from the author profile
+## Launch a local reviewer from the author profile
 
-The author server exposes `discover_reviewer_options`, `select_reviewer_configuration`
-and `launch_local_reviewer`. For CODEX_TASK, query the execution host's catalog,
-show model/effort options and its suggested valid prior choice, then persist the
-explicit user choice before launching. Use a structured selection if available,
-otherwise conversation. Discovery alone does not authorize launch. Rereviews
-inherit the selection; invalid choices fail without fallback. Other reviewer
-providers report unavailable discovery/control rather than fabricated choices.
-Unattended work requires a preauthorized choice and must not wait for interaction.
+The author server exposes `launch_local_reviewer`. The CODEX_TASK reviewer uses
+the model from the execution host's Codex configuration at `high` reasoning
+effort; change that configuration to change the model.

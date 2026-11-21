@@ -12,19 +12,19 @@ launch between them.
    provider step. Record the returned `review_id` and `state_version` and
    report the summary exactly as Prepare requires.
 2. Call `launch_local_reviewer` with `review_id` and the current
-   `expected_state_version` after the user has chosen the reviewer configuration
-   and authorized starting. This shared author tool works from Codex, Claude,
-   Hermes, or DeepSeek Harness. It uses the same CLI, home, and neutral directory
-   as `discover_reviewer_options`, revalidates the selection, and passes explicit
-   model and effort arguments. It returns promptly; wait for the ledger verdict.
-   Do not substitute a task in a different host/runtime or the author's model.
+   `expected_state_version` after the user has authorized starting. This shared
+   author tool works from Codex, Claude, Hermes, or DeepSeek Harness. The
+   reviewer uses the model from the host's Codex configuration; the tool passes
+   no model and pins reasoning effort to `high`. It returns promptly; wait for
+   the ledger verdict. Do not substitute a task in a different host/runtime or
+   the author's model.
 
-   The tool executes this sandbox shape, with the selected values (this example
-   describes the launch; use the tool rather than constructing a shell command):
+   The tool executes this sandbox shape (this example describes the launch; use
+   the tool rather than constructing a shell command):
 
    ```bash
-   codex exec --skip-git-repo-check --sandbox workspace-write --model <selected-model> \
-     -c 'model_reasoning_effort="<selected-effort>"' \
+   codex exec --skip-git-repo-check --sandbox workspace-write \
+     -c 'model_reasoning_effort="high"' \
      -c 'sandbox_workspace_write.network_access=false' \
      -c 'sandbox_workspace_write.writable_roots=[]' \
      -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
@@ -42,14 +42,10 @@ launch between them.
    > Review Bridge reviewer skill. Require `reviewer_provider: CODEX_TASK`,
    > follow the review strategy, and submit every actionable finding.
 
-   Selection is stored per round. A rereview inherits it and revalidates before
-   launch. To change it explicitly, call `select_reviewer_configuration` before
-   dispatch; previous rounds keep their identity. Invalid or expired selections
-   fail without fallback. Query failures can be retried. `model/list` is a runtime
-   catalog, not a forced network refresh; its upstream cache age is unavailable.
-   `requested` records the launch choice; `observed` is unavailable. A process log
-   cannot authenticate the remote model. Older ledgers remain readable with no
-   invented historical configuration.
+   Each round records its launch. To change the reviewer model, change the
+   host's Codex configuration. `requested` records the pinned effort; `observed`
+   is unavailable. A process log cannot authenticate the remote model. Older
+   ledgers keep the model the author selected and remain readable.
 
    Single-quote that request: it contains backticks, and a double-quoted shell
    string would execute them instead of passing them through. Pass it as one
@@ -84,7 +80,7 @@ launch between them.
    `reviewer_dispatch.exit` once the process exits and its private log path is
    `<attempt_root>/process.log`. An absent exit means running or indeterminate;
    it never permits a concurrent replacement. After a confirmed exit without a
-   verdict, a new explicit selection can replace the failed configuration.
+   verdict, `launch_local_reviewer` can start a replacement.
 
 The launch discipline is fixed, and it states what must never happen rather
 than counting launches. Never run two reviewers on the same round at once, and
@@ -250,14 +246,14 @@ this launch does not shrink that set. For attacker-controllable input the
 sandbox is therefore not an isolation boundary, so never point this launch at
 code someone else wrote.
 
-A round-two rereview uses `launch_local_reviewer` again with the inherited
-selection and current state version. Its process has the same
-shape, carrying the same review ID and a request to rereview the author's
-resolutions with the packaged reviewer skill:
+A round-two rereview uses `launch_local_reviewer` again with the current state
+version. Its process has the same
+shape and the same reviewer request; the packaged reviewer skill finds the
+rereview from the round the ledger is in:
 
 ```bash
-codex exec --skip-git-repo-check --sandbox workspace-write --model <selected-model> \
-  -c 'model_reasoning_effort="<selected-effort>"' \
+codex exec --skip-git-repo-check --sandbox workspace-write \
+  -c 'model_reasoning_effort="high"' \
   -c 'sandbox_workspace_write.network_access=false' \
   -c 'sandbox_workspace_write.writable_roots=[]' \
   -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
@@ -268,7 +264,7 @@ codex exec --skip-git-repo-check --sandbox workspace-write --model <selected-mod
   -c 'memories.generate_memories=false' \
   -c 'mcp_servers.review-bridge-author.command="node"' \
   -c 'mcp_servers.review-bridge-author.enabled=false' \
-  '<the rereview request>' < /dev/null
+  '<the same reviewer request>' < /dev/null
 ```
 
 `codex exec resume <session-id>` exists, and `codex exec` prints the session id
