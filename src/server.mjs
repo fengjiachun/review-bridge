@@ -1300,7 +1300,7 @@ if (role === "author") {
     {
       title: "List local reviews",
       description:
-        "List one repository's reviews newest first, one row each with id, status, repository_path, the latest round's head_sha, and updated_at; read one with get_review_summary or get_review. repository_path must equal the stored value exactly, the resolved top-level path prepare_review returned. Each review covers one snapshot, so unpassed reviews on older heads of the same repository are normal leftovers; compare head_sha and updated_at.",
+        "List one repository's reviews newest first, one row each with id, status, repository_path, the latest round's head_sha, and updated_at; read one with get_review_summary or get_review. repository_path must equal the stored value exactly: the real path of git rev-parse --show-toplevel, as prepare_review stores it and get_review reports it. Each review covers one snapshot, so unpassed reviews on older heads of the same repository are normal leftovers; compare head_sha and updated_at.",
       inputSchema: {
         repository_path: z.string(),
         statuses: z.array(z.string()).optional(),

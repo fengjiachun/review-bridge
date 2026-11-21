@@ -13,7 +13,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - (#212) `list_reviews` requires `repository_path` and returns only the
   reviews whose stored `repository_path` equals it exactly. Callers must pass
-  the repository's resolved top-level path, as `prepare_review` returned it.
+  the repository's resolved top-level path, as `prepare_review` stores it
+  and `get_review` reports it.
   An unfiltered call over the whole store had grown past the client's
   result size limit again.
 - (#213) The author tools that change a review -- `prepare_review`,
