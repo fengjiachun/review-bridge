@@ -458,7 +458,7 @@ test("reviewer processes list only tasks bound to their provider", async (t) => 
   }
 });
 
-test("list_reviews returns one five-field row per review, newest first", async (t) => {
+test("list_reviews requires repository_path and returns that repository's five-field rows, newest first", async (t) => {
   const store = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-mcp-"));
   t.after(() => fsp.rm(store, { recursive: true, force: true }));
   // Neither id order is the update order, so only updated_at sorts the rows.
@@ -472,7 +472,13 @@ test("list_reviews returns one five-field row per review, newest first", async (
       { round: 2, head_sha: letter.repeat(40) },
     ],
   }));
-  for (const review of reviews) {
+  const other = {
+    ...reviews[0],
+    id: "rb-2026-07-26T000000-000Z-d0000000",
+    repository_path: "/other-repository",
+    updated_at: "2026-07-29T00:00:00.000Z",
+  };
+  for (const review of [...reviews, other]) {
     const reviewRoot = path.join(store, "reviews", review.id);
     await fsp.mkdir(reviewRoot, { recursive: true, mode: 0o700 });
     await fsp.writeFile(
@@ -484,7 +490,13 @@ test("list_reviews returns one five-field row per review, newest first", async (
 
   const author = await connectClient("author", store);
   t.after(() => author.close());
-  const result = await author.callTool({ name: "list_reviews", arguments: {} });
+  const missing = await author.callTool({ name: "list_reviews", arguments: {} });
+  assert.equal(missing.isError, true);
+  assert.match(missing.content[0].text, /repository_path/);
+  const result = await author.callTool({
+    name: "list_reviews",
+    arguments: { repository_path: "/repository" },
+  });
   const rows = JSON.parse(result.content[0].text);
   assert.deepEqual(
     rows.map((row) => [row.id, row.head_sha]),
