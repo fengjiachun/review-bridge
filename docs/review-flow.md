@@ -57,7 +57,7 @@ never your live working tree, and submits structured findings. No findings
 means `CLEAN`.
 
 The autonomous workflow dispatches an independent **Codex reviewer** using the
-[explicitly selected model and effort](reviewer-configuration.md). The local
+[model from the Codex configuration at high effort](reviewer-configuration.md). The local
 launcher starts a Codex process and records its identity for reconciliation.
 On the manual path you choose the reviewer — a fresh Claude Desktop conversation, a new Codex task, or an
 isolated Hermes or DeepSeek Harness profile — though a change headed for

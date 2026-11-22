@@ -1640,7 +1640,7 @@ test("legacy full reports retain their contents and mark reviewer configuration 
   // The stored baseline retains its original rendering identity.
   assert.ok(baseline.includes("- Report revision: `9-f1`"));
   assert.ok(rendered.includes(`- Report revision: \`9-f${REPORT_FORMAT}\``));
-  assert.equal(REPORT_FORMAT, 8);
+  assert.equal(REPORT_FORMAT, 9);
 });
 
 test("a finding's heading names the constraint it records", () => {
@@ -1982,7 +1982,6 @@ test("the five places that carry the report's identity agree, renderer format in
   // 1. reportRevision, where the identity is minted.
   const revision = reportRevision(review, publication, publicationSummary);
   assert.equal(revision, `${review.state_version}-f${REPORT_FORMAT}`);
-  assert.equal(REPORT_FORMAT, 8);
 
   const receipt = await writeReviewReport(state.store, state.reviewId);
   // 2. the file name, and 3. the tool receipt.

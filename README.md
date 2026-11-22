@@ -71,28 +71,22 @@ Commit the change on a topic branch. In the author conversation, ask:
 
 > Review this change with Review Bridge using `CODEX_TASK`. The requirement is
 > "...", the implementation scope is "...", and the base ref is `origin/main`.
-> Show me the available reviewer models and reasoning levels before starting.
 
-The author queries the Codex runtime on the MCP host and presents its available
-choices. Choose a pair and authorize the review, for example:
-
-> Use `<model from the list>` with `<supported reasoning level>` and start.
-
-Review Bridge captures the snapshot, records your selection, and launches an
-independent Codex process. The author conversation's model does not choose the
-reviewer. A client may present a picker or ask in conversation; Review Bridge
-does not provide its own selection window. Follow progress in the author
+Review Bridge captures the snapshot and launches an independent Codex process.
+The reviewer uses the model from the MCP host's Codex configuration at `high`
+reasoning effort; the author conversation's model does not choose it. Follow
+progress in the author
 conversation using the returned `review_id`.
 
 If there are findings, ask the author to address them and prepare round two.
-Rereview inherits your selected model and effort. When the ledger reports
+When the ledger reports
 `CLEAN`, the author finalizes the local gate, rechecking that the working tree
 still matches the reviewed snapshot. `LOCAL_GATE_PASSED` completes local review;
 you can stop here without publishing anything to GitHub.
 
 See [local review](docs/local-review.md) for manual reviewer sessions, other
 providers, and handling unresolved findings. [Reviewer configuration](docs/reviewer-configuration.md)
-explains the same selection flow from Codex, Claude, Hermes, and DeepSeek Harness.
+explains where the reviewer model comes from and how to start a review from Codex, Claude, Hermes, and DeepSeek Harness.
 
 ## From local review to `MERGE_READY`
 
@@ -122,7 +116,7 @@ and explains why each step exists.
 | [How Review Bridge reviews a change](docs/review-flow.md) | The narrative: commit to merge-ready, and why |
 | [Product overview](docs/overview.md) | Problem, principles, store layout, local review, publication gate, workflow, clients, usage data |
 | [产品说明（中文）](docs/overview.zh.md) | The same overview in Chinese |
-| [Choose reviewer model and reasoning](docs/reviewer-configuration.md) | Cross-client selection, launch, and runtime limitations |
+| [Reviewer model and reasoning](docs/reviewer-configuration.md) | Where the model comes from, launch, and runtime limitations |
 | [Upgrade an existing installation](docs/install/upgrade.md) | Switch clients together and verify the new runtime |
 | [Run a local review](docs/local-review.md) | Every provider's request, round two, successor reviews, the state machine |
 | [GitHub publication gate](docs/publication-gate.md) | `LOCAL_GATE` and `REMOTE_ONLY` publication |

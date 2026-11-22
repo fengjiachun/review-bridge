@@ -13,16 +13,13 @@ Use an author connection in Codex, Claude, Hermes, or DeepSeek Harness. For an
 independent Codex reviewer, ask:
 
 > Review the current change using `CODEX_TASK`. The requirement is "...", the
-> implementation scope is "...", and the base ref is `origin/main`. Show the
-> available reviewer models and reasoning levels before starting.
+> implementation scope is "...", and the base ref is `origin/main`.
 
-Choose from the returned options and authorize the start. The author calls
-`discover_reviewer_options`, captures the snapshot with `prepare_review`, saves
-your choice with `select_reviewer_configuration`, then calls
-`launch_local_reviewer`. Selection requires the discovered `environment_id` and
-the current review `state_version`; launch uses the new state version returned
-after selection. See [reviewer configuration](reviewer-configuration.md) for
-client setup and runtime limits. The launcher starts an independent process;
+The author captures the snapshot with `prepare_review`, then calls
+`launch_local_reviewer` with the review's `state_version`. The reviewer uses the
+model from the MCP host's Codex configuration at `high` reasoning effort. See
+[reviewer configuration](reviewer-configuration.md) for client setup and runtime
+limits. The launcher starts an independent process;
 you follow it from the author conversation rather than creating a UI task.
 `prepare_review` also takes an optional `rationale`: the author's design
 decisions, dropped alternatives, and doubts, written before any finding exists.
@@ -42,8 +39,8 @@ progress; call it again with the same `state_version`, or resume when the user
 confirms the review is complete.
 
 The tools that change the review -- `prepare_review`,
-`select_reviewer_configuration`, `launch_local_reviewer`, `submit_resolutions`,
-`prepare_rereview`, `append_review_erratum`, and `finalize_local_gate` (under
+`launch_local_reviewer`, `submit_resolutions`, `prepare_rereview`,
+`append_review_erratum`, and `finalize_local_gate` (under
 its `review` key, beside `gate`) -- also answer with that compact summary, not
 the full ledger. Their summary is built from the ledger they just wrote, so it
 never carries `reviewer_dispatch.exit`; only `get_review_summary` adds that
@@ -118,10 +115,9 @@ Fixing an undocumented one includes writing the rule into that guidance in the
 same change. Findings without it record no constraint kind.
 
 For a Codex review started with `launch_local_reviewer`, prepare rereview and
-call the launcher again with the current state version. Round two inherits the
-selected pair; change it explicitly before launch if needed. For manual Codex
+call the launcher again with the current state version. For manual Codex
 dispatch, create another new task with the same review ID and request a rereview
-of the author's resolutions, retaining your selected model and effort.
+of the author's resolutions.
 
 For other providers, resume the same reviewer context for round two where
 allowed. A `DEEPSEEK_HARNESS` reviewer cannot: every headless run starts a fresh session,

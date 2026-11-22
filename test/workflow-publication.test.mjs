@@ -1,4 +1,3 @@
-import { prepareConfiguredReview as prepareReview } from "./helpers/configured-review.mjs";
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import fsp from "node:fs/promises";
@@ -7,6 +6,7 @@ import test from "node:test";
 import {
   finalizeLocalGate,
   submitInitialReview,
+  prepareReview,
 } from "../src/core.mjs";
 import {
   acknowledgeCodexReviewAmbiguity,

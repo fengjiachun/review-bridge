@@ -18,13 +18,35 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   An unfiltered call over the whole store had grown past the client's
   result size limit again.
 - (#213) The author tools that change a review -- `prepare_review`,
-  `select_reviewer_configuration`, `launch_local_reviewer`,
-  `submit_resolutions`, `prepare_rereview`, and `append_review_erratum` --
+  `launch_local_reviewer`, `submit_resolutions`, `prepare_rereview`, and
+  `append_review_erratum` --
   return the compact review summary instead of the full ledger, and
   `finalize_local_gate` returns that summary under `review` beside `gate`.
   The summary is the `get_review_summary` shape without the dispatch exit
   record. Call `get_review` for the requirement, finding text, resolutions,
   decisions, or errata.
+- (#214) The local `CODEX_TASK` reviewer now runs on the model set in the MCP
+  host's Codex configuration (`model` in `~/.codex/config.toml`, or the file
+  under `CODEX_HOME`): `launch_local_reviewer` and `launch_codex_task_dispatch`
+  pass no `--model` for new launches. After upgrading, reviews use that configured model, not
+  the one previously selected through Review Bridge. Reasoning effort is
+  always `high`, passed on every new launch. A round records
+  `{"reasoning_effort":"high"}` as its requested configuration, and reports
+  print it with the model as coming from the Codex configuration. Rounds that
+  earlier releases launched keep and report the model they recorded; a
+  pending round launched again after the upgrade records the new request,
+  and its history keeps the earlier selection.
+  `plan_codex_task_dispatch` no longer takes `reasoning_effort`. A dispatch
+  planned before the upgrade that recorded a model runs with that model and
+  effort.
+
+### Removed
+
+- (#214) The `discover_reviewer_options` and `select_reviewer_configuration`
+  author tools, the stored per-repository reviewer preferences, and the
+  `environment_id` check on launch. Review Bridge no longer reads or writes
+  `reviewer-preferences/`; existing files there stay on disk and can be
+  deleted. To change the reviewer model, change the Codex configuration.
 
 ## 0.24.0 - 2026-11-13
 

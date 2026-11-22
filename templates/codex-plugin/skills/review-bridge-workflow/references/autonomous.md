@@ -67,23 +67,27 @@ gap returns the ready pull request to draft before any repair.
    task has been dispatched. Only an explicit decision may call
    `extend_change_size_budget`; resume separately after the new budget admits
    the measured total.
-5. Before binding the review, use the preauthorized model/effort choice with
-   `discover_reviewer_options` and `select_reviewer_configuration`. Missing
-   unattended choices stop for configuration; never wait for interactive input.
-   For `PLAN_CODEX_TASK_DISPATCH`, call `plan_codex_task_dispatch`; it revalidates
-   the persisted selection and stores `dispatch.model`, `dispatch.reasoning_effort`,
-   and `dispatch.reviewer_configuration` with the exact opaque marker, title and
-   prompt. Persist `EXECUTING` with `mark_workflow_action_executing`, then call
+5. For `PLAN_CODEX_TASK_DISPATCH`, call `plan_codex_task_dispatch`; it stores
+   the pinned `dispatch.reasoning_effort` and `dispatch.reviewer_configuration`
+   with the exact opaque marker, title and prompt. The reviewer model comes from
+   the host's Codex configuration. Persist `EXECUTING` with
+   `mark_workflow_action_executing`, then call
    `launch_codex_task_dispatch` on that action. Use its returned task ID, exact
    title and prompt with `record_codex_task_observation`, then
-   `complete_workflow_action`. The launch uses the same runtime that supplied
-   the catalog. After restart, recover from `active_action.dispatch`; calling
+   `complete_workflow_action`. After restart, recover from `active_action.dispatch`; calling
    `launch_codex_task_dispatch` again returns the same task identity without
-   spawning another reviewer. Never reconstruct the strings or silently substitute
-   a model. If environment drift rejects a launch before any attempt, use
-   `abandon_workflow_action`, explicitly reselect, then plan again. It refuses
-   attempted or indeterminate launches. Legacy intents without the local-launch
-   contract remain readable; reconcile them or cancel the workflow.
+   spawning another reviewer while the current round holds its started receipt
+   (check the current round and marker before retrying an old action), also
+   after it exited once the review recorded a verdict. For a recorded attempt, a
+   failed start, a missing started receipt, or an exit while the review is still
+   pending is refused and needs reconciliation; an error before any attempt is
+   recorded, such as an unavailable executable, can be corrected and launched
+   again. Never reconstruct the strings or silently substitute
+   a model. An intent planned with a selected model by an earlier release runs
+   with the model and effort it recorded; to move it to the host model before
+   any launch, use `abandon_workflow_action` (it requires the ledger to show no
+   launch attempt), then plan again. Legacy intents without the
+   local-launch contract remain readable; reconcile them or cancel the workflow.
 6. If the client cannot create, discover, or wait for that independent task,
    call `pause_autonomous_workflow` with
    `TASK_ORCHESTRATION_UNAVAILABLE`. If creation may have succeeded but
@@ -117,7 +121,7 @@ gap returns the ready pull request to draft before any repair.
    fix commit. For a rebuttal-only
    rereview, state that no code commit was required. After advancing to
    `WAIT_LOCAL_REREVIEW`, call `launch_local_reviewer` with the current review
-   state version and inherited selection; it records a separate round-two
+   state version; it records a separate round-two
    process. After a restart inspect `get_review_summary.reviewer_dispatch`
    before launching; a live or indeterminate dispatch blocks duplicates. When its result arrives, call `get_review`
    again and narrate every per-finding decision and any new finding from its

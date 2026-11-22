@@ -274,13 +274,8 @@ its plugin configuration is still a developer preview.
   the verification-shape second opinion beside it — how a change is tested,
   pinned, and fixtured — rather than the gate that authorizes the publication.
 
-## Select a local reviewer from the author session
+## Launch a local reviewer from the author session
 
-Use the author server's `discover_reviewer_options` for the execution host's
-CODEX_TASK models and efforts. Show the suggested valid prior choice; use the
-client's structured selection if supported, otherwise conversation. Persist an
-explicit choice with `select_reviewer_configuration`, then use
-`launch_local_reviewer` when authorized. Discovery is not launch authorization.
-Rereviews inherit selection, invalid choices fail without fallback, and other
-providers report unavailable discovery/control. Unattended work requires a
-preauthorized choice and stops without waiting for interactive input.
+Use the author server's `launch_local_reviewer` when authorized. The CODEX_TASK
+reviewer uses the model from the execution host's Codex configuration at `high`
+reasoning effort; change that configuration to change the model.
