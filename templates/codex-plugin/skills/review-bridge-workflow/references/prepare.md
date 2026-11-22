@@ -36,7 +36,11 @@ After a verdict, load [Handle findings](findings.md) for findings or
    already-gated code costs the reviewer far more context than it buys.
    `force_full_review: true` is the deliberate exception, and one scenario
    names it. A continuation from `CONTINUABLE_FINDINGS` passes it beside
-   `continued_from_review_id`, which the server requires. Outside it,
+   `continued_from_review_id`, which the server requires. The continuation
+   repeats the source review's `requirement` exactly; its
+   `implementation_scope` may describe the new head. A refused continuation
+   names each unmet check: source status, repository, requirement, reviewer
+   provider. Outside it,
    demanding a full patch buys a re-review of gated code, so state the reason
    in the session before passing it.
 6. Choose `reviewer_provider` explicitly:

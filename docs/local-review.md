@@ -144,7 +144,11 @@ Rereview ends in `CLEAN`,
 - `CONTINUABLE_FINDINGS`: no rebuttal is still disputed, but round two judged
   a fix incomplete or found a new issue. Commit a changed head and call `prepare_review` with
   `continued_from_review_id` and `force_full_review: true`; the fresh reviewer
-  receives only the bare finding descriptions as scope hints.
+  receives only the bare finding descriptions as scope hints. The
+  continuation must repeat the source review's `requirement` exactly, while
+  its `implementation_scope` may be rewritten for the new head. A refusal
+  names each unmet check: source status, repository, requirement, reviewer
+  provider.
 - `HUMAN_REQUIRED`: round two kept a rejected finding open, so the rebuttal is
   disputed. Any incomplete fix from the same round goes into the same
   arbitration packet.

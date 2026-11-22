@@ -39,6 +39,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `plan_codex_task_dispatch` no longer takes `reasoning_effort`. A dispatch
   planned before the upgrade that recorded a model runs with that model and
   effort.
+- (#216) A continuation from `CONTINUABLE_FINDINGS` no longer requires the
+  `implementation_scope` to match the source review; the new review records
+  the scope passed for the new head. The requirement must still match, and
+  only a `CONTINUABLE_FINDINGS` source can be continued. A refused
+  continuation now names each unmet check (source status, repository,
+  requirement, reviewer provider) instead of one combined message. The
+  manual summary's `prepare_review` inputs for `ADDRESS_LOCAL_FINDINGS`
+  describe `implementation_scope` as the scope for the new head.
 
 ### Removed
 

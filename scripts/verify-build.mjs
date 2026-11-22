@@ -541,6 +541,12 @@ assert.match(
   /`CONTINUABLE_FINDINGS`, present the source ledger's `OPEN` and\s+`STILL_OPEN` `findings`/,
 );
 assert.match(workflowSkill, /call `get_review` with its new ID and read its\s+`carried_findings` as the continuation scope/);
+assert.ok(
+  workflowSkill.replace(/\s+/g, " ").includes(
+    "A continuation from `CONTINUABLE_FINDINGS` passes it beside `continued_from_review_id`, which the server requires. The continuation repeats the source review's `requirement` exactly; its `implementation_scope` may describe the new head. A refused continuation names each unmet check: source status, repository, requirement, reviewer provider.",
+  ),
+  "packaged Codex workflow skill: continuation rule",
+);
 assert.match(
   workflowSkill,
   /When a round reports findings, call `get_review`/,

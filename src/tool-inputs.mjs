@@ -137,7 +137,10 @@ export const REVIEW_ACTION_INPUTS = {
       ["repository_path", "get_review repository_path"],
       ["base_ref", "get_review base_ref"],
       ["requirement", "get_review requirement"],
-      ["implementation_scope", "get_review implementation_scope"],
+      [
+        "implementation_scope",
+        "your scope for the new head; get_review implementation_scope may be reused",
+      ],
       ["rationale", "optional, your design rationale for the new head"],
       ["reviewer_provider", "reviewer_provider"],
       ["continued_from_review_id", "id"],

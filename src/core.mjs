@@ -1142,6 +1142,12 @@ function continuationErrata(review) {
   }));
 }
 
+function continuationStatusRefusal(source) {
+  return source.status === "CONTINUABLE_FINDINGS"
+    ? null
+    : `source status is ${source.status}, but only CONTINUABLE_FINDINGS can be continued`;
+}
+
 // A continuation freezes its source. The errata copy, the carried findings,
 // the freeze marker, and its history event land in one write under the
 // source's own mutation lock, so the copy cannot race a concurrent append.
@@ -1154,10 +1160,9 @@ function continuationErrata(review) {
 async function freezeContinuationSource(storeRoot, sourceReviewId, continuationId) {
   return withReviewMutationLock(storeRoot, sourceReviewId, async () => {
     const source = await loadReview(storeRoot, sourceReviewId);
-    if (source.status !== "CONTINUABLE_FINDINGS") {
-      throw new Error(
-        "continued review does not match the repository, requirement, provider, base, scope, and continuable state",
-      );
+    const statusRefusal = continuationStatusRefusal(source);
+    if (statusRefusal != null) {
+      throw new Error(`cannot continue review ${sourceReviewId}: ${statusRefusal}`);
     }
     const carriedFindings = continuationFindings(source);
     if (carriedFindings.length === 0) {
@@ -1478,17 +1483,24 @@ export async function prepareReview(
     continuedFromReviewId == null
       ? null
       : await loadReview(storeRoot, continuedFromReviewId);
-  if (
-    continuedReview != null &&
-    (continuedReview.status !== "CONTINUABLE_FINDINGS" ||
-      continuedReview.repository_path !== repositoryRoot ||
-      continuedReview.requirement !== requirement ||
-      continuedReview.implementation_scope !== implementationScope ||
-      reviewerProviderFor(continuedReview) !== reviewerProvider)
-  ) {
-    throw new Error(
-      "continued review does not match the repository, requirement, provider, base, scope, and continuable state",
-    );
+  if (continuedReview != null) {
+    const refusals = [
+      continuationStatusRefusal(continuedReview),
+      continuedReview.repository_path === repositoryRoot
+        ? null
+        : `repository ${repositoryRoot} differs from the source review's ${continuedReview.repository_path}`,
+      continuedReview.requirement === requirement
+        ? null
+        : "requirement differs from the source review's requirement",
+      reviewerProviderFor(continuedReview) === reviewerProvider
+        ? null
+        : `reviewer_provider ${reviewerProvider} differs from the source review's ${reviewerProviderFor(continuedReview)}`,
+    ].filter((refusal) => refusal != null);
+    if (refusals.length > 0) {
+      throw new Error(
+        `cannot continue review ${continuedFromReviewId}: ${refusals.join("; ")}`,
+      );
+    }
   }
   // A cheap pre-check before any directory exists; the authoritative copy is
   // taken again under the source's own mutation lock below.
