@@ -1694,12 +1694,15 @@ test("a continuation refusal names every unmet condition", async (t) => {
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
   });
+  const other = await fixture();
+  t.after(() => fsp.rm(other.root, { recursive: true, force: true }));
   await assert.rejects(
     prepareReview(store, {
-      repositoryPath: repository,
+      repositoryPath: other.repository,
       baseRef: "HEAD",
       requirement: "Expose a different value.",
       implementationScope: "Change app.js.",
+      reviewerProvider: "CODEX_TASK",
       forceFullReview: true,
       continuedFromReviewId: source.id,
     }),
@@ -1709,7 +1712,9 @@ test("a continuation refusal names every unmet condition", async (t) => {
         error.message,
         /source status is WAITING_FOR_REVIEW, but only CONTINUABLE_FINDINGS can be continued/,
       );
-      assert.match(error.message, /requirement differs from the source review's requirement/);
+      assert.match(error.message, /; repository \S+ differs from the source review's /);
+      assert.match(error.message, /; requirement differs from the source review's requirement/);
+      assert.match(error.message, /; reviewer_provider CODEX_TASK differs from the source review's CLAUDE_DESKTOP/);
       return true;
     },
   );
