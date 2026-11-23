@@ -9,11 +9,9 @@ import {
   codexStatus,
   getPublication,
   getPublicationSummary,
-  invalidatedAutomaticResolution,
   localGateReviewMismatch,
   readBoundPublicationAuthorization,
   readLocalGateAuthorization,
-  resolutionFrontier,
 } from "./publication.mjs";
 import { sha256 } from "./storage.mjs";
 
@@ -594,47 +592,11 @@ function checksSection(observation) {
   ];
 }
 
-// A thread's outcome is the observation's resolved flag read against the
-// publication's own judges: the frontier replay says which record is active,
-// and the gate's invalidation check says whether the active frontier still
-// matches the observed threads (provenance, resolved flag, watermark). A
-// record is credited only when both agree; anything else is reported as the
-// observed state beside what the ledger recorded.
-function threadOutcome(thread, records, frontier, invalidated) {
-  const own = records.filter((entry) => entry.thread_id === thread.id);
-  const active = frontier.active.get(thread.id);
-  const observed = thread.is_resolved
-    ? "resolved on GitHub"
-    : "unresolved; left for a human";
-  if (active != null && thread.is_resolved && invalidated == null) {
-    return `resolved by record ${active.number} (action ${active.action_id}, reply comment ${active.reply_comment_id}, head ${shortSha(active.head_sha)})`;
-  }
-  if (active != null && invalidated?.thread_id === thread.id) {
-    return `${observed}; record ${active.number} no longer explains it: the gate judges THREAD_RESOLUTION_INVALIDATED (${invalidated.reason ?? "the thread's provenance, resolved flag, or watermark changed since the record"})`;
-  }
-  if (active != null) {
-    // The gate's invalidation is whole-frontier, not per thread: one
-    // invalidated record withholds credit from every automatic resolution.
-    // So this thread is not the one to repair, and the line says so.
-    return `${observed}; the gate credits no automatic resolution while thread ${invalidated?.thread_id ?? "?"} invalidates the frontier, so record ${active.number} stays active but uncredited`;
-  }
-  if (own.length > 0) {
-    const blocker = frontier.blockers.find((entry) => entry.thread_id === thread.id);
-    return `${observed}; record${own.length === 1 ? "" : "s"} ${own.map((entry) => entry.number).join(", ")} resolved it automatically and ${own.length === 1 ? "is" : "are"} no longer active (${blocker?.reason ?? "not in the active frontier"})`;
-  }
-  return thread.is_resolved
-    ? "resolved on GitHub; no automatic-resolution record"
-    : observed;
-}
-
 function threadsSection(publication) {
   if (publication.latest_observation == null) {
     return ["### Review threads", NO_OBSERVATION];
   }
   const threads = publication.latest_observation.review_threads.threads;
-  const records = publication.automatic_resolutions ?? [];
-  const frontier = resolutionFrontier(publication);
-  const invalidated = invalidatedAutomaticResolution(publication);
   const rows = threads.map((thread) => {
     const commenters = [
       ...new Set((thread.comments ?? []).map((comment) => comment.actor?.login ?? comment.actor?.id)),
@@ -643,35 +605,14 @@ function threadsSection(publication) {
       thread.id,
       thread.path == null ? "n/a" : `${thread.path}${thread.line == null ? "" : `:${thread.line}`}`,
       `${thread.comment_count ?? (thread.comments ?? []).length} by ${commenters.join(", ") || "n/a"}`,
-      threadOutcome(thread, records, frontier, invalidated),
+      thread.is_resolved ? "resolved on GitHub" : "unresolved; left for a human",
     ];
   });
-  // A thread the records name but the observation no longer holds is why the
-  // gate refuses, and the table above cannot show it: there is no thread to
-  // render. Each such thread gets its own line, so the operator reads which
-  // thread and which record rather than a bare verdict.
-  const observedIds = new Set(threads.map((thread) => thread.id));
-  const unobserved = [];
-  for (const [threadId, record] of frontier.active) {
-    if (observedIds.has(threadId)) continue;
-    unobserved.push(
-      `- ${inline(threadId)}: not in the latest observation; record ${record.number} (action ${inline(record.action_id)}, reply comment ${inline(String(record.reply_comment_id))}, head ${code(shortSha(record.head_sha))}) resolved it automatically and the gate judges THREAD_RESOLUTION_INVALIDATED`,
-    );
-  }
-  for (const blocker of frontier.blockers) {
-    if (observedIds.has(blocker.thread_id) || frontier.active.has(blocker.thread_id)) continue;
-    unobserved.push(
-      `- ${inline(blocker.thread_id)}: not in the latest observation; ${blocker.record == null ? "no record is active" : `record ${blocker.record.number} is no longer active`} (${inline(blocker.reason ?? "not in the active frontier")})`,
-    );
-  }
   return [
     "### Review threads",
-    ...(rows.length === 0 && unobserved.length === 0
-      ? ["No review thread was observed."]
-      : [
-          ...(rows.length === 0 ? [] : [table(["Thread", "Location", "Comments", "Outcome"], rows)]),
-          ...(unobserved.length === 0 ? [] : [unobserved.join("\n")]),
-        ]),
+    rows.length === 0
+      ? "No review thread was observed."
+      : table(["Thread", "Location", "Comments", "Outcome"], rows),
   ];
 }
 
@@ -696,10 +637,8 @@ function acknowledgementsSection(publication) {
 }
 
 // The gate's verdict is the publication summary's, the one judgement that
-// carries the workflow binding and the terminal replay; a bare derivation
-// over the ledger alone can say MERGE_READY where the summary says
-// CHANGES_REQUIRED, so the report never derives on its own. Without a summary
-// it says so rather than guessing.
+// also reads the gate file and the evidence's age, so the report never
+// derives on its own. Without a summary it says so rather than guessing.
 function derivationSection(publication, summary) {
   const observation = publication.latest_observation;
   const lines = [
@@ -789,7 +728,7 @@ export function summaryDigest(summary) {
 // Raise it by one in any change that alters the Markdown this module renders
 // -- wording, ordering, a new line, a heading -- so the reports the previous
 // version wrote stay readable at their own names.
-export const REPORT_FORMAT = 9;
+export const REPORT_FORMAT = 10;
 
 // `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
 // `p<revision>-s<summary digest>-f<format>` without one.
@@ -1332,7 +1271,7 @@ function footerSections(
         : [
             publicationSummary == null
               ? "- Publication summary: not supplied to this render."
-              : `- Publication summary: computed by the server over its own inputs (gate file, workflow binding, resolution sources); digest s${summaryDigest(publicationSummary)}.`,
+              : `- Publication summary: computed by the server over its own inputs (ledger, authorization, gate file); digest s${summaryDigest(publicationSummary)}.`,
           ]),
     ].join("\n"),
     review == null ? PROJECTION_NOTICE_REMOTE_ONLY : PROJECTION_NOTICE,
@@ -1465,8 +1404,8 @@ export async function loadReportLedgers(
       );
     }
   }
-  // The server's own judgement over the same ledger, workflow binding and
-  // terminal replay included; the report prints it and derives nothing.
+  // The server's own judgement over the same ledger, gate file included; the
+  // report prints it and derives nothing.
   const publicationSummary =
     publication == null ? null : await getPublicationSummary(storeRoot, reviewId);
   // The ledger and the summary are read under separate locks, so a snapshot

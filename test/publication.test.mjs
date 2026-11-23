@@ -16,17 +16,16 @@ import {
   finalizePublicationGate,
   getPublication,
   getPublicationSummary,
-  getThreadResolutionPlan,
   inspectPublicationAudit,
   publicationConstants,
   readObservationFile,
   recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
-  threadResolutionEligibility,
   verifyPublicationGate,
 } from "../src/publication.mjs";
 import { adaptCodexEvidence } from "../src/github-adapter.mjs";
+import { writeReviewReport } from "../src/report.mjs";
 import { PUBLICATION_ACTION_INPUTS } from "../src/tool-inputs.mjs";
 import {
   acquireStateLock,
@@ -7170,491 +7169,6 @@ test("comments sharing a creation time and database id are refused", async (t) =
   );
 });
 
-const GATED_HEAD = "a".repeat(40);
-const EARLIER_HEAD = "b".repeat(40);
-
-function eligibilityLedger() {
-  return {
-    version: 3,
-    authorization: { mode: "LOCAL_GATE", head_sha: GATED_HEAD, base_sha: "c".repeat(40) },
-    target: { codex_actor: { id: 199175422, type: "Bot" } },
-  };
-}
-
-function eligibilityContext(overrides = {}) {
-  return {
-    cleanForGatedHead: true,
-    ancestryByHead: new Map([
-      [
-        EARLIER_HEAD,
-        { finding_head_sha: EARLIER_HEAD, status: "AHEAD", descends: true },
-      ],
-    ]),
-    workflow: {
-      workflow_id: "wf-1",
-      status: "ACTIVE",
-      current_head_sha: GATED_HEAD,
-      attempt_head_shas: [EARLIER_HEAD, GATED_HEAD],
-      addressed_findings: [],
-    },
-    publicationTerminal: false,
-    ...overrides,
-  };
-}
-
-function addressedRecord(overrides = {}) {
-  return {
-    findings_review: {
-      result_id: 4833836859,
-      reviewed_head_sha: EARLIER_HEAD,
-      ...(overrides.findings_review ?? {}),
-    },
-    addressed_by: overrides.addressed_by ?? [GATED_HEAD],
-  };
-}
-
-function contextWithRecord(...records) {
-  const context = eligibilityContext();
-  context.workflow.addressed_findings = records;
-  return context;
-}
-
-function eligibleThread(overrides = {}) {
-  const codex = { id: 199175422, type: "Bot", login: "chatgpt-codex-connector" };
-  return {
-    id: "PRRT_1",
-    is_resolved: false,
-    is_outdated: false,
-    provenance_complete: true,
-    comments: [
-      {
-        id: "PRRC_1",
-        actor: codex,
-        review: {
-          id: "PRR_1",
-          database_id: 4833836859,
-          actor: codex,
-          reviewed_head_sha: EARLIER_HEAD,
-        },
-      },
-    ],
-    ...overrides,
-  };
-}
-
-test("an addressed-by record naming the thread's review completes eligibility", () => {
-  // RFC 0003 condition 3: with every other condition held, an addressed-by
-  // record that names the thread's root review by ID and reviewed head is
-  // what turns the verdict eligible. This is the first input for which
-  // eligible is reachable at all.
-  assert.deepEqual(
-    threadResolutionEligibility(
-      eligibilityLedger(),
-      eligibleThread(),
-      contextWithRecord(addressedRecord()),
-    ),
-    { eligible: true, addressed_by: [GATED_HEAD] },
-  );
-});
-
-test("a record that does not name the thread's review still refuses", () => {
-  // The record is the structural link to the correlated Codex review. A
-  // record for another review, another head, or without a commit is not that
-  // link, so each of these must land on the same refusal as no record at all.
-  const cases = [
-    ["no record", eligibilityContext()],
-    [
-      "different review",
-      contextWithRecord(
-        addressedRecord({ findings_review: { result_id: 999 } }),
-      ),
-    ],
-    [
-      "different reviewed head",
-      contextWithRecord(
-        addressedRecord({ findings_review: { reviewed_head_sha: "d".repeat(40) } }),
-      ),
-    ],
-    ["no commits", contextWithRecord(addressedRecord({ addressed_by: [] }))],
-  ];
-  for (const [name, context] of cases) {
-    assert.deepEqual(
-      threadResolutionEligibility(eligibilityLedger(), eligibleThread(), context),
-      { eligible: false, reason: "FIX_NOT_RECORDED" },
-      name,
-    );
-  }
-});
-
-test("each missing piece of evidence refuses with its own reason", () => {
-  const codex = { id: 199175422, type: "Bot", login: "chatgpt-codex-connector" };
-  const human = { id: 5, type: "User", login: "jeremyhi" };
-  const withReviewHead = (head) =>
-    eligibleThread({
-      comments: [
-        {
-          id: "PRRC_1",
-          actor: codex,
-          review: {
-            id: "PRR_1",
-            database_id: 4833836859,
-            actor: codex,
-            reviewed_head_sha: head,
-          },
-        },
-      ],
-    });
-  const cases = [
-    ["PROVENANCE_INCOMPLETE", eligibleThread({ provenance_complete: false }), eligibilityContext()],
-    ["ALREADY_RESOLVED", eligibleThread({ is_resolved: true }), eligibilityContext()],
-    [
-      // A human reply is a participant this workflow was never authorized to
-      // answer for, whoever opened the thread.
-      "NOT_CODEX_AUTHORED",
-      eligibleThread({
-        comments: [
-          eligibleThread().comments[0],
-          { id: "PRRC_2", actor: human, review: null },
-        ],
-      }),
-      eligibilityContext(),
-    ],
-    [
-      // The review itself must be Codex's, not merely the comment's author.
-      "NOT_CODEX_AUTHORED",
-      eligibleThread({
-        comments: [
-          {
-            id: "PRRC_1",
-            actor: codex,
-            review: { id: "PRR_1", actor: human, reviewed_head_sha: EARLIER_HEAD },
-          },
-        ],
-      }),
-      eligibilityContext(),
-    ],
-    [
-      // A dismissed review was answered through a path this workflow does not
-      // own; resolving on top of it would launder that path into a workflow
-      // decision.
-      "REVIEW_DISMISSED",
-      eligibleThread({
-        comments: [
-          {
-            id: "PRRC_1",
-            actor: codex,
-            review: {
-              id: "PRR_1",
-              actor: codex,
-              state: "DISMISSED",
-              reviewed_head_sha: EARLIER_HEAD,
-            },
-          },
-        ],
-      }),
-      eligibilityContext(),
-    ],
-    [
-      // Raised against the head the clean result examined: the same review
-      // would have both raised it and not raised it.
-      "RAISED_AGAINST_GATED_HEAD",
-      withReviewHead(GATED_HEAD),
-      eligibilityContext(),
-    ],
-    ["WORKFLOW_NOT_BOUND", eligibleThread(), eligibilityContext({ workflow: null })],
-    [
-      "WORKFLOW_NOT_ACTIVE",
-      eligibleThread(),
-      eligibilityContext({
-        workflow: {
-          workflow_id: "wf-1",
-          status: "PAUSED",
-          current_head_sha: GATED_HEAD,
-          attempt_head_shas: [EARLIER_HEAD],
-        },
-      }),
-    ],
-    [
-      // A finding from a head this workflow never published is not ours to
-      // answer, whatever else the evidence says.
-      "FINDING_HEAD_NOT_OURS",
-      eligibleThread(),
-      eligibilityContext({
-        workflow: {
-          workflow_id: "wf-1",
-          status: "ACTIVE",
-          current_head_sha: GATED_HEAD,
-          attempt_head_shas: [GATED_HEAD],
-        },
-      }),
-    ],
-    [
-      // A force-push that discarded the fix leaves the finding unanswered
-      // however clean the new head is about its own contents.
-      "DESCENT_UNPROVEN",
-      eligibleThread(),
-      eligibilityContext({
-        ancestryByHead: new Map([
-          [
-            EARLIER_HEAD,
-            { finding_head_sha: EARLIER_HEAD, status: "DIVERGED", descends: false },
-          ],
-        ]),
-      }),
-    ],
-    [
-      "DESCENT_UNPROVEN",
-      eligibleThread(),
-      eligibilityContext({ ancestryByHead: new Map() }),
-    ],
-    [
-      "NO_CLEAN_RESULT_FOR_GATED_HEAD",
-      eligibleThread(),
-      eligibilityContext({ cleanForGatedHead: false }),
-    ],
-    [
-      // A terminal publication decides nothing further.
-      "PUBLICATION_TERMINAL",
-      eligibleThread(),
-      eligibilityContext({ publicationTerminal: true }),
-    ],
-    [
-      // The workflow has already moved past this publication's head: a plan
-      // built on it would be a plan for a publication that no longer exists.
-      "PUBLICATION_SUPERSEDED",
-      eligibleThread(),
-      eligibilityContext({
-        workflow: {
-          workflow_id: "wf-1",
-          status: "ACTIVE",
-          current_head_sha: "e".repeat(40),
-          attempt_head_shas: [EARLIER_HEAD, GATED_HEAD],
-        },
-      }),
-    ],
-  ];
-  for (const [reason, thread, context] of cases) {
-    assert.deepEqual(
-      threadResolutionEligibility(eligibilityLedger(), thread, context),
-      { eligible: false, reason },
-      reason,
-    );
-  }
-});
-
-test("the reply exception admits exactly the recorded comment and nothing else", () => {
-  const operator = { id: 555, type: "User", login: "operator" };
-  const withReply = (databaseId, actor = operator) =>
-    eligibleThread({
-      comments: [
-        eligibleThread().comments[0],
-        { id: "PRRC_2", database_id: databaseId, actor, review: null },
-      ],
-    });
-  const recorded = (overrides = {}) => {
-    const context = contextWithRecord(addressedRecord());
-    context.workflow.thread_replies = [
-      {
-        thread_id: "PRRT_1",
-        comment_id: 901,
-        actor: { id: 555, type: "User" },
-        ...overrides,
-      },
-    ];
-    return context;
-  };
-  // The recorded reply completes: same thread, same comment, same actor.
-  assert.deepEqual(
-    threadResolutionEligibility(eligibilityLedger(), withReply(901), recorded()),
-    { eligible: true, addressed_by: [GATED_HEAD] },
-  );
-  const cases = [
-    ["comment not recorded", withReply(902), recorded()],
-    [
-      "recorded for another thread",
-      withReply(901),
-      recorded({ thread_id: "PRRT_OTHER" }),
-    ],
-    [
-      "another actor on the recorded id",
-      withReply(901, { id: 556, type: "User", login: "someone" }),
-      recorded(),
-    ],
-    [
-      // Never the root: a reply answers the finding, it cannot be the
-      // finding. A root that matches a reply record is a forgery, not a
-      // reply.
-      "recorded id in root position",
-      eligibleThread({
-        comments: [
-          {
-            ...eligibleThread().comments[0],
-            database_id: 901,
-            actor: operator,
-          },
-        ],
-      }),
-      recorded(),
-    ],
-  ];
-  for (const [name, thread, context] of cases) {
-    assert.deepEqual(
-      threadResolutionEligibility(eligibilityLedger(), thread, context),
-      { eligible: false, reason: "NOT_CODEX_AUTHORED" },
-      name,
-    );
-  }
-});
-
-test("a thread this workflow already resolved once never becomes eligible again", () => {
-  const ledger = {
-    ...eligibilityLedger(),
-    automatic_resolutions: [{ thread_id: "PRRT_1" }],
-  };
-  assert.deepEqual(
-    threadResolutionEligibility(
-      ledger,
-      eligibleThread(),
-      contextWithRecord(addressedRecord()),
-    ),
-    { eligible: false, reason: "THREAD_PREVIOUSLY_RESOLVED" },
-  );
-});
-
-test("an outdated diff hunk is not evidence that a finding was addressed", () => {
-  // is_outdated says the code moved, not that the finding was answered -- an
-  // unrelated edit displaces the hunk just as well as a fix does. It must not
-  // stand in for the clean result.
-  const outdated = eligibleThread({ is_outdated: true });
-  assert.deepEqual(
-    threadResolutionEligibility(
-      eligibilityLedger(),
-      outdated,
-      eligibilityContext({ cleanForGatedHead: false }),
-    ),
-    { eligible: false, reason: "NO_CLEAN_RESULT_FOR_GATED_HEAD" },
-  );
-  assert.deepEqual(
-    threadResolutionEligibility(
-      eligibilityLedger(),
-      outdated,
-      eligibilityContext(),
-    ),
-    { eligible: false, reason: "FIX_NOT_RECORDED" },
-  );
-  // Nor is it necessary: with the real evidence in place the flag adds
-  // nothing, so an outdated thread is eligible on the same terms as any other.
-  assert.deepEqual(
-    threadResolutionEligibility(
-      eligibilityLedger(),
-      outdated,
-      contextWithRecord(addressedRecord()),
-    ),
-    { eligible: true, addressed_by: [GATED_HEAD] },
-  );
-});
-
-test("the resolution plan surfaces per-thread verdicts and refuses without evidence", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const startedAt = Date.now();
-
-  // Before any observation: the mandated refusal, not an empty plan. An
-  // absent collection establishes nothing, so it plans nothing.
-  await start(state, startedAt);
-  await assert.rejects(
-    getThreadResolutionPlan(state.store, state.reviewId),
-    (error) => error.code === "PUBLICATION_THREAD_EVIDENCE_MISSING",
-  );
-
-  // An openly incomplete collection is recordable by design, and the plan must
-  // refuse it through the same code -- this pins the second half of the
-  // disjunction, which the first half cannot reach.
-  const incompleteAt = startedAt + 1_500;
-  const partial = observation({
-    at: incompleteAt,
-    baseSha: state.baseSha,
-    headSha: state.headSha,
-    requestId: null,
-    requestAt: startedAt,
-    withResult: false,
-  });
-  partial.review_threads.collection.status = "INCOMPLETE";
-  await recordGithubSnapshot(
-    state.store,
-    state.reviewId,
-    { expectedRevision: 1, observation: partial },
-    { clock: () => incompleteAt + 10 },
-  );
-  await assert.rejects(
-    getThreadResolutionPlan(state.store, state.reviewId),
-    (error) => error.code === "PUBLICATION_THREAD_EVIDENCE_MISSING",
-  );
-
-  const observedAt = startedAt + 2_000;
-  const value = observation({
-    at: observedAt,
-    baseSha: state.baseSha,
-    headSha: state.headSha,
-    requestId: null,
-    requestAt: startedAt,
-    withResult: false,
-  });
-  const codex = { id: 99, type: "Bot", login: "codex" };
-  value.review_threads.total_count = 1;
-  value.review_threads.unresolved_count = 1;
-  value.review_threads.threads = [
-    {
-      id: "PRRT_1",
-      is_resolved: false,
-      is_outdated: false,
-      comment_count: 1,
-      comments_pagination_complete: true,
-      provenance_complete: true,
-      comments: [
-        {
-          id: "PRRC_1",
-          database_id: 3694779367,
-          created_at: iso(startedAt - 5_000),
-          updated_at: iso(startedAt - 5_000),
-          actor: codex,
-          review: {
-            id: "PRR_1",
-            database_id: 4833836859,
-            state: "COMMENTED",
-            reviewed_head_sha: "c".repeat(40),
-            actor: codex,
-          },
-        },
-      ],
-    },
-  ];
-  value.review_threads.ancestry = [
-    {
-      finding_head_sha: "c".repeat(40),
-      status: "AHEAD",
-      descends: true,
-      endpoint: `GET /repos/o/r/compare/${"c".repeat(40)}...${state.headSha}`,
-      collected_at: iso(observedAt - 500),
-    },
-  ];
-  await recordGithubSnapshot(
-    state.store,
-    state.reviewId,
-    { expectedRevision: 2, observation: value },
-    { clock: () => observedAt + 10 },
-  );
-
-  // A v1 publication has no workflow binding, so the plan must carry the
-  // thread with a workflow refusal rather than pretend eligibility.
-  const plan = await getThreadResolutionPlan(state.store, state.reviewId);
-  assert.equal(plan.review_id, state.reviewId);
-  assert.equal(plan.threads.length, 1);
-  assert.equal(plan.threads[0].thread_id, "PRRT_1");
-  assert.equal(plan.threads[0].eligible, false);
-  assert.equal(plan.threads[0].reason, "WORKFLOW_NOT_BOUND");
-});
-
 test("ledger ancestry exactness and honesty are each load-bearing", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -7898,4 +7412,227 @@ test("a stale ancestry read expires the stored evidence on its own", async (t) =
     clock: () => probeAt,
   });
   assert.equal(summary.blocking_reason, "EVIDENCE_STALE");
+});
+
+function publicationPath(state, name = "publication.json") {
+  return path.join(state.store, "reviews", state.reviewId, name);
+}
+
+test("a version 2 ledger carrying workflow fields fails closed", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  await start(state, Date.now());
+  const grafted = JSON.parse(await fsp.readFile(publicationPath(state), "utf8"));
+  grafted.workflow_id = "rbwf-2026-01-01T000000-000Z-abcdabcd";
+  grafted.workflow_authorization_sha256 = "0".repeat(64);
+  await atomicWriteCanonicalJson(publicationPath(state), grafted);
+  await assert.rejects(
+    getPublication(state.store, state.reviewId),
+    /only a version 3 publication may bind an autonomous workflow/,
+  );
+});
+
+test("a version 2 gate carrying workflow fields does not verify", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, observedAt } = await reachReady(state);
+  await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  const gatePath = publicationPath(state, "publication-gate.json");
+  const gate = JSON.parse(await fsp.readFile(gatePath, "utf8"));
+  gate.workflow_id = "rbwf-2026-01-01T000000-000Z-abcdabcd";
+  await atomicWriteCanonicalJson(gatePath, gate);
+  const verified = await verifyPublicationGate(state.store, state.reviewId, {
+    clock: () => observedAt + 30,
+  });
+  assert.equal(verified.valid, false);
+  assert.equal(verified.reason, "GATE_MISMATCH");
+  const summary = await getPublicationSummary(state.store, state.reviewId, {
+    clock: () => observedAt + 40,
+  });
+  assert.equal(summary.gate_state, "INVALID");
+  assert.equal(summary.blocking_reason, "PUBLICATION_GATE_INVALID");
+});
+
+test("an observation timestamp before its collection is rejected", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  await start(state, startedAt);
+  const observedAt = startedAt + 2_000;
+  const payload = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: null,
+    requestAt: startedAt,
+    withResult: false,
+  });
+  payload.observed_at = iso(startedAt + 1);
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      { expectedRevision: 1, observation: payload },
+      { clock: () => observedAt + 10 },
+    ),
+    (error) => {
+      assert.equal(error.code, "INVALID_INPUT");
+      assert.match(error.message, /observation\.observed_at must not precede a collection/);
+      return true;
+    },
+  );
+  assert.equal((await getPublication(state.store, state.reviewId)).revision, 1);
+});
+
+// Nothing creates a version 3 (workflow-bound) publication any more, so the
+// legacy ledger is written by hand: a finalized version 2 ledger rewritten
+// with the workflow fields and an automatic-resolution record and its two
+// history events, as the workflow wrote them.
+test("a version 3 publication is read-only legacy", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const { ready, requestAt, observedAt } = await reachReady(state);
+  await finalizePublicationGate(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision },
+    { clock: () => observedAt + 20 },
+  );
+  const legacy = JSON.parse(await fsp.readFile(publicationPath(state), "utf8"));
+  const resolvedAt = iso(observedAt + 30);
+  const actor = { id: 7, type: "User" };
+  Object.assign(legacy, {
+    version: 3,
+    workflow_id: "rbwf-2026-01-01T000000-000Z-abcdabcd",
+    workflow_authorization_sha256: "1".repeat(64),
+    automatic_resolutions: [
+      {
+        number: 1,
+        action_id: "act-1",
+        thread_id: "PRRT_1",
+        thread_watermark: "2".repeat(64),
+        eligibility_sha256: "3".repeat(64),
+        head_sha: state.headSha,
+        actor,
+        reply_comment_id: 55,
+        pre_read: { observed_at: resolvedAt, is_resolved: false },
+        post_read: { observed_at: resolvedAt, is_resolved: true, resolved_by: actor },
+        recorded_at: resolvedAt,
+        recorded_revision: ready.revision + 1,
+      },
+    ],
+    revision: ready.revision + 2,
+    updated_at: resolvedAt,
+  });
+  legacy.history.push(
+    {
+      at: resolvedAt,
+      event: "AUTOMATIC_RESOLUTION_RECORDED",
+      revision: ready.revision + 1,
+      status: "PR_PENDING",
+      head_sha: state.headSha,
+      cleared_observation_sha256: null,
+      thread_id: "PRRT_1",
+    },
+    {
+      at: resolvedAt,
+      event: "AUTOMATIC_RESOLUTION_UNRESOLVED",
+      revision: ready.revision + 2,
+      status: "PR_PENDING",
+      head_sha: state.headSha,
+      cleared_observation_sha256: null,
+      thread_id: "PRRT_1",
+      record_id: "act-1",
+      action_id: "act-2",
+    },
+  );
+  await atomicWriteCanonicalJson(publicationPath(state), legacy);
+
+  assert.deepEqual(await getPublication(state.store, state.reviewId), legacy);
+  // A same-pull-request scan still reads it.
+  const second = await sameHeadSuccessorFixture(state);
+  assert.equal(
+    (await start(second, observedAt + 40)).prior_ledgers_for_pull_request,
+    1,
+  );
+
+  const audit = await inspectPublicationAudit(state.store, state.reviewId);
+  const at = observedAt + 50;
+  const refused = { code: "PUBLICATION_READ_ONLY" };
+  await assert.rejects(getPublicationSummary(state.store, state.reviewId), refused);
+  await assert.rejects(
+    recordCodexReviewRequest(
+      state.store,
+      state.reviewId,
+      {
+        expectedRevision: legacy.revision,
+        commentId: 101,
+        url: "https://github.com/owner/repo/issues/7#issuecomment-101",
+        createdAt: iso(at),
+        requestedHeadSha: state.headSha,
+      },
+      { clock: () => at + 10 },
+    ),
+    refused,
+  );
+  await assert.rejects(
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      {
+        expectedRevision: legacy.revision,
+        observation: observation({
+          at,
+          baseSha: state.baseSha,
+          headSha: state.headSha,
+          requestId: 100,
+          requestAt,
+        }),
+      },
+      { clock: () => at + 10 },
+    ),
+    refused,
+  );
+  await assert.rejects(
+    acknowledgeCodexReviewAmbiguity(
+      state.store,
+      state.reviewId,
+      {
+        expectedRevision: legacy.revision,
+        headSha: state.headSha,
+        requestRefs: [],
+        ambiguousResults: [],
+        acknowledgement: "NO_FURTHER_RESULTS_EXPECTED",
+        operatorLabel: "maintainer",
+        rationale: "inspected by hand",
+      },
+      { clock: () => at + 10 },
+    ),
+    refused,
+  );
+  await assert.rejects(
+    finalizePublicationGate(
+      state.store,
+      state.reviewId,
+      { expectedRevision: legacy.revision },
+      { clock: () => at + 10 },
+    ),
+    refused,
+  );
+  await assert.rejects(
+    verifyPublicationGate(state.store, state.reviewId, { clock: () => at + 10 }),
+    refused,
+  );
+  await assert.rejects(writeReviewReport(state.store, state.reviewId), refused);
+  // Verification refuses before it writes its audit event.
+  assert.deepEqual(
+    await inspectPublicationAudit(state.store, state.reviewId),
+    audit,
+  );
+  assert.deepEqual(await getPublication(state.store, state.reviewId), legacy);
 });
