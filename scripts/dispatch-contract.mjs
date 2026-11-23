@@ -89,7 +89,6 @@ const SHARED_REQUIREMENTS = [
     "nothing verifies the dispatch",
     /observes nothing about how the (?:instance|session) was started/,
   ],
-  ["autonomous dispatch stays CODEX_TASK-only", /`CODEX_TASK` dispatch only/],
   // The boundary these contracts must never quietly lose: an unattended
   // HERMES or DeepSeek Harness launch is cleared, a programmatic Claude
   // launch never is.
@@ -125,9 +124,8 @@ const SHARED_STRUCTURAL = [
 ];
 
 // CODEX_TASK does not reuse SHARED_REQUIREMENTS. Those claims are worded for a
-// reviewer "instance" or "session" launched from a profile, and they close
-// each provider's section by handing autonomous dispatch back to CODEX_TASK.
-// CODEX_TASK is that provider: it launches a "task", and its launch has a
+// reviewer "instance" or "session" launched from a profile. CODEX_TASK
+// launches a "task", and its launch has a
 // boundary the other two do not — Codex's own `workspace-write` sandbox
 // around the reviewer's shell, with the MCP calls that sandbox leaves gated
 // routed to Codex's guardian subagent. So its contract states the genuinely
@@ -450,10 +448,6 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     [
       "the section makes no claim about the other providers' launches",
       /What the HERMES and DeepSeek Harness sections require of their own launches is stated there and is neither changed nor described by this one/,
-    ],
-    [
-      "only the autonomous state machine is CODEX_TASK-only",
-      /autonomous workflow's own state machine dispatches `CODEX_TASK` and no other provider/,
     ],
     ["remote identity is not authenticated", /does not authenticate the remote model identity/],
     // The one boundary this launch must never be read as loosening: an

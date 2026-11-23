@@ -114,7 +114,7 @@ and explains why each step exists.
 | Page | For |
 | --- | --- |
 | [How Review Bridge reviews a change](docs/review-flow.md) | The narrative: commit to merge-ready, and why |
-| [Product overview](docs/overview.md) | Problem, principles, store layout, local review, publication gate, workflow, clients, usage data |
+| [Product overview](docs/overview.md) | Problem, principles, store layout, local review, publication gate, clients, usage data |
 | [产品说明（中文）](docs/overview.zh.md) | The same overview in Chinese |
 | [Reviewer model and reasoning](docs/reviewer-configuration.md) | Where the model comes from, launch, and runtime limitations |
 | [Upgrade an existing installation](docs/install/upgrade.md) | Switch clients together and verify the new runtime |
@@ -123,7 +123,6 @@ and explains why each step exists.
 | [Search historical findings](docs/finding-search.md) | Read-only CLI filters, provenance, and ledger diagnostics |
 | [Pair remote review threads with local reviews](docs/miss-report.md) | Read-only CLI listing a pull request's GitHub threads beside the local reviews of the same head |
 | [Review statistics](docs/publication-gate.md#review-statistics) | Monthly rebuttal outcomes and filtering rules |
-| [Autonomous workflow](docs/autonomous-workflow.md) | The authorized end-to-end workflow |
 | [Reference](docs/reference.md) | Every tool and error code, generated from the source |
 | [Troubleshooting](docs/troubleshooting.md) | Structured errors and build failures |
 | [Install pages](docs/install/) | Claude Desktop, Codex plugin, Hermes, DeepSeek Harness |

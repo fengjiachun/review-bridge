@@ -29,20 +29,17 @@ Upgrade the CLI before using automatic launch.
 
 The reviewer uses the model set in the MCP host's Codex configuration
 (`model` in `~/.codex/config.toml`, or the file under `CODEX_HOME`).
-`launch_local_reviewer` and `launch_codex_task_dispatch` pass no `--model`, so
+`launch_local_reviewer` passes no `--model`, so
 a model Codex accepts there is the model that reviews. To change the reviewer
 model, change the Codex configuration.
 
-Reasoning effort is always `high`: those two tools pass
-`model_reasoning_effort="high"` on every launch they start, so an everyday
+Reasoning effort is always `high`: that tool passes
+`model_reasoning_effort="high"` on every launch it starts, so an everyday
 configuration set to a lighter effort does not weaken reviews. A `CODEX_TASK`
 task you create yourself ([manual dispatch](local-review.md#start-a-reviewer-manually))
 runs with the model and effort set in that client. Neither choice affects
 GitHub's Codex review or the other reviewer providers, which use their own
-clients' settings. A workflow dispatch planned before the upgrade that
-recorded a model is the one exception: it runs with the model and effort it
-recorded, whatever the Codex configuration says. An older intent without a
-recorded configuration is not launched; see the recovery section below.
+clients' settings.
 
 ## Tool sequence
 
@@ -74,26 +71,6 @@ Each round records its own launch. Live or indeterminate attempts block
 replacement. Process exit is not a verdict; inspect the ledger before retrying.
 An absent exit record is deliberately indeterminate even if a host reboot killed
 the process; an operator must reconcile that attempt before replacing it.
-
-The autonomous controller stores the pinned effort in its dispatch intent.
-After marking the action EXECUTING, `launch_codex_task_dispatch` starts the
-reviewer and returns its task identity, title and prompt for the existing
-observation/completion protocol. Repeating it recovers the recorded identity
-instead of launching a duplicate while the current round holds that dispatch's
-started receipt (an older round's receipt is not consulted, so check the
-current round and marker before retrying an old action), including after the
-process exited once the review recorded a verdict. For a recorded attempt, a
-failed start, a missing started receipt, or a process that exited while the
-review is still pending is refused and needs reconciliation. An error before
-any attempt is recorded, such as an unavailable Codex executable, can be
-corrected and launched again. An intent planned by an earlier release with
-a selected model runs with the model and effort it recorded. To move such a
-LOCAL_PROCESS intent to the host model before any launch, abandon it with
-`abandon_workflow_action`, which requires the ledger to show no launch attempt,
-then plan again. Legacy intents without
-the local-launch contract remain readable but need reconciliation or workflow
-cancellation before replacement. Round-two launch uses `launch_local_reviewer`
-after the controller advances to WAIT_LOCAL_REREVIEW.
 
 Requested configuration is a launch record: `{"reasoning_effort":"high"}`, with
 the model left to the Codex configuration. Observed remote model identity is

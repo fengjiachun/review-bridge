@@ -53,8 +53,7 @@ not access GitHub or return the full ledger. A finalized gate also reports
 `gate_expires_in_seconds`: the gate expires five minutes after the oldest source
 collection in the observation it was minted over, not five minutes after
 issuance, so part of that window is already spent when the gate first exists.
-Its `required_inputs` — like the one on `get_review_summary`,
-`get_autonomous_workflow_summary`, and `list_autonomous_workflows` — names the
+Its `required_inputs` — like the one on `get_review_summary` — names the
 calls the current action implies as `{tool: [[field, source], ...]}`, so a
 driver never has to discover a schema by sending empty arguments. When
 `next_action` is
@@ -69,8 +68,7 @@ Every fix pushed during a remote-only loop is a new head and so a new ledger.
 store target the same `repository_id` and `pr_number`. It is counted from the
 store at call time and never written to the ledger. It is a signal for the
 operator only and never changes `status`, `blocking_reason`, or
-`next_action`. The autonomous workflow has a remote cycle budget; this is the
-manual path's only sign of how many heads came before.
+`next_action`.
 
 For a fresh snapshot, run the
 packaged read-only collector against the review ID:

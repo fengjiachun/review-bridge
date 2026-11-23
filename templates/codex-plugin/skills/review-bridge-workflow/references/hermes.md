@@ -122,9 +122,8 @@ not keep a preload, which is why the round-two resume passes it again.
 
 Review Bridge records the review's `HERMES` binding; it observes nothing about
 how the instance was started, and this section adds no mechanism that would.
-The autonomous workflow continues to accept `CODEX_TASK` dispatch only.
 `HERMES` records configured reviewer provenance; it is not cryptographic model
-identity. Autonomous local task creation remains `CODEX_TASK`-only. After a
+identity. After a
 local HERMES gate passes, remote GitHub Codex publication remains an
 author/publication-side operation.
 The `CLAUDE_DESKTOP` boundary is unchanged, and nothing above narrows it:

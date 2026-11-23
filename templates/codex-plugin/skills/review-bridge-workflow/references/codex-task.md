@@ -280,9 +280,7 @@ exactly the recall this design makes the reviewer re-derive.
 
 This launch may run unattended; it needs no operator at the keyboard. What the
 HERMES and DeepSeek Harness sections require of their own launches is stated
-there and is neither changed nor described by this one. Separately, the
-autonomous workflow's own state machine dispatches `CODEX_TASK` and no other
-provider; this shell launch is a different path from that one. Review Bridge
+there and is neither changed nor described by this one. Review Bridge
 records the review's `CODEX_TASK` binding and requested launch configuration;
 it does not authenticate the remote model identity. The
 `CLAUDE_DESKTOP` boundary is unchanged, and nothing above narrows it: never

@@ -507,16 +507,6 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /persisted\s+disposition, rationale, and evidence from its `resolutions`/,
-);
-assert.match(workflowSkill, /every per-finding decision and any new finding/);
-assert.match(workflowSkill, /state the escalation and why it needs a human/);
-assert.match(
-  workflowSkill,
-  /After\s+`prepare_rereview` captures the result, call `get_review` again/,
-);
-assert.match(
-  workflowSkill,
   /compare the preceding and latest rounds'\s+authoritative `head_sha` values with `git diff --name-only` to derive the\s+actual fix files/,
 );
 assert.match(
@@ -524,10 +514,6 @@ assert.match(
   /require a new commit only when at least\s+one resolution is `fixed`/,
 );
 assert.match(workflowSkill, /rereview is rebuttal-only and no\s+code commit was required/);
-assert.match(
-  workflowSkill,
-  /Any author `human_required` resolution moves directly to `HUMAN_REQUIRED`\s+without capturing a rereview round/,
-);
 assert.match(
   workflowSkill,
   /If the state is instead `HUMAN_REQUIRED`[\s\S]*stop and follow the human-arbitration flow/,
@@ -549,15 +535,7 @@ assert.ok(
 );
 assert.match(
   workflowSkill,
-  /When a round reports findings, call `get_review`/,
-);
-assert.match(
-  workflowSkill,
   /When rereview\s+completes, call `get_review` again/,
-);
-assert.match(
-  workflowSkill,
-  /After\s+`submit_resolutions`, call `get_review` again/,
 );
 assert.match(workflowSkill, /persisted disposition from its\s+`resolutions`/);
 assert.match(

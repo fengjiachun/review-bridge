@@ -27,172 +27,100 @@ not hold up.
 
 ## When everything goes well
 
-A change driven by the autonomous workflow moves through seven steps. Two
-words used throughout: the **driver** is the model (or person) calling the
-tools, and the **ledger** is the server-side record the tools write — the
-driver proposes, the ledger decides what counts. (Every step can also be
-performed manually through the same tools; the workflow adds ordering,
-ownership, and crash recovery on top. The manual path differs in a few places
-noted below.)
+A change published in `LOCAL_GATE` mode moves through five steps. Two words used throughout: the **driver**
+is the model (or person) calling the tools, and the **ledger** is the
+server-side record the tools write — the driver proposes, the ledger decides
+what counts.
 
 ```mermaid
 flowchart LR
-  A["1 Commit"] --> B["2 Local review"]
-  B --> C["3 Push +<br/>draft PR"]
-  C --> D["4 Ask Codex<br/>to review"]
-  D --> E["5 Watch CI<br/>and comments"]
-  E --> F["6 All green:<br/>mark ready"]
-  F --> G["7 Record success<br/>and stop"]
+  A["1 Local review"] --> B["2 Push +<br/>draft PR"]
+  B --> C["3 Follow the<br/>publication summary"]
+  C --> D["4 MERGE_READY:<br/>mint the gate"]
+  D --> E["5 Verify,<br/>then merge"]
   classDef n fill:#ffffff,stroke:#57606a,stroke-width:1px,color:#111111;
-  class A,B,C,D,E,F,G n;
+  class A,B,C,D,E n;
 ```
 
-**1 — Commit.** The working tree must be clean, and each new head must
-descend from the previous one. No force-pushes, no rewrites.
-
-**2 — Local review.** The first gate, before the code leaves your machine.
+**1 — Local review.** The first gate, before the code leaves your machine.
+Commit the change first: publication requires a clean checkout whose `HEAD`
+is the gated head, so a commit made after review means reviewing again.
 The system captures an **immutable snapshot** of the change and hands it to a
 reviewer that had no part in writing it. The reviewer reads the snapshot,
 never your live working tree, and submits structured findings. No findings
 means `CLEAN`.
 
-The autonomous workflow dispatches an independent **Codex reviewer** using the
-[model from the Codex configuration at high effort](reviewer-configuration.md). The local
-launcher starts a Codex process and records its identity for reconciliation.
-On the manual path you choose the reviewer — a fresh Claude Desktop conversation, a new Codex task, or an
-isolated Hermes or DeepSeek Harness profile — though a change headed for
-publication takes a Codex review by default, with any other provider read
-as a second opinion beside that gate rather than in place of it. A manual
-snapshot may also capture uncommitted working-tree state; the workflow never
-has any, since step 1 required a clean tree.
+You choose the reviewer — a Codex process that `launch_local_reviewer` starts
+with the [model from the Codex configuration at high effort](reviewer-configuration.md),
+a fresh Claude Desktop conversation, a new Codex task, or an isolated Hermes or
+DeepSeek Harness profile — though a change headed for publication takes a
+Codex review by default, with any other provider read as a second opinion
+beside that gate rather than in place of it. A review that will not be
+published may also snapshot uncommitted working-tree state.
 
-Before dispatch, the immutable patch is measured as added plus deleted lines.
-At 75% of the current budget the autonomous workflow reports the total and
-remaining headroom, and it refuses to prepare the next round until the split
-decision is recorded as continue or split. It pauses for an operator decision
-when the total exceeds its default 2000-line budget, so no reviewer context is
-spent before a split is discussed. A manual review reports the same
-measurement but proceeds, because the operator is already present.
+The immutable patch is measured as added plus deleted lines, and the review
+reports the total against the default budget and the remaining headroom; it
+does not block, because the operator is already present to decide on a split.
 
 Note that this gate attests **snapshot consistency**, not test results:
 finalizing it re-checks that the tree still matches what the reviewer saw.
-The deterministic test gate lives later, in step 5, where CI results are
+The deterministic test gate lives later, in step 3, where CI results are
 provider evidence rather than the author's word.
 
-**3 — Push and open a draft PR.** What gets pushed must be byte-for-byte the
-head that passed review. The PR is created as a **draft**: draft means
-reviewers are not looking at it yet, and the workflow relies on that.
+**2 — Push and open a draft PR.** What gets pushed must be byte-for-byte the
+head that passed review. The PR starts as a **draft**.
 
 A repository in Git's sha256 object format can run a full local review and
 reach the local gate, but it cannot go further. GitHub hosts no sha256
-repository, so starting an autonomous workflow, authorizing a remote-only
-publication, and starting a publication each refuse it with
-`REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE`.
+repository, so authorizing a remote-only publication and starting a
+publication each refuse it with `REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE`.
 
-**4 — Ask Codex to review.** The server composes the request comment — with a
-correlation marker — and the driver posts it verbatim. The marker is how a
-later result is recognized as answering *this* request rather than one from
-last week. (This is the one external write that does not use the four-step
-action trail described below: the comment is posted, then bound to the ledger,
-and a crash between the two is caught by unbound-request detection — the
-marker makes the orphan recognizable.)
+**3 — Follow the publication summary.** `start_publication` binds a
+baseline of the existing Codex feeds. From then on, `get_publication_summary`
+names the next action and its `required_inputs` — post the Codex review
+request, record a fresh observation, mark the PR ready, or fix what blocks
+it. Do what it names, then read it again. Marking the PR ready is your click
+on "Ready for review". How a Codex result is matched to its request is in the
+[publication gate](publication-gate.md); the full `MERGE_READY` condition is in
+RFC 0001's [State derivation](rfcs/0001-github-publication-ledger.md#state-derivation).
 
-**5 — Watch.** Periodically the driver collects the PR's complete state in
-one pass — check runs, Codex results, review threads — and records it in the
-ledger. The ledger derives a status from each observation.
+**4 — `MERGE_READY`: mint the gate.** `finalize_publication_gate` issues an
+audited gate that expires within minutes.
 
-**6 — Mark ready.** Only when the local gate passed, Codex returned a clean
-correlated result, every required check succeeded, and every thread that
-should be resolved is resolved, may the PR leave draft. The clearance is read
-again immediately before the call: a blocker that appeared in between refuses
-the write. (On the manual path, this is simply you clicking "Ready for
-review" — the marking step belongs to the autonomous workflow.)
-
-**7 — Record success and stop.** One more observation confirms nothing moved,
-the resolution records are replayed against that same observation, and the
-workflow writes a terminal `MERGE_READY` record — then **stops**. It does not
-merge. Merging takes a separate, explicit operator instruction through the
-publication gate.
+**5 — Verify, then merge.** Immediately before the merge,
+`verify_publication_gate` re-checks the gate against the current ledger; only
+`valid: true` authorizes it, and the merge is pinned to the verified head.
+Merging stays an explicit operator decision.
 
 ---
 
 ## When things do not go well
 
-Step 5 rarely passes on the first try. The common cases:
+Step 3 rarely passes on the first try. The common cases:
 
 ```mermaid
 flowchart TD
-  E["5 Watching"] --> Q{"What came back?"}
+  E["3 Following the summary"] --> Q{"What came back?"}
   Q -->|"Codex found a problem"| R1["Fix the code:<br/>back to step 1"]
   Q -->|"CI failed"| R1
-  Q -->|"An unresolved<br/>review thread"| R2["Reply, then<br/>resolve it"]
+  Q -->|"An unresolved<br/>review thread"| R2["Answer it,<br/>then resolve it"]
   Q -->|"Something ambiguous"| R3["Stop and ask<br/>a human"]
   R2 --> E
   classDef n fill:#ffffff,stroke:#57606a,stroke-width:1px,color:#111111;
   class E,Q,R1,R2,R3 n;
 ```
 
-**Fixing code restarts the pipeline.** A new commit is a new head, and a new
-head repeats local review from the top. Previous verdicts do not carry over —
-deliberately. A repair phase can only be left by recording that new head:
-even a check that goes green on a bare re-run leaves the workflow waiting for
-a real fix or an operator decision.
+**Fixing code restarts the pipeline.** A new commit is a new head; previous
+verdicts do not carry over — deliberately. What a new head needs is in
+[head-SHA discipline](publication-gate.md#head-sha-discipline).
 
-**Threads are answered before they are closed.** The workflow never silently
-resolves a Codex comment thread. It posts a reply naming the commits that
-addressed the finding, waits until that reply shows up in a recorded
-observation, and only then resolves — so the thread's history shows who
-closed it and on what grounds. Threads it cannot prove it owns stay open for
-a human.
+**Threads are answered before they are closed.** An unresolved review thread
+keeps the ledger short of `MERGE_READY`. Reply on the thread with the commits
+that addressed it, then resolve it, so its history shows who closed it and on
+what grounds.
 
-**Ambiguity stops the run.** An uncorrelated Codex result, a merge conflict,
-a PR someone closed — the workflow pauses with the exact evidence and waits.
-It does not guess.
-
----
-
-## One rule that runs through everything
-
-Once a draft PR becomes ready, **no new commits are pushed to it** — at that
-point reviewers may be reading it, and swapping the code out from under a
-review is the exact failure this tool exists to prevent.
-
-So when a ready PR needs another change, the workflow first returns it to
-**draft**, then repairs. The rule is enforced at three separate points: when a
-repair would start, when a new head would be recorded, and in the pre-push
-read itself.
-
----
-
-## The autonomous workflow: every external action leaves a trail
-
-The workflow's driver is a model, and a model can crash at any point. Each
-externally visible action — pushing, creating the PR, posting a thread reply,
-resolving a thread, flipping draft state either way — therefore goes through
-the same four durable steps (the Codex review request of step 4 is the one
-exception, with its own recovery):
-
-```mermaid
-flowchart LR
-  P["1 Record the intent"] --> E["2 Look once more,<br/>then act"]
-  E --> O["3 Reconcile<br/>the result"]
-  O --> C["4 Record completion"]
-  classDef n fill:#ffffff,stroke:#57606a,stroke-width:1px,color:#111111;
-  class P,E,O,C n;
-```
-
-Why four steps instead of just doing it? Because after a crash, the restarted
-driver reads the ledger and knows exactly where it stopped. Stopped at 1:
-nothing external happened, safe to retry or drop. Stopped at 2: the call may
-or may not have landed — go reconcile against the provider instead of firing
-again, which is what prevents duplicate comments and double pushes.
-
-Step 2's "look once more" also catches the world moving between planning and
-acting: if CI failed in the meantime, the action refuses rather than execute
-a stale decision. And the reconciliation in step 3 decides its outcome from
-that pre-action reading, not from what the driver claims: a driver whose
-pre-read found the PR already ready cannot claim the ready flip as its own
-work.
+**Ambiguity stops the run.** When the ledger cannot attribute a Codex result,
+it stops for a human decision instead of guessing.
 
 ---
 
@@ -238,10 +166,9 @@ touches no gate; the report is a projection of the ledger, not evidence.
 
 **The workflow skill loads one route at a time.** The packaged
 `review-bridge-workflow` skill is a router: a table maps the current task —
-prepare a manual review, handle findings, finish, publish, or run the
-autonomous workflow — to one reference page, and the agent reads only that
-page and the references it calls for at the current step. A manual
-review loads only its selected provider's dispatch page. The boundaries that
+prepare a review, handle findings, finish, or publish — to one reference
+page, and the agent reads only that page and the references it calls for at
+the current step. A review loads only its selected provider's dispatch page. The boundaries that
 hold in every mode stay in the skill itself.
 
 **Templates are packaging, not the capability boundary.** The repository
@@ -255,7 +182,5 @@ it; a small script importing the modules directly works too.
 ## What works today
 
 Everything above is implemented and tested: local review with four isolated
-reviewer providers, publication with baseline and atomic
-observations, the thread reply-and-resolve loop with its compensating
-unresolve, mark-ready, return-to-draft, and the terminal record. RFC 0003 is
-`Implemented`.
+reviewer providers, and publication with baseline and atomic observations,
+an expiring gate, and verification immediately before the merge.

@@ -27,8 +27,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   decisions, or errata.
 - (#214) The local `CODEX_TASK` reviewer now runs on the model set in the MCP
   host's Codex configuration (`model` in `~/.codex/config.toml`, or the file
-  under `CODEX_HOME`): `launch_local_reviewer` and `launch_codex_task_dispatch`
-  pass no `--model` for new launches. After upgrading, reviews use that configured model, not
+  under `CODEX_HOME`): `launch_local_reviewer` passes no `--model` for new
+  launches. After upgrading, reviews use that configured model, not
   the one previously selected through Review Bridge. Reasoning effort is
   always `high`, passed on every new launch. A round records
   `{"reasoning_effort":"high"}` as its requested configuration, and reports
@@ -36,9 +36,6 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   earlier releases launched keep and report the model they recorded; a
   pending round launched again after the upgrade records the new request,
   and its history keeps the earlier selection.
-  `plan_codex_task_dispatch` no longer takes `reasoning_effort`. A dispatch
-  planned before the upgrade that recorded a model runs with that model and
-  effort.
 - (#216) A continuation from `CONTINUABLE_FINDINGS` no longer requires the
   `implementation_scope` to match the source review; the new review records
   the scope passed for the new head. The requirement must still match, and
@@ -55,6 +52,38 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `environment_id` check on launch. Review Bridge no longer reads or writes
   `reviewer-preferences/`; existing files there stay on disk and can be
   deleted. To change the reviewer model, change the Codex configuration.
+- (#217) The autonomous workflow's author tools: the workflow lifecycle
+  (`start_autonomous_workflow`, `list_autonomous_workflows`,
+  `get_autonomous_workflow`, `get_autonomous_workflow_summary`,
+  `record_workflow_head`, `bind_workflow_review`,
+  `bind_workflow_publication`, `advance_local_workflow`,
+  `advance_remote_workflow`, `pause_autonomous_workflow`,
+  `resume_autonomous_workflow`, `cancel_autonomous_workflow`,
+  `release_workflow_claims`), its budgets (`extend_change_size_budget`,
+  `acknowledge_change_size_warning`, `extend_local_cycle_budget`,
+  `extend_remote_cycle_budget`), the external action trail
+  (`plan_codex_task_dispatch`, `launch_codex_task_dispatch`,
+  `record_codex_task_observation`, `plan_workflow_push`,
+  `record_push_observation`, `plan_draft_pull_request`,
+  `record_draft_pull_request_observation`, `plan_mark_pull_request_ready`,
+  `record_mark_ready_observation`, `plan_return_to_draft`,
+  `record_return_to_draft_observation`, `mark_workflow_action_executing`,
+  `complete_workflow_action`, `abandon_workflow_action`), thread handling
+  (`get_thread_resolution_plan`, `get_invalidated_resolution_plan`,
+  `plan_thread_reply`, `record_thread_reply_observation`,
+  `plan_thread_resolution`, `record_thread_resolution_observation`,
+  `record_automatic_resolution`, `plan_thread_unresolve`,
+  `record_thread_unresolve_observation`, `record_automatic_unresolve`), and
+  the autonomous publication projections (`get_autonomous_pre_ready`,
+  `get_autonomous_terminal`). `start_publication` no longer accepts
+  `workflow_id` or `expected_workflow_revision`: a call that still sends them
+  has both ignored and creates an unbound version-2 publication. The packaged skill's
+  autonomous route and `docs/autonomous-workflow.md` are gone. Manual local
+  review and the hand-driven publication ledger remain unchanged.
+  Upgrading: workflow records under `workflows/` in an existing store stay
+  on disk. Most publication tools still read the workflow record a
+  version-3 (workflow-bound) publication names, so keep it while that
+  publication is in use.
 
 ## 0.24.0 - 2026-11-13
 

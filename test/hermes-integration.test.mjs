@@ -474,7 +474,6 @@ test("Hermes author MCP snippet is separate, unfiltered, and starts only --role 
     "prepare_review",
     "start_publication",
     "record_github_snapshot",
-    "start_autonomous_workflow",
   ]) {
     assert.ok(authorTools.includes(tool), `author server is missing ${tool}`);
   }
@@ -555,30 +554,24 @@ test("noise comments and decorative tests are contracted on both ends", async ()
   const workflowSkill = flatten(
     await readWorkflowSkill(path.join(projectRoot, WORKFLOW_SKILL)),
   );
-  // Both author paths — autonomous COMMIT_HEAD and the manual Prepare flow —
-  // must carry the obligation, so one occurrence is a silent exemption.
   const countOf = (text, phrase) => text.split(phrase).length - 1;
   assert.ok(
     countOf(
       workflowSkill,
       "remove comments that do not state a constraint the code cannot express",
     ) >= 2,
-    "noise-comment cleanup must cover both the autonomous and manual author paths",
+    "the routed skill must state the noise-comment cleanup at least twice",
   );
   assert.ok(
     countOf(
       workflowSkill,
       "remove tests that no behavior change can turn red",
     ) >= 2,
-    "decorative-test cleanup must cover both the autonomous and manual author paths",
-  );
-  assert.ok(
-    workflowSkill.includes("every later fix commit the workflow records"),
-    "the cleanup obligation must scope to fix commits, not only COMMIT_HEAD",
+    "the routed skill must state the decorative-test cleanup at least twice",
   );
   assert.ok(
     countOf(workflowSkill, "pre-commit cleanup") >= 6,
-    "every commit instruction site must reference the pre-commit cleanup: the step-7 fix head, ADDRESS_LOCAL_FINDINGS, the step-12 repair phases, the manual rereview fix, and both REMOTE_ONLY commit paths",
+    "the routed skill must mention the pre-commit cleanup at least six times",
   );
   for (const file of [
     path.join(
@@ -644,16 +637,8 @@ test("publish-bound work states its gate provider and its review strategy", asyn
       "a full-patch review must read as the exception, with its scenarios named",
     ],
     [
-      "That review is a successor by default: leave `parent_review_id` unset and `force_full_review` off",
-      "the review after a remote finding must read as successor-by-default",
-    ],
-    [
-      "In `LOCAL_GATE` mode that task is a successor by default",
-      "the manual publication path must read as successor-by-default too",
-    ],
-    [
-      "also pass its `continued_from_review_id` and `force_full_review: true`",
-      "the carried-findings continuation keeps its deliberate full review",
+      "In `LOCAL_GATE` mode leave `parent_review_id` unset and `force_full_review` off",
+      "the repair review must leave parent selection to prepare_review",
     ],
     [
       "The summary's `gate_expires_in_seconds` says how much of that gate's window is left.",
@@ -994,7 +979,6 @@ test("the workflow skill states Hermes provenance and provider binding", async (
   ]);
   const hermesText = hermes.replace(/\s+/g, " ");
   assert.match(hermesText, /configured.*provenance.*not cryptographic/is);
-  assert.match(hermesText, /Autonomous local task creation remains `CODEX_TASK`-only\./);
   assert.match(hermesText, /local HERMES gate passes/i);
   assert.match(hermesText, /author\/publication-side operation/i);
 

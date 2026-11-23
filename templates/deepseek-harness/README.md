@@ -244,8 +244,7 @@ not be replaced; this runtime does not wait.
 
 Review Bridge records the review's `DEEPSEEK_HARNESS` binding; it observes
 nothing about how the session was started, and this section adds no
-mechanism that would. Local autonomous task creation still accepts
-`CODEX_TASK` dispatch only. The `CLAUDE_DESKTOP` boundary is unchanged, and
+mechanism that would. The `CLAUDE_DESKTOP` boundary is unchanged, and
 nothing above narrows it: never launch, script, or otherwise programmatically
 invoke a Claude reviewer from the driver session — the operator opens that
 conversation themselves, an account-compliance boundary rather than a
@@ -266,8 +265,6 @@ its plugin configuration is still a developer preview.
 
 - `DEEPSEEK_HARNESS` is configured local reviewer provenance, not cryptographic
   model identity.
-- Local autonomous task creation remains `CODEX_TASK`-only; the DeepSeek
-  Harness reviewer never creates or advances local autonomous workflow tasks.
 - Remote GitHub Codex publication is performed by the author/publication side
   only after a local reviewer gate has passed. On a publish-bound change that
   gate is a `CODEX_TASK` review by default, and a `DEEPSEEK_HARNESS` review is

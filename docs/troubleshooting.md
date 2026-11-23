@@ -5,12 +5,10 @@ Describes Review Bridge v0.24.0.
 ## Models, launch, and upgrades
 
 **The reviewer runs on the wrong model** — a `CODEX_TASK` reviewer started by
-`launch_local_reviewer` or `launch_codex_task_dispatch` uses the model in the
+`launch_local_reviewer` uses the model in the
 MCP host's Codex configuration, not a choice made in the author conversation.
 Change `model` in that host's `~/.codex/config.toml` (or the file under
-`CODEX_HOME`); reasoning effort is `high`. A workflow dispatch planned before
-the upgrade that recorded a model instead runs with the model and effort in
-its `reviewer_configuration.requested`, whatever the host configuration says. A
+`CODEX_HOME`); reasoning effort is `high`. A
 task you start yourself ([manual dispatch](local-review.md#start-a-reviewer-manually))
 uses the model and effort set in the client that creates it. See
 [reviewer configuration](reviewer-configuration.md).
@@ -21,11 +19,7 @@ support `high` reasoning effort. Read the attempt's `process.log`; if its
 message does not say which, check both. For a new launch, configure a model
 that the account can use at `high`, check the executable and account used on
 that host (`REVIEW_BRIDGE_CODEX_COMMAND` can pin an absolute executable when a
-desktop app has a different PATH), and launch again. A workflow dispatch
-planned before the upgrade fails on its recorded model and effort instead,
-which the host configuration does not change. A reviewer launched by a
-workflow dispatch must be reconciled, or the workflow cancelled, before it is
-replaced.
+desktop app has a different PATH), and launch again.
 
 **No new reviewer task window appears** — `launch_local_reviewer` starts an
 independent Codex process on the MCP host. Follow its `review_id` from the author
