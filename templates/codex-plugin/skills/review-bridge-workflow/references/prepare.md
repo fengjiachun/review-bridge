@@ -60,9 +60,10 @@ After a verdict, load [Handle findings](findings.md) for findings or
    to repair; the same defect found at the local gate costs one local round.
    `DEEPSEEK_HARNESS` is the verification-shape second opinion beside that
    gate — pins that match a substring, fixtures that do not cover the case, a
-   refusal test passing on a neighbour's message. Run it in addition to the
-   `CODEX_TASK` gate when the risk in a change is how it is verified; never as
-   the sole gate on a publication path.
+   refusal test passing on a neighbour's message. When the risk in a change is
+   how it is verified, suggest it to the user and run it in addition to the
+   `CODEX_TASK` gate only when they name it; never as the sole gate on a
+   publication path.
 
    Never call reviewer tools from the author task; provider binding and task
    separation are workflow attestations, not authenticated model identity.

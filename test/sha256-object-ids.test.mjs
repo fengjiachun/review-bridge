@@ -119,6 +119,7 @@ test("a sha256 repository runs a full local review and local gate", async (t) =>
     baseRef: state.baseSha,
     requirement: "Review a sha256 repository.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(review.status, "WAITING_FOR_REVIEW");
   await submitInitialReview(state.store, review.id, [LOCAL_FINDING.finding]);
@@ -197,6 +198,7 @@ test("starting a publication over a sha256 local gate is refused by name", async
     baseRef: state.baseSha,
     requirement: "Review a sha256 repository.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(state.store, review.id, []);
   const gated = await finalizeLocalGate(state.store, review.id);

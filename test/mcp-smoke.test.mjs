@@ -7,7 +7,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { REVIEWER_PROVIDERS, prepareReview, prepareRereview, submitResolutions } from "../src/core.mjs";
-import { fixture, git } from "./helpers/repository-fixture";
+import { commit, fixture, git } from "./helpers/repository-fixture";
 
 const serverPath = path.resolve("src/server.mjs");
 
@@ -484,6 +484,7 @@ test("MCP preserves immutable intent texts and only serves the reconstruction in
     requirement: "Export the new value.",
     implementationScope: "app.js",
     rationale: "Consumers need value 2.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const reviewer = await connectClient("reviewer", store);
   const author = await connectClient("author", store);
@@ -545,9 +546,7 @@ test("reviewer instructions read changed prose under a FULL review", async (t) =
 test("MCP prepare_review binds CODEX_TASK unless another provider is passed", async (t) => {
   const { root, repository, store, baseSha } = await fixture();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
-  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
-  git(repository, "add", "app.js");
-  git(repository, "commit", "-m", "change value");
+  await commit(repository, "export const value = 2;\n");
   const author = await connectClient("author", store);
   t.after(() => author.close());
   const prepare = (extra) =>

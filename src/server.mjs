@@ -191,7 +191,7 @@ if (role === "author") {
         requirement: z.string(),
         implementation_scope: z.string(),
         rationale: z.string().optional(),
-        reviewer_provider: z.enum(REVIEWER_PROVIDERS).default("CODEX_TASK"),
+        reviewer_provider: z.enum(REVIEWER_PROVIDERS).optional(),
         parent_review_id: z.string().optional(),
         force_full_review: z.boolean().optional(),
         continued_from_review_id: z.string().optional(),

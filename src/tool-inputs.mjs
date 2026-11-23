@@ -142,7 +142,7 @@ export const REVIEW_ACTION_INPUTS = {
         "your scope for the new head; get_review implementation_scope may be reused",
       ],
       ["rationale", "optional, your design rationale for the new head"],
-      ["reviewer_provider", "reviewer_provider"],
+      ["reviewer_provider", "reviewer_provider; may be omitted when it is CODEX_TASK"],
       ["continued_from_review_id", "id"],
       ["force_full_review", "true, required with continued_from_review_id"],
     ],
@@ -278,7 +278,7 @@ export const WORKFLOW_ACTION_INPUTS = {
         "get_autonomous_workflow implementation_scope",
       ],
       ["rationale", "optional, your design rationale for the current head"],
-      ["reviewer_provider", "CODEX_TASK"],
+      ["reviewer_provider", "optional, CODEX_TASK is the default"],
       [
         "continued_from_review_id",
         "local_review_cycles.at(-1), when it has an addressed head and no follow-up review",

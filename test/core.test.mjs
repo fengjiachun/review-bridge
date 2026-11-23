@@ -86,6 +86,7 @@ test("manual review reports immutable change size without blocking", async (t) =
     baseRef: baseSha,
     requirement: "Report deterministic change size.",
     implementationScope: "Replace app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(prepared.status, "WAITING_FOR_REVIEW");
   assert.deepEqual(prepared.change_size, {
@@ -133,6 +134,7 @@ test("manual review reports an over-budget change without blocking", async (t) =
     baseRef: baseSha,
     requirement: "Report an over-budget manual review without blocking it.",
     implementationScope: "Add large.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(prepared.status, "WAITING_FOR_REVIEW");
   assert.deepEqual(prepared.change_size, {
@@ -164,6 +166,7 @@ test("a manual review crossing the warning completes every round without acknowl
     baseRef: baseSha,
     requirement: "Keep the operator-present flow report-only past the warning.",
     implementationScope: "Add large.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(prepared.change_size.warning_threshold_crossed, true);
   assert.equal(prepared.change_size.over_budget, false);
@@ -210,6 +213,7 @@ test("workflow snapshot reads reject a tampered change-size measurement", async 
     baseRef: baseSha,
     requirement: "Bind the immutable measurement.",
     implementationScope: "Add large.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
   const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
@@ -479,6 +483,7 @@ test("legacy review records default their reviewer provider to Claude", async (t
     baseRef: git(repository, "rev-parse", "HEAD"),
     requirement: "Preserve legacy reviewer compatibility.",
     implementationScope: "Interpret a missing provider as Claude Desktop.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const reviewPath = path.join(
     store,
@@ -518,6 +523,7 @@ async function createGatedParent({
     baseRef: baseSha,
     requirement,
     implementationScope: "Create the reviewed parent.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, parent.id, []);
   await finalizeLocalGate(store, parent.id);
@@ -541,6 +547,7 @@ test("successor review binds a clean parent gate and exposes only the exact delt
     baseRef: baseSha,
     requirement: "Harden the fixture in reviewed increments.",
     implementationScope: "Add the parent behavior.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, parent.id, []);
   const parentGate = await finalizeLocalGate(store, parent.id);
@@ -558,6 +565,7 @@ test("successor review binds a clean parent gate and exposes only the exact delt
     requirement: "Harden the fixture in reviewed increments.",
     implementationScope: "Add the successor behavior.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   assert.equal(child.review_strategy.mode, "SUCCESSOR");
@@ -681,6 +689,7 @@ test("ineligible successor parent falls back to an explicit full review", async 
     baseRef: baseSha,
     requirement: "Review the fixture.",
     implementationScope: "Prepare a parent that remains pending.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   await fsp.writeFile(path.join(repository, "app.js"), "child committed\n");
@@ -692,6 +701,7 @@ test("ineligible successor parent falls back to an explicit full review", async 
     requirement: "Review the fixture.",
     implementationScope: "Fall back when the parent is not gated.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.equal(child.review_strategy.parent_review_id, parent.id);
@@ -743,6 +753,7 @@ test("a tampered parent gate forces a full review", async (t) => {
     baseRef: baseSha,
     requirement: "Review the fixture.",
     implementationScope: "Create the parent.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, parent.id, []);
   await finalizeLocalGate(store, parent.id);
@@ -761,6 +772,7 @@ test("a tampered parent gate forces a full review", async (t) => {
     requirement: "Review the fixture.",
     implementationScope: "Reject the tampered parent proof.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(child.review_strategy.fallback_reason, /gate does not match/);
@@ -779,6 +791,7 @@ test("parent reviewer provider drift forces a full review", async (t) => {
     baseRef: baseSha,
     requirement: "Review the fixture.",
     implementationScope: "Create the parent.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, parent.id, []);
   await finalizeLocalGate(store, parent.id);
@@ -797,6 +810,7 @@ test("parent reviewer provider drift forces a full review", async (t) => {
     requirement: "Review the fixture.",
     implementationScope: "Reject parent reviewer provider drift.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(child.review_strategy.fallback_reason, /reviewer provider/);
@@ -815,6 +829,7 @@ test("a malformed parent ledger forces a full review", async (t) => {
     baseRef: baseSha,
     requirement: "Review the fixture.",
     implementationScope: "Create the parent.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, parent.id, []);
   await finalizeLocalGate(store, parent.id);
@@ -833,6 +848,7 @@ test("a malformed parent ledger forces a full review", async (t) => {
     requirement: "Review the fixture.",
     implementationScope: "Reject the malformed parent proof.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(child.review_strategy.fallback_reason, /ledger/);
@@ -888,6 +904,7 @@ test("tampered parent metadata cannot qualify a successor review", async (t) => 
         requirement,
         implementationScope: "Create the successor.",
         parentReviewId: parent.id,
+        reviewerProvider: "CLAUDE_DESKTOP",
       });
       assert.equal(child.review_strategy.mode, "FULL");
       assert.equal(child.rounds[0].successor, null);
@@ -905,6 +922,7 @@ test("tampered parent overlay metadata cannot qualify a successor review", async
     baseRef: baseSha,
     requirement: "Review the fixture.",
     implementationScope: "Review the dirty parent.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(parent.rounds[0].overlays.length, 1);
   await submitInitialReview(store, parent.id, []);
@@ -923,6 +941,7 @@ test("tampered parent overlay metadata cannot qualify a successor review", async
     requirement: "Review the fixture.",
     implementationScope: "Create the successor.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.equal(child.rounds[0].successor, null);
@@ -942,6 +961,7 @@ test("tampered successor artifacts fail closed on read and clean submission", as
     requirement: "Review the fixture.",
     implementationScope: "Create the successor.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const roundRoot = path.join(
     store,
@@ -987,6 +1007,7 @@ test("tampered successor artifacts prevent local gate finalization", async (t) =
     requirement: "Review the fixture.",
     implementationScope: "Create the successor.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, child.id, []);
   await fsp.writeFile(
@@ -1023,6 +1044,7 @@ test("linked worktrees from the same repository can use successor mode", async (
     requirement: "Review the fixture.",
     implementationScope: "Create the successor in a linked worktree.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "SUCCESSOR");
 });
@@ -1060,6 +1082,7 @@ test("dirty current worktrees fall back to full review", async (t) => {
         requirement: "Review the fixture.",
         implementationScope: "Reject a dirty successor worktree.",
         parentReviewId: parent.id,
+        reviewerProvider: "CLAUDE_DESKTOP",
       });
       assert.equal(child.rounds[0].worktree_clean, false);
       assert.equal(child.rounds[0].overlays.length, scenario.expectedOverlays);
@@ -1091,6 +1114,7 @@ test("a parent without a worktree cleanliness commitment falls back to full revi
     requirement: "Review the fixture.",
     implementationScope: "Reject an old parent ledger.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(child.review_strategy.fallback_reason, /snapshot commitment/);
@@ -1106,6 +1130,7 @@ test("a tampered worktree cleanliness commitment cannot qualify a successor revi
     baseRef: baseSha,
     requirement: "Review the fixture.",
     implementationScope: "Review a dirty parent.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(parent.rounds[0].worktree_clean, false);
   await submitInitialReview(store, parent.id, []);
@@ -1125,6 +1150,7 @@ test("a tampered worktree cleanliness commitment cannot qualify a successor revi
     requirement: "Review the fixture.",
     implementationScope: "Reject a tampered parent commitment.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(child.review_strategy.fallback_reason, /snapshot commitment/);
@@ -1146,6 +1172,7 @@ test("a divergent parent head falls back to full review", async (t) => {
     requirement: "Review the fixture.",
     implementationScope: "Reject a divergent parent.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(child.review_strategy.fallback_reason, /not an ancestor/);
@@ -1180,6 +1207,7 @@ test("a parent from another repository falls back to full review", async (t) => 
     requirement: "Review the fixture.",
     implementationScope: "Reject a parent from another repository.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(
@@ -1203,6 +1231,7 @@ test("oversized successor proof generation falls back to full review", async (t)
     baseRef: baseSha,
     requirement: "Review the fixture.",
     implementationScope: "Create the large parent.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, parent.id, []);
   await finalizeLocalGate(store, parent.id);
@@ -1220,6 +1249,7 @@ test("oversized successor proof generation falls back to full review", async (t)
     requirement: "Review the fixture.",
     implementationScope: "Fall back when the successor proof is too large.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(
@@ -1247,6 +1277,7 @@ test("two-round fixed finding reaches a local gate", async (t) => {
     baseRef: "HEAD",
     requirement: "Return null when division by zero is requested.",
     implementationScope: "Change app.js and add focused tests.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(prepared.status, "WAITING_FOR_REVIEW");
   assert.equal(prepared.rounds[0].changed_files.includes("app.test.js"), true);
@@ -1332,6 +1363,7 @@ test("rereview rebuttals require verification without breaking old ledgers", asy
     baseRef: "HEAD",
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, prepared.id, [
     {
@@ -1488,6 +1520,7 @@ test("new findings after an uncontested rereview are continuable", async (t) => 
     baseRef: "HEAD",
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, prepared.id, [
     { severity: "major", title: "Missing test", explanation: "Add a test." },
@@ -1537,6 +1570,7 @@ test("carried findings are reviewer scope hints without author rationale", async
     baseRef: baseSha,
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, source.id, [
     { severity: "major", title: "Missing test", explanation: "Add a test." },
@@ -1569,6 +1603,7 @@ test("carried findings are reviewer scope hints without author rationale", async
       implementationScope: "Change app.js.",
       forceFullReview: true,
       continuedFromReviewId: source.id,
+      reviewerProvider: "CLAUDE_DESKTOP",
     }),
     /continued review head must change/,
   );
@@ -1579,6 +1614,7 @@ test("carried findings are reviewer scope hints without author rationale", async
       requirement: "Expose a stable value.",
       implementationScope: "Change app.js.",
       continuedFromReviewId: source.id,
+      reviewerProvider: "CLAUDE_DESKTOP",
     }),
     /must set force_full_review/,
   );
@@ -1593,6 +1629,7 @@ test("carried findings are reviewer scope hints without author rationale", async
       implementationScope: "Change app.js.",
       forceFullReview: true,
       continuedFromReviewId: source.id,
+      reviewerProvider: "CLAUDE_DESKTOP",
     }),
     /must preserve the immutable source base/,
   );
@@ -1608,6 +1645,7 @@ test("carried findings are reviewer scope hints without author rationale", async
       implementationScope: "Change app.js.",
       forceFullReview: true,
       continuedFromReviewId: source.id,
+      reviewerProvider: "CLAUDE_DESKTOP",
     }),
     /must descend from the source head/,
   );
@@ -1620,6 +1658,7 @@ test("carried findings are reviewer scope hints without author rationale", async
       implementationScope: "Change app.js.",
       forceFullReview: true,
       continuedFromReviewId: source.id,
+      reviewerProvider: "CLAUDE_DESKTOP",
     }),
     {
       message: `cannot continue review ${source.id}: requirement differs from the source review's requirement`,
@@ -1631,7 +1670,6 @@ test("carried findings are reviewer scope hints without author rationale", async
       baseRef: baseSha,
       requirement: "Expose a stable value.",
       implementationScope: "Change app.js.",
-      reviewerProvider: "CODEX_TASK",
       forceFullReview: true,
       continuedFromReviewId: source.id,
     }),
@@ -1650,6 +1688,7 @@ test("carried findings are reviewer scope hints without author rationale", async
       implementationScope: "Change app.js.",
       forceFullReview: true,
       continuedFromReviewId: source.id,
+      reviewerProvider: "CLAUDE_DESKTOP",
     }),
     {
       message: `cannot continue review ${source.id}: repository ${otherRepository} differs from the source review's ${await fsp.realpath(repository)}`,
@@ -1664,6 +1703,7 @@ test("carried findings are reviewer scope hints without author rationale", async
     implementationScope: "Change app.js and cover the edge case.",
     forceFullReview: true,
     continuedFromReviewId: source.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const opened = await openReview(store, prepared.id);
   assert.equal(opened.repository_path, await fsp.realpath(repository));
@@ -1693,6 +1733,7 @@ test("a continuation refusal names every unmet condition", async (t) => {
     baseRef: "HEAD",
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const other = await fixture();
   t.after(() => fsp.rm(other.root, { recursive: true, force: true }));
@@ -1731,6 +1772,7 @@ test("a finding's constraint is documented with a source or undocumented without
     baseRef: "HEAD",
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const finding = (constraint) => ({
     severity: "minor",
@@ -1780,6 +1822,7 @@ test("unresolved round-two finding escalates to a human", async (t) => {
     baseRef: "HEAD",
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, prepared.id, [
     {
@@ -1879,6 +1922,7 @@ test("an incomplete fix is carried into a fresh full review", async (t) => {
     baseRef: baseSha,
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, source.id, [
     {
@@ -1923,6 +1967,7 @@ test("an incomplete fix is carried into a fresh full review", async (t) => {
     implementationScope: "Change app.js.",
     forceFullReview: true,
     continuedFromReviewId: source.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const [carried, ...rest] = (await openReview(store, continued.id))
     .carried_findings;
@@ -1947,6 +1992,7 @@ test("a disputed rebuttal escalates beside an incomplete fix", async (t) => {
     baseRef: "HEAD",
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, prepared.id, [
     { severity: "major", title: "Undocumented export", explanation: "Document it." },
@@ -1988,6 +2034,7 @@ test("human arbitration export rejects reviews that are not awaiting a human", a
     baseRef: "HEAD",
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   await assert.rejects(
@@ -2041,6 +2088,7 @@ test("compact review summaries support bounded state-change waits", async (t) =>
     baseRef: "HEAD",
     requirement: "Update the exported value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(prepared.state_version, 1);
   assert.equal(prepared.created_at, prepared.updated_at);
@@ -2113,6 +2161,7 @@ test("core review mutations wait behind the review-state lock without changing s
     baseRef: "HEAD",
     requirement: "Update the exported value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const reviewRoot = path.join(store, "reviews", prepared.id);
   const release = await acquireStateLock({
@@ -2144,6 +2193,7 @@ test("review snapshots derive review and summary under one mutation lock", async
     baseRef: "HEAD",
     requirement: "Update the exported value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const release = await acquireStateLock({
     directory: path.join(store, "reviews", prepared.id),
@@ -2193,6 +2243,7 @@ test("compact finding histograms distinguish active and all-time severity", asyn
     baseRef: "HEAD",
     requirement: "Update the exported value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, prepared.id, [
     {
@@ -2273,6 +2324,7 @@ test("finalization fails closed when code changes after a clean verdict", async 
     baseRef: "HEAD",
     requirement: "Expose the safe flag.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, prepared.id, []);
   await fsp.writeFile(path.join(repository, "app.js"), "export const safe = false;\n");
@@ -2295,6 +2347,7 @@ test("committed deletions are represented as deleted snapshot files", async (t) 
     baseRef: base,
     requirement: "Remove the obsolete README.",
     implementationScope: "Delete README.md.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   assert.deepEqual(prepared.rounds[0].deleted_files, ["README.md"]);
@@ -2314,6 +2367,7 @@ test("chunked artifact and snapshot reads preserve UTF-8 characters", async (t) 
     baseRef: "HEAD",
     requirement: "Expose a localized message.",
     implementationScope: "Update app.js with a Chinese message.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const patch = await readAll((offset) =>
     readReviewArtifact(store, prepared.id, 1, "patch.diff", offset, 4),
@@ -2337,6 +2391,7 @@ test("snapshot paths preserve literal backslashes", async (t) => {
     baseRef: "HEAD",
     requirement: "Add a file whose name contains a backslash.",
     implementationScope: `Add ${fileName}.`,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   assert.equal(prepared.rounds[0].changed_files.includes(fileName), true);
@@ -2357,6 +2412,7 @@ test("snapshot search preserves paths containing colon-number segments", async (
     baseRef: base,
     requirement: "Add the numbered guide.",
     implementationScope: "Add guide:123.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const results = await searchSnapshot(store, prepared.id, 1, "search needle");
 
@@ -2381,6 +2437,7 @@ test("snapshot search reports modified files that are too large to inspect", asy
     baseRef: "HEAD",
     requirement: "Update the large binary.",
     implementationScope: "Modify large.bin.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const results = await searchSnapshot(store, prepared.id, 1, "needle");
 
@@ -2439,6 +2496,7 @@ test("the patch index addresses each file's exact section without reading the wh
     baseRef: baseSha,
     requirement: "Guard the zero divisor.",
     implementationScope: "Edit app.js and add notes.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const opened = await openReview(store, prepared.id);
   const index = opened.current_snapshot.patch_index;
@@ -2481,6 +2539,7 @@ test("open_review states each round once and keeps the current snapshot whole", 
     baseRef: baseSha,
     requirement: "Simplify the module.",
     implementationScope: "Replace divide with a constant.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, prepared.id, [
     {
@@ -2540,6 +2599,7 @@ test("an unattended review selects a verified successor parent and can be forced
     baseRef: baseSha,
     requirement,
     implementationScope: "Add the parent behavior.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(parent.review_strategy.mode, "FULL");
   assert.equal(parent.review_strategy.parent_selection, "NONE");
@@ -2555,6 +2615,7 @@ test("an unattended review selects a verified successor parent and can be forced
     baseRef: baseSha,
     requirement,
     implementationScope: "Add the child behavior.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   assert.equal(child.review_strategy.mode, "SUCCESSOR");
@@ -2570,6 +2631,7 @@ test("an unattended review selects a verified successor parent and can be forced
     requirement,
     implementationScope: "Add the child behavior.",
     forceFullReview: true,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(forced.review_strategy.mode, "FULL");
   assert.equal(forced.review_strategy.parent_selection, "NONE");
@@ -2590,6 +2652,7 @@ test("a drifting requirement blocks an explicit parent but is disclosed in an au
     baseRef: baseSha,
     requirement: "Implement PR1: the ledger and its owners.",
     implementationScope: "Add one.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, parent.id, []);
   await finalizeLocalGate(store, parent.id);
@@ -2606,6 +2669,7 @@ test("a drifting requirement blocks an explicit parent but is disclosed in an au
     requirement: driftedRequirement,
     implementationScope: "Add two.",
     parentReviewId: parent.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(explicit.review_strategy.mode, "FULL");
   assert.equal(explicit.review_strategy.parent_selection, "EXPLICIT");
@@ -2619,6 +2683,7 @@ test("a drifting requirement blocks an explicit parent but is disclosed in an au
     baseRef: baseSha,
     requirement: driftedRequirement,
     implementationScope: "Add two.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(automatic.review_strategy.mode, "SUCCESSOR");
   assert.equal(automatic.review_strategy.parent_selection, "AUTOMATIC");
@@ -2667,6 +2732,7 @@ test("automatic parent selection ignores unrelated and ungated history", async (
     baseRef: baseSha,
     requirement: "One requirement.",
     implementationScope: "Add one.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, gated.id, []);
   await finalizeLocalGate(store, gated.id);
@@ -2685,6 +2751,7 @@ test("automatic parent selection ignores unrelated and ungated history", async (
     baseRef: otherBase,
     requirement: "One requirement.",
     implementationScope: "Add later.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(rebased.review_strategy.mode, "FULL");
   assert.equal(rebased.review_strategy.parent_selection, "NONE");
@@ -2696,6 +2763,7 @@ test("automatic parent selection ignores unrelated and ungated history", async (
     baseRef: baseSha,
     requirement: "Never gated.",
     implementationScope: "Add two.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await fsp.writeFile(path.join(repository, "three.js"), "export const three = 3;\n");
   git(repository, "add", ".");
@@ -2705,6 +2773,7 @@ test("automatic parent selection ignores unrelated and ungated history", async (
     baseRef: baseSha,
     requirement: "Never gated.",
     implementationScope: "Add three.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   // The ungated task is never a parent, so selection reaches past it to the
   // gated one rather than treating the nearest task as reviewed.
@@ -2731,6 +2800,7 @@ test("a truncated patch index still spans the whole patch", async (t) => {
     baseRef: baseSha,
     requirement: "Add many modules.",
     implementationScope: "Add 405 generated modules.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const opened = await openReview(store, prepared.id);
   const index = opened.current_snapshot.patch_index;
@@ -2782,6 +2852,7 @@ test("the patch index decodes quoted Git paths", async (t) => {
     baseRef: baseSha,
     requirement: "Add awkward filenames.",
     implementationScope: "Add files whose names Git quotes.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const opened = await openReview(store, prepared.id);
   const index = opened.current_snapshot.patch_index;
@@ -2822,6 +2893,7 @@ test("automatic parent selection reaches across linked worktrees", async (t) => 
     baseRef: baseSha,
     requirement,
     implementationScope: "Add the parent behavior.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, parent.id, []);
   await finalizeLocalGate(store, parent.id);
@@ -2838,6 +2910,7 @@ test("automatic parent selection reaches across linked worktrees", async (t) => 
     baseRef: baseSha,
     requirement,
     implementationScope: "Add the child behavior.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   assert.equal(child.review_strategy.mode, "SUCCESSOR");
@@ -2859,6 +2932,7 @@ test("the served patch index comes from the immutable patch, not the ledger", as
     baseRef: baseSha,
     requirement: "Simplify the module.",
     implementationScope: "Replace divide with a constant.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   // A tampered ledger index must not redirect what a reviewer skips: inject
@@ -2919,6 +2993,7 @@ test("the patch index resolves filenames containing ' b/' unambiguously", async 
     baseRef: baseSha,
     requirement: "Add an awkward directory name.",
     implementationScope: "Add files under 'foo b'.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const opened = await openReview(store, prepared.id);
   const index = opened.current_snapshot.patch_index;
@@ -2956,6 +3031,7 @@ test("a corrupted stored candidate cannot abort unattended preparation", async (
     baseRef: baseSha,
     requirement,
     implementationScope: "Add the parent behavior.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, parent.id, []);
   await finalizeLocalGate(store, parent.id);
@@ -2968,6 +3044,7 @@ test("a corrupted stored candidate cannot abort unattended preparation", async (
     baseRef: baseSha,
     requirement,
     implementationScope: "Decoy candidate.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, decoy.id, []);
   await finalizeLocalGate(store, decoy.id);
@@ -2989,6 +3066,7 @@ test("a corrupted stored candidate cannot abort unattended preparation", async (
     baseRef: baseSha,
     requirement,
     implementationScope: "Add the child behavior.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   // The corrupted candidate is rejected by the proof, and selection falls
@@ -3011,6 +3089,7 @@ test("a same-length patch corruption withdraws the index and blocks the gate", a
     baseRef: baseSha,
     requirement: "Simplify the module.",
     implementationScope: "Replace divide with a constant.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, prepared.id, []);
 
@@ -3053,6 +3132,7 @@ test("index coverage starts at offset zero even when the patch does not", async 
     baseRef: baseSha,
     requirement: "Add a new module.",
     implementationScope: "Add brand-new.js untracked.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const opened = await openReview(store, prepared.id);
   const index = opened.current_snapshot.patch_index;
@@ -3116,6 +3196,7 @@ test("automatic parent selection prefers the nearest ancestor over the newest ga
     baseRef: baseSha,
     requirement,
     implementationScope: "Add step 1.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, far.id, []);
   await finalizeLocalGate(store, far.id);
@@ -3128,6 +3209,7 @@ test("automatic parent selection prefers the nearest ancestor over the newest ga
     baseRef: baseSha,
     requirement,
     implementationScope: "Add step 2.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(store, near.id, []);
   await finalizeLocalGate(store, near.id);
@@ -3147,6 +3229,7 @@ test("automatic parent selection prefers the nearest ancestor over the newest ga
     baseRef: baseSha,
     requirement,
     implementationScope: "Add step 3.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   assert.equal(child.review_strategy.mode, "SUCCESSOR");
@@ -3170,6 +3253,7 @@ async function erratumFixture(t) {
     baseRef: "HEAD",
     requirement: "Return null when division by zero is requested.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   return { repository, store, prepared };
 }
@@ -3380,6 +3464,7 @@ test("a continuation review carries the source errata with resequenced watermark
     baseRef: baseSha,
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await appendReviewErratum(store, source.id, "Stale claim, noticed in round one.");
   await submitInitialReview(store, source.id, [
@@ -3413,6 +3498,7 @@ test("a continuation review carries the source errata with resequenced watermark
     implementationScope: "Change app.js.",
     forceFullReview: true,
     continuedFromReviewId: source.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   // A continuation ledger starts unserved: it carries the corrections, not
   // the source's open.
@@ -3468,6 +3554,7 @@ test("a re-continued ledger keeps each carried erratum's origin review", async (
     baseRef: baseSha,
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   };
   // Each link needs its own commit: a continuation reviews the work done
   // since the source's verdict.
@@ -3680,6 +3767,7 @@ async function continuableSource(t) {
     baseRef: baseSha,
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await appendReviewErratum(store, source.id, "Stale claim on the source.");
   await submitInitialReview(store, source.id, [
@@ -3716,6 +3804,7 @@ test("a continuation freezes its source against further errata", async (t) => {
     implementationScope: "Change app.js.",
     forceFullReview: true,
     continuedFromReviewId: source.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const frozen = await getReview(store, source.id);
   assert.equal(frozen.continued_by_review_id, continuation.id);
@@ -3744,6 +3833,7 @@ test("a continuation freezes its source against further errata", async (t) => {
     implementationScope: "Change app.js.",
     forceFullReview: true,
     continuedFromReviewId: source.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(second.errata.length, 1);
   assert.equal(
@@ -3771,6 +3861,7 @@ test("the continuation errata copy waits behind the source review lock", async (
     implementationScope: "Change app.js.",
     forceFullReview: true,
     continuedFromReviewId: source.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   }).finally(() => {
     settled = true;
   });
@@ -4193,6 +4284,7 @@ async function rationaleFixture(t) {
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
     rationale: RATIONALE,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   return { repository, store, baseSha, prepared };
 }
@@ -4231,6 +4323,7 @@ test("the rationale stays out of the snapshot", async (t) => {
     baseRef: baseSha,
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(without.rationale, null);
   assert.equal((await getReviewSummary(store, without.id)).has_rationale, false);
@@ -4270,6 +4363,7 @@ test("a continuation records its own rationale for the new head", async (t) => {
     rationale: "Kept the constant; the test now pins it.",
     forceFullReview: true,
     continuedFromReviewId: prepared.id,
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(continued.rationale, "Kept the constant; the test now pins it.");
 });

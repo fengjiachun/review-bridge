@@ -864,3 +864,16 @@ test("declared start_publication inputs carry the acknowledgement pair", async (
     /explicit-only mode cannot include an acknowledgement/,
   );
 });
+
+test("prepare_review declarations name reviewer_provider as defaulting to CODEX_TASK", () => {
+  const source = (table) =>
+    table.prepare_review.find(([field]) => field === "reviewer_provider")[1];
+  assert.match(
+    source(REVIEW_ACTION_INPUTS.ADDRESS_LOCAL_FINDINGS),
+    /^reviewer_provider; may be omitted when it is CODEX_TASK$/,
+  );
+  assert.match(
+    source(WORKFLOW_ACTION_INPUTS.PREPARE_LOCAL_REVIEW),
+    /^optional, CODEX_TASK is the default$/,
+  );
+});
