@@ -28,7 +28,6 @@ packaged `deepseek-harness/README.md` gives the complete install, profile tool
 checks, and atomic upgrade procedure.
 
 `DEEPSEEK_HARNESS` records configured reviewer provenance; it is not
-cryptographic model identity. Autonomous local task creation remains
-`CODEX_TASK`-only. A round-two rereview runs in a new session rather than a
+cryptographic model identity. A round-two rereview runs in a new session rather than a
 resumed one, because a headless run always starts a fresh session; the reviewer
 decides from the ledger `open_review` serves and re-runs its own verification.

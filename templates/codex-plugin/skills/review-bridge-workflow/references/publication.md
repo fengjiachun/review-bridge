@@ -161,19 +161,13 @@ For either mode:
     not evidence, and a failure in this step changes no gate and no workflow
     state, so it may run before or after the merge.
 
-The fifteen publication tools are `authorize_remote_publication`,
+The nine publication tools are `authorize_remote_publication`,
 `start_publication`, `get_publication`, `get_publication_summary`,
-`get_autonomous_pre_ready`, `get_autonomous_terminal`,
-`get_thread_resolution_plan`,
-`get_invalidated_resolution_plan`,
 `record_codex_review_request`, `record_github_snapshot`,
-`record_automatic_resolution`, `record_automatic_unresolve`,
 `acknowledge_codex_review_ambiguity`,
 `finalize_publication_gate`, and `verify_publication_gate`. Keep their
 revision ordering explicit and retry `PUBLICATION_BUSY` or `REVIEW_BUSY` only
-after rereading current state. `get_autonomous_pre_ready` exists only for a
-version-3 autonomous ledger; version-1 and version-2 ledgers keep their exact
-existing status and next-action behavior and can never bind a workflow.
+after rereading current state.
 
 Any new commit invalidates the GitHub review gate. Compare the reviewed PR head
 before merge; a squash merge naturally creates a different merge commit.

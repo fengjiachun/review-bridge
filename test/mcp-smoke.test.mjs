@@ -8,7 +8,6 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { REVIEWER_PROVIDERS, prepareReview, prepareRereview, submitResolutions } from "../src/core.mjs";
 import { fixture, git } from "./helpers/repository-fixture";
-import { AUTONOMOUS_PAUSE_REASON_CODES } from "../src/workflow.mjs";
 
 const serverPath = path.resolve("src/server.mjs");
 
@@ -49,66 +48,23 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
   const reviewer = await listToolNames("reviewer", store);
 
   assert.deepEqual(author, [
-    "abandon_workflow_action",
-    "acknowledge_change_size_warning",
     "acknowledge_codex_review_ambiguity",
-    "advance_local_workflow",
-    "advance_remote_workflow",
     "append_review_erratum",
     "authorize_remote_publication",
-    "bind_workflow_publication",
-    "bind_workflow_review",
-    "cancel_autonomous_workflow",
-    "complete_workflow_action",
     "export_human_arbitration",
-    "extend_change_size_budget",
-    "extend_local_cycle_budget",
-    "extend_remote_cycle_budget",
     "finalize_local_gate",
     "finalize_publication_gate",
-    "get_autonomous_pre_ready",
-    "get_autonomous_terminal",
-    "get_autonomous_workflow",
-    "get_autonomous_workflow_summary",
-    "get_invalidated_resolution_plan",
     "get_publication",
     "get_publication_summary",
     "get_review",
     "get_review_summary",
-    "get_thread_resolution_plan",
-    "launch_codex_task_dispatch",
     "launch_local_reviewer",
-    "list_autonomous_workflows",
     "list_reviews",
-    "mark_workflow_action_executing",
-    "pause_autonomous_workflow",
-    "plan_codex_task_dispatch",
-    "plan_draft_pull_request",
-    "plan_mark_pull_request_ready",
-    "plan_return_to_draft",
-    "plan_thread_reply",
-    "plan_thread_resolution",
-    "plan_thread_unresolve",
-    "plan_workflow_push",
     "prepare_rereview",
     "prepare_review",
-    "record_automatic_resolution",
-    "record_automatic_unresolve",
     "record_codex_review_request",
-    "record_codex_task_observation",
-    "record_draft_pull_request_observation",
     "record_github_snapshot",
-    "record_mark_ready_observation",
-    "record_push_observation",
-    "record_return_to_draft_observation",
-    "record_thread_reply_observation",
-    "record_thread_resolution_observation",
-    "record_thread_unresolve_observation",
-    "record_workflow_head",
-    "release_workflow_claims",
     "render_review_report",
-    "resume_autonomous_workflow",
-    "start_autonomous_workflow",
     "start_publication",
     "submit_resolutions",
     "verify_publication_gate",
@@ -144,126 +100,6 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
     );
     assert.ok(prepare.inputSchema.required.includes("reviewer_provider"));
 
-    const startWorkflow = authorTools.tools.find(
-      (tool) => tool.name === "start_autonomous_workflow",
-    );
-    assert.deepEqual(
-      startWorkflow.inputSchema.properties.capabilities.items.enum,
-      [
-        "EDIT_AND_TEST",
-        "CREATE_COMMITS",
-        "CREATE_CODEX_REVIEWER_TASKS",
-        "PUSH_TOPIC_BRANCH",
-        "CREATE_OR_UPDATE_DRAFT_PR",
-        "POST_CODEX_REVIEW_REQUESTS",
-        "MARK_PR_READY",
-        "RETURN_PR_TO_DRAFT_FOR_REPAIR",
-        "RESOLVE_ELIGIBLE_CODEX_THREADS",
-        "UNRESOLVE_INVALIDATED_CODEX_THREADS",
-      ],
-    );
-    assert.ok(
-      startWorkflow.inputSchema.required.includes("publication_target"),
-    );
-    assert.ok(startWorkflow.inputSchema.properties.remote_cycle_budget);
-    assert.ok(startWorkflow.inputSchema.properties.local_cycle_budget);
-    assert.ok(startWorkflow.inputSchema.properties.change_size_budget);
-    assert.equal(
-      startWorkflow.inputSchema.required.includes("local_cycle_budget"),
-      false,
-    );
-    assert.equal(
-      startWorkflow.inputSchema.required.includes("change_size_budget"),
-      false,
-    );
-    assert.equal(
-      startWorkflow.inputSchema.required.includes("remote_cycle_budget"),
-      false,
-    );
-    const planDispatch = authorTools.tools.find(
-      (tool) => tool.name === "plan_codex_task_dispatch",
-    );
-    assert.deepEqual(planDispatch.inputSchema.required.sort(), [
-      "expected_revision",
-      "review_id",
-      "workflow_id",
-    ]);
-    const releaseClaims = authorTools.tools.find(
-      (tool) => tool.name === "release_workflow_claims",
-    );
-    assert.deepEqual(
-      releaseClaims.inputSchema.properties.reconciled_claims.items.required.sort(),
-      [
-        "canonical_key_sha256",
-        "kind",
-        "observed_at",
-        "present",
-        "target",
-        "workflow_revision",
-      ],
-    );
-    const resumeWorkflow = authorTools.tools.find(
-      (tool) => tool.name === "resume_autonomous_workflow",
-    );
-    assert.deepEqual(resumeWorkflow.inputSchema.required.sort(), [
-      "expected_revision",
-      "operator_label",
-      "rationale",
-      "workflow_id",
-    ]);
-    // The registered enum is the only gate a driver meets; the core allowlist
-    // is the one it must agree with. Assert them equal so a reason the
-    // workflow accepts can never become unreachable through MCP.
-    const pauseWorkflow = authorTools.tools.find(
-      (tool) => tool.name === "pause_autonomous_workflow",
-    );
-    assert.deepEqual(pauseWorkflow.inputSchema.properties.reason_code.enum, [
-      ...AUTONOMOUS_PAUSE_REASON_CODES,
-    ]);
-    const extendBudget = authorTools.tools.find(
-      (tool) => tool.name === "extend_remote_cycle_budget",
-    );
-    assert.deepEqual(extendBudget.inputSchema.required.sort(), [
-      "expected_revision",
-      "new_budget",
-      "operator_label",
-      "rationale",
-      "workflow_id",
-    ]);
-    const extendLocalBudget = authorTools.tools.find(
-      (tool) => tool.name === "extend_local_cycle_budget",
-    );
-    assert.deepEqual(extendLocalBudget.inputSchema.required.sort(), [
-      "expected_revision",
-      "new_budget",
-      "operator_label",
-      "rationale",
-      "workflow_id",
-    ]);
-    const extendChangeSizeBudget = authorTools.tools.find(
-      (tool) => tool.name === "extend_change_size_budget",
-    );
-    assert.deepEqual(extendChangeSizeBudget.inputSchema.required.sort(), [
-      "expected_revision",
-      "new_budget",
-      "operator_label",
-      "rationale",
-      "workflow_id",
-    ]);
-    const acknowledgeWarning = authorTools.tools.find(
-      (tool) => tool.name === "acknowledge_change_size_warning",
-    );
-    assert.deepEqual(acknowledgeWarning.inputSchema.required.sort(), [
-      "decision",
-      "expected_revision",
-      "operator_label",
-      "rationale",
-      "workflow_id",
-    ]);
-    assert.deepEqual(acknowledgeWarning.inputSchema.properties.decision.enum, [
-      "continue",
-      "split",
-    ]);
     const prepareReview = authorTools.tools.find(
       (tool) => tool.name === "prepare_review",
     );

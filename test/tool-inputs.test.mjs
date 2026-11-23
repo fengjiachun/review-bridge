@@ -8,7 +8,6 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { startPublication } from "../src/publication.mjs";
 import { executingProof } from "../src/server-input.mjs";
 import {
-  DECLARATION_TABLES,
   PUBLICATION_ACTION_INPUTS,
   REVIEW_ACTION_INPUTS,
   SPLIT_CUT_RECORDED_INPUTS,
@@ -47,7 +46,7 @@ async function authorTools(t) {
 }
 
 function declaredCalls() {
-  return DECLARATION_TABLES.flatMap((table) =>
+  return [REVIEW_ACTION_INPUTS, PUBLICATION_ACTION_INPUTS].flatMap((table) =>
     Object.entries(table).flatMap(([action, calls]) =>
       Object.entries(calls).map(([tool, fields]) => ({ action, tool, fields })),
     ),
@@ -94,8 +93,6 @@ test("read-surface tool descriptions point at required_inputs", async (t) => {
   for (const name of [
     "get_review_summary",
     "get_publication_summary",
-    "get_autonomous_workflow_summary",
-    "list_autonomous_workflows",
   ]) {
     assert.match(tools.get(name).description, /required_inputs/);
   }

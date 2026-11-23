@@ -474,7 +474,6 @@ test("Hermes author MCP snippet is separate, unfiltered, and starts only --role 
     "prepare_review",
     "start_publication",
     "record_github_snapshot",
-    "start_autonomous_workflow",
   ]) {
     assert.ok(authorTools.includes(tool), `author server is missing ${tool}`);
   }
@@ -555,30 +554,26 @@ test("noise comments and decorative tests are contracted on both ends", async ()
   const workflowSkill = flatten(
     await readWorkflowSkill(path.join(projectRoot, WORKFLOW_SKILL)),
   );
-  // Both author paths — autonomous COMMIT_HEAD and the manual Prepare flow —
-  // must carry the obligation, so one occurrence is a silent exemption.
+  // Both the entrypoint and the Prepare flow must carry the obligation, so one
+  // occurrence is a silent exemption.
   const countOf = (text, phrase) => text.split(phrase).length - 1;
   assert.ok(
     countOf(
       workflowSkill,
       "remove comments that do not state a constraint the code cannot express",
     ) >= 2,
-    "noise-comment cleanup must cover both the autonomous and manual author paths",
+    "noise-comment cleanup must cover both the entrypoint and Prepare",
   );
   assert.ok(
     countOf(
       workflowSkill,
       "remove tests that no behavior change can turn red",
     ) >= 2,
-    "decorative-test cleanup must cover both the autonomous and manual author paths",
-  );
-  assert.ok(
-    workflowSkill.includes("every later fix commit the workflow records"),
-    "the cleanup obligation must scope to fix commits, not only COMMIT_HEAD",
+    "decorative-test cleanup must cover both the entrypoint and Prepare",
   );
   assert.ok(
     countOf(workflowSkill, "pre-commit cleanup") >= 6,
-    "every commit instruction site must reference the pre-commit cleanup: the step-7 fix head, ADDRESS_LOCAL_FINDINGS, the step-12 repair phases, the manual rereview fix, and both REMOTE_ONLY commit paths",
+    "every commit instruction site must reference the pre-commit cleanup: the entrypoint and its test-quality section, the rereview fix, the publication preamble, the REMOTE_ONLY commit, and the Codex-finding fix",
   );
   for (const file of [
     path.join(
@@ -994,7 +989,6 @@ test("the workflow skill states Hermes provenance and provider binding", async (
   ]);
   const hermesText = hermes.replace(/\s+/g, " ");
   assert.match(hermesText, /configured.*provenance.*not cryptographic/is);
-  assert.match(hermesText, /Autonomous local task creation remains `CODEX_TASK`-only\./);
   assert.match(hermesText, /local HERMES gate passes/i);
   assert.match(hermesText, /author\/publication-side operation/i);
 
