@@ -1714,9 +1714,9 @@ test("a continuation refusal names every unmet condition", async (t) => {
         error.message,
         /source status is WAITING_FOR_REVIEW, but only CONTINUABLE_FINDINGS can be continued/,
       );
-      assert.ok(error.message.includes(`; repository ${otherRepository} differs from the source review's ${sourceRepository};`));
-      assert.match(error.message, /; requirement differs from the source review's requirement/);
-      assert.match(error.message, /; reviewer_provider CODEX_TASK differs from the source review's CLAUDE_DESKTOP/);
+      assert.ok(error.message.includes(`repository ${otherRepository} differs from the source review's ${sourceRepository}`));
+      assert.match(error.message, /requirement differs from the source review's requirement/);
+      assert.match(error.message, /reviewer_provider CODEX_TASK differs from the source review's CLAUDE_DESKTOP/);
       return true;
     },
   );
