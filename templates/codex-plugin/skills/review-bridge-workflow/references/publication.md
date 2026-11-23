@@ -77,11 +77,11 @@ For either mode:
    the prior requests it proved this chain issued. An unverified or legacy one
    is never superseded and keeps the acknowledgement path.
 5. Refresh the PR head and require it to equal the publication authorization
-   head. Call `get_publication_summary` and require
-   `next_action: POST_AND_RECORD_CODEX_REVIEW_REQUEST`. If it instead returns
-   `MARK_PULL_REQUEST_READY`, the pull request is still a draft: ask the
-   operator to mark it ready, record a fresh observation, and read the summary
-   again. Post exactly one issue
+   head. From here on, call `get_publication_summary`, do what its
+   `next_action` and `required_inputs` name, and read it again; the steps
+   below add only what the summary cannot say. `MARK_PULL_REQUEST_READY` is
+   the operator's step. When it is `POST_AND_RECORD_CODEX_REVIEW_REQUEST`:
+   Post exactly one issue
    comment whose entire body equals the returned `codex_review_request.body`;
    do not edit, reconstruct, or shorten it. Then immediately call
    `record_codex_review_request` with the post response's comment ID, URL,
@@ -137,8 +137,8 @@ For either mode:
     `authorize_remote_publication` again in `REMOTE_ONLY` mode. A new commit
     invalidates this ledger and its prior GitHub Codex result. In `LOCAL_GATE`
     mode that task is a successor by default: leave `parent_review_id` unset
-    and `force_full_review` off, so its reviewed unit is the fix delta over the
-    head this publication already gated.
+    and `force_full_review` off, so the server selects a verified parent as
+    Prepare describes and reviews the delta over it.
 10. After `MERGE_READY`, run the packaged collector once more with
     `--review-id <review_id>` for a final fresh GitHub observation and call
     `record_github_snapshot` with the printed `observation_path`, then call

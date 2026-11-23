@@ -27,7 +27,7 @@ not hold up.
 
 ## When everything goes well
 
-A change moves through seven steps. Two words used throughout: the **driver**
+A change moves through five steps. Two words used throughout: the **driver**
 is the model (or person) calling the tools, and the **ledger** is the
 server-side record the tools write — the driver proposes, the ledger decides
 what counts.
@@ -35,13 +35,11 @@ what counts.
 ```mermaid
 flowchart LR
   A["1 Local review"] --> B["2 Push +<br/>draft PR"]
-  B --> C["3 Ask Codex<br/>to review"]
-  C --> D["4 Mark ready"]
-  D --> E["5 Watch CI<br/>and comments"]
-  E --> F["6 MERGE_READY:<br/>mint the gate"]
-  F --> G["7 Verify,<br/>then merge"]
+  B --> C["3 Follow the<br/>publication summary"]
+  C --> D["4 MERGE_READY:<br/>mint the gate"]
+  D --> E["5 Verify,<br/>then merge"]
   classDef n fill:#ffffff,stroke:#57606a,stroke-width:1px,color:#111111;
-  class A,B,C,D,E,F,G n;
+  class A,B,C,D,E n;
 ```
 
 **1 — Local review.** The first gate, before the code leaves your machine.
@@ -66,7 +64,7 @@ does not block, because the operator is already present to decide on a split.
 
 Note that this gate attests **snapshot consistency**, not test results:
 finalizing it re-checks that the tree still matches what the reviewer saw.
-The deterministic test gate lives later, in step 5, where CI results are
+The deterministic test gate lives later, in step 3, where CI results are
 provider evidence rather than the author's word.
 
 **2 — Push and open a draft PR.** What gets pushed must be byte-for-byte the
@@ -78,32 +76,31 @@ reach the local gate, but it cannot go further. GitHub hosts no sha256
 repository, so authorizing a remote-only publication and starting a
 publication each refuse it with `REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE`.
 
-**3 — Ask Codex to review.** `start_publication` binds a baseline of the
-existing Codex feeds; the server then composes the request comment — with a
-correlation marker — and the driver posts it verbatim and binds the posted
-comment to the ledger. The marker is how a later result is recognized as
-answering *this* request rather than one from last week; a crash between
-posting and binding is caught by unbound-request detection. When the baseline
-holds an earlier request that needs an observation first, a recorded
-observation of the draft reads `PR_DRAFT` and the summary asks for step 4
-before it offers the request body.
+**3 — Follow the publication summary.** `start_publication` binds a
+baseline of the existing Codex feeds. From then on, `get_publication_summary`
+names the next action and its `required_inputs` — post the Codex review
+request, record a fresh observation, mark the PR ready, or fix what blocks
+it. Do what it names, then read it again. What it does not say:
 
-**4 — Mark ready.** Leaving draft is your call: click "Ready for review" when
-the summary's next action is `MARK_PULL_REQUEST_READY`. A draft never reads
-`MERGE_READY`.
+- The request comment it supplies carries a correlation marker. Post it
+  verbatim and bind it at once: the marker is how a later result is
+  recognized as answering *this* request rather than one from last week, and
+  a crash between posting and binding is caught by unbound-request detection.
+- Marking the PR ready is your click on "Ready for review". A draft never
+  reads `MERGE_READY`.
+- An observation is the PR's complete state collected in one pass — check
+  runs, Codex results, review threads — and the ledger derives its status
+  from it.
 
-**5 — Watch.** Periodically the driver collects the PR's complete state in
-one pass — check runs, Codex results, review threads — and records it in the
-ledger. The ledger derives a status from each observation; the driver
-follows the summary's next action until the head is the gated head, Codex returned a
-clean correlated result, every required check succeeded, and no review
-thread is unresolved.
+The ledger reads `MERGE_READY` once the head is the gated head, the PR is out
+of draft and mergeable, every required check succeeded, Codex returned a
+clean correlated result, and no review thread is unresolved.
 
-**6 — `MERGE_READY`: mint the gate.** One more fresh observation confirms
+**4 — `MERGE_READY`: mint the gate.** One more fresh observation confirms
 nothing moved, and `finalize_publication_gate` issues an audited gate that
 expires five minutes after the oldest source collection in that observation.
 
-**7 — Verify, then merge.** Immediately before the merge,
+**5 — Verify, then merge.** Immediately before the merge,
 `verify_publication_gate` re-checks the gate against the current ledger; only
 `valid: true` authorizes it, and the merge is pinned to the verified head.
 Merging stays an explicit operator decision.
@@ -112,11 +109,11 @@ Merging stays an explicit operator decision.
 
 ## When things do not go well
 
-Step 5 rarely passes on the first try. The common cases:
+Step 3 rarely passes on the first try. The common cases:
 
 ```mermaid
 flowchart TD
-  E["5 Watching"] --> Q{"What came back?"}
+  E["3 Following the summary"] --> Q{"What came back?"}
   Q -->|"Codex found a problem"| R1["Fix the code:<br/>back to step 1"]
   Q -->|"CI failed"| R1
   Q -->|"An unresolved<br/>review thread"| R2["Answer it,<br/>then resolve it"]
@@ -128,9 +125,10 @@ flowchart TD
 
 **Fixing code restarts the pipeline.** A new commit is a new head, and a new
 head needs a new local review and a new publication ledger. Previous verdicts
-do not carry over — deliberately. The new review is a successor by default:
-its reviewed unit is the fix delta over the head the earlier publication
-gated.
+do not carry over — deliberately. When `prepare_review` reports a verified
+parent, the new review is a successor and its reviewed unit is the delta over
+that parent; otherwise it reviews the full patch. [Successor
+reviews](local-review.md#successor-reviews) describes how the parent is chosen.
 
 **Threads are answered before they are closed.** An unresolved review thread
 keeps the ledger short of `MERGE_READY`. Reply on the thread with the commits

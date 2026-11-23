@@ -554,26 +554,24 @@ test("noise comments and decorative tests are contracted on both ends", async ()
   const workflowSkill = flatten(
     await readWorkflowSkill(path.join(projectRoot, WORKFLOW_SKILL)),
   );
-  // Both the entrypoint and the Prepare flow must carry the obligation, so one
-  // occurrence is a silent exemption.
   const countOf = (text, phrase) => text.split(phrase).length - 1;
   assert.ok(
     countOf(
       workflowSkill,
       "remove comments that do not state a constraint the code cannot express",
     ) >= 2,
-    "noise-comment cleanup must cover both the entrypoint and Prepare",
+    "the routed skill must state the noise-comment cleanup at least twice",
   );
   assert.ok(
     countOf(
       workflowSkill,
       "remove tests that no behavior change can turn red",
     ) >= 2,
-    "decorative-test cleanup must cover both the entrypoint and Prepare",
+    "the routed skill must state the decorative-test cleanup at least twice",
   );
   assert.ok(
     countOf(workflowSkill, "pre-commit cleanup") >= 6,
-    "every commit instruction site must reference the pre-commit cleanup: the entrypoint and its test-quality section, the rereview fix, the publication preamble, the REMOTE_ONLY commit, and the Codex-finding fix",
+    "the routed skill must mention the pre-commit cleanup at least six times",
   );
   for (const file of [
     path.join(

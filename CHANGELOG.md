@@ -82,8 +82,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   Upgrading: workflow records under `workflows/` in an existing store stay
   on disk. Most publication tools still read the workflow record a
   version-3 (workflow-bound) publication names, so keep it while that
-  publication is in use; no author tool reads the others, and they can be
-  deleted.
+  publication is in use.
 
 ## 0.24.0 - 2026-11-13
 
