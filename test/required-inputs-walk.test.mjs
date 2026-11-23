@@ -48,9 +48,10 @@ import { commit, fixture, git, TOPIC_BRANCH } from "./helpers/repository-fixture
 
 // The state-rejection family: every code a transition raises because of the
 // ledger state the call was initiated from, enumerated from the fail() sites
-// of workflow.mjs and publication.mjs. Included are the status, phase, and
-// action-progress guards, the review-transition and split gates, the calls a
-// state has already consumed or not yet earned, and the terminal refusals.
+// of workflow.mjs that the local probes reach. Included are the status,
+// phase, and action-progress guards, the review-transition and split gates,
+// the calls a state has already consumed or not yet earned, and the terminal
+// refusals.
 // Excluded are argument validation, revision conflicts, identity and
 // repository mismatches, and evidence-content refusals: those reject what
 // the driver brought, not the state it stood in. Review-side transitions in
@@ -61,7 +62,6 @@ const STATE_REJECTION_CODES = new Set([
   "WORKFLOW_PHASE_INVALID",
   "WORKFLOW_NOT_ACTIVE",
   "WORKFLOW_PAUSED",
-  "WORKFLOW_CANCELLED",
   "WORKFLOW_TERMINAL",
   "WORKFLOW_ACTION_STATE_INVALID",
   "WORKFLOW_ACTION_KIND_INVALID",
@@ -84,10 +84,6 @@ const STATE_REJECTION_CODES = new Set([
   "WORKFLOW_THREAD_ALREADY_RESOLVED",
   "WORKFLOW_THREAD_REPLY_NOT_OBSERVED",
   "WORKFLOW_PUBLICATION_NOT_READY",
-  "PUBLICATION_TERMINAL",
-  "PUBLICATION_ALREADY_STARTED",
-  "PUBLICATION_STARTED",
-  "PUBLICATION_NOT_READY",
 ]);
 
 const OPERATOR = "Test Operator";

@@ -1527,8 +1527,6 @@ function validateThreadProvenance(thread) {
       const review = assertObject(comment.review, "thread comment review");
       assertString(review.id, "thread review id", 255);
       assertId(review.database_id, "thread review database_id");
-      // GitHub's normalized enum, exactly: an unknown spelling fails closed
-      // here rather than being stored as a plain string.
       assertEnum(
         review.state,
         ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"],
@@ -1954,7 +1952,7 @@ export function refuseLegacyPublication(ledger) {
   if (ledger.version === 3) {
     fail(
       "PUBLICATION_READ_ONLY",
-      "a version 3 (workflow-bound) publication is read-only; only get_publication reads it",
+      "version 3 (workflow-bound) publications are read-only; use get_publication to inspect this ledger",
     );
   }
 }
@@ -1968,14 +1966,18 @@ function requireStoredReviewId(ledger, reviewId) {
   }
 }
 
-function validateStoredLedger(ledger) {
-  assertObject(ledger, "publication");
+function requireSupportedVersion(ledger) {
   if (!SUPPORTED_PUBLICATION_VERSIONS.includes(ledger.version)) {
     fail(
       "UNSUPPORTED_PUBLICATION_VERSION",
       "only publication schema versions 1, 2, and 3 are supported",
     );
   }
+}
+
+function validateStoredLedger(ledger) {
+  assertObject(ledger, "publication");
+  requireSupportedVersion(ledger);
   assertRevision(ledger.revision);
   publicationDirectory("/store", ledger.review_id);
   timestampMs(ledger.created_at, "publication.created_at");
@@ -2936,6 +2938,7 @@ async function openAuthorizationFiles(
       "PUBLICATION_STORE_INVALID",
       "publication.json is not a JSON object",
     );
+    requireSupportedVersion(ledger);
     assertStoredCanonicalJsonBytes(
       ledger,
       publicationFile.bytes,
@@ -3051,6 +3054,7 @@ async function loadPublicationFile(
       "PUBLICATION_STORE_INVALID",
       "publication.json is not a JSON object",
     );
+    requireSupportedVersion(ledger);
     assertStoredCanonicalJsonBytes(
       ledger,
       opened.bytes,

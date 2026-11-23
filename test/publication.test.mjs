@@ -24,6 +24,8 @@ import {
   startPublication,
   verifyPublicationGate,
 } from "../src/publication.mjs";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { adaptCodexEvidence } from "../src/github-adapter.mjs";
 import { writeReviewReport } from "../src/report.mjs";
 import {
@@ -7453,6 +7455,21 @@ test("a version 2 ledger carrying workflow fields fails closed", async (t) => {
   }
 });
 
+test("an unsupported version is named before the canonical-bytes check", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  await start(state, Date.now());
+  const ledger = JSON.parse(await fsp.readFile(publicationPath(state), "utf8"));
+  await fsp.writeFile(
+    publicationPath(state),
+    `${JSON.stringify({ ...ledger, version: 4 }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  const unsupported = { code: "UNSUPPORTED_PUBLICATION_VERSION" };
+  await assert.rejects(getPublication(state.store, state.reviewId), unsupported);
+  await assert.rejects(getPublicationSummary(state.store, state.reviewId), unsupported);
+});
+
 test("a version 2 gate carrying workflow fields does not verify", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -7580,7 +7597,7 @@ test("a version 3 publication is read-only legacy", async (t) => {
   );
   const codex = { id: 99, type: "Bot", login: "codex" };
   const author = { id: 7, type: "User", login: "author" };
-  const comment = (databaseId, actor, at, reviewId) => ({
+  const comment = (databaseId, actor, at, reviewId, reviewedHead = state.headSha) => ({
     id: `PRRC_${databaseId}`,
     database_id: databaseId,
     created_at: iso(at),
@@ -7590,11 +7607,13 @@ test("a version 3 publication is read-only legacy", async (t) => {
       id: `PRR_${reviewId}`,
       database_id: reviewId,
       state: "COMMENTED",
-      reviewed_head_sha: state.headSha,
+      reviewed_head_sha: reviewedHead,
       actor,
     },
   });
-  // The Codex finding and the workflow's reply (comment 55), still open.
+  // A Codex finding raised against an earlier head, and the workflow's reply
+  // (comment 55) on the gated head, still open.
+  const findingHead = "c".repeat(40);
   const answered = {
     id: "PRRT_1",
     is_resolved: false,
@@ -7603,7 +7622,7 @@ test("a version 3 publication is read-only legacy", async (t) => {
     comments_pagination_complete: true,
     provenance_complete: true,
     comments: [
-      comment(54, codex, startedAt - 5_000, 501),
+      comment(54, codex, startedAt - 5_000, 501, findingHead),
       comment(55, author, startedAt - 4_000, 502),
     ],
   };
@@ -7615,6 +7634,15 @@ test("a version 3 publication is read-only legacy", async (t) => {
   first.review_threads.total_count = 1;
   first.review_threads.unresolved_count = 1;
   first.review_threads.threads = [answered];
+  first.review_threads.ancestry = [
+    {
+      finding_head_sha: findingHead,
+      status: "AHEAD",
+      descends: true,
+      endpoint: `GET /repos/owner/repo/compare/${findingHead}...${state.headSha}`,
+      collected_at: iso(observedAt - 500),
+    },
+  ];
   await recordGithubSnapshot(
     state.store,
     state.reviewId,
@@ -7676,6 +7704,16 @@ test("a version 3 publication is read-only legacy", async (t) => {
   };
   const secondAt = iso(startedAt + 2_500);
   const second = structuredClone(firstObservation);
+  // Every source of the later snapshot was collected after the follow-up.
+  const retime = (value) => {
+    if (Array.isArray(value)) return value.forEach(retime);
+    if (value == null || typeof value !== "object") return;
+    for (const [key, entry] of Object.entries(value)) {
+      if (key === "collected_at") value[key] = iso(startedAt + 2_400);
+      else retime(entry);
+    }
+  };
+  retime(second);
   second.observed_at = secondAt;
   second.recorded_at = secondAt;
   second.review_threads.unresolved_count = 0;
@@ -7720,6 +7758,10 @@ test("a version 3 publication is read-only legacy", async (t) => {
   await atomicWriteCanonicalJson(publicationPath(state), legacy);
 
   assert.deepEqual(await getPublication(state.store, state.reviewId), legacy);
+  // A repeated start keeps its own refusal.
+  await assert.rejects(start(state, Date.now()), {
+    code: "PUBLICATION_ALREADY_STARTED",
+  });
   // Both same-pull-request scans still read it: the prior-ledger count, and
   // the issuance match that binds the request this ledger posted.
   const successor = await successorFixture(state);
@@ -7736,6 +7778,10 @@ test("a version 3 publication is read-only legacy", async (t) => {
   });
 
   const audit = await inspectPublicationAudit(state.store, state.reviewId);
+  // A gate file beside the ledger must survive every refusal.
+  const gatePath = publicationPath(state, "publication-gate.json");
+  await atomicWriteCanonicalJson(gatePath, { legacy_gate: true });
+  const gateBytes = await fsp.readFile(gatePath);
   const at = Date.now();
   const refused = { code: "PUBLICATION_READ_ONLY" };
   await assert.rejects(getPublicationSummary(state.store, state.reviewId), refused);
@@ -7806,19 +7852,66 @@ test("a version 3 publication is read-only legacy", async (t) => {
     refused,
   );
   await assert.rejects(writeReviewReport(state.store, state.reviewId), refused);
-  // The report refuses on the publication, not on a companion file it would
-  // otherwise read.
-  await fsp.rename(
-    path.join(state.store, "reviews", state.reviewId, "review.json"),
-    path.join(state.root, "review.json"),
+  // Input errors keep their place ahead of the refusal: a stale request
+  // comment, an unreadable observation file, and a malformed review ledger.
+  await assert.rejects(
+    recordCodexReviewRequest(
+      state.store,
+      state.reviewId,
+      {
+        expectedRevision: legacy.revision,
+        commentId: 102,
+        url: "https://github.com/owner/repo/issues/7#issuecomment-102",
+        createdAt: iso(at - 10 * 60 * 1_000),
+        requestedHeadSha: state.headSha,
+      },
+      { clock: () => at },
+    ),
+    { code: "EVIDENCE_STALE" },
   );
+  const client = new Client({ name: "review-bridge-test", version: "0.9.0" });
+  await client.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [path.resolve("src/server.mjs"), "--role", "author"],
+      env: { ...process.env, REVIEW_BRIDGE_HOME: state.store },
+      stderr: "pipe",
+    }),
+  );
+  try {
+    const unreadable = await client.callTool({
+      name: "record_github_snapshot",
+      arguments: {
+        review_id: state.reviewId,
+        expected_revision: legacy.revision,
+        observation_path: path.join(state.root, "absent.json"),
+      },
+    });
+    assert.equal(
+      JSON.parse(unreadable.content[0].text).code,
+      "OBSERVATION_FILE_UNREADABLE",
+    );
+  } finally {
+    await client.close();
+  }
+  const reviewPath = path.join(state.store, "reviews", state.reviewId, "review.json");
+  const reviewBytes = await fsp.readFile(reviewPath);
+  await fsp.writeFile(reviewPath, "{", { mode: 0o600 });
+  await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+    assert.notEqual(error.code, "PUBLICATION_READ_ONLY");
+    return true;
+  });
+  // Without a review ledger the report refuses on the publication.
+  await fsp.rm(reviewPath);
   await assert.rejects(writeReviewReport(state.store, state.reviewId), refused);
-  // Verification refuses before it writes its audit event.
+  await fsp.writeFile(reviewPath, reviewBytes, { mode: 0o600 });
+  // Nothing was written: not the audit, the ledger, or the gate file.
   assert.deepEqual(
     await inspectPublicationAudit(state.store, state.reviewId),
     audit,
   );
   assert.deepEqual(await getPublication(state.store, state.reviewId), legacy);
+  assert.deepEqual(await fsp.readFile(gatePath), gateBytes);
 
   // The structural rules on the automatic-resolution events still apply.
   const malformed = structuredClone(legacy);
