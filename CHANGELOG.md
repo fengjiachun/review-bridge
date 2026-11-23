@@ -11,6 +11,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Changed
 
+- (#219) `prepare_review` no longer requires `reviewer_provider`; a review
+  prepared without one is bound to `CODEX_TASK`. Pass another provider only
+  to use it.
 - (#212) `list_reviews` requires `repository_path` and returns only the
   reviews whose stored `repository_path` equals it exactly. Callers must pass
   the repository's resolved top-level path, as `prepare_review` stores it
