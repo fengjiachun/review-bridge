@@ -629,6 +629,10 @@ test("publish-bound work states its gate provider and its review strategy", asyn
       "the second opinion must never read as a substitute for the gate",
     ],
     [
+      "run it in addition to the `CODEX_TASK` gate only when they name it",
+      "the second opinion must run only when the user names it",
+    ],
+    [
       "A verified `SUCCESSOR` is the default and stands",
       "successor must be stated as the default review strategy",
     ],
@@ -664,7 +668,7 @@ test("Codex workflow skill documents manual Hermes provider selection and handof
   // Keyed on each step's text rather than its number, so inserting a Prepare
   // step renumbers the list without reading as a missing section.
   const providerSelection = skill.match(
-    /`CODEX_TASK` is the default `reviewer_provider`[\s\S]*?names one:(?<body>[\s\S]*?)\n\d+\. Call `prepare_review`/,
+    /`CODEX_TASK` is the default `reviewer_provider`;[\s\S]*?Pass another provider only when the user names one:(?<body>[\s\S]*?)\n\d+\. Call `prepare_review`/,
   );
   assert.ok(providerSelection, "manual reviewer provider section is missing");
   assert.match(

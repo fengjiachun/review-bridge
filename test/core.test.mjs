@@ -86,7 +86,6 @@ test("manual review reports immutable change size without blocking", async (t) =
     baseRef: baseSha,
     requirement: "Report deterministic change size.",
     implementationScope: "Replace app.js.",
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(prepared.status, "WAITING_FOR_REVIEW");
   assert.deepEqual(prepared.change_size, {
@@ -134,7 +133,6 @@ test("manual review reports an over-budget change without blocking", async (t) =
     baseRef: baseSha,
     requirement: "Report an over-budget manual review without blocking it.",
     implementationScope: "Add large.js.",
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(prepared.status, "WAITING_FOR_REVIEW");
   assert.deepEqual(prepared.change_size, {
@@ -213,7 +211,6 @@ test("workflow snapshot reads reject a tampered change-size measurement", async 
     baseRef: baseSha,
     requirement: "Bind the immutable measurement.",
     implementationScope: "Add large.js.",
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
   const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
@@ -483,7 +480,6 @@ test("legacy review records default their reviewer provider to Claude", async (t
     baseRef: git(repository, "rev-parse", "HEAD"),
     requirement: "Preserve legacy reviewer compatibility.",
     implementationScope: "Interpret a missing provider as Claude Desktop.",
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const reviewPath = path.join(
     store,
