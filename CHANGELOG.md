@@ -87,9 +87,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   autonomous route and `docs/autonomous-workflow.md` are gone. Manual local
   review and the hand-driven publication ledger remain unchanged.
   Upgrading: workflow records under `workflows/` in an existing store stay
-  on disk. Most publication tools still read the workflow record a
-  version-3 (workflow-bound) publication names, so keep it while that
-  publication is in use.
+  on disk.
+- (#218) Version-3 (workflow-bound) publications can no longer be used:
+  `get_publication` still reads one, and every other publication tool,
+  `render_review_report` included, refuses it with `PUBLICATION_READ_ONLY`.
+  No publication tool reads `workflows/` any more, so a version-3
+  publication no longer needs its workflow record. Reports no longer mark
+  review threads as resolved automatically, and their format number is now 10.
 
 ## 0.24.0 - 2026-11-13
 

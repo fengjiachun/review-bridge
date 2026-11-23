@@ -419,6 +419,10 @@ test("publication summary reports compact next actions and gate state", async (t
   const requested = await getPublicationSummary(state.store, state.reviewId);
   assert.equal(requested.blocking_reason, "NO_GITHUB_SNAPSHOT");
   assert.equal(requested.next_action, "RECORD_GITHUB_SNAPSHOT");
+  assert.deepEqual(
+    requested.required_inputs,
+    PUBLICATION_ACTION_INPUTS.RECORD_GITHUB_SNAPSHOT,
+  );
 
   const pendingAt = startedAt + 2_000;
   await recordGithubSnapshot(
