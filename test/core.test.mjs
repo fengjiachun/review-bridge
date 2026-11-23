@@ -1510,6 +1510,15 @@ test("new findings after an uncontested rereview are continuable", async (t) => 
   );
   assert.equal(result.status, "CONTINUABLE_FINDINGS");
   assert.equal(result.findings.at(-1).status, "OPEN");
+  const continuable = await getReviewSummary(store, prepared.id);
+  assert.equal(continuable.action_required, "ADDRESS_LOCAL_FINDINGS");
+  assert.deepEqual(
+    continuable.required_inputs.prepare_review.find(([field]) => field === "implementation_scope"),
+    [
+      "implementation_scope",
+      "your scope for the new head; get_review implementation_scope may be reused",
+    ],
+  );
   await assert.rejects(
     exportHumanArbitration(store, prepared.id, result.state_version),
     /does not require human arbitration/,
@@ -1603,18 +1612,69 @@ test("carried findings are reviewer scope hints without author rationale", async
     /must descend from the source head/,
   );
   git(repository, "switch", "main");
+  await assert.rejects(
+    prepareReview(store, {
+      repositoryPath: repository,
+      baseRef: baseSha,
+      requirement: "Expose a stable, documented value.",
+      implementationScope: "Change app.js.",
+      forceFullReview: true,
+      continuedFromReviewId: source.id,
+    }),
+    {
+      message: `cannot continue review ${source.id}: requirement differs from the source review's requirement`,
+    },
+  );
+  await assert.rejects(
+    prepareReview(store, {
+      repositoryPath: repository,
+      baseRef: baseSha,
+      requirement: "Expose a stable value.",
+      implementationScope: "Change app.js.",
+      reviewerProvider: "CODEX_TASK",
+      forceFullReview: true,
+      continuedFromReviewId: source.id,
+    }),
+    {
+      message: `cannot continue review ${source.id}: reviewer_provider CODEX_TASK differs from the source review's CLAUDE_DESKTOP`,
+    },
+  );
+  const other = await fixture();
+  t.after(() => fsp.rm(other.root, { recursive: true, force: true }));
+  const otherRepository = await fsp.realpath(other.repository);
+  await assert.rejects(
+    prepareReview(store, {
+      repositoryPath: other.repository,
+      baseRef: "HEAD",
+      requirement: "Expose a stable value.",
+      implementationScope: "Change app.js.",
+      forceFullReview: true,
+      continuedFromReviewId: source.id,
+    }),
+    {
+      message: `cannot continue review ${source.id}: repository ${otherRepository} differs from the source review's ${await fsp.realpath(repository)}`,
+    },
+  );
   const nestedDirectory = path.join(repository, "nested");
   await fsp.mkdir(nestedDirectory);
   const prepared = await prepareReview(store, {
     repositoryPath: nestedDirectory,
     baseRef: baseSha,
     requirement: "Expose a stable value.",
-    implementationScope: "Change app.js.",
+    implementationScope: "Change app.js and cover the edge case.",
     forceFullReview: true,
     continuedFromReviewId: source.id,
   });
   const opened = await openReview(store, prepared.id);
   assert.equal(opened.repository_path, await fsp.realpath(repository));
+  assert.equal(
+    opened.implementation_scope,
+    "Change app.js and cover the edge case.",
+  );
+  assert.equal(
+    (await getReview(store, prepared.id)).implementation_scope,
+    "Change app.js and cover the edge case.",
+  );
   assert.equal(opened.review_strategy.mode, "FULL");
   assert.equal(opened.carried_findings.length, 1);
   assert.equal(opened.carried_findings[0].continued_from_review_id, source.id);
@@ -1622,6 +1682,44 @@ test("carried findings are reviewer scope hints without author rationale", async
   assert.equal(opened.carried_findings[0].title, "New edge case");
   assert.deepEqual(opened.carried_findings[0].constraint, { kind: "undocumented" });
   assert.equal("rationale" in opened.carried_findings[0], false);
+});
+
+test("a continuation refusal names every unmet condition", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
+  const source = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: "HEAD",
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+  });
+  const other = await fixture();
+  t.after(() => fsp.rm(other.root, { recursive: true, force: true }));
+  const otherRepository = await fsp.realpath(other.repository);
+  const sourceRepository = await fsp.realpath(repository);
+  await assert.rejects(
+    prepareReview(store, {
+      repositoryPath: other.repository,
+      baseRef: "HEAD",
+      requirement: "Expose a different value.",
+      implementationScope: "Change app.js.",
+      reviewerProvider: "CODEX_TASK",
+      forceFullReview: true,
+      continuedFromReviewId: source.id,
+    }),
+    (error) => {
+      assert.match(error.message, new RegExp(`^cannot continue review ${source.id}: `));
+      assert.match(
+        error.message,
+        /source status is WAITING_FOR_REVIEW, but only CONTINUABLE_FINDINGS can be continued/,
+      );
+      assert.ok(error.message.includes(`repository ${otherRepository} differs from the source review's ${sourceRepository}`));
+      assert.match(error.message, /requirement differs from the source review's requirement/);
+      assert.match(error.message, /reviewer_provider CODEX_TASK differs from the source review's CLAUDE_DESKTOP/);
+      return true;
+    },
+  );
 });
 
 test("a finding's constraint is documented with a source or undocumented without one", async (t) => {
