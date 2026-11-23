@@ -47,8 +47,9 @@ test("waiting keeps cadence separate from local timeouts", async () => {
   const entry = docs.get("SKILL.md").replace(/\s+/g, " ");
   assert.match(entry, /Prefer supported state-change waits or long polling/);
   const remote = docs.get("SKILL.md").split(/\n\s*\n/)
+    .map((paragraph) => paragraph.replace(/\s+/g, " ").trim())
     .find((paragraph) => paragraph.startsWith("For remote GitHub observation collection,"));
-  assert.equal(remote?.replace(/\s+/g, " ").trim(),
+  assert.equal(remote,
     "For remote GitHub observation collection, when the host can wake the agent on "
     + "pull-request events such as check results, new comments or reviews, and conflicts, "
     + "wait on that wake instead of collecting repeatedly. Without such a host, back off "
