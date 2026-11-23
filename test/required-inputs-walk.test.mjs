@@ -75,7 +75,6 @@ const STATE_REJECTION_CODES = new Set([
   "WORKFLOW_CLAIMS_RELEASED",
   "WORKFLOW_CLAIMS_ALREADY_RELEASED",
   "WORKFLOW_RESOLUTION_RECORD_MISSING",
-  "WORKFLOW_RESOLUTION_ACTION_MISSING",
   "WORKFLOW_UNRESOLVE_RECORD_MISSING",
   "WORKFLOW_UNRESOLVE_REFRESH_MISSING",
   "WORKFLOW_THREAD_NOT_ELIGIBLE",
@@ -86,7 +85,6 @@ const STATE_REJECTION_CODES = new Set([
   "WORKFLOW_THREAD_REPLY_NOT_OBSERVED",
   "WORKFLOW_PUBLICATION_NOT_READY",
   "PUBLICATION_TERMINAL",
-  "PUBLICATION_SUPERSEDED",
   "PUBLICATION_ALREADY_STARTED",
   "PUBLICATION_STARTED",
   "PUBLICATION_NOT_READY",
@@ -179,8 +177,7 @@ const PROBES = {
     ctx.revision = result.revision;
   },
   submit_resolutions: async (ctx, summary) => {
-    const reviewId =
-      summary.current_review?.review_id ?? summary.current_publication?.review_id;
+    const reviewId = summary.current_review.review_id;
     const review = await getReviewSummary(ctx.store, reviewId);
     const active = review.active_findings ?? [];
     if (active.length === 0) {
@@ -438,9 +435,7 @@ const dispatchTurns = (label) => [
   { expect: "COMPLETE_CODEX_TASK_DISPATCH" },
 ];
 
-// Push and draft-pull-request action states, walked. Once the workflow owns a
-// pull request the push pre-read owes its draft flag, which is exactly what
-// the declared source states.
+// Push and draft-pull-request action states, walked.
 const publishTurns = () => [
   { expect: "PLAN_PUSH" },
   {
@@ -451,9 +446,6 @@ const publishTurns = () => [
         return {
           resolved_repository_id: REPOSITORY_ID,
           resolved_url: workflow.active_action.target.remote_url,
-          ...(workflow.pull_request == null
-            ? {}
-            : { pull_request_is_draft: true }),
         };
       },
     },

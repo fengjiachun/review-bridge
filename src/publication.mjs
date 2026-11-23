@@ -1455,9 +1455,10 @@ function validateChecks(requiredChecks, pullRequest, target) {
 }
 
 /**
- * A thread's provenance has to be complete enough to replay who wrote it and
- * which formal review it belongs to. Partial evidence is rejected rather than
- * recorded, so an absent field can never read as an established fact.
+ * A thread's provenance records who wrote each comment and which formal
+ * review it belongs to. Incomplete evidence is stored when provenance_complete
+ * says so; what is rejected is a field claimed without the evidence behind
+ * it, or a completeness claim the evidence does not support.
  */
 function validateThreadProvenance(thread) {
   if (thread.comments === undefined) {
@@ -1485,9 +1486,8 @@ function validateThreadProvenance(thread) {
   if (thread.comment_count !== null) {
     assertId(thread.comment_count, "thread.comment_count");
   }
-  // Both identifiers, not just one. The node ID is what the later watermark
-  // and resolution joins key on, so a duplicate there would leave the identity
-  // this evidence exists to establish ambiguous.
+  // Both identifiers, not just one: a duplicate node ID would leave the
+  // comment's identity ambiguous.
   //
   // Database-ID uniqueness is also load-bearing for the ordering rule below:
   // it is what makes (created_at, database_id) a total order, and so what
@@ -1948,8 +1948,8 @@ function authorizationForLedger(ledger) {
 
 // A version-3 publication was bound to the autonomous workflow, which no
 // longer exists. It stays loadable, so get_publication and the same-PR scans
-// still read it; every other publication tool, the report included, refuses
-// it here.
+// still read it; every operation on an existing ledger, the report included,
+// refuses it here. A repeated start keeps its own already-started refusal.
 export function refuseLegacyPublication(ledger) {
   if (ledger.version === 3) {
     fail(

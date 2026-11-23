@@ -26,7 +26,6 @@ import {
 } from "../src/publication.mjs";
 import { adaptCodexEvidence } from "../src/github-adapter.mjs";
 import { writeReviewReport } from "../src/report.mjs";
-import { PUBLICATION_ACTION_INPUTS } from "../src/tool-inputs.mjs";
 import {
   acquireStateLock,
   atomicWriteCanonicalJson,
@@ -396,19 +395,21 @@ test("publication summary reports compact next actions and gate state", async (t
     },
     required_request_refs: [],
     required_ambiguous_results: [],
-    required_inputs:
-      PUBLICATION_ACTION_INPUTS.POST_AND_RECORD_CODEX_REVIEW_REQUEST,
+    required_inputs: {
+      record_codex_review_request: [
+        ["review_id", "review_id"],
+        ["expected_revision", "revision"],
+        ["comment_id", "the comment posted from codex_review_request"],
+        ["url", "the posted comment"],
+        ["created_at", "the posted comment"],
+        ["requested_head_sha", "head_sha"],
+        ["request_id", "the posted comment, when the response carries one"],
+      ],
+    },
     prior_ledgers_for_pull_request: 0,
     gate_state: "ABSENT",
     gate_expires_in_seconds: null,
   });
-  // Each step declares the call this test makes next, by its own name.
-  assert.deepEqual(
-    Object.keys(
-      (await getPublicationSummary(state.store, state.reviewId)).required_inputs,
-    ),
-    ["record_codex_review_request"],
-  );
 
   const requestAt = startedAt + 1_000;
   await recordCodexReviewRequest(
@@ -7436,14 +7437,20 @@ test("a version 2 ledger carrying workflow fields fails closed", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
   await start(state, Date.now());
-  const grafted = JSON.parse(await fsp.readFile(publicationPath(state), "utf8"));
-  grafted.workflow_id = "rbwf-2026-01-01T000000-000Z-abcdabcd";
-  grafted.workflow_authorization_sha256 = "0".repeat(64);
-  await atomicWriteCanonicalJson(publicationPath(state), grafted);
-  await assert.rejects(
-    getPublication(state.store, state.reviewId),
-    /only a version 3 publication may bind an autonomous workflow/,
-  );
+  const ledger = JSON.parse(await fsp.readFile(publicationPath(state), "utf8"));
+  for (const [field, value] of [
+    ["workflow_id", "rbwf-2026-01-01T000000-000Z-abcdabcd"],
+    ["workflow_authorization_sha256", "0".repeat(64)],
+    ["automatic_resolutions", []],
+    ["resolution_lifecycle", []],
+  ]) {
+    await atomicWriteCanonicalJson(publicationPath(state), { ...ledger, [field]: value });
+    await assert.rejects(
+      getPublication(state.store, state.reviewId),
+      /only a version 3 publication may bind an autonomous workflow/,
+      field,
+    );
+  }
 });
 
 test("a version 2 gate carrying workflow fields does not verify", async (t) => {
@@ -7518,12 +7525,28 @@ test("an observation timestamp before its collection is rejected", async (t) => 
   assert.equal((await getPublication(state.store, state.reviewId)).revision, 1);
 });
 
-// Nothing creates a version 3 (workflow-bound) publication any more. The
-// legacy ledger is built the way the removed writers left one: real writers
-// for the start, the posted request and both snapshots, and by hand what
-// recording an automatic resolution and its compensating unresolve did --
-// append the history event, clear the observation, revoke the gate -- plus
-// the workflow fields the start bound.
+// Nothing creates a version 3 (workflow-bound) publication any more, so the
+// legacy ledger is assembled from what the removed writers left: real writers
+// for the start, the posted request and the first snapshot, then by hand the
+// automatic resolution, the snapshot that saw a human follow-up, and the
+// compensating unresolve -- each appending its history event and clearing or
+// replacing the observation as the old writer did. The watermark is the
+// removed writer's formula.
+function legacyWatermark(thread) {
+  return digest(
+    canonicalJson({
+      thread_id: thread.id,
+      comments: thread.comments.map((comment) => ({
+        id: comment.id,
+        database_id: comment.database_id,
+        created_at: comment.created_at,
+        updated_at: comment.updated_at,
+        actor: { id: comment.actor.id ?? null, type: comment.actor.type ?? null },
+      })),
+    }),
+  );
+}
+
 test("a version 3 publication is read-only legacy", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -7555,103 +7578,145 @@ test("a version 3 publication is read-only legacy", async (t) => {
     },
     { clock: () => requestAt + 10 },
   );
-  const snapshot = (revision, at) =>
-    recordGithubSnapshot(
-      state.store,
-      state.reviewId,
-      {
-        expectedRevision: revision,
-        observation: observationV2(
-          {
-            at,
-            baseSha: state.baseSha,
-            headSha: state.headSha,
-            requestId: 90,
-            requestAt,
-          },
-          requestId,
-        ),
-      },
-      { clock: () => at + 10 },
-    );
-  const ready = await snapshot(2, startedAt + 2_000);
-  assert.equal(ready.status, "MERGE_READY");
-  await finalizePublicationGate(
+  const codex = { id: 99, type: "Bot", login: "codex" };
+  const author = { id: 7, type: "User", login: "author" };
+  const comment = (databaseId, actor, at, reviewId) => ({
+    id: `PRRC_${databaseId}`,
+    database_id: databaseId,
+    created_at: iso(at),
+    updated_at: iso(at),
+    actor,
+    review: {
+      id: `PRR_${reviewId}`,
+      database_id: reviewId,
+      state: "COMMENTED",
+      reviewed_head_sha: state.headSha,
+      actor,
+    },
+  });
+  // The Codex finding and the workflow's reply (comment 55), still open.
+  const answered = {
+    id: "PRRT_1",
+    is_resolved: false,
+    is_outdated: false,
+    comment_count: 2,
+    comments_pagination_complete: true,
+    provenance_complete: true,
+    comments: [
+      comment(54, codex, startedAt - 5_000, 501),
+      comment(55, author, startedAt - 4_000, 502),
+    ],
+  };
+  const observedAt = startedAt + 2_000;
+  const first = observationV2(
+    { at: observedAt, baseSha: state.baseSha, headSha: state.headSha, requestId: 90, requestAt },
+    requestId,
+  );
+  first.review_threads.total_count = 1;
+  first.review_threads.unresolved_count = 1;
+  first.review_threads.threads = [answered];
+  await recordGithubSnapshot(
     state.store,
     state.reviewId,
-    { expectedRevision: 3 },
-    { clock: () => startedAt + 2_020 },
+    { expectedRevision: 2, observation: first },
+    { clock: () => observedAt + 10 },
   );
-  const actor = { id: 7, type: "User" };
-  const clearObservation = async (event, at, fields) => {
-    const ledger = JSON.parse(await fsp.readFile(publicationPath(state), "utf8"));
-    ledger.history.push({
-      at,
-      event,
-      revision: ledger.revision + 1,
-      status: ledger.status,
-      head_sha: state.headSha,
-      thread_id: "PRRT_1",
-      ...fields,
-      cleared_observation_sha256: digest(canonicalJson(ledger.latest_observation)),
-    });
-    ledger.latest_observation = null;
-    ledger.revision += 1;
-    ledger.updated_at = at;
-    await atomicWriteCanonicalJson(publicationPath(state), ledger);
-    await fsp.rm(publicationPath(state, "publication-gate.json"), { force: true });
-  };
-  const resolvedAt = iso(startedAt + 2_100);
-  await clearObservation("AUTOMATIC_RESOLUTION_RECORDED", resolvedAt, {});
-  await snapshot(4, startedAt + 2_500);
-  const unresolvedAt = iso(startedAt + 2_600);
-  await clearObservation("AUTOMATIC_RESOLUTION_UNRESOLVED", unresolvedAt, {
-    record_id: "act-1",
-    action_id: "act-2",
-  });
-  const legacy = JSON.parse(await fsp.readFile(publicationPath(state), "utf8"));
-  Object.assign(legacy, {
+
+  const ledger = JSON.parse(await fsp.readFile(publicationPath(state), "utf8"));
+  Object.assign(ledger, {
     version: 3,
     workflow_id: "rbwf-2026-01-01T000000-000Z-abcdabcd",
     workflow_authorization_sha256: "1".repeat(64),
-    automatic_resolutions: [
-      {
-        number: 1,
-        action_id: "act-1",
-        thread_id: "PRRT_1",
-        thread_watermark: "2".repeat(64),
-        eligibility_sha256: "3".repeat(64),
-        head_sha: state.headSha,
-        actor,
-        reply_comment_id: 55,
-        pre_read: { observed_at: resolvedAt, is_resolved: false },
-        post_read: { observed_at: resolvedAt, is_resolved: true, resolved_by: actor },
-        recorded_at: resolvedAt,
-        recorded_revision: 4,
-      },
-    ],
-    resolution_lifecycle: [
-      {
-        number: 1,
-        kind: "INVALIDATED",
-        thread_id: "PRRT_1",
-        record_id: "act-1",
-        prior_watermark: "2".repeat(64),
-        new_watermark: "4".repeat(64),
-        follow_up_comments: [],
-        reason: "NEW_COMMENTS",
-        at: unresolvedAt,
-      },
-      {
-        number: 2,
-        kind: "UNRESOLVED_FOR_REPAIR",
-        thread_id: "PRRT_1",
-        record_id: "act-1",
-        action_id: "act-2",
-        at: unresolvedAt,
-      },
-    ],
   });
+  const append = (event, at, fields) => {
+    ledger.revision += 1;
+    ledger.updated_at = at;
+    ledger.history.push({
+      at,
+      event,
+      revision: ledger.revision,
+      status: ledger.status,
+      head_sha: state.headSha,
+      ...fields,
+    });
+  };
+  // recordAutomaticResolution: the record, then the observation cleared.
+  const resolvedAt = iso(startedAt + 2_100);
+  const actor = { id: 7, type: "User" };
+  ledger.automatic_resolutions = [
+    {
+      number: 1,
+      action_id: "act-1",
+      thread_id: "PRRT_1",
+      thread_watermark: legacyWatermark(answered),
+      eligibility_sha256: "3".repeat(64),
+      head_sha: state.headSha,
+      actor,
+      reply_comment_id: 55,
+      pre_read: { observed_at: resolvedAt, is_resolved: false },
+      post_read: { observed_at: resolvedAt, is_resolved: true, resolved_by: actor },
+      recorded_at: resolvedAt,
+      recorded_revision: ledger.revision + 1,
+    },
+  ];
+  append("AUTOMATIC_RESOLUTION_RECORDED", resolvedAt, {
+    thread_id: "PRRT_1",
+    cleared_observation_sha256: digest(canonicalJson(ledger.latest_observation)),
+  });
+  const firstObservation = ledger.latest_observation;
+  ledger.latest_observation = null;
+  // A later snapshot: the thread is resolved, and a human followed up after
+  // the reply, which the gate judged THREAD_RESOLUTION_INVALIDATED.
+  const followUp = comment(56, { id: 8, type: "User", login: "reviewer" }, startedAt + 2_200, 503);
+  const followedUp = {
+    ...structuredClone(answered),
+    is_resolved: true,
+    comment_count: 3,
+    comments: [...structuredClone(answered.comments), followUp],
+  };
+  const secondAt = iso(startedAt + 2_500);
+  const second = structuredClone(firstObservation);
+  second.observed_at = secondAt;
+  second.recorded_at = secondAt;
+  second.review_threads.unresolved_count = 0;
+  second.review_threads.threads = [followedUp];
+  ledger.status = "CHANGES_REQUIRED";
+  ledger.latest_observation = second;
+  append("GITHUB_SNAPSHOT_RECORDED", secondAt, {});
+  // recordAutomaticUnresolve: the invalidation and the compensating
+  // unresolve it planned, then the observation cleared.
+  const unresolvedAt = iso(startedAt + 2_600);
+  ledger.resolution_lifecycle = [
+    {
+      number: 1,
+      kind: "INVALIDATED",
+      thread_id: "PRRT_1",
+      record_id: "act-1",
+      prior_watermark: legacyWatermark(answered),
+      new_watermark: legacyWatermark(followedUp),
+      follow_up_comments: [
+        { comment_id: 56, actor: { id: 8, type: "User" }, created_at: followUp.created_at },
+      ],
+      reason: "THREAD_RESOLUTION_UNSAFE",
+      at: unresolvedAt,
+    },
+    {
+      number: 2,
+      kind: "UNRESOLVED_FOR_REPAIR",
+      thread_id: "PRRT_1",
+      record_id: "act-1",
+      action_id: "act-2",
+      at: unresolvedAt,
+    },
+  ];
+  append("AUTOMATIC_RESOLUTION_UNRESOLVED", unresolvedAt, {
+    thread_id: "PRRT_1",
+    record_id: "act-1",
+    action_id: "act-2",
+    cleared_observation_sha256: digest(canonicalJson(second)),
+  });
+  ledger.latest_observation = null;
+  const legacy = ledger;
   await atomicWriteCanonicalJson(publicationPath(state), legacy);
 
   assert.deepEqual(await getPublication(state.store, state.reviewId), legacy);
