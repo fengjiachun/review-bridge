@@ -89,8 +89,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   Upgrading: workflow records under `workflows/` in an existing store stay
   on disk.
 - (#218) Version-3 (workflow-bound) publications can no longer be used:
-  `get_publication` still reads one, and every other publication tool,
-  `render_review_report` included, refuses it with `PUBLICATION_READ_ONLY`.
+  `get_publication` still reads one, and the tools that act on an existing
+  publication (`get_publication_summary`, `record_codex_review_request`,
+  `record_github_snapshot`, `acknowledge_codex_review_ambiguity`,
+  `finalize_publication_gate`, `verify_publication_gate`, and
+  `render_review_report`) refuse it with `PUBLICATION_READ_ONLY`.
+  `start_publication` for that review still returns
+  `PUBLICATION_ALREADY_STARTED`.
   No publication tool reads `workflows/` any more, so a version-3
   publication no longer needs its workflow record. Reports no longer mark
   review threads as resolved automatically, and their format number is now 10.

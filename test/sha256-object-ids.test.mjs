@@ -36,7 +36,7 @@ import {
 const SHA1_WIDTH = 40;
 const SHA256_WIDTH = 64;
 
-function startInput(state, reviewId, startedAt) {
+function startInput(reviewId, startedAt) {
   return {
     reviewId,
     repositoryId: REPOSITORY_ID,
@@ -205,7 +205,7 @@ test("starting a publication over a sha256 local gate is refused by name", async
   await assert.rejects(
     startPublication(
       state.store,
-      startInput(state, review.id, Date.now()),
+      startInput(review.id, Date.now()),
     ),
     (error) => {
       assert.equal(error.code, "REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE");
@@ -343,7 +343,7 @@ test("the observation schema keeps GitHub's own object ids at 40", async (t) => 
   await finalizeLocalGate(state.store, review.id);
   const reviewId = review.id;
   const at = Date.now();
-  await startPublication(state.store, startInput(state, reviewId, at), {
+  await startPublication(state.store, startInput(reviewId, at), {
     clock: () => at,
   });
   await recordCodexReviewRequest(

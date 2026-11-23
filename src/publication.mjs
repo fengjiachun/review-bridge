@@ -1124,8 +1124,7 @@ function validateObservation(input, ledger, currentMs) {
     allTimes.push(...sourceTimes(collection, name));
   }
   // Every ancestry comparison read, not merely the summary source's latest:
-  // one stale compare would otherwise ride in under a fresh sibling, and
-  // eligibility would trust its descends value.
+  // one stale compare would otherwise ride in under a fresh sibling.
   for (const entry of reviewThreads.ancestry ?? []) {
     allTimes.push(
       timestampMs(entry.collected_at, "review_threads.ancestry collected_at"),
@@ -1457,9 +1456,8 @@ function validateChecks(requiredChecks, pullRequest, target) {
 
 /**
  * A thread's provenance has to be complete enough to replay who wrote it and
- * which formal review it belongs to, because that is what later decides
- * whether the workflow may resolve it. Partial evidence is rejected rather
- * than recorded, so an absent field can never read as an established fact.
+ * which formal review it belongs to. Partial evidence is rejected rather than
+ * recorded, so an absent field can never read as an established fact.
  */
 function validateThreadProvenance(thread) {
   if (thread.comments === undefined) {
@@ -1529,9 +1527,8 @@ function validateThreadProvenance(thread) {
       const review = assertObject(comment.review, "thread comment review");
       assertString(review.id, "thread review id", 255);
       assertId(review.database_id, "thread review database_id");
-      // GitHub's normalized enum, exactly: the eligibility predicate compares
-      // against DISMISSED, so an unknown spelling must fail closed here rather
-      // than slide past the unsupported-dismissal guard as a plain string.
+      // GitHub's normalized enum, exactly: an unknown spelling fails closed
+      // here rather than being stored as a plain string.
       assertEnum(
         review.state,
         ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"],
@@ -1547,7 +1544,7 @@ function validateThreadProvenance(thread) {
   // deeper than one comment page, or one whose author GitHub can no longer
   // resolve, is still a real thread; refusing the whole observation for it
   // would stall the publication behind something no fix can change. It is
-  // re-derived here so a caller cannot claim an eligibility it lacks.
+  // re-derived here so a caller cannot claim a completeness it lacks.
   if (thread.provenance_complete !== threadProvenanceComplete(thread)) {
     fail(
       "INVALID_INPUT",
@@ -1951,9 +1948,9 @@ function authorizationForLedger(ledger) {
 
 // A version-3 publication was bound to the autonomous workflow, which no
 // longer exists. It stays loadable, so get_publication and the same-PR scans
-// still read it; every other publication tool refuses it here, before doing
-// any work.
-function refuseLegacyPublication(ledger) {
+// still read it; every other publication tool, the report included, refuses
+// it here.
+export function refuseLegacyPublication(ledger) {
   if (ledger.version === 3) {
     fail(
       "PUBLICATION_READ_ONLY",
@@ -4080,7 +4077,7 @@ function publicationDecision(
 
 function derivePublication(
   ledger,
-  { historyConflict = null, visibilityGrace = false, ignoreDraft = false } = {},
+  { historyConflict = null, visibilityGrace = false } = {},
 ) {
   if (ledger.terminal != null) {
     return publicationDecision(
@@ -4175,7 +4172,7 @@ function derivePublication(
   if (historyConflict) {
     return publicationDecision("INVALIDATED", historyConflict, historyConflict);
   }
-  if (pullRequest.is_draft && !ignoreDraft) {
+  if (pullRequest.is_draft) {
     return publicationDecision("PR_DRAFT");
   }
   if (pullRequest.mergeable === "UNKNOWN") {
@@ -5231,7 +5228,9 @@ function assessPublicationGate(
   // A version 1 or 2 publication never bound a workflow, so neither may
   // its gate.
   const workflowBindingMatches =
-    !("workflow_id" in gate) && !("workflow_authorization_sha256" in gate);
+    !("workflow_id" in gate) &&
+    !("workflow_authorization_sha256" in gate) &&
+    !("resolution_sha256" in gate);
   const authorizationBindingMatches =
     ledger.version === 1
       ? gate.version === 1 &&
@@ -6060,8 +6059,6 @@ export async function verifyPublicationGate(
       const gateDigest = gate == null ? null : canonicalDigest(gate);
       const auditSession = await openAuditSession(paths, reviewId);
       try {
-        // The audit record every verification writes, over the verdict the
-        // assessment reached.
         const writeAudit = (result) =>
           appendAuditEvent(
             paths,

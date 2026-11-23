@@ -930,13 +930,9 @@ test("a refused cut where the round is prepared walks out on continue", async (t
 
 // The walked product, held exactly. A next_action losing its walk, or a walk
 // silently exercising fewer declared calls, is a coverage regression this
-// listing turns red. States no walk above reaches -- the publication start
-// and every remote phase, which need a version-3 publication nothing creates
-// any more, the unresolve and return-to-draft action families, the check
-// and base repair phases, the operator pauses and arbitration, cancellation,
-// and the recovery fallback INSPECT_WORKFLOW -- are the recorded remainder:
-// each needs its own invalidation or regression observation, and none of the
-// five conditions the projection selects declarations with reaches them.
+// listing turns red. The clean loop reaches START_PUBLICATION and stops
+// before executing it: starting and binding a workflow publication needs a
+// version-3 publication, which nothing creates any more.
 test("the walk covers the declared product it claims", () => {
   const listing = [...walked.entries()]
     .map(([key, tools]) => `${key} ${[...tools].sort().join(" ")}`)

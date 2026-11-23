@@ -12,6 +12,7 @@ import {
   localGateReviewMismatch,
   readBoundPublicationAuthorization,
   readLocalGateAuthorization,
+  refuseLegacyPublication,
 } from "./publication.mjs";
 import { sha256 } from "./storage.mjs";
 
@@ -1350,6 +1351,7 @@ export async function loadReportLedgers(
   } catch (error) {
     if (error?.code !== "PUBLICATION_NOT_FOUND") throw error;
   }
+  if (publication != null) refuseLegacyPublication(publication);
   if (review == null && publication == null) {
     throw reportError(
       "REVIEW_NOT_FOUND",

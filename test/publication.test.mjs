@@ -402,6 +402,13 @@ test("publication summary reports compact next actions and gate state", async (t
     gate_state: "ABSENT",
     gate_expires_in_seconds: null,
   });
+  // Each step declares the call this test makes next, by its own name.
+  assert.deepEqual(
+    Object.keys(
+      (await getPublicationSummary(state.store, state.reviewId)).required_inputs,
+    ),
+    ["record_codex_review_request"],
+  );
 
   const requestAt = startedAt + 1_000;
   await recordCodexReviewRequest(
@@ -419,10 +426,13 @@ test("publication summary reports compact next actions and gate state", async (t
   const requested = await getPublicationSummary(state.store, state.reviewId);
   assert.equal(requested.blocking_reason, "NO_GITHUB_SNAPSHOT");
   assert.equal(requested.next_action, "RECORD_GITHUB_SNAPSHOT");
-  assert.deepEqual(
-    requested.required_inputs,
-    PUBLICATION_ACTION_INPUTS.RECORD_GITHUB_SNAPSHOT,
-  );
+  assert.deepEqual(requested.required_inputs, {
+    record_github_snapshot: [
+      ["review_id", "review_id"],
+      ["expected_revision", "revision"],
+      ["observation_path", "the collector --out file"],
+    ],
+  });
 
   const pendingAt = startedAt + 2_000;
   await recordGithubSnapshot(
@@ -7448,18 +7458,33 @@ test("a version 2 gate carrying workflow fields does not verify", async (t) => {
   );
   const gatePath = publicationPath(state, "publication-gate.json");
   const gate = JSON.parse(await fsp.readFile(gatePath, "utf8"));
-  gate.workflow_id = "rbwf-2026-01-01T000000-000Z-abcdabcd";
+  for (const [field, value] of [
+    ["workflow_id", "rbwf-2026-01-01T000000-000Z-abcdabcd"],
+    ["workflow_authorization_sha256", "1".repeat(64)],
+    ["resolution_sha256", "2".repeat(64)],
+  ]) {
+    await atomicWriteCanonicalJson(gatePath, { ...gate, [field]: value });
+    const verified = await verifyPublicationGate(state.store, state.reviewId, {
+      clock: () => observedAt + 30,
+    });
+    assert.equal(verified.valid, false, field);
+    assert.equal(verified.reason, "GATE_MISMATCH", field);
+    const summary = await getPublicationSummary(state.store, state.reviewId, {
+      clock: () => observedAt + 40,
+    });
+    assert.equal(summary.gate_state, "INVALID", field);
+    assert.equal(summary.blocking_reason, "PUBLICATION_GATE_INVALID", field);
+  }
+  // The same gate without them still verifies.
   await atomicWriteCanonicalJson(gatePath, gate);
-  const verified = await verifyPublicationGate(state.store, state.reviewId, {
-    clock: () => observedAt + 30,
-  });
-  assert.equal(verified.valid, false);
-  assert.equal(verified.reason, "GATE_MISMATCH");
-  const summary = await getPublicationSummary(state.store, state.reviewId, {
-    clock: () => observedAt + 40,
-  });
-  assert.equal(summary.gate_state, "INVALID");
-  assert.equal(summary.blocking_reason, "PUBLICATION_GATE_INVALID");
+  assert.equal(
+    (
+      await verifyPublicationGate(state.store, state.reviewId, {
+        clock: () => observedAt + 50,
+      })
+    ).valid,
+    true,
+  );
 });
 
 test("an observation timestamp before its collection is rejected", async (t) => {
@@ -7493,23 +7518,98 @@ test("an observation timestamp before its collection is rejected", async (t) => 
   assert.equal((await getPublication(state.store, state.reviewId)).revision, 1);
 });
 
-// Nothing creates a version 3 (workflow-bound) publication any more, so the
-// legacy ledger is written by hand: a finalized version 2 ledger rewritten
-// with the workflow fields and an automatic-resolution record and its two
-// history events, as the workflow wrote them.
+// Nothing creates a version 3 (workflow-bound) publication any more. The
+// legacy ledger is built the way the removed writers left one: real writers
+// for the start, the posted request and both snapshots, and by hand what
+// recording an automatic resolution and its compensating unresolve did --
+// append the history event, clear the observation, revoke the gate -- plus
+// the workflow fields the start bound.
 test("a version 3 publication is read-only legacy", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const { ready, requestAt, observedAt } = await reachReady(state);
+  const startedAt = Date.now();
+  await start(state, startedAt, baselineV2(startedAt - 100));
+  const requestId = (await getPublicationSummary(state.store, state.reviewId))
+    .codex_review_request.request_id;
+  const requestAt = startedAt + 1_000;
+  const postedRequest = {
+    resource_id: 90,
+    resource_kind: "ISSUE_COMMENT",
+    url: "https://github.com/owner/repo/issues/7#issuecomment-90",
+    event_at: iso(requestAt),
+    timestamp_field: "created_at",
+    body_sha256: digest(correlatedRequestBody(requestId)),
+    request_id: requestId,
+    actor: { id: 7, type: "User" },
+  };
+  await recordCodexReviewRequest(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 90,
+      url: postedRequest.url,
+      createdAt: postedRequest.event_at,
+      requestedHeadSha: state.headSha,
+      requestId,
+    },
+    { clock: () => requestAt + 10 },
+  );
+  const snapshot = (revision, at) =>
+    recordGithubSnapshot(
+      state.store,
+      state.reviewId,
+      {
+        expectedRevision: revision,
+        observation: observationV2(
+          {
+            at,
+            baseSha: state.baseSha,
+            headSha: state.headSha,
+            requestId: 90,
+            requestAt,
+          },
+          requestId,
+        ),
+      },
+      { clock: () => at + 10 },
+    );
+  const ready = await snapshot(2, startedAt + 2_000);
+  assert.equal(ready.status, "MERGE_READY");
   await finalizePublicationGate(
     state.store,
     state.reviewId,
-    { expectedRevision: ready.revision },
-    { clock: () => observedAt + 20 },
+    { expectedRevision: 3 },
+    { clock: () => startedAt + 2_020 },
   );
-  const legacy = JSON.parse(await fsp.readFile(publicationPath(state), "utf8"));
-  const resolvedAt = iso(observedAt + 30);
   const actor = { id: 7, type: "User" };
+  const clearObservation = async (event, at, fields) => {
+    const ledger = JSON.parse(await fsp.readFile(publicationPath(state), "utf8"));
+    ledger.history.push({
+      at,
+      event,
+      revision: ledger.revision + 1,
+      status: ledger.status,
+      head_sha: state.headSha,
+      thread_id: "PRRT_1",
+      ...fields,
+      cleared_observation_sha256: digest(canonicalJson(ledger.latest_observation)),
+    });
+    ledger.latest_observation = null;
+    ledger.revision += 1;
+    ledger.updated_at = at;
+    await atomicWriteCanonicalJson(publicationPath(state), ledger);
+    await fsp.rm(publicationPath(state, "publication-gate.json"), { force: true });
+  };
+  const resolvedAt = iso(startedAt + 2_100);
+  await clearObservation("AUTOMATIC_RESOLUTION_RECORDED", resolvedAt, {});
+  await snapshot(4, startedAt + 2_500);
+  const unresolvedAt = iso(startedAt + 2_600);
+  await clearObservation("AUTOMATIC_RESOLUTION_UNRESOLVED", unresolvedAt, {
+    record_id: "act-1",
+    action_id: "act-2",
+  });
+  const legacy = JSON.parse(await fsp.readFile(publicationPath(state), "utf8"));
   Object.assign(legacy, {
     version: 3,
     workflow_id: "rbwf-2026-01-01T000000-000Z-abcdabcd",
@@ -7527,46 +7627,51 @@ test("a version 3 publication is read-only legacy", async (t) => {
         pre_read: { observed_at: resolvedAt, is_resolved: false },
         post_read: { observed_at: resolvedAt, is_resolved: true, resolved_by: actor },
         recorded_at: resolvedAt,
-        recorded_revision: ready.revision + 1,
+        recorded_revision: 4,
       },
     ],
-    revision: ready.revision + 2,
-    updated_at: resolvedAt,
+    resolution_lifecycle: [
+      {
+        number: 1,
+        kind: "INVALIDATED",
+        thread_id: "PRRT_1",
+        record_id: "act-1",
+        prior_watermark: "2".repeat(64),
+        new_watermark: "4".repeat(64),
+        follow_up_comments: [],
+        reason: "NEW_COMMENTS",
+        at: unresolvedAt,
+      },
+      {
+        number: 2,
+        kind: "UNRESOLVED_FOR_REPAIR",
+        thread_id: "PRRT_1",
+        record_id: "act-1",
+        action_id: "act-2",
+        at: unresolvedAt,
+      },
+    ],
   });
-  legacy.history.push(
-    {
-      at: resolvedAt,
-      event: "AUTOMATIC_RESOLUTION_RECORDED",
-      revision: ready.revision + 1,
-      status: "PR_PENDING",
-      head_sha: state.headSha,
-      cleared_observation_sha256: null,
-      thread_id: "PRRT_1",
-    },
-    {
-      at: resolvedAt,
-      event: "AUTOMATIC_RESOLUTION_UNRESOLVED",
-      revision: ready.revision + 2,
-      status: "PR_PENDING",
-      head_sha: state.headSha,
-      cleared_observation_sha256: null,
-      thread_id: "PRRT_1",
-      record_id: "act-1",
-      action_id: "act-2",
-    },
-  );
   await atomicWriteCanonicalJson(publicationPath(state), legacy);
 
   assert.deepEqual(await getPublication(state.store, state.reviewId), legacy);
-  // A same-pull-request scan still reads it.
-  const second = await sameHeadSuccessorFixture(state);
-  assert.equal(
-    (await start(second, observedAt + 40)).prior_ledgers_for_pull_request,
-    1,
+  // Both same-pull-request scans still read it: the prior-ledger count, and
+  // the issuance match that binds the request this ledger posted.
+  const successor = await successorFixture(state);
+  const started = await start(
+    successor,
+    startedAt + 3_000,
+    baselineV2(startedAt + 2_900, [postedRequest]),
   );
+  assert.equal(started.prior_ledgers_for_pull_request, 1);
+  assert.deepEqual(started.codex_review_baseline.requests[0].issuance, {
+    review_id: state.reviewId,
+    recorded_revision: 2,
+    requested_head_sha: state.headSha,
+  });
 
   const audit = await inspectPublicationAudit(state.store, state.reviewId);
-  const at = observedAt + 50;
+  const at = Date.now();
   const refused = { code: "PUBLICATION_READ_ONLY" };
   await assert.rejects(getPublicationSummary(state.store, state.reviewId), refused);
   await assert.rejects(
@@ -7590,13 +7695,16 @@ test("a version 3 publication is read-only legacy", async (t) => {
       state.reviewId,
       {
         expectedRevision: legacy.revision,
-        observation: observation({
-          at,
-          baseSha: state.baseSha,
-          headSha: state.headSha,
-          requestId: 100,
-          requestAt,
-        }),
+        observation: observationV2(
+          {
+            at,
+            baseSha: state.baseSha,
+            headSha: state.headSha,
+            requestId: 90,
+            requestAt,
+          },
+          requestId,
+        ),
       },
       { clock: () => at + 10 },
     ),
@@ -7633,10 +7741,26 @@ test("a version 3 publication is read-only legacy", async (t) => {
     refused,
   );
   await assert.rejects(writeReviewReport(state.store, state.reviewId), refused);
+  // The report refuses on the publication, not on a companion file it would
+  // otherwise read.
+  await fsp.rename(
+    path.join(state.store, "reviews", state.reviewId, "review.json"),
+    path.join(state.root, "review.json"),
+  );
+  await assert.rejects(writeReviewReport(state.store, state.reviewId), refused);
   // Verification refuses before it writes its audit event.
   assert.deepEqual(
     await inspectPublicationAudit(state.store, state.reviewId),
     audit,
   );
   assert.deepEqual(await getPublication(state.store, state.reviewId), legacy);
+
+  // The structural rules on the automatic-resolution events still apply.
+  const malformed = structuredClone(legacy);
+  delete malformed.history.at(-1).record_id;
+  await atomicWriteCanonicalJson(publicationPath(state), malformed);
+  await assert.rejects(
+    getPublication(state.store, state.reviewId),
+    /unresolve history record_id/,
+  );
 });

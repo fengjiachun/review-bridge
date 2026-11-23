@@ -774,36 +774,19 @@ test("a LOCAL_GATE publication without its review ledger is refused, not rendere
   assert.ok(!(await fsp.readdir(reviewDirectory(state))).some((name) => name.startsWith("report-")));
 });
 
-// A thread as the observation records it.
-function observedThread(id, headSha, comments = 1) {
-  return {
-    id,
-    path: "src/value.js",
-    line: 1,
-    is_outdated: false,
-    is_resolved: true,
-    provenance_complete: true,
-    comments_pagination_complete: true,
-    comment_count: comments,
-    comments: Array.from({ length: comments }, (_, index) => ({
-      id: `${id}-c${index + 1}`,
-      database_id: 1000 + index,
-      created_at: `2026-09-01T01:0${index}:00.000Z`,
-      updated_at: `2026-09-01T01:0${index}:00.000Z`,
-      actor: { id: index === 0 ? 99 : 7, type: index === 0 ? "Bot" : "User", login: index === 0 ? "codex[bot]" : "author" },
-      review: { id: `PRR_${id}`, database_id: 5000 + index, state: "COMMENTED", reviewed_head_sha: headSha, actor: { id: 7, type: "User", login: "author" } },
-    })),
-  };
-}
-
-// A thread's outcome is the observation's resolved flag, nothing more.
 test("a thread's outcome is the resolved flag the observation recorded", async (t) => {
   const state = await gatedFixture(t);
   await reachReady(state);
   const { publication } = await loadReportLedgers(state.store, state.reviewId);
-  const headSha = publication.latest_observation.pull_request.head_sha;
   const threads = publication.latest_observation.review_threads;
-  const thread = observedThread("PRRT_1", headSha);
+  const thread = {
+    id: "PRRT_1",
+    path: "src/value.js",
+    line: 1,
+    is_resolved: true,
+    comment_count: 1,
+    comments: [{ actor: { login: "codex[bot]" } }],
+  };
   threads.threads = [thread];
   threads.total_count = 1;
   threads.unresolved_count = 0;
