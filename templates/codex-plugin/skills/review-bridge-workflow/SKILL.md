@@ -90,9 +90,10 @@ that its reviewer has exited; never use it to launch a concurrent replacement.
 For remote GitHub observation collection, when the host can wake the agent on
 pull-request events such as check results, new comments or reviews, and
 conflicts, wait on that wake instead of collecting repeatedly. Without such a
-host, back off when relevant state remains unchanged, respect rate-limit and
-retry signals, and reset the cadence when relevant state changes. Do not invoke
-the collector in a tight loop. A local review wait does not watch GitHub. Fresh
-complete evidence is still required before each gated action; a wait, a host
-wake, elapsed time, or unchanged revision proves none. After a wake, collect and
-record a fresh observation and follow the publication summary's `next_action`.
+host, back off when relevant state remains unchanged and reset the cadence when
+relevant state changes. Every collection, including one after a wake, respects
+rate-limit and retry signals. Do not invoke the collector in a tight loop. A
+local review wait does not watch GitHub. Fresh complete evidence is still
+required before each gated action; a wait, a host wake, elapsed time, or
+unchanged revision proves none. After a wake, collect and record a fresh
+observation and follow the publication summary's `next_action`.
