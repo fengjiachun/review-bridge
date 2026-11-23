@@ -104,6 +104,11 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       (tool) => tool.name === "prepare_review",
     );
     assert.ok(prepareReview.inputSchema.properties.continued_from_review_id);
+    const startPublication = authorTools.tools.find(
+      (tool) => tool.name === "start_publication",
+    );
+    assert.equal("workflow_id" in startPublication.inputSchema.properties, false);
+    assert.equal("expected_workflow_revision" in startPublication.inputSchema.properties, false);
 
     const arbitrationExport = authorTools.tools.find(
       (tool) => tool.name === "export_human_arbitration",

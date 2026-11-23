@@ -76,7 +76,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `record_thread_unresolve_observation`, `record_automatic_unresolve`), and
   the autonomous publication projections (`get_autonomous_pre_ready`,
   `get_autonomous_terminal`). `start_publication` no longer accepts
-  `workflow_id` or `expected_workflow_revision`. The packaged skill's
+  `workflow_id` or `expected_workflow_revision`: a call that still sends them
+  has both ignored and creates an unbound version-2 publication. The packaged skill's
   autonomous route and `docs/autonomous-workflow.md` are gone. Manual local
   review and the hand-driven publication ledger remain unchanged.
   Upgrading: workflow records under `workflows/` in an existing store stay

@@ -637,8 +637,8 @@ test("publish-bound work states its gate provider and its review strategy", asyn
       "a full-patch review must read as the exception, with its scenarios named",
     ],
     [
-      "In `LOCAL_GATE` mode that task is a successor by default",
-      "the manual publication path must read as successor-by-default too",
+      "the review uses whatever parent `prepare_review` reports, which may be none (FULL)",
+      "the repair review must leave parent selection to prepare_review",
     ],
     [
       "The summary's `gate_expires_in_seconds` says how much of that gate's window is left.",

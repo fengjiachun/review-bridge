@@ -27,7 +27,7 @@ not hold up.
 
 ## When everything goes well
 
-A change moves through five steps. Two words used throughout: the **driver**
+A change published in `LOCAL_GATE` mode moves through five steps. Two words used throughout: the **driver**
 is the model (or person) calling the tools, and the **ledger** is the
 server-side record the tools write — the driver proposes, the ledger decides
 what counts.
@@ -68,8 +68,7 @@ The deterministic test gate lives later, in step 3, where CI results are
 provider evidence rather than the author's word.
 
 **2 — Push and open a draft PR.** What gets pushed must be byte-for-byte the
-head that passed review: the publication ledger binds the gate's head and
-reads `MERGE_READY` only while the pull request's head equals it. The PR starts as a **draft**.
+head that passed review. The PR starts as a **draft**.
 
 A repository in Git's sha256 object format can run a full local review and
 reach the local gate, but it cannot go further. GitHub hosts no sha256
@@ -80,25 +79,12 @@ publication each refuse it with `REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE`.
 baseline of the existing Codex feeds. From then on, `get_publication_summary`
 names the next action and its `required_inputs` — post the Codex review
 request, record a fresh observation, mark the PR ready, or fix what blocks
-it. Do what it names, then read it again. What it does not say:
+it. Do what it names, then read it again. Marking the PR ready is your click
+on "Ready for review". How a Codex result is matched to its request and what
+`MERGE_READY` requires are in the [publication gate](publication-gate.md).
 
-- The request comment it supplies carries a correlation marker. Post it
-  verbatim and bind it at once: the marker is how a later result is
-  recognized as answering *this* request rather than one from last week, and
-  a crash between posting and binding is caught by unbound-request detection.
-- Marking the PR ready is your click on "Ready for review". A draft never
-  reads `MERGE_READY`.
-- An observation is the PR's complete state collected in one pass — check
-  runs, Codex results, review threads — and the ledger derives its status
-  from it.
-
-The ledger reads `MERGE_READY` once the head is the gated head, the PR is out
-of draft and mergeable, every required check succeeded, Codex returned a
-clean correlated result, and no review thread is unresolved.
-
-**4 — `MERGE_READY`: mint the gate.** One more fresh observation confirms
-nothing moved, and `finalize_publication_gate` issues an audited gate that
-expires five minutes after the oldest source collection in that observation.
+**4 — `MERGE_READY`: mint the gate.** `finalize_publication_gate` issues an
+audited gate that expires within minutes.
 
 **5 — Verify, then merge.** Immediately before the merge,
 `verify_publication_gate` re-checks the gate against the current ledger; only
@@ -123,24 +109,17 @@ flowchart TD
   class E,Q,R1,R2,R3 n;
 ```
 
-**Fixing code restarts the pipeline.** A new commit is a new head, and a new
-head needs a new local review and a new publication ledger. Previous verdicts
-do not carry over — deliberately. When `prepare_review` reports a verified
-parent, the new review is a successor and its reviewed unit is the delta over
-that parent; otherwise it reviews the full patch. [Successor
-reviews](local-review.md#successor-reviews) describes how the parent is chosen.
+**Fixing code restarts the pipeline.** A new commit is a new head; previous
+verdicts do not carry over — deliberately. What a new head needs is in
+[head-SHA discipline](publication-gate.md#head-sha-discipline).
 
 **Threads are answered before they are closed.** An unresolved review thread
 keeps the ledger short of `MERGE_READY`. Reply on the thread with the commits
 that addressed it, then resolve it, so its history shows who closed it and on
 what grounds.
 
-**Ambiguity stops the run.** A Codex result the ledger cannot attribute, or
-an unbound request, reads `GITHUB_REVIEW_UNKNOWN`. The summary names the exact
-requests and results still outstanding, and only a human's direct
-acknowledgement of those sets lets a fresh request go out. A result correctly
-identified as unrelated is not ambiguous; it just cannot answer the current
-request. Nothing guesses.
+**Ambiguity stops the run.** When the ledger cannot attribute a Codex result,
+it stops for a human decision instead of guessing.
 
 ---
 
