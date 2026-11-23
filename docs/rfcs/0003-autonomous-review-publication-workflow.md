@@ -3,6 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Status | Implemented |
+| Removed | The implementation was removed after 0.24.0 (#217). |
 | Authors | Review Bridge contributors |
 | Created | 2026-07-29 |
 | Target release | TBD |

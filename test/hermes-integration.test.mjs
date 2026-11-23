@@ -639,16 +639,8 @@ test("publish-bound work states its gate provider and its review strategy", asyn
       "a full-patch review must read as the exception, with its scenarios named",
     ],
     [
-      "That review is a successor by default: leave `parent_review_id` unset and `force_full_review` off",
-      "the review after a remote finding must read as successor-by-default",
-    ],
-    [
       "In `LOCAL_GATE` mode that task is a successor by default",
       "the manual publication path must read as successor-by-default too",
-    ],
-    [
-      "also pass its `continued_from_review_id` and `force_full_review: true`",
-      "the carried-findings continuation keeps its deliberate full review",
     ],
     [
       "The summary's `gate_expires_in_seconds` says how much of that gate's window is left.",
