@@ -275,7 +275,8 @@ still needs sampling.
   findings, operator labels and rationales, the patch of every round
   (uncommitted changes included, whatever their size), and separate copies of
   uncommitted files up to 10 MiB each. To remove one review, stop active Review Bridge
-  operations and delete `reviews/<review_id>`. Quit every Review Bridge process before
+  operations and delete `reviews/<review_id>`, unless a legacy workflow-bound
+  (version 3) publication names it. Quit every Review Bridge process before
   deleting the whole directory. Retention and permissions are in the
   [README](../README.md#data-handling-and-cleanup).
 - The selected client may send source returned by the reviewer tools to its

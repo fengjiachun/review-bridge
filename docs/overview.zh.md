@@ -151,7 +151,7 @@ flowchart LR
 
 - 本地、REMOTE_ONLY 和发布门禁都是工作流层面的证明，不是 Git 或 GitHub 的安全边界。Review Bridge 不装 `pre-push` 钩子。提供方绑定和独立 Codex 任务都不是经过认证的人或模型身份；`CODEX_TASK` 评审改善的是上下文隔离，不等于换一家提供方带来的模型多样性。
 - 宿主沙箱限制写和网络，不限制读，所以挡不住能操纵评审者的文本。两轮「盲审」是工具面上的保证，挡不住直接读 store 的进程。
-- store 里有仓库路径、需求、patch、manifest、意见、操作者标签与理由，每一轮的 patch（含未提交改动，不限大小），以及未提交文件的单独副本（单个不超过 10 MiB）。删一条评审：先停掉进行中的 Review Bridge 操作，再删 `reviews/<review_id>`。删整个目录前要先退出所有 Review Bridge 进程。保留与权限见 [README](../README.md#data-handling-and-cleanup)。
+- store 里有仓库路径、需求、patch、manifest、意见、操作者标签与理由，每一轮的 patch（含未提交改动，不限大小），以及未提交文件的单独副本（单个不超过 10 MiB）。删一条评审：先停掉进行中的 Review Bridge 操作，再删 `reviews/<review_id>`；旧版绑定 workflow 的（版本 3）publication 引用的评审不要删。删整个目录前要先退出所有 Review Bridge 进程。保留与权限见 [README](../README.md#data-handling-and-cleanup)。
 - 所选客户端可能按其账号配置把评审工具返回的源码发给模型提供方。MCP 服务器进程不打开网络连接；打包的脚本通过用户的 `gh` 访问 GitHub。
 
 逐版本的变更见 [CHANGELOG](../CHANGELOG.md)。

@@ -80,8 +80,9 @@ baseline of the existing Codex feeds. From then on, `get_publication_summary`
 names the next action and its `required_inputs` — post the Codex review
 request, record a fresh observation, mark the PR ready, or fix what blocks
 it. Do what it names, then read it again. Marking the PR ready is your click
-on "Ready for review". How a Codex result is matched to its request and what
-`MERGE_READY` requires are in the [publication gate](publication-gate.md).
+on "Ready for review". How a Codex result is matched to its request is in the
+[publication gate](publication-gate.md); the full `MERGE_READY` condition is in
+RFC 0001's [State derivation](rfcs/0001-github-publication-ledger.md#state-derivation).
 
 **4 — `MERGE_READY`: mint the gate.** `finalize_publication_gate` issues an
 audited gate that expires within minutes.

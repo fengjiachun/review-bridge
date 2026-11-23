@@ -637,7 +637,7 @@ test("publish-bound work states its gate provider and its review strategy", asyn
       "a full-patch review must read as the exception, with its scenarios named",
     ],
     [
-      "the review uses whatever parent `prepare_review` reports, which may be none (FULL)",
+      "In `LOCAL_GATE` mode leave `parent_review_id` unset and `force_full_review` off",
       "the repair review must leave parent selection to prepare_review",
     ],
     [

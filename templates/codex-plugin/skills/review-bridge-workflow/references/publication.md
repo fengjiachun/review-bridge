@@ -91,7 +91,8 @@ For either mode:
      or outside this action. A crash between post and binding leaves an
      unbound request and must fail closed.
    - `MARK_PULL_REQUEST_READY` is the operator's step.
-   - `FINALIZE_PUBLICATION_GATE`. The summary's `gate_expires_in_seconds`
+   - `FINALIZE_PUBLICATION_GATE`. Run the collector once more for a fresh
+     observation, then finalize. The summary's `gate_expires_in_seconds`
      says how much of that gate's window is left. It expires five minutes after the
      oldest source collection in the observation it was minted over, not five
      minutes after issuance, so a gate finalized over an old observation has
