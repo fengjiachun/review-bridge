@@ -47,6 +47,8 @@ test("waiting keeps cadence separate from local timeouts", async () => {
   const entry = docs.get("SKILL.md").replace(/\s+/g, " ");
   assert.match(entry, /Prefer supported state-change waits or long polling/);
   assert.match(entry, /back off.*respect rate-limit and retry signals.*reset the cadence/);
+  assert.match(entry, /host can wake the agent on pull-request events.*wait on that wake instead of collecting repeatedly/);
+  assert.match(entry, /After a wake, collect and record a fresh observation/);
   assert.match(entry, /25 seconds by default and accepts at most 30 seconds/);
   assert.match(entry, /call again with the same `state_version` until `changed` is true/);
   assert.match(entry, /timeout is neither a failed review nor proof that its reviewer has exited/);
