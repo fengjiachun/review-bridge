@@ -68,7 +68,7 @@ Every fix pushed during a remote-only loop is a new head and so a new ledger.
 store target the same `repository_id` and `pr_number`. It is counted from the
 store at call time and never written to the ledger. It is a signal for the
 operator only and never changes `status`, `blocking_reason`, or
-`next_action`. It is the only sign of how many heads came before.
+`next_action`.
 
 For a fresh snapshot, run the
 packaged read-only collector against the review ID:

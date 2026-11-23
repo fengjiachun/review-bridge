@@ -36,8 +36,8 @@ what counts.
 flowchart LR
   A["1 Local review"] --> B["2 Push +<br/>draft PR"]
   B --> C["3 Ask Codex<br/>to review"]
-  C --> D["4 Watch CI<br/>and comments"]
-  D --> E["5 Mark ready"]
+  C --> D["4 Mark ready"]
+  D --> E["5 Watch CI<br/>and comments"]
   E --> F["6 MERGE_READY:<br/>mint the gate"]
   F --> G["7 Verify,<br/>then merge"]
   classDef n fill:#ffffff,stroke:#57606a,stroke-width:1px,color:#111111;
@@ -45,6 +45,8 @@ flowchart LR
 ```
 
 **1 — Local review.** The first gate, before the code leaves your machine.
+Commit the change first: publication requires a clean checkout whose `HEAD`
+is the gated head, so a commit made after review means reviewing again.
 The system captures an **immutable snapshot** of the change and hands it to a
 reviewer that had no part in writing it. The reviewer reads the snapshot,
 never your live working tree, and submits structured findings. No findings
@@ -55,8 +57,8 @@ with the [model from the Codex configuration at high effort](reviewer-configurat
 a fresh Claude Desktop conversation, a new Codex task, or an isolated Hermes or
 DeepSeek Harness profile — though a change headed for publication takes a
 Codex review by default, with any other provider read as a second opinion
-beside that gate rather than in place of it. A snapshot may also capture
-uncommitted working-tree state.
+beside that gate rather than in place of it. A review that will not be
+published may also snapshot uncommitted working-tree state.
 
 The immutable patch is measured as added plus deleted lines, and the review
 reports the total against the default budget and the remaining headroom; it
@@ -64,13 +66,12 @@ does not block, because the operator is already present to decide on a split.
 
 Note that this gate attests **snapshot consistency**, not test results:
 finalizing it re-checks that the tree still matches what the reviewer saw.
-The deterministic test gate lives later, in step 4, where CI results are
+The deterministic test gate lives later, in step 5, where CI results are
 provider evidence rather than the author's word.
 
 **2 — Push and open a draft PR.** What gets pushed must be byte-for-byte the
 head that passed review: the publication ledger binds the gate's head and
-reads `MERGE_READY` only while the pull request's head equals it. The PR starts as a **draft**, so
-reviewers are not looking at it while its evidence is collected.
+reads `MERGE_READY` only while the pull request's head equals it. The PR starts as a **draft**.
 
 A repository in Git's sha256 object format can run a full local review and
 reach the local gate, but it cannot go further. GitHub hosts no sha256
@@ -82,16 +83,21 @@ existing Codex feeds; the server then composes the request comment — with a
 correlation marker — and the driver posts it verbatim and binds the posted
 comment to the ledger. The marker is how a later result is recognized as
 answering *this* request rather than one from last week; a crash between
-posting and binding is caught by unbound-request detection.
+posting and binding is caught by unbound-request detection. When the baseline
+holds an earlier request that needs an observation first, a recorded
+observation of the draft reads `PR_DRAFT` and the summary asks for step 4
+before it offers the request body.
 
-**4 — Watch.** Periodically the driver collects the PR's complete state in
+**4 — Mark ready.** Leaving draft is your call: click "Ready for review" when
+the summary's next action is `MARK_PULL_REQUEST_READY`. A draft never reads
+`MERGE_READY`.
+
+**5 — Watch.** Periodically the driver collects the PR's complete state in
 one pass — check runs, Codex results, review threads — and records it in the
-ledger. The ledger derives a status from each observation.
-
-**5 — Mark ready.** Leaving draft is your call: click "Ready for review" once
-the local gate passed, Codex returned a clean correlated result, every
-required check succeeded, and every review thread is resolved. A draft never
-reads `MERGE_READY`.
+ledger. The ledger derives a status from each observation; the driver
+follows the summary's next action until the head is the gated head, Codex returned a
+clean correlated result, every required check succeeded, and no review
+thread is unresolved.
 
 **6 — `MERGE_READY`: mint the gate.** One more fresh observation confirms
 nothing moved, and `finalize_publication_gate` issues an audited gate that
@@ -106,11 +112,11 @@ Merging stays an explicit operator decision.
 
 ## When things do not go well
 
-Step 4 rarely passes on the first try. The common cases:
+Step 5 rarely passes on the first try. The common cases:
 
 ```mermaid
 flowchart TD
-  E["4 Watching"] --> Q{"What came back?"}
+  E["5 Watching"] --> Q{"What came back?"}
   Q -->|"Codex found a problem"| R1["Fix the code:<br/>back to step 1"]
   Q -->|"CI failed"| R1
   Q -->|"An unresolved<br/>review thread"| R2["Answer it,<br/>then resolve it"]
@@ -131,10 +137,12 @@ keeps the ledger short of `MERGE_READY`. Reply on the thread with the commits
 that addressed it, then resolve it, so its history shows who closed it and on
 what grounds.
 
-**Ambiguity stops the run.** An uncorrelated Codex result or an unbound
-request reads `GITHUB_REVIEW_UNKNOWN`. The ledger names the exact requests
-and results involved, and only a human's direct acknowledgement of that full
-set lets a fresh request go out. Nothing guesses.
+**Ambiguity stops the run.** A Codex result the ledger cannot attribute, or
+an unbound request, reads `GITHUB_REVIEW_UNKNOWN`. The summary names the exact
+requests and results still outstanding, and only a human's direct
+acknowledgement of those sets lets a fresh request go out. A result correctly
+identified as unrelated is not ambiguous; it just cannot answer the current
+request. Nothing guesses.
 
 ---
 

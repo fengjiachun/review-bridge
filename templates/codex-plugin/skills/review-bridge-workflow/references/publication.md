@@ -78,7 +78,10 @@ For either mode:
    is never superseded and keeps the acknowledgement path.
 5. Refresh the PR head and require it to equal the publication authorization
    head. Call `get_publication_summary` and require
-   `next_action: POST_AND_RECORD_CODEX_REVIEW_REQUEST`. Post exactly one issue
+   `next_action: POST_AND_RECORD_CODEX_REVIEW_REQUEST`. If it instead returns
+   `MARK_PULL_REQUEST_READY`, the pull request is still a draft: ask the
+   operator to mark it ready, record a fresh observation, and read the summary
+   again. Post exactly one issue
    comment whose entire body equals the returned `codex_review_request.body`;
    do not edit, reconstruct, or shorten it. Then immediately call
    `record_codex_review_request` with the post response's comment ID, URL,

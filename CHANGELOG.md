@@ -80,7 +80,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   autonomous route and `docs/autonomous-workflow.md` are gone. Manual local
   review and the hand-driven publication ledger remain unchanged.
   Upgrading: workflow records under `workflows/` in an existing store stay
-  on disk, are no longer read by any author tool, and can be deleted.
+  on disk. Most publication tools still read the workflow record a
+  version-3 (workflow-bound) publication names, so keep it while that
+  publication is in use; no author tool reads the others, and they can be
+  deleted.
 
 ## 0.24.0 - 2026-11-13
 
