@@ -15,6 +15,7 @@ independent Codex reviewer, ask:
 > Review the current change using `CODEX_TASK`. The requirement is "...", the
 > implementation scope is "...", and the base ref is `origin/main`.
 
+`CODEX_TASK` is the default reviewer provider; name another only to use it.
 The author captures the snapshot with `prepare_review`, then calls
 `launch_local_reviewer` with the review's `state_version`. The reviewer uses the
 model from the MCP host's Codex configuration at `high` reasoning effort. See

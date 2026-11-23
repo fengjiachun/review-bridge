@@ -43,7 +43,8 @@ After a verdict, load [Handle findings](findings.md) for findings or
    provider. Outside it,
    demanding a full patch buys a re-review of gated code, so state the reason
    in the session before passing it.
-6. Choose `reviewer_provider` explicitly:
+6. `CODEX_TASK` is the default `reviewer_provider`; omitting it prepares a
+   `CODEX_TASK` review. Pass another provider only when the user names one:
    - `CLAUDE_DESKTOP` for a fresh Claude Desktop conversation.
    - `CODEX_TASK` for a newly created Codex task that is not a fork of the
      author task and has no authoring history for the change.

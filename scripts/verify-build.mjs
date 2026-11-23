@@ -497,7 +497,7 @@ assert.match(
 );
 assert.match(workflowSkill, /`force_full_review: true`/);
 assert.match(workflowSkill, /`current_snapshot\.patch_index`/);
-assert.match(workflowSkill, /Choose `reviewer_provider` explicitly/);
+assert.match(workflowSkill, /`CODEX_TASK` is the default `reviewer_provider`/);
 assert.match(workflowSkill, /newly created Codex task/);
 assert.match(workflowSkill, /is not a fork of the\s+author task/);
 assert.match(workflowSkill, /Never call reviewer tools from the author task/);
@@ -1208,8 +1208,9 @@ try {
   await claudeAuthor.connect(claudeAuthorTransport);
   try {
     const pending = await call(claudeAuthor, "prepare_review", {
-      repository_path: repository, base_ref: baseSha, requirement: "Package author smoke", implementation_scope: "value.js", reviewer_provider: "CODEX_TASK",
+      repository_path: repository, base_ref: baseSha, requirement: "Package author smoke", implementation_scope: "value.js",
     });
+    assert.equal(pending.reviewer_provider, "CODEX_TASK");
     const launched = await call(claudeAuthor, "launch_local_reviewer", {
       review_id: pending.id, expected_state_version: pending.state_version,
     });

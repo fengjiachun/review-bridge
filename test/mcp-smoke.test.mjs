@@ -98,7 +98,7 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       prepare.inputSchema.properties.reviewer_provider.enum,
       ["CLAUDE_DESKTOP", "CODEX_TASK", "HERMES", "DEEPSEEK_HARNESS"],
     );
-    assert.ok(prepare.inputSchema.required.includes("reviewer_provider"));
+    assert.equal(prepare.inputSchema.required.includes("reviewer_provider"), false);
 
     const prepareReview = authorTools.tools.find(
       (tool) => tool.name === "prepare_review",
@@ -540,4 +540,41 @@ test("reviewer instructions read changed prose under a FULL review", async (t) =
     reviewer.getInstructions(),
     /skipping sections whose behavior the review does not depend on, except changed prose that asserts behavior, which is read and checked against the code/,
   );
+});
+
+test("MCP prepare_review binds CODEX_TASK unless another provider is passed", async (t) => {
+  const { root, repository, store, baseSha } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "change value");
+  const author = await connectClient("author", store);
+  t.after(() => author.close());
+  const prepare = (extra) =>
+    author.callTool({
+      name: "prepare_review",
+      arguments: {
+        repository_path: repository,
+        base_ref: baseSha,
+        requirement: "Export the new value.",
+        implementation_scope: "app.js",
+        ...extra,
+      },
+    });
+  const bound = async (extra) => {
+    const result = await prepare(extra);
+    assert.notEqual(result.isError, true, JSON.stringify(result));
+    const { id, reviewer_provider } = JSON.parse(result.content[0].text);
+    const stored = JSON.parse(
+      await fsp.readFile(path.join(store, "reviews", id, "review.json"), "utf8"),
+    );
+    assert.equal(stored.reviewer_provider, reviewer_provider);
+    return reviewer_provider;
+  };
+
+  assert.equal(await bound({}), "CODEX_TASK");
+  assert.equal(await bound({ reviewer_provider: "HERMES" }), "HERMES");
+  const invalid = await prepare({ reviewer_provider: "OTHER" });
+  assert.equal(invalid.isError, true);
+  assert.match(invalid.content[0].text, /reviewer_provider/);
 });
