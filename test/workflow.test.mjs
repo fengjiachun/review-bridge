@@ -5961,8 +5961,8 @@ test("a workflow written before the cycle fields stays readable and cancellable"
     workflowInput(state.repository, state.baseSha),
   );
 
-  // Reproduce a ledger written before this change: schema version 1 with
-  // neither cycle field. A released v0.5.0 workflow looks exactly like this.
+  // A schema version 1 ledger without the cycle, budget and
+  // current_publication fields: this removes six fields from a current ledger.
   const workflowPath = path.join(
     state.store,
     "workflows",

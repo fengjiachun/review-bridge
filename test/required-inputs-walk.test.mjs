@@ -47,38 +47,6 @@ import {
 } from "./helpers/publication-chain";
 import { commit, fixture, git, TOPIC_BRANCH } from "./helpers/repository-fixture";
 
-// The state-rejection family: every code a transition raises because of the
-// ledger state the call was initiated from, enumerated from the fail() sites
-// of workflow.mjs that the local probes reach. Included are the status,
-// phase, and action-progress guards, the review-transition and split gates,
-// the calls a state has already consumed or not yet earned, and the terminal
-// refusals.
-// Excluded are argument validation, revision conflicts, identity and
-// repository mismatches, and evidence-content refusals: those reject what
-// the driver brought, not the state it stood in. Review-side transitions in
-// core.mjs raise plain Errors without codes; the walk treats any failure of
-// a declared call as a defect, so they are covered by the same assertion.
-const STATE_REJECTION_CODES = new Set([
-  "WORKFLOW_STATE_INVALID",
-  "WORKFLOW_PHASE_INVALID",
-  "WORKFLOW_NOT_ACTIVE",
-  "WORKFLOW_PAUSED",
-  "WORKFLOW_TERMINAL",
-  "WORKFLOW_ACTION_STATE_INVALID",
-  "WORKFLOW_ACTION_KIND_INVALID",
-  "WORKFLOW_REVIEW_TRANSITION_INVALID",
-  "WORKFLOW_REVIEW_RAN_AHEAD",
-  "WORKFLOW_CHANGE_SIZE_WARNING_UNACKNOWLEDGED",
-  "WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED",
-  "WORKFLOW_CHANGE_SIZE_BUDGET_EXCEEDED",
-  "WORKFLOW_RESUME_INVALID",
-  "WORKFLOW_CLAIMS_RELEASED",
-  "WORKFLOW_RESOLUTION_RECORD_MISSING",
-  "WORKFLOW_UNRESOLVE_RECORD_MISSING",
-  "WORKFLOW_UNRESOLVE_REFRESH_MISSING",
-  "WORKFLOW_PUBLICATION_NOT_READY",
-]);
-
 const OPERATOR = "Test Operator";
 const walked = new Map();
 
@@ -380,11 +348,8 @@ async function runTurn(ctx, turn) {
     try {
       await PROBES[tool](ctx, summary, declared[tool], materials);
     } catch (error) {
-      const family = STATE_REJECTION_CODES.has(error?.code)
-        ? "a state rejection"
-        : "an error";
       assert.fail(
-        `${summary.next_action} declares ${tool}, which failed with ${family}: ${error?.code ?? "(no code)"} ${error?.message}`,
+        `${summary.next_action} declares ${tool}, which failed: ${error?.code ?? "(no code)"} ${error?.message}`,
       );
     }
   }
@@ -507,7 +472,6 @@ test("the declaration walk closes the clean loop from commit to the publication 
   }
   const summary = await getAutonomousWorkflowSummary(ctx.store, ctx.workflowId);
   assert.equal(summary.next_action, "START_PUBLICATION");
-  // Binding a workflow publication is refused, and the workflow stays put.
   await assert.rejects(
     bindWorkflowPublication(
       ctx.store,
