@@ -111,7 +111,7 @@ function fail(code, message, details = {}) {
 }
 
 // The publication side of the workflow left publication.mjs with version-3
-// publications, so no workflow can reach a remote phase any more.
+// publications, so binding a workflow publication now throws here.
 function removedPublicationSide() {
   fail("PUBLICATION_READ_ONLY", "workflow-bound publications are read-only");
 }
