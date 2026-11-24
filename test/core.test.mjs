@@ -805,7 +805,6 @@ test("parent reviewer provider drift forces a full review", async (t) => {
     requirement: "Review the fixture.",
     implementationScope: "Reject parent reviewer provider drift.",
     parentReviewId: parent.id,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(child.review_strategy.fallback_reason, /reviewer provider/);
@@ -843,7 +842,6 @@ test("a malformed parent ledger forces a full review", async (t) => {
     requirement: "Review the fixture.",
     implementationScope: "Reject the malformed parent proof.",
     parentReviewId: parent.id,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(child.review_strategy.fallback_reason, /ledger/);
@@ -899,7 +897,6 @@ test("tampered parent metadata cannot qualify a successor review", async (t) => 
         requirement,
         implementationScope: "Create the successor.",
         parentReviewId: parent.id,
-        reviewerProvider: "CLAUDE_DESKTOP",
       });
       assert.equal(child.review_strategy.mode, "FULL");
       assert.equal(child.rounds[0].successor, null);
@@ -936,7 +933,6 @@ test("tampered parent overlay metadata cannot qualify a successor review", async
     requirement: "Review the fixture.",
     implementationScope: "Create the successor.",
     parentReviewId: parent.id,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.equal(child.rounds[0].successor, null);
@@ -1076,7 +1072,6 @@ test("dirty current worktrees fall back to full review", async (t) => {
         requirement: "Review the fixture.",
         implementationScope: "Reject a dirty successor worktree.",
         parentReviewId: parent.id,
-        reviewerProvider: "CLAUDE_DESKTOP",
       });
       assert.equal(child.rounds[0].worktree_clean, false);
       assert.equal(child.rounds[0].overlays.length, scenario.expectedOverlays);
@@ -1108,7 +1103,6 @@ test("a parent without a worktree cleanliness commitment falls back to full revi
     requirement: "Review the fixture.",
     implementationScope: "Reject an old parent ledger.",
     parentReviewId: parent.id,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(child.review_strategy.fallback_reason, /snapshot commitment/);
@@ -1144,7 +1138,6 @@ test("a tampered worktree cleanliness commitment cannot qualify a successor revi
     requirement: "Review the fixture.",
     implementationScope: "Reject a tampered parent commitment.",
     parentReviewId: parent.id,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(child.review_strategy.fallback_reason, /snapshot commitment/);
@@ -1166,7 +1159,6 @@ test("a divergent parent head falls back to full review", async (t) => {
     requirement: "Review the fixture.",
     implementationScope: "Reject a divergent parent.",
     parentReviewId: parent.id,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(child.review_strategy.fallback_reason, /not an ancestor/);
@@ -1201,7 +1193,6 @@ test("a parent from another repository falls back to full review", async (t) => 
     requirement: "Review the fixture.",
     implementationScope: "Reject a parent from another repository.",
     parentReviewId: parent.id,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(
@@ -1243,7 +1234,6 @@ test("oversized successor proof generation falls back to full review", async (t)
     requirement: "Review the fixture.",
     implementationScope: "Fall back when the successor proof is too large.",
     parentReviewId: parent.id,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(
@@ -1608,7 +1598,6 @@ test("carried findings are reviewer scope hints without author rationale", async
       requirement: "Expose a stable value.",
       implementationScope: "Change app.js.",
       continuedFromReviewId: source.id,
-      reviewerProvider: "CLAUDE_DESKTOP",
     }),
     /must set force_full_review/,
   );
@@ -2660,7 +2649,6 @@ test("a drifting requirement blocks an explicit parent but is disclosed in an au
     requirement: driftedRequirement,
     implementationScope: "Add two.",
     parentReviewId: parent.id,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(explicit.review_strategy.mode, "FULL");
   assert.equal(explicit.review_strategy.parent_selection, "EXPLICIT");
@@ -2742,7 +2730,6 @@ test("automatic parent selection ignores unrelated and ungated history", async (
     baseRef: otherBase,
     requirement: "One requirement.",
     implementationScope: "Add later.",
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(rebased.review_strategy.mode, "FULL");
   assert.equal(rebased.review_strategy.parent_selection, "NONE");
@@ -2754,7 +2741,6 @@ test("automatic parent selection ignores unrelated and ungated history", async (
     baseRef: baseSha,
     requirement: "Never gated.",
     implementationScope: "Add two.",
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await fsp.writeFile(path.join(repository, "three.js"), "export const three = 3;\n");
   git(repository, "add", ".");
@@ -2764,7 +2750,6 @@ test("automatic parent selection ignores unrelated and ungated history", async (
     baseRef: baseSha,
     requirement: "Never gated.",
     implementationScope: "Add three.",
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   // The ungated task is never a parent, so selection reaches past it to the
   // gated one rather than treating the nearest task as reviewed.
@@ -2901,7 +2886,6 @@ test("automatic parent selection reaches across linked worktrees", async (t) => 
     baseRef: baseSha,
     requirement,
     implementationScope: "Add the child behavior.",
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   assert.equal(child.review_strategy.mode, "SUCCESSOR");
@@ -3057,7 +3041,6 @@ test("a corrupted stored candidate cannot abort unattended preparation", async (
     baseRef: baseSha,
     requirement,
     implementationScope: "Add the child behavior.",
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   // The corrupted candidate is rejected by the proof, and selection falls
@@ -3220,7 +3203,6 @@ test("automatic parent selection prefers the nearest ancestor over the newest ga
     baseRef: baseSha,
     requirement,
     implementationScope: "Add step 3.",
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   assert.equal(child.review_strategy.mode, "SUCCESSOR");
