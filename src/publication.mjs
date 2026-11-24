@@ -6101,7 +6101,6 @@ export async function verifyPublicationGate(
             "GATE_MISSING_OR_MALFORMED",
             verifiedAt,
           );
-          await writeAudit(response);
         } else {
           const gateAssessment = assessPublicationGate(
             ledger,
@@ -6125,8 +6124,8 @@ export async function verifyPublicationGate(
                     expires_at: gate.expires_at,
                     verified_at: verifiedAt,
                   };
-          await writeAudit(response);
         }
+        await writeAudit(response);
         return response;
       } finally {
         await closeAuditSession(auditSession);

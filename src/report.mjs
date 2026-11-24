@@ -1272,7 +1272,7 @@ function footerSections(
         : [
             publicationSummary == null
               ? "- Publication summary: not supplied to this render."
-              : `- Publication summary: computed by the server over its own inputs (ledger, authorization, gate file); digest s${summaryDigest(publicationSummary)}.`,
+              : `- Publication summary: computed by the server; digest s${summaryDigest(publicationSummary)}.`,
           ]),
     ].join("\n"),
     review == null ? PROJECTION_NOTICE_REMOTE_ONLY : PROJECTION_NOTICE,

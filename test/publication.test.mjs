@@ -459,12 +459,33 @@ test("publication summary reports compact next actions and gate state", async (t
   assert.equal(pending.blocking_reason, "GITHUB_REVIEW_PENDING");
   assert.equal(pending.next_action, "REFRESH_GITHUB_SNAPSHOT");
 
-  const readyAt = startedAt + 3_000;
+  const draftAt = startedAt + 2_500;
   await recordGithubSnapshot(
     state.store,
     state.reviewId,
     {
       expectedRevision: 3,
+      observation: observation({
+        at: draftAt,
+        baseSha: state.baseSha,
+        headSha: state.headSha,
+        requestId: 100,
+        requestAt,
+        isDraft: true,
+      }),
+    },
+    { clock: () => draftAt + 10 },
+  );
+  const draft = await getPublicationSummary(state.store, state.reviewId);
+  assert.equal(draft.status, "PR_DRAFT");
+  assert.equal(draft.next_action, "MARK_PULL_REQUEST_READY");
+
+  const readyAt = startedAt + 3_000;
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    {
+      expectedRevision: 4,
       observation: observation({
         at: readyAt,
         baseSha: state.baseSha,
@@ -484,7 +505,7 @@ test("publication summary reports compact next actions and gate state", async (t
   await finalizePublicationGate(
     state.store,
     state.reviewId,
-    { expectedRevision: 4 },
+    { expectedRevision: 5 },
     { clock: () => readyAt + 20 },
   );
   const finalized = await getPublicationSummary(state.store, state.reviewId);
@@ -4177,48 +4198,6 @@ test("reserved history capacity records terminal invalidation instead of losing 
   assert.match(terminal.terminal.reason, /monotonic publication state/);
 });
 
-test("a draft pull request asks the operator to mark it ready", async (t) => {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const startedAt = Date.now();
-  await start(state, startedAt);
-  const requestAt = startedAt + 1_000;
-  await recordCodexReviewRequest(
-    state.store,
-    state.reviewId,
-    {
-      expectedRevision: 1,
-      commentId: 100,
-      url: "https://github.com/owner/repo/issues/7#issuecomment-100",
-      createdAt: iso(requestAt),
-      requestedHeadSha: state.headSha,
-    },
-    { clock: () => requestAt + 10 },
-  );
-  const observedAt = startedAt + 2_000;
-  await recordGithubSnapshot(
-    state.store,
-    state.reviewId,
-    {
-      expectedRevision: 2,
-      observation: observation({
-        at: observedAt,
-        baseSha: state.baseSha,
-        headSha: state.headSha,
-        requestId: 100,
-        requestAt,
-        isDraft: true,
-      }),
-    },
-    { clock: () => observedAt + 10 },
-  );
-  const summary = await getPublicationSummary(state.store, state.reviewId, {
-    clock: () => observedAt + 20,
-  });
-  assert.equal(summary.status, "PR_DRAFT");
-  assert.equal(summary.next_action, "MARK_PULL_REQUEST_READY");
-});
-
 test("pure publication derivation preserves the normative blocking priority", async (t) => {
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -7705,7 +7684,13 @@ test("a version 3 publication is read-only legacy", async (t) => {
     requested_head_sha: state.headSha,
   });
 
-  const audit = await inspectPublicationAudit(state.store, state.reviewId);
+  // An interrupted audit write: the tool that opened an audit session would
+  // recover it, truncating the tail or advancing the head.
+  const auditPath = publicationPath(state, "publication-gate-audit.jsonl");
+  const auditHeadPath = publicationPath(state, "publication-gate-audit-head.json");
+  await fsp.appendFile(auditPath, '{"incomplete":');
+  const auditBytes = await fsp.readFile(auditPath);
+  const auditHeadBytes = await fsp.readFile(auditHeadPath);
   const gatePath = publicationPath(state, "publication-gate.json");
   await atomicWriteCanonicalJson(gatePath, { legacy_gate: true });
   const gateBytes = await fsp.readFile(gatePath);
@@ -7828,10 +7813,8 @@ test("a version 3 publication is read-only legacy", async (t) => {
   await fsp.rm(reviewPath);
   await assert.rejects(writeReviewReport(state.store, state.reviewId), refused);
   await fsp.writeFile(reviewPath, reviewBytes, { mode: 0o600 });
-  assert.deepEqual(
-    await inspectPublicationAudit(state.store, state.reviewId),
-    audit,
-  );
+  assert.deepEqual(await fsp.readFile(auditPath), auditBytes);
+  assert.deepEqual(await fsp.readFile(auditHeadPath), auditHeadBytes);
   assert.deepEqual(await getPublication(state.store, state.reviewId), legacy);
   assert.deepEqual(await fsp.readFile(gatePath), gateBytes);
 

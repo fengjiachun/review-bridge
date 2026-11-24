@@ -701,7 +701,7 @@ test("a local-gate publication at MERGE_READY renders the pull request, Codex re
   // bound the publication included, and names the summary by digest rather
   // than enumerating what the server read to compute it.
   const directory = reviewDirectory(state);
-  assert.match(markdown, new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/publication\\.json\`, \`${directory}/gate\\.json\`\\n- Publication summary: computed by the server over its own inputs \\(ledger, authorization, gate file\\); digest s${digest}\\.\\n`));
+  assert.match(markdown, new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/publication\\.json\`, \`${directory}/gate\\.json\`\\n- Publication summary: computed by the server; digest s${digest}\\.\\n`));
   assert.equal(reportRevision(review, publication, publicationSummary), `${review.state_version}-p${ready.revision}-s${digest}-f${REPORT_FORMAT}`);
   assert.equal(reportRevision(review, publication), `${review.state_version}-p${ready.revision}-f${REPORT_FORMAT}`);
 });
@@ -724,7 +724,7 @@ test("a remote-only publication renders from its publication and bound authoriza
   assert.match(markdown, new RegExp(`- Authorization: \`REMOTE_ONLY\`, acknowledgement \`LOCAL_REVIEW_SKIPPED\`, operator maintainer, at ${authorization.authorized_at}\\n- Authorized repository: \`[^\`]*/repo\`\\n- Codex trigger policy: \`EXPLICIT_ONLY\`\\n\\nAuthorization rationale:\\n\\n\`\`\`text\\nUse the GitHub Codex, CI, and review-thread gates only\\.\\n\`\`\``));
   assert.equal(markdown.match(/Use the GitHub Codex, CI, and review-thread gates only\./g).length, 1);
   assert.match(markdown, new RegExp(`- Stored status \`MERGE_READY\` at revision ${ready.revision}; the publication summary derives \`MERGE_READY\`, next action \`${publicationSummary.next_action}\`, gate \`ABSENT\`\\.`));
-  assert.match(markdown, new RegExp(`- Review ledger state_version: n/a \\(remote-only: no local review ledger\\)\\n- Publication ledger revision: ${ready.revision}\\n- Report revision: \`p${ready.revision}-s${summaryDigest(publicationSummary)}-f${REPORT_FORMAT}\`\\n- Rendered at: [^\\n]+\\n- Ledger: \`/store/reviews/x/publication\\.json\`, \`/store/reviews/x/remote-authorization\\.json\`\\n- Publication summary: computed by the server over its own inputs \\(ledger, authorization, gate file\\); digest s${summaryDigest(publicationSummary)}\\.`));
+  assert.match(markdown, new RegExp(`- Review ledger state_version: n/a \\(remote-only: no local review ledger\\)\\n- Publication ledger revision: ${ready.revision}\\n- Report revision: \`p${ready.revision}-s${summaryDigest(publicationSummary)}-f${REPORT_FORMAT}\`\\n- Rendered at: [^\\n]+\\n- Ledger: \`/store/reviews/x/publication\\.json\`, \`/store/reviews/x/remote-authorization\\.json\`\\n- Publication summary: computed by the server; digest s${summaryDigest(publicationSummary)}\\.`));
   // The remote-only footer names the ledgers that were actually rendered.
   assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE_REMOTE_ONLY}\n`));
   assert.ok(!markdown.includes(PROJECTION_NOTICE));

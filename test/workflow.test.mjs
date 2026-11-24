@@ -24,6 +24,9 @@ import {
   bindWorkflowReview,
   cancelAutonomousWorkflow,
   completeWorkflowAction,
+  DEFAULT_CHANGE_SIZE_BUDGET,
+  DEFAULT_LOCAL_CYCLE_BUDGET,
+  DEFAULT_REMOTE_CYCLE_BUDGET,
   distinctUnresolveFindingReviews,
   extendChangeSizeBudget,
   extendLocalCycleBudget,
@@ -44,7 +47,7 @@ import {
   resumeAutonomousWorkflow,
   startAutonomousWorkflow,
 } from "../src/workflow.mjs";
-import { canonicalJson, sha256 } from "../src/storage.mjs";
+import { atomicWriteCanonicalJson, canonicalJson, sha256 } from "../src/storage.mjs";
 
 process.env.REVIEW_BRIDGE_CODEX_COMMAND = FIXTURE_CODEX;
 
@@ -5948,4 +5951,62 @@ test("a dispatch planned with a selected model runs with that model after the up
   });
   const completed = await completeWorkflowAction(state.store, workflow.workflow_id, observed.revision, planned.action.action_id);
   assert.equal(completed.phase, "WAIT_LOCAL_REVIEW");
+});
+
+test("a workflow written before the cycle fields stays readable and cancellable", async (t) => {
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  const workflow = await startAutonomousWorkflow(
+    state.store,
+    workflowInput(state.repository, state.baseSha),
+  );
+
+  // Reproduce a ledger written before this change: schema version 1 with
+  // neither cycle field. A released v0.5.0 workflow looks exactly like this.
+  const workflowPath = path.join(
+    state.store,
+    "workflows",
+    workflow.workflow_id,
+    "workflow.json",
+  );
+  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
+  assert.equal(stored.version, 1);
+  delete stored.local_review_cycles;
+  delete stored.local_cycle_budget;
+  delete stored.change_size_budget;
+  delete stored.remote_attempts;
+  delete stored.remote_cycle_budget;
+  delete stored.current_publication;
+  await atomicWriteCanonicalJson(workflowPath, stored);
+
+  const summary = await getAutonomousWorkflowSummary(
+    state.store,
+    workflow.workflow_id,
+  );
+  assert.equal(summary.status, "ACTIVE");
+  assert.deepEqual(summary.local_review_cycles, []);
+  assert.equal(summary.local_cycle_budget, DEFAULT_LOCAL_CYCLE_BUDGET);
+  assert.equal(summary.local_cycle_count, 0);
+  assert.equal(summary.change_size_budget, DEFAULT_CHANGE_SIZE_BUDGET);
+  assert.deepEqual(summary.remote_attempts, []);
+  assert.equal(summary.remote_cycle_budget, DEFAULT_REMOTE_CYCLE_BUDGET);
+  assert.equal(summary.remote_cycle_count, 0);
+  assert.equal(summary.current_publication, null);
+
+  // The store-wide claim scan validates every ledger, so an unreadable one
+  // would also block starts on unrelated branches.
+  const listed = await listAutonomousWorkflows(state.store);
+  assert.deepEqual(
+    listed.map((entry) => entry.workflow_id),
+    [workflow.workflow_id],
+  );
+
+  // Cancellation is the path that releases the branch and head-ref claims.
+  const cancelled = await cancelAutonomousWorkflow(
+    state.store,
+    workflow.workflow_id,
+    summary.revision,
+    { operatorLabel: "Test Operator", rationale: "cleanup" },
+  );
+  assert.equal(cancelled.status, "CANCELLED");
 });

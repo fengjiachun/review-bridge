@@ -25,6 +25,7 @@ import {
 import {
   acknowledgeChangeSizeWarning,
   advanceLocalWorkflow,
+  bindWorkflowPublication,
   bindWorkflowReview,
   completeWorkflowAction,
   getAutonomousWorkflow,
@@ -71,15 +72,10 @@ const STATE_REJECTION_CODES = new Set([
   "WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED",
   "WORKFLOW_CHANGE_SIZE_BUDGET_EXCEEDED",
   "WORKFLOW_RESUME_INVALID",
-  "WORKFLOW_RESUMED",
   "WORKFLOW_CLAIMS_RELEASED",
   "WORKFLOW_RESOLUTION_RECORD_MISSING",
   "WORKFLOW_UNRESOLVE_RECORD_MISSING",
   "WORKFLOW_UNRESOLVE_REFRESH_MISSING",
-  "WORKFLOW_THREAD_NOT_ELIGIBLE",
-  "WORKFLOW_THREAD_NOT_INVALIDATED",
-  "WORKFLOW_THREAD_ALREADY_RESOLVED",
-  "WORKFLOW_THREAD_REPLY_NOT_OBSERVED",
   "WORKFLOW_PUBLICATION_NOT_READY",
 ]);
 
@@ -511,6 +507,19 @@ test("the declaration walk closes the clean loop from commit to the publication 
   }
   const summary = await getAutonomousWorkflowSummary(ctx.store, ctx.workflowId);
   assert.equal(summary.next_action, "START_PUBLICATION");
+  // Binding a workflow publication is refused, and the workflow stays put.
+  await assert.rejects(
+    bindWorkflowPublication(
+      ctx.store,
+      ctx.workflowId,
+      summary.revision,
+      summary.current_review.review_id,
+    ),
+    { code: "PUBLICATION_READ_ONLY" },
+  );
+  const after = await getAutonomousWorkflowSummary(ctx.store, ctx.workflowId);
+  assert.equal(after.revision, summary.revision);
+  assert.equal(after.phase, summary.phase);
 });
 
 // Five added lines over the one-line base measure six total against a budget
