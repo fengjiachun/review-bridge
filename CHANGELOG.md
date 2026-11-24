@@ -44,6 +44,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   requirement, reviewer provider) instead of one combined message. The
   manual summary's `prepare_review` inputs for `ADDRESS_LOCAL_FINDINGS`
   describe `implementation_scope` as the scope for the new head.
+- (#220) The workflow skill waits on the host's pull-request event wake-ups,
+  where the host offers them, instead of repeatedly collecting GitHub
+  observations. A wake is not evidence: after a wake the agent collects and
+  records a fresh observation and follows the publication summary's
+  `next_action`. Hosts without such wake-ups keep the existing back-off rule,
+  and every collection still respects rate-limit and retry signals.
 
 ### Removed
 

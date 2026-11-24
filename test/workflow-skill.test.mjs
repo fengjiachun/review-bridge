@@ -46,7 +46,20 @@ test("waiting keeps cadence separate from local timeouts", async () => {
   const docs = await readWorkflowDocuments(path.join(root, "SKILL.md"));
   const entry = docs.get("SKILL.md").replace(/\s+/g, " ");
   assert.match(entry, /Prefer supported state-change waits or long polling/);
-  assert.match(entry, /back off.*respect rate-limit and retry signals.*reset the cadence/);
+  const remote = docs.get("SKILL.md").split(/\n\s*\n/)
+    .map((paragraph) => paragraph.replace(/\s+/g, " ").trim())
+    .find((paragraph) => paragraph.startsWith("For remote GitHub observation collection,"));
+  assert.equal(remote,
+    "For remote GitHub observation collection, when the host can wake the agent on "
+    + "pull-request events such as check results, new comments or reviews, and conflicts, "
+    + "wait on that wake instead of collecting repeatedly. Without such a host, back off "
+    + "when relevant state remains unchanged and reset the cadence when relevant state "
+    + "changes. Every collection, including one after a wake, respects rate-limit and "
+    + "retry signals. Do not invoke the collector in a tight loop. A local review wait "
+    + "does not watch GitHub. Fresh complete evidence is still required before each gated "
+    + "action; a wait, a host wake, elapsed time, or unchanged revision proves none. After "
+    + "a wake, collect and record a fresh observation and follow the publication summary's "
+    + "`next_action`.");
   assert.match(entry, /25 seconds by default and accepts at most 30 seconds/);
   assert.match(entry, /call again with the same `state_version` until `changed` is true/);
   assert.match(entry, /timeout is neither a failed review nor proof that its reviewer has exited/);
