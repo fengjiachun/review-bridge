@@ -768,7 +768,6 @@ test("a tampered parent gate forces a full review", async (t) => {
     requirement: "Review the fixture.",
     implementationScope: "Reject the tampered parent proof.",
     parentReviewId: parent.id,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "FULL");
   assert.match(child.review_strategy.fallback_reason, /gate does not match/);
@@ -1040,7 +1039,6 @@ test("linked worktrees from the same repository can use successor mode", async (
     requirement: "Review the fixture.",
     implementationScope: "Create the successor in a linked worktree.",
     parentReviewId: parent.id,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(child.review_strategy.mode, "SUCCESSOR");
 });
@@ -2189,7 +2187,6 @@ test("review snapshots derive review and summary under one mutation lock", async
     baseRef: "HEAD",
     requirement: "Update the exported value.",
     implementationScope: "Change app.js.",
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const release = await acquireStateLock({
     directory: path.join(store, "reviews", prepared.id),
@@ -2611,7 +2608,6 @@ test("an unattended review selects a verified successor parent and can be forced
     baseRef: baseSha,
     requirement,
     implementationScope: "Add the child behavior.",
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
 
   assert.equal(child.review_strategy.mode, "SUCCESSOR");
@@ -2627,7 +2623,6 @@ test("an unattended review selects a verified successor parent and can be forced
     requirement,
     implementationScope: "Add the child behavior.",
     forceFullReview: true,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(forced.review_strategy.mode, "FULL");
   assert.equal(forced.review_strategy.parent_selection, "NONE");
