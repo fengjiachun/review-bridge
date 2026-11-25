@@ -124,6 +124,12 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   Manual review, publication, reports, and release verification are unchanged,
   and version-3 publications stay readable.
 
+### Internal
+
+- (#225) Test that a review round with no `change_size`, as written before
+  v0.8.0, still passes `openReview`, `finalizeLocalGate`, and the successor
+  parent check.
+
 ## 0.24.0 - 2026-11-13
 
 ### Added
