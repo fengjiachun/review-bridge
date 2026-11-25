@@ -118,6 +118,11 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   no longer counts `reviews/<id>/workflow-binding.json` as a ledger. Workflow
   records under `workflows/` stay on disk; release verification still reads
   their terminal records.
+- (#224) The remaining autonomous workflow code: its modules, its required-input
+  tables, and the `workflow` and `claims` lock domains. The `WORKFLOW_BUSY` and
+  `WORKFLOW_CLAIMS_BUSY` errors and the other workflow error codes are gone.
+  Manual review, publication, reports, and release verification are unchanged,
+  and version-3 publications stay readable.
 
 ## 0.24.0 - 2026-11-13
 
