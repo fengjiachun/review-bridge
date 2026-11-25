@@ -12,7 +12,6 @@ import {
   exportHumanArbitration,
   finalizeLocalGate,
   getReview,
-  getReviewSnapshot,
   getReviewSummary,
   listPendingReviews,
   listReviews,
@@ -199,7 +198,7 @@ test("a manual review crossing the warning completes every round without acknowl
   assert.equal(gate.review.status, "LOCAL_GATE_PASSED");
 });
 
-test("workflow snapshot reads reject a tampered change-size measurement", async (t) => {
+test("the local gate rejects a tampered change-size measurement", async (t) => {
   const { root, repository, store } = await fixture();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const baseSha = git(repository, "rev-parse", "HEAD");
@@ -212,13 +211,14 @@ test("workflow snapshot reads reject a tampered change-size measurement", async 
     requirement: "Bind the immutable measurement.",
     implementationScope: "Add large.js.",
   });
+  await submitInitialReview(store, prepared.id, [], "CODEX_TASK");
   const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
   const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
   ledger.rounds[0].change_size.total_lines = 0;
   await fsp.writeFile(reviewPath, `${JSON.stringify(ledger)}\n`, { mode: 0o600 });
 
   await assert.rejects(
-    getReviewSnapshot(store, prepared.id),
+    finalizeLocalGate(store, prepared.id),
     /review change size does not match its immutable patch/,
   );
 });
@@ -1905,7 +1905,7 @@ test("an incomplete fix is carried into a fresh full review", async (t) => {
     baseRef: baseSha,
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
-    reviewerProvider: "CLAUDE_DESKTOP",
+    reviewerProvider: "CODEX_TASK",
   });
   await submitInitialReview(store, source.id, [
     {
@@ -1916,7 +1916,7 @@ test("an incomplete fix is carried into a fresh full review", async (t) => {
       path: "app.js",
       line: 1,
     },
-  ]);
+  ], "CODEX_TASK");
   await submitResolutions(store, source.id, [
     { finding_id: "F-001", disposition: "fixed", rationale: "Added tests." },
   ]);
@@ -1932,6 +1932,7 @@ test("an incomplete fix is carried into a fresh full review", async (t) => {
       },
     ],
     [],
+    "CODEX_TASK",
   );
   assert.equal(result.status, "CONTINUABLE_FINDINGS");
   assert.equal(result.findings[0].status, "STILL_OPEN");
@@ -1950,10 +1951,12 @@ test("an incomplete fix is carried into a fresh full review", async (t) => {
     implementationScope: "Change app.js.",
     forceFullReview: true,
     continuedFromReviewId: source.id,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
-  const [carried, ...rest] = (await openReview(store, continued.id))
-    .carried_findings;
+  // The omitted provider defaults to CODEX_TASK, which matches the source.
+  assert.equal(continued.reviewer_provider, "CODEX_TASK");
+  const opened = await openReview(store, continued.id, "CODEX_TASK");
+  assert.equal(opened.review_strategy.mode, "FULL");
+  const [carried, ...rest] = opened.carried_findings;
   assert.equal(rest.length, 0);
   assert.equal(carried.continued_from_review_id, source.id);
   assert.equal(carried.finding_id, "F-001");
@@ -2165,38 +2168,6 @@ test("core review mutations wait behind the review-state lock without changing s
   const updated = await mutation;
   assert.equal(updated.status, "CLEAN");
   assert.equal(updated.state_version, prepared.state_version + 1);
-});
-
-test("review snapshots derive review and summary under one mutation lock", async (t) => {
-  const { root, repository, store } = await fixture();
-  t.after(() => fsp.rm(root, { recursive: true, force: true }));
-  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
-  const prepared = await prepareReview(store, {
-    repositoryPath: repository,
-    baseRef: "HEAD",
-    requirement: "Update the exported value.",
-    implementationScope: "Change app.js.",
-  });
-  const release = await acquireStateLock({
-    directory: path.join(store, "reviews", prepared.id),
-    reviewId: prepared.id,
-    domain: "review",
-  });
-  let settled = false;
-  const snapshot = getReviewSnapshot(store, prepared.id).finally(() => {
-    settled = true;
-  });
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.equal(settled, false);
-  await release();
-  const value = await snapshot;
-  assert.equal(value.review.status, "WAITING_FOR_REVIEW");
-  assert.equal(value.summary.status, value.review.status);
-  assert.equal(value.summary.state_version, value.review.state_version);
-  assert.equal(
-    value.summary.current_snapshot.snapshot_hash,
-    value.review.rounds[0].snapshot_hash,
-  );
 });
 
 test("a missing review mutation does not create an empty review directory", async (t) => {

@@ -41,7 +41,7 @@ export async function reviewerRuntime(storeRoot) {
   throw new Error(`Codex executable unavailable: ${name}`);
 }
 
-export function codexReviewerArguments(reviewId, requested, storeRoot, prompt) {
+export function codexReviewerArguments(reviewId, requested, storeRoot) {
   const packagedSkill = fileURLToPath(new URL("./reviewer-skill.md", import.meta.url));
   const skill = fs.existsSync(packagedSkill) ? packagedSkill :
     fileURLToPath(new URL("../templates/codex-plugin/skills/review-bridge-reviewer/SKILL.md", import.meta.url));
@@ -64,12 +64,9 @@ export function codexReviewerArguments(reviewId, requested, storeRoot, prompt) {
   };
   return [
     "exec", "--skip-git-repo-check", "--sandbox", "workspace-write",
-    // A dispatch planned before the model followed the Codex configuration
-    // runs with the model it recorded.
-    ...(requested.model == null ? [] : ["--model", requested.model]),
     ...Object.entries(settings).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`]),
     "-c", "approval_policy={granular={rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false}}",
-    prompt ?? `Independently review Review Bridge task ${reviewId} using the packaged Review Bridge reviewer skill. Require reviewer_provider: CODEX_TASK, follow the review strategy, and submit every actionable finding.`,
+    `Independently review Review Bridge task ${reviewId} using the packaged Review Bridge reviewer skill. Require reviewer_provider: CODEX_TASK, follow the review strategy, and submit every actionable finding.`,
   ];
 }
 

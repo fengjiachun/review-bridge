@@ -21,17 +21,11 @@ import {
   recordGithubSnapshot,
   startPublication,
 } from "../src/publication.mjs";
-import {
-  listAutonomousWorkflows,
-  startAutonomousWorkflow,
-} from "../src/workflow.mjs";
 import { baseline, iso, observation } from "./helpers/github-observation.mjs";
 import { commit, fixture, git, TOPIC_BRANCH } from "./helpers/repository-fixture";
-import {
-  PR_NUMBER,
-  REPOSITORY_ID,
-  workflowInput,
-} from "./helpers/publication-chain";
+
+const REPOSITORY_ID = 101;
+const PR_NUMBER = 7;
 
 const SHA1_WIDTH = 40;
 const SHA256_WIDTH = 64;
@@ -134,31 +128,6 @@ test("a sha256 repository runs a full local review and local gate", async (t) =>
   assert.equal(gated.gate.base_sha, state.baseSha);
 });
 
-test("starting an autonomous workflow on a sha256 repository is refused by name", async (t) => {
-  const state = await sha256Fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  assert.equal(state.baseSha.length, SHA256_WIDTH);
-
-  await assert.rejects(
-    startAutonomousWorkflow(
-      state.store,
-      workflowInput(state.repository, state.baseSha),
-    ),
-    (error) => {
-      assert.equal(error.code, "REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE");
-      assert.match(error.message, /GitHub does not host sha256 repositories/);
-      assert.equal(error.details.object_format, "sha256");
-      return true;
-    },
-  );
-  // The refusal happens before anything is authorized, so no ledger exists to
-  // carry a half-run push, draft pull request, or publication.
-  await assert.rejects(fsp.readdir(path.join(state.store, "workflows")), {
-    code: "ENOENT",
-  });
-  assert.deepEqual(await listAutonomousWorkflows(state.store), []);
-});
-
 test("remote authorization on a sha256 repository is refused by name", async (t) => {
   const state = await sha256Fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -186,9 +155,6 @@ test("remote authorization on a sha256 repository is refused by name", async (t)
   assert.equal(isLocalObjectId(headSha), true);
 });
 
-// A local gate needs no autonomous workflow, so it is still reachable on a
-// repository no workflow can be authorized over. Publishing one is the remaining
-// way to ask GitHub about a sha256 repository, and it is refused by the same name.
 test("starting a publication over a sha256 local gate is refused by name", async (t) => {
   const state = await sha256Fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
