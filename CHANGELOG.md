@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.25.0 - 2026-11-25
 
 ### Changed
 
@@ -126,6 +126,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Internal
 
+- (#226) Release 0.25.0.
 - (#225) Test that a review round with no `change_size`, as written before
   v0.8.0, still passes `openReview`, `finalizeLocalGate`, and the successor
   parent check.
