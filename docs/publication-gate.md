@@ -195,21 +195,23 @@ which has no review ledger, renders from its publication and authorization
 alone).
 
 Both tiers open with the conclusion: one line naming the pull request (or "no
-PR"), base and head, the reviewer, the round count, and the gate outcome with
-the publication status and the latest Codex verdict; a table of every finding
-with its final disposition and the round that raised it, plus the remote Codex
-result; and the items still open or waiting on a human, or "None". The audit
-detail follows.
+PR"), the latest round's base and head, the reviewer and the model it
+requested, the round count, and the gate outcome with the publication status
+and the Codex gate's judgement; a table of the review's findings with each final
+disposition and the round that raised it, plus the Codex results the
+publication observed; and the items still open or waiting on a human, or
+"None". The audit detail follows unchanged.
 
 The script prints a brief by default: below the conclusion, the terminal state
-and where the review goes next, a fact table, the findings already settled, the
-round-level facts, and a pointer to the full rendering. Every number in it is
-counted over the ledger and every grouping is one the ledger decides --
-severity, the round a finding was introduced in, whether two findings name the
-same title at the same location -- because the renderer calls no model; a line
-that would read across findings to say what they have in common is out of its
-reach, and it states the counting rule instead. A `REMOTE_ONLY` publication
-briefs in the same shape.
+and where the review goes next, a fact table, the findings still open before
+the ones already settled, the round-level facts, and a pointer to the full
+rendering. Every number in it is counted over the ledger and every grouping is
+one the ledger decides -- severity, the round a finding was introduced in,
+whether two findings name the same title at the same location -- because the
+renderer calls no model; a line that would read across findings to say what
+they have in common is out of its reach, and it states the counting rule
+instead. A review with nothing open says so rather than heading an empty
+section, and a `REMOTE_ONLY` publication briefs in the same shape.
 
 `--full` prints the full rendering, which is also what the tool writes:
 requirement and scope, each round's findings

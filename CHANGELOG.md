@@ -16,7 +16,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   to use it.
 - (#221) Both report tiers open with a conclusion: one line naming the pull
   request, base and head, reviewer, round count, and gate outcome (with the
-  publication status and latest Codex verdict when published); a findings
+  publication status and the Codex gate's judgement when published); a findings
   table with each final disposition and the round that raised it; and the
   items still open, or "None". The audit detail follows unchanged.
   `REPORT_FORMAT` is now 11.

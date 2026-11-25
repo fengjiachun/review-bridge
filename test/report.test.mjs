@@ -747,7 +747,6 @@ test("a publication with no observation yet says so in every observation-based s
   assert.match(markdown, /### Derivation\n\n- Stored status `PR_PENDING` at revision 1; the publication summary derives `PR_PENDING` \(`NO_GITHUB_SNAPSHOT`\), next action `POST_AND_RECORD_CODEX_REVIEW_REQUEST`, gate `ABSENT`\.\n- No observation has been recorded yet, so there is nothing here to judge\.\n/);
   assert.doesNotMatch(markdown, /passing/);
   assert.doesNotMatch(markdown, /MERGE_READY rests on/);
-  assert.equal(markdown.match(/No observation has been recorded yet/g).length, 5);
   assert.match(markdown, /^Remote Codex: No observation has been recorded yet/m);
   assert.match(markdown.split("\n")[2], / · publication `PR_PENDING` · Codex not yet observed$/);
   assert.match(markdown, /## Open items\n\n- Publication blocked: `NO_GITHUB_SNAPSHOT`, next action `POST_AND_RECORD_CODEX_REVIEW_REQUEST`\.\n/);
@@ -804,15 +803,44 @@ test("a thread's outcome is the resolved flag the observation recorded", async (
   threads.unresolved_count = 1;
   markdown = render(cleanInTwoRounds(), { publication });
   assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| unresolved; left for a human \|/);
-  // And the open items at the top name it.
   assert.match(markdown, /## Open items\n\n- Unresolved review thread `PRRT_1` at `src\/value\.js:1`\.\n/);
+  assert.match(markdown, /^Pull request review threads, from any reviewer: 1, 1 unresolved\.$/m);
 
-  // A Codex verdict on another head is never shown as this head's.
+  // A merged publication owes nothing: its last threads stay in the audit.
+  publication.terminal = { status: "MERGED", revision: publication.revision, at: "2026-09-10T00:00:00.000Z", reason: "pull request merged" };
+  markdown = render(cleanInTwoRounds(), {
+    publication,
+    publicationSummary: { status: "MERGED", blocking_reason: "pull request merged", next_action: "NONE", gate_state: "ABSENT" },
+  });
+  assert.match(markdown, /## Open items\n\nNone\.\n/);
+  assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| unresolved; left for a human \|/);
+});
+
+// The headline's Codex standing is the gate's own judgement, never the latest
+// result read on its own: a result for another head is not this head's CLEAN.
+test("the conclusion's Codex standing is the gate's judgement over the observation", async (t) => {
+  const state = await gatedFixture(t);
+  await reachReady(state);
+  const { publication } = await loadReportLedgers(state.store, state.reviewId);
+  let markdown = render(cleanInTwoRounds(), { publication });
   assert.match(markdown.split("\n")[2], / · Codex `CLEAN`$/);
-  publication.latest_observation.codex_review.results.at(-1).reviewed_head_sha = "f".repeat(40);
+  const result = publication.latest_observation.codex_review.results.at(-1);
+  assert.match(markdown, new RegExp(`^- \`CLEAN\` on head \`${result.reviewed_head_sha.slice(0, 7)}\` — `, "m"));
+  result.reviewed_head_sha = "f".repeat(40);
   markdown = render(cleanInTwoRounds(), { publication });
-  assert.match(markdown.split("\n")[2], / · Codex `CLEAN` on earlier head `fffffff`$/);
-  assert.match(markdown, /^Remote Codex: `CLEAN` on head `fffffff`, not the authorized head; /m);
+  assert.match(markdown.split("\n")[2], / · Codex `GITHUB_REVIEW_UNKNOWN`$/);
+  assert.match(markdown, /^Remote Codex: `GITHUB_REVIEW_UNKNOWN`, as the gate judges the latest observation\.$/m);
+  assert.match(markdown, /^- `CLEAN` on head `fffffff` — /m);
+  // A findings review lists the review comments it attached, apart from the
+  // pull request's threads.
+  publication.latest_observation.codex_review.results.push({
+    ...result,
+    verdict: "FINDINGS",
+    url: "https://github.com/owner/repo/pull/7#pullrequestreview-9",
+    attached_review_comments: [{ comment_id: 11 }, { comment_id: 12 }],
+  });
+  markdown = render(cleanInTwoRounds(), { publication });
+  assert.match(markdown, /^- `FINDINGS` on head `fffffff`, 2 review comments: `11`, `12` — https:\/\/github\.com\/owner\/repo\/pull\/7#pullrequestreview-9$/m);
 });
 
 // A review that carried findings through both rounds, built through the
@@ -1427,10 +1455,10 @@ function brief(review, options = {}) {
   });
 }
 
-// The second line promises to say where the review goes next. Without a
+// Below the conclusion the brief says where the review goes next. Without a
 // publication that has to come from the local status itself, one sentence
 // per status, and never the same generic sentence for all of them.
-test("the brief's second line names the next local step when no publication exists", () => {
+test("the brief names the next local step when no publication exists", () => {
   const expected = {
     WAITING_FOR_REVIEW: /^Next: the reviewer's first review is still owed\./,
     REVIEW_SUBMITTED: /^Next: the author's resolutions are owed next\./,
@@ -1476,8 +1504,9 @@ test("the brief calls submitted findings open and awaiting the author", () => {
   const gated = brief(cleanInTwoRounds(submitted));
   assert.match(gated, /2 of 2 findings still open/);
   assert.match(gated, /\| Outcome \| 0 fixed and verified · 2 open · 0 rebutted \|/);
-  assert.match(gated, /^## Open items$/m);
+  assert.match(gated, /^## Still open — what the next reader inherits$/m);
   assert.match(gated, /^\| F-001 \| major \| title of F-001 \| open \(`OPEN`\) \| 1 \|$/m);
+  assert.match(gated, /^- F-001 · major · .+ — title of F-001: no author response yet\.$/m);
   assert.match(gated, /no author response yet/);
 });
 
@@ -1525,7 +1554,7 @@ test("both tiers open with the conclusion, the findings, and what is still open"
   const top = [
     `# Review report ${BASELINE_REVIEW_ID}`,
     "",
-    "**Conclusion:** no PR · `aaaaaaa` → `ccccccc` · `CODEX_TASK`/model not recorded · 2 rounds · `CONTINUABLE_FINDINGS`",
+    "**Conclusion:** no PR · `aaaaaaa` → `ccccccc` · `CODEX_TASK`, model not recorded · 2 rounds · `CONTINUABLE_FINDINGS`",
     "",
     "## Findings",
     "",
@@ -1536,15 +1565,13 @@ test("both tiers open with the conclusion, the findings, and what is still open"
     "| F-003 | nit | Title of F-003 | fixed | 1 |",
     "| F-004 | minor | Title of F-004 | open (`OPEN`) | 2 |",
     "| F-005 | nit | Title of F-005 | open (`OPEN`) | 2 |",
-    "| F-009 | major | Title of the carried finding | carried in | from `rb-2026-08-30T000000-000Z-1234abcd` |",
+    "",
+    "Carried in as scope hints from `rb-2026-08-30T000000-000Z-1234abcd`: 1 finding, rendered as recorded in the full report.",
     "",
     "## Open items",
     "",
-    "**F-004 · minor · `docs/rfcs/0007-object-store-wal.md:114` — Title of F-004**",
-    "Round 2 introduced it; no author response yet. Explanation of F-004.",
-    "",
-    "**F-005 · nit · `docs/rfcs/0007-object-store-wal.md:222` — Title of F-005**",
-    "Round 2 introduced it; no author response yet. Explanation of F-005.",
+    "- F-004 · minor · `docs/rfcs/0007-object-store-wal.md:114` — Title of F-004: no author response yet.",
+    "- F-005 · nit · `docs/rfcs/0007-object-store-wal.md:222` — Title of F-005: no author response yet.",
     "",
     "---",
     "",
@@ -1565,9 +1592,30 @@ test("both tiers open with the conclusion, the findings, and what is still open"
   );
 });
 
+// The conclusion names the latest round's own base and head, the model that
+// round requested, and what an unfinished review still owes; the opening
+// never repeats a finding's free text, which only the audit fences.
+test("the conclusion reads the latest round, and the opening carries no free text", () => {
+  const review = continuableInTwoRounds({ status: "WAITING_FOR_REREVIEW" });
+  review.rounds[1].base_sha = "d".repeat(40);
+  review.rounds[1].reviewer_configuration = { requested: { model: "gpt-x", reasoning_effort: "high" } };
+  review.findings[3].explanation = `first line\n${"word ".repeat(40)}\n\`\`\` fence`;
+  for (const markdown of [brief(review), renderReviewReport(review, { renderedAt: BASELINE_RENDERED_AT })]) {
+    assert.equal(
+      markdown.split("\n")[2],
+      "**Conclusion:** no PR · `ddddddd` → `ccccccc` · `CODEX_TASK`, requested model `gpt-x` · 2 rounds · `WAITING_FOR_REREVIEW`",
+    );
+    const opening = markdown.slice(0, markdown.indexOf("\n---\n"));
+    assert.ok(opening.includes("- Still owed: the rereview is still owed."));
+    assert.ok(!opening.includes("first line"));
+  }
+  review.rounds[1].reviewer_configuration = { requested: { reasoning_effort: "high" } };
+  assert.match(brief(review).split("\n")[2], /· `CODEX_TASK`, model from the Codex configuration ·/);
+});
+
 test("the brief puts what is still open before what is settled, and counts both from the ledger", () => {
   const markdown = brief(continuableInTwoRounds());
-  const open = markdown.indexOf("## Open items");
+  const open = markdown.indexOf("## Still open");
   const fixed = markdown.indexOf("## Fixed and verified");
   const rebutted = markdown.indexOf("## Rebutted, and the rebuttal accepted");
   assert.ok(open > 0 && fixed > open && rebutted > fixed);
@@ -1625,6 +1673,8 @@ test("a review with nothing open says so instead of opening a heading over nothi
   settled.findings = settled.findings.filter((entry) => entry.status !== "OPEN");
   const markdown = brief(settled);
   assert.ok(markdown.includes("## Open items\n\nNone.\n"));
+  assert.ok(!markdown.includes("## Still open"));
+  assert.ok(markdown.includes("Nothing is still open: every finding this review raised was settled, below."));
   assert.match(afterConclusion(markdown)[0], /^\*\*CLEAN\*\* — 3 findings raised, none still open\.$/);
   // And a review that raised nothing at all says that, not "nothing is open".
   const empty = continuableInTwoRounds({
@@ -1636,7 +1686,8 @@ test("a review with nothing open says so instead of opening a heading over nothi
     continued_by_review_id: null,
   });
   const emptyMarkdown = brief(empty);
-  assert.ok(emptyMarkdown.includes("## Findings\n\nNo finding was raised.\n\n## Open items\n\nNone.\n"));
+  assert.ok(emptyMarkdown.includes("## Findings\n\nNo finding was raised in this review.\n\n## Open items\n\nNone.\n"));
+  assert.ok(emptyMarkdown.includes("No finding was raised in this review, so nothing is open."));
   assert.ok(emptyMarkdown.includes("| Findings | none raised |"));
   assert.ok(!emptyMarkdown.includes("## Fixed and verified"));
   assert.ok(!emptyMarkdown.includes("## Rebutted"));
@@ -1659,7 +1710,11 @@ test("an open finding says what it is waiting on, from its own status", () => {
   assert.ok(markdown.includes("Round 1 introduced it; the author escalated it to a human."));
   assert.ok(markdown.includes("Round 2 introduced it; the author reports it fixed, and no rereview has decided it."));
   assert.ok(markdown.includes("| Outcome | 0 fixed and verified · 5 open · 0 rebutted |"));
-  assert.ok(markdown.includes("- Human arbitration required: `REREVIEW_UNRESOLVED` at 2026-09-01T00:26:00.000Z."));
+  const audit = afterConclusion(markdown).join("\n");
+  const opening = markdown.slice(0, markdown.length - audit.length);
+  for (const part of [opening, audit]) {
+    assert.ok(part.includes("- Human arbitration required: `REREVIEW_UNRESOLVED` at 2026-09-01T00:26:00.000Z."));
+  }
 });
 
 test("a finding restated in a later round is named as a repeat, by the rule the brief prints", () => {
@@ -1780,8 +1835,8 @@ test("a brief with a publication names the pull request and the summary's verdic
     ledgerDirectory: reviewDirectory(state),
   });
   assert.equal(publicationSummary.status, "MERGE_READY");
-  assert.match(markdown.split("\n")[2], /^\*\*Conclusion:\*\* owner\/repo#7 · `[0-9a-f]{7}` → `[0-9a-f]{7}` · `CLAUDE_DESKTOP`\/.+ · 1 round · `LOCAL_GATE_PASSED` · publication `MERGE_READY` · Codex `CLEAN`$/);
-  assert.match(markdown, /^Remote Codex: `CLEAN` on head `[0-9a-f]{7}`; 0 review threads on the pull request, 0 unresolved\.$/m);
+  assert.match(markdown.split("\n")[2], /^\*\*Conclusion:\*\* owner\/repo#7 · `[0-9a-f]{7}` → `[0-9a-f]{7}` · `CLAUDE_DESKTOP`, .+ · 1 round · `LOCAL_GATE_PASSED` · publication `MERGE_READY` · Codex `CLEAN`$/);
+  assert.match(markdown, /^Remote Codex: `CLEAN`, as the gate judges the latest observation\.$/m);
   assert.match(afterConclusion(markdown)[1], /^Publication owner\/repo#7: `MERGE_READY`/);
   assert.ok(
     markdown.includes(
@@ -1789,8 +1844,9 @@ test("a brief with a publication names the pull request and the summary's verdic
     ),
   );
   // The review itself had no finding, and nothing is left open.
-  assert.ok(markdown.includes("## Findings\n\nNo finding was raised.\n\nRemote Codex: "));
+  assert.ok(markdown.includes("## Findings\n\nNo finding was raised in this review.\n\nRemote Codex: "));
   assert.ok(markdown.includes("## Open items\n\nNone.\n"));
+  assert.ok(markdown.includes("No finding was raised in this review, so nothing is open."));
 });
 
 // ---------------------------------------------------------------------------
@@ -1833,7 +1889,8 @@ test("the packaged script prints the brief by default and the full report under 
   assert.match(afterConclusion(briefOut)[0], /^\*\*LOCAL_GATE_PASSED\*\* — no finding was raised\.$/);
   assert.match(afterConclusion(briefOut)[1], /^The local gate passed over snapshot `/);
   assert.ok(briefOut.includes("| Outcome | 0 fixed and verified · 0 open · 0 rebutted |"));
-  assert.ok(briefOut.includes("## Findings\n\nNo finding was raised.\n\n## Open items\n\nNone.\n"));
+  assert.ok(briefOut.includes("## Findings\n\nNo finding was raised in this review.\n\n## Open items\n\nNone.\n"));
+  assert.ok(briefOut.includes("No finding was raised in this review, so nothing is open."));
   // The two tiers are two depths of one document: only the full one carries
   // the author's own text back at the reader.
   assert.ok(!briefOut.includes("### Requirement"));

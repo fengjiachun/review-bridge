@@ -479,7 +479,6 @@ function changesSection(review) {
 }
 
 function outcomeSection(review) {
-  const history = review.history ?? [];
   const lines = [
     TERMINAL_STATUSES.includes(review.status)
       ? `- Terminal state: ${code(review.status)}`
@@ -492,12 +491,7 @@ function outcomeSection(review) {
     }
   }
   if (review.status === "HUMAN_REQUIRED") {
-    const reason = [...history]
-      .reverse()
-      .find((entry) => HUMAN_REQUIRED_EVENTS.includes(entry?.event));
-    lines.push(
-      `- Human arbitration required: ${reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`}`,
-    );
+    lines.push(`- Human arbitration required: ${arbitrationReason(review)}`);
   }
   const carried = review.carried_findings ?? [];
   if (carried.length > 0) {
@@ -1004,8 +998,8 @@ function destinationSentence(review, publication, summary) {
   return `Next: ${next}. No publication ledger was rendered, so nothing here is merged or gated.`;
 }
 
-// The first two lines: the terminal state, what is still owed, and where the
-// review goes next. Everything below them is detail on these two.
+// The brief's first lines below the conclusion: the terminal state, what is
+// still owed, and where the review goes next.
 function verdictLines(review, publication, summary, partition) {
   if (review == null) {
     return [
@@ -1040,53 +1034,76 @@ function findingHeadline(finding) {
   return `**${inline(finding.id)} · ${inline(finding.severity)} · ${where}${constraintLabel(finding)} — ${inline(finding.title)}**`;
 }
 
+// Unresolved first, and a review with none says so on one line instead of
+// opening a heading over nothing.
+function openFindingsSection(review, partition) {
+  const carried = review.carried_findings ?? [];
+  if (partition.all.length === 0) {
+    return [
+      carried.length === 0
+        ? "No finding was raised in this review, so nothing is open."
+        : `No finding was raised in this review; ${count(carried.length, "finding")} carried in from an earlier review and the full report renders each.`,
+    ];
+  }
+  if (partition.open.length === 0) {
+    return ["Nothing is still open: every finding this review raised was settled, below."];
+  }
+  return [
+    "## Still open — what the next reader inherits",
+    ...partition.open.map((finding) => {
+      const state = Object.hasOwn(OPEN_FINDING_STATE, finding.status)
+        ? OPEN_FINDING_STATE[finding.status]
+        : `its status is ${code(finding.status)}`;
+      return [
+        findingHeadline(finding),
+        `Round ${inline(finding.introduced_round ?? "n/a")} introduced it; ${state}. ${inline(finding.explanation)}`,
+      ].join("\n");
+    }),
+  ];
+}
+
 // ---------------------------------------------------------------------------
-// The conclusion: what both tiers open with, so the outcome comes before the
-// audit detail. One line names the change, the reviewer, and where the gates
-// stand; a table lists every finding with what became of it; and the items
-// still owed come last.
+// The conclusion both tiers open with.
 
 function short(sha) {
   return typeof sha === "string" ? code(sha.slice(0, 7)) : "n/a";
 }
 
-// The most recent Codex result the latest observation holds, by its own time.
-function latestCodexResult(publication) {
-  const results = publication?.latest_observation?.codex_review?.results ?? [];
-  return [...results]
-    .sort((left, right) => Date.parse(left.event_at) - Date.parse(right.event_at))
-    .at(-1);
+// The Codex gate's own judgement over the latest observation; null is its
+// "nothing wrong", which it reaches only on a CLEAN result for the current
+// request on the authorized head.
+function codexStanding(publication) {
+  if (publication.latest_observation == null) return "not yet observed";
+  const status = codexStatus(publication);
+  return status == null ? code("CLEAN") : code(status);
 }
 
-// A result for a head other than the authorized one says so, so a verdict on
-// an earlier head never reads as the verdict on this one.
-function codexPhrase(publication, record) {
-  if (publication.latest_observation == null) return "Codex not yet observed";
-  const latest = latestCodexResult(publication);
-  if (latest == null) return "no Codex result yet";
-  return latest.reviewed_head_sha === record.head_sha
-    ? `Codex ${code(latest.verdict)}`
-    : `Codex ${code(latest.verdict)} on earlier head ${short(latest.reviewed_head_sha)}`;
+function reviewerModel(round) {
+  const requested = round?.reviewer_configuration?.requested;
+  if (requested == null) return "model not recorded";
+  return requested.model == null
+    ? "model from the Codex configuration"
+    : `requested model ${code(requested.model)}`;
 }
 
-function conclusionLine(review, publication, record, summary) {
-  const rounds = review?.rounds ?? [];
-  const requested = rounds.at(-1)?.reviewer_configuration?.requested;
+function conclusionLine(review, publication, authorization, summary) {
+  const record = authorization ?? publication?.authorization ?? {};
+  const latest = review?.rounds?.at(-1);
   const parts = [
     publication == null ? "no PR" : pullRequestName(publication),
     review == null
       ? `${short(record.base_sha)} → ${short(record.head_sha)}`
-      : `${short(rounds[0]?.base_sha)} → ${short(rounds.at(-1)?.head_sha)}`,
+      : `${short(latest?.base_sha)} → ${short(latest?.head_sha)}`,
     review == null
       ? "no local reviewer"
-      : `${code(review.reviewer_provider ?? "CLAUDE_DESKTOP")}/${requested == null ? "model not recorded" : requested.model == null ? "model from the Codex configuration" : code(requested.model)}`,
-    review == null ? "no local round" : count(rounds.length, "round"),
+      : `${code(review.reviewer_provider ?? "CLAUDE_DESKTOP")}, ${reviewerModel(latest)}`,
+    review == null ? "no local round" : count((review.rounds ?? []).length, "round"),
     review == null ? code("REMOTE_ONLY") : code(review.status),
   ];
   if (publication != null) {
     parts.push(
       `publication ${code(summary?.status ?? publication.status)}`,
-      codexPhrase(publication, record),
+      `Codex ${codexStanding(publication)}`,
     );
   }
   return `**Conclusion:** ${parts.join(" · ")}`;
@@ -1097,97 +1114,110 @@ const DISPOSITION = {
   REBUTTAL_ACCEPTED: "rejected, rebuttal accepted",
 };
 
-function findingsTableSection(review, publication, record) {
+// Each Codex result the latest observation holds, with the review comments a
+// findings review attached; the gate's judgement over them is the headline's.
+function codexResultLines(publication) {
+  if (publication.latest_observation == null) return [`Remote Codex: ${NO_OBSERVATION}`];
+  const results = publication.latest_observation.codex_review?.results ?? [];
+  const threads = publication.latest_observation.review_threads?.threads ?? [];
+  return [
+    `Remote Codex: ${codexStanding(publication)}, as the gate judges the latest observation.`,
+    ...(results.length === 0
+      ? []
+      : [
+          results
+            .map((result) => {
+              const comments = result.attached_review_comments ?? [];
+              return `- ${code(result.verdict)} on head ${short(result.reviewed_head_sha)}${comments.length === 0 ? "" : `, ${count(comments.length, "review comment")}: ${comments.map((comment) => code(comment.comment_id)).join(", ")}`} — ${inline(result.url)}`;
+            })
+            .join("\n"),
+        ]),
+    `Pull request review threads, from any reviewer: ${threads.length}, ${threads.filter((thread) => !thread.is_resolved).length} unresolved.`,
+  ];
+}
+
+function findingsTableSection(review, publication) {
   const lines = [];
   if (review == null) {
     lines.push("No local finding: a `REMOTE_ONLY` publication has no review ledger.");
   } else {
-    const rows = [
-      ...(review.findings ?? []).map((finding) => [
-        inline(finding.id),
-        inline(finding.severity),
-        inline(finding.title),
-        Object.hasOwn(DISPOSITION, finding.status)
-          ? DISPOSITION[finding.status]
-          : `open (${cellCode(finding.status)})`,
-        inline(finding.introduced_round ?? "n/a"),
-      ]),
-      ...(review.carried_findings ?? []).map((entry) => [
-        inline(entry.finding_id),
-        inline(entry.severity),
-        inline(entry.title),
-        "carried in",
-        `from ${cellCode(entry.continued_from_review_id)}`,
-      ]),
-    ];
+    const findings = review.findings ?? [];
     lines.push(
-      rows.length === 0
-        ? "No finding was raised."
-        : builtTable(["ID", "Severity", "Finding", "Disposition", "Round"], rows),
+      findings.length === 0
+        ? "No finding was raised in this review."
+        : builtTable(
+            ["ID", "Severity", "Finding", "Disposition", "Round"],
+            findings.map((finding) => [
+              inline(finding.id),
+              inline(finding.severity),
+              inline(finding.title),
+              Object.hasOwn(DISPOSITION, finding.status)
+                ? DISPOSITION[finding.status]
+                : `open (${cellCode(finding.status)})`,
+              inline(finding.introduced_round ?? "n/a"),
+            ]),
+          ),
     );
+    const carried = review.carried_findings ?? [];
+    if (carried.length > 0) {
+      const sources = [...new Set(carried.map((entry) => entry.continued_from_review_id))];
+      lines.push(
+        `Carried in as scope hints from ${sources.map(code).join(", ")}: ${count(carried.length, "finding")}, rendered as recorded in the full report.`,
+      );
+    }
   }
-  if (publication != null) {
-    const latest = latestCodexResult(publication);
-    const threads = publication.latest_observation?.review_threads?.threads ?? [];
-    lines.push(
-      publication.latest_observation == null
-        ? `Remote Codex: ${NO_OBSERVATION}`
-        : latest == null
-          ? "Remote Codex: no result in the latest observation."
-          : `Remote Codex: ${code(latest.verdict)} on head ${short(latest.reviewed_head_sha)}${latest.reviewed_head_sha === record.head_sha ? "" : ", not the authorized head"}; ${count(threads.length, "review thread")} on the pull request, ${threads.filter((thread) => !thread.is_resolved).length} unresolved.`,
-    );
-  }
+  if (publication != null) lines.push(...codexResultLines(publication));
   return ["## Findings", lines.join("\n\n")];
 }
 
-// What a reader still has to act on: findings not settled, an arbitration
-// the review is waiting for, what blocks the publication, and review threads
-// left unresolved on GitHub.
+// The recorded reason a review needs a human, from its own history.
+function arbitrationReason(review) {
+  const reason = [...(review.history ?? [])]
+    .reverse()
+    .find((entry) => HUMAN_REQUIRED_EVENTS.includes(entry?.event));
+  return reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`;
+}
+
+// A terminal publication owes nothing: its last threads and terminal reason
+// stay in the audit detail.
 function openItemsSection(review, publication, summary) {
-  const paragraphs = (review?.findings ?? [])
+  const items = (review?.findings ?? [])
     .filter((finding) => !SETTLED_STATUSES.has(finding.status))
     .map((finding) => {
       const state = Object.hasOwn(OPEN_FINDING_STATE, finding.status)
         ? OPEN_FINDING_STATE[finding.status]
         : `its status is ${code(finding.status)}`;
-      return [
-        findingHeadline(finding),
-        `Round ${inline(finding.introduced_round ?? "n/a")} introduced it; ${state}. ${inline(finding.explanation)}`,
-      ].join("\n");
+      const where = finding.path == null ? "no location" : code(findingLocation(finding));
+      return `- ${inline(finding.id)} · ${inline(finding.severity)} · ${where} — ${inline(finding.title)}: ${state}.`;
     });
-  const items = [];
   if (review?.status === "HUMAN_REQUIRED") {
-    const reason = [...(review.history ?? [])]
-      .reverse()
-      .find((entry) => HUMAN_REQUIRED_EVENTS.includes(entry?.event));
+    items.push(`- Human arbitration required: ${arbitrationReason(review)}.`);
+  } else if (review != null && !TERMINAL_STATUSES.includes(review.status)) {
     items.push(
-      `- Human arbitration required: ${reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`}.`,
+      `- Still owed: ${Object.hasOwn(LOCAL_NEXT_STEP, review.status) ? LOCAL_NEXT_STEP[review.status] : `status ${code(review.status)}; inspect the ledger`}.`,
     );
   }
-  if (summary?.blocking_reason != null) {
-    items.push(
-      `- Publication blocked: ${code(summary.blocking_reason)}, next action ${code(summary.next_action)}.`,
-    );
+  if (publication != null && publication.terminal == null) {
+    if (summary?.blocking_reason != null) {
+      items.push(
+        `- Publication blocked: ${code(summary.blocking_reason)}, next action ${code(summary.next_action)}.`,
+      );
+    }
+    for (const thread of publication.latest_observation?.review_threads?.threads ?? []) {
+      if (thread.is_resolved) continue;
+      items.push(
+        `- Unresolved review thread ${code(thread.id)} at ${thread.path == null ? "n/a" : code(`${thread.path}${thread.line == null ? "" : `:${thread.line}`}`)}.`,
+      );
+    }
   }
-  for (const thread of publication?.latest_observation?.review_threads?.threads ?? []) {
-    if (thread.is_resolved) continue;
-    items.push(
-      `- Unresolved review thread ${code(thread.id)} at ${thread.path == null ? "n/a" : code(`${thread.path}${thread.line == null ? "" : `:${thread.line}`}`)}.`,
-    );
-  }
-  if (items.length > 0) paragraphs.push(items.join("\n"));
-  return ["## Open items", ...(paragraphs.length === 0 ? ["None."] : paragraphs)];
+  return ["## Open items", items.length === 0 ? "None." : items.join("\n")];
 }
 
 function conclusionSections(review, publication, authorization, summary) {
-  // The bound authorization when the reader admitted one, else the ledger's
-  // own copy, as the remote section reads it.
-  const record = authorization ?? publication?.authorization ?? {};
   return [
-    conclusionLine(review, publication, record, summary),
-    ...findingsTableSection(review, publication, record),
+    conclusionLine(review, publication, authorization, summary),
+    ...findingsTableSection(review, publication),
     ...openItemsSection(review, publication, summary),
-    // The audit detail follows, as each tier rendered it before.
     "---",
   ];
 }
@@ -1257,12 +1287,7 @@ function aboutReviewSection(review, partition, timings) {
     lines.push(`- Continued by ${code(review.continued_by_review_id)}.`);
   }
   if (review.status === "HUMAN_REQUIRED") {
-    const reason = [...(review.history ?? [])]
-      .reverse()
-      .find((entry) => HUMAN_REQUIRED_EVENTS.includes(entry?.event));
-    lines.push(
-      `- Human arbitration required: ${reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`}.`,
-    );
+    lines.push(`- Human arbitration required: ${arbitrationReason(review)}.`);
   }
   return ["## About this review", lines.join("\n")];
 }
@@ -1330,6 +1355,7 @@ export function renderReviewBrief(
           "No finding is reported here: a `REMOTE_ONLY` publication has no review ledger, so none was raised locally. What gated it is the remote side alone -- the Codex review, the required checks, and the review threads the publication recorded.",
         ]
       : [
+          ...openFindingsSection(review, partition),
           ...settledSection("## Fixed and verified", partition.resolved, decisionByFinding),
           ...settledSection(
             "## Rebutted, and the rebuttal accepted",
