@@ -18,15 +18,12 @@ import {
 import {
   authorizeRemotePublication,
   canonicalDigest,
-  derivePublicationStatus,
   finalizePublicationGate,
   getPublication,
   recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
-  threadWatermark,
 } from "../src/publication.mjs";
-import { startAutonomousWorkflow } from "../src/workflow.mjs";
 import {
   PROJECTION_NOTICE,
   PROJECTION_NOTICE_REMOTE_ONLY,
@@ -40,12 +37,6 @@ import {
 } from "../src/report.mjs";
 import { atomicWriteCanonicalJson } from "../src/storage.mjs";
 import { baseline, iso, observation } from "./helpers/github-observation.mjs";
-import {
-  gateAndPublishHead,
-  reachRemoteWait,
-  workflowInput,
-} from "./helpers/publication-chain";
-import { commit, fixture as workflowFixture } from "./helpers/repository-fixture";
 import {
   BASELINE_RENDERED_AT,
   BASELINE_REVIEW_ID,
@@ -710,7 +701,7 @@ test("a local-gate publication at MERGE_READY renders the pull request, Codex re
   // bound the publication included, and names the summary by digest rather
   // than enumerating what the server read to compute it.
   const directory = reviewDirectory(state);
-  assert.match(markdown, new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/publication\\.json\`, \`${directory}/gate\\.json\`\\n- Publication summary: computed by the server over its own inputs \\(gate file, workflow binding, resolution sources\\); digest s${digest}\\.\\n`));
+  assert.match(markdown, new RegExp(`- Ledger: \`${directory}/review\\.json\`, \`${directory}/publication\\.json\`, \`${directory}/gate\\.json\`\\n- Publication summary: computed by the server; digest s${digest}\\.\\n`));
   assert.equal(reportRevision(review, publication, publicationSummary), `${review.state_version}-p${ready.revision}-s${digest}-f${REPORT_FORMAT}`);
   assert.equal(reportRevision(review, publication), `${review.state_version}-p${ready.revision}-f${REPORT_FORMAT}`);
 });
@@ -733,7 +724,7 @@ test("a remote-only publication renders from its publication and bound authoriza
   assert.match(markdown, new RegExp(`- Authorization: \`REMOTE_ONLY\`, acknowledgement \`LOCAL_REVIEW_SKIPPED\`, operator maintainer, at ${authorization.authorized_at}\\n- Authorized repository: \`[^\`]*/repo\`\\n- Codex trigger policy: \`EXPLICIT_ONLY\`\\n\\nAuthorization rationale:\\n\\n\`\`\`text\\nUse the GitHub Codex, CI, and review-thread gates only\\.\\n\`\`\``));
   assert.equal(markdown.match(/Use the GitHub Codex, CI, and review-thread gates only\./g).length, 1);
   assert.match(markdown, new RegExp(`- Stored status \`MERGE_READY\` at revision ${ready.revision}; the publication summary derives \`MERGE_READY\`, next action \`${publicationSummary.next_action}\`, gate \`ABSENT\`\\.`));
-  assert.match(markdown, new RegExp(`- Review ledger state_version: n/a \\(remote-only: no local review ledger\\)\\n- Publication ledger revision: ${ready.revision}\\n- Report revision: \`p${ready.revision}-s${summaryDigest(publicationSummary)}-f${REPORT_FORMAT}\`\\n- Rendered at: [^\\n]+\\n- Ledger: \`/store/reviews/x/publication\\.json\`, \`/store/reviews/x/remote-authorization\\.json\`\\n- Publication summary: computed by the server over its own inputs \\(gate file, workflow binding, resolution sources\\); digest s${summaryDigest(publicationSummary)}\\.`));
+  assert.match(markdown, new RegExp(`- Review ledger state_version: n/a \\(remote-only: no local review ledger\\)\\n- Publication ledger revision: ${ready.revision}\\n- Report revision: \`p${ready.revision}-s${summaryDigest(publicationSummary)}-f${REPORT_FORMAT}\`\\n- Rendered at: [^\\n]+\\n- Ledger: \`/store/reviews/x/publication\\.json\`, \`/store/reviews/x/remote-authorization\\.json\`\\n- Publication summary: computed by the server; digest s${summaryDigest(publicationSummary)}\\.`));
   // The remote-only footer names the ledgers that were actually rendered.
   assert.ok(markdown.endsWith(`\n${PROJECTION_NOTICE_REMOTE_ONLY}\n`));
   assert.ok(!markdown.includes(PROJECTION_NOTICE));
@@ -783,186 +774,33 @@ test("a LOCAL_GATE publication without its review ledger is refused, not rendere
   assert.ok(!(await fsp.readdir(reviewDirectory(state))).some((name) => name.startsWith("report-")));
 });
 
-// A thread with complete provenance the frontier and the gate can judge.
-function observedThread(id, headSha, comments = 1) {
-  return {
-    id,
-    path: "src/value.js",
-    line: 1,
-    is_outdated: false,
-    is_resolved: true,
-    provenance_complete: true,
-    comments_pagination_complete: true,
-    comment_count: comments,
-    comments: Array.from({ length: comments }, (_, index) => ({
-      id: `${id}-c${index + 1}`,
-      database_id: 1000 + index,
-      created_at: `2026-09-01T01:0${index}:00.000Z`,
-      updated_at: `2026-09-01T01:0${index}:00.000Z`,
-      actor: { id: index === 0 ? 99 : 7, type: index === 0 ? "Bot" : "User", login: index === 0 ? "codex[bot]" : "author" },
-      review: { id: `PRR_${id}`, database_id: 5000 + index, state: "COMMENTED", reviewed_head_sha: headSha, actor: { id: 7, type: "User", login: "author" } },
-    })),
-  };
-}
-
-function resolutionRecord(thread, headSha, number = 1) {
-  return {
-    number,
-    action_id: `act-${number}`,
-    thread_id: thread.id,
-    thread_watermark: threadWatermark(thread),
-    eligibility_sha256: "e".repeat(64),
-    head_sha: headSha,
-    actor: { id: 7, type: "User" },
-    reply_comment_id: 55,
-    recorded_revision: 3,
-  };
-}
-
-// The observation's resolved flag is read against the publication's own
-// judges, so a retired or invalidated record never explains a resolved thread
-// and an unresolve after an automatic resolution is reported as history.
-test("a thread's outcome follows the frontier replay and the gate's invalidation check, not the presence of a record", async (t) => {
+test("a thread's outcome is the resolved flag the observation recorded", async (t) => {
   const state = await gatedFixture(t);
   await reachReady(state);
   const { publication } = await loadReportLedgers(state.store, state.reviewId);
-  const headSha = publication.latest_observation.pull_request.head_sha;
   const threads = publication.latest_observation.review_threads;
-  const thread = observedThread("PRRT_1", headSha);
+  const thread = {
+    id: "PRRT_1",
+    path: "src/value.js",
+    line: 1,
+    is_resolved: true,
+    comment_count: 1,
+    comments: [{ actor: { login: "codex[bot]" } }],
+  };
   threads.threads = [thread];
   threads.total_count = 1;
   threads.unresolved_count = 0;
-  publication.automatic_resolutions = [resolutionRecord(thread, headSha)];
-
-  // Active record, resolved thread, matching watermark: credited.
   let markdown = render(cleanInTwoRounds(), { publication });
-  assert.match(markdown, new RegExp(`\\| PRRT_1 \\| src/value\\.js:1 \\| 1 by codex\\\\\\[bot\\\\\\] \\| resolved by record 1 \\(action act-1, reply comment 55, head ${headSha.slice(0, 12)}\\) \\|`));
-
-  // A comment appended after the record: the thread is still resolved on
-  // GitHub, but its watermark moved, and the gate judges the resolution
-  // invalidated. The record must not be credited.
-  const commented = observedThread("PRRT_1", headSha, 2);
-  threads.threads = [commented];
-  markdown = render(cleanInTwoRounds(), { publication });
-  assert.match(markdown, /\| PRRT_1 \| src\/value\.js:1 \| 2 by codex\\\[bot\\\], author \| resolved on GitHub; record 1 no longer explains it: the gate judges THREAD_RESOLUTION_INVALIDATED \(the thread's provenance, resolved flag, or watermark changed since the record\) \|/);
+  assert.match(markdown, /\| PRRT_1 \| src\/value\.js:1 \| 1 by codex\\\[bot\\\] \| resolved on GitHub \|/);
   // A hand-mutated ledger has no summary, and the report derives nothing on
   // its own.
   assert.match(markdown, /- Stored status `MERGE_READY` at revision 3; not derived here: no publication summary was supplied\.\n- No MERGE_READY derivation is rendered for this status\./);
   assert.match(markdown, /- Publication summary: not supplied to this render\./);
 
-  // The record was invalidated and unresolved for repair, and the observation
-  // now shows the thread unresolved: a legitimate state, reported as such.
-  threads.threads = [{ ...thread, is_resolved: false }];
-  threads.unresolved_count = 1;
-  publication.resolution_lifecycle = [
-    {
-      number: 1,
-      kind: "INVALIDATED",
-      thread_id: "PRRT_1",
-      record_id: "act-1",
-      prior_watermark: threadWatermark(thread),
-      new_watermark: threadWatermark(commented),
-      follow_up_comments: [],
-      reason: "NEW_COMMENTS",
-      at: "2026-09-01T01:05:00.000Z",
-    },
-    {
-      number: 2,
-      kind: "UNRESOLVED_FOR_REPAIR",
-      thread_id: "PRRT_1",
-      record_id: "act-1",
-      action_id: "act-2",
-      at: "2026-09-01T01:06:00.000Z",
-    },
-  ];
-  markdown = render(cleanInTwoRounds(), { publication });
-  assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| unresolved; left for a human; record 1 resolved it automatically and is no longer active \(THREAD_RESOLUTION_INVALIDATED\) \|/);
-
-  // A retired record does not explain a thread GitHub shows resolved either.
-  threads.threads = [thread];
-  threads.unresolved_count = 0;
-  markdown = render(cleanInTwoRounds(), { publication });
-  assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| resolved on GitHub; record 1 resolved it automatically and is no longer active \(THREAD_RESOLUTION_INVALIDATED\) \|/);
-
-  // A second thread with its own active record, while the first is
-  // invalidated: the gate's invalidation is whole-frontier, so the second
-  // thread's record is uncredited too. Its line must say that, and must not
-  // read as though this thread were the one to repair.
-  publication.resolution_lifecycle = [];
-  const other = observedThread("PRRT_2", headSha);
-  threads.threads = [commented, other];
-  threads.total_count = 2;
-  publication.automatic_resolutions = [resolutionRecord(thread, headSha), resolutionRecord(other, headSha, 2)];
-  markdown = render(cleanInTwoRounds(), { publication });
-  const row = markdown.split("\n").find((line) => line.startsWith("| PRRT_2 "));
-  assert.match(row, /resolved on GitHub; the gate credits no automatic resolution while thread PRRT_1 invalidates the frontier, so record 2 stays active but uncredited \|/);
-  assert.doesNotMatch(row, /no longer explains it|THREAD_RESOLUTION_INVALIDATED|no longer active/);
-  threads.threads = [thread];
-  threads.total_count = 1;
-
-  // A thread the records name but the observation no longer holds: the gate
-  // refuses over it, and the table cannot show it, so it gets its own line
-  // naming the thread and the record.
-  threads.threads = [];
-  threads.total_count = 0;
-  threads.unresolved_count = 0;
-  publication.automatic_resolutions = [resolutionRecord(thread, headSha)];
-  publication.resolution_lifecycle = [];
-  markdown = render(cleanInTwoRounds(), { publication });
-  const section = markdown.slice(markdown.indexOf("### Review threads"), markdown.indexOf("### Supersessions"));
-  assert.match(
-    section,
-    new RegExp(`- PRRT_1: not in the latest observation; record 1 \\(action act-1, reply comment 55, head \`${headSha.slice(0, 12)}\`\\) resolved it automatically and the gate judges THREAD_RESOLUTION_INVALIDATED`),
-  );
-  assert.doesNotMatch(markdown, /No review thread was observed/);
-  threads.threads = [thread];
-  threads.total_count = 1;
-
-  // No record at all: the observed state, nothing more.
-  publication.resolution_lifecycle = [];
-  publication.automatic_resolutions = [];
   threads.threads = [{ ...thread, is_resolved: false }];
   threads.unresolved_count = 1;
   markdown = render(cleanInTwoRounds(), { publication });
   assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| unresolved; left for a human \|/);
-  threads.threads = [thread];
-  threads.unresolved_count = 0;
-  markdown = render(cleanInTwoRounds(), { publication });
-  assert.match(markdown, /\| PRRT_1 \| [^|]+\| [^|]+\| resolved on GitHub; no automatic-resolution record \|/);
-});
-
-// The gate section is the publication summary's verdict, never a bare
-// derivation: on a workflow-bound ledger the summary's terminal replay refuses
-// a resolved thread the workflow owns no proof for, where derivePublication
-// over the ledger alone still says MERGE_READY.
-test("the derivation section agrees with the publication summary where a bare derivation would not", async (t) => {
-  const state = await workflowFixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(state.store, workflowInput(state.repository, state.baseSha));
-  const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(state, workflow, headSha, "one");
-  await reachRemoteWait(state, atPublication, reviewId, headSha, Date.now(), (payload) => {
-    // Ready to merge on its face, with one thread resolved by nobody the
-    // workflow can account for.
-    payload.pull_request.is_draft = false;
-    const thread = observedThread("PRRT_unowned", headSha);
-    payload.review_threads.threads = [thread];
-    payload.review_threads.total_count = 1;
-    payload.review_threads.unresolved_count = 0;
-    return payload;
-  });
-
-  const { review, publication, authorization, publicationSummary } = await loadReportLedgers(state.store, reviewId);
-  const bare = derivePublicationStatus(publication);
-  assert.equal(bare.status, "MERGE_READY");
-  assert.notEqual(publicationSummary.status, "MERGE_READY");
-  const markdown = render(review, { publication, authorization, publicationSummary });
-  assert.match(
-    markdown,
-    new RegExp(`- Stored status \`${publication.status}\` at revision ${publication.revision}; the publication summary derives \`${publicationSummary.status}\` \\(\`${publicationSummary.blocking_reason}\`\\), next action \`${publicationSummary.next_action}\`, gate \`${publicationSummary.gate_state}\`\\.\\n- No MERGE_READY derivation is rendered for this status\\.`),
-  );
-  assert.doesNotMatch(markdown, /MERGE_READY rests on/);
-  assert.match(markdown, /\| PRRT_unowned \| [^|]+\| [^|]+\| resolved on GitHub; no automatic-resolution record \|/);
 });
 
 // A review that carried findings through both rounds, built through the
@@ -1640,7 +1478,7 @@ test("legacy full reports retain their contents and mark reviewer configuration 
   // The stored baseline retains its original rendering identity.
   assert.ok(baseline.includes("- Report revision: `9-f1`"));
   assert.ok(rendered.includes(`- Report revision: \`9-f${REPORT_FORMAT}\``));
-  assert.equal(REPORT_FORMAT, 9);
+  assert.equal(REPORT_FORMAT, 10);
 });
 
 test("a finding's heading names the constraint it records", () => {

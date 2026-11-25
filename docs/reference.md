@@ -94,14 +94,12 @@ A code chosen at run time from a variable is not seen.
 | `PUBLICATION_HISTORY_CONFLICT` | `src/publication.mjs` |
 | `PUBLICATION_LIMIT_EXCEEDED` | `src/publication.mjs` |
 | `PUBLICATION_MOVED_DURING_RENDER` | `src/report.mjs` |
-| `PUBLICATION_NOT_AUTONOMOUS` | `src/publication.mjs` |
 | `PUBLICATION_NOT_FOUND` | `src/publication.mjs` |
 | `PUBLICATION_NOT_READY` | `src/publication.mjs` |
+| `PUBLICATION_READ_ONLY` | `src/publication.mjs`, `src/workflow.mjs` |
 | `PUBLICATION_REVISION_CONFLICT` | `src/publication.mjs` |
 | `PUBLICATION_STORE_INVALID` | `src/publication.mjs` |
-| `PUBLICATION_SUPERSEDED` | `src/publication.mjs` |
 | `PUBLICATION_TERMINAL` | `src/publication.mjs` |
-| `PUBLICATION_THREAD_EVIDENCE_MISSING` | `src/publication.mjs` |
 | `REMOTE_AUTHORIZATION_INVALID` | `src/publication.mjs` |
 | `REPORT_FILE_MISMATCH` | `src/report.mjs` |
 | `REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE` | `src/publication.mjs` |
@@ -125,12 +123,10 @@ A code chosen at run time from a variable is not seen.
 | `WORKFLOW_AUDIT_EVENT_TOO_LARGE` | `src/workflow.mjs` |
 | `WORKFLOW_AUDIT_LOG_FULL` | `src/workflow.mjs` |
 | `WORKFLOW_AUTHORIZATION_INVALID` | `src/workflow-binding.mjs`, `src/workflow.mjs` |
-| `WORKFLOW_AUTHORIZATION_MISMATCH` | `src/publication.mjs` |
 | `WORKFLOW_BASE_MISMATCH` | `src/workflow.mjs` |
 | `WORKFLOW_BRANCH_MISMATCH` | `src/workflow.mjs` |
 | `WORKFLOW_BUSY` | `src/storage.mjs` |
 | `WORKFLOW_CANCELLATION_RESERVE_EXHAUSTED` | `src/workflow.mjs` |
-| `WORKFLOW_CANCELLED` | `src/publication.mjs` |
 | `WORKFLOW_CAPABILITY_REQUIRED` | `src/workflow.mjs` |
 | `WORKFLOW_CHANGE_SIZE_BUDGET_EXCEEDED` | `src/workflow.mjs` |
 | `WORKFLOW_CHANGE_SIZE_SPLIT_UNEXECUTED` | `src/workflow.mjs` |
@@ -139,21 +135,20 @@ A code chosen at run time from a variable is not seen.
 | `WORKFLOW_CLAIMS_BUSY` | `src/storage.mjs` |
 | `WORKFLOW_CLAIMS_INVALID` | `src/workflow.mjs` |
 | `WORKFLOW_FINDINGS_UNIDENTIFIED` | `src/workflow.mjs` |
-| `WORKFLOW_HEAD_MISMATCH` | `src/publication.mjs`, `src/workflow.mjs` |
+| `WORKFLOW_HEAD_MISMATCH` | `src/workflow.mjs` |
 | `WORKFLOW_HEAD_NOT_DESCENDANT` | `src/workflow.mjs` |
 | `WORKFLOW_LOCAL_GATE_MISMATCH` | `src/workflow.mjs` |
-| `WORKFLOW_NOT_ACTIVE` | `src/publication.mjs`, `src/workflow.mjs` |
+| `WORKFLOW_NOT_ACTIVE` | `src/workflow.mjs` |
 | `WORKFLOW_NOT_FOUND` | `src/workflow-binding.mjs`, `src/workflow.mjs` |
 | `WORKFLOW_NO_PROGRESS` | `src/workflow.mjs` |
 | `WORKFLOW_OWNERSHIP_CONFLICT` | `src/workflow.mjs` |
-| `WORKFLOW_PHASE_INVALID` | `src/publication.mjs`, `src/workflow.mjs` |
+| `WORKFLOW_PHASE_INVALID` | `src/workflow.mjs` |
 | `WORKFLOW_PUBLICATION_MISMATCH` | `src/workflow.mjs` |
 | `WORKFLOW_PUBLICATION_NOT_READY` | `src/workflow.mjs` |
 | `WORKFLOW_PULL_REQUEST_AMBIGUOUS` | `src/workflow.mjs` |
 | `WORKFLOW_PULL_REQUEST_EXPOSED` | `src/workflow.mjs` |
 | `WORKFLOW_RELEASE_EVIDENCE_INVALID` | `src/workflow.mjs` |
 | `WORKFLOW_REPOSITORY_DRIFT` | `src/workflow.mjs` |
-| `WORKFLOW_RESOLUTION_ACTION_MISSING` | `src/publication.mjs` |
 | `WORKFLOW_RESOLUTION_RECORD_MISSING` | `src/workflow.mjs` |
 | `WORKFLOW_RESUME_INVALID` | `src/workflow.mjs` |
 | `WORKFLOW_REVIEWER_TASK_REQUIRED` | `src/workflow.mjs` |
@@ -165,7 +160,7 @@ A code chosen at run time from a variable is not seen.
 | `WORKFLOW_REVIEW_RAN_AHEAD` | `src/workflow.mjs` |
 | `WORKFLOW_REVIEW_STATE_INVALID` | `src/workflow.mjs` |
 | `WORKFLOW_REVIEW_TRANSITION_INVALID` | `src/workflow.mjs` |
-| `WORKFLOW_REVISION_CONFLICT` | `src/publication.mjs`, `src/workflow.mjs` |
+| `WORKFLOW_REVISION_CONFLICT` | `src/workflow.mjs` |
 | `WORKFLOW_SCHEMA_UNSUPPORTED` | `src/workflow-binding.mjs`, `src/workflow.mjs` |
 | `WORKFLOW_STATE_INVALID` | `src/workflow-binding.mjs`, `src/workflow.mjs` |
 | `WORKFLOW_STATE_TOO_LARGE` | `src/workflow.mjs` |
@@ -180,7 +175,6 @@ A code chosen at run time from a variable is not seen.
 | `WORKFLOW_THREAD_REPLY_AMBIGUOUS` | `src/workflow.mjs` |
 | `WORKFLOW_THREAD_REPLY_MISMATCH` | `src/workflow.mjs` |
 | `WORKFLOW_THREAD_REPLY_NOT_OBSERVED` | `src/workflow.mjs` |
-| `WORKFLOW_UNRESOLVE_ACTION_MISSING` | `src/publication.mjs` |
 | `WORKFLOW_UNRESOLVE_RECORD_MISSING` | `src/workflow.mjs` |
 | `WORKFLOW_UNRESOLVE_REFRESH_MISSING` | `src/workflow.mjs` |
 | `WORKTREE_DIRTY` | `src/workflow.mjs` |

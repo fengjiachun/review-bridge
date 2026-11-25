@@ -16,14 +16,7 @@ import {
 } from "./core.mjs";
 import {
   assertRemoteHostableRepository,
-  getAutonomousPreReady,
-  getAutonomousTerminal,
-  withAutonomousTerminalLock,
   getPublication,
-  getInvalidatedResolutionPlan,
-  getThreadResolutionPlan,
-  withPublicationFindingsReviewLock,
-  withUnresolveCompletionEvidenceLock,
 } from "./publication.mjs";
 import {
   atomicWriteCanonicalJson,
@@ -116,6 +109,19 @@ function fail(code, message, details = {}) {
   error.details = { retryable: false, ...details };
   throw error;
 }
+
+// The publication side of the workflow left publication.mjs with version-3
+// publications, so binding a workflow publication now throws here.
+function removedPublicationSide() {
+  fail("PUBLICATION_READ_ONLY", "workflow-bound publications are read-only");
+}
+const getAutonomousPreReady = removedPublicationSide;
+const getAutonomousTerminal = removedPublicationSide;
+const withAutonomousTerminalLock = removedPublicationSide;
+const getInvalidatedResolutionPlan = removedPublicationSide;
+const getThreadResolutionPlan = removedPublicationSide;
+const withPublicationFindingsReviewLock = removedPublicationSide;
+const withUnresolveCompletionEvidenceLock = removedPublicationSide;
 
 function now() {
   return new Date().toISOString();
