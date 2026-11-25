@@ -106,8 +106,8 @@ offline audit validation.
 `scripts/review-scorecard.mjs` aggregates the ledgers already in the configured
 store into one report: findings by severity, author dispositions crossed with
 reviewer decisions, rebuttal outcomes before and after the verification
-obligation, rounds to CLEAN, continuations, workflow budget events, and human
-arbitration escalations, each per reviewer provider and overall. A
+obligation, rounds to CLEAN, continuations, and human arbitration escalations,
+each per reviewer provider and overall. A
 ledgers-per-pull-request section groups publication ledgers by `repository_id`
 and `pr_number`, bins the pull requests at 1, 2, 3-5, 6-10 and more than 10
 ledgers, and lists the three with the most. It prints
@@ -162,23 +162,21 @@ review counts. Valid reviews excluded by the filters are counted separately
 as `corpus.reviews_filtered_out`. An empty selection has zero counters and
 null corpus timestamps and rates whose denominator is zero.
 
-Review filters do not identify an entire workflow or its audit events. With
-any filter enabled, the helper does not read workflow ledgers or audit logs:
-JSON `workflows`, corpus workflow/audit counts, and workflow/audit diagnostic
-lists are null, and
-`scope.workflow_omission_reason` explains their omission. Markdown gives the
-same explanation. With no filters, existing workflow statistics remain
-included over the whole store. Publication ledgers follow the same rule: a
-review filter does not select them, so with any filter enabled JSON
-`publications`, `skipped_publications`, and the corpus publication counts are
-null, and `scope.publication_omission_reason` says why.
+Review filters do not select publication ledgers. With any filter enabled,
+the helper does not read them: JSON `publications`, `skipped_publications`, and
+the corpus publication counts are null, `scope.publication_omission_reason`
+says why, and Markdown gives the same explanation. With no filters, publication
+statistics cover the whole store.
 
-The JSON schema is version 3. Version 2 added `filters`, `scope`,
+The JSON schema is version 4. Version 2 added `filters`, `scope`,
 `metric_semantics`, and `corpus.reviews_filtered_out`; version 3 removes the
 review-type filter and each provider's `reviews_by_type` and
-`advisory_reported`. Consumers should check `schema_version` and handle the
-null workflow fields in filtered reports. The raw `not_clean` counter means a
-status other than `CLEAN` or `LOCAL_GATE_PASSED`; it is not a failure count.
+`advisory_reported`; version 4 removes the workflow statistics (`workflows`,
+`skipped_workflows`, `skipped_audit_logs`, the scope's workflow fields, and the
+corpus workflow and audit-log counts). Consumers should check `schema_version`
+and handle the null publication fields in filtered reports. The raw
+`not_clean` counter means a status other than `CLEAN` or `LOCAL_GATE_PASSED`;
+it is not a failure count.
 
 These are recorded outcomes, not model accuracy: `fixed`/`resolved` does not
 establish accuracy, and `rebuttal_accepted` does not establish a false

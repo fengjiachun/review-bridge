@@ -1,10 +1,8 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { MAX_ROUNDS, REVIEWER_PROVIDERS } from "./core.mjs";
-import { isFullSha } from "./object-id.mjs";
-import { DEFAULT_CHANGE_SIZE_BUDGET } from "./workflow.mjs";
 
-export const SCORECARD_SCHEMA_VERSION = 3;
+export const SCORECARD_SCHEMA_VERSION = 4;
 
 const SEVERITIES = ["blocker", "major", "minor", "nit"];
 const CONSTRAINT_KINDS = ["documented", "undocumented"];
@@ -23,8 +21,6 @@ const REVIEW_STATUSES = [
 ];
 const CLEAN_STATUSES = ["CLEAN", "LOCAL_GATE_PASSED"];
 const REVIEW_STRATEGIES = ["FULL", "SUCCESSOR"];
-const WORKFLOW_OMISSION_REASON =
-  "Review filters do not define a workflow or audit-log cohort; workflow statistics are omitted.";
 const PUBLICATION_OMISSION_REASON =
   "Review filters do not define a publication-ledger cohort; ledgers-per-pull-request statistics are omitted.";
 const LEDGER_COUNT_BINS = [
@@ -48,17 +44,6 @@ const HUMAN_REQUIRED_EVENTS = [
   "REREVIEW_UNRESOLVED",
 ];
 const HUMAN_REQUIRED_REASONS = [...HUMAN_REQUIRED_EVENTS, "NOT_RECORDED"];
-const WORKFLOW_STATUSES = ["ACTIVE", "PAUSED", "CANCELLED", "MERGE_READY"];
-const BUDGET_PAUSE_REASONS = [
-  "LOCAL_CYCLE_BUDGET_EXHAUSTED",
-  "REMOTE_CYCLE_BUDGET_EXHAUSTED",
-  "CHANGE_SIZE_BUDGET_EXCEEDED",
-];
-const BUDGET_EXTENSION_EVENTS = [
-  "LOCAL_CYCLE_BUDGET_EXTENDED",
-  "REMOTE_CYCLE_BUDGET_EXTENDED",
-  "CHANGE_SIZE_BUDGET_EXTENDED",
-];
 // The obligation landed with the field, so a decision record either predates
 // it and has no `verification` key at all, or postdates it and always has one.
 const OBLIGATION_BUCKETS = ["before_obligation", "after_obligation"];
@@ -103,23 +88,6 @@ function emptyStats() {
     carried_findings: 0,
     human_required: 0,
     human_required_by_reason: zeroCounts(HUMAN_REQUIRED_REASONS),
-  };
-}
-
-function emptyWorkflowStats() {
-  return {
-    workflows: 0,
-    workflows_by_status: zeroCounts(WORKFLOW_STATUSES),
-    budget_pauses: zeroCounts(BUDGET_PAUSE_REASONS),
-    budget_extensions: zeroCounts(BUDGET_EXTENSION_EVENTS),
-    change_size: {
-      snapshots_measured: 0,
-      snapshots_without_change_size: 0,
-      warning_threshold_crossed: 0,
-      over_budget: 0,
-    },
-    local_cycles: { started: 0, addressed: 0, followed_up: 0 },
-    remote_attempts: { recorded: 0, counted: 0, diverted: 0 },
   };
 }
 
@@ -253,31 +221,6 @@ function reviewDefect(review, directoryName) {
   return null;
 }
 
-function workflowDefect(workflow, directoryName) {
-  if (workflow == null || typeof workflow !== "object") {
-    return "not a JSON object";
-  }
-  if (typeof workflow.workflow_id !== "string") return "missing workflow_id";
-  // The audit log is read from the enclosing directory, so a ledger that names
-  // a different workflow would splice one workflow's cycles onto another's
-  // events. The server refuses the same mismatch.
-  if (workflow.workflow_id !== directoryName) {
-    return "workflow ID does not match its store directory";
-  }
-  if (!WORKFLOW_STATUSES.includes(workflow.status)) {
-    return `unknown status ${JSON.stringify(workflow.status)}`;
-  }
-  for (const key of ["local_review_cycles", "remote_attempts"]) {
-    if (workflow[key] == null) continue;
-    if (!Array.isArray(workflow[key])) return `${key} is not an array`;
-    for (const [index, entry] of workflow[key].entries()) {
-      const defect = repairEntryDefect(entry, index);
-      if (defect != null) return `${key} holds an entry that ${defect}`;
-    }
-  }
-  return null;
-}
-
 // Only the fields the grouping reads: which pull request the ledger targets,
 // the name it is shown under, and when it was created.
 function publicationDefect(ledger, directoryName) {
@@ -354,35 +297,6 @@ function countPublications(ledgers) {
   };
 }
 
-// Each entry counts as one repair cycle simply by existing, and three of its
-// fields decide which counter it lands in. Those three are checked for what
-// they mean, not merely their type: an empty string is a value the counters
-// would read as "addressed", "followed up", or "diverted". The writer's
-// remaining schema is not reproduced here.
-function repairEntryDefect(entry, index) {
-  if (entry == null || typeof entry !== "object" || Array.isArray(entry)) {
-    return "is not an object";
-  }
-  // The number is the cycle's position, not just any positive integer: two
-  // entries both numbered 1 are two counted cycles with one identity.
-  if (entry.number !== index + 1) {
-    return "is not numbered by its position";
-  }
-  if (entry.addressed_head_sha != null && !isFullSha(entry.addressed_head_sha)) {
-    return "has an addressed_head_sha that is not a commit";
-  }
-  if (
-    entry.followup_review_id != null &&
-    (typeof entry.followup_review_id !== "string" || entry.followup_review_id === "")
-  ) {
-    return "has an empty followup_review_id";
-  }
-  if (entry.diverted_at != null && !isTimestamp(entry.diverted_at)) {
-    return "has a diverted_at that is not a timestamp";
-  }
-  return null;
-}
-
 function isTimestamp(value) {
   return typeof value === "string" && !Number.isNaN(Date.parse(value));
 }
@@ -442,15 +356,6 @@ function matchesFilters(review, filters) {
       review.repository_path === filters.repository) &&
     (filters.strategy == null ||
       (review.review_strategy?.mode ?? "FULL") === filters.strategy)
-  );
-}
-
-// The total is what every threshold is computed from, so it has to be a real
-// measurement: counting lines, and the sum of the two halves it reports.
-function isChangeSize({ added_lines: added, deleted_lines: deleted, total_lines: total }) {
-  return (
-    [added, deleted, total].every((n) => Number.isSafeInteger(n) && n >= 0) &&
-    total === added + deleted
   );
 }
 
@@ -561,178 +466,6 @@ async function readJsonLedgers(root, fileName) {
   return { records, skipped, absent };
 }
 
-// Only the first `committed_bytes` of the audit log are committed; a tail
-// beyond that is a torn append and is not evidence of anything.
-async function readCommittedAuditEvents(directory, workflowId) {
-  let head;
-  let raw;
-  try {
-    // Starting a workflow writes both artifacts, so a missing one is damage,
-    // not a workflow that has yet to record anything. The server's own reader
-    // fails WORKFLOW_AUDIT_CORRUPT on either.
-    head = JSON.parse(
-      await fsp.readFile(path.join(directory, "action-audit-head.json"), "utf8"),
-    );
-    raw = await fsp.readFile(path.join(directory, "action-audit.jsonl"));
-  } catch (error) {
-    return {
-      events: [],
-      reason:
-        error?.code === "ENOENT"
-          ? "audit artifact is missing"
-          : `unreadable audit artifact: ${error.message}`,
-    };
-  }
-  if (!Number.isInteger(head?.committed_bytes) || head.committed_bytes < 0) {
-    return { events: [], reason: "audit head has no committed_bytes" };
-  }
-  // A head belonging to another workflow can still land on a byte boundary
-  // this log accepts, silently cutting it short.
-  if (head.workflow_id !== workflowId) {
-    return { events: [], reason: "audit head names a different workflow" };
-  }
-  // subarray clamps, so without this a log truncated at an earlier event
-  // boundary would parse cleanly and contribute an arbitrary subset.
-  if (raw.length < head.committed_bytes) {
-    return { events: [], reason: "audit log is shorter than its cursor" };
-  }
-  // An interrupted append leaves at most one event past the cursor: a partial
-  // line, or one whole line. More than that means the cursor and the log have
-  // diverged, and the committed part is then an arbitrary prefix of what the
-  // workflow actually recorded.
-  const tail = raw.subarray(head.committed_bytes);
-  const newlines = tail.filter((byte) => byte === 0x0a).length;
-  if (newlines > 1 || (newlines === 1 && tail.at(-1) !== 0x0a)) {
-    return { events: [], reason: "audit crash tail is ambiguous" };
-  }
-  const events = [];
-  // committed_bytes counts bytes, so the cut is made on the buffer. Slicing the
-  // decoded string would run past the boundary by one position per multi-byte
-  // character and swallow part of an uncommitted append.
-  const committedBytes = raw.subarray(0, head.committed_bytes);
-  // A cursor stopping one byte short of an event's newline leaves a tail the
-  // ambiguity check accepts and a prefix that still parses, so the boundary
-  // itself has to be checked.
-  if (committedBytes.length > 0 && committedBytes.at(-1) !== 0x0a) {
-    return { events: [], reason: "committed audit prefix is not newline terminated" };
-  }
-  const committed = committedBytes.toString("utf8");
-  const lines = committed.split("\n");
-  // Only the trailing newline may leave an empty element. A blank line between
-  // events is damage, and skipping it would read the log as healthy.
-  if (lines.at(-1) === "") lines.pop();
-  for (const line of lines) {
-    if (line === "") {
-      return { events: [], reason: "audit log has a blank committed line" };
-    }
-    let event;
-    try {
-      event = JSON.parse(line);
-    } catch (error) {
-      // A prefix of a damaged log is an arbitrary subset of the workflow's
-      // pauses and extensions, so none of it is returned.
-      return { events: [], reason: `unparseable audit line: ${error.message}` };
-    }
-    // The last of the three identities an artifact carries: without this, one
-    // workflow's pauses and extensions could be counted under another.
-    if (event?.workflow_id !== workflowId) {
-      return { events: [], reason: "audit event names a different workflow" };
-    }
-    // A repeated or skipped sequence would let one event be counted twice, or
-    // hide that another is missing, while the cursor still totals correctly.
-    if (event.sequence !== events.length + 1) {
-      return { events: [], reason: "audit event is out of sequence" };
-    }
-    // Absent is legitimate — an audited state older than the field falls back
-    // to the default — but a present malformed budget makes every threshold
-    // NaN, which reads as a measured snapshot that crossed nothing.
-    const budget = event.workflow_state?.change_size_budget;
-    if (budget != null && (!Number.isInteger(budget) || budget < 1)) {
-      return { events: [], reason: "audit event has an invalid change size budget" };
-    }
-    const review = event.workflow_state?.current_review;
-    if (review != null) {
-      // Snapshots are deduplicated by this pair, so an unidentified one would
-      // collapse distinct snapshots together and hide the later measurements.
-      if (!isName(review.review_id) || !isName(review.snapshot_hash)) {
-        return { events: [], reason: "audit event has an unidentified review snapshot" };
-      }
-      if (review.change_size != null && !isChangeSize(review.change_size)) {
-        return { events: [], reason: "audit event has an invalid change size" };
-      }
-    }
-    events.push(event);
-  }
-  // The cursor describes the committed region in three ways, and a head left
-  // behind by a stale write can agree on the byte count while disagreeing
-  // about which events those bytes are.
-  if (
-    head.next_sequence !== events.length + 1 ||
-    head.last_event_sha256 !== (events.at(-1)?.event_sha256 ?? null)
-  ) {
-    return { events: [], reason: "audit cursor disagrees with committed events" };
-  }
-  return { events, reason: null };
-}
-
-function countWorkflowAudit(stats, events) {
-  // A snapshot is measured against the budget in force the first time it
-  // appears, so a later extension cannot retroactively erase a crossing.
-  const measured = new Map();
-  const unmeasurable = new Set();
-  for (const event of events) {
-    if (BUDGET_EXTENSION_EVENTS.includes(event?.event)) {
-      stats.budget_extensions[event.event] += 1;
-    }
-    const state = event?.workflow_state;
-    const reason = state?.pause?.reason_code;
-    if (event?.event === "WORKFLOW_PAUSED" && BUDGET_PAUSE_REASONS.includes(reason)) {
-      stats.budget_pauses[reason] += 1;
-    }
-    const review = state?.current_review;
-    if (review == null) continue;
-    const key = `${review.review_id}:${review.snapshot_hash}`;
-    if (measured.has(key)) continue;
-    const totalLines = review.change_size?.total_lines;
-    // A legacy dispatch backfills the change size in a later event, so an
-    // unmeasurable snapshot is provisional: it is measured from the first
-    // event that carries a size, and counting it as zero meanwhile would
-    // read as "no large snapshot".
-    if (!Number.isInteger(totalLines)) {
-      unmeasurable.add(key);
-      continue;
-    }
-    unmeasurable.delete(key);
-    measured.set(key, {
-      totalLines,
-      budget: state.change_size_budget ?? DEFAULT_CHANGE_SIZE_BUDGET,
-    });
-  }
-  stats.change_size.snapshots_without_change_size += unmeasurable.size;
-  for (const { totalLines, budget } of measured.values()) {
-    stats.change_size.snapshots_measured += 1;
-    if (totalLines >= Math.ceil(budget * 0.75)) {
-      stats.change_size.warning_threshold_crossed += 1;
-    }
-    if (totalLines > budget) stats.change_size.over_budget += 1;
-  }
-}
-
-function countWorkflow(stats, workflow) {
-  stats.workflows += 1;
-  stats.workflows_by_status[workflow.status] += 1;
-  for (const cycle of workflow.local_review_cycles ?? []) {
-    stats.local_cycles.started += 1;
-    if (cycle?.addressed_head_sha != null) stats.local_cycles.addressed += 1;
-    if (cycle?.followup_review_id != null) stats.local_cycles.followed_up += 1;
-  }
-  for (const attempt of workflow.remote_attempts ?? []) {
-    stats.remote_attempts.recorded += 1;
-    if (attempt?.diverted_at == null) stats.remote_attempts.counted += 1;
-    else stats.remote_attempts.diverted += 1;
-  }
-}
-
 export async function buildScorecard(storeRoot, options = {}) {
   const filters = scorecardFilters(options);
   const filtered = Object.values(filters).some((value) => value != null);
@@ -769,31 +502,6 @@ export async function buildScorecard(storeRoot, options = {}) {
   }
   for (const stats of providers.values()) finalizeRebuttals(stats);
 
-  const workflowsRoot = path.join(storeRoot, "workflows");
-  const workflowLedgers = filtered
-    ? null
-    : await readJsonLedgers(workflowsRoot, "workflow.json");
-  const workflows = filtered ? null : emptyWorkflowStats();
-  const skippedWorkflows = filtered ? null : [...workflowLedgers.skipped];
-  const skippedAuditLogs = filtered ? null : [];
-  for (const { id, record } of workflowLedgers?.records ?? []) {
-    const defect = workflowDefect(record, id);
-    if (defect != null) {
-      skippedWorkflows.push({ id, reason: defect });
-      continue;
-    }
-    countWorkflow(workflows, record);
-    // The audit log is a separate artifact from the workflow ledger: a damaged
-    // one contributes no events at all rather than an arbitrary prefix, but it
-    // does not disqualify the ledger that parsed.
-    const audit = await readCommittedAuditEvents(
-      path.join(workflowsRoot, id),
-      id,
-    );
-    if (audit.reason != null) skippedAuditLogs.push({ id, reason: audit.reason });
-    countWorkflowAudit(workflows, audit.events);
-  }
-
   const publicationLedgers = filtered
     ? null
     : await readJsonLedgers(path.join(storeRoot, "reviews"), "publication.json");
@@ -815,8 +523,6 @@ export async function buildScorecard(storeRoot, options = {}) {
       reviews: "selected_valid_review_ledgers",
       review_time: "review.created_at as UTC instants in [since, until)",
       review_diagnostics: "all_review_directories_in_store",
-      workflows: filtered ? "omitted" : "all_valid_workflow_ledgers",
-      workflow_omission_reason: filtered ? WORKFLOW_OMISSION_REASON : null,
       publications: filtered ? "omitted" : "all_valid_publication_ledgers",
       publication_omission_reason: filtered ? PUBLICATION_OMISSION_REASON : null,
     },
@@ -826,10 +532,6 @@ export async function buildScorecard(storeRoot, options = {}) {
       reviews_filtered_out: filteredOut,
       reviews_skipped: skipped.length,
       review_directories_without_ledger: reviewLedgers.absent,
-      workflows_counted: workflows?.workflows ?? null,
-      workflows_skipped: skippedWorkflows?.length ?? null,
-      workflow_directories_without_ledger: workflowLedgers?.absent ?? null,
-      audit_logs_skipped: skippedAuditLogs?.length ?? null,
       publications_counted: publications?.ledgers ?? null,
       publications_skipped: skippedPublications?.length ?? null,
       earliest_review_created_at: earliest?.text ?? null,
@@ -838,11 +540,8 @@ export async function buildScorecard(storeRoot, options = {}) {
     providers: Object.fromEntries(
       [...providers].sort(([a], [b]) => a.localeCompare(b)),
     ),
-    workflows,
     publications,
     skipped,
-    skipped_workflows: skippedWorkflows,
-    skipped_audit_logs: skippedAuditLogs,
     skipped_publications: skippedPublications,
   };
 }
@@ -894,8 +593,8 @@ function providerRows(scorecard, build) {
 
 const COUNTING_RULES = [
   "Reviews are read from `<store>/reviews/*/review.json`. Without filters,",
-  "workflows are read from `<store>/workflows/*/workflow.json` and publication",
-  "ledgers from `<store>/reviews/*/publication.json`. Nothing is written.",
+  "publication ledgers are read from `<store>/reviews/*/publication.json`.",
+  "Nothing is written.",
   "",
   "- A review is attributed to `reviewer_provider`; a ledger written before that",
   "  field existed counts as `CLAUDE_DESKTOP`, which is the server's own default.",
@@ -934,18 +633,6 @@ const COUNTING_RULES = [
   "  an ordinary defect, since older ledgers never had the field — so the",
   "  undocumented share is undocumented / (documented + undocumented) and is `-`",
   "  when both are zero.",
-  "- Size-warning crossings are not persisted; they are recomputed as",
-  "  `total_lines >= ceil(change_size_budget * 0.75)` over each distinct review",
-  "  snapshot in a workflow's committed audit log, against the budget in force",
-  "  the first event that records a size for it — a legacy dispatch backfills",
-  "  that size later, and the backfilled value counts. Over-budget snapshots are",
-  "  counted in the warning row too, matching `changeSizeReport`.",
-  "- Budget exhaustions count `WORKFLOW_PAUSED` audit events by",
-  "  `workflow_state.pause.reason_code`; extensions count the `*_BUDGET_EXTENDED`",
-  "  audit events. Workflows are dispatched to `CODEX_TASK` by construction, so",
-  "  workflow numbers are not split by provider.",
-  "  With any review filter, workflow ledgers and audit logs are not read and",
-  "  their statistics are omitted: a review selection does not select workflows.",
   "- Ledgers per pull request groups publication ledgers by",
   "  `target.repository_id` and `target.pr_number`; every published head starts",
   "  its own ledger, so the count is how many heads were published for that pull",
@@ -953,14 +640,8 @@ const COUNTING_RULES = [
   "  ledger by `created_at`. Pull requests are binned at 1, 2, 3-5, 6-10 and",
   "  more than 10 ledgers; the top three sort by count, then repository, then",
   "  pull request number. With any review filter, publication ledgers are not",
-  "  read and this section is omitted, as workflow statistics are: a review",
-  "  selection does not select publications.",
-  "- Audit logs are read only up to `action-audit-head.json`'s `committed_bytes`,",
-  "  measured in bytes, so an uncommitted append never reaches the counts. The",
-  "  hash chain is not verified here. An audit log that does not parse, is",
-  "  missing, is shorter than its cursor, or carries more than one interrupted",
-  "  append past it contributes no events at all rather than a prefix, and is",
-  "  listed under Skipped; the workflow ledger beside it still counts.",
+  "  read and this section is omitted: a review selection does not select",
+  "  publications.",
   "- A ledger that does not parse, or does not match the shape above, is listed",
   "  under Skipped and left untouched. A directory holding no ledger of its kind",
   "  is counted separately: a remote-only publication never creates a local",
@@ -972,7 +653,7 @@ const COUNTING_RULES = [
 ].join("\n");
 
 export function renderScorecardMarkdown(scorecard) {
-  const { corpus, workflows, publications } = scorecard;
+  const { corpus, publications } = scorecard;
   const sections = [
     "# Review Bridge scorecard",
     `Generated ${scorecard.generated_at} from \`${scorecard.store_root}\`. Read-only: this report never writes to the store.`,
@@ -985,9 +666,6 @@ export function renderScorecardMarkdown(scorecard) {
       return `- ${key}: <code>${display}</code>`;
     }).join("\n"),
     `Review metrics and the corpus window use ${corpus.reviews_counted} selected valid reviews. Valid reviews excluded by filters: ${corpus.reviews_filtered_out}. Review scan diagnostics cover all review directories in the store.`,
-    workflows == null
-      ? scorecard.scope.workflow_omission_reason
-      : "Workflow statistics independently cover all valid workflow ledgers and their readable committed audit logs in the store.",
     "## Corpus",
     table(
       ["Ledger", "Counted", "Skipped", "Directories with no ledger"],
@@ -998,14 +676,6 @@ export function renderScorecardMarkdown(scorecard) {
           corpus.reviews_skipped,
           corpus.review_directories_without_ledger,
         ],
-        ...(workflows == null ? [] : [
-          [
-            "Workflows",
-            corpus.workflows_counted,
-            corpus.workflows_skipped,
-            corpus.workflow_directories_without_ledger,
-          ],
-        ]),
         ...(publications == null ? [] : [
           [
             "Publications",
@@ -1016,9 +686,6 @@ export function renderScorecardMarkdown(scorecard) {
         ]),
       ],
     ),
-    workflows == null
-      ? "Workflow and audit-log counts: n/a (not read)."
-      : `Audit logs skipped: ${corpus.audit_logs_skipped}.`,
     `Review \`created_at\` spans ${corpus.earliest_review_created_at ?? "n/a"} to ${corpus.latest_review_created_at ?? "n/a"}.`,
     "## Review outcomes",
     table(
@@ -1158,41 +825,6 @@ export function renderScorecardMarkdown(scorecard) {
       ]),
     ),
     "The recorded reason is the escalating ledger event. The prose behind it stays in the ledger; `export_human_arbitration` renders one review's packet.",
-    "## Workflow budgets and repair cycles",
-    workflows == null ? scorecard.scope.workflow_omission_reason : table(
-      ["Metric", "Count"],
-      [
-        ["Workflows", workflows.workflows],
-        ...WORKFLOW_STATUSES.map((status) => [
-          `Status ${status}`,
-          workflows.workflows_by_status[status],
-        ]),
-        ...BUDGET_PAUSE_REASONS.map((reason) => [
-          `Paused: ${reason}`,
-          workflows.budget_pauses[reason],
-        ]),
-        ...BUDGET_EXTENSION_EVENTS.map((event) => [
-          `Extended: ${event}`,
-          workflows.budget_extensions[event],
-        ]),
-        ["Snapshots measured", workflows.change_size.snapshots_measured],
-        [
-          "Snapshots with no recorded change size",
-          workflows.change_size.snapshots_without_change_size,
-        ],
-        [
-          "Crossed the size warning",
-          workflows.change_size.warning_threshold_crossed,
-        ],
-        ["Over the size budget", workflows.change_size.over_budget],
-        ["Local repair cycles started", workflows.local_cycles.started],
-        ["Local repair cycles addressed", workflows.local_cycles.addressed],
-        ["Local repair cycles followed up", workflows.local_cycles.followed_up],
-        ["Remote repair attempts recorded", workflows.remote_attempts.recorded],
-        ["Remote repair attempts counted", workflows.remote_attempts.counted],
-        ["Remote repair attempts diverted", workflows.remote_attempts.diverted],
-      ],
-    ),
     "## Ledgers per pull request",
     ...(publications == null
       ? [scorecard.scope.publication_omission_reason]
@@ -1218,14 +850,6 @@ export function renderScorecardMarkdown(scorecard) {
   ];
   const skippedRows = [
     ...scorecard.skipped.map(({ id, reason }) => [`reviews/${id}`, reason]),
-    ...(scorecard.skipped_workflows ?? []).map(({ id, reason }) => [
-      `workflows/${id}`,
-      reason,
-    ]),
-    ...(scorecard.skipped_audit_logs ?? []).map(({ id, reason }) => [
-      `workflows/${id}/action-audit.jsonl`,
-      reason,
-    ]),
     ...(scorecard.skipped_publications ?? []).map(({ id, reason }) => [
       `reviews/${id}/publication.json`,
       reason,
