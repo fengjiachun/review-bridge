@@ -113,6 +113,7 @@ test("a ledger carrying an author-selected model still reads, reports, scores an
   const roundTwo = await prepareRereview(store, review.id);
   assert.equal(roundTwo.reviewer_configuration, null);
   const launched = await launchLocalReviewer(store, review.id, roundTwo.state_version);
+  assert.equal(launched.reviewer_dispatch.marker, null);
   assert.equal((await waitForExit(launched.reviewer_dispatch.attempt_root)).code, 0);
 
   const continued = await loadReview(store, review.id);
