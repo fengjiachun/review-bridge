@@ -340,6 +340,7 @@ test("the observation schema keeps GitHub's own object ids at 40", async (t) => 
     baseRef: state.baseSha,
     requirement: "Publish one head.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(state.store, review.id, []);
   await finalizeLocalGate(state.store, review.id);
