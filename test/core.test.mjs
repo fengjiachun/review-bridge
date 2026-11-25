@@ -211,7 +211,6 @@ test("the local gate rejects a tampered change-size measurement", async (t) => {
     requirement: "Bind the immutable measurement.",
     implementationScope: "Add large.js.",
   });
-  await openReview(store, prepared.id, "CODEX_TASK");
   await submitInitialReview(store, prepared.id, [], "CODEX_TASK");
   const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
   const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
@@ -1906,7 +1905,7 @@ test("an incomplete fix is carried into a fresh full review", async (t) => {
     baseRef: baseSha,
     requirement: "Expose a stable value.",
     implementationScope: "Change app.js.",
-    reviewerProvider: "CLAUDE_DESKTOP",
+    reviewerProvider: "CODEX_TASK",
   });
   await submitInitialReview(store, source.id, [
     {
@@ -1917,7 +1916,7 @@ test("an incomplete fix is carried into a fresh full review", async (t) => {
       path: "app.js",
       line: 1,
     },
-  ]);
+  ], "CODEX_TASK");
   await submitResolutions(store, source.id, [
     { finding_id: "F-001", disposition: "fixed", rationale: "Added tests." },
   ]);
@@ -1933,6 +1932,7 @@ test("an incomplete fix is carried into a fresh full review", async (t) => {
       },
     ],
     [],
+    "CODEX_TASK",
   );
   assert.equal(result.status, "CONTINUABLE_FINDINGS");
   assert.equal(result.findings[0].status, "STILL_OPEN");
@@ -1951,10 +1951,12 @@ test("an incomplete fix is carried into a fresh full review", async (t) => {
     implementationScope: "Change app.js.",
     forceFullReview: true,
     continuedFromReviewId: source.id,
-    reviewerProvider: "CLAUDE_DESKTOP",
   });
-  const [carried, ...rest] = (await openReview(store, continued.id))
-    .carried_findings;
+  // The omitted provider defaults to CODEX_TASK, which matches the source.
+  assert.equal(continued.reviewer_provider, "CODEX_TASK");
+  const opened = await openReview(store, continued.id, "CODEX_TASK");
+  assert.equal(opened.review_strategy.mode, "FULL");
+  const [carried, ...rest] = opened.carried_findings;
   assert.equal(rest.length, 0);
   assert.equal(carried.continued_from_review_id, source.id);
   assert.equal(carried.finding_id, "F-001");
@@ -1965,57 +1967,6 @@ test("an incomplete fix is carried into a fresh full review", async (t) => {
   const carriedText = JSON.stringify(carried);
   assert.equal(carriedText.includes("Added tests."), false);
   assert.equal(carriedText.includes("Only one export is tested."), false);
-});
-
-test("a continuation without a reviewer provider continues a CODEX_TASK source", async (t) => {
-  const { root, repository, store } = await fixture();
-  t.after(() => fsp.rm(root, { recursive: true, force: true }));
-  const baseSha = git(repository, "rev-parse", "HEAD");
-  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
-  git(repository, "add", "app.js");
-  git(repository, "commit", "-m", "first change");
-  const source = await prepareReview(store, {
-    repositoryPath: repository,
-    baseRef: baseSha,
-    requirement: "Expose a stable value.",
-    implementationScope: "Change app.js.",
-    reviewerProvider: "CODEX_TASK",
-  });
-  await openReview(store, source.id, "CODEX_TASK");
-  await submitInitialReview(store, source.id, [
-    {
-      severity: "major",
-      title: "Missing tests",
-      explanation: "The export has no test.",
-      recommendation: "Test the export.",
-      path: "app.js",
-      line: 1,
-    },
-  ], "CODEX_TASK");
-  await submitResolutions(store, source.id, [
-    { finding_id: "F-001", disposition: "fixed", rationale: "Added a test." },
-  ]);
-  await prepareRereview(store, source.id);
-  const result = await submitRereview(store, source.id, [
-    { finding_id: "F-001", decision: "still_open", rationale: "No test landed." },
-  ], [], "CODEX_TASK");
-  assert.equal(result.status, "CONTINUABLE_FINDINGS");
-
-  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
-  git(repository, "add", "app.js");
-  git(repository, "commit", "-m", "finish the fix");
-  const continued = await prepareReview(store, {
-    repositoryPath: repository,
-    baseRef: baseSha,
-    requirement: "Expose a stable value.",
-    implementationScope: "Change app.js.",
-    forceFullReview: true,
-    continuedFromReviewId: source.id,
-  });
-  assert.equal(continued.reviewer_provider, "CODEX_TASK");
-  const opened = await openReview(store, continued.id, "CODEX_TASK");
-  assert.equal(opened.review_strategy.mode, "FULL");
-  assert.equal(opened.carried_findings[0].continued_from_review_id, source.id);
 });
 
 test("a disputed rebuttal escalates beside an incomplete fix", async (t) => {

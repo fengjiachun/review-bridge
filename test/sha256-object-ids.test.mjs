@@ -155,8 +155,6 @@ test("remote authorization on a sha256 repository is refused by name", async (t)
   assert.equal(isLocalObjectId(headSha), true);
 });
 
-// A local gate is still reachable on a sha256 repository. Publishing one is the
-// way to ask GitHub about it, and it is refused by name.
 test("starting a publication over a sha256 local gate is refused by name", async (t) => {
   const state = await sha256Fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
