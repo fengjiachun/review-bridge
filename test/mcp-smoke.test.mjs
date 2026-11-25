@@ -7,7 +7,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { REVIEWER_PROVIDERS, prepareReview, prepareRereview, submitResolutions } from "../src/core.mjs";
-import { fixture, git } from "./helpers/repository-fixture";
+import { commit, fixture, git } from "./helpers/repository-fixture";
 
 const serverPath = path.resolve("src/server.mjs");
 
@@ -98,7 +98,7 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       prepare.inputSchema.properties.reviewer_provider.enum,
       ["CLAUDE_DESKTOP", "CODEX_TASK", "HERMES", "DEEPSEEK_HARNESS"],
     );
-    assert.ok(prepare.inputSchema.required.includes("reviewer_provider"));
+    assert.equal(prepare.inputSchema.required.includes("reviewer_provider"), false);
 
     const prepareReview = authorTools.tools.find(
       (tool) => tool.name === "prepare_review",
@@ -484,6 +484,7 @@ test("MCP preserves immutable intent texts and only serves the reconstruction in
     requirement: "Export the new value.",
     implementationScope: "app.js",
     rationale: "Consumers need value 2.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const reviewer = await connectClient("reviewer", store);
   const author = await connectClient("author", store);
@@ -540,4 +541,39 @@ test("reviewer instructions read changed prose under a FULL review", async (t) =
     reviewer.getInstructions(),
     /skipping sections whose behavior the review does not depend on, except changed prose that asserts behavior, which is read and checked against the code/,
   );
+});
+
+test("MCP prepare_review binds CODEX_TASK unless another provider is passed", async (t) => {
+  const { root, repository, store, baseSha } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await commit(repository, "export const value = 2;\n");
+  const author = await connectClient("author", store);
+  t.after(() => author.close());
+  const prepare = (extra) =>
+    author.callTool({
+      name: "prepare_review",
+      arguments: {
+        repository_path: repository,
+        base_ref: baseSha,
+        requirement: "Export the new value.",
+        implementation_scope: "app.js",
+        ...extra,
+      },
+    });
+  const bound = async (extra) => {
+    const result = await prepare(extra);
+    assert.notEqual(result.isError, true, JSON.stringify(result));
+    const { id, reviewer_provider } = JSON.parse(result.content[0].text);
+    const stored = JSON.parse(
+      await fsp.readFile(path.join(store, "reviews", id, "review.json"), "utf8"),
+    );
+    assert.equal(stored.reviewer_provider, reviewer_provider);
+    return reviewer_provider;
+  };
+
+  assert.equal(await bound({}), "CODEX_TASK");
+  assert.equal(await bound({ reviewer_provider: "HERMES" }), "HERMES");
+  const invalid = await prepare({ reviewer_provider: "OTHER" });
+  assert.equal(invalid.isError, true);
+  assert.match(invalid.content[0].text, /reviewer_provider/);
 });

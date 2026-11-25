@@ -142,7 +142,7 @@ export const REVIEW_ACTION_INPUTS = {
         "your scope for the new head; get_review implementation_scope may be reused",
       ],
       ["rationale", "optional, your design rationale for the new head"],
-      ["reviewer_provider", "reviewer_provider"],
+      ["reviewer_provider", "reviewer_provider; may be omitted when it is CODEX_TASK"],
       ["continued_from_review_id", "id"],
       ["force_full_review", "true, required with continued_from_review_id"],
     ],

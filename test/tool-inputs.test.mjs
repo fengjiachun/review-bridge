@@ -864,3 +864,12 @@ test("declared start_publication inputs carry the acknowledgement pair", async (
     /explicit-only mode cannot include an acknowledgement/,
   );
 });
+
+test("the continuation declaration lets a CODEX_TASK source omit reviewer_provider", () => {
+  assert.match(
+    REVIEW_ACTION_INPUTS.ADDRESS_LOCAL_FINDINGS.prepare_review.find(
+      ([field]) => field === "reviewer_provider",
+    )[1],
+    /^reviewer_provider; may be omitted when it is CODEX_TASK$/,
+  );
+});

@@ -145,6 +145,7 @@ async function successorFixture(state) {
     baseRef: state.baseSha,
     requirement: "Change the exported value again.",
     implementationScope: "Update value.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(state.store, review.id, []);
   await finalizeLocalGate(state.store, review.id);
@@ -159,6 +160,7 @@ async function sameHeadSuccessorFixture(state) {
     baseRef: state.baseSha,
     requirement: "Re-publish the same change.",
     implementationScope: "Update value.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(state.store, review.id, []);
   await finalizeLocalGate(state.store, review.id);

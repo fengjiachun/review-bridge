@@ -1456,7 +1456,7 @@ export async function prepareReview(
     parentReviewId = null,
     forceFullReview = false,
     continuedFromReviewId = null,
-    reviewerProvider = "CLAUDE_DESKTOP",
+    reviewerProvider = "CODEX_TASK",
   },
 ) {
   assertString(baseRef, "base_ref", { max: 1024 });

@@ -4578,7 +4578,6 @@ test("incomplete fixes and uncontested rereview findings continue through a FULL
     baseRef: state.baseSha,
     requirement: started.requirement,
     implementationScope: started.implementation_scope,
-    reviewerProvider: "CODEX_TASK",
     forceFullReview: true,
     continuedFromReviewId: source.id,
   });
