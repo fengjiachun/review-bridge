@@ -369,7 +369,13 @@ async function scanStore(storeRoot, known) {
   const counts = new Map();
   const publicationEdges = new Map();
   let scanned = 0;
-  for (const file of await listFiles(storeRoot, ".json")) {
+  // Ledgers live only under reviews/ and releases/; the depth matches a walk
+  // from the store root.
+  const files = [
+    ...(await listFiles(path.join(storeRoot, "releases"), ".json", 5)),
+    ...(await listFiles(path.join(storeRoot, "reviews"), ".json", 5)),
+  ];
+  for (const file of files) {
     if (!isCanonicalLedgerPath(storeRoot, file)) continue;
     const base = path.basename(file);
     const text = await fsp.readFile(file, "utf8").catch(() => null);

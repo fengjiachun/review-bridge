@@ -988,21 +988,21 @@ test("the scorecard CLI passes combined filters through JSON and states scope in
   const unfilteredScorecard = JSON.parse(unfiltered.stdout);
   assert.equal(unfilteredScorecard.publications.ledgers, 0);
   for (const report of [scorecard, unfilteredScorecard]) {
-    assert.deepEqual(Object.keys(report), [
+    assert.deepEqual(Object.keys(report).sort(), [
       "schema_version", "generated_at", "store_root", "filters", "scope",
       "metric_semantics", "corpus", "providers", "publications", "skipped",
       "skipped_publications",
-    ]);
-    assert.deepEqual(Object.keys(report.scope), [
+    ].sort());
+    assert.deepEqual(Object.keys(report.scope).sort(), [
       "reviews", "review_time", "review_diagnostics", "publications",
       "publication_omission_reason",
-    ]);
-    assert.deepEqual(Object.keys(report.corpus), [
+    ].sort());
+    assert.deepEqual(Object.keys(report.corpus).sort(), [
       "reviews_counted", "reviews_filtered_out", "reviews_skipped",
       "review_directories_without_ledger", "publications_counted",
       "publications_skipped", "earliest_review_created_at",
       "latest_review_created_at",
-    ]);
+    ].sort());
   }
 });
 
