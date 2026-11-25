@@ -939,6 +939,7 @@ test("under every filter an empty selection distinguishes zero from unknown", as
     assert.equal(scorecard.providers.ALL.findings, 0);
     assert.equal(scorecard.providers.ALL.rebuttals.after_obligation.overturn_rate, null);
     assert.deepEqual(scorecard.providers.ALL.rounds_to_clean, {});
+    assert.equal(scorecard.publications, null);
     const markdown = renderScorecardMarkdown(scorecard);
     assert.match(markdown, /0 selected valid reviews/);
     assert.match(markdown, /created_at` spans n\/a to n\/a/);
@@ -984,7 +985,25 @@ test("the scorecard CLI passes combined filters through JSON and states scope in
   assert.match(markdown.stdout, /- strategy: <code>"SUCCESSOR"<\/code>/);
   const unfiltered = run("--json");
   assert.equal(unfiltered.status, 0, unfiltered.stderr);
-  assert.equal(JSON.parse(unfiltered.stdout).publications.ledgers, 0);
+  const unfilteredScorecard = JSON.parse(unfiltered.stdout);
+  assert.equal(unfilteredScorecard.publications.ledgers, 0);
+  for (const report of [scorecard, unfilteredScorecard]) {
+    assert.deepEqual(Object.keys(report), [
+      "schema_version", "generated_at", "store_root", "filters", "scope",
+      "metric_semantics", "corpus", "providers", "publications", "skipped",
+      "skipped_publications",
+    ]);
+    assert.deepEqual(Object.keys(report.scope), [
+      "reviews", "review_time", "review_diagnostics", "publications",
+      "publication_omission_reason",
+    ]);
+    assert.deepEqual(Object.keys(report.corpus), [
+      "reviews_counted", "reviews_filtered_out", "reviews_skipped",
+      "review_directories_without_ledger", "publications_counted",
+      "publications_skipped", "earliest_review_created_at",
+      "latest_review_created_at",
+    ]);
+  }
 });
 
 test("the scorecard CLI rejects invalid, missing, unknown and repeated value options", async (t) => {

@@ -114,9 +114,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   and repair cycles" section, the workflow and audit-log corpus rows, and the
   JSON `workflows`, `skipped_workflows`, `skipped_audit_logs`, the scope's
   workflow fields, and the corpus workflow and audit-log counts. Its JSON
-  schema is version 4. The state inventory no longer reads `workflows/` or
-  `reviews/<id>/workflow-binding.json`. Workflow records under `workflows/`
-  stay on disk; release verification still reads their terminal records.
+  schema is version 4. The state inventory no longer counts `workflows/`
+  records or `reviews/<id>/workflow-binding.json` as ledgers. Workflow records
+  under `workflows/` stay on disk; release verification still reads their
+  terminal records.
 
 ## 0.24.0 - 2026-11-13
 

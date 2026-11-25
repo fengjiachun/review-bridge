@@ -526,7 +526,7 @@ function markdown(result) {
     ...result.transitions.publication.defined_not_observed.map((edge) => `- defined, never observed: ${edge}`),
     ...result.transitions.publication.never_observed.map((name) => `- never entered: \`${name}\``),
     "",
-    "Unquoted object keys are not read: a value that only a key writes appears here as an external-input guard, so read the group-4 list with that in mind.",
+    "Unquoted object keys are not read: a value that only a key writes, and that code elsewhere compares against, appears here as an external-input guard, so read the group-4 list with that in mind.",
     "",
     "## Instrument defects",
     "",
