@@ -223,6 +223,59 @@ test("the local gate rejects a tampered change-size measurement", async (t) => {
   );
 });
 
+async function dropRoundChangeSize(store, reviewId) {
+  const reviewPath = path.join(store, "reviews", reviewId, "review.json");
+  const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  delete ledger.rounds[0].change_size;
+  await fsp.writeFile(reviewPath, `${JSON.stringify(ledger)}\n`, { mode: 0o600 });
+}
+
+test("a pre-0.8.0 round without change size still opens and finalizes", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "large.js"), "export const value = 1;\n");
+  git(repository, "add", "large.js");
+  git(repository, "commit", "-m", "add implementation");
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Accept ledgers written before change size existed.",
+    implementationScope: "Add large.js.",
+  });
+  await dropRoundChangeSize(store, prepared.id);
+
+  const opened = await openReview(store, prepared.id, "CODEX_TASK");
+  assert.deepEqual(
+    opened.current_snapshot.patch_index.map((entry) => entry.path),
+    ["large.js"],
+  );
+  await submitInitialReview(store, prepared.id, [], "CODEX_TASK");
+  const gate = await finalizeLocalGate(store, prepared.id);
+  assert.equal(gate.review.status, "LOCAL_GATE_PASSED");
+});
+
+test("a pre-0.8.0 parent round without change size still qualifies a successor", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  const parent = await createGatedParent({ repository, store, baseSha });
+  await dropRoundChangeSize(store, parent.id);
+
+  await fsp.writeFile(path.join(repository, "app.js"), "successor\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "successor");
+  const child = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Review the fixture.",
+    implementationScope: "Build on a legacy parent.",
+    parentReviewId: parent.id,
+  });
+  assert.equal(child.review_strategy.mode, "SUCCESSOR");
+  assert.equal(child.rounds[0].successor.parent_review_id, parent.id);
+});
+
 test("review tasks bind one reviewer provider through the local gate", async (t) => {
   const { root, repository, store } = await fixture();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
