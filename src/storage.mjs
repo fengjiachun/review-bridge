@@ -380,8 +380,6 @@ function lockErrorCode(domain) {
   const codes = {
     review: "REVIEW_BUSY",
     publication: "PUBLICATION_BUSY",
-    workflow: "WORKFLOW_BUSY",
-    claims: "WORKFLOW_CLAIMS_BUSY",
   };
   return codes[domain];
 }
@@ -418,8 +416,6 @@ function lockOwnershipLostError(
   const stateName = {
     review: "review",
     publication: "publication ledger",
-    workflow: "workflow ledger",
-    claims: "workflow claim registry",
   }[domain];
   return new StoreError(
     "LOCK_OWNERSHIP_LOST",
@@ -438,8 +434,6 @@ function lockCleanupFailedError(reviewId, domain, lockPath, cause) {
   const stateName = {
     review: "review",
     publication: "publication ledger",
-    workflow: "workflow ledger",
-    claims: "workflow claim registry",
   }[domain];
   return new StoreError(
     "LOCK_CLEANUP_FAILED",
@@ -508,7 +502,7 @@ async function readLock(
     !Number.isFinite(Date.parse(record.acquired_at)) ||
     typeof record.heartbeat_at !== "string" ||
     !Number.isFinite(Date.parse(record.heartbeat_at)) ||
-    !["review", "publication", "workflow", "claims"].includes(record.domain) ||
+    !["review", "publication"].includes(record.domain) ||
     typeof record.review_id !== "string"
   ) {
     throw invalidLockRecord(
@@ -996,10 +990,8 @@ export async function acquireStateLock({
   staleMs = LOCK_STALE_MS,
   heartbeatMs = LOCK_HEARTBEAT_MS,
 }) {
-  if (!["review", "publication", "workflow", "claims"].includes(domain)) {
-    throw new TypeError(
-      "lock domain must be review, publication, workflow, or claims",
-    );
+  if (!["review", "publication"].includes(domain)) {
+    throw new TypeError("lock domain must be review or publication");
   }
   for (const [name, value] of [
     ["waitMs", waitMs],

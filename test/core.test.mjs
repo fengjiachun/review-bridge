@@ -12,7 +12,6 @@ import {
   exportHumanArbitration,
   finalizeLocalGate,
   getReview,
-  getReviewSnapshot,
   getReviewSummary,
   listPendingReviews,
   listReviews,
@@ -199,7 +198,7 @@ test("a manual review crossing the warning completes every round without acknowl
   assert.equal(gate.review.status, "LOCAL_GATE_PASSED");
 });
 
-test("workflow snapshot reads reject a tampered change-size measurement", async (t) => {
+test("the local gate rejects a tampered change-size measurement", async (t) => {
   const { root, repository, store } = await fixture();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const baseSha = git(repository, "rev-parse", "HEAD");
@@ -212,13 +211,15 @@ test("workflow snapshot reads reject a tampered change-size measurement", async 
     requirement: "Bind the immutable measurement.",
     implementationScope: "Add large.js.",
   });
+  await openReview(store, prepared.id, "CODEX_TASK");
+  await submitInitialReview(store, prepared.id, [], "CODEX_TASK");
   const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
   const ledger = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
   ledger.rounds[0].change_size.total_lines = 0;
   await fsp.writeFile(reviewPath, `${JSON.stringify(ledger)}\n`, { mode: 0o600 });
 
   await assert.rejects(
-    getReviewSnapshot(store, prepared.id),
+    finalizeLocalGate(store, prepared.id),
     /review change size does not match its immutable patch/,
   );
 });
@@ -1966,6 +1967,57 @@ test("an incomplete fix is carried into a fresh full review", async (t) => {
   assert.equal(carriedText.includes("Only one export is tested."), false);
 });
 
+test("a continuation without a reviewer provider continues a CODEX_TASK source", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const baseSha = git(repository, "rev-parse", "HEAD");
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 1;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "first change");
+  const source = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    reviewerProvider: "CODEX_TASK",
+  });
+  await openReview(store, source.id, "CODEX_TASK");
+  await submitInitialReview(store, source.id, [
+    {
+      severity: "major",
+      title: "Missing tests",
+      explanation: "The export has no test.",
+      recommendation: "Test the export.",
+      path: "app.js",
+      line: 1,
+    },
+  ], "CODEX_TASK");
+  await submitResolutions(store, source.id, [
+    { finding_id: "F-001", disposition: "fixed", rationale: "Added a test." },
+  ]);
+  await prepareRereview(store, source.id);
+  const result = await submitRereview(store, source.id, [
+    { finding_id: "F-001", decision: "still_open", rationale: "No test landed." },
+  ], [], "CODEX_TASK");
+  assert.equal(result.status, "CONTINUABLE_FINDINGS");
+
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "finish the fix");
+  const continued = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: baseSha,
+    requirement: "Expose a stable value.",
+    implementationScope: "Change app.js.",
+    forceFullReview: true,
+    continuedFromReviewId: source.id,
+  });
+  assert.equal(continued.reviewer_provider, "CODEX_TASK");
+  const opened = await openReview(store, continued.id, "CODEX_TASK");
+  assert.equal(opened.review_strategy.mode, "FULL");
+  assert.equal(opened.carried_findings[0].continued_from_review_id, source.id);
+});
+
 test("a disputed rebuttal escalates beside an incomplete fix", async (t) => {
   const { root, repository, store } = await fixture();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
@@ -2165,38 +2217,6 @@ test("core review mutations wait behind the review-state lock without changing s
   const updated = await mutation;
   assert.equal(updated.status, "CLEAN");
   assert.equal(updated.state_version, prepared.state_version + 1);
-});
-
-test("review snapshots derive review and summary under one mutation lock", async (t) => {
-  const { root, repository, store } = await fixture();
-  t.after(() => fsp.rm(root, { recursive: true, force: true }));
-  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
-  const prepared = await prepareReview(store, {
-    repositoryPath: repository,
-    baseRef: "HEAD",
-    requirement: "Update the exported value.",
-    implementationScope: "Change app.js.",
-  });
-  const release = await acquireStateLock({
-    directory: path.join(store, "reviews", prepared.id),
-    reviewId: prepared.id,
-    domain: "review",
-  });
-  let settled = false;
-  const snapshot = getReviewSnapshot(store, prepared.id).finally(() => {
-    settled = true;
-  });
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.equal(settled, false);
-  await release();
-  const value = await snapshot;
-  assert.equal(value.review.status, "WAITING_FOR_REVIEW");
-  assert.equal(value.summary.status, value.review.status);
-  assert.equal(value.summary.state_version, value.review.state_version);
-  assert.equal(
-    value.summary.current_snapshot.snapshot_hash,
-    value.review.rounds[0].snapshot_hash,
-  );
 });
 
 test("a missing review mutation does not create an empty review directory", async (t) => {

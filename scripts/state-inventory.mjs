@@ -5,9 +5,8 @@
 // defined, produced and consumed, how often it appears in a real store and in
 // the tests, and whether any path from a tool surface -- the server module and
 // the packaged scripts -- reaches a unit that produces it. With --coverage it
-// also reports whether a run actually executed each producer line, which is how
-// the declared walk (test/required-inputs-walk.test.mjs) contributes: a line the
-// walk executed is reachable by evidence rather than by inference.
+// also reports whether a run actually executed each producer line: a line a run
+// executed is reachable by evidence rather than by inference.
 //
 // Blind spots, restated in the rendered report so no reader has to open this
 // file to learn them:
