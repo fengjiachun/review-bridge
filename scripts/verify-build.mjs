@@ -1578,7 +1578,7 @@ try {
     assert.equal(packagedRemoteBrief.status, 0, packagedRemoteBrief.stderr);
     assert.match(
       packagedRemoteBrief.stdout.split("\n")[2],
-      /^\*\*Conclusion:\*\* owner\/repo#7 · .+ · review `REMOTE_ONLY` · publication summary /,
+      /^\*\*Conclusion:\*\* owner\/repo#7 · .+ · local review skipped, authorization `REMOTE_ONLY` · publication summary /,
     );
     assert.match(
       packagedRemoteBrief.stdout,

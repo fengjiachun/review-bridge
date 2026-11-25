@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { actionRequired, loadReview } from "./core.mjs";
+import { loadReview, reviewSummary } from "./core.mjs";
 import {
   canonicalDigest,
   checkRequiredRuns,
@@ -127,8 +127,8 @@ function code(value) {
   return text.includes("`") ? inline(text) : `\`${text}\``;
 }
 
-function shortSha(sha) {
-  return typeof sha === "string" ? sha.slice(0, 12) : "n/a";
+function shortSha(sha, width = 12) {
+  return typeof sha === "string" ? sha.slice(0, width) : "n/a";
 }
 
 // `path:line` as the ledger recorded it, before any escaping; each caller
@@ -745,8 +745,9 @@ export function reportRevision(review, publication, summary = null) {
 
 // ---------------------------------------------------------------------------
 // The brief: the same ledgers through the same reader, at the depth a person
-// reads. The verdict and where the review goes next come first, what is still
-// open comes before what is settled, and a settled finding is one table row.
+// reads. Below the shared conclusion, the verdict and where the review goes
+// next come first, what is still open comes before what is settled, and a
+// settled finding is one table row.
 //
 // Nothing here is inferred. Every number is counted over the ledger's own
 // fields and every grouping is one the ledger decides -- a finding's severity,
@@ -1070,15 +1071,18 @@ function openFindingsSection(review, partition) {
 }
 
 // ---------------------------------------------------------------------------
-// The conclusion both tiers open with. It prints values the review ledger and
+// The conclusion both tiers open with. It prints what the review summary and
 // the publication summary already carry, and judges nothing itself.
 
-function short(sha) {
-  return typeof sha === "string" ? code(sha.slice(0, 7)) : "n/a";
+// A title in the opening sits outside any code span, so the emphasis and
+// strikethrough delimiters inline() leaves alone are escaped too: an
+// identifier like __init__ stays literal.
+function titleText(value) {
+  return inline(value).replace(/[_~]/g, "\\$&");
 }
 
-function reviewerModel(round) {
-  const requested = round?.reviewer_configuration?.requested;
+function reviewerModel(configuration) {
+  const requested = configuration?.requested;
   if (requested == null) return "model not recorded";
   return requested.model == null
     ? "model from the Codex configuration"
@@ -1092,28 +1096,33 @@ function publicationPart(publication, summary) {
   return `publication summary ${code(summary.status)}${summary.blocking_reason == null ? "" : `, blocking ${code(summary.blocking_reason)}`}`;
 }
 
-function conclusionLine(review, publication, authorization, summary) {
+function conclusionLine(local, publication, authorization, summary) {
   const record = authorization ?? publication?.authorization ?? {};
-  const latest = review?.rounds?.at(-1);
+  const snapshot = local?.current_snapshot;
   const parts = [
     publication == null ? "no PR" : pullRequestName(publication),
-    review == null
-      ? `${short(record.base_sha)} → ${short(record.head_sha)}`
-      : `${short(latest?.base_sha)} → ${short(latest?.head_sha)}`,
-    review == null
-      ? "no local reviewer"
-      : `${code(review.reviewer_provider ?? "CLAUDE_DESKTOP")}, ${reviewerModel(latest)}`,
-    review == null ? "no local round" : count((review.rounds ?? []).length, "round"),
-    review == null ? `review ${code("REMOTE_ONLY")}` : `review ${code(review.status)}`,
+    `${code(shortSha(snapshot?.base_sha ?? record.base_sha, 7))} → ${code(shortSha(snapshot?.head_sha ?? record.head_sha, 7))}`,
+    ...(local == null
+      ? [`local review skipped, authorization ${code(record.mode)}`]
+      : [
+          `${code(local.reviewer_provider)}, ${reviewerModel(local.reviewer_configuration)}`,
+          count(local.current_round, "round"),
+          `review ${code(local.status)}`,
+        ]),
   ];
   if (publication != null) parts.push(publicationPart(publication, summary));
   return `**Conclusion:** ${parts.join(" · ")}`;
 }
 
-const DISPOSITION = {
-  RESOLVED: "fixed",
-  REBUTTAL_ACCEPTED: "rejected, rebuttal accepted",
-};
+// A settled finding is named by the author's disposition and the rereview's
+// decision as recorded; the two usual pairs get their short names.
+function dispositionCell(finding, resolution, decision) {
+  if (!SETTLED_STATUSES.has(finding.status)) return `open (${cellCode(finding.status)})`;
+  const pair = `${resolution?.disposition ?? "none"}/${decision?.decision ?? "none"}`;
+  if (pair === "fixed/resolved") return "fixed";
+  if (pair === "rejected/rebuttal_accepted") return "rejected, rebuttal accepted";
+  return `author ${cellCode(resolution?.disposition ?? "none")}, rereview ${cellCode(decision?.decision ?? "none")}`;
+}
 
 function findingsTableSection(review, publication) {
   const lines = [];
@@ -1121,6 +1130,12 @@ function findingsTableSection(review, publication) {
     lines.push("No local finding: a `REMOTE_ONLY` publication has no review ledger.");
   } else {
     const findings = review.findings ?? [];
+    const resolutionByFinding = new Map(
+      (review.resolutions ?? []).map((entry) => [entry.finding_id, entry]),
+    );
+    const decisionByFinding = new Map(
+      (review.rereview_decisions ?? []).map((entry) => [entry.finding_id, entry]),
+    );
     lines.push(
       findings.length === 0
         ? "No finding was raised in this review."
@@ -1129,59 +1144,63 @@ function findingsTableSection(review, publication) {
             findings.map((finding) => [
               inline(finding.id),
               inline(finding.severity),
-              inline(finding.title),
-              Object.hasOwn(DISPOSITION, finding.status)
-                ? DISPOSITION[finding.status]
-                : `open (${cellCode(finding.status)})`,
+              titleText(finding.title),
+              dispositionCell(
+                finding,
+                resolutionByFinding.get(finding.id),
+                decisionByFinding.get(finding.id),
+              ),
               inline(finding.introduced_round ?? "n/a"),
             ]),
           ),
     );
     const carried = review.carried_findings ?? [];
     if (carried.length > 0) {
-      const sources = [...new Set(carried.map((entry) => entry.continued_from_review_id))];
       lines.push(
-        `Carried in as scope hints from ${sources.map(code).join(", ")}: ${count(carried.length, "finding")}, rendered as recorded in the full report.`,
+        [
+          "Carried in as scope hints, not dispositions of this review:",
+          ...carried.map(
+            (entry) =>
+              `- ${inline(entry.finding_id)} from ${code(entry.continued_from_review_id)} · ${inline(entry.severity)} — ${titleText(entry.title)}`,
+          ),
+        ].join("\n"),
       );
     }
   }
   if (publication != null) {
     lines.push(
-      "The remote Codex outcome is the publication summary's standing in the conclusion; each Codex result, check, and review thread is listed under Remote publication in the full report.",
+      "The latest observation's Codex results, checks, and review threads are under Remote publication in the full report.",
     );
   }
   return ["## Findings", lines.join("\n\n")];
 }
 
-// The next step is the publication summary's next action when a publication
-// was rendered, and the review's own action otherwise.
-function nextStepLine(review, publication, summary) {
+function nextStepLine(local, publication, summary) {
   if (publication != null) {
     if (summary == null) return "- Next step: not assessed: no publication summary was supplied.";
     return summary.next_action === "NONE"
       ? null
       : `- Next step: ${code(summary.next_action)}, from the publication summary.`;
   }
-  return `- Next step: ${code(actionRequired(review.status))}, from the review summary.`;
+  return `- Next step: ${code(local.action_required)}, from the review summary.`;
 }
 
-function openItemsSection(review, publication, summary) {
-  const items = (review?.findings ?? [])
-    .filter((finding) => !SETTLED_STATUSES.has(finding.status))
-    .map(
-      (finding) =>
-        `- ${inline(finding.id)} · ${inline(finding.severity)} · ${findingWhere(finding)} — ${inline(finding.title)}: ${openFindingState(finding)}.`,
-    );
-  const next = nextStepLine(review, publication, summary);
+function openItemsSection(local, publication, summary) {
+  const items = (local?.active_findings ?? []).map(
+    (finding) =>
+      `- ${inline(finding.id)} · ${inline(finding.severity)} · ${findingWhere(finding)} — ${titleText(finding.title)}: ${openFindingState(finding)}.`,
+  );
+  const next = nextStepLine(local, publication, summary);
   if (next != null) items.push(next);
   return ["## Open items", items.length === 0 ? "None." : items.join("\n")];
 }
 
 function conclusionSections(review, publication, authorization, summary) {
+  const local = review == null ? null : reviewSummary(review);
   return [
-    conclusionLine(review, publication, authorization, summary),
+    conclusionLine(local, publication, authorization, summary),
     ...findingsTableSection(review, publication),
-    ...openItemsSection(review, publication, summary),
+    ...openItemsSection(local, publication, summary),
     "---",
   ];
 }

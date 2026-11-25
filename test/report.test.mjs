@@ -807,14 +807,6 @@ test("a thread's outcome is the resolved flag the observation recorded", async (
   assert.match(markdown.split("\n")[2], / · publication stored `MERGE_READY` \(no publication summary supplied\)$/);
   assert.match(markdown, /## Open items\n\n- Next step: not assessed: no publication summary was supplied\.\n/);
   assert.doesNotMatch(markdown.slice(0, markdown.indexOf("\n---\n")), /PRRT_1|unresolved/);
-
-  // A summary whose next action is NONE leaves nothing open.
-  markdown = render(cleanInTwoRounds(), {
-    publication,
-    publicationSummary: { status: "MERGED", blocking_reason: "pull request merged", next_action: "NONE", gate_state: "ABSENT" },
-  });
-  assert.match(markdown.split("\n")[2], / · publication summary `MERGED`, blocking `pull request merged`$/);
-  assert.match(markdown, /## Open items\n\nNone\.\n/);
 });
 
 // The opening's remote standing is the publication summary's, read from a
@@ -846,17 +838,68 @@ test("the opening's remote standing and next step are the publication summary's"
     },
     { clock: () => requestAt + 10 },
   );
+  // A fresh observation still holds the first request's CLEAN result, and
+  // the newer request on the same head has none yet: the summary blocks on
+  // Codex, and the opening says what the summary says.
+  const observedAt = requestAt + 2_000;
+  const fresh = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: 200,
+    requestAt,
+    withResult: false,
+  });
+  const earlier = ledgers.publication.latest_observation.codex_review;
+  fresh.codex_review.requests = [...earlier.requests, ...fresh.codex_review.requests];
+  fresh.codex_review.results = earlier.results;
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision + 1, observation: fresh },
+    { clock: () => observedAt + 10 },
+  );
   ledgers = await loadReportLedgers(state.store, state.reviewId);
-  assert.notEqual(ledgers.publicationSummary.status, "MERGE_READY");
+  const summary = ledgers.publicationSummary;
+  assert.equal(summary.blocking_reason, "GITHUB_REVIEW_PENDING");
   markdown = render(ledgers.review, ledgers);
-  assert.ok(markdown.split("\n")[2].endsWith(publicationPartFor(ledgers.publicationSummary)));
-  assert.doesNotMatch(opening(), /CLEAN/);
-  assert.match(opening(), new RegExp(`- Next step: \`${ledgers.publicationSummary.next_action}\`, from the publication summary\\.`));
+  assert.ok(markdown.split("\n")[2].endsWith(`publication summary \`${summary.status}\`, blocking \`GITHUB_REVIEW_PENDING\``));
+  assert.match(opening(), new RegExp(`- Next step: \`${summary.next_action}\`, from the publication summary\\.`));
+  assert.ok(!opening().includes(result.url));
+  assert.ok(markdown.slice(opening().length).includes(result.url));
 });
 
-function publicationPartFor(summary) {
-  return `publication summary \`${summary.status}\`${summary.blocking_reason == null ? "" : `, blocking \`${summary.blocking_reason}\``}`;
-}
+// A merged pull request, recorded through the writer, leaves the summary
+// with nothing to do, and the opening with nothing open.
+test("a merged publication leaves nothing open", async (t) => {
+  const state = await gatedFixture(t);
+  const ready = await reachReady(state);
+  const observedAt = Date.parse(ready.latest_observation.observed_at) + 60_000;
+  const merged = observation({
+    at: observedAt,
+    baseSha: state.baseSha,
+    headSha: state.headSha,
+    requestId: 100,
+    requestAt: Date.parse(ready.latest_observation.codex_review.requests[0].event_at),
+  });
+  Object.assign(merged.pull_request, {
+    state: "CLOSED",
+    is_merged: true,
+    merged_at: iso(observedAt - 1_000),
+    merge_commit_sha: "e".repeat(40),
+  });
+  await recordGithubSnapshot(
+    state.store,
+    state.reviewId,
+    { expectedRevision: ready.revision, observation: merged },
+    { clock: () => observedAt + 10 },
+  );
+  const ledgers = await loadReportLedgers(state.store, state.reviewId);
+  assert.equal(ledgers.publicationSummary.next_action, "NONE");
+  const markdown = render(ledgers.review, ledgers);
+  assert.match(markdown.split("\n")[2], new RegExp(` · publication summary \`${ledgers.publicationSummary.status}\``));
+  assert.match(markdown, /## Open items\n\nNone\.\n/);
+});
 
 // A review that carried findings through both rounds, built through the
 // writers, so the validator's derived status table meets real records.
@@ -1050,12 +1093,32 @@ test("a continuation renders the findings it carries, with the review that raise
     new RegExp(`^### Carried findings\n\n#### F-002 carried from ${state.sourceId} · minor · no location\n\n- Title: new concern\n\nExplanation:\n\n\`\`\`text\nraised on rereview\n\`\`\`\n\n#### F-003 carried from ${state.sourceId} · blocker · value\.js:1\n\n- Title: second concern\n\nExplanation:\n\n\`\`\`text\nalso raised on rereview\n\`\`\`\n\nRecommendation:\n\n\`\`\`text\nguard the caller\n\`\`\`\n\n$`),
     section,
   );
+  // The opening names each carried finding apart from this review's own.
+  assert.ok(markdown.includes(`## Findings\n\nNo finding was raised in this review.\n\nCarried in as scope hints, not dispositions of this review:\n- F-002 from \`${state.sourceId}\` · minor — new concern\n- F-003 from \`${state.sourceId}\` · blocker — second concern\n`));
   // The findings section says what this review raised, and where the rest came from.
   assert.match(markdown, new RegExp(`### Findings\n\nNo findings were raised in this review; 2 carried from \`${state.sourceId}\`\.`));
   await fsp.rm(receipt.path);
   // The source itself carries nothing and keeps the plain wording.
   const source = await fsp.readFile((await writeReviewReport(state.store, state.sourceId, { renderedAt: RENDERED_AT })).path, "utf8");
   assert.doesNotMatch(source, /### Carried findings/);
+});
+
+// The opening's dispositions come from the recorded author response and
+// rereview decision, as the writers stored them, including the cross pairs.
+test("the opening names each settled finding by its recorded pair", async (t) => {
+  const usual = await reviewedFixture(t);
+  let markdown = await fsp.readFile((await writeReviewReport(usual.store, usual.reviewId, { renderedAt: RENDERED_AT })).path, "utf8");
+  assert.match(markdown, /^\| F-001 \| [^|]+\| [^|]+\| fixed \| 1 \|$/m);
+  assert.match(markdown, /^\| F-002 \| [^|]+\| [^|]+\| rejected, rebuttal accepted \| 1 \|$/m);
+  const crossed = await reviewedFixture(t, {
+    decisions: [
+      { finding_id: "F-001", decision: "rebuttal_accepted", rationale: "agreed", verification: "read value.js" },
+      { finding_id: "F-002", decision: "resolved", rationale: "verified", verification: "reread the style" },
+    ],
+  });
+  markdown = await fsp.readFile((await writeReviewReport(crossed.store, crossed.reviewId, { renderedAt: RENDERED_AT })).path, "utf8");
+  assert.match(markdown, /^\| F-001 \| [^|]+\| [^|]+\| author `fixed`, rereview `rebuttal_accepted` \| 1 \|$/m);
+  assert.match(markdown, /^\| F-002 \| [^|]+\| [^|]+\| author `rejected`, rereview `resolved` \| 1 \|$/m);
 });
 
 // A continuation copies its source's errata in, each keeping the round it was
@@ -1581,7 +1644,8 @@ test("both tiers open with the conclusion, the findings, and what is still open"
     "| F-004 | minor | Title of F-004 | open (`OPEN`) | 2 |",
     "| F-005 | nit | Title of F-005 | open (`OPEN`) | 2 |",
     "",
-    "Carried in as scope hints from `rb-2026-08-30T000000-000Z-1234abcd`: 1 finding, rendered as recorded in the full report.",
+    "Carried in as scope hints, not dispositions of this review:",
+    "- F-009 from `rb-2026-08-30T000000-000Z-1234abcd` · major — Title of the carried finding",
     "",
     "## Open items",
     "",
@@ -1747,7 +1811,11 @@ test("free text from the ledger cannot shape the brief or break out of a table c
   hostile.findings[3].explanation = "## also not a heading\n- not a list item";
   hostile.findings[0].path = "src/we|rd.mjs";
   hostile.rereview_decisions[0].verification = "| broke | the | row |";
+  hostile.findings[4].title = "Fix __init__ and ~~this~~";
   const markdown = brief(hostile);
+  // The opening keeps an identifier literal: no emphasis, no strikethrough.
+  assert.ok(markdown.includes("| F-005 | nit | Fix \\_\\_init\\_\\_ and \\~\\~this\\~\\~ | open (`OPEN`) | 2 |"));
+  assert.ok(markdown.includes("— Fix \\_\\_init\\_\\_ and \\~\\~this\\~\\~: no author response yet."));
   for (const line of markdown.split("\n")) {
     assert.ok(
       !/^#{1,6} (?:not|also not)/.test(line),
@@ -1795,9 +1863,9 @@ test("a remote-only publication briefs in the same shape, saying why it has no f
   assert.equal(lines[0], `# Review report ${state.reviewId}`);
   assert.match(
     lines[2],
-    /^\*\*Conclusion:\*\* owner\/repo#7 · `[0-9a-f]{7}` → `[0-9a-f]{7}` · no local reviewer · no local round · review `REMOTE_ONLY` · publication summary `MERGE_READY`$/,
+    /^\*\*Conclusion:\*\* owner\/repo#7 · `[0-9a-f]{7}` → `[0-9a-f]{7}` · local review skipped, authorization `REMOTE_ONLY` · publication summary `MERGE_READY`$/,
   );
-  assert.ok(markdown.includes("## Findings\n\nNo local finding: a `REMOTE_ONLY` publication has no review ledger.\n\nThe remote Codex outcome is the publication summary's standing"));
+  assert.ok(markdown.includes("## Findings\n\nNo local finding: a `REMOTE_ONLY` publication has no review ledger.\n\nThe latest observation's Codex results, checks, and review threads are under Remote publication in the full report.\n"));
   assert.ok(markdown.includes(`## Open items\n\n- Next step: \`${publicationSummary.next_action}\`, from the publication summary.\n`));
   const details = afterConclusion(markdown);
   assert.match(
@@ -1853,7 +1921,7 @@ test("a brief with a publication names the pull request and the summary's verdic
     ),
   );
   // The review itself had no finding; what is left is the summary's next step.
-  assert.ok(markdown.includes("## Findings\n\nNo finding was raised in this review.\n\nThe remote Codex outcome"));
+  assert.ok(markdown.includes("## Findings\n\nNo finding was raised in this review.\n\nThe latest observation's Codex results"));
   assert.ok(markdown.includes(`## Open items\n\n- Next step: \`${publicationSummary.next_action}\`, from the publication summary.\n`));
 });
 

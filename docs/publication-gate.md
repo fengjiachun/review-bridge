@@ -194,16 +194,18 @@ Markdown report a person can read in one sitting (a `REMOTE_ONLY` publication,
 which has no review ledger, renders from its publication and authorization
 alone).
 
-Both tiers open with a conclusion that prints values the review ledger and
-the publication summary already carry and judges nothing itself: one line
-naming the pull request (or "no PR"), the latest round's base and head, the
-reviewer and the model it requested, the round count, the review status, and
-the publication summary's status and blocking reason; a table of the review's
-findings with each final disposition and the round that raised it; and the
-open items, which are the open findings and the next step -- the publication
-summary's next action, or the review's own action when there is no
-publication. The audit detail follows unchanged, and carries each Codex
-result, check, and review thread.
+Both tiers open with a conclusion that prints what the review summary and the
+publication summary already carry and judges nothing itself: one line naming
+the pull request (or "no PR"), the latest round's base and head, the reviewer
+and the model it requested, the round count, the review status (or, for
+`REMOTE_ONLY`, that local review was skipped), and the publication summary's
+status and blocking reason; a table of the review's findings with the author
+disposition and rereview decision each settled on and the round that raised
+it, with carried findings listed apart; and the open items, which are the open
+findings and the next step -- the publication summary's next action, or the
+review summary's action when there is no publication. The audit detail follows
+unchanged; in the full report it lists the latest observation's Codex results,
+checks, and review threads.
 
 The script prints a brief by default: below the conclusion, the terminal state
 and where the review goes next, a fact table, the findings still open before
