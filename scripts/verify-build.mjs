@@ -1422,8 +1422,9 @@ try {
     assert.equal(auditInspection.status, 0, auditInspection.stderr);
     assert.equal(JSON.parse(auditInspection.stdout).valid, true);
 
-    // The packaged report script's default tier: a brief, whose first two
-    // lines carry the verdict and where the review goes next.
+    // The packaged report script's default tier: a brief that opens with the
+    // conclusion line, and below the conclusion carries the verdict and where
+    // the review goes next.
     const packagedBrief = spawnSync(
       process.execPath,
       [reportScript, prepared.id, "--store", store],
@@ -1431,8 +1432,12 @@ try {
     );
     assert.equal(packagedBrief.status, 0, packagedBrief.stderr);
     assert.match(packagedBrief.stdout.split("\n")[0], /^# Review report /);
-    assert.match(packagedBrief.stdout.split("\n")[2], /^\*\*[A-Z_]+\*\* — /);
-    assert.match(packagedBrief.stdout.split("\n")[3], /^Publication owner\/repo#7: /);
+    assert.match(packagedBrief.stdout.split("\n")[2], /^\*\*Conclusion:\*\* owner\/repo#7 · /);
+    const briefDetail = packagedBrief.stdout
+      .slice(packagedBrief.stdout.indexOf("\n---\n") + 6)
+      .split("\n");
+    assert.match(briefDetail[0], /^\*\*[A-Z_]+\*\* — /);
+    assert.match(briefDetail[1], /^Publication owner\/repo#7: /);
     assert.match(packagedBrief.stdout, /\| Outcome \| \d+ fixed and verified · \d+ open · \d+ rebutted \|/);
     assert.match(packagedBrief.stdout, /projection of the ledger, not evidence/);
     // The packaged report script under --full and the author tool render the
@@ -1573,7 +1578,11 @@ try {
     assert.equal(packagedRemoteBrief.status, 0, packagedRemoteBrief.stderr);
     assert.match(
       packagedRemoteBrief.stdout.split("\n")[2],
-      /^\*\*REMOTE_ONLY\*\* — this publication was authorized with local review skipped/,
+      /^\*\*Conclusion:\*\* owner\/repo#7 · .+ · `REMOTE_ONLY` · /,
+    );
+    assert.match(
+      packagedRemoteBrief.stdout,
+      /\n---\n\n\*\*REMOTE_ONLY\*\* — this publication was authorized with local review skipped/,
     );
     assert.match(
       packagedRemoteBrief.stdout,
