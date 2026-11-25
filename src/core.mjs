@@ -1061,7 +1061,7 @@ function reviewerReview(review) {
   };
 }
 
-function actionRequired(status) {
+export function actionRequired(status) {
   const actions = {
     WAITING_FOR_REVIEW: "REVIEWER_INITIAL_REVIEW",
     REVIEW_SUBMITTED: "AUTHOR_RESOLUTIONS",

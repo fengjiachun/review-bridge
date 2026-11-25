@@ -194,13 +194,16 @@ Markdown report a person can read in one sitting (a `REMOTE_ONLY` publication,
 which has no review ledger, renders from its publication and authorization
 alone).
 
-Both tiers open with the conclusion: one line naming the pull request (or "no
-PR"), the latest round's base and head, the reviewer and the model it
-requested, the round count, and the gate outcome with the publication status
-and the Codex gate's judgement; a table of the review's findings with each final
-disposition and the round that raised it, plus the Codex results the
-publication observed; and the items still open or waiting on a human, or
-"None". The audit detail follows unchanged.
+Both tiers open with a conclusion that prints values the review ledger and
+the publication summary already carry and judges nothing itself: one line
+naming the pull request (or "no PR"), the latest round's base and head, the
+reviewer and the model it requested, the round count, the review status, and
+the publication summary's status and blocking reason; a table of the review's
+findings with each final disposition and the round that raised it; and the
+open items, which are the open findings and the next step -- the publication
+summary's next action, or the review's own action when there is no
+publication. The audit detail follows unchanged, and carries each Codex
+result, check, and review thread.
 
 The script prints a brief by default: below the conclusion, the terminal state
 and where the review goes next, a fact table, the findings still open before
@@ -210,8 +213,9 @@ one the ledger decides -- severity, the round a finding was introduced in,
 whether two findings name the same title at the same location -- because the
 renderer calls no model; a line that would read across findings to say what
 they have in common is out of its reach, and it states the counting rule
-instead. A review with nothing open says so rather than heading an empty
-section, and a `REMOTE_ONLY` publication briefs in the same shape.
+instead. A review with nothing open leaves the still-open section out, since
+the conclusion's open items already answer it, and a `REMOTE_ONLY`
+publication briefs in the same shape.
 
 `--full` prints the full rendering, which is also what the tool writes:
 requirement and scope, each round's findings

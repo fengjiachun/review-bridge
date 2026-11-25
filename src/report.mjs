@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { loadReview } from "./core.mjs";
+import { actionRequired, loadReview } from "./core.mjs";
 import {
   canonicalDigest,
   checkRequiredRuns,
@@ -479,6 +479,7 @@ function changesSection(review) {
 }
 
 function outcomeSection(review) {
+  const history = review.history ?? [];
   const lines = [
     TERMINAL_STATUSES.includes(review.status)
       ? `- Terminal state: ${code(review.status)}`
@@ -491,7 +492,12 @@ function outcomeSection(review) {
     }
   }
   if (review.status === "HUMAN_REQUIRED") {
-    lines.push(`- Human arbitration required: ${arbitrationReason(review)}`);
+    const reason = [...history]
+      .reverse()
+      .find((entry) => HUMAN_REQUIRED_EVENTS.includes(entry?.event));
+    lines.push(
+      `- Human arbitration required: ${reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`}`,
+    );
   }
   const carried = review.carried_findings ?? [];
   if (carried.length > 0) {
@@ -1028,54 +1034,47 @@ function verdictLines(review, publication, summary, partition) {
   ];
 }
 
-function findingHeadline(finding) {
-  const where =
-    finding.path == null ? "no location" : code(findingLocation(finding));
-  return `**${inline(finding.id)} · ${inline(finding.severity)} · ${where}${constraintLabel(finding)} — ${inline(finding.title)}**`;
+function findingWhere(finding) {
+  return finding.path == null ? "no location" : code(findingLocation(finding));
 }
 
-// Unresolved first, and a review with none says so on one line instead of
-// opening a heading over nothing.
+function openFindingState(finding) {
+  return Object.hasOwn(OPEN_FINDING_STATE, finding.status)
+    ? OPEN_FINDING_STATE[finding.status]
+    : `its status is ${code(finding.status)}`;
+}
+
+function findingHeadline(finding) {
+  return `**${inline(finding.id)} · ${inline(finding.severity)} · ${findingWhere(finding)}${constraintLabel(finding)} — ${inline(finding.title)}**`;
+}
+
+// Unresolved first. With nothing open the section is left out rather than
+// saying so: the opening's Open items answers that, next step included.
 function openFindingsSection(review, partition) {
   const carried = review.carried_findings ?? [];
   if (partition.all.length === 0) {
-    return [
-      carried.length === 0
-        ? "No finding was raised in this review, so nothing is open."
-        : `No finding was raised in this review; ${count(carried.length, "finding")} carried in from an earlier review and the full report renders each.`,
-    ];
+    return carried.length === 0
+      ? []
+      : [`No finding was raised in this review; ${count(carried.length, "finding")} carried in from an earlier review and the full report renders each.`];
   }
-  if (partition.open.length === 0) {
-    return ["Nothing is still open: every finding this review raised was settled, below."];
-  }
+  if (partition.open.length === 0) return [];
   return [
     "## Still open — what the next reader inherits",
-    ...partition.open.map((finding) => {
-      const state = Object.hasOwn(OPEN_FINDING_STATE, finding.status)
-        ? OPEN_FINDING_STATE[finding.status]
-        : `its status is ${code(finding.status)}`;
-      return [
+    ...partition.open.map((finding) =>
+      [
         findingHeadline(finding),
-        `Round ${inline(finding.introduced_round ?? "n/a")} introduced it; ${state}. ${inline(finding.explanation)}`,
-      ].join("\n");
-    }),
+        `Round ${inline(finding.introduced_round ?? "n/a")} introduced it; ${openFindingState(finding)}. ${inline(finding.explanation)}`,
+      ].join("\n"),
+    ),
   ];
 }
 
 // ---------------------------------------------------------------------------
-// The conclusion both tiers open with.
+// The conclusion both tiers open with. It prints values the review ledger and
+// the publication summary already carry, and judges nothing itself.
 
 function short(sha) {
   return typeof sha === "string" ? code(sha.slice(0, 7)) : "n/a";
-}
-
-// The Codex gate's own judgement over the latest observation; null is its
-// "nothing wrong", which it reaches only on a CLEAN result for the current
-// request on the authorized head.
-function codexStanding(publication) {
-  if (publication.latest_observation == null) return "not yet observed";
-  const status = codexStatus(publication);
-  return status == null ? code("CLEAN") : code(status);
 }
 
 function reviewerModel(round) {
@@ -1084,6 +1083,13 @@ function reviewerModel(round) {
   return requested.model == null
     ? "model from the Codex configuration"
     : `requested model ${code(requested.model)}`;
+}
+
+function publicationPart(publication, summary) {
+  if (summary == null) {
+    return `publication stored ${code(publication.status)} (no publication summary supplied)`;
+  }
+  return `publication summary ${code(summary.status)}${summary.blocking_reason == null ? "" : `, blocking ${code(summary.blocking_reason)}`}`;
 }
 
 function conclusionLine(review, publication, authorization, summary) {
@@ -1098,14 +1104,9 @@ function conclusionLine(review, publication, authorization, summary) {
       ? "no local reviewer"
       : `${code(review.reviewer_provider ?? "CLAUDE_DESKTOP")}, ${reviewerModel(latest)}`,
     review == null ? "no local round" : count((review.rounds ?? []).length, "round"),
-    review == null ? code("REMOTE_ONLY") : code(review.status),
+    review == null ? `review ${code("REMOTE_ONLY")}` : `review ${code(review.status)}`,
   ];
-  if (publication != null) {
-    parts.push(
-      `publication ${code(summary?.status ?? publication.status)}`,
-      `Codex ${codexStanding(publication)}`,
-    );
-  }
+  if (publication != null) parts.push(publicationPart(publication, summary));
   return `**Conclusion:** ${parts.join(" · ")}`;
 }
 
@@ -1113,28 +1114,6 @@ const DISPOSITION = {
   RESOLVED: "fixed",
   REBUTTAL_ACCEPTED: "rejected, rebuttal accepted",
 };
-
-// Each Codex result the latest observation holds, with the review comments a
-// findings review attached; the gate's judgement over them is the headline's.
-function codexResultLines(publication) {
-  if (publication.latest_observation == null) return [`Remote Codex: ${NO_OBSERVATION}`];
-  const results = publication.latest_observation.codex_review?.results ?? [];
-  const threads = publication.latest_observation.review_threads?.threads ?? [];
-  return [
-    `Remote Codex: ${codexStanding(publication)}, as the gate judges the latest observation.`,
-    ...(results.length === 0
-      ? []
-      : [
-          results
-            .map((result) => {
-              const comments = result.attached_review_comments ?? [];
-              return `- ${code(result.verdict)} on head ${short(result.reviewed_head_sha)}${comments.length === 0 ? "" : `, ${count(comments.length, "review comment")}: ${comments.map((comment) => code(comment.comment_id)).join(", ")}`} — ${inline(result.url)}`;
-            })
-            .join("\n"),
-        ]),
-    `Pull request review threads, from any reviewer: ${threads.length}, ${threads.filter((thread) => !thread.is_resolved).length} unresolved.`,
-  ];
-}
 
 function findingsTableSection(review, publication) {
   const lines = [];
@@ -1166,50 +1145,35 @@ function findingsTableSection(review, publication) {
       );
     }
   }
-  if (publication != null) lines.push(...codexResultLines(publication));
+  if (publication != null) {
+    lines.push(
+      "The remote Codex outcome is the publication summary's standing in the conclusion; each Codex result, check, and review thread is listed under Remote publication in the full report.",
+    );
+  }
   return ["## Findings", lines.join("\n\n")];
 }
 
-// The recorded reason a review needs a human, from its own history.
-function arbitrationReason(review) {
-  const reason = [...(review.history ?? [])]
-    .reverse()
-    .find((entry) => HUMAN_REQUIRED_EVENTS.includes(entry?.event));
-  return reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`;
+// The next step is the publication summary's next action when a publication
+// was rendered, and the review's own action otherwise.
+function nextStepLine(review, publication, summary) {
+  if (publication != null) {
+    if (summary == null) return "- Next step: not assessed: no publication summary was supplied.";
+    return summary.next_action === "NONE"
+      ? null
+      : `- Next step: ${code(summary.next_action)}, from the publication summary.`;
+  }
+  return `- Next step: ${code(actionRequired(review.status))}, from the review summary.`;
 }
 
-// A terminal publication owes nothing: its last threads and terminal reason
-// stay in the audit detail.
 function openItemsSection(review, publication, summary) {
   const items = (review?.findings ?? [])
     .filter((finding) => !SETTLED_STATUSES.has(finding.status))
-    .map((finding) => {
-      const state = Object.hasOwn(OPEN_FINDING_STATE, finding.status)
-        ? OPEN_FINDING_STATE[finding.status]
-        : `its status is ${code(finding.status)}`;
-      const where = finding.path == null ? "no location" : code(findingLocation(finding));
-      return `- ${inline(finding.id)} · ${inline(finding.severity)} · ${where} — ${inline(finding.title)}: ${state}.`;
-    });
-  if (review?.status === "HUMAN_REQUIRED") {
-    items.push(`- Human arbitration required: ${arbitrationReason(review)}.`);
-  } else if (review != null && !TERMINAL_STATUSES.includes(review.status)) {
-    items.push(
-      `- Still owed: ${Object.hasOwn(LOCAL_NEXT_STEP, review.status) ? LOCAL_NEXT_STEP[review.status] : `status ${code(review.status)}; inspect the ledger`}.`,
+    .map(
+      (finding) =>
+        `- ${inline(finding.id)} · ${inline(finding.severity)} · ${findingWhere(finding)} — ${inline(finding.title)}: ${openFindingState(finding)}.`,
     );
-  }
-  if (publication != null && publication.terminal == null) {
-    if (summary?.blocking_reason != null) {
-      items.push(
-        `- Publication blocked: ${code(summary.blocking_reason)}, next action ${code(summary.next_action)}.`,
-      );
-    }
-    for (const thread of publication.latest_observation?.review_threads?.threads ?? []) {
-      if (thread.is_resolved) continue;
-      items.push(
-        `- Unresolved review thread ${code(thread.id)} at ${thread.path == null ? "n/a" : code(`${thread.path}${thread.line == null ? "" : `:${thread.line}`}`)}.`,
-      );
-    }
-  }
+  const next = nextStepLine(review, publication, summary);
+  if (next != null) items.push(next);
   return ["## Open items", items.length === 0 ? "None." : items.join("\n")];
 }
 
@@ -1287,7 +1251,12 @@ function aboutReviewSection(review, partition, timings) {
     lines.push(`- Continued by ${code(review.continued_by_review_id)}.`);
   }
   if (review.status === "HUMAN_REQUIRED") {
-    lines.push(`- Human arbitration required: ${arbitrationReason(review)}.`);
+    const reason = [...(review.history ?? [])]
+      .reverse()
+      .find((entry) => HUMAN_REQUIRED_EVENTS.includes(entry?.event));
+    lines.push(
+      `- Human arbitration required: ${reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`}.`,
+    );
   }
   return ["## About this review", lines.join("\n")];
 }
