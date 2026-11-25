@@ -6,11 +6,11 @@ import { buildScorecard, renderScorecardMarkdown } from "../server/scorecard.mjs
 const USAGE = `Usage: review-scorecard.mjs [--json] [--since <time>] [--until <time>]
                             [--repository <path>] [--strategy FULL|SUCCESSOR]
 
-  Aggregate the review and workflow ledgers in the configured store into one
-  report: findings by severity, author dispositions crossed with reviewer
+  Aggregate the review and publication ledgers in the configured store into
+  one report: findings by severity, author dispositions crossed with reviewer
   decisions, rebuttal outcomes before and after the verification obligation,
-  rounds to CLEAN, continuations, workflow budget events, and human
-  arbitration escalations. Every counting rule is stated in the report.
+  rounds to CLEAN, continuations, human arbitration escalations, and ledgers
+  per pull request. Every counting rule is stated in the report.
 
   --json               Emit schema-versioned JSON instead of markdown.
   --since <time>       Include review.created_at >= this UTC instant.
@@ -24,8 +24,8 @@ const USAGE = `Usage: review-scorecard.mjs [--json] [--since <time>] [--until <t
   --strategy <mode>    Select FULL or SUCCESSOR; missing strategy means FULL.
 
   Filters combine with AND and apply only to reviews. With any filter,
-  workflow/audit statistics are omitted, with an explanation in the output.
-  Without filters, existing review and workflow counting scopes are retained.
+  publication statistics are omitted, with an explanation in the output.
+  Without filters, publication statistics cover the whole store.
 
   Read-only: nothing is written, and a ledger that does not parse is listed
   under Skipped rather than repaired. The store is the one the servers use;

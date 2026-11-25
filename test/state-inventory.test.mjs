@@ -198,25 +198,6 @@ test("definition names a producing site, or says no site defines the value", asy
   );
 });
 
-// Audit logs are not ledgers. Their committed extent is decided by their own
-// reader's head cursor and event chain, and this instrument does not carry a
-// second copy of that reader: a value that appears only in an audit log is
-// not an observation, whatever the log's head says.
-test("audit logs are not evidence", async () => {
-  const root = await sample();
-  const workflow = path.join(root, "store", "workflows", "rbwf-sample");
-  await fsp.mkdir(workflow, { recursive: true });
-  const line = `${JSON.stringify({ workflow_state: { phase: "ORPHAN_STATUS" } })}\n`;
-  await fsp.writeFile(path.join(workflow, "action-audit.jsonl"), line);
-  await fsp.writeFile(
-    path.join(workflow, "action-audit-head.json"),
-    JSON.stringify({ version: 1, workflow_id: "rbwf-sample", committed_bytes: Buffer.byteLength(line), next_sequence: 2, last_event_sha256: null }),
-  );
-  const constants = run(root, path.join(root, "store"));
-  assert.equal(constants.get("ORPHAN_STATUS").store, 0);
-  assert.equal(constants.get("ORPHAN_STATUS").group, "unreachable");
-});
-
 // A reviewed repository can carry a file named like a ledger, and a snapshot
 // keeps it below reviews/<id>/rounds/<n>/files/. Only the store's own
 // locations are ledgers.
@@ -225,7 +206,6 @@ test("a snapshot's copy of a ledger-named project file is not a ledger", async (
   const overlay = path.join(root, "store", "reviews", "rb-sample", "rounds", "1", "files");
   await fsp.mkdir(overlay, { recursive: true });
   await fsp.writeFile(path.join(overlay, "review.json"), `${JSON.stringify({ status: "ORPHAN_STATUS" })}\n`);
-  await fsp.writeFile(path.join(overlay, "workflow.json"), `${JSON.stringify({ phase: "ORPHAN_STATUS" })}\n`);
   // A ledger at the canonical location still counts.
   await fsp.writeFile(
     path.join(root, "store", "reviews", "rb-sample", "review.json"),

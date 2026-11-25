@@ -110,6 +110,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   No publication tool reads `workflows/` any more, so a version-3
   publication no longer needs its workflow record. Reports no longer mark
   review threads as resolved automatically, and their format number is now 10.
+- (#222) Remove workflow statistics from the scorecard: the "Workflow budgets
+  and repair cycles" section, the workflow and audit-log corpus rows, and the
+  JSON `workflows`, `skipped_workflows`, `skipped_audit_logs`, the scope's
+  workflow fields, and the corpus workflow and audit-log counts. Its JSON
+  schema is version 4. The state inventory no longer reads `workflows/` and
+  no longer counts `reviews/<id>/workflow-binding.json` as a ledger. Workflow
+  records under `workflows/` stay on disk; release verification still reads
+  their terminal records.
 
 ## 0.24.0 - 2026-11-13
 

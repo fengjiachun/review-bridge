@@ -3,9 +3,9 @@
 // repository can reach before the remote path refuses it by name decide
 // through this judge: the local gate a local review mints, and the base and
 // head `authorize_remote_publication` is handed. Everything past that refusal
-// -- publications, workflows, their bindings, the scorecard -- is sha1 by
-// construction and keeps a 40-only guard, so a 64-character id there is
-// malformed rather than wide.
+// -- publications, workflows, their bindings -- is sha1 by construction and
+// keeps a 40-only guard, so a 64-character id there is malformed rather than
+// wide.
 const LOCAL_OBJECT_ID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 export const LOCAL_OBJECT_ID_DESCRIPTION =

@@ -51,8 +51,6 @@ const LEDGER_FILES = new Set([
   "gate.json",
   "remote-authorization.json",
   "observation.json",
-  "workflow-binding.json",
-  "workflow.json",
 ]);
 
 function parseArgs(argv) {
@@ -351,15 +349,14 @@ function walkJson(value, visit) {
 // A ledger is known by where the store keeps it, not by its basename: a
 // reviewed repository can carry its own review.json, and a snapshot stores
 // that file below reviews/<id>/rounds/<n>/files/. Only the store's own
-// locations count -- a ledger directly under reviews/<id>/ or
-// workflows/<id>/, or anything the release store writes under releases/.
+// locations count -- a ledger directly under reviews/<id>/, or anything the
+// release store writes under releases/.
 function isCanonicalLedgerPath(storeRoot, file) {
   const parts = path.relative(storeRoot, file).split(path.sep);
   if (parts.includes("rounds")) return false;
   if (parts[0] === "releases") return parts.length >= 3;
   if (parts.length !== 3) return false;
   if (parts[0] === "reviews") return LEDGER_FILES.has(parts[2]);
-  if (parts[0] === "workflows") return parts[2] === "workflow.json";
   return false;
 }
 
@@ -372,7 +369,13 @@ async function scanStore(storeRoot, known) {
   const counts = new Map();
   const publicationEdges = new Map();
   let scanned = 0;
-  for (const file of await listFiles(storeRoot, ".json")) {
+  // Ledgers live only under reviews/ and releases/; the depth matches a walk
+  // from the store root.
+  const files = [
+    ...(await listFiles(path.join(storeRoot, "releases"), ".json", 5)),
+    ...(await listFiles(path.join(storeRoot, "reviews"), ".json", 5)),
+  ];
+  for (const file of files) {
     if (!isCanonicalLedgerPath(storeRoot, file)) continue;
     const base = path.basename(file);
     const text = await fsp.readFile(file, "utf8").catch(() => null);
@@ -529,9 +532,7 @@ function markdown(result) {
     ...result.transitions.publication.defined_not_observed.map((edge) => `- defined, never observed: ${edge}`),
     ...result.transitions.publication.never_observed.map((name) => `- never entered: \`${name}\``),
     "",
-    "Workflow phases are not tabulated: workflow.json carries only its current phase, and phase history lives in the action audit log, which this instrument does not read.",
-    "",
-    "Unquoted object keys are not read: a value that only a key writes appears here as an external-input guard. HISTORY_REWRITE_REQUIRED is the known case; read the group-4 list with that in mind.",
+    "Unquoted object keys are not read: a value that only a key writes, and that code elsewhere compares against, appears here as an external-input guard, so read the group-4 list with that in mind.",
     "",
     "## Instrument defects",
     "",
