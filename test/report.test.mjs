@@ -807,6 +807,11 @@ test("a thread's outcome is the resolved flag the observation recorded", async (
   assert.match(markdown.split("\n")[2], / · publication stored `MERGE_READY` \(no publication summary supplied\)$/);
   assert.match(markdown, /## Open items\n\n- Next step: not assessed: no publication summary was supplied\.\n/);
   assert.doesNotMatch(markdown.slice(0, markdown.indexOf("\n---\n")), /PRRT_1|unresolved/);
+
+  // A repository name with paired underscores stays literal in the opening.
+  publication.target.repo = "__tools__";
+  markdown = render(cleanInTwoRounds(), { publication });
+  assert.ok(markdown.split("\n")[2].startsWith("**Conclusion:** owner/\\_\\_tools\\_\\_#7 · "));
 });
 
 // The opening's remote standing is the publication summary's, read from a
@@ -869,8 +874,6 @@ test("the opening's remote standing and next step are the publication summary's"
   assert.ok(markdown.slice(opening().length).includes(result.url));
 });
 
-// A merged pull request, recorded through the writer, leaves the summary
-// with nothing to do, and the opening with nothing open.
 test("a merged publication leaves nothing open", async (t) => {
   const state = await gatedFixture(t);
   const ready = await reachReady(state);
@@ -1101,6 +1104,12 @@ test("a continuation renders the findings it carries, with the review that raise
   // The source itself carries nothing and keeps the plain wording.
   const source = await fsp.readFile((await writeReviewReport(state.store, state.sourceId, { renderedAt: RENDERED_AT })).path, "utf8");
   assert.doesNotMatch(source, /### Carried findings/);
+  // Its round-two findings, written by the rereview, are open in the table
+  // and listed under Open items.
+  assert.match(source, /^\| F-002 \| minor \| new concern \| open \(`OPEN`\) \| 2 \|$/m);
+  assert.match(source, /^\| F-003 \| blocker \| second concern \| open \(`OPEN`\) \| 2 \|$/m);
+  assert.match(source, /^- F-002 · minor · no location — new concern: no author response yet\.$/m);
+  assert.match(source, /^- F-003 · blocker · `value\.js:1` — second concern: no author response yet\.$/m);
 });
 
 // The opening's dispositions come from the recorded author response and
@@ -1811,11 +1820,11 @@ test("free text from the ledger cannot shape the brief or break out of a table c
   hostile.findings[3].explanation = "## also not a heading\n- not a list item";
   hostile.findings[0].path = "src/we|rd.mjs";
   hostile.rereview_decisions[0].verification = "| broke | the | row |";
-  hostile.findings[4].title = "Fix __init__ and ~~this~~";
+  hostile.findings[4].title = "Fix __init__ and ~~this~~ &amp; that";
   const markdown = brief(hostile);
   // The opening keeps an identifier literal: no emphasis, no strikethrough.
-  assert.ok(markdown.includes("| F-005 | nit | Fix \\_\\_init\\_\\_ and \\~\\~this\\~\\~ | open (`OPEN`) | 2 |"));
-  assert.ok(markdown.includes("— Fix \\_\\_init\\_\\_ and \\~\\~this\\~\\~: no author response yet."));
+  assert.ok(markdown.includes("| F-005 | nit | Fix \\_\\_init\\_\\_ and \\~\\~this\\~\\~ \\&amp; that | open (`OPEN`) | 2 |"));
+  assert.ok(markdown.includes("— Fix \\_\\_init\\_\\_ and \\~\\~this\\~\\~ \\&amp; that: no author response yet."));
   for (const line of markdown.split("\n")) {
     assert.ok(
       !/^#{1,6} (?:not|also not)/.test(line),

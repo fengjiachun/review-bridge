@@ -194,16 +194,16 @@ Markdown report a person can read in one sitting (a `REMOTE_ONLY` publication,
 which has no review ledger, renders from its publication and authorization
 alone).
 
-Both tiers open with a conclusion that prints what the review summary and the
-publication summary already carry and judges nothing itself: one line naming
-the pull request (or "no PR"), the latest round's base and head, the reviewer
-and the model it requested, the round count, the review status (or, for
-`REMOTE_ONLY`, that local review was skipped), and the publication summary's
-status and blocking reason; a table of the review's findings with the author
-disposition and rereview decision each settled on and the round that raised
-it, with carried findings listed apart; and the open items, which are the open
-findings and the next step -- the publication summary's next action, or the
-review summary's action when there is no publication. The audit detail follows
+Both tiers open with a conclusion that judges nothing itself. From the review
+summary it takes the latest round's base and head, the reviewer and the model
+it requested, the round count, the review status, which findings are open,
+and, without a publication, the next action; from the publication summary, its
+status, blocking reason, and next action. From the review ledger it takes the
+pull request name, each finding's title and the round that raised it, the
+author disposition and rereview decision a settled finding was closed with,
+and the carried findings, listed apart. It is one conclusion line, a findings
+table, and the open items: the open findings and the next step. A
+`REMOTE_ONLY` conclusion says local review was skipped. The audit detail follows
 unchanged; in the full report it lists the latest observation's Codex results,
 checks, and review threads.
 

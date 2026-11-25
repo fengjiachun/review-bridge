@@ -158,8 +158,9 @@ writes one review's ledger, and its publication ledger when there is one, as
 Markdown beside the ledger and returns a receipt rather than the text. The
 packaged `scripts/review-report.mjs` prints a brief by default. Both tiers open
 with a one-line conclusion, a findings table with each final disposition, and
-the open findings with the next step, all read from the review and publication
-summaries; the brief then gives the terminal state and where the
+the open findings with the next step -- statuses, open findings, and next
+steps from the review and publication summaries, finding details from the
+review ledger; the brief then gives the terminal state and where the
 review goes next, a fact table, the findings still open, and the round-level
 facts. `--full` prints the full rendering the tool writes.
 The workflow skill renders the report once `LOCAL_GATE_PASSED` is recorded and

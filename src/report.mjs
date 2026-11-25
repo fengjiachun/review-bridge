@@ -401,7 +401,20 @@ function carriedSection(review) {
   ];
 }
 
-function findingsSection(review) {
+// Each finding's author response and rereview decision, by finding id; built
+// once per render and shared by the sections that join them.
+function findingIndexes(review) {
+  return {
+    resolutionByFinding: new Map(
+      (review?.resolutions ?? []).map((entry) => [entry.finding_id, entry]),
+    ),
+    decisionByFinding: new Map(
+      (review?.rereview_decisions ?? []).map((entry) => [entry.finding_id, entry]),
+    ),
+  };
+}
+
+function findingsSection(review, { resolutionByFinding, decisionByFinding }) {
   const findings = review.findings ?? [];
   const carried = review.carried_findings ?? [];
   if (findings.length === 0) {
@@ -413,12 +426,6 @@ function findingsSection(review) {
         : `No findings were raised in this review; ${carried.length} carried from ${sources.map((id) => code(id)).join(", ")}.`,
     ];
   }
-  const resolutionByFinding = new Map(
-    (review.resolutions ?? []).map((entry) => [entry.finding_id, entry]),
-  );
-  const decisionByFinding = new Map(
-    (review.rereview_decisions ?? []).map((entry) => [entry.finding_id, entry]),
-  );
   return [
     "### Findings",
     ...findings.flatMap((finding) =>
@@ -1071,14 +1078,17 @@ function openFindingsSection(review, partition) {
 }
 
 // ---------------------------------------------------------------------------
-// The conclusion both tiers open with. It prints what the review summary and
-// the publication summary already carry, and judges nothing itself.
+// The conclusion both tiers open with. Statuses, open findings, and next steps
+// come from the review summary and the publication summary; the findings
+// table's titles, rounds, carried entries, and recorded response pairs come
+// from the review ledger. It judges nothing itself.
 
-// A title in the opening sits outside any code span, so the emphasis and
-// strikethrough delimiters inline() leaves alone are escaped too: an
-// identifier like __init__ stays literal.
-function titleText(value) {
-  return inline(value).replace(/[_~]/g, "\\$&");
+// Text in the opening sits outside any code span, so what inline() leaves
+// alone is escaped too: emphasis and strikethrough delimiters, and the
+// ampersand that would start a character reference. An identifier like
+// __init__ or &amp; stays literal.
+function literal(value) {
+  return inline(value).replace(/[_~&]/g, "\\$&");
 }
 
 function reviewerModel(configuration) {
@@ -1100,7 +1110,9 @@ function conclusionLine(local, publication, authorization, summary) {
   const record = authorization ?? publication?.authorization ?? {};
   const snapshot = local?.current_snapshot;
   const parts = [
-    publication == null ? "no PR" : pullRequestName(publication),
+    publication == null
+      ? "no PR"
+      : `${literal(publication.target?.owner)}/${literal(publication.target?.repo)}#${inline(publication.target?.pr_number)}`,
     `${code(shortSha(snapshot?.base_sha ?? record.base_sha, 7))} → ${code(shortSha(snapshot?.head_sha ?? record.head_sha, 7))}`,
     ...(local == null
       ? [`local review skipped, authorization ${code(record.mode)}`]
@@ -1116,26 +1128,23 @@ function conclusionLine(local, publication, authorization, summary) {
 
 // A settled finding is named by the author's disposition and the rereview's
 // decision as recorded; the two usual pairs get their short names.
-function dispositionCell(finding, resolution, decision) {
-  if (!SETTLED_STATUSES.has(finding.status)) return `open (${cellCode(finding.status)})`;
+function dispositionCell(finding, active, resolution, decision) {
+  if (active) return `open (${cellCode(finding.status)})`;
   const pair = `${resolution?.disposition ?? "none"}/${decision?.decision ?? "none"}`;
   if (pair === "fixed/resolved") return "fixed";
   if (pair === "rejected/rebuttal_accepted") return "rejected, rebuttal accepted";
   return `author ${cellCode(resolution?.disposition ?? "none")}, rereview ${cellCode(decision?.decision ?? "none")}`;
 }
 
-function findingsTableSection(review, publication) {
+// Open or settled is the review summary's call: a finding is open exactly when
+// it is among the summary's active findings, the same list Open items prints.
+function findingsTableSection(review, local, publication, { resolutionByFinding, decisionByFinding }) {
   const lines = [];
   if (review == null) {
     lines.push("No local finding: a `REMOTE_ONLY` publication has no review ledger.");
   } else {
     const findings = review.findings ?? [];
-    const resolutionByFinding = new Map(
-      (review.resolutions ?? []).map((entry) => [entry.finding_id, entry]),
-    );
-    const decisionByFinding = new Map(
-      (review.rereview_decisions ?? []).map((entry) => [entry.finding_id, entry]),
-    );
+    const activeIds = new Set(local.active_findings.map((finding) => finding.id));
     lines.push(
       findings.length === 0
         ? "No finding was raised in this review."
@@ -1144,9 +1153,10 @@ function findingsTableSection(review, publication) {
             findings.map((finding) => [
               inline(finding.id),
               inline(finding.severity),
-              titleText(finding.title),
+              literal(finding.title),
               dispositionCell(
                 finding,
+                activeIds.has(finding.id),
                 resolutionByFinding.get(finding.id),
                 decisionByFinding.get(finding.id),
               ),
@@ -1161,7 +1171,7 @@ function findingsTableSection(review, publication) {
           "Carried in as scope hints, not dispositions of this review:",
           ...carried.map(
             (entry) =>
-              `- ${inline(entry.finding_id)} from ${code(entry.continued_from_review_id)} · ${inline(entry.severity)} — ${titleText(entry.title)}`,
+              `- ${inline(entry.finding_id)} from ${code(entry.continued_from_review_id)} · ${inline(entry.severity)} — ${literal(entry.title)}`,
           ),
         ].join("\n"),
       );
@@ -1188,18 +1198,18 @@ function nextStepLine(local, publication, summary) {
 function openItemsSection(local, publication, summary) {
   const items = (local?.active_findings ?? []).map(
     (finding) =>
-      `- ${inline(finding.id)} · ${inline(finding.severity)} · ${findingWhere(finding)} — ${titleText(finding.title)}: ${openFindingState(finding)}.`,
+      `- ${inline(finding.id)} · ${inline(finding.severity)} · ${findingWhere(finding)} — ${literal(finding.title)}: ${openFindingState(finding)}.`,
   );
   const next = nextStepLine(local, publication, summary);
   if (next != null) items.push(next);
   return ["## Open items", items.length === 0 ? "None." : items.join("\n")];
 }
 
-function conclusionSections(review, publication, authorization, summary) {
+function conclusionSections(review, publication, authorization, summary, indexes) {
   const local = review == null ? null : reviewSummary(review);
   return [
     conclusionLine(local, publication, authorization, summary),
-    ...findingsTableSection(review, publication),
+    ...findingsTableSection(review, local, publication, indexes),
     ...openItemsSection(local, publication, summary),
     "---",
   ];
@@ -1328,12 +1338,11 @@ export function renderReviewBrief(
   const context = reportContext(review, publication, authorization, ledgerDirectory);
   const partition = review == null ? null : partitionFindings(review);
   const timings = review == null ? [] : roundTimings(review);
-  const decisionByFinding = new Map(
-    (review?.rereview_decisions ?? []).map((entry) => [entry.finding_id, entry]),
-  );
+  const indexes = findingIndexes(review);
+  const { decisionByFinding } = indexes;
   const sections = [
     `# Review report ${inline(context.reviewId)}`,
-    ...conclusionSections(review, publication, authorization, publicationSummary),
+    ...conclusionSections(review, publication, authorization, publicationSummary, indexes),
     verdictLines(review, publication, publicationSummary, partition).join("\n"),
     review == null
       ? factTable(remoteOnlyFacts(publication, authorization, publicationSummary))
@@ -1432,16 +1441,17 @@ export function renderReviewReport(
   } = {},
 ) {
   const context = reportContext(review, publication, authorization, ledgerDirectory);
+  const indexes = findingIndexes(review);
   const sections = [
     `# Review report ${inline(context.reviewId)}`,
-    ...conclusionSections(review, publication, authorization, publicationSummary),
+    ...conclusionSections(review, publication, authorization, publicationSummary, indexes),
     ...(review == null
       ? remoteOnlySection()
       : [
           ...identitySection(review),
           ...roundsSection(review),
           ...carriedSection(review),
-          ...findingsSection(review),
+          ...findingsSection(review, indexes),
           ...changesSection(review),
           ...outcomeSection(review),
         ]),
