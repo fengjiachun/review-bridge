@@ -16,8 +16,14 @@ const USAGE = `Usage: review-report.mjs <review_id> [--full] [--json] [--store <
   a REMOTE_ONLY publication, which has no review ledger, renders from its
   publication and authorization alone.
 
-  By default it prints a brief: the terminal state and where the review goes
-  next in the first two lines, a fact table, the findings still open before
+  Both tiers open with a conclusion: one line with the pull request, base and
+  head, reviewer, rounds, and statuses; a table of the findings and their
+  dispositions; and the open findings with the next step. Statuses, open
+  findings, and next steps come from the review and publication summaries,
+  finding details from the review ledger.
+
+  By default it prints a brief: below the conclusion, the terminal state and
+  where the review goes next, a fact table, the findings still open before
   the ones already settled, the round-level facts, and a pointer to the full
   rendering. Every number in it is counted over the ledger; nothing is
   inferred across findings.

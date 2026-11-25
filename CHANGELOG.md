@@ -14,6 +14,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - (#219) `prepare_review` no longer requires `reviewer_provider`; a review
   prepared without one is bound to `CODEX_TASK`. Pass another provider only
   to use it.
+- (#221) Both report tiers open with a conclusion: one line naming the pull
+  request, base and head, reviewer, round count, review status, and the
+  publication summary's status; a findings table with each final disposition
+  and the round that raised it; and the open findings with the next step.
+  Statuses, open findings, and next steps come from the review and
+  publication summaries, finding details from the review ledger. The audit
+  detail follows unchanged.
+  `REPORT_FORMAT` is now 11.
 - (#212) `list_reviews` requires `repository_path` and returns only the
   reviews whose stored `repository_path` equals it exactly. Callers must pass
   the repository's resolved top-level path, as `prepare_review` stores it

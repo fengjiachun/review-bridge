@@ -194,16 +194,30 @@ Markdown report a person can read in one sitting (a `REMOTE_ONLY` publication,
 which has no review ledger, renders from its publication and authorization
 alone).
 
-The script prints a brief by default: the terminal state and where the review
-goes next in the first two lines, a fact table, the findings still open before
+Both tiers open with a conclusion that judges nothing itself. From the review
+summary it takes the latest round's base and head, the reviewer and the model
+it requested, the round count, the review status, which findings are open,
+and, without a publication, the next action; from the publication summary, its
+status, blocking reason, and next action. From the review ledger it takes the
+pull request name, each finding's title and the round that raised it, the
+author disposition and rereview decision a settled finding was closed with,
+and the carried findings, listed apart. It is one conclusion line, a findings
+table, and the open items: the open findings and the next step. A
+`REMOTE_ONLY` conclusion says local review was skipped. The audit detail follows
+unchanged; in the full report it lists the latest observation's Codex results,
+checks, and review threads.
+
+The script prints a brief by default: below the conclusion, the terminal state
+and where the review goes next, a fact table, the findings still open before
 the ones already settled, the round-level facts, and a pointer to the full
 rendering. Every number in it is counted over the ledger and every grouping is
 one the ledger decides -- severity, the round a finding was introduced in,
 whether two findings name the same title at the same location -- because the
 renderer calls no model; a line that would read across findings to say what
 they have in common is out of its reach, and it states the counting rule
-instead. A review with nothing open says so rather than heading an empty
-section, and a `REMOTE_ONLY` publication briefs in the same shape.
+instead. A review with nothing open leaves the still-open section out, since
+the conclusion's open items already answer it, and a `REMOTE_ONLY`
+publication briefs in the same shape.
 
 `--full` prints the full rendering, which is also what the tool writes:
 requirement and scope, each round's findings
