@@ -45,7 +45,7 @@ export async function reviewerRuntime(storeRoot) {
 
 export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
   const child = spawn(runtime.command, ["app-server", "--listen", "stdio://"], {
-    cwd: runtime.cwd, stdio: ["pipe", "pipe", "pipe"],
+    cwd: runtime.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true,
   });
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-2000); });
@@ -83,6 +83,10 @@ export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
     await request("initialize", { clientInfo: { name: "review_bridge", version: "0" } });
     child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
     const config = await request("config/read", { includeLayers: false });
+    if (config?.config == null || typeof config.config !== "object" ||
+        (config.config.model != null && typeof config.config.model !== "string")) {
+      throw new Error("Invalid Codex config/read response");
+    }
     const models = [];
     const cursors = new Set();
     let cursor = null;
@@ -106,13 +110,16 @@ export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
       }
       cursors.add(cursor);
     } while (cursor != null);
-    return { configured_model: config?.config?.model ?? null, models };
+    return { configured_model: config.config.model ?? null, models };
   } finally {
     clearTimeout(timer);
     lines.close();
     child.stdin.end();
-    // The listing has no state to save; a process that ignores SIGTERM must still end.
-    child.kill("SIGKILL");
+    // The listing has no state to save, and the executable may be a wrapper:
+    // end its whole process group, including processes that ignore SIGTERM.
+    if (child.pid != null) {
+      try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
   }
 }
 
@@ -148,7 +155,9 @@ export async function reviewerRequest(runtime, { model, reasoning_effort }) {
   if (!entry.reasoning_efforts.includes(requested.reasoning_effort)) {
     throw new Error(`Model ${name} does not support reasoning effort ${requested.reasoning_effort}; it supports ${entry.reasoning_efforts.join(", ")}. Nothing was launched.`);
   }
-  return requested;
+  // The configured model that was checked is the one launched, even if the
+  // configuration changes before the reviewer starts.
+  return { model: name, ...requested };
 }
 
 export function codexReviewerArguments(reviewId, requested, storeRoot) {

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { createInterface } from "node:readline";
 if (process.argv[2] === "exec") {
@@ -13,14 +14,24 @@ if (process.argv[2] === "app-server") {
   // RB_TEST_MODELS limits the models served, RB_TEST_APP_SERVER picks a failure,
   // and model/list waits while RB_TEST_LIST_HOLD exists.
   const mode = process.env.RB_TEST_APP_SERVER;
+  if (process.argv.slice(3).join(" ") !== "--listen stdio://") {
+    process.stderr.write("error: only --listen stdio:// is served\n");
+    process.exit(2);
+  }
   if (mode === "exit") {
     process.stderr.write("error: unknown configuration key\n");
     process.exit(3);
   }
-  if (mode === "hang") {
+  // A wrapper that ignores SIGTERM runs a worker that does too; the worker
+  // fails initialize only after both have written their pids.
+  const worker = process.env.RB_TEST_STUBBORN_WORKER === "1";
+  if (mode === "stubborn") {
     process.on("SIGTERM", () => {});
     setInterval(() => {}, 1000);
-    fs.writeFileSync("hang.pid", String(process.pid));
+    fs.writeFileSync(worker ? "worker.pid" : "wrapper.pid", String(process.pid));
+    if (!worker) {
+      spawn(process.execPath, process.argv.slice(1), { stdio: "inherit", env: { ...process.env, RB_TEST_STUBBORN_WORKER: "1" } });
+    }
   }
   const efforts = (...values) => values.map((reasoningEffort) => ({ reasoningEffort, description: reasoningEffort }));
   const served = process.env.RB_TEST_MODELS?.split(",");
@@ -38,7 +49,7 @@ if (process.argv[2] === "app-server") {
   let initialized = false;
   const results = {
     initialize: () => ({ userAgent: "fixture" }),
-    "config/read": () => ({ config: { model: configured || null, model_reasoning_effort: "low" } }),
+    "config/read": () => mode === "invalid-config" ? {} : ({ config: { model: configured || null, model_reasoning_effort: "low" } }),
     "model/list": ({ cursor, includeHidden }) => mode === "invalid-page"
       ? { data: [{ model: "fixture-sol", supportedReasoningEfforts: [{ effort: "high" }] }], nextCursor: null }
       : { ...pages[cursor], data: [...visible(pages[cursor].data), ...(includeHidden === false || cursor ? [] : [hidden])] },
@@ -46,12 +57,13 @@ if (process.argv[2] === "app-server") {
   const hold = process.env.RB_TEST_LIST_HOLD;
   const whenReleased = (reply) => hold && fs.existsSync(hold)
     ? (fs.writeFileSync("list-held", ""), setTimeout(() => whenReleased(reply), 10)) : reply();
-  createInterface({ input: process.stdin }).on("line", (line) => {
+  if (mode !== "stubborn" || worker) createInterface({ input: process.stdin }).on("line", (line) => {
     const message = JSON.parse(line);
     if (message.method === "initialized" && initializeAnswered) initialized = true;
     if (message.id == null || mode === "hang") return;
     if (mode === "malformed") process.stdout.write("null\n[]\n");
     const reply = (body) => process.stdout.write(`${JSON.stringify({ id: message.id, ...body })}\n`);
+    if (mode === "stubborn") return reply({ error: { message: "stubborn worker refuses" } });
     if (message.method === "initialize") {
       initializeAnswered = true;
       return reply({ result: results.initialize() });

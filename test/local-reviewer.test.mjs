@@ -225,11 +225,13 @@ test("a chosen model or effort is refused unless listed and supported, and carri
   assert.equal(untouched.state_version, review.state_version);
   assert.equal(untouched.rounds[0].reviewer_dispatch, undefined);
 
-  const effortOnly = { reasoning_effort: "max", model_source: "configuration", reasoning_effort_source: "selected" };
+  // The configured model the effort was checked against is the one launched.
+  const effortOnly = { model: "fixture-luna", reasoning_effort: "max", model_source: "configuration", reasoning_effort_source: "selected" };
   const first = await launchLocalReviewer(store, review.id, review.state_version, { reasoningEffort: "max" });
   assert.deepEqual(first.reviewer_configuration.requested, effortOnly);
   assert.equal((await waitForExit(first.reviewer_dispatch.attempt_root)).code, 0);
-  assert.ok(!(await executedArgs(store)).includes("--model"));
+  const firstArgs = await executedArgs(store);
+  assert.equal(firstArgs[firstArgs.indexOf("--model") + 1], "fixture-luna");
   await submitInitialReview(store, review.id, [{ severity: "major", path: "file.txt", line: 1, title: "Content", explanation: "Content needs correction", recommendation: "Fix content" }], "CODEX_TASK");
   const [finding] = (await loadReview(store, review.id)).findings;
   await submitResolutions(store, review.id, [{ finding_id: finding.id, disposition: "fixed", rationale: "Corrected", evidence: "file.txt" }]);
@@ -293,6 +295,7 @@ test("a failed model listing explains itself, refuses a choice, and leaves defau
     ["exit", /process exited \(code 3\): error: unknown configuration key/],
     ["repeat-cursor", /Invalid Codex model\/list pagination cursor/],
     ["invalid-page", /Invalid Codex model capabilities/],
+    ["invalid-config", /Invalid Codex config\/read response/],
   ];
   setEnv(t, { RB_TEST_APP_SERVER: "" });
   for (const [mode, message] of failures) {
@@ -317,16 +320,20 @@ test("a failed model listing explains itself, refuses a choice, and leaves defau
 
   process.env.RB_TEST_APP_SERVER = "hang";
   const runtime = await reviewerRuntime(store);
-  // The fixture writes hang.pid once its SIGTERM handler is installed; a
-  // missing file means the listing timed out before the child was ready.
-  await fsp.rm(path.join(runtime.cwd, "hang.pid"), { force: true });
-  await assert.rejects(queryCodexModels(runtime, { timeoutMs: 2000 }), /timed out/);
-  const pid = Number(await fsp.readFile(path.join(runtime.cwd, "hang.pid"), "utf8"));
-  for (let i = 0; i < 100; i++) {
-    try { process.kill(pid, 0); } catch (error) { if (error.code === "ESRCH") return; throw error; }
-    await new Promise((resolve) => setTimeout(resolve, 20));
+  await assert.rejects(queryCodexModels(runtime, { timeoutMs: 300 }), /timed out/);
+
+  // The worker's refusal arrives only after both processes wrote their pids.
+  process.env.RB_TEST_APP_SERVER = "stubborn";
+  await assert.rejects(queryCodexModels(runtime), /stubborn worker refuses/);
+  for (const name of ["wrapper.pid", "worker.pid"]) {
+    const pid = Number(await fsp.readFile(path.join(runtime.cwd, name), "utf8"));
+    let alive = true;
+    for (let i = 0; i < 100 && alive; i++) {
+      try { process.kill(pid, 0); await new Promise((resolve) => setTimeout(resolve, 20)); }
+      catch (error) { if (error.code !== "ESRCH") throw error; alive = false; }
+    }
+    assert.equal(alive, false, `${name} still names a running process`);
   }
-  assert.fail("the hung model listing process is still running");
 });
 
 test("a malformed model listing reply does not take down the author server", async (t) => {
