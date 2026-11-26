@@ -114,7 +114,8 @@ flowchart LR
 The author states the requirement, the implementation scope, the base ref,
 and a reviewer choice; `prepare_review` captures the snapshot and creates the
 ledger. A `CODEX_TASK` reviewer is launched by the server as a separate
-process on the MCP host's configured Codex model at high reasoning effort; the other
+process on the MCP host's configured Codex model at high reasoning effort by default,
+or on a model and effort the user chose for that review; the other
 providers are dispatched by the operator as their install pages describe.
 
 In round one the reviewer sees the snapshot, the requirement, and the scope
@@ -298,7 +299,7 @@ source; this is an overview grouped by purpose.
 
 | Group | Tools |
 | --- | --- |
-| Local review | `launch_local_reviewer` `prepare_review` `list_reviews` `get_review` `get_review_summary` `wait_for_review_state` `submit_resolutions` `prepare_rereview` `append_review_erratum` `finalize_local_gate` `export_human_arbitration` `render_review_report` |
+| Local review | `launch_local_reviewer` `list_reviewer_models` `prepare_review` `list_reviews` `get_review` `get_review_summary` `wait_for_review_state` `submit_resolutions` `prepare_rereview` `append_review_erratum` `finalize_local_gate` `export_human_arbitration` `render_review_report` |
 | Publication gate | `authorize_remote_publication` `start_publication` `get_publication` `get_publication_summary` `record_codex_review_request` `record_github_snapshot` `acknowledge_codex_review_ambiguity` `finalize_publication_gate` `verify_publication_gate` |
 
 ## Appendix B: glossary

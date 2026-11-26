@@ -11,7 +11,7 @@ import {
 } from "./storage.mjs";
 import { reviewRequiredInputs } from "./tool-inputs.mjs";
 
-import { REVIEWER_REQUESTED, codexReviewerArguments, reviewerRuntime, startLocalReviewer } from "./local-reviewer.mjs";
+import { codexReviewerArguments, reviewerRequest, reviewerRuntime, startLocalReviewer } from "./local-reviewer.mjs";
 
 export const MAX_ROUNDS = 2;
 export const DEFAULT_CHANGE_SIZE_BUDGET = 2000;
@@ -2806,13 +2806,22 @@ export async function openReview(
   });
 }
 
-export async function launchLocalReviewer(storeRoot, reviewId, expectedStateVersion) {
-  return withReviewMutationLock(storeRoot, reviewId, async () => {
-    const review = await loadReview(storeRoot, reviewId);
+// A choice carries to the review's later launches until the user chooses
+// again; values that were not chosen, including any a ledger recorded
+// without a source, start back at the defaults.
+function carriedSelection(review) {
+  const requested = review.rounds.findLast((round) => round.reviewer_configuration)?.reviewer_configuration.requested ?? {};
+  return {
+    model: requested.model_source === "selected" ? requested.model : undefined,
+    reasoning_effort: requested.reasoning_effort_source === "selected" ? requested.reasoning_effort : undefined,
+  };
+}
+
+export async function launchLocalReviewer(storeRoot, reviewId, expectedStateVersion, { model, reasoningEffort } = {}) {
+  const checkLaunchable = async (review) => {
     if (review.state_version !== expectedStateVersion) throw new Error("review state_version mismatch");
     if (reviewerProviderFor(review) !== "CODEX_TASK") throw new Error("Automatic launch unavailable for this provider");
-    const round = review.rounds.at(-1);
-    const prior = round.reviewer_dispatch;
+    const prior = review.rounds.at(-1).reviewer_dispatch;
     if (prior) {
       let exited;
       try { exited = await loadJson(path.join(prior.attempt_root, "exit.json")); }
@@ -2820,7 +2829,20 @@ export async function launchLocalReviewer(storeRoot, reviewId, expectedStateVers
       if (!exited) throw new Error("Reviewer dispatch is running or indeterminate; do not launch a concurrent replacement");
     }
     if (!["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"].includes(review.status)) throw new Error("Review is not pending");
-    const configuration = { requested: { ...REVIEWER_REQUESTED }, observed: { status: "unavailable" }, runtime: await reviewerRuntime(storeRoot) };
+  };
+  // A model listing can outlast the lock's wait, so the request is resolved
+  // first; the checks repeated under the lock confirm the review it was
+  // resolved from is unchanged.
+  const loaded = await loadReview(storeRoot, reviewId);
+  await checkLaunchable(loaded);
+  const runtime = await reviewerRuntime(storeRoot);
+  const requested = await reviewerRequest(runtime, model == null && reasoningEffort == null
+    ? carriedSelection(loaded) : { model, reasoning_effort: reasoningEffort });
+  return withReviewMutationLock(storeRoot, reviewId, async () => {
+    const review = await loadReview(storeRoot, reviewId);
+    await checkLaunchable(review);
+    const round = review.rounds.at(-1);
+    const configuration = { requested, observed: { status: "unavailable" }, runtime };
     const attemptRoot = path.join(roundDirectory(storeRoot, reviewId, review.current_round), `dispatch-${crypto.randomUUID()}`);
     await fsp.mkdir(attemptRoot, { recursive: true, mode: 0o700 });
     const dispatch = { attempt_root: attemptRoot, requested: configuration.requested, observed: { status: "unavailable" }, started_at: now(), status: "STARTING", task_id: path.basename(attemptRoot), marker: null };
@@ -2829,7 +2851,7 @@ export async function launchLocalReviewer(storeRoot, reviewId, expectedStateVers
     review.history.push({ at: now(), event: "REVIEWER_DISPATCH_REQUESTED", round: review.current_round, ...dispatch });
     await saveReview(storeRoot, review);
     try {
-      const process = await startLocalReviewer(configuration.runtime, codexReviewerArguments(reviewId, REVIEWER_REQUESTED, storeRoot), attemptRoot);
+      const process = await startLocalReviewer(configuration.runtime, codexReviewerArguments(reviewId, configuration.requested, storeRoot), attemptRoot);
       Object.assign(dispatch, process, { status: "STARTED" });
     } catch (error) {
       if (error.code === "DISPATCH_INDETERMINATE") throw error;

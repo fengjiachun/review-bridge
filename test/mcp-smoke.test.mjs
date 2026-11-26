@@ -59,6 +59,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
     "get_review",
     "get_review_summary",
     "launch_local_reviewer",
+    "list_reviewer_models",
     "list_reviews",
     "prepare_rereview",
     "prepare_review",

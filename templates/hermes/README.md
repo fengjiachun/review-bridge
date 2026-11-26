@@ -235,4 +235,7 @@ Every participant sharing that store must run one exact Review Bridge version.
 
 The author server exposes `launch_local_reviewer`. The CODEX_TASK reviewer uses
 the model from the execution host's Codex configuration at `high` reasoning
-effort; change that configuration to change the model.
+effort; change `model` there to change the default model (the default effort
+stays `high`). For one review, ask
+the author to list the reviewer models (`list_reviewer_models`) and name a
+model or effort; the choice holds for that review's later rounds.

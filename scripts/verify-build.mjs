@@ -1214,7 +1214,7 @@ try {
     const launched = await call(claudeAuthor, "launch_local_reviewer", {
       review_id: pending.id, expected_state_version: pending.state_version,
     });
-    assert.deepEqual(launched.reviewer_configuration.requested, { reasoning_effort: "high" });
+    assert.deepEqual(launched.reviewer_configuration.requested, { reasoning_effort: "high", model_source: "configuration", reasoning_effort_source: "default" });
     assert.equal(launched.reviewer_configuration.observed.status, "unavailable");
     const { waitForExit } = await import(pathToFileURL(path.join(projectRoot, "test", "helpers", "codex-runtime.mjs")));
     assert.equal((await waitForExit(launched.reviewer_dispatch.attempt_root)).code, 0);

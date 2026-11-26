@@ -18,9 +18,11 @@ independent Codex reviewer, ask:
 `CODEX_TASK` is the default reviewer provider; name another only to use it.
 The author captures the snapshot with `prepare_review`, then calls
 `launch_local_reviewer` with the review's `state_version`. The reviewer uses the
-model from the MCP host's Codex configuration at `high` reasoning effort. See
-[reviewer configuration](reviewer-configuration.md) for client setup and runtime
-limits. The launcher starts an independent process;
+model from the MCP host's Codex configuration at `high` reasoning effort unless
+you ask the author for another model or effort; that choice holds for the
+review's later rounds. See
+[reviewer configuration](reviewer-configuration.md) for choosing, client setup
+and runtime limits. The launcher starts an independent process;
 you follow it from the author conversation rather than creating a UI task.
 `prepare_review` also takes an optional `rationale`: the author's design
 decisions, dropped alternatives, and doubts, written before any finding exists.
@@ -116,7 +118,8 @@ Fixing an undocumented one includes writing the rule into that guidance in the
 same change. Findings without it record no constraint kind.
 
 For a Codex review started with `launch_local_reviewer`, prepare rereview and
-call the launcher again with the current state version. For manual Codex
+call the launcher again with the current state version; it reuses the model and
+effort chosen for the review, if any, unless you choose again. For manual Codex
 dispatch, create another new task with the same review ID and request a rereview
 of the author's resolutions.
 

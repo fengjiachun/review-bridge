@@ -8,15 +8,16 @@ import path from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { reviewerRuntime, startLocalReviewer } from "../src/local-reviewer.mjs";
+import { listReviewerModels, queryCodexModels, reviewerRuntime, startLocalReviewer } from "../src/local-reviewer.mjs";
 import {
-  getReviewSummary, launchLocalReviewer, loadReview, prepareRereview, prepareReview,
+  appendReviewErratum, getReviewSummary, launchLocalReviewer, loadReview, prepareRereview, prepareReview,
   submitInitialReview, submitResolutions,
 } from "../src/core.mjs";
 import { renderReviewBrief, renderReviewReport } from "../src/report.mjs";
 import { buildScorecard } from "../src/scorecard.mjs";
 
 process.env.REVIEW_BRIDGE_CODEX_COMMAND = FIXTURE_CODEX;
+const DEFAULT_REQUEST = { reasoning_effort: "high", model_source: "configuration", reasoning_effort_source: "default" };
 
 const call = async (client, name, args) => {
   const response = await client.callTool({ name, arguments: args });
@@ -52,8 +53,8 @@ test("launch leaves the model to the Codex configuration and pins high effort", 
   const review = await call(client, "prepare_review", { repository_path: repository, base_ref: base, requirement: "Change content", implementation_scope: "file.txt", reviewer_provider: "CODEX_TASK" });
   assert.equal(review.reviewer_configuration, null);
   const launched = await call(client, "launch_local_reviewer", { review_id: review.id, expected_state_version: review.state_version });
-  assert.deepEqual(launched.reviewer_configuration.requested, { reasoning_effort: "high" });
-  assert.deepEqual(launched.reviewer_dispatch.requested, { reasoning_effort: "high" });
+  assert.deepEqual(launched.reviewer_configuration.requested, DEFAULT_REQUEST);
+  assert.deepEqual(launched.reviewer_dispatch.requested, DEFAULT_REQUEST);
   await assert.rejects(call(client, "launch_local_reviewer", { review_id: review.id, expected_state_version: launched.state_version }), /concurrent replacement/);
   await fsp.rm(holdFile);
   assert.equal((await waitForExit(launched.reviewer_dispatch.attempt_root)).code, 0);
@@ -118,10 +119,10 @@ test("a ledger carrying an author-selected model still reads, reports, scores an
 
   const continued = await loadReview(store, review.id);
   assert.deepEqual(continued.rounds[0].reviewer_configuration, legacy);
-  assert.deepEqual(continued.rounds[1].reviewer_configuration.requested, { reasoning_effort: "high" });
+  assert.deepEqual(continued.rounds[1].reviewer_configuration.requested, DEFAULT_REQUEST);
   const full = renderReviewReport(continued);
   assert.ok(full.includes(`- Round 1 reviewer requested: ${legacyRequest};`));
-  assert.ok(full.includes('- Round 2 reviewer requested: `{"reasoning_effort":"high"}`, model from the Codex configuration;'));
+  assert.ok(full.includes(`- Round 2 reviewer requested: \`${JSON.stringify(DEFAULT_REQUEST)}\`, model from the Codex configuration;`));
   assert.ok(renderReviewBrief(continued).includes("model from the Codex configuration"));
   assert.equal((await buildScorecard(store)).corpus.reviews_counted, 1);
 });
@@ -145,7 +146,7 @@ test("a direct launch on a pending round that holds a selected model follows the
   assert.ok(!executed.args.includes("--model"));
   assert.ok(executed.args.includes('model_reasoning_effort="high"'));
   const relaunched = await loadReview(store, review.id);
-  assert.deepEqual(relaunched.rounds[0].reviewer_configuration.requested, { reasoning_effort: "high" });
+  assert.deepEqual(relaunched.rounds[0].reviewer_configuration.requested, DEFAULT_REQUEST);
   assert.deepEqual(relaunched.history.find((event) => event.event === "REVIEWER_CONFIGURATION_SELECTED").requested, requested);
   // A retry after the confirmed exit keeps the first attempt in history.
   const retried = await launchLocalReviewer(store, review.id, relaunched.state_version);
@@ -153,10 +154,205 @@ test("a direct launch on a pending round that holds a selected model follows the
   const attempts = (await loadReview(store, review.id)).history.filter((event) => event.event === "REVIEWER_DISPATCH_REQUESTED");
   assert.notEqual(launched.reviewer_dispatch.attempt_root, retried.reviewer_dispatch.attempt_root);
   assert.deepEqual(attempts.map(({ attempt_root, requested }) => ({ attempt_root, requested })), [
-    { attempt_root: launched.reviewer_dispatch.attempt_root, requested: { reasoning_effort: "high" } },
-    { attempt_root: retried.reviewer_dispatch.attempt_root, requested: { reasoning_effort: "high" } },
+    { attempt_root: launched.reviewer_dispatch.attempt_root, requested: DEFAULT_REQUEST },
+    { attempt_root: retried.reviewer_dispatch.attempt_root, requested: DEFAULT_REQUEST },
   ]);
   assert.equal((await loadReview(store, review.id)).rounds[0].reviewer_dispatch.attempt_root, retried.reviewer_dispatch.attempt_root);
+});
+
+test("the author lists the reviewer models and launches with a chosen model and effort", async (t) => {
+  const { repository, store, base } = await fixture(t);
+  const client = new Client({ name: "claude-author-fixture", version: "1" });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.resolve("src/server.mjs"), "--role", "author"], env: { ...process.env, REVIEW_BRIDGE_HOME: store }, stderr: "pipe" }));
+  t.after(() => client.close());
+  // The configured model, not the catalog's isDefault entry, and the launcher's
+  // high, not the configuration's effort, are the defaults.
+  assert.deepEqual(await call(client, "list_reviewer_models", {}), {
+    reviewer_provider: "CODEX_TASK", available: true, configured_model: "fixture-luna",
+    default_reasoning_effort: { value: "high", source: "launcher default" },
+    models: [
+      { model: "fixture-sol", display_name: "Fixture Sol", reasoning_efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+      { model: "fixture-luna", display_name: "Fixture Luna", reasoning_efforts: ["low", "medium", "high", "xhigh", "max"] },
+      { model: "fixture-mini", display_name: "Fixture Mini", reasoning_efforts: ["low", "medium"] },
+    ],
+  });
+  assert.equal((await call(client, "list_reviewer_models", { reviewer_provider: "HERMES" })).available, false);
+  const review = await call(client, "prepare_review", { repository_path: repository, base_ref: base, requirement: "Change content", implementation_scope: "file.txt", reviewer_provider: "CODEX_TASK" });
+  const launched = await call(client, "launch_local_reviewer", { review_id: review.id, expected_state_version: review.state_version, model: "fixture-sol", reasoning_effort: "ultra" });
+  assert.deepEqual(launched.reviewer_configuration.requested, { model: "fixture-sol", reasoning_effort: "ultra", model_source: "selected", reasoning_effort_source: "selected" });
+  assert.equal((await waitForExit(launched.reviewer_dispatch.attempt_root)).code, 0);
+  const executed = JSON.parse(await fsp.readFile(path.join(store, "codex-runtime", "executed.json")));
+  assert.deepEqual(executed.args.slice(executed.args.indexOf("--model"), executed.args.indexOf("--model") + 2), ["--model", "fixture-sol"]);
+  assert.ok(executed.args.includes('model_reasoning_effort="ultra"'));
+  assert.ok(renderReviewReport(await loadReview(store, review.id)).includes(
+    '- Round 1 reviewer requested: `{"model":"fixture-sol","reasoning_effort":"ultra","model_source":"selected","reasoning_effort_source":"selected"}`;'));
+});
+
+function setEnv(t, values) {
+  const saved = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  t.after(() => { for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+}
+
+const executedArgs = async (store) => JSON.parse(await fsp.readFile(path.join(store, "codex-runtime", "executed.json"))).args;
+
+test("a chosen model or effort is refused unless listed and supported, and carries to later rounds", async (t) => {
+  const { repository, store, base } = await fixture(t);
+  const prepare = () => prepareReview(store, {
+    repositoryPath: repository, baseRef: base, requirement: "Change content",
+    implementationScope: "file.txt", reviewerProvider: "CODEX_TASK",
+  });
+  const review = await prepare();
+  const refusals = [
+    [{ model: "fixture-terra" }, /Model fixture-terra is not in Codex's model list/],
+    [{ model: "fixture-luna", reasoningEffort: "ultra" }, /fixture-luna does not support reasoning effort ultra; it supports low, medium, high, xhigh, max/],
+    [{ reasoningEffort: "ultra" }, /fixture-luna does not support reasoning effort ultra/],
+    [{ model: "fixture-mini" }, /fixture-mini does not support reasoning effort high; it supports low, medium/],
+  ];
+  for (const [selection, message] of refusals) {
+    await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, selection), message);
+  }
+  assert.ok((await listReviewerModels(store, "CODEX_TASK")).models.some((entry) => entry.model === "fixture-sol"));
+  setEnv(t, { RB_TEST_MODELS: "fixture-luna" });
+  await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, { model: "fixture-sol" }), /Model fixture-sol is not in Codex's model list/);
+  delete process.env.RB_TEST_MODELS;
+  setEnv(t, { RB_TEST_CONFIG_MODEL: "" });
+  await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, { reasoningEffort: "max" }), /configuration names no model/);
+  process.env.RB_TEST_CONFIG_MODEL = "fixture-hidden";
+  await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, { reasoningEffort: "max" }), /configured model fixture-hidden is not in Codex's model list/);
+  delete process.env.RB_TEST_CONFIG_MODEL;
+  const untouched = await loadReview(store, review.id);
+  assert.equal(untouched.state_version, review.state_version);
+  assert.equal(untouched.rounds[0].reviewer_dispatch, undefined);
+
+  // The configured model the effort was checked against is the one launched.
+  const effortOnly = { model: "fixture-luna", reasoning_effort: "max", model_source: "configuration", reasoning_effort_source: "selected" };
+  const first = await launchLocalReviewer(store, review.id, review.state_version, { reasoningEffort: "max" });
+  assert.deepEqual(first.reviewer_configuration.requested, effortOnly);
+  assert.equal((await waitForExit(first.reviewer_dispatch.attempt_root)).code, 0);
+  const firstArgs = await executedArgs(store);
+  assert.equal(firstArgs[firstArgs.indexOf("--model") + 1], "fixture-luna");
+  await submitInitialReview(store, review.id, [{ severity: "major", path: "file.txt", line: 1, title: "Content", explanation: "Content needs correction", recommendation: "Fix content" }], "CODEX_TASK");
+  const [finding] = (await loadReview(store, review.id)).findings;
+  await submitResolutions(store, review.id, [{ finding_id: finding.id, disposition: "fixed", rationale: "Corrected", evidence: "file.txt" }]);
+  const roundTwo = await prepareRereview(store, review.id);
+  // The carried effort is checked again against the model configured now.
+  process.env.RB_TEST_CONFIG_MODEL = "fixture-sol";
+  const carried = await launchLocalReviewer(store, review.id, roundTwo.state_version);
+  assert.deepEqual(carried.reviewer_configuration.requested, { ...effortOnly, model: "fixture-sol" });
+  assert.equal((await waitForExit(carried.reviewer_dispatch.attempt_root)).code, 0);
+  const carriedArgs = await executedArgs(store);
+  assert.equal(carriedArgs[carriedArgs.indexOf("--model") + 1], "fixture-sol");
+  delete process.env.RB_TEST_CONFIG_MODEL;
+  // Choosing again replaces the whole choice for that launch and those after it.
+  const modelOnly = { model: "fixture-sol", reasoning_effort: "high", model_source: "selected", reasoning_effort_source: "default" };
+  const chosenAgain = await launchLocalReviewer(store, review.id, carried.state_version, { model: "fixture-sol" });
+  assert.deepEqual(chosenAgain.reviewer_configuration.requested, modelOnly);
+  assert.equal((await waitForExit(chosenAgain.reviewer_dispatch.attempt_root)).code, 0);
+  const retried = await launchLocalReviewer(store, review.id, chosenAgain.state_version);
+  assert.deepEqual(retried.reviewer_configuration.requested, modelOnly);
+  assert.equal((await waitForExit(retried.reviewer_dispatch.attempt_root)).code, 0);
+  const args = await executedArgs(store);
+  assert.equal(args[args.indexOf("--model") + 1], "fixture-sol");
+  assert.ok(args.includes('model_reasoning_effort="high"'));
+
+  const fresh = await prepare();
+  const defaulted = await launchLocalReviewer(store, fresh.id, fresh.state_version);
+  assert.deepEqual(defaulted.reviewer_configuration.requested, DEFAULT_REQUEST);
+  assert.equal((await waitForExit(defaulted.reviewer_dispatch.attempt_root)).code, 0);
+  const mini = await prepare();
+  const supported = await launchLocalReviewer(store, mini.id, mini.state_version, { model: "fixture-mini", reasoningEffort: "medium" });
+  assert.deepEqual(supported.reviewer_configuration.requested, { model: "fixture-mini", reasoning_effort: "medium", model_source: "selected", reasoning_effort_source: "selected" });
+  assert.equal((await waitForExit(supported.reviewer_dispatch.attempt_root)).code, 0);
+});
+
+test("a launch whose review changes while the model listing runs reserves no attempt", async (t) => {
+  const { root, repository, store, base } = await fixture(t);
+  const review = await prepareReview(store, {
+    repositoryPath: repository, baseRef: base, requirement: "Change content",
+    implementationScope: "file.txt", reviewerProvider: "CODEX_TASK",
+  });
+  const hold = path.join(root, "list-hold");
+  await fsp.writeFile(hold, "");
+  setEnv(t, { RB_TEST_LIST_HOLD: hold });
+  const held = path.join((await reviewerRuntime(store)).cwd, "list-held");
+  const launching = launchLocalReviewer(store, review.id, review.state_version, { model: "fixture-sol" });
+  for (let i = 0; i < 250; i++) {
+    try { await fsp.access(held); break; } catch { await new Promise((resolve) => setTimeout(resolve, 20)); }
+  }
+  await fsp.access(held);
+  const corrected = await appendReviewErratum(store, review.id, "The scope claim is stale.");
+  assert.ok(corrected.state_version > review.state_version);
+  await fsp.rm(hold);
+  await assert.rejects(launching, /state_version mismatch/);
+  const after = await loadReview(store, review.id);
+  assert.equal(after.rounds[0].reviewer_dispatch, undefined);
+  assert.ok(!after.history.some((event) => event.event === "REVIEWER_DISPATCH_REQUESTED"));
+});
+
+test("a failed model listing explains itself, refuses a choice, and leaves default launches alone", async (t) => {
+  const { repository, store, base } = await fixture(t);
+  const review = await prepareReview(store, {
+    repositoryPath: repository, baseRef: base, requirement: "Change content",
+    implementationScope: "file.txt", reviewerProvider: "CODEX_TASK",
+  });
+  const failures = [
+    ["exit", /process exited \(code 3\): error: unknown configuration key/],
+    ["repeat-cursor", /Invalid Codex model\/list pagination cursor/],
+    ["invalid-page", /Invalid Codex model capabilities/],
+    ["invalid-config", /Invalid Codex config\/read response/],
+    ["array-config", /Invalid Codex config\/read response/],
+  ];
+  setEnv(t, { RB_TEST_APP_SERVER: "" });
+  for (const [mode, message] of failures) {
+    process.env.RB_TEST_APP_SERVER = mode;
+    await assert.rejects(listReviewerModels(store, "CODEX_TASK"), message);
+  }
+  process.env.RB_TEST_APP_SERVER = "invalid-config";
+  await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, { model: "fixture-sol" }), /Invalid Codex config\/read response/);
+  assert.equal((await loadReview(store, review.id)).rounds[0].reviewer_dispatch, undefined);
+  process.env.RB_TEST_APP_SERVER = "exit";
+  const holdFile = path.join(store, "..", "exec-hold");
+  await fsp.writeFile(holdFile, "");
+  setEnv(t, { RB_TEST_HOLD: holdFile });
+  const launched = await launchLocalReviewer(store, review.id, review.state_version);
+  assert.deepEqual(launched.reviewer_configuration.requested, DEFAULT_REQUEST);
+  // A running reviewer or a settled review is refused before Codex is asked for models.
+  await assert.rejects(launchLocalReviewer(store, review.id, launched.state_version, { model: "fixture-sol" }), /concurrent replacement/);
+  await fsp.rm(holdFile);
+  assert.equal((await waitForExit(launched.reviewer_dispatch.attempt_root)).code, 0);
+  assert.ok(!(await executedArgs(store)).includes("--model"));
+  const settled = await submitInitialReview(store, review.id, [], "CODEX_TASK");
+  await assert.rejects(launchLocalReviewer(store, review.id, settled.state_version, { model: "fixture-sol" }), /Review is not pending/);
+
+  process.env.RB_TEST_APP_SERVER = "hang";
+  const runtime = await reviewerRuntime(store);
+  await assert.rejects(queryCodexModels(runtime, { timeoutMs: 300 }), /timed out/);
+
+  process.env.RB_TEST_APP_SERVER = "stubborn";
+  await assert.rejects(queryCodexModels(runtime), /stubborn listing refuses/);
+  const pid = Number(await fsp.readFile(path.join(runtime.cwd, "stubborn.pid"), "utf8"));
+  let alive = true;
+  t.after(() => { if (alive) process.kill(pid, "SIGKILL"); });
+  for (let i = 0; i < 100 && alive; i++) {
+    try { process.kill(pid, 0); await new Promise((resolve) => setTimeout(resolve, 20)); }
+    catch (error) { if (error.code !== "ESRCH") throw error; alive = false; }
+  }
+  assert.equal(alive, false, "the listing process that ignores SIGTERM is still running");
+  process.env.RB_TEST_APP_SERVER = "unterminated";
+  await assert.rejects(queryCodexModels(runtime, { maxOutputBytes: 64, timeoutMs: 5000 }), /output exceeded 64 bytes/);
+});
+
+test("a malformed model listing reply does not take down the author server", async (t) => {
+  const { store } = await fixture(t);
+  const client = new Client({ name: "claude-author-fixture", version: "1" });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.resolve("src/server.mjs"), "--role", "author"], env: { ...process.env, REVIEW_BRIDGE_HOME: store, RB_TEST_APP_SERVER: "malformed" }, stderr: "pipe" }));
+  t.after(() => client.close());
+  // Null and array lines precede every reply, and model/list answers with an
+  // error whose message cannot be converted to text.
+  for (let i = 0; i < 2; i++) {
+    await assert.rejects(call(client, "list_reviewer_models", {}), /Codex model listing: invalid error reply/);
+  }
 });
 
 test("a failed executable spawn cannot produce a started-process receipt", async (t) => {

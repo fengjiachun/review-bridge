@@ -6,20 +6,27 @@ Describes Review Bridge v0.25.0.
 
 **The reviewer runs on the wrong model** — a `CODEX_TASK` reviewer started by
 `launch_local_reviewer` uses the model in the
-MCP host's Codex configuration, not a choice made in the author conversation.
-Change `model` in that host's `~/.codex/config.toml` (or the file under
-`CODEX_HOME`); reasoning effort is `high`. A
+MCP host's Codex configuration unless a model was chosen for that review in the
+author conversation; reasoning effort is `high` unless another was chosen.
+Choose one for the review, or change `model` in that host's
+`~/.codex/config.toml` (or the file under `CODEX_HOME`). A
 task you start yourself ([manual dispatch](local-review.md#start-a-reviewer-manually))
 uses the model and effort set in the client that creates it. See
 [reviewer configuration](reviewer-configuration.md).
 
 **The reviewer exits at once with a model error** — the Codex CLI on the MCP
-host rejected its configured model for that account, or the model does not
-support `high` reasoning effort. Read the attempt's `process.log`; if its
-message does not say which, check both. For a new launch, configure a model
-that the account can use at `high`, check the executable and account used on
-that host (`REVIEW_BRIDGE_CODEX_COMMAND` can pin an absolute executable when a
-desktop app has a different PATH), and launch again.
+host rejected the model for that account, or the model does not support the
+requested reasoning effort. The round's `reviewer_configuration.requested`
+(in `get_review_summary`) shows the effort, whether the model and effort were
+chosen for the review or came from the defaults, and the model name when one
+was chosen or an effort was checked against it. A default launch names no
+model: the model is `model` in the host's Codex configuration, and the
+attempt's `process.log` may show what Codex reported. Read both. If both came from the defaults, configure a
+model the account can use at `high`. If either was chosen, launching again
+without a new choice repeats it, so ask the author to launch with another
+model or effort for this review. In either case check the executable and
+account used on that host (`REVIEW_BRIDGE_CODEX_COMMAND` can pin an absolute
+executable when a desktop app has a different PATH).
 
 **No new reviewer task window appears** — `launch_local_reviewer` starts an
 independent Codex process on the MCP host. Follow its `review_id` from the author

@@ -22,6 +22,7 @@ The server started with `--role author`. The summary is the first sentence of ea
 | `get_review` | Read findings, author resolutions, decisions, errata, and state. | `review_id` |
 | `get_review_summary` | Read current state, next action, snapshot identity, and compact finding counts without returning the full review ledger. | `review_id` |
 | `launch_local_reviewer` | After authorization to start, launch Codex on this MCP host. | `review_id`, `expected_state_version` |
+| `list_reviewer_models` | List the models this host's Codex offers the local reviewer, each with its supported reasoning efforts, beside the model its configuration names and the launcher's high effort default. |  |
 | `list_reviews` | List one repository's reviews newest first, one row each with id, status, repository_path, the latest round's head_sha, and updated_at; read one with get_review_summary or get_review. | `repository_path` |
 | `prepare_rereview` | Capture the updated code as round two after all findings have author responses. | `review_id` |
 | `prepare_review` | Capture an immutable Git snapshot, requirement, implementation scope, patch, added-plus-deleted line measurement, warning-threshold headroom, test context, and reviewer provider. | `repository_path`, `base_ref`, `requirement`, `implementation_scope` |

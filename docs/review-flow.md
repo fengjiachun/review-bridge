@@ -51,7 +51,8 @@ never your live working tree, and submits structured findings. No findings
 means `CLEAN`.
 
 You choose the reviewer — a Codex process that `launch_local_reviewer` starts
-with the [model from the Codex configuration at high effort](reviewer-configuration.md),
+with the [model from the Codex configuration at high effort](reviewer-configuration.md)
+unless you choose another,
 a fresh Claude Desktop conversation, a new Codex task, or an isolated Hermes or
 DeepSeek Harness profile — though a change headed for publication takes a
 Codex review by default, with any other provider read as a second opinion
