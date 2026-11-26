@@ -310,8 +310,8 @@ test("list_reviews requires repository_path and returns that repository's five-f
     repository_path: "/repository",
     updated_at: `2026-07-${day}T00:00:00.000Z`,
     rounds: [
-      { round: 1, head_sha: "0".repeat(40) },
-      { round: 2, head_sha: letter.repeat(40) },
+      { version: 1, round: 1, head_sha: "0".repeat(40) },
+      { version: 1, round: 2, head_sha: letter.repeat(40) },
     ],
   }));
   const other = {

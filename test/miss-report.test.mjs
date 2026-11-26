@@ -38,6 +38,7 @@ async function writeReview(store, id, repositoryPath, heads, version = 1) {
       repository_path: repositoryPath,
       status: "CLEAN",
       rounds: heads.map((head_sha, index) => ({
+        version: 1,
         round: index + 1,
         head_sha,
         snapshot_hash: `hash-${id}-${index + 1}`,

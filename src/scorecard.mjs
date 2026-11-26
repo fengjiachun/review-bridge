@@ -2,9 +2,9 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import {
   MAX_ROUNDS,
-  REVIEW_LEDGER_VERSIONS,
   REVIEWER_PROVIDERS,
   requireRecordVersion,
+  requireReviewVersions,
 } from "./core.mjs";
 import { SUPPORTED_PUBLICATION_VERSIONS } from "./publication.mjs";
 
@@ -98,11 +98,9 @@ function emptyStats() {
   };
 }
 
-// A ledger of a version this release does not read is skipped, not counted by
-// rules it was not written under.
-function versionDefect(record, kind, supported) {
+function versionDefect(check) {
   try {
-    requireRecordVersion(record, kind, supported);
+    check();
     return null;
   } catch (error) {
     return error.message;
@@ -113,14 +111,14 @@ function versionDefect(record, kind, supported) {
 // so a single bad record never silently distorts a column.
 function reviewDefect(review, directoryName) {
   if (review == null || typeof review !== "object") return "not a JSON object";
+  const unsupported = versionDefect(() => requireReviewVersions(review));
+  if (unsupported != null) return unsupported;
   if (typeof review.id !== "string") return "missing id";
   // Two directories holding the same ledger would otherwise contribute the
   // same findings and outcomes twice.
   if (review.id !== directoryName) {
     return "review ID does not match its store directory";
   }
-  const unsupported = versionDefect(review, "review ledger", REVIEW_LEDGER_VERSIONS);
-  if (unsupported != null) return unsupported;
   if (!REVIEW_STATUSES.includes(review.status)) {
     return `unknown status ${JSON.stringify(review.status)}`;
   }
@@ -245,15 +243,13 @@ function reviewDefect(review, directoryName) {
 // the name it is shown under, and when it was created.
 function publicationDefect(ledger, directoryName) {
   if (ledger == null || typeof ledger !== "object") return "not a JSON object";
+  const unsupported = versionDefect(() =>
+    requireRecordVersion(ledger, "publication ledger", SUPPORTED_PUBLICATION_VERSIONS),
+  );
+  if (unsupported != null) return unsupported;
   if (ledger.review_id !== directoryName) {
     return "review ID does not match its store directory";
   }
-  const unsupported = versionDefect(
-    ledger,
-    "publication ledger",
-    SUPPORTED_PUBLICATION_VERSIONS,
-  );
-  if (unsupported != null) return unsupported;
   const target = ledger.target;
   if (
     !Number.isSafeInteger(target?.repository_id) ||

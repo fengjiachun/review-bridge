@@ -837,7 +837,6 @@ function semanticFields(record) {
  * unchanged boundary means history changed after it was recorded.
  */
 export function compareReleaseRecords(existing, fresh) {
-  // A record a newer verifier wrote is not compared by this one's rules.
   if (existing.schema !== RELEASE_RECORD_SCHEMA) {
     return {
       status: "UNSUPPORTED",

@@ -570,12 +570,25 @@ test("a review ledger of an unknown or missing version is refused by name", asyn
   const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
   const review = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
   assert.equal(review.version, 1);
-  for (const [version, details] of [
-    [2, { record: "review ledger", version: 2, supported: [1] }],
-    [undefined, { record: "review ledger", version: null, supported: [1] }],
+  const refusal = (record, version) => ({
+    record,
+    version,
+    supported: [1],
+    retryable: false,
+  });
+  const [round] = review.rounds;
+  for (const [stored, details] of [
+    [{ ...review, version: 2 }, refusal("review ledger", 2)],
+    [{ ...review, version: undefined }, refusal("review ledger", null)],
+    // A newer release could bump a round's own record inside a v1 ledger.
+    [{ ...review, rounds: [{ ...round, version: 2 }] }, refusal("snapshot manifest", 2)],
+    [
+      { ...review, rounds: [{ ...round, successor: { version: 2 } }] },
+      refusal("successor proof", 2),
+    ],
   ]) {
-    const stored = `${JSON.stringify({ ...review, version }, null, 2)}\n`;
-    await fsp.writeFile(reviewPath, stored);
+    const bytes = `${JSON.stringify(stored, null, 2)}\n`;
+    await fsp.writeFile(reviewPath, bytes);
     const refused = (error) => {
       assert.equal(error.code, "LEDGER_VERSION_UNSUPPORTED");
       assert.deepEqual(error.details, details);
@@ -584,9 +597,21 @@ test("a review ledger of an unknown or missing version is refused by name", asyn
     await assert.rejects(getReview(store, prepared.id), refused);
     // A writer refuses too, before it could rewrite the record by older rules.
     await assert.rejects(submitInitialReview(store, prepared.id, []), refused);
-    assert.equal(await fsp.readFile(reviewPath, "utf8"), stored);
+    assert.equal(await fsp.readFile(reviewPath, "utf8"), bytes);
     assert.deepEqual(await listReviews(store), []);
   }
+  // A parent named explicitly keeps the diagnosis in its fallback reason.
+  const successor = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: review.rounds[0].base_sha,
+    requirement: "Refuse a ledger a newer release wrote.",
+    implementationScope: "Name the newer parent.",
+    parentReviewId: prepared.id,
+  });
+  assert.equal(
+    successor.review_strategy.fallback_reason,
+    "parent successor proof version 2; this release reads version 1",
+  );
 });
 
 async function createGatedParent({

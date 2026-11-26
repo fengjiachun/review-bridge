@@ -636,6 +636,21 @@ const collectorPath = path.join(
 );
 assert.ok(await fsp.stat(collectorPath));
 const collectorHelp = run(process.execPath, [collectorPath, "--help"], pluginRoot);
+// A publication ledger a newer release wrote is refused before any GitHub request.
+const newerPublicationRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-newer-"));
+const newerPublicationPath = path.join(newerPublicationRoot, "publication.json");
+await fsp.writeFile(newerPublicationPath, JSON.stringify({ version: 99, review_id: "rb-x" }));
+const newerCollection = spawnSync(
+  process.execPath,
+  [collectorPath, "--publication", newerPublicationPath],
+  { cwd: pluginRoot, encoding: "utf8", env: { ...process.env, PATH: "/nonexistent" } },
+);
+await fsp.rm(newerPublicationRoot, { recursive: true, force: true });
+assert.equal(newerCollection.status, 1);
+assert.match(
+  newerCollection.stderr,
+  /publication ledger version 99; this release reads version 1, 2, 3/,
+);
 assert.match(collectorHelp, /Usage: collect-github-observation\.mjs/);
 assert.match(collectorHelp, /--review-id <id>/);
 assert.match(collectorHelp, /--out <path>/);
@@ -761,7 +776,7 @@ try {
     version: 1,
     id: findingReviewId,
     repository_path: "/deleted/historical/worktree",
-    rounds: [{ round: 1, head_sha: "a".repeat(40), snapshot_hash: "b".repeat(64) }],
+    rounds: [{ version: 1, round: 1, head_sha: "a".repeat(40), snapshot_hash: "b".repeat(64) }],
     findings: [{ id: "F-001", introduced_round: 1, severity: "major", title: "Historical probe", explanation: "Snapshot evidence", path: "src/probe.mjs" }],
     resolutions: [],
     rereview_decisions: [],

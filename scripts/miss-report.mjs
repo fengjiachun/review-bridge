@@ -11,8 +11,7 @@ import { parseArgs } from "node:util";
 import {
   defaultStoreRoot,
   repositoryIdentity,
-  requireRecordVersion,
-  REVIEW_LEDGER_VERSIONS,
+  requireReviewVersions,
 } from "../src/core.mjs";
 
 const USAGE = `Usage: miss-report.mjs <owner/name> <pull-request> --repository <path>
@@ -55,7 +54,7 @@ async function readReviews(storeRoot) {
       const review = JSON.parse(
         await fsp.readFile(path.join(root, id, "review.json"), "utf8"),
       );
-      requireRecordVersion(review, "review ledger", REVIEW_LEDGER_VERSIONS);
+      requireReviewVersions(review);
       if (!Array.isArray(review.rounds)) throw new Error("no rounds");
       reviews.push({ id, review });
     } catch (error) {

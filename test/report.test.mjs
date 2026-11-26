@@ -984,6 +984,18 @@ test("a review that moves after it was read fails the render closed", async (t) 
     },
   );
   assert.ok(!(await fsp.readdir(reviewDirectory(state))).some((name) => name.startsWith("report-")));
+  // A newer release rewriting the ledger between the reads is named as such.
+  const reviewPath = path.join(reviewDirectory(state), "review.json");
+  const original = await fsp.readFile(reviewPath, "utf8");
+  const upgradeBetweenReads = async (storeRoot, reviewId) => {
+    await fsp.writeFile(reviewPath, JSON.stringify({ ...JSON.parse(original), version: 2 }));
+    return getPublication(storeRoot, reviewId);
+  };
+  await assert.rejects(
+    loadReportLedgers(state.store, state.reviewId, { readPublication: upgradeBetweenReads }),
+    (error) => error.code === "LEDGER_VERSION_UNSUPPORTED" && error.details.version === 2,
+  );
+  await fsp.writeFile(reviewPath, original);
   // Read again at rest, the passed review renders with its gate.
   const written = await writeReviewReport(state.store, state.reviewId, { renderedAt: RENDERED_AT });
   assert.equal(written.reused, false);

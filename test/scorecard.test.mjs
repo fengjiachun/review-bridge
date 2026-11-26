@@ -1131,7 +1131,7 @@ test("publication ledgers are counted per pull request and binned", async (t) =>
   });
   await fsp.writeFile(
     path.join(store, "reviews", "elsewhere", "publication.json"),
-    `${JSON.stringify({ review_id: "moved", target: {} })}\n`,
+    `${JSON.stringify({ version: 2, review_id: "moved", target: {} })}\n`,
   );
 
   const scorecard = await buildScorecard(store);
