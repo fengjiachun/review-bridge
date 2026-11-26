@@ -15,12 +15,16 @@ uses the model and effort set in the client that creates it. See
 [reviewer configuration](reviewer-configuration.md).
 
 **The reviewer exits at once with a model error** — the Codex CLI on the MCP
-host rejected its configured model for that account, or the model does not
-support `high` reasoning effort. Read the attempt's `process.log`; if its
-message does not say which, check both. For a new launch, configure a model
-that the account can use at `high`, check the executable and account used on
-that host (`REVIEW_BRIDGE_CODEX_COMMAND` can pin an absolute executable when a
-desktop app has a different PATH), and launch again.
+host rejected the model for that account, or the model does not support the
+requested reasoning effort. The round's `reviewer_configuration.requested`
+(in `get_review_summary`) shows which model and effort were asked for and
+whether each was chosen for the review or came from the defaults; read it
+with the attempt's `process.log`. If both came from the defaults, configure a
+model the account can use at `high`. If either was chosen, launching again
+without a new choice repeats it, so ask the author to launch with another
+model or effort for this review. In either case check the executable and
+account used on that host (`REVIEW_BRIDGE_CODEX_COMMAND` can pin an absolute
+executable when a desktop app has a different PATH).
 
 **No new reviewer task window appears** — `launch_local_reviewer` starts an
 independent Codex process on the MCP host. Follow its `review_id` from the author

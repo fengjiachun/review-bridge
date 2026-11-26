@@ -17,5 +17,6 @@ client yourself. Review Bridge does not automate Claude Desktop.
 
 To use another model or effort for one review, ask Claude to list the reviewer
 models (`list_reviewer_models`) and name your choice; it holds for that review's
-later rounds. To change the default for every review, change the host's Codex
-configuration. Requested configuration is recorded; observed remote model identity is unavailable.
+later rounds. To change the default model for every review, change `model` in
+the host's Codex configuration; the default effort stays `high` whatever that
+configuration says, so choose another effort per review. Requested configuration is recorded; observed remote model identity is unavailable.
