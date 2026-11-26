@@ -8,7 +8,7 @@ import path from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { reviewerRuntime, startLocalReviewer } from "../src/local-reviewer.mjs";
+import { listReviewerModels, queryCodexModels, reviewerRuntime, startLocalReviewer } from "../src/local-reviewer.mjs";
 import {
   getReviewSummary, launchLocalReviewer, loadReview, prepareRereview, prepareReview,
   submitInitialReview, submitResolutions,
@@ -187,6 +187,14 @@ test("the author lists the reviewer models and launches with a chosen model and 
     '- Round 1 reviewer requested: `{"model":"fixture-sol","reasoning_effort":"ultra","model_source":"selected","reasoning_effort_source":"selected"}`;'));
 });
 
+function setEnv(t, values) {
+  const saved = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  t.after(() => { for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+}
+
+const executedArgs = async (store) => JSON.parse(await fsp.readFile(path.join(store, "codex-runtime", "executed.json"))).args;
+
 test("a chosen model or effort is refused unless listed and supported, and carries to later rounds", async (t) => {
   const { repository, store, base } = await fixture(t);
   const prepare = () => prepareReview(store, {
@@ -197,14 +205,17 @@ test("a chosen model or effort is refused unless listed and supported, and carri
   const refusals = [
     [{ model: "fixture-terra" }, /Model fixture-terra is not in Codex's model list/],
     [{ model: "fixture-luna", reasoningEffort: "ultra" }, /fixture-luna does not support reasoning effort ultra; it supports low, medium, high, xhigh, max/],
-    // An effort alone is checked against the configured model.
     [{ reasoningEffort: "ultra" }, /fixture-luna does not support reasoning effort ultra/],
   ];
   for (const [selection, message] of refusals) {
     await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, selection), message);
   }
-  process.env.RB_TEST_CONFIG_MODEL = "";
-  t.after(() => { delete process.env.RB_TEST_CONFIG_MODEL; });
+  // A model listed earlier but gone by launch time is refused.
+  assert.ok((await listReviewerModels(store, "CODEX_TASK")).models.some((entry) => entry.model === "fixture-sol"));
+  setEnv(t, { RB_TEST_MODELS: "fixture-luna" });
+  await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, { model: "fixture-sol" }), /Model fixture-sol is not in Codex's model list/);
+  delete process.env.RB_TEST_MODELS;
+  setEnv(t, { RB_TEST_CONFIG_MODEL: "" });
   await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, { reasoningEffort: "max" }), /configuration names no model/);
   process.env.RB_TEST_CONFIG_MODEL = "fixture-hidden";
   await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, { reasoningEffort: "max" }), /configured model fixture-hidden is not in Codex's model list/);
@@ -217,27 +228,74 @@ test("a chosen model or effort is refused unless listed and supported, and carri
   const first = await launchLocalReviewer(store, review.id, review.state_version, { reasoningEffort: "max" });
   assert.deepEqual(first.reviewer_configuration.requested, effortOnly);
   assert.equal((await waitForExit(first.reviewer_dispatch.attempt_root)).code, 0);
-  assert.ok(!JSON.parse(await fsp.readFile(path.join(store, "codex-runtime", "executed.json"))).args.includes("--model"));
+  assert.ok(!(await executedArgs(store)).includes("--model"));
   await submitInitialReview(store, review.id, [{ severity: "major", path: "file.txt", line: 1, title: "Content", explanation: "Content needs correction", recommendation: "Fix content" }], "CODEX_TASK");
-  const toRoundTwo = async (id) => {
-    const findings = (await loadReview(store, id)).findings;
-    await submitResolutions(store, id, findings.map((finding) => ({ finding_id: finding.id, disposition: "fixed", rationale: "Corrected", evidence: "file.txt" })));
-    return prepareRereview(store, id);
-  };
-  const roundTwo = await toRoundTwo(review.id);
+  const [finding] = (await loadReview(store, review.id)).findings;
+  await submitResolutions(store, review.id, [{ finding_id: finding.id, disposition: "fixed", rationale: "Corrected", evidence: "file.txt" }]);
+  const roundTwo = await prepareRereview(store, review.id);
   const carried = await launchLocalReviewer(store, review.id, roundTwo.state_version);
   assert.deepEqual(carried.reviewer_configuration.requested, effortOnly);
   assert.equal((await waitForExit(carried.reviewer_dispatch.attempt_root)).code, 0);
   // Choosing again replaces the whole choice for that launch and those after it.
+  const modelOnly = { model: "fixture-sol", reasoning_effort: "high", model_source: "selected", reasoning_effort_source: "default" };
   const chosenAgain = await launchLocalReviewer(store, review.id, carried.state_version, { model: "fixture-sol" });
-  assert.deepEqual(chosenAgain.reviewer_configuration.requested, { model: "fixture-sol", reasoning_effort: "high", model_source: "selected", reasoning_effort_source: "default" });
+  assert.deepEqual(chosenAgain.reviewer_configuration.requested, modelOnly);
   assert.equal((await waitForExit(chosenAgain.reviewer_dispatch.attempt_root)).code, 0);
+  const retried = await launchLocalReviewer(store, review.id, chosenAgain.state_version);
+  assert.deepEqual(retried.reviewer_configuration.requested, modelOnly);
+  assert.equal((await waitForExit(retried.reviewer_dispatch.attempt_root)).code, 0);
+  const args = await executedArgs(store);
+  assert.equal(args[args.indexOf("--model") + 1], "fixture-sol");
+  assert.ok(args.includes('model_reasoning_effort="high"'));
 
-  // A new review starts at the defaults.
   const fresh = await prepare();
   const defaulted = await launchLocalReviewer(store, fresh.id, fresh.state_version);
   assert.deepEqual(defaulted.reviewer_configuration.requested, DEFAULT_REQUEST);
   assert.equal((await waitForExit(defaulted.reviewer_dispatch.attempt_root)).code, 0);
+});
+
+test("a failed model listing explains itself, refuses a choice, and leaves default launches alone", async (t) => {
+  const { repository, store, base } = await fixture(t);
+  const review = await prepareReview(store, {
+    repositoryPath: repository, baseRef: base, requirement: "Change content",
+    implementationScope: "file.txt", reviewerProvider: "CODEX_TASK",
+  });
+  const failures = [
+    ["exit", /process exited \(code 3\): error: unknown configuration key/],
+    ["repeat-cursor", /Invalid Codex model\/list pagination cursor/],
+    ["invalid-page", /Invalid Codex model capabilities/],
+  ];
+  for (const [mode, message] of failures) {
+    setEnv(t, { RB_TEST_APP_SERVER: mode });
+    await assert.rejects(listReviewerModels(store, "CODEX_TASK"), message);
+    await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, { model: "fixture-sol" }), message);
+  }
+  assert.equal((await loadReview(store, review.id)).rounds[0].reviewer_dispatch, undefined);
+  process.env.RB_TEST_APP_SERVER = "exit";
+  const launched = await launchLocalReviewer(store, review.id, review.state_version);
+  assert.deepEqual(launched.reviewer_configuration.requested, DEFAULT_REQUEST);
+  assert.equal((await waitForExit(launched.reviewer_dispatch.attempt_root)).code, 0);
+  assert.ok(!(await executedArgs(store)).includes("--model"));
+
+  // A listing that never answers and ignores SIGTERM still ends.
+  process.env.RB_TEST_APP_SERVER = "hang";
+  const runtime = await reviewerRuntime(store);
+  await assert.rejects(queryCodexModels(runtime, { timeoutMs: 300 }), /timed out/);
+  const pid = Number(await fsp.readFile(path.join(runtime.cwd, "app-server.pid"), "utf8"));
+  for (let i = 0; i < 100; i++) {
+    try { process.kill(pid, 0); } catch (error) { if (error.code === "ESRCH") return; throw error; }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail("the hung model listing process is still running");
+});
+
+test("a malformed model listing reply does not take down the author server", async (t) => {
+  const { store } = await fixture(t);
+  const client = new Client({ name: "claude-author-fixture", version: "1" });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.resolve("src/server.mjs"), "--role", "author"], env: { ...process.env, REVIEW_BRIDGE_HOME: store, RB_TEST_APP_SERVER: "malformed" }, stderr: "pipe" }));
+  t.after(() => client.close());
+  assert.equal((await call(client, "list_reviewer_models", {})).configured_model, "fixture-luna");
+  assert.equal((await call(client, "list_reviewer_models", {})).models.length, 2);
 });
 
 test("a failed executable spawn cannot produce a started-process receipt", async (t) => {

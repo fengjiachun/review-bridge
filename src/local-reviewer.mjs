@@ -43,12 +43,14 @@ export async function reviewerRuntime(storeRoot) {
   throw new Error(`Codex executable unavailable: ${name}`);
 }
 
-// Asks the same executable, from the same cwd used for dispatch, which model
-// its configuration names and which models it offers.
+// The listing comes from the executable and cwd that dispatch uses, so it
+// cannot offer a model the reviewer's own Codex would not run.
 export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
   const child = spawn(runtime.command, ["app-server", "--listen", "stdio://"], {
-    cwd: runtime.cwd, stdio: ["pipe", "pipe", "ignore"],
+    cwd: runtime.cwd, stdio: ["pipe", "pipe", "pipe"],
   });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-2000); });
   const pending = new Map();
   let sequence = 0;
   let failure;
@@ -59,15 +61,16 @@ export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
   };
   child.on("error", fail);
   child.stdin.on("error", fail);
-  child.on("exit", () => fail(new Error("Codex model listing process exited")));
+  child.on("close", (code, signal) => fail(new Error(
+    `Codex model listing process exited (${signal ?? `code ${code}`})${stderr.trim() ? `: ${stderr.trim()}` : ""}`)));
   const lines = createInterface({ input: child.stdout });
   lines.on("line", (line) => {
     let message;
     try { message = JSON.parse(line); } catch { return; }
-    const waiter = pending.get(message.id);
+    const waiter = pending.get(message?.id);
     if (!waiter) return;
     pending.delete(message.id);
-    if (message.error) waiter.reject(new Error(`Codex model listing: ${message.error.message}`));
+    if (message.error != null) waiter.reject(new Error(`Codex model listing: ${message.error?.message ?? JSON.stringify(message.error)}`));
     else waiter.resolve(message.result);
   });
   const request = (method, params) => new Promise((resolve, reject) => {
@@ -76,10 +79,7 @@ export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
     pending.set(id, { resolve, reject });
     child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
   });
-  const timer = setTimeout(() => {
-    fail(new Error("Codex model listing timed out"));
-    child.kill();
-  }, timeoutMs);
+  const timer = setTimeout(() => fail(new Error("Codex model listing timed out")), timeoutMs);
   try {
     await request("initialize", { clientInfo: { name: "review_bridge", version: "0" } });
     child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
@@ -91,9 +91,9 @@ export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
       const page = await request("model/list", { limit: 100, includeHidden: false, cursor });
       if (!Array.isArray(page?.data)) throw new Error("Invalid Codex model/list response");
       for (const entry of page.data) {
-        if (typeof entry.model !== "string" || !entry.model ||
+        if (typeof entry?.model !== "string" || !entry.model ||
             !Array.isArray(entry.supportedReasoningEfforts) ||
-            entry.supportedReasoningEfforts.some((e) => typeof e.reasoningEffort !== "string")) {
+            entry.supportedReasoningEfforts.some((e) => typeof e?.reasoningEffort !== "string")) {
           throw new Error("Invalid Codex model capabilities");
         }
         models.push({
@@ -111,7 +111,9 @@ export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
   } finally {
     clearTimeout(timer);
     lines.close();
-    child.kill();
+    child.stdin.end();
+    // The listing has no state to save; a process that ignores SIGTERM must still end.
+    child.kill("SIGKILL");
   }
 }
 
@@ -127,9 +129,6 @@ export async function listReviewerModels(storeRoot, provider) {
   };
 }
 
-// What the reviewer is asked to run with, and where each value came from.
-// A chosen model or effort is checked against a fresh listing; nothing
-// unlisted or unsupported is launched, and nothing is substituted for it.
 export async function reviewerRequest(runtime, { model, reasoning_effort }) {
   const requested = {
     ...(model == null ? {} : { model }),
