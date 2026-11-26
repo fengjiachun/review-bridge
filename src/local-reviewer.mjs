@@ -83,7 +83,7 @@ export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
     await request("initialize", { clientInfo: { name: "review_bridge", version: "0" } });
     child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
     const config = await request("config/read", { includeLayers: false });
-    if (config?.config == null || typeof config.config !== "object" ||
+    if (config?.config == null || typeof config.config !== "object" || Array.isArray(config.config) ||
         (config.config.model != null && typeof config.config.model !== "string")) {
       throw new Error("Invalid Codex config/read response");
     }
@@ -137,7 +137,6 @@ export async function listReviewerModels(storeRoot, provider) {
 
 export async function reviewerRequest(runtime, { model, reasoning_effort }) {
   const requested = {
-    ...(model == null ? {} : { model }),
     reasoning_effort: reasoning_effort ?? REVIEWER_REQUESTED.reasoning_effort,
     model_source: model == null ? "configuration" : "selected",
     reasoning_effort_source: reasoning_effort == null ? "default" : "selected",

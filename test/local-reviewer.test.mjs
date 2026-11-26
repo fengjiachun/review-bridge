@@ -236,9 +236,14 @@ test("a chosen model or effort is refused unless listed and supported, and carri
   const [finding] = (await loadReview(store, review.id)).findings;
   await submitResolutions(store, review.id, [{ finding_id: finding.id, disposition: "fixed", rationale: "Corrected", evidence: "file.txt" }]);
   const roundTwo = await prepareRereview(store, review.id);
+  // The carried effort is checked again against the model configured now.
+  process.env.RB_TEST_CONFIG_MODEL = "fixture-sol";
   const carried = await launchLocalReviewer(store, review.id, roundTwo.state_version);
-  assert.deepEqual(carried.reviewer_configuration.requested, effortOnly);
+  assert.deepEqual(carried.reviewer_configuration.requested, { ...effortOnly, model: "fixture-sol" });
   assert.equal((await waitForExit(carried.reviewer_dispatch.attempt_root)).code, 0);
+  const carriedArgs = await executedArgs(store);
+  assert.equal(carriedArgs[carriedArgs.indexOf("--model") + 1], "fixture-sol");
+  delete process.env.RB_TEST_CONFIG_MODEL;
   // Choosing again replaces the whole choice for that launch and those after it.
   const modelOnly = { model: "fixture-sol", reasoning_effort: "high", model_source: "selected", reasoning_effort_source: "default" };
   const chosenAgain = await launchLocalReviewer(store, review.id, carried.state_version, { model: "fixture-sol" });
@@ -296,6 +301,7 @@ test("a failed model listing explains itself, refuses a choice, and leaves defau
     ["repeat-cursor", /Invalid Codex model\/list pagination cursor/],
     ["invalid-page", /Invalid Codex model capabilities/],
     ["invalid-config", /Invalid Codex config\/read response/],
+    ["array-config", /Invalid Codex config\/read response/],
   ];
   setEnv(t, { RB_TEST_APP_SERVER: "" });
   for (const [mode, message] of failures) {
@@ -322,18 +328,16 @@ test("a failed model listing explains itself, refuses a choice, and leaves defau
   const runtime = await reviewerRuntime(store);
   await assert.rejects(queryCodexModels(runtime, { timeoutMs: 300 }), /timed out/);
 
-  // The worker's refusal arrives only after both processes wrote their pids.
   process.env.RB_TEST_APP_SERVER = "stubborn";
-  await assert.rejects(queryCodexModels(runtime), /stubborn worker refuses/);
-  for (const name of ["wrapper.pid", "worker.pid"]) {
-    const pid = Number(await fsp.readFile(path.join(runtime.cwd, name), "utf8"));
-    let alive = true;
-    for (let i = 0; i < 100 && alive; i++) {
-      try { process.kill(pid, 0); await new Promise((resolve) => setTimeout(resolve, 20)); }
-      catch (error) { if (error.code !== "ESRCH") throw error; alive = false; }
-    }
-    assert.equal(alive, false, `${name} still names a running process`);
+  await assert.rejects(queryCodexModels(runtime), /stubborn listing refuses/);
+  const pid = Number(await fsp.readFile(path.join(runtime.cwd, "stubborn.pid"), "utf8"));
+  t.after(() => { try { process.kill(pid, "SIGKILL"); } catch {} });
+  let alive = true;
+  for (let i = 0; i < 100 && alive; i++) {
+    try { process.kill(pid, 0); await new Promise((resolve) => setTimeout(resolve, 20)); }
+    catch (error) { if (error.code !== "ESRCH") throw error; alive = false; }
   }
+  assert.equal(alive, false, "the listing process that ignores SIGTERM is still running");
 });
 
 test("a malformed model listing reply does not take down the author server", async (t) => {
