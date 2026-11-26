@@ -40,7 +40,13 @@ After a verdict, load [Handle findings](findings.md) for findings or
    repeats the source review's `requirement` exactly; its
    `implementation_scope` may describe the new head. A refused continuation
    names each unmet check: source status, repository, requirement, reviewer
-   provider. Outside it,
+   provider. A lens review is the other exception: `lens_review: true`
+   requires `force_full_review: true` and `CODEX_TASK`, and its round one runs
+   the general reviewer plus `tests` and `design` lens runs on the same
+   snapshot, at about three times the round-one cost. Pass `lens_review: true`
+   only when the user has asked, in this conversation, for a lens review of
+   this review; never offer, suggest, or start one otherwise. A continuation
+   gets lenses only when the user asks again. Outside these,
    demanding a full patch buys a re-review of gated code, so state the reason
    in the session before passing it.
 6. `CODEX_TASK` is the default `reviewer_provider`; omitting it prepares a
@@ -85,8 +91,9 @@ After a verdict, load [Handle findings](findings.md) for findings or
    first in round two. The rationale is frozen before any finding exists and
    the reviewer does not see it in round one.
 8. Call `get_review_summary`, record its `state_version`, and report the
-   returned `review_id`, `reviewer_provider`, `review_strategy`, and state
-   `WAITING_FOR_REVIEW`. Also report `current_snapshot.change_size`: manual
+   returned `review_id`, `reviewer_provider`, `review_strategy`, and the
+   `status` it gives: `WAITING_FOR_REVIEW`, or `WAITING_FOR_LENS_REVIEW` for a
+   lens review. Also report `current_snapshot.change_size`: manual
    review continues even when `over_budget` is true, because the operator is
    already present to decide whether the change should be split. When
    `warning_threshold_crossed` is true, state the total and

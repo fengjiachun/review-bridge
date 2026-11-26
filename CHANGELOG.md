@@ -16,6 +16,17 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   the model the Codex configuration names and the `high` effort default.
   Other providers answer that it is not available. The author calls it only
   when the user asks to choose a reviewer model or effort, or names one.
+- (#229) An optional lens review, as RFC 0005 specifies. `prepare_review`
+  takes `lens_review: true` with `force_full_review` for `CODEX_TASK`, from an
+  installation outside any Git work tree. Round one, in the new status
+  `WAITING_FOR_LENS_REVIEW`, runs the general reviewer plus `tests` and
+  `design` lens reviewers on the same snapshot; each run's submission waits in
+  its own entry until the third closes the round into the one ledger, each
+  lens finding tagged with its `lens`. Round two and later are unchanged. The
+  author passes `lens_review` only when the user asks for one, and never
+  offers it. Errata are refused during the lens round. Reports show lens runs
+  and lens findings (`REPORT_FORMAT` 12), and the scorecard counts the new
+  status (`SCORECARD_SCHEMA_VERSION` 5).
 
 ### Changed
 

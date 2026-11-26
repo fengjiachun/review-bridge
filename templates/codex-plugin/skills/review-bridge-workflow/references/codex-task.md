@@ -90,10 +90,19 @@ launch between them.
    `<attempt_root>/process.log`. An absent exit means running or indeterminate;
    it never permits a concurrent replacement. After a confirmed exit without a
    verdict, `launch_local_reviewer` can start a replacement.
+   In a lens round (`WAITING_FOR_LENS_REVIEW`) the launch starts three runs,
+   `general`, `tests`, and `design`, and the summary's `runs` carries each
+   one's `reviewer_dispatch` and exit receipt; the `tests` and `design` runs
+   get a request naming their lens instead of the one above. Apply these rules
+   per run: a run with a live or indeterminate attempt is never replaced, and a
+   run whose exit receipt shows it exited without submitting is relaunched by
+   calling `launch_local_reviewer` again, which starts only such runs. The
+   round's verdict forms when all three have submitted.
 
 The launch discipline is fixed, and it states what must never happen rather
-than counting launches. Never run two reviewers on the same round at once, and
-never review from the author task: never fork that task, and never pass any
+than counting launches. Never run two reviewers on the same round at once —
+in a lens round, never two on the same run at once, because its three runs
+are that round's reviewers — and never review from the author task: never fork that task, and never pass any
 authoring history — not the diff you wrote, the requirement discussion, your
 reasoning, or this session's transcript. Within those two bars launches are not
 rationed. A round-two rereview is that review's next round, so its launch is

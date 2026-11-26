@@ -13,6 +13,7 @@ import {
   assertDispatchContract,
   assertConventionsSection,
   assertDeletionLens,
+  assertLensReviewRequestRule,
   assertThirdPartyMaterialBoundary,
   CODEX_TASK_DISPATCH_CONTRACT,
   DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
@@ -496,6 +497,9 @@ assert.match(
   /Leave `parent_review_id` unset unless you have a specific parent in mind/,
 );
 assert.match(workflowSkill, /`force_full_review: true`/);
+for (const name of ["SKILL.md", "references/prepare.md"]) {
+  assertLensReviewRequestRule(packagedWorkflowDocuments.get(name), `packaged Codex workflow ${name}`);
+}
 assert.match(workflowSkill, /`current_snapshot\.patch_index`/);
 assert.match(workflowSkill, /`CODEX_TASK` is the default `reviewer_provider`/);
 assert.match(workflowSkill, /newly created Codex task/);
@@ -1122,6 +1126,12 @@ for (const root of [pluginRoot, reviewerRoot, hermesIntegration, deepseekHarness
   assert.equal(JSON.parse(instructions.slice("developer_instructions=".length)), sourceReviewerSkill);
   assert.ok(!args.includes("--model") && !args.some((value) => value.startsWith("model=")));
   assert.ok(args.includes('model_reasoning_effort="high"'));
+  for (const lens of ["tests", "design"]) {
+    assert.equal(
+      await fsp.readFile(path.join(root, "server", `lens-${lens}.md`), "utf8"),
+      await fsp.readFile(path.join(projectRoot, `templates/codex-plugin/skills/review-bridge-reviewer/lenses/${lens}.md`), "utf8"),
+    );
+  }
 }
 
 const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-build-"));
@@ -1222,6 +1232,42 @@ try {
     assert.ok(executed.args.includes('model_reasoning_effort="high"') && !executed.args.includes("--model"));
   } finally {
     await claudeAuthor.close();
+  }
+
+  // A lens review reads its instructions from an installation outside any
+  // work tree, so the package is launched from a copy of it.
+  const installed = path.join(temporary, "installed-plugin");
+  await fsp.cp(pluginRoot, installed, { recursive: true });
+  const lensStore = path.join(temporary, "lens-store");
+  const lensAuthor = new Client({ name: "lens-author-smoke", version: releaseVersion });
+  await lensAuthor.connect(new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(installed, "server", "server.mjs"), "--role", "author"],
+    env: {
+      ...process.env,
+      REVIEW_BRIDGE_HOME: lensStore,
+      REVIEW_BRIDGE_CODEX_COMMAND: path.join(projectRoot, "test", "fixtures", "codex-runtime.mjs"),
+    },
+    stderr: "pipe",
+  }));
+  try {
+    const pending = await call(lensAuthor, "prepare_review", {
+      repository_path: repository, base_ref: baseSha, requirement: "Package lens smoke", implementation_scope: "value.js",
+      force_full_review: true, lens_review: true,
+    });
+    assert.equal(pending.status, "WAITING_FOR_LENS_REVIEW");
+    await call(lensAuthor, "launch_local_reviewer", { review_id: pending.id, expected_state_version: pending.state_version });
+    const { waitForExit } = await import(pathToFileURL(path.join(projectRoot, "test", "helpers", "codex-runtime.mjs")));
+    const summary = await call(lensAuthor, "get_review_summary", { review_id: pending.id });
+    for (const entry of summary.runs) assert.equal((await waitForExit(entry.reviewer_dispatch.attempt_root)).code, 0);
+    for (const lens of ["tests", "design"]) {
+      const executed = JSON.parse(await fsp.readFile(path.join(lensStore, "codex-runtime", `executed-${lens}.json`), "utf8"));
+      const instructions = executed.args.find((value) => value.startsWith("developer_instructions="));
+      assert.equal(JSON.parse(instructions.slice("developer_instructions=".length)),
+        `${sourceReviewerSkill}\n\n${await fsp.readFile(path.join(installed, "server", `lens-${lens}.md`), "utf8")}`);
+    }
+  } finally {
+    await lensAuthor.close();
   }
 
   const author = await connect(authorServer, "author", store);

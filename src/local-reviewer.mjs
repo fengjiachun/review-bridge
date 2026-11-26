@@ -12,21 +12,25 @@ const server = fileURLToPath(new URL("./server.mjs", import.meta.url));
 // default cannot weaken reviews.
 export const REVIEWER_REQUESTED = Object.freeze({ reasoning_effort: "high" });
 
+function assertOutsideGitRepository(cwd, subject, remedy) {
+  // Inherited GIT_* variables such as GIT_DIR would answer for another repository.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+  const git = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"], env: { ...env, LC_ALL: "C" } });
+  if (git.error) throw new Error(`Cannot verify the ${subject} is outside a Git repository: git could not be started`);
+  if (git.status !== 0 && (git.status !== 128 ||
+      !/^fatal: not a git repository \((or any of the parent directories\): \.git|or any parent up to mount point [^\n]+\))\n/.test(git.stderr ?? ""))) {
+    throw new Error(`Cannot verify the ${subject} is outside a Git repository: ${(git.stderr ?? "").trim() || `git exited with ${git.status ?? git.signal}`}`);
+  }
+  if (git.status === 0) {
+    throw new Error(`The ${subject} must be outside a Git repository; ${remedy}`);
+  }
+}
+
 export async function reviewerRuntime(storeRoot) {
   let cwd = path.join(storeRoot, "codex-runtime");
   await fsp.mkdir(cwd, { recursive: true, mode: 0o700 });
   cwd = await fsp.realpath(cwd);
-  // Inherited GIT_* variables such as GIT_DIR would answer for another repository.
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
-  const git = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"], env: { ...env, LC_ALL: "C" } });
-  if (git.error) throw new Error("Cannot verify the reviewer runtime is outside a Git repository: git could not be started");
-  if (git.status !== 0 && (git.status !== 128 ||
-      !/^fatal: not a git repository \((or any of the parent directories\): \.git|or any parent up to mount point [^\n]+\))\n/.test(git.stderr ?? ""))) {
-    throw new Error(`Cannot verify the reviewer runtime is outside a Git repository: ${(git.stderr ?? "").trim() || `git exited with ${git.status ?? git.signal}`}`);
-  }
-  if (git.status === 0) {
-    throw new Error("Reviewer runtime must be outside a Git repository; choose an external REVIEW_BRIDGE_HOME");
-  }
+  assertOutsideGitRepository(cwd, "reviewer runtime", "choose an external REVIEW_BRIDGE_HOME");
   const name = process.env.REVIEW_BRIDGE_CODEX_COMMAND || "codex";
   const candidates = path.isAbsolute(name) ? [name] :
     (process.env.PATH ?? "").split(path.delimiter).map((directory) => path.resolve(directory, name));
@@ -163,12 +167,26 @@ export async function reviewerRequest(runtime, { model, reasoning_effort }) {
   return { model: name, ...requested };
 }
 
-export function codexReviewerArguments(reviewId, requested, storeRoot) {
+export const LENS_RUNS = Object.freeze(["general", "tests", "design"]);
+
+// A lens round's instructions come only from this installation, never from a
+// work tree an author may be changing, possibly the one under review.
+export function lensInstructions() {
+  const directory = path.dirname(server);
+  assertOutsideGitRepository(directory, "lens review installation", "launch lens reviews from an installed package");
+  const read = (name) => fs.readFileSync(path.join(directory, name), "utf8");
+  return { skill: read("reviewer-skill.md"), tests: read("lens-tests.md"), design: read("lens-design.md") };
+}
+
+// `lens` is set only for a lens-round run: its name and the installation's
+// lensInstructions().
+export function codexReviewerArguments(reviewId, requested, storeRoot, lens = null) {
   const packagedSkill = fileURLToPath(new URL("./reviewer-skill.md", import.meta.url));
   const skill = fs.existsSync(packagedSkill) ? packagedSkill :
     fileURLToPath(new URL("../templates/codex-plugin/skills/review-bridge-reviewer/SKILL.md", import.meta.url));
   const settings = {
-    developer_instructions: fs.readFileSync(skill, "utf8"),
+    developer_instructions: lens == null ? fs.readFileSync(skill, "utf8") :
+      lens.run === "general" ? lens.instructions.skill : `${lens.instructions.skill}\n\n${lens.instructions[lens.run]}`,
     model_reasoning_effort: requested.reasoning_effort,
     "sandbox_workspace_write.network_access": false,
     "sandbox_workspace_write.writable_roots": [],
@@ -181,7 +199,8 @@ export function codexReviewerArguments(reviewId, requested, storeRoot) {
     "mcp_servers.review-bridge-author.enabled": false,
     "mcp_servers.review-bridge-reviewer.enabled": true,
     "mcp_servers.review-bridge-reviewer.command": process.execPath,
-    "mcp_servers.review-bridge-reviewer.args": [server, "--role", "reviewer", "--reviewer-provider", "CODEX_TASK"],
+    "mcp_servers.review-bridge-reviewer.args": [server, "--role", "reviewer", "--reviewer-provider", "CODEX_TASK",
+      ...(lens == null ? [] : ["--review-id", reviewId]), ...(lens == null || lens.run === "general" ? [] : ["--lens", lens.run])],
     "mcp_servers.review-bridge-reviewer.env.REVIEW_BRIDGE_HOME": path.resolve(storeRoot),
   };
   return [
@@ -189,7 +208,9 @@ export function codexReviewerArguments(reviewId, requested, storeRoot) {
     ...(requested.model == null ? [] : ["--model", requested.model]),
     ...Object.entries(settings).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`]),
     "-c", "approval_policy={granular={rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false}}",
-    `Independently review Review Bridge task ${reviewId} using the packaged Review Bridge reviewer skill. Require reviewer_provider: CODEX_TASK, follow the review strategy, and submit every actionable finding.`,
+    lens == null || lens.run === "general"
+      ? `Independently review Review Bridge task ${reviewId} using the packaged Review Bridge reviewer skill. Require reviewer_provider: CODEX_TASK, follow the review strategy, and submit every actionable finding.`
+      : `Independently review Review Bridge task ${reviewId} as its ${lens.run} lens run, using the packaged Review Bridge reviewer skill and its ${lens.run} lens. Require reviewer_provider: CODEX_TASK, follow the review strategy, and submit the findings the ${lens.run} lens asks for.`,
   ];
 }
 

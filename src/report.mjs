@@ -737,7 +737,7 @@ export function summaryDigest(summary) {
 // Raise it by one in any change that alters the Markdown this module renders
 // -- wording, ordering, a new line, a heading -- so the reports the previous
 // version wrote stay readable at their own names.
-export const REPORT_FORMAT = 11;
+export const REPORT_FORMAT = 12;
 
 // `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
 // `p<revision>-s<summary digest>-f<format>` without one.
@@ -992,6 +992,7 @@ function remoteOnlyFacts(publication, authorization, summary) {
 // inspect, and says so.
 const LOCAL_NEXT_STEP = {
   WAITING_FOR_REVIEW: "the reviewer's first review is still owed",
+  WAITING_FOR_LENS_REVIEW: "round one's lens runs are still owed",
   REVIEW_SUBMITTED: "the author's resolutions are owed next",
   AUTHOR_RESPONDED: "a rereview is the next step",
   WAITING_FOR_REREVIEW: "the rereview is still owed",
@@ -1161,10 +1162,21 @@ function findingsTableSection(review, local, publication, { resolutionByFinding,
                 resolutionByFinding.get(finding.id),
                 decisionByFinding.get(finding.id),
               ),
-              inline(finding.introduced_round ?? "n/a"),
+              `${inline(finding.introduced_round ?? "n/a")}${finding.lens == null ? "" : ` (${cellCode(finding.lens)} lens)`}`,
             ]),
           ),
     );
+    const runs = review.rounds?.[0]?.runs;
+    if (runs != null) {
+      // A run's count is derived from the round-one findings, which hold
+      // nothing until the round closes.
+      const closed = review.status !== "WAITING_FOR_LENS_REVIEW";
+      lines.push(`Lens runs: ${runs.map((entry) => {
+        const raised = findings.filter((finding) => finding.introduced_round === 1 && (finding.lens ?? "general") === entry.run).length;
+        const state = entry.submitted_at == null ? "owed" : closed ? `submitted, ${count(raised, "finding")}` : "submitted";
+        return `${code(entry.run)} ${state}`;
+      }).join("; ")}.`);
+    }
     const carried = review.carried_findings ?? [];
     if (carried.length > 0) {
       lines.push(

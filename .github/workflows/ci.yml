@@ -17,6 +17,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The lens-review compatibility test reads the v0.25.0 release.
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: 20

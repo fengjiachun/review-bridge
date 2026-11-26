@@ -112,6 +112,12 @@ async function copyServer(target) {
     path.join(projectRoot, "templates/codex-plugin/skills/review-bridge-reviewer/SKILL.md"),
     path.join(serverTarget, "reviewer-skill.md"),
   );
+  for (const lens of ["tests", "design"]) {
+    await fsp.copyFile(
+      path.join(projectRoot, `templates/codex-plugin/skills/review-bridge-reviewer/lenses/${lens}.md`),
+      path.join(serverTarget, `lens-${lens}.md`),
+    );
+  }
 }
 
 await fsp.rm(outputRoot, { recursive: true, force: true });

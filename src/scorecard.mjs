@@ -2,7 +2,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { MAX_ROUNDS, REVIEWER_PROVIDERS } from "./core.mjs";
 
-export const SCORECARD_SCHEMA_VERSION = 4;
+export const SCORECARD_SCHEMA_VERSION = 5;
 
 const SEVERITIES = ["blocker", "major", "minor", "nit"];
 const CONSTRAINT_KINDS = ["documented", "undocumented"];
@@ -11,6 +11,7 @@ const DECISIONS = ["resolved", "rebuttal_accepted", "still_open"];
 const DECISION_COLUMNS = [...DECISIONS, "undecided"];
 const REVIEW_STATUSES = [
   "WAITING_FOR_REVIEW",
+  "WAITING_FOR_LENS_REVIEW",
   "REVIEW_SUBMITTED",
   "AUTHOR_RESPONDED",
   "WAITING_FOR_REREVIEW",
