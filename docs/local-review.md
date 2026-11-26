@@ -55,9 +55,9 @@ State-changing tools can also return structured concurrency and durability
 errors. See [Troubleshooting](troubleshooting.md) for what each one means and
 whether retrying is safe.
 
-## Lens review
+## Lens review (unreleased)
 
-On request, a `CODEX_TASK` review can run a lens round first. Ask the author
+Not in v0.25.0: this describes the next release. On request, a `CODEX_TASK` review can run a lens round first. Ask the author
 for a lens review of this change; the author passes `lens_review: true` with
 `force_full_review: true` only when you ask, and never offers one. Round one
 then runs three reviewers on the same snapshot at once: the general reviewer,
@@ -68,9 +68,11 @@ times a plain round one, lasts as long as its slowest run, and returns more
 findings to answer.
 
 The review waits in `WAITING_FOR_LENS_REVIEW` until all three runs have
-submitted; `get_review_summary` lists each run with its dispatch and exit
-receipt, and `launch_local_reviewer` relaunches only a run that exited without
-submitting. Errata are refused until the round closes. The close puts every
+submitted. Its runs are started only by `launch_local_reviewer`, which binds
+each run's reviewer server to the review; a reviewer started by hand, as
+below, cannot list or submit to a lens round. `get_review_summary` lists each
+run with its `submitted` flag and exit receipt, and `launch_local_reviewer`
+relaunches only a run that exited without submitting. Errata are refused until the round closes. The close puts every
 finding into the one ledger, general first, each lens finding tagged with its
 `lens`, and ends `CLEAN` or `REVIEW_SUBMITTED`. From there the review is a
 plain one: one general reviewer decides every finding in round two, and a

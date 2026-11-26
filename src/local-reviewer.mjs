@@ -174,7 +174,15 @@ export const LENS_RUNS = Object.freeze(["general", "tests", "design"]);
 export function lensInstructions() {
   const directory = path.dirname(server);
   assertOutsideGitRepository(directory, "lens review installation", "launch lens reviews from an installed package");
-  const read = (name) => fs.readFileSync(path.join(directory, name), "utf8");
+  // A linked file would read whatever its target holds, so each file must
+  // resolve inside the directory that was checked.
+  const read = (name) => {
+    const file = path.join(directory, name);
+    if (fs.realpathSync(file) !== path.join(fs.realpathSync(directory), name)) {
+      throw new Error(`Lens review instruction ${name} must be a file in the installation, not a link`);
+    }
+    return fs.readFileSync(file, "utf8");
+  };
   return { skill: read("reviewer-skill.md"), tests: read("lens-tests.md"), design: read("lens-design.md") };
 }
 

@@ -11,7 +11,7 @@ import {
 } from "./storage.mjs";
 import { reviewRequiredInputs } from "./tool-inputs.mjs";
 
-import { LENS_RUNS, codexReviewerArguments, lensInstructions, reviewerRequest, reviewerRuntime, startLocalReviewer } from "./local-reviewer.mjs";
+import { LENS_RUNS, codexReviewerArguments, lensInstructions, readDispatchReceipt, reviewerRequest, reviewerRuntime, startLocalReviewer } from "./local-reviewer.mjs";
 
 export const MAX_ROUNDS = 2;
 export const DEFAULT_CHANGE_SIZE_BUDGET = 2000;
@@ -83,15 +83,12 @@ function requireReviewerProvider(review, expectedProvider) {
   }
 }
 
-// A reviewer server started with --review-id serves one lens round and
-// nothing else, so a round-one run cannot open or decide round two.
+// A reviewer server started with --review-id, whose tools refuse any other
+// review ID, serves its lens round and nothing else, so a round-one run cannot
+// open or decide round two.
 function requireReviewer(review, expectedProvider, binding) {
   requireReviewerProvider(review, expectedProvider);
-  if (binding == null) return;
-  if (review.id !== binding.reviewId) {
-    throw new Error(`this reviewer server is bound to review ${binding.reviewId}`);
-  }
-  if (review.status !== "WAITING_FOR_LENS_REVIEW") {
+  if (binding != null && review.status !== "WAITING_FOR_LENS_REVIEW") {
     throw new Error(`this reviewer server serves its review only during the lens round (status=${review.status})`);
   }
 }
@@ -1634,6 +1631,16 @@ export async function prepareReview(
   }, { allowMissing: true });
 }
 
+function reviewRow(review) {
+  return {
+    id: review.id,
+    status: review.status,
+    repository_path: review.repository_path,
+    head_sha: review.rounds?.at(-1)?.head_sha ?? null,
+    updated_at: review.updated_at,
+  };
+}
+
 export async function listReviews(
   storeRoot,
   statuses = null,
@@ -1665,13 +1672,7 @@ export async function listReviews(
         (providerFilter == null ||
           reviewerProviderFor(review) === providerFilter)
       ) {
-        result.push({
-          id: review.id,
-          status: review.status,
-          repository_path: review.repository_path,
-          head_sha: review.rounds?.at(-1)?.head_sha ?? null,
-          updated_at: review.updated_at,
-        });
+        result.push(reviewRow(review));
       }
     } catch {
       // Ignore incomplete directories; normal writes are atomic.
@@ -1684,8 +1685,9 @@ export async function listReviews(
 // reviewer may read it.
 export async function listPendingReviews(storeRoot, reviewerProvider, binding = null) {
   if (binding != null) {
-    return (await listReviews(storeRoot, ["WAITING_FOR_LENS_REVIEW"], reviewerProvider))
-      .filter((row) => row.id === binding.reviewId);
+    const review = await loadReview(storeRoot, binding.reviewId).catch(() => null);
+    return review?.status === "WAITING_FOR_LENS_REVIEW" && reviewerProviderFor(review) === reviewerProvider
+      ? [reviewRow(review)] : [];
   }
   return listReviews(
     storeRoot,
@@ -1701,9 +1703,8 @@ export async function getReview(storeRoot, reviewId) {
 export async function getReviewSummary(storeRoot, reviewId) {
   const summary = reviewSummary(await loadReview(storeRoot, reviewId));
   for (const dispatch of [summary.reviewer_dispatch, ...(summary.runs ?? []).map((entry) => entry.reviewer_dispatch)]) {
-    if (!dispatch) continue;
-    try { dispatch.exit = await loadJson(path.join(dispatch.attempt_root, "exit.json")); }
-    catch (error) { if (error.code !== "ENOENT") throw error; }
+    const exit = dispatch && await readDispatchReceipt(dispatch.attempt_root, "exit.json");
+    if (exit) dispatch.exit = exit;
   }
   return summary;
 }
@@ -2047,13 +2048,11 @@ async function submitInitialReviewWhileLocked(
       await saveReview(storeRoot, review);
       return reviewerReview(review);
     }
-    // The close: IDs follow the fixed run order, not the arrival order.
-    review.findings = LENS_RUNS.flatMap((name) =>
-      runs.find((candidate) => candidate.run === name).findings.map((finding) =>
-        name === "general" ? finding : { ...finding, lens: name }),
+    // The close: IDs follow the runs' fixed order, not the arrival order.
+    review.findings = runs.flatMap((candidate) => candidate.findings.map((finding) =>
+      candidate.run === "general" ? finding : { ...finding, lens: candidate.run }),
     ).map((finding, index) => ({ id: findingId(index), ...finding }));
-    const general = runs.find((candidate) => candidate.run === "general");
-    if (general.reconstructed_intent !== undefined) review.reconstructed_intent = general.reconstructed_intent;
+    if (runs[0].reconstructed_intent !== undefined) review.reconstructed_intent = runs[0].reconstructed_intent;
     for (const candidate of runs) {
       delete candidate.findings;
       delete candidate.reconstructed_intent;
@@ -2906,10 +2905,6 @@ function carriedSelection(review) {
 }
 
 export async function launchLocalReviewer(storeRoot, reviewId, expectedStateVersion, { model, reasoningEffort } = {}) {
-  const exited = async (dispatch) => {
-    try { return await loadJson(path.join(dispatch.attempt_root, "exit.json")); }
-    catch (error) { if (error.code !== "ENOENT") throw error; return null; }
-  };
   // A lens round launches every run that has not submitted and has no live
   // or indeterminate attempt; a plain round has one slot, the round itself.
   const launchSlots = async (review) => {
@@ -2920,7 +2915,7 @@ export async function launchLocalReviewer(storeRoot, reviewId, expectedStateVers
       ? round.runs.filter((entry) => entry.submitted_at == null) : [round];
     const free = [];
     for (const slot of slots) {
-      if (!slot.reviewer_dispatch || await exited(slot.reviewer_dispatch)) free.push(slot);
+      if (!slot.reviewer_dispatch || await readDispatchReceipt(slot.reviewer_dispatch.attempt_root, "exit.json")) free.push(slot);
     }
     if (free.length === 0) throw new Error("Reviewer dispatch is running or indeterminate; do not launch a concurrent replacement");
     if (!["WAITING_FOR_REVIEW", "WAITING_FOR_LENS_REVIEW", "WAITING_FOR_REREVIEW"].includes(review.status)) throw new Error("Review is not pending");

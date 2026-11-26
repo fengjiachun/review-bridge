@@ -415,9 +415,13 @@ function findingIndexes(review) {
   };
 }
 
+// Run submissions wait in their run entries until the lens round closes.
+const LENS_ROUND_PENDING = "No finding is recorded until all three lens-round runs have submitted.";
+
 function findingsSection(review, { resolutionByFinding, decisionByFinding }) {
   const findings = review.findings ?? [];
   const carried = review.carried_findings ?? [];
+  if (review.status === "WAITING_FOR_LENS_REVIEW") return ["### Findings", LENS_ROUND_PENDING];
   if (findings.length === 0) {
     const sources = [...new Set(carried.map((entry) => entry.continued_from_review_id))];
     return [
@@ -933,7 +937,9 @@ function pullRequestName(publication) {
 function findingsFact(review, partition) {
   const carried = (review.carried_findings ?? []).length;
   const raised =
-    partition.all.length === 0
+    review.status === "WAITING_FOR_LENS_REVIEW"
+      ? "none recorded until the lens round closes"
+      : partition.all.length === 0
       ? "none raised"
       : `${partition.all.length} — ${severityBreakdown(partition.all)}`;
   return carried === 0
@@ -1062,6 +1068,7 @@ function findingHeadline(finding) {
 // saying so: the opening's Open items answers that, next step included.
 function openFindingsSection(review, partition) {
   const carried = review.carried_findings ?? [];
+  if (review.status === "WAITING_FOR_LENS_REVIEW") return [];
   if (partition.all.length === 0) {
     return carried.length === 0
       ? []
@@ -1148,7 +1155,9 @@ function findingsTableSection(review, local, publication, { resolutionByFinding,
     const findings = review.findings ?? [];
     const activeIds = new Set(local.active_findings.map((finding) => finding.id));
     lines.push(
-      findings.length === 0
+      review.status === "WAITING_FOR_LENS_REVIEW"
+        ? LENS_ROUND_PENDING
+        : findings.length === 0
         ? "No finding was raised in this review."
         : builtTable(
             ["ID", "Severity", "Finding", "Disposition", "Round"],
@@ -1168,8 +1177,6 @@ function findingsTableSection(review, local, publication, { resolutionByFinding,
     );
     const runs = review.rounds?.[0]?.runs;
     if (runs != null) {
-      // A run's count is derived from the round-one findings, which hold
-      // nothing until the round closes.
       const closed = review.status !== "WAITING_FOR_LENS_REVIEW";
       lines.push(`Lens runs: ${runs.map((entry) => {
         const raised = findings.filter((finding) => finding.introduced_round === 1 && (finding.lens ?? "general") === entry.run).length;

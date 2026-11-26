@@ -13,6 +13,7 @@ import {
   assertDispatchContract,
   assertConventionsSection,
   assertDeletionLens,
+  assertLensPolicy,
   assertLensReviewRequestRule,
   assertThirdPartyMaterialBoundary,
   CODEX_TASK_DISPATCH_CONTRACT,
@@ -1127,10 +1128,9 @@ for (const root of [pluginRoot, reviewerRoot, hermesIntegration, deepseekHarness
   assert.ok(!args.includes("--model") && !args.some((value) => value.startsWith("model=")));
   assert.ok(args.includes('model_reasoning_effort="high"'));
   for (const lens of ["tests", "design"]) {
-    assert.equal(
-      await fsp.readFile(path.join(root, "server", `lens-${lens}.md`), "utf8"),
-      await fsp.readFile(path.join(projectRoot, `templates/codex-plugin/skills/review-bridge-reviewer/lenses/${lens}.md`), "utf8"),
-    );
+    const packaged = await fsp.readFile(path.join(root, "server", `lens-${lens}.md`), "utf8");
+    assert.equal(packaged, await fsp.readFile(path.join(projectRoot, `templates/codex-plugin/skills/review-bridge-reviewer/lenses/${lens}.md`), "utf8"));
+    assertLensPolicy(packaged, lens, `packaged ${lens} lens`);
   }
 }
 
@@ -1241,14 +1241,8 @@ try {
   const lensStore = path.join(temporary, "lens-store");
   const lensAuthor = new Client({ name: "lens-author-smoke", version: releaseVersion });
   await lensAuthor.connect(new StdioClientTransport({
-    command: process.execPath,
-    args: [path.join(installed, "server", "server.mjs"), "--role", "author"],
-    env: {
-      ...process.env,
-      REVIEW_BRIDGE_HOME: lensStore,
-      REVIEW_BRIDGE_CODEX_COMMAND: path.join(projectRoot, "test", "fixtures", "codex-runtime.mjs"),
-    },
-    stderr: "pipe",
+    command: process.execPath, args: [path.join(installed, "server", "server.mjs"), "--role", "author"], stderr: "pipe",
+    env: { ...process.env, REVIEW_BRIDGE_HOME: lensStore, REVIEW_BRIDGE_CODEX_COMMAND: path.join(projectRoot, "test", "fixtures", "codex-runtime.mjs") },
   }));
   try {
     const pending = await call(lensAuthor, "prepare_review", {

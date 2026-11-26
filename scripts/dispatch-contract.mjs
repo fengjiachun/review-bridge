@@ -153,7 +153,6 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the discipline states prohibitions rather than a count",
       /states what must never happen rather than counting launches/,
     ],
-    // A lens round's three runs are its reviewers, so the bar holds per run.
     [
       "no two reviewers on one round, or on one lens run, at once",
       /Never run two reviewers on the same round at once — in a lens round, never two on the same run at once, because its three runs are that round's reviewers/,
@@ -887,6 +886,27 @@ export function assertLensReviewRequestRule(document, label) {
     document.replace(/^ *(?:- )?/gm, "").replace(/\s+/g, " ").includes(LENS_REVIEW_REQUEST_RULE),
     `${label} does not limit lens_review to an explicit user request`,
   );
+}
+
+// The policy each lens file exists to carry, which a byte comparison between
+// the source and the package cannot protect.
+const LENS_POLICY_SENTENCES = {
+  shared: [
+    "Report only defects worth fixing before merge, and no nits. That bar also covers any other defect you notice outside this lens.",
+    "Submit findings only, with `submit_review`: write no `reconstructed_intent`.",
+  ],
+  tests: [
+    "tracing it to its callers and to the tests that reach it, by reading the snapshot, finds no assertion that would observe a plausible break of it;",
+    "Each finding names the production line, the plausible regression, and the assertion that would catch it.",
+  ],
+  design: ["Each finding names the code, the simpler equivalent, and why behavior stays the same."],
+};
+
+export function assertLensPolicy(document, lens, label) {
+  const prose = document.replace(/^ *- /gm, "").replace(/\s+/g, " ");
+  for (const sentence of [...LENS_POLICY_SENTENCES.shared, ...LENS_POLICY_SENTENCES[lens]]) {
+    assert.ok(prose.includes(sentence), `${label} lost its policy: ${sentence}`);
+  }
 }
 
 export function assertConventionsSection(document, label) {
