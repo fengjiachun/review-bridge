@@ -1,6 +1,6 @@
 # Run a local review
 
-Describes Review Bridge v0.25.0.
+Describes Review Bridge v0.26.0.
 
 Local review, step by step: selecting and starting Codex, manual reviewer requests,
 the states a review ends in, successor reviews, and the state machine. For

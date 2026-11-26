@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.26.0 - 2026-11-26
 
 ### Added
 
@@ -45,6 +45,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Internal
 
+- (#230) Release 0.26.0.
 - (#227) Accepted RFC 0005 specifies an optional lens review. On the user's
   request, Review Bridge will run `tests` and `design` lens reviewers beside
   the general reviewer in round one, with their findings in the same review
