@@ -416,7 +416,7 @@ function findingIndexes(review) {
 }
 
 // Run submissions wait in their run entries until the lens round closes.
-const LENS_ROUND_PENDING = "No finding is recorded until all three lens-round runs have submitted.";
+const LENS_ROUND_PENDING = "Run submissions are staged until all three lens-round runs have submitted; the review's finding list is empty until then.";
 
 function findingsSection(review, { resolutionByFinding, decisionByFinding }) {
   const findings = review.findings ?? [];
@@ -1032,7 +1032,9 @@ function verdictLines(review, publication, summary, partition) {
   const total = partition.all.length;
   const open = partition.open.length;
   const standing =
-    total === 0
+    review.status === "WAITING_FOR_LENS_REVIEW"
+      ? "the lens round's run submissions are staged until all three have submitted"
+      : total === 0
       ? "no finding was raised"
       : open === 0
         ? `${count(total, "finding")} raised, none still open`

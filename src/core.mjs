@@ -52,7 +52,7 @@ function assertString(value, name, { allowEmpty = false, max = MAX_TEXT_FIELD } 
   return value;
 }
 
-function assertReviewId(reviewId) {
+export function assertReviewId(reviewId) {
   if (typeof reviewId !== "string" || !/^rb-[0-9TZ-]+-[a-f0-9]{8}$/.test(reviewId)) {
     throw new Error("invalid review_id");
   }
@@ -198,7 +198,7 @@ export async function loadReview(storeRoot, reviewId) {
     return await loadJson(reviewFile(storeRoot, reviewId));
   } catch (error) {
     if (error?.code === "ENOENT") {
-      throw new Error(`review ${reviewId} not found`);
+      throw new Error(`review ${reviewId} not found`, { cause: error });
     }
     throw error;
   }
@@ -1685,7 +1685,10 @@ export async function listReviews(
 // reviewer may read it.
 export async function listPendingReviews(storeRoot, reviewerProvider, binding = null) {
   if (binding != null) {
-    const review = await loadReview(storeRoot, binding.reviewId).catch(() => null);
+    const review = await loadReview(storeRoot, binding.reviewId).catch((error) => {
+      if (error.cause?.code === "ENOENT") return null;
+      throw error;
+    });
     return review?.status === "WAITING_FOR_LENS_REVIEW" && reviewerProviderFor(review) === reviewerProvider
       ? [reviewRow(review)] : [];
   }

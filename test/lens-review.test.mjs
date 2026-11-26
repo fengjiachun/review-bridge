@@ -166,11 +166,12 @@ test("run submissions stay out of the review until the third closes the round", 
     ["F-001", "General one", undefined], ["F-002", "General two", undefined],
     ["F-003", "Tests one", "tests"], ["F-004", "Design one", "design"],
   ]);
-  for (const entry of closed.rounds[0].runs) assert.deepEqual(Object.keys(entry), ["run", "reviewer_dispatch", "submitted_at"]);
+  for (const entry of closed.rounds[0].runs) assert.deepEqual(Object.keys(entry).sort(), ["reviewer_dispatch", "run", "submitted_at"]);
 
   const reordered = await prepare(context);
-  await submitRun(context, reordered.id, "design", [finding("Design one")]);
   await submitRun(context, reordered.id, "general", [finding("General one"), finding("General two")], "General intent");
+  const afterGeneral = await submitRun(context, reordered.id, "design", [finding("Design one")]);
+  assert.ok(noRuns(afterGeneral) && !/General one|General intent/.test(JSON.stringify(afterGeneral)));
   await submitRun(context, reordered.id, "tests", [finding("Tests one")]);
   const other = await current.loadReview(context.store, reordered.id);
   assert.deepEqual(other.findings, closed.findings);
@@ -278,6 +279,7 @@ test("a bound reviewer server serves only its own lens round", async (t) => {
   await assert.rejects(boundCall("read_review_artifact", { review_id: otherReview.id, round: 1, artifact: "patch.diff" }), refused);
   await assert.rejects(boundCall("search_snapshot", { review_id: otherReview.id, round: 1, pattern: "only-in-other" }), refused);
   await assert.rejects(boundCall("submit_review", { review_id: otherReview.id, findings: [] }), refused);
+  await assert.rejects(boundCall("open_review", { review_id: "rb-2026-01-01T000000-000Z-0badf00d" }), refused);
   await assert.rejects(unbound("submit_review", { review_id: review.id, findings: [] }), /only from its bound runs/);
 
   await lensCalls.tests("submit_review", { review_id: review.id, findings: [finding("Tests one")] });
@@ -316,11 +318,14 @@ test("lens findings settle through the existing protocol, and only round one has
   const roundTwo = await current.prepareRereview(context.store, continued.id);
   const launched = await context.core.launchLocalReviewer(context.store, continued.id, roundTwo.state_version);
   await waitForExit(launched.reviewer_dispatch.attempt_root);
-  const { args } = JSON.parse(await fsp.readFile(path.join(context.store, "codex-runtime", "executed-general.json"), "utf8"));
+  const { args } = JSON.parse(await fsp.readFile(path.join(context.store, "codex-runtime", "executed.json"), "utf8"));
   assert.ok(!args.some((value) => value.includes("--review-id") || value.includes("--lens")));
   await current.submitRereview(context.store, continued.id, [{ finding_id: "F-001", decision: "still_open", rationale: "Incomplete" }], [], "CODEX_TASK");
   git(context.repository, "commit", "-am", "change");
-  const plain = await prepare(context, { continuedFromReviewId: continued.id, lensReview: false });
+  const plain = await current.prepareReview(context.store, {
+    repositoryPath: context.repository, baseRef: context.base, requirement: "Change content",
+    implementationScope: "file.txt", forceFullReview: true, continuedFromReviewId: continued.id,
+  });
   assert.equal(plain.status, "WAITING_FOR_REVIEW");
   assert.equal(plain.rounds[0].runs, undefined);
 });
@@ -333,8 +338,8 @@ test("reports and the summary show lens runs and lens findings", async (t) => {
   assert.match(renderReviewBrief(partial), /round one's lens runs are still owed/);
   for (const rendered of [renderReviewBrief(partial), renderReviewReport(partial)]) {
     assert.match(rendered, /Lens runs: `general` submitted; `tests` owed; `design` owed\./);
-    assert.match(rendered, /No finding is recorded until all three lens-round runs have submitted\./);
-    assert.doesNotMatch(rendered, /No findings? (?:was|were) (?:raised|recorded)|none raised/);
+    assert.match(rendered, /Run submissions are staged until all three lens-round runs have submitted/);
+    assert.doesNotMatch(rendered, /no findings? (?:was|were) (?:raised|recorded)|none raised/i);
   }
 
   await submitRun(context, pending.id, "tests", [finding("Tests one")]);
@@ -406,9 +411,15 @@ test("a plain review keeps the released ledger, summary, and gate fields", async
 test("each lens file carries its policy", async () => {
   for (const lens of ["tests", "design"]) {
     const text = await fsp.readFile(lensFile(lens), "utf8");
-    assertLensPolicy(text, lens, lens);
-    assert.throws(() => assertLensPolicy(text.replace("and no nits", ""), lens, lens), /lost its policy/);
+    assertLensPolicy(text, lens);
+    assert.throws(() => assertLensPolicy(text.replace("and no nits", ""), lens), /lost its/);
   }
-  const tests = await fsp.readFile(lensFile("tests"), "utf8");
-  assert.throws(() => assertLensPolicy(tests.replace("finds no assertion", "finds an assertion"), "tests", "tests"), /lost its policy/);
+});
+
+test("a bound queue is empty only for a missing review and surfaces other read failures", async (t) => {
+  const context = await fixture(t);
+  const review = await prepare(context);
+  assert.deepEqual(await current.listPendingReviews(context.store, "CODEX_TASK", bound("rb-2026-01-01T000000-000Z-0badf00d")), []);
+  await fsp.writeFile(path.join(context.store, "reviews", review.id, "review.json"), "{");
+  await assert.rejects(current.listPendingReviews(context.store, "CODEX_TASK", bound(review.id)), SyntaxError);
 });

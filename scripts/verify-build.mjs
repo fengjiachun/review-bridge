@@ -1130,7 +1130,7 @@ for (const root of [pluginRoot, reviewerRoot, hermesIntegration, deepseekHarness
   for (const lens of ["tests", "design"]) {
     const packaged = await fsp.readFile(path.join(root, "server", `lens-${lens}.md`), "utf8");
     assert.equal(packaged, await fsp.readFile(path.join(projectRoot, `templates/codex-plugin/skills/review-bridge-reviewer/lenses/${lens}.md`), "utf8"));
-    assertLensPolicy(packaged, lens, `packaged ${lens} lens`);
+    assertLensPolicy(packaged, `packaged ${lens} lens`);
   }
 }
 

@@ -34,8 +34,8 @@ After a verdict, load [Handle findings](findings.md) for findings or
    A verified `SUCCESSOR` is the default and stands: on a long-lived branch its
    delta is a small fraction of the cumulative patch, and re-reviewing
    already-gated code costs the reviewer far more context than it buys.
-   `force_full_review: true` is the deliberate exception, and one scenario
-   names it. A continuation from `CONTINUABLE_FINDINGS` passes it beside
+   `force_full_review: true` is the deliberate exception, and two scenarios
+   name it. A continuation from `CONTINUABLE_FINDINGS` passes it beside
    `continued_from_review_id`, which the server requires. The continuation
    repeats the source review's `requirement` exactly; its
    `implementation_scope` may describe the new head. A refused continuation
@@ -98,7 +98,11 @@ After a verdict, load [Handle findings](findings.md) for findings or
    already present to decide whether the change should be split. When
    `warning_threshold_crossed` is true, state the total and
    `remaining_headroom` and say whether the change will continue or split.
-9. Start a fresh reviewer context for every new `review_id`. For
+9. Start a fresh reviewer context for every new `review_id`. For a
+   `WAITING_FOR_LENS_REVIEW` review, call `launch_local_reviewer` as in
+   [Dispatching a CODEX_TASK review](codex-task.md): only its bound runs can
+   list or submit to the lens round, so a reviewer task started by hand cannot
+   serve it. For
    `CLAUDE_DESKTOP`, use a fresh Claude conversation. For `CODEX_TASK`, create
    a new Codex task rather than forking this task, and send it only the review
    ID and a request to follow the packaged reviewer skill. To launch it from this session, follow [Dispatching a CODEX_TASK review](codex-task.md). For

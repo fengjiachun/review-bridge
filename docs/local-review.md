@@ -55,17 +55,17 @@ State-changing tools can also return structured concurrency and durability
 errors. See [Troubleshooting](troubleshooting.md) for what each one means and
 whether retrying is safe.
 
-## Lens review (unreleased)
+## Lens review
 
-Not in v0.25.0: this describes the next release. On request, a `CODEX_TASK` review can run a lens round first. Ask the author
+On request, a `CODEX_TASK` review can run a lens round first. Ask the author
 for a lens review of this change; the author passes `lens_review: true` with
 `force_full_review: true` only when you ask, and never offers one. Round one
 then runs three reviewers on the same snapshot at once: the general reviewer,
 a `tests` lens that looks for changed behavior no test would catch breaking,
 and a `design` lens that looks for a simpler shape. Both lenses report only
 defects worth fixing before merge, never nits. The round costs about three
-times a plain round one, lasts as long as its slowest run, and returns more
-findings to answer.
+times a plain round one, can return more findings to answer, and waits for the
+last run's submission, including any relaunch.
 
 The review waits in `WAITING_FOR_LENS_REVIEW` until all three runs have
 submitted. Its runs are started only by `launch_local_reviewer`, which binds

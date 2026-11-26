@@ -2,11 +2,11 @@
 import fs from "node:fs";
 import { createInterface } from "node:readline";
 if (process.argv[2] === "exec") {
-  // A lens-round run also records under its run name, and waits on its own hold file too.
+  // A lens-round run records under its run name and waits on its own hold file too.
+  const bound = process.argv.join(" ").includes('"--review-id"');
   const run = /"--lens","(\w+)"/.exec(process.argv.join(" "))?.[1] ?? "general";
-  const executed = JSON.stringify({ args: process.argv.slice(2), stdin: fs.readFileSync(0, "utf8") });
-  fs.writeFileSync("executed.json", executed);
-  fs.writeFileSync(`executed-${run}.json`, executed);
+  fs.writeFileSync(bound ? `executed-${run}.json` : "executed.json",
+    JSON.stringify({ args: process.argv.slice(2), stdin: fs.readFileSync(0, "utf8") }));
   // Waits while the configured hold file exists, so removing the fixture root also ends it.
   const hold = process.env.RB_TEST_HOLD;
   const held = () => hold && (fs.existsSync(hold) || fs.existsSync(`${hold}-${run}`));

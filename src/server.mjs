@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import {
   appendReviewErratum,
+  assertReviewId,
   defaultStoreRoot,
   exportHumanArbitration,
   finalizeLocalGate,
@@ -47,7 +48,8 @@ function parseOption(argv, name) {
     return equals.slice(`--${name}=`.length);
   }
   const index = argv.indexOf(`--${name}`);
-  return index >= 0 ? argv[index + 1] : null;
+  // A flag given without a value reads as empty, not as absent.
+  return index >= 0 ? argv[index + 1] ?? "" : null;
 }
 
 const argv = process.argv.slice(2);
@@ -66,14 +68,14 @@ if (role === "reviewer" && !REVIEWER_PROVIDERS.includes(reviewerProvider)) {
   );
   process.exit(2);
 }
-// A lens-round run is bound to its review and, for a lens run, its lens. A
-// flag given without a value is refused rather than read as absent.
-const given = (name) => argv.some((arg) => arg === `--${name}` || arg.startsWith(`--${name}=`));
-const boundReviewId = role === "reviewer" && given("review-id") ? parseOption(argv, "review-id") ?? "" : null;
-const lens = role === "reviewer" && given("lens") ? parseOption(argv, "lens") ?? "" : null;
-if (boundReviewId != null && !/^rb-[0-9TZ-]+-[a-f0-9]{8}$/.test(boundReviewId)) {
-  console.error("--review-id takes a review ID");
-  process.exit(2);
+// A lens-round run is bound to its review and, for a lens run, its lens.
+const boundReviewId = role === "reviewer" ? parseOption(argv, "review-id") : null;
+const lens = role === "reviewer" ? parseOption(argv, "lens") : null;
+if (boundReviewId != null) {
+  try { assertReviewId(boundReviewId); } catch {
+    console.error("--review-id takes a review ID");
+    process.exit(2);
+  }
 }
 if (lens != null && (!["tests", "design"].includes(lens) || boundReviewId == null)) {
   console.error("--lens takes tests or design and requires --review-id");
@@ -737,7 +739,7 @@ if (role === "author") {
     {
       title: "Submit initial review",
       description:
-        "Submit structured initial findings and optional reconstructed_intent: what the code appears to do, distinguishing clear behavior from inference. Both are immutable after submission. An empty array marks the current snapshot CLEAN. In a lens round a submission records only this run's findings and, from the general run, its intent; a tests or design run's intent is dropped. The verdict forms when all three runs have submitted, CLEAN only when all three submitted no findings.",
+        "Submit structured initial findings and optional reconstructed_intent: what the code appears to do, distinguishing clear behavior from inference. Both are immutable after submission. Outside a lens round an empty array marks the current snapshot CLEAN. In a lens round a submission records only this run's findings and, from the general run, its intent; a tests or design run's intent is dropped. The verdict forms when all three runs have submitted, CLEAN only when all three submitted no findings.",
       inputSchema: {
         review_id: z.string(),
         findings: z.array(findingSchema),

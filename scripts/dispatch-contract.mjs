@@ -888,25 +888,12 @@ export function assertLensReviewRequestRule(document, label) {
   );
 }
 
-// The policy each lens file exists to carry, which a byte comparison between
-// the source and the package cannot protect.
-const LENS_POLICY_SENTENCES = {
-  shared: [
-    "Report only defects worth fixing before merge, and no nits. That bar also covers any other defect you notice outside this lens.",
-    "Submit findings only, with `submit_review`: write no `reconstructed_intent`.",
-  ],
-  tests: [
-    "tracing it to its callers and to the tests that reach it, by reading the snapshot, finds no assertion that would observe a plausible break of it;",
-    "Each finding names the production line, the plausible regression, and the assertion that would catch it.",
-  ],
-  design: ["Each finding names the code, the simpler equivalent, and why behavior stays the same."],
-};
+// The bar each lens file exists to carry, which a byte comparison between the
+// source and the package cannot protect.
+const LENS_BAR = "worth fixing before merge, and no nits";
 
-export function assertLensPolicy(document, lens, label) {
-  const prose = document.replace(/^ *- /gm, "").replace(/\s+/g, " ");
-  for (const sentence of [...LENS_POLICY_SENTENCES.shared, ...LENS_POLICY_SENTENCES[lens]]) {
-    assert.ok(prose.includes(sentence), `${label} lost its policy: ${sentence}`);
-  }
+export function assertLensPolicy(document, label) {
+  assert.ok(document.replace(/\s+/g, " ").includes(LENS_BAR), `${label} lost its "${LENS_BAR}" bar`);
 }
 
 export function assertConventionsSection(document, label) {

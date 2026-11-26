@@ -99,7 +99,10 @@ launch between them.
    round's verdict: a run without `exit` is never replaced, and a run with
    `exit` and `submitted: false` exited without submitting and is relaunched
    by calling `launch_local_reviewer` again, which starts only such runs. The
-   round's verdict forms when all three have submitted.
+   wait returns no exit receipts, so after each `timed_out` result in a lens
+   round call `get_review_summary` and inspect every run before waiting again
+   with the same `state_version`. The round's verdict forms when all three have
+   submitted.
 
 The launch discipline is fixed, and it states what must never happen rather
 than counting launches. Never run two reviewers on the same round at once —
