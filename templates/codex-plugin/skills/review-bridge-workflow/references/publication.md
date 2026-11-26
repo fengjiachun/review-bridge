@@ -38,24 +38,22 @@ For either mode:
    source. Record its stable numeric actor ID and exact `Bot` type; the login is
    audit display only. Never learn or replace this identity from a candidate
    result.
-3. Immediately before `start_publication`, collect every page of the three
-   preexisting Codex feeds: issue comments, formal pull-request reviews, and
-   pull-request review comments. Supply their independent completion times and
-   pagination proof as the complete version-2 baseline. Version 2 recognizes
-   Review Bridge request IDs while preserving legacy request shapes as
-   fail-closed baseline evidence. Set `adapter_version: 2` in the normalizer
-   input. Use `EXPLICIT_ONLY`
+3. Immediately before `start_publication`, run the packaged read-only
+   `../../scripts/collect-github-observation.mjs` helper resolved relative to
+   the entrypoint SKILL as `--baseline --review-id <review_id> --repo
+   <owner/name> --pr <pr_number> --codex-actor-id <id>`, with the actor ID
+   from step 2. It reads the authorization head from the store, requires the
+   PR head to equal it, collects every page of the three preexisting Codex
+   feeds (issue comments, formal pull-request reviews, and pull-request review
+   comments), normalizes them as the complete version-2 baseline, writes it
+   into the private store beside the review, and prints only a receipt. Pass
+   the printed `codex_review_baseline_path` to `start_publication`; never
+   build, paste, or retype the baseline yourself. Use `EXPLICIT_ONLY`
    only when automatic Codex review is disabled and this workflow is the sole
    trigger actor. `AUTOMATIC_QUIESCENCE_ACKNOWLEDGED` requires direct human
    approval, an operator label, and a rationale immediately before this fresh
    baseline; never infer quiescence from elapsed time, silence, reactions, or a
-   general instruction to continue. Normalize the raw three-feed payload with
-   the packaged `../../scripts/normalize-codex-evidence.mjs` adapter resolved
-   relative to the entrypoint SKILL in `BASELINE` mode and set `authorization_head_sha`
-   to the immutable publication head; do not reproduce provider body parsing
-   ad hoc. The legacy
-   `local_gate_head_sha` input remains compatible only for older local-ledger
-   callers.
+   general instruction to continue.
 4. Call `start_publication`. From then on, call `get_publication_summary`,
    do what its `next_action` and `required_inputs` name, and read it again.
    The summary decides the order; the notes below add only what it cannot say

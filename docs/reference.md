@@ -29,7 +29,7 @@ The server started with `--role author`. The summary is the first sentence of ea
 | `record_codex_review_request` | Immediately bind the exact summary-provided Codex review body, its request ID when present, and the posted issue-comment response to the freshly verified pull-request head, then clear any pre-post snapshot. | `review_id`, `expected_revision`, `comment_id`, `url`, `created_at`, `requested_head_sha` |
 | `record_github_snapshot` | Validate and persist one normalized GitHub observation covering pull-request identity, policy and checks, Codex evidence, and review threads. | `review_id`, `expected_revision` |
 | `render_review_report` | Render a human-readable Markdown report of a review from its ledger and, when present, its publication ledger -- or, for a REMOTE_ONLY publication with no review ledger, from the publication and its authorization alone -- and write it to reviews/<review_id>/report-r<state_version>[-p<revision>-s<summary digest>]-f<renderer format>.md (report-p<revision>-s<summary digest>-f<renderer format>.md when remote-only) beside them; the summary digest covers the publication summary fields the report prints, so a gate appearing or evidence expiring writes a new report, and the renderer format version means an upgrade that changes the Markdown writes a new report beside the old one rather than colliding with it. | `review_id` |
-| `start_publication` | Bind a local review gate or explicit remote-only authorization to one pull request, pinned Codex Bot actor, trigger policy, and fresh complete preexisting Codex baseline. | `review_id`, `repository_id`, `owner`, `repo`, `pr_number`, `base_branch`, `head_branch`, `codex_actor_id`, `codex_actor_type`, `codex_actor_login`, `codex_trigger_mode`, `codex_review_baseline` |
+| `start_publication` | Bind a local review gate or explicit remote-only authorization to one pull request, pinned Codex Bot actor, trigger policy, and fresh complete preexisting Codex baseline, read from the codex_review_baseline_path the collector's --baseline mode prints or, for compatibility, passed inline as codex_review_baseline. | `review_id`, `repository_id`, `owner`, `repo`, `pr_number`, `base_branch`, `head_branch`, `codex_actor_id`, `codex_actor_type`, `codex_actor_login`, `codex_trigger_mode` |
 | `submit_resolutions` | Answer every open finding as fixed, rejected, or human_required. | `review_id`, `resolutions` |
 | `verify_publication_gate` | Immediately before merge, cross-check the committed gate, current ledger revision and freshness, then durably audit the verdict. | `review_id` |
 | `wait_for_review_state` | Wait 25 seconds by default, configurable up to 30 seconds, for the review's state machine to move past a known state_version. | `review_id`, `known_state_version` |
@@ -62,6 +62,9 @@ A code chosen at run time from a variable is not seen.
 | `AUDIT_EVENT_TOO_LARGE` | `src/publication.mjs` |
 | `AUDIT_STATE_INVALID` | `src/publication.mjs` |
 | `AUDIT_WRITE_FAILED` | `src/publication.mjs` |
+| `BASELINE_FILE_MALFORMED` | `src/publication.mjs` |
+| `BASELINE_FILE_TOO_LARGE` | `src/publication.mjs` |
+| `BASELINE_FILE_UNREADABLE` | `src/publication.mjs` |
 | `DISPATCH_INDETERMINATE` | `src/local-reviewer.mjs` |
 | `EVIDENCE_FUTURE` | `src/publication.mjs` |
 | `EVIDENCE_NOT_ATOMIC` | `src/publication.mjs` |

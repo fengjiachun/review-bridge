@@ -28,7 +28,7 @@ const PUBLICATION_TARGET_INPUTS = [
   ["codex_actor_type", "Bot"],
   ["codex_actor_login", "the pinned Codex bot actor"],
   ["codex_trigger_mode", "the operator's trigger policy"],
-  ["codex_review_baseline", "the collector's preexisting Codex baseline"],
+  ["codex_review_baseline_path", "the collector --baseline file"],
   [
     "operator_label",
     "the acknowledging human; required for AUTOMATIC_QUIESCENCE_ACKNOWLEDGED, refused for EXPLICIT_ONLY",

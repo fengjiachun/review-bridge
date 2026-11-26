@@ -432,7 +432,14 @@ assert.match(
 );
 assert.match(workflowSkill, /legacy exact body without a request ID/);
 assert.match(workflowSkill, /Never infer\s+correlation from\s+timestamps/);
-assert.match(workflowSkill, /Set `adapter_version: 2` in the normalizer\s+input/);
+assert.match(
+  workflowSkill,
+  /`--baseline --review-id <review_id> --repo\s+<owner\/name> --pr <pr_number> --codex-actor-id <id>`/,
+);
+assert.match(
+  workflowSkill,
+  /Pass\s+the printed `codex_review_baseline_path` to `start_publication`/,
+);
 assert.match(
   workflowSkill,
   /Require the PR head commit to equal the immutable publication authorization\s+`head_sha`/,
@@ -614,10 +621,6 @@ assert.match(
 assert.match(workflowSkill, /Immediately\s+before merge call `verify_publication_gate`/);
 assert.match(
   workflowSkill,
-  /\.\.\/\.\.\/scripts\/normalize-codex-evidence\.mjs/,
-);
-assert.match(
-  workflowSkill,
   /\.\.\/\.\.\/scripts\/collect-github-observation\.mjs/,
 );
 assert.match(workflowSkill, /canonicalizes GitHub timestamps to UTC milliseconds/);
@@ -636,6 +639,8 @@ const collectorHelp = run(process.execPath, [collectorPath, "--help"], pluginRoo
 assert.match(collectorHelp, /Usage: collect-github-observation\.mjs/);
 assert.match(collectorHelp, /--review-id <id>/);
 assert.match(collectorHelp, /--out <path>/);
+assert.match(collectorHelp, /--baseline --review-id <id> --repo <owner\/name>/);
+assert.match(collectorHelp, /pass the printed codex_review_baseline_path/);
 assert.match(collectorHelp, /Never retype\s+the observation itself/);
 assert.match(workflowSkill, /--review-id <review_id>/);
 assert.match(collectorHelp, /Refused inside any\s+Git worktree/);
@@ -687,7 +692,38 @@ const collectorWorktreeOut = spawnSync(
 assert.equal(collectorWorktreeOut.status, 2);
 assert.match(
   collectorWorktreeOut.stderr,
-  /refusing to write the observation inside the Git worktree/,
+  /The output file must be outside a Git repository; omit --out/,
+);
+const dubiousGitDirectory = path.join(collectorStore, "dubious-git");
+await fsp.mkdir(dubiousGitDirectory);
+await fsp.writeFile(
+  path.join(dubiousGitDirectory, "git"),
+  `#!/bin/sh\necho "fatal: detected dubious ownership in repository" >&2\nexit 128\n`,
+  { mode: 0o755 },
+);
+const collectorIndeterminateOut = spawnSync(
+  process.execPath,
+  [
+    collectorPath,
+    "--review-id",
+    "rb-2026-07-26T000000-000Z-deadbeef",
+    "--out",
+    path.join(collectorStore, "observation.json"),
+  ],
+  {
+    cwd: pluginRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${dubiousGitDirectory}${path.delimiter}${process.env.PATH}`,
+      REVIEW_BRIDGE_HOME: collectorStore,
+    },
+  },
+);
+assert.equal(collectorIndeterminateOut.status, 2);
+assert.match(
+  collectorIndeterminateOut.stderr,
+  /Cannot verify the output file is outside a Git repository: fatal: detected dubious ownership/,
 );
 const collectorBadId = spawnSync(
   process.execPath,
@@ -1525,6 +1561,112 @@ try {
       renderedReport.sha256,
     );
     assert.equal(renderedBytes.toString("utf8"), packagedReport.stdout.replace(/- Rendered at: [^\n]+/, renderedBytes.toString("utf8").match(/- Rendered at: [^\n]+/)[0]));
+
+    // The packaged baseline mode end to end: the head comes from the stored
+    // authorization, the feeds from gh, and start_publication reads the file.
+    const baselineAuthorization = await call(
+      author,
+      "authorize_remote_publication",
+      {
+        repository_path: repository,
+        base_sha: baseSha,
+        head_sha: headSha,
+        acknowledgement: "LOCAL_REVIEW_SKIPPED",
+        operator_label: "maintainer",
+        rationale: "Verify the packaged baseline collector.",
+      },
+    );
+    const fakeGhDirectory = path.join(temporary, "fake-gh");
+    await fsp.mkdir(fakeGhDirectory);
+    await fsp.writeFile(
+      path.join(fakeGhDirectory, "gh"),
+      `#!${process.execPath}
+const args = process.argv.slice(2);
+if (args[1] === "-i") {
+  const items = args[2].startsWith("/repos/owner/repo/issues/7/comments?") ? [${JSON.stringify({
+        id: 501,
+        html_url: "https://github.com/owner/repo/pull/7#issuecomment-501",
+        created_at: "2026-01-01T00:00:00Z",
+        body: "Codex Review: Didn't find any major issues.",
+        user: { id: 4242, type: "Bot", login: "codex[bot]" },
+      })}] : [];
+  process.stdout.write("HTTP/2.0 200 OK\\r\\n\\r\\n" + JSON.stringify(items));
+} else if (args[1] === "/repos/owner/repo/pulls/7") {
+  process.stdout.write(JSON.stringify({ head: { sha: ${JSON.stringify(headSha)} } }));
+} else {
+  process.exit(1);
+}
+`,
+      { mode: 0o755 },
+    );
+    const baselineArgs = [
+      collectorPath,
+      "--baseline",
+      "--review-id",
+      baselineAuthorization.review_id,
+      "--repo",
+      "owner/repo",
+      "--pr",
+      "7",
+    ];
+    const baselineEnv = {
+      ...process.env,
+      PATH: `${fakeGhDirectory}${path.delimiter}${process.env.PATH}`,
+      REVIEW_BRIDGE_HOME: store,
+    };
+    const baselineNoActor = spawnSync(process.execPath, baselineArgs, {
+      cwd: pluginRoot,
+      encoding: "utf8",
+      env: baselineEnv,
+    });
+    assert.equal(baselineNoActor.status, 2);
+    assert.match(baselineNoActor.stderr, /--codex-actor-id must be a positive safe integer/);
+    const baselineUnsafePr = spawnSync(
+      process.execPath,
+      [...baselineArgs.slice(0, -1), "9007199254740993", "--codex-actor-id", "4242"],
+      { cwd: pluginRoot, encoding: "utf8", env: baselineEnv },
+    );
+    assert.equal(baselineUnsafePr.status, 2);
+    assert.match(baselineUnsafePr.stderr, /--pr must be a positive safe integer/);
+    const baselineRun = spawnSync(
+      process.execPath,
+      [...baselineArgs, "--codex-actor-id", "4242"],
+      { cwd: pluginRoot, encoding: "utf8", env: baselineEnv },
+    );
+    assert.equal(baselineRun.status, 0, baselineRun.stderr);
+    const baselineReceipt = JSON.parse(baselineRun.stdout);
+    assert.equal(
+      baselineReceipt.codex_review_baseline_path,
+      path.join(store, "reviews", baselineAuthorization.review_id, "codex-review-baseline.json"),
+    );
+    assert.equal(baselineReceipt.head_sha, headSha);
+    const baselineBytes = await fsp.readFile(baselineReceipt.codex_review_baseline_path);
+    assert.equal(
+      crypto.createHash("sha256").update(baselineBytes).digest("hex"),
+      baselineReceipt.sha256,
+    );
+    const baselinePublication = await call(author, "start_publication", {
+      review_id: baselineAuthorization.review_id,
+      repository_id: 42,
+      owner: "owner",
+      repo: "repo",
+      pr_number: 7,
+      base_branch: "main",
+      head_branch: "agent/change",
+      codex_actor_id: 4242,
+      codex_actor_type: "Bot",
+      codex_actor_login: "codex[bot]",
+      codex_trigger_mode: "EXPLICIT_ONLY",
+      codex_review_baseline_path: baselineReceipt.codex_review_baseline_path,
+    });
+    assert.equal(baselinePublication.status, "PR_PENDING");
+    assert.equal(baselinePublication.codex_review_baseline.collection.adapter_version, 2);
+    assert.deepEqual(
+      baselinePublication.codex_review_baseline.candidate_results.map(
+        (result) => [result.result_id, result.actor.id],
+      ),
+      [[501, 4242]],
+    );
 
     const remoteAuthorization = await call(
       author,

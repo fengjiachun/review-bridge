@@ -537,21 +537,26 @@ function normalizeRuns(publication, raw) {
   };
 }
 
-function normalizeCodex(publication, raw) {
-  const target = object(publication.target, "publication.target");
-  const authorizationValue = authorization(publication);
+function codexFeedEndpoints(root, prNumber) {
+  return {
+    issue_comments: `${root}/issues/${prNumber}/comments?per_page=100`,
+    pull_request_reviews: `${root}/pulls/${prNumber}/reviews?per_page=100`,
+    pull_request_review_comments: `${root}/pulls/${prNumber}/comments?per_page=100`,
+  };
+}
+
+function codexCollection(raw, endpoints, adapterVersion) {
   const feeds = [
-    ["ISSUE_COMMENTS", "issue_comments", `/repos/${target.owner}/${target.repo}/issues/${target.pr_number}/comments?per_page=100`],
-    ["PULL_REQUEST_REVIEWS", "pull_request_reviews", `/repos/${target.owner}/${target.repo}/pulls/${target.pr_number}/reviews?per_page=100`],
-    ["PULL_REQUEST_REVIEW_COMMENTS", "pull_request_review_comments", `/repos/${target.owner}/${target.repo}/pulls/${target.pr_number}/comments?per_page=100`],
-  ].map(([kind, key, endpoint]) => {
+    ["ISSUE_COMMENTS", "issue_comments"],
+    ["PULL_REQUEST_REVIEWS", "pull_request_reviews"],
+    ["PULL_REQUEST_REVIEW_COMMENTS", "pull_request_review_comments"],
+  ].map(([kind, key]) => {
     const normalized = itemPages(raw[key], key);
     return {
-      key,
       items: normalized.items,
       source: completeSource(
         kind,
-        raw[key].endpoint ?? `GET ${endpoint}`,
+        raw[key].endpoint ?? `GET ${endpoints[key]}`,
         normalized.collectedAt,
         {
           status: "COMPLETE",
@@ -561,18 +566,37 @@ function normalizeCodex(publication, raw) {
       ),
     };
   });
-  const collectionAt = latestTime(
-    feeds.map((feed) => feed.source.collected_at),
-  );
-  return adaptCodexEvidence({
-    mode: "SNAPSHOT",
+  return {
     collection: {
       status: "COMPLETE",
-      collected_at: collectionAt,
+      collected_at: latestTime(feeds.map((feed) => feed.source.collected_at)),
       sources: feeds.map((feed) => feed.source),
-      adapter_version:
-        publication.codex_review_baseline.collection.adapter_version,
+      adapter_version: adapterVersion,
     },
+    issue_comments: feeds[0].items,
+    pull_request_reviews: feeds[1].items,
+    pull_request_review_comments: feeds[2].items,
+  };
+}
+
+function collectCodexFeeds(root, prNumber) {
+  return Object.fromEntries(
+    Object.entries(codexFeedEndpoints(root, prNumber)).map(
+      ([key, endpoint]) => [key, getPages(endpoint)],
+    ),
+  );
+}
+
+function normalizeCodex(publication, raw) {
+  const target = object(publication.target, "publication.target");
+  const authorizationValue = authorization(publication);
+  return adaptCodexEvidence({
+    mode: "SNAPSHOT",
+    ...codexCollection(
+      raw,
+      codexFeedEndpoints(`/repos/${target.owner}/${target.repo}`, target.pr_number),
+      publication.codex_review_baseline.collection.adapter_version,
+    ),
     expected_actor: {
       id: target.codex_actor.id,
       type: target.codex_actor.type,
@@ -582,9 +606,6 @@ function normalizeCodex(publication, raw) {
     request_history: publication.codex_request_history,
     ambiguity_acknowledgements:
       publication.codex_review_ambiguity_acknowledgements,
-    issue_comments: feeds[0].items,
-    pull_request_reviews: feeds[1].items,
-    pull_request_review_comments: feeds[2].items,
   });
 }
 
@@ -1399,15 +1420,7 @@ export function collectGithubObservation(publicationInput) {
     `${root}/commits/${authorizationValue.head_sha}/statuses?per_page=${ITEM_PAGE_SIZE}`,
     "commit statuses",
   );
-  const issueComments = getPages(
-    `${root}/issues/${target.pr_number}/comments?per_page=100`,
-  );
-  const pullRequestReviews = getPages(
-    `${root}/pulls/${target.pr_number}/reviews?per_page=100`,
-  );
-  const pullRequestReviewComments = getPages(
-    `${root}/pulls/${target.pr_number}/comments?per_page=100`,
-  );
+  const codexFeeds = collectCodexFeeds(root, target.pr_number);
   // One request, not a walk. Only a single page can be recorded, so paginating
   // would spend GitHub traffic building pages that are refused on arrival --
   // and would read as though multi-page collection were supported. A pull
@@ -1482,10 +1495,36 @@ export function collectGithubObservation(publicationInput) {
     classic_protection: classicProtection,
     check_runs: checkRuns,
     commit_statuses: commitStatuses,
-    issue_comments: issueComments,
-    pull_request_reviews: pullRequestReviews,
-    pull_request_review_comments: pullRequestReviewComments,
+    ...codexFeeds,
     review_threads: reviewThreads,
     observed_at: new Date().toISOString(),
   });
+}
+
+// The preexisting Codex evidence start_publication binds, read for the
+// authorized head. The selected pull request must currently carry that head.
+export function collectCodexBaseline({ owner, repo, prNumber, headSha, codexActorId }) {
+  const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  const pullRequestHead = get(`${root}/pulls/${prNumber}`).value.head?.sha;
+  if (pullRequestHead !== headSha) {
+    throw new Error(
+      `pull request ${owner}/${repo}#${prNumber} head is ${pullRequestHead}, not the authorized head ${headSha}`,
+    );
+  }
+  const baseline = adaptCodexEvidence({
+    mode: "BASELINE",
+    ...codexCollection(
+      collectCodexFeeds(root, prNumber),
+      codexFeedEndpoints(root, prNumber),
+      2,
+    ),
+    expected_actor: { id: codexActorId, type: "Bot" },
+    authorization_head_sha: headSha,
+  });
+  if (baseline.collection.status !== "COMPLETE") {
+    throw new Error(
+      `the Codex baseline is ${baseline.collection.status}: a review by Codex actor ${codexActorId} is still pending, or a review request lacks its author or timestamp; collect again once the review is submitted`,
+    );
+  }
+  return baseline;
 }

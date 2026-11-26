@@ -473,6 +473,78 @@ test("record_github_snapshot takes an observation file instead of an inline payl
   );
 });
 
+test("start_publication takes a baseline file instead of an inline payload", async (t) => {
+  const { root, repository, store, baseSha } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "change value");
+  const author = await connectClient("author", store);
+  t.after(() => author.close());
+  const authorized = await author.callTool({
+    name: "authorize_remote_publication",
+    arguments: {
+      repository_path: repository,
+      base_sha: baseSha,
+      head_sha: git(repository, "rev-parse", "HEAD"),
+      acknowledgement: "LOCAL_REVIEW_SKIPPED",
+      operator_label: "maintainer",
+      rationale: "Exercise the baseline file handoff.",
+    },
+  });
+  assert.notEqual(authorized.isError, true, JSON.stringify(authorized));
+  const reviewId = JSON.parse(authorized.content[0].text).review_id;
+  const invalidBaseline = { observed_at: 1 };
+  const baselinePath = path.join(root, "codex-review-baseline.json");
+  await fsp.writeFile(baselinePath, `${JSON.stringify(invalidBaseline)}\n`);
+  const start = async (baseline) => {
+    const result = await author.callTool({
+      name: "start_publication",
+      arguments: {
+        review_id: reviewId,
+        repository_id: 42,
+        owner: "owner",
+        repo: "repo",
+        pr_number: 7,
+        base_branch: "main",
+        head_branch: "feature",
+        codex_actor_id: 99,
+        codex_actor_type: "Bot",
+        codex_actor_login: "codex[bot]",
+        codex_trigger_mode: "EXPLICIT_ONLY",
+        ...baseline,
+      },
+    });
+    assert.equal(result.isError, true);
+    return JSON.parse(result.content[0].text);
+  };
+
+  for (const baseline of [
+    {
+      codex_review_baseline_path: baselinePath,
+      codex_review_baseline: invalidBaseline,
+    },
+    {},
+  ]) {
+    assert.match(
+      (await start(baseline)).error,
+      /exactly one of codex_review_baseline_path or codex_review_baseline/,
+    );
+  }
+
+  assert.equal(
+    (await start({ codex_review_baseline_path: path.join(root, "absent.json") })).code,
+    "BASELINE_FILE_UNREADABLE",
+  );
+
+  const inline = await start({ codex_review_baseline: invalidBaseline });
+  assert.match(inline.error, /baseline\.observed_at/);
+  assert.deepEqual(
+    await start({ codex_review_baseline_path: baselinePath }),
+    inline,
+  );
+});
+
 test("MCP preserves immutable intent texts and only serves the reconstruction in round two", async (t) => {
   const { root, repository, store, baseSha } = await fixture();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));

@@ -12,7 +12,7 @@ const server = fileURLToPath(new URL("./server.mjs", import.meta.url));
 // default cannot weaken reviews.
 export const REVIEWER_REQUESTED = Object.freeze({ reasoning_effort: "high" });
 
-function assertOutsideGitRepository(cwd, subject, remedy) {
+export function assertOutsideGitRepository(cwd, subject, remedy) {
   // Inherited GIT_* variables such as GIT_DIR would answer for another repository.
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
   const git = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"], env: { ...env, LC_ALL: "C" } });

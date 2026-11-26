@@ -70,6 +70,22 @@ store at call time and never written to the ledger. It is a signal for the
 operator only and never changes `status`, `blocking_reason`, or
 `next_action`.
 
+Before `start_publication`, collect the baseline with the same packaged
+collector in baseline mode, naming the review ID, the pull request, and the
+pinned Codex Bot's numeric actor ID:
+
+```bash
+node dist/review-bridge-v0.26.0/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --baseline --review-id <review_id> --repo <owner/name> --pr <pr_number> --codex-actor-id <id>
+```
+
+It reads the head from the review's local gate or remote-only authorization in
+the store and refuses a pull request whose head differs, then walks every page
+of the three Codex feeds and normalizes them as the complete version-2
+baseline. It writes the baseline into the private store beside the review and
+prints only a receipt; pass the printed path to `start_publication` as
+`codex_review_baseline_path`. The baseline must be at most five minutes old
+when the publication starts.
+
 For a fresh snapshot, run the
 packaged read-only collector against the review ID:
 
@@ -93,9 +109,12 @@ Neither the ledger nor the observation should be routed through the reviewing
 or authoring model. Both run to tens of thousands of tokens, and a model that
 retypes them pays for the same bytes twice — once to read them and again to
 emit them — while adding a transcription failure mode the file handoff does not
-have. The collector still accepts a ledger path or stdin, and
-`record_github_snapshot` still accepts an inline `observation`, for callers that
-have already loaded the data by other means.
+have. The baseline file saves the same retyping, although the
+`start_publication` result still returns the baseline. The collector still
+accepts a ledger path or stdin, `record_github_snapshot` still accepts an
+inline `observation`, and `start_publication` still accepts an inline
+`codex_review_baseline`, for callers that have already loaded the data by
+other means.
 
 The packaged Codex plugin also includes
 `scripts/inspect-publication-audit.mjs <review_id>` for read-only, full-chain

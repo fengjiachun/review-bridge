@@ -9,6 +9,22 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Added
+
+- (#232) The packaged collector's `--baseline` mode builds the Codex baseline
+  `start_publication` needs. Given a review ID, `--repo`, `--pr`, and the
+  pinned `--codex-actor-id`, it reads the authorized head from the store,
+  refuses a pull request whose head differs, walks every page of the three
+  Codex feeds, and writes the version-2 baseline into the private store,
+  printing only a receipt. It writes nothing while the baseline is
+  incomplete, such as when a Codex review is still pending, and names the
+  possible causes. `start_publication` takes that file as
+  `codex_review_baseline_path`; exactly one of it and the inline
+  `codex_review_baseline` is required, and the workflow skill now uses the
+  file. In both collector modes an explicit `--out` is now refused unless Git
+  positively reports the path outside any work tree, rather than whenever the
+  check fails to find one.
+
 ### Internal
 
 - (#231) CONTRIBUTING states that the version labels in the guides change only

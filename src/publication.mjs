@@ -175,6 +175,42 @@ export async function readObservationFile(filePath) {
   );
 }
 
+export async function readBaselineFile(filePath) {
+  if (typeof filePath !== "string" || filePath.trim() === "") {
+    fail("INVALID_INPUT", "codex_review_baseline_path must be a non-empty string");
+  }
+  const resolved = path.resolve(filePath);
+  let stat;
+  try {
+    stat = await fsp.stat(resolved);
+  } catch (error) {
+    fail(
+      "BASELINE_FILE_UNREADABLE",
+      `cannot read baseline file: ${error.message}`,
+      { path: resolved, retryable: false },
+    );
+  }
+  if (!stat.isFile()) {
+    fail("BASELINE_FILE_UNREADABLE", "codex_review_baseline_path is not a regular file", {
+      path: resolved,
+      retryable: false,
+    });
+  }
+  if (stat.size > MAX_OBSERVATION_BYTES) {
+    fail(
+      "BASELINE_FILE_TOO_LARGE",
+      `baseline file exceeds ${MAX_OBSERVATION_BYTES} bytes`,
+      { path: resolved, bytes: stat.size, retryable: false },
+    );
+  }
+  const content = await fsp.readFile(resolved);
+  return parseJsonObject(
+    content,
+    "BASELINE_FILE_MALFORMED",
+    "baseline file is not a JSON object",
+  );
+}
+
 function publicationDirectory(storeRoot, reviewId) {
   if (typeof reviewId !== "string" || !/^rb-[0-9TZ-]+-[a-f0-9]{8}$/.test(reviewId)) {
     fail("INVALID_INPUT", "invalid review_id");
@@ -2884,6 +2920,12 @@ async function readBoundAuthorization(
 // replaced, or belongs to another head fails here, not in the report.
 export async function readBoundPublicationAuthorization(storeRoot, reviewId, ledger) {
   return readBoundAuthorization(pathsFor(storeRoot, reviewId), reviewId, ledger);
+}
+
+// The authorization start_publication would bind, read without the repository
+// checks start repeats, for a collector that needs only its head.
+export async function readPublicationStartAuthorization(storeRoot, reviewId) {
+  return readStartAuthorization(pathsFor(storeRoot, reviewId), reviewId);
 }
 
 // The local gate a LOCAL_GATE_PASSED review minted, read and validated the

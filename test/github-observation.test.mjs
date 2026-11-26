@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { collectClassicProtection, exceedsSinglePage, linkHasNext, normalizeClassicProtectionResponse, normalizeGithubObservation, normalizeOauthAdminProofResponse, spawnGh, splitGhResponse } from "../src/github-observation.mjs";
+import { collectClassicProtection, collectCodexBaseline, exceedsSinglePage, linkHasNext, normalizeClassicProtectionResponse, normalizeGithubObservation, normalizeOauthAdminProofResponse, spawnGh, splitGhResponse } from "../src/github-observation.mjs";
 
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
@@ -1159,4 +1162,119 @@ test("an HTTP answer or a non-transport failure is not retried", () => {
     assert.equal(gh.calls.length, 1);
     assert.deepEqual(gh.sleeps, []);
   }
+});
+
+// A gh stand-in on PATH that answers each endpoint from a table, with the
+// response head `gh api -i` prints, so the real transport and Link walk run.
+async function withFakeGh(t, responses) {
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-fake-gh-"));
+  t.after(() => fsp.rm(directory, { recursive: true, force: true }));
+  const table = path.join(directory, "responses.json");
+  await fsp.writeFile(table, JSON.stringify(responses));
+  await fsp.writeFile(
+    path.join(directory, "gh"),
+    `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const include = args[1] === "-i";
+const endpoint = args[include ? 2 : 1];
+fs.appendFileSync(${JSON.stringify(path.join(directory, "calls"))}, endpoint + "\\n");
+const response = JSON.parse(fs.readFileSync(${JSON.stringify(table)}, "utf8"))[endpoint];
+if (response == null) {
+  process.stderr.write("gh: Not Found (HTTP 404)\\n");
+  process.exit(1);
+}
+const head = "HTTP/2.0 200 OK\\r\\n" + (response.link ? "Link: " + response.link + "\\r\\n" : "") + "\\r\\n";
+process.stdout.write((include ? head : "") + JSON.stringify(response.body));
+`,
+    { mode: 0o755 },
+  );
+  const previous = process.env.PATH;
+  process.env.PATH = `${directory}${path.delimiter}${previous}`;
+  t.after(() => {
+    process.env.PATH = previous;
+  });
+  return async () =>
+    (await fsp.readFile(path.join(directory, "calls"), "utf8")).trim().split("\n");
+}
+
+const fixtureUrl = new URL("./fixtures/github/codex-clean.json", import.meta.url);
+
+test("the baseline walks every page of the three Codex feeds for the authorized head", async (t) => {
+  const fixture = JSON.parse(await fsp.readFile(fixtureUrl, "utf8"));
+  const head = fixture.local_gate_head_sha;
+  const root = "/repos/owner/repo";
+  const calls = await withFakeGh(t, {
+    [`${root}/pulls/7`]: { body: { head: { sha: head } } },
+    [`${root}/issues/7/comments?per_page=100&page=1`]: {
+      body: [fixture.issue_comments[0]],
+      link: `<https://api.github.com${root}/issues/7/comments?per_page=100&page=2>; rel="next"`,
+    },
+    [`${root}/issues/7/comments?per_page=100&page=2`]: {
+      body: [fixture.issue_comments[1]],
+    },
+    [`${root}/pulls/7/reviews?per_page=100&page=1`]: { body: [] },
+    [`${root}/pulls/7/comments?per_page=100&page=1`]: { body: [] },
+  });
+  const baseline = collectCodexBaseline({
+    owner: "owner",
+    repo: "repo",
+    prNumber: 7,
+    headSha: head,
+    codexActorId: fixture.expected_actor.id,
+  });
+  assert.equal(baseline.collection.status, "COMPLETE");
+  assert.equal(baseline.collection.adapter_version, 2);
+  assert.deepEqual(
+    baseline.collection.sources.map((source) => [source.kind, source.page_count]),
+    [
+      ["ISSUE_COMMENTS", 2],
+      ["PULL_REQUEST_REVIEWS", 1],
+      ["PULL_REQUEST_REVIEW_COMMENTS", 1],
+    ],
+  );
+  assert.equal(baseline.requests.length, 1);
+  assert.equal(baseline.candidate_results.length, 1);
+  assert.equal((await calls()).length, 5);
+});
+
+test("the baseline refuses a pull request whose head is not the authorized one", async (t) => {
+  const calls = await withFakeGh(t, {
+    "/repos/owner/repo/pulls/8": { body: { head: { sha: baseSha } } },
+  });
+  assert.throws(
+    () =>
+      collectCodexBaseline({
+        owner: "owner",
+        repo: "repo",
+        prNumber: 8,
+        headSha,
+        codexActorId: 99,
+      }),
+    /head is a{40}, not the authorized head b{40}/,
+  );
+  assert.deepEqual(await calls(), ["/repos/owner/repo/pulls/8"]);
+});
+
+test("the baseline refuses while a Codex review is still pending", async (t) => {
+  const root = "/repos/owner/repo";
+  await withFakeGh(t, {
+    [`${root}/pulls/9`]: { body: { head: { sha: headSha } } },
+    [`${root}/issues/9/comments?per_page=100&page=1`]: { body: [] },
+    [`${root}/pulls/9/reviews?per_page=100&page=1`]: {
+      body: [{ id: 5, state: "PENDING", body: "", user: { id: 99, type: "Bot" } }],
+    },
+    [`${root}/pulls/9/comments?per_page=100&page=1`]: { body: [] },
+  });
+  assert.throws(
+    () =>
+      collectCodexBaseline({
+        owner: "owner",
+        repo: "repo",
+        prNumber: 9,
+        headSha,
+        codexActorId: 99,
+      }),
+    /the Codex baseline is INCOMPLETE: a review by Codex actor 99 is still pending/,
+  );
 });
