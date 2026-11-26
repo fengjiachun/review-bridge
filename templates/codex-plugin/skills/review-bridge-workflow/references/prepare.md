@@ -34,13 +34,19 @@ After a verdict, load [Handle findings](findings.md) for findings or
    A verified `SUCCESSOR` is the default and stands: on a long-lived branch its
    delta is a small fraction of the cumulative patch, and re-reviewing
    already-gated code costs the reviewer far more context than it buys.
-   `force_full_review: true` is the deliberate exception, and one scenario
-   names it. A continuation from `CONTINUABLE_FINDINGS` passes it beside
+   `force_full_review: true` is the deliberate exception, and two scenarios
+   name it. A continuation from `CONTINUABLE_FINDINGS` passes it beside
    `continued_from_review_id`, which the server requires. The continuation
    repeats the source review's `requirement` exactly; its
    `implementation_scope` may describe the new head. A refused continuation
    names each unmet check: source status, repository, requirement, reviewer
-   provider. Outside it,
+   provider. A lens review is the other exception: `lens_review: true`
+   requires `force_full_review: true` and `CODEX_TASK`, and its round one runs
+   the general reviewer plus `tests` and `design` lens runs on the same
+   snapshot, at about three times the round-one cost. Pass `lens_review: true`
+   only when the user has asked, in this conversation, for a lens review of
+   this review; never offer, suggest, or start one otherwise. A continuation
+   gets lenses only when the user asks again. Outside these,
    demanding a full patch buys a re-review of gated code, so state the reason
    in the session before passing it.
 6. `CODEX_TASK` is the default `reviewer_provider`; omitting it prepares a
@@ -85,13 +91,18 @@ After a verdict, load [Handle findings](findings.md) for findings or
    first in round two. The rationale is frozen before any finding exists and
    the reviewer does not see it in round one.
 8. Call `get_review_summary`, record its `state_version`, and report the
-   returned `review_id`, `reviewer_provider`, `review_strategy`, and state
-   `WAITING_FOR_REVIEW`. Also report `current_snapshot.change_size`: manual
+   returned `review_id`, `reviewer_provider`, `review_strategy`, and the
+   `status` it gives: `WAITING_FOR_REVIEW`, or `WAITING_FOR_LENS_REVIEW` for a
+   lens review. Also report `current_snapshot.change_size`: manual
    review continues even when `over_budget` is true, because the operator is
    already present to decide whether the change should be split. When
    `warning_threshold_crossed` is true, state the total and
    `remaining_headroom` and say whether the change will continue or split.
-9. Start a fresh reviewer context for every new `review_id`. For
+9. Start a fresh reviewer context for every new `review_id`. For a
+   `WAITING_FOR_LENS_REVIEW` review, call `launch_local_reviewer` as in
+   [Dispatching a CODEX_TASK review](codex-task.md): only its bound runs can
+   list or submit to the lens round, so a reviewer task started by hand cannot
+   serve it. For
    `CLAUDE_DESKTOP`, use a fresh Claude conversation. For `CODEX_TASK`, create
    a new Codex task rather than forking this task, and send it only the review
    ID and a request to follow the packaged reviewer skill. To launch it from this session, follow [Dispatching a CODEX_TASK review](codex-task.md). For

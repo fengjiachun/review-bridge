@@ -728,7 +728,7 @@ test("time filters compare UTC instants with inclusive since and exclusive until
     since: "2026-09-01T01:00:00+01:00",
     until: "2026-09-02",
   });
-  assert.equal(scorecard.schema_version, 4);
+  assert.equal(scorecard.schema_version, 5);
   assert.equal(scorecard.filters.since, "2026-09-01T00:00:00.000Z");
   assert.equal(scorecard.filters.until, "2026-09-02T00:00:00.000Z");
   assert.equal(scorecard.corpus.reviews_counted, 2);
@@ -879,7 +879,7 @@ test("legacy absent and null mode fields retain core compatibility defaults", as
 
 test("review outcomes count clean reviews and leave the rest in flight", async (t) => {
   const store = await emptyStore(t);
-  for (const status of ["REVIEW_SUBMITTED", "CLEAN", "WAITING_FOR_REVIEW"]) {
+  for (const status of ["REVIEW_SUBMITTED", "CLEAN", "WAITING_FOR_REVIEW", "WAITING_FOR_LENS_REVIEW"]) {
     await writeReview(store, status, reviewLedger({ id: status, status }));
   }
   const scorecard = await buildScorecard(store);
@@ -887,12 +887,13 @@ test("review outcomes count clean reviews and leave the rest in flight", async (
   assert.equal(stats.reviews_by_status.REVIEW_SUBMITTED, 1);
   assert.equal(stats.reviews_by_status.CLEAN, 1);
   assert.equal(stats.reviews_by_status.WAITING_FOR_REVIEW, 1);
-  assert.equal(stats.not_clean, 2);
+  assert.equal(stats.reviews_by_status.WAITING_FOR_LENS_REVIEW, 1);
+  assert.equal(stats.not_clean, 3);
   assert.deepEqual(stats.rounds_to_clean, { 1: 1 });
   assert.match(scorecard.metric_semantics.not_clean, /not a failure count/);
   assert.match(
     renderScorecardMarkdown(scorecard),
-    /\| Provider \| Reviews \| Clean \| Clean in round 1 \| Clean in round 2 \| Human required \| Continuable \| In flight \|\n[^\n]*\n\| ALL \| 3 \| 1 \| 1 \| 0 \| 0 \| 0 \| 2 \|/,
+    /\| Provider \| Reviews \| Clean \| Clean in round 1 \| Clean in round 2 \| Human required \| Continuable \| In flight \|\n[^\n]*\n\| ALL \| 4 \| 1 \| 1 \| 0 \| 0 \| 0 \| 3 \|/,
   );
 });
 

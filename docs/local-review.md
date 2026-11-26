@@ -55,6 +55,33 @@ State-changing tools can also return structured concurrency and durability
 errors. See [Troubleshooting](troubleshooting.md) for what each one means and
 whether retrying is safe.
 
+## Lens review
+
+On request, a `CODEX_TASK` review can run a lens round first. Ask the author
+for a lens review of this change; the author passes `lens_review: true` with
+`force_full_review: true` only when you ask, and never offers one. Round one
+then runs three reviewers on the same snapshot at once: the general reviewer,
+a `tests` lens that looks for changed behavior no test would catch breaking,
+and a `design` lens that looks for a simpler shape. Both lenses report only
+defects worth fixing before merge, never nits. The round costs about three
+times a plain round one, can return more findings to answer, and waits for the
+last run's submission, including any relaunch.
+
+The review waits in `WAITING_FOR_LENS_REVIEW` until all three runs have
+submitted. Its runs are started only by `launch_local_reviewer`, which binds
+each run's reviewer server to the review; a reviewer started by hand, as
+below, cannot list or submit to a lens round. `get_review_summary` lists each
+run with its `submitted` flag and exit receipt, and `launch_local_reviewer`
+relaunches only a run that exited without submitting. Errata are refused until the round closes. The close puts every
+finding into the one ledger, general first, each lens finding tagged with its
+`lens`, and ends `CLEAN` or `REVIEW_SUBMITTED`. From there the review is a
+plain one: one general reviewer decides every finding in round two, and a
+continuation has no lenses unless you ask again.
+
+The lens instructions are read only from an installed package outside any Git
+work tree, so a source checkout refuses `lens_review`. Every install sharing
+the store must run a release with lens reviews before you start one.
+
 ## Start a reviewer manually
 
 If you choose manual dispatch instead of `launch_local_reviewer`, prepare the
@@ -258,6 +285,9 @@ it sees the same bytes.
 ## State machine
 
 ```text
+WAITING_FOR_LENS_REVIEW (lens review, until all three runs submit)
+  └─ closes like WAITING_FOR_REVIEW below
+
 WAITING_FOR_REVIEW
   ├─ no findings ──────────────────────────────> CLEAN
   └─ findings -> REVIEW_SUBMITTED

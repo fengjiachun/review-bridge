@@ -1614,7 +1614,7 @@ test("legacy full reports retain their contents and mark reviewer configuration 
   // The stored baseline retains its original rendering identity.
   assert.ok(baseline.includes("- Report revision: `9-f1`"));
   assert.ok(rendered.includes(`- Report revision: \`9-f${REPORT_FORMAT}\``));
-  assert.equal(REPORT_FORMAT, 11);
+  assert.equal(REPORT_FORMAT, 12);
 });
 
 test("a finding's heading names the constraint it records", () => {

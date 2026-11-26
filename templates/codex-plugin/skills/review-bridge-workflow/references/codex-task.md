@@ -90,16 +90,30 @@ launch between them.
    `<attempt_root>/process.log`. An absent exit means running or indeterminate;
    it never permits a concurrent replacement. After a confirmed exit without a
    verdict, `launch_local_reviewer` can start a replacement.
+   In a lens round (`WAITING_FOR_LENS_REVIEW`) the launch starts three runs,
+   `general`, `tests`, and `design`, and `get_review_summary` lists each in
+   `runs` with its `submitted` flag and its `reviewer_dispatch`, which carries
+   `exit` once that run's process has exited; the `tests` and `design` runs get
+   a request naming their lens instead of the one above. Apply these rules per
+   run, judging each run by its own `submitted` flag rather than by the
+   round's verdict: a run without `exit` is never replaced, and a run with
+   `exit` and `submitted: false` exited without submitting and is relaunched
+   by calling `launch_local_reviewer` again, which starts only such runs. The
+   wait returns no exit receipts, so after each `timed_out` result in a lens
+   round call `get_review_summary` and inspect every run before waiting again
+   with the same `state_version`. The round's verdict forms when all three have
+   submitted.
 
 The launch discipline is fixed, and it states what must never happen rather
-than counting launches. Never run two reviewers on the same round at once, and
-never review from the author task: never fork that task, and never pass any
+than counting launches. Never run two reviewers on the same round at once —
+in a lens round, never two on the same run at once, because its three runs
+are that round's reviewers — and never review from the author task: never fork that task, and never pass any
 authoring history — not the diff you wrote, the requirement discussion, your
 reasoning, or this session's transcript. Within those two bars launches are not
 rationed. A round-two rereview is that review's next round, so its launch is
 required rather than an exception. A launch that has exited leaves the round to
-be judged from the ledger: if the ledger shows no verdict for this round, no
-reviewer is working it, so start a replacement launch in the same shape as the
+be judged from the ledger: if the ledger shows no verdict for this round (in a
+lens round, for that run), no reviewer is working it, so start a replacement launch in the same shape as the
 original; that replacement is the same round, and both bars still hold, because
 the reviewer it replaces is gone. The exit status, zero or not, establishes
 only that the process is gone — a run can submit its verdict and then fail

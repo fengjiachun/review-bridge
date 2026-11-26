@@ -637,7 +637,7 @@ test("publish-bound work states its gate provider and its review strategy", asyn
       "successor must be stated as the default review strategy",
     ],
     [
-      "`force_full_review: true` is the deliberate exception, and one scenario names it.",
+      "`force_full_review: true` is the deliberate exception, and two scenarios name it.",
       "a full-patch review must read as the exception, with its scenarios named",
     ],
     [

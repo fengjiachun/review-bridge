@@ -154,8 +154,8 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       /states what must never happen rather than counting launches/,
     ],
     [
-      "no two reviewers on one round at once",
-      /Never run two reviewers on the same round at once/,
+      "no two reviewers on one round, or on one lens run, at once",
+      /Never run two reviewers on the same round at once — in a lens round, never two on the same run at once, because its three runs are that round's reviewers/,
     ],
     ["no reviewing from the author task", /never review from the author task/],
     [
@@ -875,6 +875,26 @@ const CONVENTIONS_SECTION = [
   "code, and a misplaced module boundary are not requests for abstraction, so it",
   "does not cover them.",
 ].join(" ");
+
+// The server cannot tell where a lens review was asked for, so this sentence
+// in the author guidance is the whole rule.
+export const LENS_REVIEW_REQUEST_RULE =
+  "Pass `lens_review: true` only when the user has asked, in this conversation, for a lens review of this review; never offer, suggest, or start one otherwise.";
+
+export function assertLensReviewRequestRule(document, label) {
+  assert.ok(
+    document.replace(/^ *(?:- )?/gm, "").replace(/\s+/g, " ").includes(LENS_REVIEW_REQUEST_RULE),
+    `${label} does not limit lens_review to an explicit user request`,
+  );
+}
+
+// The bar each lens file exists to carry, which a byte comparison between the
+// source and the package cannot protect.
+const LENS_BAR = "worth fixing before merge, and no nits";
+
+export function assertLensPolicy(document, label) {
+  assert.ok(document.replace(/\s+/g, " ").includes(LENS_BAR), `${label} lost its "${LENS_BAR}" bar`);
+}
 
 export function assertConventionsSection(document, label) {
   const body = extractMarkdownSection(`\n${document}`, CONVENTIONS_HEADING);

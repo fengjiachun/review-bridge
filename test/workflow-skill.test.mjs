@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { assertLensReviewRequestRule } from "../scripts/dispatch-contract.mjs";
 import { readWorkflowDocuments } from "../scripts/workflow-skill.mjs";
 
 const root = fileURLToPath(new URL(
@@ -75,4 +76,13 @@ test("reference validation rejects broken routes and unreachable files", async (
   await fsp.writeFile(path.join(fixture, "SKILL.md"), "# No routes\n");
   await fsp.writeFile(path.join(fixture, "references", "orphan.md"), "# Orphan\n");
   await assert.rejects(readWorkflowDocuments(path.join(fixture, "SKILL.md")), /unreachable workflow reference: orphan.md/);
+});
+
+test("the author guidance limits lens_review to an explicit user request", async () => {
+  const docs = await readWorkflowDocuments(path.join(root, "SKILL.md"));
+  for (const name of ["SKILL.md", "references/prepare.md"]) {
+    assertLensReviewRequestRule(docs.get(name), name);
+    assert.throws(() => assertLensReviewRequestRule(docs.get(name).replace("never offer, suggest,", "offer,"), name),
+      /does not limit lens_review to an explicit user request/);
+  }
 });

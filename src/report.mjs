@@ -415,9 +415,13 @@ function findingIndexes(review) {
   };
 }
 
+// Run submissions wait in their run entries until the lens round closes.
+const LENS_ROUND_PENDING = "Run submissions are staged until all three lens-round runs have submitted; the review's finding list is empty until then.";
+
 function findingsSection(review, { resolutionByFinding, decisionByFinding }) {
   const findings = review.findings ?? [];
   const carried = review.carried_findings ?? [];
+  if (review.status === "WAITING_FOR_LENS_REVIEW") return ["### Findings", LENS_ROUND_PENDING];
   if (findings.length === 0) {
     const sources = [...new Set(carried.map((entry) => entry.continued_from_review_id))];
     return [
@@ -737,7 +741,7 @@ export function summaryDigest(summary) {
 // Raise it by one in any change that alters the Markdown this module renders
 // -- wording, ordering, a new line, a heading -- so the reports the previous
 // version wrote stay readable at their own names.
-export const REPORT_FORMAT = 11;
+export const REPORT_FORMAT = 12;
 
 // `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
 // `p<revision>-s<summary digest>-f<format>` without one.
@@ -933,7 +937,9 @@ function pullRequestName(publication) {
 function findingsFact(review, partition) {
   const carried = (review.carried_findings ?? []).length;
   const raised =
-    partition.all.length === 0
+    review.status === "WAITING_FOR_LENS_REVIEW"
+      ? "none recorded until the lens round closes"
+      : partition.all.length === 0
       ? "none raised"
       : `${partition.all.length} — ${severityBreakdown(partition.all)}`;
   return carried === 0
@@ -992,6 +998,7 @@ function remoteOnlyFacts(publication, authorization, summary) {
 // inspect, and says so.
 const LOCAL_NEXT_STEP = {
   WAITING_FOR_REVIEW: "the reviewer's first review is still owed",
+  WAITING_FOR_LENS_REVIEW: "round one's lens runs are still owed",
   REVIEW_SUBMITTED: "the author's resolutions are owed next",
   AUTHOR_RESPONDED: "a rereview is the next step",
   WAITING_FOR_REREVIEW: "the rereview is still owed",
@@ -1025,7 +1032,9 @@ function verdictLines(review, publication, summary, partition) {
   const total = partition.all.length;
   const open = partition.open.length;
   const standing =
-    total === 0
+    review.status === "WAITING_FOR_LENS_REVIEW"
+      ? "the lens round's run submissions are staged until all three have submitted"
+      : total === 0
       ? "no finding was raised"
       : open === 0
         ? `${count(total, "finding")} raised, none still open`
@@ -1061,6 +1070,7 @@ function findingHeadline(finding) {
 // saying so: the opening's Open items answers that, next step included.
 function openFindingsSection(review, partition) {
   const carried = review.carried_findings ?? [];
+  if (review.status === "WAITING_FOR_LENS_REVIEW") return [];
   if (partition.all.length === 0) {
     return carried.length === 0
       ? []
@@ -1147,7 +1157,9 @@ function findingsTableSection(review, local, publication, { resolutionByFinding,
     const findings = review.findings ?? [];
     const activeIds = new Set(local.active_findings.map((finding) => finding.id));
     lines.push(
-      findings.length === 0
+      review.status === "WAITING_FOR_LENS_REVIEW"
+        ? LENS_ROUND_PENDING
+        : findings.length === 0
         ? "No finding was raised in this review."
         : builtTable(
             ["ID", "Severity", "Finding", "Disposition", "Round"],
@@ -1161,10 +1173,19 @@ function findingsTableSection(review, local, publication, { resolutionByFinding,
                 resolutionByFinding.get(finding.id),
                 decisionByFinding.get(finding.id),
               ),
-              inline(finding.introduced_round ?? "n/a"),
+              `${inline(finding.introduced_round ?? "n/a")}${finding.lens == null ? "" : ` (${cellCode(finding.lens)} lens)`}`,
             ]),
           ),
     );
+    const runs = review.rounds?.[0]?.runs;
+    if (runs != null) {
+      const closed = review.status !== "WAITING_FOR_LENS_REVIEW";
+      lines.push(`Lens runs: ${runs.map((entry) => {
+        const raised = findings.filter((finding) => finding.introduced_round === 1 && (finding.lens ?? "general") === entry.run).length;
+        const state = entry.submitted_at == null ? "owed" : closed ? `submitted, ${count(raised, "finding")}` : "submitted";
+        return `${code(entry.run)} ${state}`;
+      }).join("; ")}.`);
+    }
     const carried = review.carried_findings ?? [];
     if (carried.length > 0) {
       lines.push(

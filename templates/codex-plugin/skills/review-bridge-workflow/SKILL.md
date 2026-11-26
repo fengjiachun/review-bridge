@@ -42,7 +42,12 @@ load [Lock contention](references/lock-contention.md) before deciding to retry.
 - Never call reviewer tools from the author task. Each new review ID needs a
   fresh independent reviewer with only the review ID and the reviewer request,
   no authoring history or other reviewer's findings. Never run two reviewers
-  on the same round at once. Use the selected provider's round-two rules.
+  on the same round at once; in a lens round its three runs are that round's
+  reviewers, and the rule holds per run. Use the selected provider's round-two
+  rules.
+- Pass `lens_review: true` only when the user has asked, in this conversation,
+  for a lens review of this review; never offer, suggest, or start one
+  otherwise.
 - Never programmatically launch a CLAUDE_DESKTOP reviewer. The operator opens
   the conversation themselves; this account-compliance boundary applies in
   every mode.
