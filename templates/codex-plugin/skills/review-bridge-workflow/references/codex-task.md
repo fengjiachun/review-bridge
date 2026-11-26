@@ -50,7 +50,7 @@ launch between them.
    > follow the review strategy, and submit every actionable finding.
 
    Each round records its launch. `requested` records the model when one was
-   chosen, the effort, and whether each was chosen (`selected`) or came from
+   chosen or an effort was checked against it, the effort, and whether each was chosen (`selected`) or came from
    the Codex configuration or the `high` default; `observed` is unavailable. A
    process log cannot authenticate the remote model. Older ledgers keep what
    they recorded and remain readable.

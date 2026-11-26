@@ -17,9 +17,11 @@ uses the model and effort set in the client that creates it. See
 **The reviewer exits at once with a model error** — the Codex CLI on the MCP
 host rejected the model for that account, or the model does not support the
 requested reasoning effort. The round's `reviewer_configuration.requested`
-(in `get_review_summary`) shows which model and effort were asked for and
-whether each was chosen for the review or came from the defaults; read it
-with the attempt's `process.log`. If both came from the defaults, configure a
+(in `get_review_summary`) shows the effort, whether the model and effort were
+chosen for the review or came from the defaults, and the model name when one
+was chosen or an effort was checked against it. A default launch names no
+model: the model is `model` in the host's Codex configuration, and the
+attempt's `process.log` may show what Codex reported. Read both. If both came from the defaults, configure a
 model the account can use at `high`. If either was chosen, launching again
 without a new choice repeats it, so ask the author to launch with another
 model or effort for this review. In either case check the executable and

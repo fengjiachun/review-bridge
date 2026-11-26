@@ -43,7 +43,9 @@ gpt-6.2-sol at max effort". The author lists the models this host's Codex
 offers (`list_reviewer_models`), with each model's supported efforts, and
 launches with your choice. A model Codex does not list, or an effort the model
 does not support, is refused; the author never substitutes another. An effort
-chosen without a model is checked against the configured model. The choice
+chosen without a model is checked against the configured model, and the
+reviewer is started with that model even if the configuration changes before
+launch. The choice
 carries to the review's later rounds until you choose again; a new review or a
 continuation starts back at the defaults. The author does not ask which model
 to use unless you raise it.
@@ -86,9 +88,10 @@ replacement. Process exit is not a verdict; inspect the ledger before retrying.
 An absent exit record is deliberately indeterminate even if a host reboot killed
 the process; an operator must reconcile that attempt before replacing it.
 
-Requested configuration is a launch record: the chosen model if any, the
-effort, and for each whether it was `selected` or came from the Codex
-configuration or the `high` default, for example
+Requested configuration is a launch record: the model when one was chosen or
+an effort was checked against it, the effort, and for each whether it was
+`selected` or came from the Codex configuration or the `high` default. A
+default launch names no model, for example
 `{"reasoning_effort":"high","model_source":"configuration","reasoning_effort_source":"default"}`.
 Reports print it per round. Observed remote model identity is
 `unavailable`; neither local logs nor provider binding authenticate it. Rounds

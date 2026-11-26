@@ -23,7 +23,8 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `reasoning_effort`. Either one is checked against a fresh model list right
   before launch; a model the list does not offer, or an effort that model
   does not support, is refused, with nothing substituted. An effort given
-  alone is checked against the configured model. A choice carries to the
+  alone is checked against the configured model, and the reviewer is started
+  with that model. A choice carries to the
   review's later rounds until the user chooses again; a new review or a
   continuation starts at the defaults, which are unchanged: the configured
   model at `high` effort. Each round's `requested` now also records
