@@ -35,6 +35,7 @@ import {
   finalizePublicationGate,
   getPublication,
   getPublicationSummary,
+  readBaselineFile,
   readObservationFile,
   recordCodexReviewRequest,
   recordGithubSnapshot,
@@ -432,7 +433,7 @@ if (role === "author") {
     {
       title: "Start GitHub publication ledger",
       description:
-        "Bind a local review gate or explicit remote-only authorization to one pull request, pinned Codex Bot actor, trigger policy, and fresh complete preexisting Codex baseline. The result is the new ledger plus prior_ledgers_for_pull_request, the number of other publication ledgers in this store for the same repository_id and pr_number; it is derived at call time, not stored, and decides nothing.",
+        "Bind a local review gate or explicit remote-only authorization to one pull request, pinned Codex Bot actor, trigger policy, and fresh complete preexisting Codex baseline, read from the codex_review_baseline_path the collector's --baseline mode prints or, for compatibility, passed inline as codex_review_baseline. Never retype the baseline inline. The result is the new ledger plus prior_ledgers_for_pull_request, the number of other publication ledgers in this store for the same repository_id and pr_number; it is derived at call time, not stored, and decides nothing.",
       inputSchema: {
         review_id: z.string(),
         repository_id: z.number().int().positive(),
@@ -450,11 +451,24 @@ if (role === "author") {
         ]),
         operator_label: z.string().optional(),
         rationale: z.string().optional(),
-        codex_review_baseline: z.record(z.unknown()),
+        codex_review_baseline_path: z.string().optional(),
+        codex_review_baseline: z.record(z.unknown()).optional(),
       },
     },
-    (input) =>
-      startPublication(storeRoot, {
+    async (input) => {
+      if (
+        (input.codex_review_baseline_path == null) ===
+        (input.codex_review_baseline == null)
+      ) {
+        throw new Error(
+          "provide exactly one of codex_review_baseline_path or codex_review_baseline",
+        );
+      }
+      const baseline =
+        input.codex_review_baseline_path == null
+          ? input.codex_review_baseline
+          : await readBaselineFile(input.codex_review_baseline_path);
+      return startPublication(storeRoot, {
         reviewId: input.review_id,
         repositoryId: input.repository_id,
         owner: input.owner,
@@ -468,8 +482,9 @@ if (role === "author") {
         codexTriggerMode: input.codex_trigger_mode,
         operatorLabel: input.operator_label ?? null,
         rationale: input.rationale ?? null,
-        baseline: input.codex_review_baseline,
-      }),
+        baseline,
+      });
+    },
   );
 
   register(

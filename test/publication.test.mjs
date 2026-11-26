@@ -18,6 +18,7 @@ import {
   getPublicationSummary,
   inspectPublicationAudit,
   publicationConstants,
+  readBaselineFile,
   readObservationFile,
   recordCodexReviewRequest,
   recordGithubSnapshot,
@@ -6802,6 +6803,15 @@ test("observations reach the ledger by path instead of through the caller", asyn
   );
   await assert.rejects(readObservationFile(oversized), (error) => {
     assert.equal(error.code, "OBSERVATION_FILE_TOO_LARGE");
+    return true;
+  });
+
+  await assert.rejects(readBaselineFile(array), (error) => {
+    assert.equal(error.code, "BASELINE_FILE_MALFORMED");
+    return true;
+  });
+  await assert.rejects(readBaselineFile(oversized), (error) => {
+    assert.equal(error.code, "BASELINE_FILE_TOO_LARGE");
     return true;
   });
 });
