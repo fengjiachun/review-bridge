@@ -28,6 +28,12 @@ small workflow changes.
    older than it are reported as `pre-convention` and are not reconciled;
    moving the marker is a visible edit to the file it governs.
 
+6. Update the guides under `docs/` and the READMEs in the same pull request
+   as the behavior they describe. Leave their version labels, such as the
+   opening `Describes Review Bridge vX.Y.Z.` line, unchanged: a guide on `main`
+   describes `main`, and only the release commit moves those labels, with the
+   other version carriers. Do not mark a new feature as unreleased.
+
 Do not include proprietary source snapshots, Review Bridge store contents,
 credentials, or raw model-review transcripts in issues or pull requests. Report
 security issues privately as described in [SECURITY.md](SECURITY.md).
