@@ -95,8 +95,10 @@ default launch names no model, for example
 `{"reasoning_effort":"high","model_source":"configuration","reasoning_effort_source":"default"}`.
 Reports print it per round. Observed remote model identity is
 `unavailable`; neither local logs nor provider binding authenticate it. Rounds
-that earlier releases launched keep the model, effort and `environment_id` the
-author selected, and reports print them per round as recorded. A round still
+that earlier releases launched keep the fields each release recorded, and
+reports print them per round as recorded: 0.25.0 recorded only
+`{"reasoning_effort":"high"}`, and older releases the model, effort and
+`environment_id` the author selected. A round still
 pending at the upgrade and launched again records the new request; its
 history keeps the earlier selection.
 

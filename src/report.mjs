@@ -171,7 +171,8 @@ function list(values) {
   return values.length === 0 ? "none" : values.map(code).join(", ");
 }
 
-// A request that names a model was selected by the author, or comes from a
+// A request that names a model was selected by the author, pins the
+// configured model an effort-only choice was checked against, or comes from a
 // workflow dispatch planned before the upgrade; one without leaves the model
 // to the host's Codex configuration.
 function requestedConfiguration(round, format) {

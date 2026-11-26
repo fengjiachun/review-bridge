@@ -307,8 +307,8 @@ test("a failed model listing explains itself, refuses a choice, and leaves defau
   for (const [mode, message] of failures) {
     process.env.RB_TEST_APP_SERVER = mode;
     await assert.rejects(listReviewerModels(store, "CODEX_TASK"), message);
-    await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, { model: "fixture-sol" }), message);
   }
+  await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, { model: "fixture-sol" }), /Invalid Codex config\/read response/);
   assert.equal((await loadReview(store, review.id)).rounds[0].reviewer_dispatch, undefined);
   process.env.RB_TEST_APP_SERVER = "exit";
   const holdFile = path.join(store, "..", "exec-hold");
@@ -331,13 +331,15 @@ test("a failed model listing explains itself, refuses a choice, and leaves defau
   process.env.RB_TEST_APP_SERVER = "stubborn";
   await assert.rejects(queryCodexModels(runtime), /stubborn listing refuses/);
   const pid = Number(await fsp.readFile(path.join(runtime.cwd, "stubborn.pid"), "utf8"));
-  t.after(() => { try { process.kill(pid, "SIGKILL"); } catch {} });
   let alive = true;
+  t.after(() => { if (alive) process.kill(pid, "SIGKILL"); });
   for (let i = 0; i < 100 && alive; i++) {
     try { process.kill(pid, 0); await new Promise((resolve) => setTimeout(resolve, 20)); }
     catch (error) { if (error.code !== "ESRCH") throw error; alive = false; }
   }
   assert.equal(alive, false, "the listing process that ignores SIGTERM is still running");
+  process.env.RB_TEST_APP_SERVER = "";
+  await assert.rejects(queryCodexModels(runtime, { maxOutputBytes: 64 }), /output exceeded 64 bytes/);
 });
 
 test("a malformed model listing reply does not take down the author server", async (t) => {

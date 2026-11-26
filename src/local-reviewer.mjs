@@ -43,40 +43,50 @@ export async function reviewerRuntime(storeRoot) {
   throw new Error(`Codex executable unavailable: ${name}`);
 }
 
-export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
+export async function queryCodexModels(runtime, { timeoutMs = 30000, maxOutputBytes = 8 * 1024 * 1024 } = {}) {
   const child = spawn(runtime.command, ["app-server", "--listen", "stdio://"], {
     cwd: runtime.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true,
   });
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-2000); });
-  const pending = new Map();
+  let pending = null;
   let sequence = 0;
   let failure;
   const fail = (error) => {
-    failure = error;
-    for (const { reject } of pending.values()) reject(error);
-    pending.clear();
+    failure ??= error;
+    pending?.reject(failure);
+    pending = null;
   };
+  const exited = (code, signal) => new Error(
+    `Codex model listing process exited (${signal ?? `code ${code}`})${stderr.trim() ? `: ${stderr.trim()}` : ""}`);
   child.on("error", fail);
   child.stdin.on("error", fail);
-  child.on("close", (code, signal) => fail(new Error(
-    `Codex model listing process exited (${signal ?? `code ${code}`})${stderr.trim() ? `: ${stderr.trim()}` : ""}`)));
+  // close waits for every holder of the pipes, so a failed exit also ends the
+  // listing shortly after, leaving time to read its last output first.
+  child.on("exit", (code, signal) => {
+    if (code !== 0) setTimeout(() => fail(exited(code, signal)), 200).unref();
+  });
+  child.on("close", (code, signal) => fail(exited(code, signal)));
+  let received = 0;
+  child.stdout.on("data", (chunk) => {
+    received += chunk.length;
+    if (received > maxOutputBytes) fail(new Error(`Codex model listing output exceeded ${maxOutputBytes} bytes`));
+  });
   const lines = createInterface({ input: child.stdout });
   lines.on("line", (line) => {
     let message;
     try { message = JSON.parse(line); } catch { return; }
-    const waiter = pending.get(message?.id);
-    if (!waiter) return;
-    pending.delete(message.id);
+    if (pending == null || message?.id !== pending.id) return;
+    const waiter = pending;
+    pending = null;
     if (message.error == null) waiter.resolve(message.result);
     else if (typeof message.error.message === "string") waiter.reject(new Error(`Codex model listing: ${message.error.message}`));
     else waiter.reject(new Error("Codex model listing: invalid error reply"));
   });
   const request = (method, params) => new Promise((resolve, reject) => {
     if (failure) return reject(failure);
-    const id = ++sequence;
-    pending.set(id, { resolve, reject });
-    child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+    pending = { id: ++sequence, resolve, reject };
+    child.stdin.write(`${JSON.stringify({ id: pending.id, method, params })}\n`);
   });
   const timer = setTimeout(() => fail(new Error("Codex model listing timed out")), timeoutMs);
   try {

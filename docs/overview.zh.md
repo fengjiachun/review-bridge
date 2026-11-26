@@ -76,7 +76,7 @@ flowchart LR
   class A,B,C,D,E n;
 ```
 
-作者说明需求、实现范围、base ref，选择评审者；`prepare_review` 截快照、建账本。`CODEX_TASK` 评审者由服务端另起一个进程，模型取 MCP 主机的 Codex 配置，推理强度固定为 high；其它提供方由操作者按各自安装页的说明派发。
+作者说明需求、实现范围、base ref，选择评审者；`prepare_review` 截快照、建账本。`CODEX_TASK` 评审者由服务端另起一个进程，默认模型取 MCP 主机的 Codex 配置、推理强度为 high，用户也可以为这次评审另选模型和强度；其它提供方由操作者按各自安装页的说明派发。
 
 第一轮评审者看到快照、需求和范围（以及作者追加过的勘误，勘误只修正关于外部世界的说法，不改 diff），提交结构化的 findings。没有意见直接 `CLEAN`。有意见则作者逐条回应，每条只能选一种：`fixed`（finding 点名的每个位置、每个子句在新 head 都做完了）、`rejected`（给出理由和证据，由复审者判）、`human_required`（交给人）。第二轮由同一评审者提供方对照新快照核每条回应：`resolved`、`rebuttal_accepted`、`still_open`，也可以报新意见。同一个 review ID 没有第三轮。
 
@@ -166,7 +166,7 @@ flowchart LR
 
 | 分组 | 工具 |
 | --- | --- |
-| 本地评审 | `launch_local_reviewer` `prepare_review` `list_reviews` `get_review` `get_review_summary` `wait_for_review_state` `submit_resolutions` `prepare_rereview` `append_review_erratum` `finalize_local_gate` `export_human_arbitration` `render_review_report` |
+| 本地评审 | `launch_local_reviewer` `list_reviewer_models` `prepare_review` `list_reviews` `get_review` `get_review_summary` `wait_for_review_state` `submit_resolutions` `prepare_rereview` `append_review_erratum` `finalize_local_gate` `export_human_arbitration` `render_review_report` |
 | 发布门禁 | `authorize_remote_publication` `start_publication` `get_publication` `get_publication_summary` `record_codex_review_request` `record_github_snapshot` `acknowledge_codex_review_ambiguity` `finalize_publication_gate` `verify_publication_gate` |
 
 ## 附录 B · 术语

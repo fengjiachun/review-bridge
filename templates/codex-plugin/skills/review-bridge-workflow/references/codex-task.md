@@ -22,8 +22,9 @@ launch between them.
    with its supported efforts, wait for their pick if they have not made one,
    and pass it as `model` and/or `reasoning_effort`. The tool refuses a model the list does not offer or an
    effort that model does not support; report the refusal and let the user
-   choose again rather than picking a substitute. It returns promptly; wait for
-   the ledger verdict. Do not substitute a task in a different host/runtime or
+   choose again rather than picking a substitute. A chosen model or effort is
+   checked before anything starts, which can take a few seconds; once the
+   reviewer has started the tool returns, and you wait for the ledger verdict. Do not substitute a task in a different host/runtime or
    the author's model.
 
    The tool executes this sandbox shape (this example describes the launch; use
