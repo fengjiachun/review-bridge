@@ -636,21 +636,35 @@ const collectorPath = path.join(
 );
 assert.ok(await fsp.stat(collectorPath));
 const collectorHelp = run(process.execPath, [collectorPath, "--help"], pluginRoot);
-// A publication ledger a newer release wrote is refused before any GitHub request.
+// A publication ledger a newer release wrote is refused before any GitHub
+// request: gh is off PATH, and the same ledger at a supported version does
+// reach it.
 const newerPublicationRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-newer-"));
 const newerPublicationPath = path.join(newerPublicationRoot, "publication.json");
-await fsp.writeFile(newerPublicationPath, JSON.stringify({ version: 99, review_id: "rb-x" }));
-const newerCollection = spawnSync(
-  process.execPath,
-  [collectorPath, "--publication", newerPublicationPath],
-  { cwd: pluginRoot, encoding: "utf8", env: { ...process.env, PATH: "/nonexistent" } },
-);
+const collectPublicationAt = async (version) => {
+  await fsp.writeFile(newerPublicationPath, JSON.stringify({
+    version,
+    review_id: "rb-x",
+    target: { owner: "owner", repo: "repo", base_branch: "main", pr_number: 7 },
+    authorization: { base_sha: "a".repeat(40), head_sha: "b".repeat(40) },
+  }));
+  return spawnSync(
+    process.execPath,
+    [collectorPath, "--publication", newerPublicationPath],
+    { cwd: pluginRoot, encoding: "utf8", env: { ...process.env, PATH: "/nonexistent" } },
+  );
+};
+const newerCollection = await collectPublicationAt(99);
+const supportedCollection = await collectPublicationAt(2);
 await fsp.rm(newerPublicationRoot, { recursive: true, force: true });
 assert.equal(newerCollection.status, 1);
 assert.match(
   newerCollection.stderr,
   /publication ledger version 99; this release reads version 1, 2, 3/,
 );
+assert.notEqual(supportedCollection.status, 0);
+assert.match(supportedCollection.stderr, /\bgh\b/);
+assert.doesNotMatch(supportedCollection.stderr, /LEDGER_VERSION_UNSUPPORTED/);
 assert.match(collectorHelp, /Usage: collect-github-observation\.mjs/);
 assert.match(collectorHelp, /--review-id <id>/);
 assert.match(collectorHelp, /--out <path>/);

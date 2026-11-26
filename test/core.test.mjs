@@ -601,6 +601,7 @@ test("a review ledger of an unknown or missing version is refused by name", asyn
     assert.deepEqual(await listReviews(store), []);
   }
   // A parent named explicitly keeps the diagnosis in its fallback reason.
+  await fsp.writeFile(reviewPath, `${JSON.stringify({ ...review, version: 2 }, null, 2)}\n`);
   const successor = await prepareReview(store, {
     repositoryPath: repository,
     baseRef: review.rounds[0].base_sha,
@@ -610,7 +611,7 @@ test("a review ledger of an unknown or missing version is refused by name", asyn
   });
   assert.equal(
     successor.review_strategy.fallback_reason,
-    "parent successor proof version 2; this release reads version 1",
+    "parent review ledger version 2; this release reads version 1",
   );
 });
 

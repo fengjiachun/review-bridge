@@ -196,7 +196,7 @@ async function loadJson(filePath) {
 // Every release has written version 1 of the review ledger, of each round's
 // snapshot manifest, and of each successor proof (see CONTRIBUTING.md on when
 // to bump).
-export const SUPPORTED_REVIEW_VERSIONS = [1];
+const SUPPORTED_REVIEW_VERSIONS = [1];
 const SUPPORTED_MANIFEST_VERSIONS = [1];
 const SUPPORTED_SUCCESSOR_VERSIONS = [1];
 
@@ -221,7 +221,7 @@ export function requireReviewVersions(review) {
   requireRecordVersion(review, "review ledger", SUPPORTED_REVIEW_VERSIONS);
   for (const round of Array.isArray(review.rounds) ? review.rounds : []) {
     requireRecordVersion(round, "snapshot manifest", SUPPORTED_MANIFEST_VERSIONS);
-    if (round?.successor != null) {
+    if (round.successor != null) {
       requireRecordVersion(round.successor, "successor proof", SUPPORTED_SUCCESSOR_VERSIONS);
     }
   }
