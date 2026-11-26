@@ -57,16 +57,10 @@ export async function queryCodexModels(runtime, { timeoutMs = 30000, maxOutputBy
     pending?.reject(failure);
     pending = null;
   };
-  const exited = (code, signal) => new Error(
-    `Codex model listing process exited (${signal ?? `code ${code}`})${stderr.trim() ? `: ${stderr.trim()}` : ""}`);
   child.on("error", fail);
   child.stdin.on("error", fail);
-  // close waits for every holder of the pipes, so a failed exit also ends the
-  // listing shortly after, leaving time to read its last output first.
-  child.on("exit", (code, signal) => {
-    if (code !== 0) setTimeout(() => fail(exited(code, signal)), 200).unref();
-  });
-  child.on("close", (code, signal) => fail(exited(code, signal)));
+  child.on("close", (code, signal) => fail(new Error(
+    `Codex model listing process exited (${signal ?? `code ${code}`})${stderr.trim() ? `: ${stderr.trim()}` : ""}`)));
   let received = 0;
   child.stdout.on("data", (chunk) => {
     received += chunk.length;

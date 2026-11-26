@@ -308,6 +308,7 @@ test("a failed model listing explains itself, refuses a choice, and leaves defau
     process.env.RB_TEST_APP_SERVER = mode;
     await assert.rejects(listReviewerModels(store, "CODEX_TASK"), message);
   }
+  process.env.RB_TEST_APP_SERVER = "invalid-config";
   await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, { model: "fixture-sol" }), /Invalid Codex config\/read response/);
   assert.equal((await loadReview(store, review.id)).rounds[0].reviewer_dispatch, undefined);
   process.env.RB_TEST_APP_SERVER = "exit";
@@ -338,8 +339,8 @@ test("a failed model listing explains itself, refuses a choice, and leaves defau
     catch (error) { if (error.code !== "ESRCH") throw error; alive = false; }
   }
   assert.equal(alive, false, "the listing process that ignores SIGTERM is still running");
-  process.env.RB_TEST_APP_SERVER = "";
-  await assert.rejects(queryCodexModels(runtime, { maxOutputBytes: 64 }), /output exceeded 64 bytes/);
+  process.env.RB_TEST_APP_SERVER = "unterminated";
+  await assert.rejects(queryCodexModels(runtime, { maxOutputBytes: 64, timeoutMs: 5000 }), /output exceeded 64 bytes/);
 });
 
 test("a malformed model listing reply does not take down the author server", async (t) => {

@@ -22,6 +22,10 @@ if (process.argv[2] === "app-server") {
     process.stderr.write("error: unknown configuration key\n");
     process.exit(3);
   }
+  if (mode === "unterminated") {
+    process.stdout.write("x".repeat(1000));
+    setInterval(() => {}, 1000);
+  }
   // Ignores SIGTERM and fails initialize only after writing its pid.
   if (mode === "stubborn") {
     process.on("SIGTERM", () => {});
@@ -56,7 +60,7 @@ if (process.argv[2] === "app-server") {
   createInterface({ input: process.stdin }).on("line", (line) => {
     const message = JSON.parse(line);
     if (message.method === "initialized" && initializeAnswered) initialized = true;
-    if (message.id == null || mode === "hang") return;
+    if (message.id == null || mode === "hang" || mode === "unterminated") return;
     if (mode === "malformed") process.stdout.write("null\n[]\n");
     const reply = (body) => process.stdout.write(`${JSON.stringify({ id: message.id, ...body })}\n`);
     if (mode === "stubborn") return reply({ error: { message: "stubborn listing refuses" } });
