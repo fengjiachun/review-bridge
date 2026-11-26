@@ -558,6 +558,37 @@ test("legacy review records default their reviewer provider to Claude", async (t
   assert.equal(finalized.gate.reviewer_provider, "CLAUDE_DESKTOP");
 });
 
+test("a review ledger of an unknown or missing version is refused by name", async (t) => {
+  const { root, repository, store } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const prepared = await prepareReview(store, {
+    repositoryPath: repository,
+    baseRef: git(repository, "rev-parse", "HEAD"),
+    requirement: "Refuse a ledger a newer release wrote.",
+    implementationScope: "Check the review ledger version on load.",
+  });
+  const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
+  const review = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
+  assert.equal(review.version, 1);
+  for (const [version, details] of [
+    [2, { record: "review ledger", version: 2, supported: [1] }],
+    [undefined, { record: "review ledger", version: null, supported: [1] }],
+  ]) {
+    const stored = `${JSON.stringify({ ...review, version }, null, 2)}\n`;
+    await fsp.writeFile(reviewPath, stored);
+    const refused = (error) => {
+      assert.equal(error.code, "LEDGER_VERSION_UNSUPPORTED");
+      assert.deepEqual(error.details, details);
+      return true;
+    };
+    await assert.rejects(getReview(store, prepared.id), refused);
+    // A writer refuses too, before it could rewrite the record by older rules.
+    await assert.rejects(submitInitialReview(store, prepared.id, []), refused);
+    assert.equal(await fsp.readFile(reviewPath, "utf8"), stored);
+    assert.deepEqual(await listReviews(store), []);
+  }
+});
+
 async function createGatedParent({
   repository,
   store,

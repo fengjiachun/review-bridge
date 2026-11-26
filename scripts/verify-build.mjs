@@ -758,6 +758,7 @@ try {
   const directory = path.join(findingsStore, "reviews", findingReviewId);
   await fsp.mkdir(directory, { recursive: true });
   await fsp.writeFile(path.join(directory, "review.json"), JSON.stringify({
+    version: 1,
     id: findingReviewId,
     repository_path: "/deleted/historical/worktree",
     rounds: [{ round: 1, head_sha: "a".repeat(40), snapshot_hash: "b".repeat(64) }],

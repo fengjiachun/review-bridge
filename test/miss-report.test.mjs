@@ -27,12 +27,13 @@ async function setup(t) {
   return paths;
 }
 
-async function writeReview(store, id, repositoryPath, heads) {
+async function writeReview(store, id, repositoryPath, heads, version = 1) {
   const directory = path.join(store, "reviews", id);
   await fsp.mkdir(directory, { recursive: true });
   await fsp.writeFile(
     path.join(directory, "review.json"),
     JSON.stringify({
+      version,
       id,
       repository_path: repositoryPath,
       status: "CLEAN",
@@ -93,6 +94,8 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
   await writeReview(store, "rb-gone", gone, [HEAD_A]);
   await writeReview(store, "rb-gone-only", gone, [HEAD_D]);
   await writeReview(store, "rb-other-head", repo, ["c".repeat(40)]);
+  // A ledger a newer release wrote is skipped, not matched by older rules.
+  await writeReview(store, "rb-newer", repo, [HEAD_A], 2);
   await fsp.mkdir(path.join(store, "reviews", "rb-publication-only"));
   await fsp.mkdir(path.join(store, "reviews", "rb-damaged"));
   await fsp.writeFile(
@@ -142,7 +145,7 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
   assert.deepEqual(report.threads[2].unverified_matches, [
     entry("rb-gone-only", 1),
   ]);
-  assert.deepEqual(report.skipped_reviews, ["rb-damaged"]);
+  assert.deepEqual(report.skipped_reviews, ["rb-damaged", "rb-newer"]);
 
   const markdown = renderMissReportMarkdown(report);
   assert.match(markdown, /^3 review threads not opened/m);
@@ -159,7 +162,7 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
     /\| `` src\/`x`\.py:12 `` \| `dddddddddd` \| `rb-gone-only` \(CLEAN, 1, repository unverified\) \|/,
   );
   assert.equal(markdown.match(/no local ledger/g).length, 1);
-  assert.match(markdown, /Skipped 1 unreadable review ledgers: rb-damaged\./);
+  assert.match(markdown, /Skipped 2 unreadable review ledgers: rb-damaged, rb-newer\./);
 });
 
 test("refuses a fetch that does not account for every review comment", async (t) => {

@@ -47,6 +47,12 @@ The Claude Desktop reviewer extension alone does not provide author tools;
 install the separate [author connection](install/claude-desktop.md#use-claude-as-an-author)
 to launch a Codex reviewer from Claude.
 
+**`LEDGER_VERSION_UNSUPPORTED`** — a newer Review Bridge wrote this record
+into the shared store, and the process that read it is older. `details` names
+the record, the version found, and the versions this process reads. Upgrade
+that install as in the [upgrade guide](install/upgrade.md); leave the record
+as it is.
+
 **Codex marketplace is “already added from a different source”** — replace the
 old marketplace registration using the [Codex upgrade steps](install/upgrade.md#codex-plugin).
 Keep the shared review store and the old runtime directory intact.

@@ -451,4 +451,11 @@ test("re-run equality ignores provenance and reports a moved boundary", () => {
   assert.equal(compareReleaseRecords(first, backfilled).status, "SUPERSEDED");
   const diverged = { ...first, tag: { ...first.tag, target_sha: "7".repeat(40) } };
   assert.equal(compareReleaseRecords(first, diverged).status, "DIVERGED");
+  // A record a newer verifier wrote is refused, even with a moved boundary.
+  const newer = { ...backfilled, schema: "review-bridge/release-record/2" };
+  assert.deepEqual(compareReleaseRecords(newer, first), {
+    status: "UNSUPPORTED",
+    message:
+      'the existing record has schema "review-bridge/release-record/2"; this verifier reads review-bridge/release-record/1',
+  });
 });

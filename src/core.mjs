@@ -192,16 +192,38 @@ async function loadJson(filePath) {
   return JSON.parse(await fsp.readFile(filePath, "utf8"));
 }
 
+// Every release has written version 1 (see CONTRIBUTING.md on when to bump).
+export const REVIEW_LEDGER_VERSIONS = [1];
+
+// Installs sharing one store upgrade one at a time, so a reader can meet a
+// record a newer release wrote. It refuses a version it does not know rather
+// than acting on that record by its own older rules.
+export function requireRecordVersion(record, kind, supported) {
+  if (supported.includes(record?.version)) {
+    return;
+  }
+  const found = record?.version ?? null;
+  const error = new Error(
+    `${kind} version ${found == null ? "is missing" : JSON.stringify(found)}; this release reads version ${supported.join(", ")}`,
+  );
+  error.code = "LEDGER_VERSION_UNSUPPORTED";
+  error.details = { record: kind, version: found, supported: [...supported] };
+  throw error;
+}
+
 export async function loadReview(storeRoot, reviewId) {
   assertReviewId(reviewId);
+  let review;
   try {
-    return await loadJson(reviewFile(storeRoot, reviewId));
+    review = await loadJson(reviewFile(storeRoot, reviewId));
   } catch (error) {
     if (error?.code === "ENOENT") {
       throw new Error(`review ${reviewId} not found`, { cause: error });
     }
     throw error;
   }
+  requireRecordVersion(review, "review ledger", REVIEW_LEDGER_VERSIONS);
+  return review;
 }
 
 async function saveReview(storeRoot, review) {

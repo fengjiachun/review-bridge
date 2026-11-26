@@ -837,6 +837,13 @@ function semanticFields(record) {
  * unchanged boundary means history changed after it was recorded.
  */
 export function compareReleaseRecords(existing, fresh) {
+  // A record a newer verifier wrote is not compared by this one's rules.
+  if (existing.schema !== RELEASE_RECORD_SCHEMA) {
+    return {
+      status: "UNSUPPORTED",
+      message: `the existing record has schema ${JSON.stringify(existing.schema ?? null)}; this verifier reads ${RELEASE_RECORD_SCHEMA}`,
+    };
+  }
   if (canonicalJson(existing.range) !== canonicalJson(fresh.range)) {
     return {
       status: "SUPERSEDED",

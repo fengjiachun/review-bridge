@@ -1,6 +1,12 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { MAX_ROUNDS, REVIEWER_PROVIDERS } from "./core.mjs";
+import {
+  MAX_ROUNDS,
+  REVIEW_LEDGER_VERSIONS,
+  REVIEWER_PROVIDERS,
+  requireRecordVersion,
+} from "./core.mjs";
+import { SUPPORTED_PUBLICATION_VERSIONS } from "./publication.mjs";
 
 export const SCORECARD_SCHEMA_VERSION = 5;
 
@@ -92,6 +98,17 @@ function emptyStats() {
   };
 }
 
+// A ledger of a version this release does not read is skipped, not counted by
+// rules it was not written under.
+function versionDefect(record, kind, supported) {
+  try {
+    requireRecordVersion(record, kind, supported);
+    return null;
+  } catch (error) {
+    return error.message;
+  }
+}
+
 // A ledger the aggregation cannot count without guessing is skipped whole,
 // so a single bad record never silently distorts a column.
 function reviewDefect(review, directoryName) {
@@ -102,6 +119,8 @@ function reviewDefect(review, directoryName) {
   if (review.id !== directoryName) {
     return "review ID does not match its store directory";
   }
+  const unsupported = versionDefect(review, "review ledger", REVIEW_LEDGER_VERSIONS);
+  if (unsupported != null) return unsupported;
   if (!REVIEW_STATUSES.includes(review.status)) {
     return `unknown status ${JSON.stringify(review.status)}`;
   }
@@ -229,6 +248,12 @@ function publicationDefect(ledger, directoryName) {
   if (ledger.review_id !== directoryName) {
     return "review ID does not match its store directory";
   }
+  const unsupported = versionDefect(
+    ledger,
+    "publication ledger",
+    SUPPORTED_PUBLICATION_VERSIONS,
+  );
+  if (unsupported != null) return unsupported;
   const target = ledger.target;
   if (
     !Number.isSafeInteger(target?.repository_id) ||
