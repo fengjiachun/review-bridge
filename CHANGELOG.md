@@ -32,6 +32,13 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   `reasoning_effort_source` (`default` or `selected`); rounds recorded by
   earlier releases read and render as before.
 
+### Internal
+
+- (#227) Accepted RFC 0005 specifies an optional lens review. On the user's
+  request, Review Bridge will run `tests` and `design` lens reviewers beside
+  the general reviewer in round one, with their findings in the same review
+  ledger.
+
 ## 0.25.0 - 2026-11-25
 
 ### Changed
