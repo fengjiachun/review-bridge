@@ -43,8 +43,6 @@ export async function reviewerRuntime(storeRoot) {
   throw new Error(`Codex executable unavailable: ${name}`);
 }
 
-// The listing comes from the executable and cwd that dispatch uses, so it
-// cannot offer a model the reviewer's own Codex would not run.
 export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
   const child = spawn(runtime.command, ["app-server", "--listen", "stdio://"], {
     cwd: runtime.cwd, stdio: ["pipe", "pipe", "pipe"],
@@ -70,8 +68,9 @@ export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
     const waiter = pending.get(message?.id);
     if (!waiter) return;
     pending.delete(message.id);
-    if (message.error != null) waiter.reject(new Error(`Codex model listing: ${message.error?.message ?? JSON.stringify(message.error)}`));
-    else waiter.resolve(message.result);
+    if (message.error == null) waiter.resolve(message.result);
+    else if (typeof message.error.message === "string") waiter.reject(new Error(`Codex model listing: ${message.error.message}`));
+    else waiter.reject(new Error("Codex model listing: invalid error reply"));
   });
   const request = (method, params) => new Promise((resolve, reject) => {
     if (failure) return reject(failure);

@@ -10,7 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { listReviewerModels, queryCodexModels, reviewerRuntime, startLocalReviewer } from "../src/local-reviewer.mjs";
 import {
-  getReviewSummary, launchLocalReviewer, loadReview, prepareRereview, prepareReview,
+  appendReviewErratum, getReviewSummary, launchLocalReviewer, loadReview, prepareRereview, prepareReview,
   submitInitialReview, submitResolutions,
 } from "../src/core.mjs";
 import { renderReviewBrief, renderReviewReport } from "../src/report.mjs";
@@ -173,6 +173,7 @@ test("the author lists the reviewer models and launches with a chosen model and 
     models: [
       { model: "fixture-sol", display_name: "Fixture Sol", reasoning_efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
       { model: "fixture-luna", display_name: "Fixture Luna", reasoning_efforts: ["low", "medium", "high", "xhigh", "max"] },
+      { model: "fixture-mini", display_name: "Fixture Mini", reasoning_efforts: ["low", "medium"] },
     ],
   });
   assert.equal((await call(client, "list_reviewer_models", { reviewer_provider: "HERMES" })).available, false);
@@ -206,11 +207,11 @@ test("a chosen model or effort is refused unless listed and supported, and carri
     [{ model: "fixture-terra" }, /Model fixture-terra is not in Codex's model list/],
     [{ model: "fixture-luna", reasoningEffort: "ultra" }, /fixture-luna does not support reasoning effort ultra; it supports low, medium, high, xhigh, max/],
     [{ reasoningEffort: "ultra" }, /fixture-luna does not support reasoning effort ultra/],
+    [{ model: "fixture-mini" }, /fixture-mini does not support reasoning effort high; it supports low, medium/],
   ];
   for (const [selection, message] of refusals) {
     await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, selection), message);
   }
-  // A model listed earlier but gone by launch time is refused.
   assert.ok((await listReviewerModels(store, "CODEX_TASK")).models.some((entry) => entry.model === "fixture-sol"));
   setEnv(t, { RB_TEST_MODELS: "fixture-luna" });
   await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, { model: "fixture-sol" }), /Model fixture-sol is not in Codex's model list/);
@@ -252,6 +253,34 @@ test("a chosen model or effort is refused unless listed and supported, and carri
   const defaulted = await launchLocalReviewer(store, fresh.id, fresh.state_version);
   assert.deepEqual(defaulted.reviewer_configuration.requested, DEFAULT_REQUEST);
   assert.equal((await waitForExit(defaulted.reviewer_dispatch.attempt_root)).code, 0);
+  const mini = await prepare();
+  const supported = await launchLocalReviewer(store, mini.id, mini.state_version, { model: "fixture-mini", reasoningEffort: "medium" });
+  assert.deepEqual(supported.reviewer_configuration.requested, { model: "fixture-mini", reasoning_effort: "medium", model_source: "selected", reasoning_effort_source: "selected" });
+  assert.equal((await waitForExit(supported.reviewer_dispatch.attempt_root)).code, 0);
+});
+
+test("a launch whose review changes while the model listing runs reserves no attempt", async (t) => {
+  const { root, repository, store, base } = await fixture(t);
+  const review = await prepareReview(store, {
+    repositoryPath: repository, baseRef: base, requirement: "Change content",
+    implementationScope: "file.txt", reviewerProvider: "CODEX_TASK",
+  });
+  const hold = path.join(root, "list-hold");
+  await fsp.writeFile(hold, "");
+  setEnv(t, { RB_TEST_LIST_HOLD: hold });
+  const held = path.join((await reviewerRuntime(store)).cwd, "list-held");
+  const launching = launchLocalReviewer(store, review.id, review.state_version, { model: "fixture-sol" });
+  for (let i = 0; i < 250; i++) {
+    try { await fsp.access(held); break; } catch { await new Promise((resolve) => setTimeout(resolve, 20)); }
+  }
+  await fsp.access(held);
+  const corrected = await appendReviewErratum(store, review.id, "The scope claim is stale.");
+  assert.ok(corrected.state_version > review.state_version);
+  await fsp.rm(hold);
+  await assert.rejects(launching, /state_version mismatch/);
+  const after = await loadReview(store, review.id);
+  assert.equal(after.rounds[0].reviewer_dispatch, undefined);
+  assert.ok(!after.history.some((event) => event.event === "REVIEWER_DISPATCH_REQUESTED"));
 });
 
 test("a failed model listing explains itself, refuses a choice, and leaves default launches alone", async (t) => {
@@ -265,23 +294,34 @@ test("a failed model listing explains itself, refuses a choice, and leaves defau
     ["repeat-cursor", /Invalid Codex model\/list pagination cursor/],
     ["invalid-page", /Invalid Codex model capabilities/],
   ];
+  setEnv(t, { RB_TEST_APP_SERVER: "" });
   for (const [mode, message] of failures) {
-    setEnv(t, { RB_TEST_APP_SERVER: mode });
+    process.env.RB_TEST_APP_SERVER = mode;
     await assert.rejects(listReviewerModels(store, "CODEX_TASK"), message);
     await assert.rejects(launchLocalReviewer(store, review.id, review.state_version, { model: "fixture-sol" }), message);
   }
   assert.equal((await loadReview(store, review.id)).rounds[0].reviewer_dispatch, undefined);
   process.env.RB_TEST_APP_SERVER = "exit";
+  const holdFile = path.join(store, "..", "exec-hold");
+  await fsp.writeFile(holdFile, "");
+  setEnv(t, { RB_TEST_HOLD: holdFile });
   const launched = await launchLocalReviewer(store, review.id, review.state_version);
   assert.deepEqual(launched.reviewer_configuration.requested, DEFAULT_REQUEST);
+  // A running reviewer or a settled review is refused before Codex is asked for models.
+  await assert.rejects(launchLocalReviewer(store, review.id, launched.state_version, { model: "fixture-sol" }), /concurrent replacement/);
+  await fsp.rm(holdFile);
   assert.equal((await waitForExit(launched.reviewer_dispatch.attempt_root)).code, 0);
   assert.ok(!(await executedArgs(store)).includes("--model"));
+  const settled = await submitInitialReview(store, review.id, [], "CODEX_TASK");
+  await assert.rejects(launchLocalReviewer(store, review.id, settled.state_version, { model: "fixture-sol" }), /Review is not pending/);
 
-  // A listing that never answers and ignores SIGTERM still ends.
   process.env.RB_TEST_APP_SERVER = "hang";
   const runtime = await reviewerRuntime(store);
-  await assert.rejects(queryCodexModels(runtime, { timeoutMs: 300 }), /timed out/);
-  const pid = Number(await fsp.readFile(path.join(runtime.cwd, "app-server.pid"), "utf8"));
+  // The fixture writes hang.pid once its SIGTERM handler is installed; a
+  // missing file means the listing timed out before the child was ready.
+  await fsp.rm(path.join(runtime.cwd, "hang.pid"), { force: true });
+  await assert.rejects(queryCodexModels(runtime, { timeoutMs: 2000 }), /timed out/);
+  const pid = Number(await fsp.readFile(path.join(runtime.cwd, "hang.pid"), "utf8"));
   for (let i = 0; i < 100; i++) {
     try { process.kill(pid, 0); } catch (error) { if (error.code === "ESRCH") return; throw error; }
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -294,8 +334,11 @@ test("a malformed model listing reply does not take down the author server", asy
   const client = new Client({ name: "claude-author-fixture", version: "1" });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.resolve("src/server.mjs"), "--role", "author"], env: { ...process.env, REVIEW_BRIDGE_HOME: store, RB_TEST_APP_SERVER: "malformed" }, stderr: "pipe" }));
   t.after(() => client.close());
-  assert.equal((await call(client, "list_reviewer_models", {})).configured_model, "fixture-luna");
-  assert.equal((await call(client, "list_reviewer_models", {})).models.length, 2);
+  // Null and array lines precede every reply, and model/list answers with an
+  // error whose message cannot be converted to text.
+  for (let i = 0; i < 2; i++) {
+    await assert.rejects(call(client, "list_reviewer_models", {}), /Codex model listing: invalid error reply/);
+  }
 });
 
 test("a failed executable spawn cannot produce a started-process receipt", async (t) => {

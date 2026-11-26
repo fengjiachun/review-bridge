@@ -2818,23 +2818,10 @@ function carriedSelection(review) {
 }
 
 export async function launchLocalReviewer(storeRoot, reviewId, expectedStateVersion, { model, reasoningEffort } = {}) {
-  const checkLaunchable = (review) => {
+  const checkLaunchable = async (review) => {
     if (review.state_version !== expectedStateVersion) throw new Error("review state_version mismatch");
     if (reviewerProviderFor(review) !== "CODEX_TASK") throw new Error("Automatic launch unavailable for this provider");
-  };
-  // A model listing can outlast the lock's wait, so the request is resolved
-  // first; the state_version check under the lock confirms the review it was
-  // resolved from is unchanged.
-  const loaded = await loadReview(storeRoot, reviewId);
-  checkLaunchable(loaded);
-  const runtime = await reviewerRuntime(storeRoot);
-  const requested = await reviewerRequest(runtime, model == null && reasoningEffort == null
-    ? carriedSelection(loaded) : { model, reasoning_effort: reasoningEffort });
-  return withReviewMutationLock(storeRoot, reviewId, async () => {
-    const review = await loadReview(storeRoot, reviewId);
-    checkLaunchable(review);
-    const round = review.rounds.at(-1);
-    const prior = round.reviewer_dispatch;
+    const prior = review.rounds.at(-1).reviewer_dispatch;
     if (prior) {
       let exited;
       try { exited = await loadJson(path.join(prior.attempt_root, "exit.json")); }
@@ -2842,6 +2829,19 @@ export async function launchLocalReviewer(storeRoot, reviewId, expectedStateVers
       if (!exited) throw new Error("Reviewer dispatch is running or indeterminate; do not launch a concurrent replacement");
     }
     if (!["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"].includes(review.status)) throw new Error("Review is not pending");
+  };
+  // A model listing can outlast the lock's wait, so the request is resolved
+  // first; the checks repeated under the lock confirm the review it was
+  // resolved from is unchanged.
+  const loaded = await loadReview(storeRoot, reviewId);
+  await checkLaunchable(loaded);
+  const runtime = await reviewerRuntime(storeRoot);
+  const requested = await reviewerRequest(runtime, model == null && reasoningEffort == null
+    ? carriedSelection(loaded) : { model, reasoning_effort: reasoningEffort });
+  return withReviewMutationLock(storeRoot, reviewId, async () => {
+    const review = await loadReview(storeRoot, reviewId);
+    await checkLaunchable(review);
+    const round = review.rounds.at(-1);
     const configuration = { requested, observed: { status: "unavailable" }, runtime };
     const attemptRoot = path.join(roundDirectory(storeRoot, reviewId, review.current_round), `dispatch-${crypto.randomUUID()}`);
     await fsp.mkdir(attemptRoot, { recursive: true, mode: 0o700 });
