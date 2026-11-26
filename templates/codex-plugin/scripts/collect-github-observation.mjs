@@ -3,13 +3,16 @@
 import crypto from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { defaultStoreRoot } from "../server/core.mjs";
+import { defaultStoreRoot, requireRecordVersion } from "../server/core.mjs";
 import {
   collectCodexBaseline,
   collectGithubObservation,
 } from "../server/github-observation.mjs";
 import { assertOutsideGitRepository } from "../server/local-reviewer.mjs";
-import { readPublicationStartAuthorization } from "../server/publication.mjs";
+import {
+  readPublicationStartAuthorization,
+  SUPPORTED_PUBLICATION_VERSIONS,
+} from "../server/publication.mjs";
 import { atomicWriteFile } from "../server/storage.mjs";
 
 const USAGE = `Usage: collect-github-observation.mjs [publication.json]
@@ -203,7 +206,9 @@ if (argv[0] === "--help") {
         ? await readStdin()
         : await readFile(publicationPath, "utf8");
 
-    const observation = collectGithubObservation(JSON.parse(input));
+    const publication = JSON.parse(input);
+    requireRecordVersion(publication, "publication ledger", SUPPORTED_PUBLICATION_VERSIONS);
+    const observation = collectGithubObservation(publication);
 
     if (out == null) {
       process.stdout.write(`${JSON.stringify(observation, null, 2)}\n`);

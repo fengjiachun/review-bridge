@@ -7,6 +7,7 @@ import {
   atomicWriteFile,
   canonicalJson,
   removeAndSync,
+  StoreError,
   withStateLock,
 } from "./storage.mjs";
 import { reviewRequiredInputs } from "./tool-inputs.mjs";
@@ -192,16 +193,53 @@ async function loadJson(filePath) {
   return JSON.parse(await fsp.readFile(filePath, "utf8"));
 }
 
+// Every release has written version 1 of the review ledger, of each round's
+// snapshot manifest, and of each successor proof (see CONTRIBUTING.md on when
+// to bump).
+const SUPPORTED_REVIEW_VERSIONS = [1];
+const SUPPORTED_MANIFEST_VERSIONS = [1];
+const SUPPORTED_SUCCESSOR_VERSIONS = [1];
+
+// Installs sharing one store upgrade one at a time, so a reader can meet a
+// record a newer release wrote. It refuses a version it does not know rather
+// than acting on that record by its own older rules.
+export function requireRecordVersion(record, kind, supported) {
+  if (supported.includes(record?.version)) {
+    return;
+  }
+  const found = record?.version ?? null;
+  throw new StoreError(
+    "LEDGER_VERSION_UNSUPPORTED",
+    `${kind} version ${found == null ? "is missing" : JSON.stringify(found)}; this release reads version ${supported.join(", ")}`,
+    { record: kind, version: found, supported: [...supported] },
+  );
+}
+
+// The rounds carry their own manifest and successor versions, so a newer
+// release could bump one of those inside a version 1 ledger.
+export function requireReviewVersions(review) {
+  requireRecordVersion(review, "review ledger", SUPPORTED_REVIEW_VERSIONS);
+  for (const round of Array.isArray(review.rounds) ? review.rounds : []) {
+    requireRecordVersion(round, "snapshot manifest", SUPPORTED_MANIFEST_VERSIONS);
+    if (round.successor != null) {
+      requireRecordVersion(round.successor, "successor proof", SUPPORTED_SUCCESSOR_VERSIONS);
+    }
+  }
+}
+
 export async function loadReview(storeRoot, reviewId) {
   assertReviewId(reviewId);
+  let review;
   try {
-    return await loadJson(reviewFile(storeRoot, reviewId));
+    review = await loadJson(reviewFile(storeRoot, reviewId));
   } catch (error) {
     if (error?.code === "ENOENT") {
       throw new Error(`review ${reviewId} not found`, { cause: error });
     }
     throw error;
   }
+  requireReviewVersions(review);
+  return review;
 }
 
 async function saveReview(storeRoot, review) {
@@ -806,8 +844,12 @@ async function buildSuccessorArtifacts({
   let gate;
   try {
     parent = await loadReview(storeRoot, parentReviewId);
-  } catch {
-    return fullStrategy("parent review is unavailable");
+  } catch (error) {
+    return fullStrategy(
+      error?.code === "LEDGER_VERSION_UNSUPPORTED"
+        ? `parent ${error.message}`
+        : "parent review is unavailable",
+    );
   }
   if (parent.id !== parentReviewId) {
     return fullStrategy("parent review id does not match the requested review");

@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { loadReview, reviewSummary } from "./core.mjs";
+import { loadReview, requireReviewVersions, reviewSummary } from "./core.mjs";
 import {
   canonicalDigest,
   checkRequiredRuns,
@@ -1611,6 +1611,7 @@ export async function loadReportLedgers(
         path: reviewPath,
       });
     }
+    requireReviewVersions(now);
     if (sha256(`${JSON.stringify(now, null, 2)}\n`) !== reviewDigestLoaded) {
       throw reportError(
         "REVIEW_MOVED_DURING_RENDER",

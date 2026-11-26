@@ -72,6 +72,7 @@ A code chosen at run time from a variable is not seen.
 | `INVALID_INPUT` | `src/publication.mjs` |
 | `INVALID_REVIEW_ID` | `src/report.mjs` |
 | `LEDGER_UNREADABLE` | `src/report.mjs` |
+| `LEDGER_VERSION_UNSUPPORTED` | `src/core.mjs` |
 | `LOCAL_GATE_INVALID` | `src/publication.mjs`, `src/report.mjs` |
 | `LOCAL_GATE_MISSING` | `src/report.mjs` |
 | `LOCAL_HEAD_MISMATCH` | `src/publication.mjs` |

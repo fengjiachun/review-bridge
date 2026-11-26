@@ -423,6 +423,34 @@ test("a ledger that cannot be counted is reported and left alone", async (t) => 
   );
 });
 
+test("a ledger of a version this release does not read is skipped", async (t) => {
+  const store = await emptyStore(t);
+  const newer = "rb-2026-08-12T000000-000Z-66666666";
+  await writeReview(store, newer, {
+    ...reviewLedger({ id: newer, status: "CLEAN" }),
+    version: 2,
+  });
+  const unversioned = "rb-2026-08-13T000000-000Z-77777777";
+  const { version: _version, ...ledger } = reviewLedger({ id: unversioned, status: "CLEAN" });
+  await writeReview(store, unversioned, ledger);
+  await writePublication(store, newer, {
+    repositoryId: 1,
+    prNumber: 1,
+    createdAt: "2026-08-12T00:00:00.000Z",
+    version: 4,
+  });
+
+  const scorecard = await buildScorecard(store);
+  assert.equal(scorecard.corpus.reviews_counted, 0);
+  assert.deepEqual(scorecard.skipped.map(({ reason }) => reason), [
+    "review ledger version 2; this release reads version 1",
+    "review ledger version is missing; this release reads version 1",
+  ]);
+  assert.deepEqual(scorecard.skipped_publications, [
+    { id: newer, reason: "publication ledger version 4; this release reads version 1, 2, 3" },
+  ]);
+});
+
 test("an unsupported reviewer provider is skipped, not made a bucket", async (t) => {
   const store = await emptyStore(t);
   // A non-string provider would break the provider sort and abort the report.
@@ -1059,13 +1087,13 @@ test("the undocumented share counts only findings that record a constraint", asy
   assert.match(markdown, /^\| HERMES \| 1 \| 0 \| 0 \| - \|$/m);
 });
 
-async function writePublication(storeRoot, id, { repositoryId, owner = "owner", repo = "repo", prNumber, createdAt }) {
+async function writePublication(storeRoot, id, { repositoryId, owner = "owner", repo = "repo", prNumber, createdAt, version = 2 }) {
   const directory = path.join(storeRoot, "reviews", id);
   await fsp.mkdir(directory, { recursive: true });
   await fsp.writeFile(
     path.join(directory, "publication.json"),
     `${JSON.stringify({
-      version: 2,
+      version,
       review_id: id,
       created_at: createdAt,
       target: { repository_id: repositoryId, owner, repo, pr_number: prNumber },
@@ -1103,7 +1131,7 @@ test("publication ledgers are counted per pull request and binned", async (t) =>
   });
   await fsp.writeFile(
     path.join(store, "reviews", "elsewhere", "publication.json"),
-    `${JSON.stringify({ review_id: "moved", target: {} })}\n`,
+    `${JSON.stringify({ version: 2, review_id: "moved", target: {} })}\n`,
   );
 
   const scorecard = await buildScorecard(store);

@@ -467,6 +467,13 @@ if (options.phase === "PRE") {
         message: recordOutcome.message,
       });
     }
+    if (recordOutcome.status === "UNSUPPORTED") {
+      result.status = "FAILED";
+      result.failures.push({
+        code: "LEDGER_VERSION_UNSUPPORTED",
+        message: recordOutcome.message,
+      });
+    }
   }
 }
 

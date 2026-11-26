@@ -1,6 +1,12 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { MAX_ROUNDS, REVIEWER_PROVIDERS } from "./core.mjs";
+import {
+  MAX_ROUNDS,
+  REVIEWER_PROVIDERS,
+  requireRecordVersion,
+  requireReviewVersions,
+} from "./core.mjs";
+import { SUPPORTED_PUBLICATION_VERSIONS } from "./publication.mjs";
 
 export const SCORECARD_SCHEMA_VERSION = 5;
 
@@ -92,10 +98,21 @@ function emptyStats() {
   };
 }
 
+function versionDefect(check) {
+  try {
+    check();
+    return null;
+  } catch (error) {
+    return error.message;
+  }
+}
+
 // A ledger the aggregation cannot count without guessing is skipped whole,
 // so a single bad record never silently distorts a column.
 function reviewDefect(review, directoryName) {
   if (review == null || typeof review !== "object") return "not a JSON object";
+  const unsupported = versionDefect(() => requireReviewVersions(review));
+  if (unsupported != null) return unsupported;
   if (typeof review.id !== "string") return "missing id";
   // Two directories holding the same ledger would otherwise contribute the
   // same findings and outcomes twice.
@@ -226,6 +243,10 @@ function reviewDefect(review, directoryName) {
 // the name it is shown under, and when it was created.
 function publicationDefect(ledger, directoryName) {
   if (ledger == null || typeof ledger !== "object") return "not a JSON object";
+  const unsupported = versionDefect(() =>
+    requireRecordVersion(ledger, "publication ledger", SUPPORTED_PUBLICATION_VERSIONS),
+  );
+  if (unsupported != null) return unsupported;
   if (ledger.review_id !== directoryName) {
     return "review ID does not match its store directory";
   }

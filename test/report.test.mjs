@@ -969,6 +969,18 @@ test("the summary digest covers exactly the fields the report prints", () => {
 // in one report. The file is re-read after every other read.
 test("a review that moves after it was read fails the render closed", async (t) => {
   const state = await gatedFixture(t, { finalize: false });
+  // A newer release rewriting the CLEAN ledger between the reads is named as such.
+  const reviewPath = path.join(reviewDirectory(state), "review.json");
+  const original = await fsp.readFile(reviewPath, "utf8");
+  const upgradeBetweenReads = async (storeRoot, reviewId) => {
+    await fsp.writeFile(reviewPath, JSON.stringify({ ...JSON.parse(original), version: 2 }));
+    return getPublication(storeRoot, reviewId);
+  };
+  await assert.rejects(
+    loadReportLedgers(state.store, state.reviewId, { readPublication: upgradeBetweenReads }),
+    (error) => error.code === "LEDGER_VERSION_UNSUPPORTED" && error.details.version === 2,
+  );
+  await fsp.writeFile(reviewPath, original);
   const finalizeBetweenReads = async (storeRoot, reviewId) => {
     await finalizeLocalGate(storeRoot, reviewId);
     return getPublication(storeRoot, reviewId);

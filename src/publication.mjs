@@ -37,7 +37,7 @@ import {
 } from "./storage.mjs";
 import { publicationRequiredInputs } from "./tool-inputs.mjs";
 
-const SUPPORTED_PUBLICATION_VERSIONS = [1, 2, 3];
+export const SUPPORTED_PUBLICATION_VERSIONS = [1, 2, 3];
 const MAX_PUBLICATION_BYTES = 10 * 1024 * 1024;
 const TERMINAL_RESERVE_BYTES = 64 * 1024;
 const MAX_OBSERVATION_BYTES = 6 * 1024 * 1024;

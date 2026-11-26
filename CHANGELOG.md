@@ -25,6 +25,22 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   positively reports the path outside any work tree, rather than whenever the
   check fails to find one.
 
+### Fixed
+
+- (#233) A review ledger whose `version` this release does not read is
+  refused with `LEDGER_VERSION_UNSUPPORTED`, naming the record, the version
+  found, and the versions supported, instead of being read by older rules.
+  The same holds for the snapshot manifest and successor proof each round
+  carries. Installs sharing one store upgrade one at a time, so an older
+  process can meet a ledger a newer one wrote. A ledger with no `version` is
+  refused too: every release has written version 1. The packaged GitHub
+  collector refuses a publication ledger of an unknown version before any
+  GitHub request. The scorecard skips such review and publication ledgers
+  with that reason, the miss report lists such review ledgers among its
+  skipped ones, and release verification fails on an existing release record
+  of another schema rather than comparing it. CONTRIBUTING states when a
+  record's version is bumped.
+
 ### Internal
 
 - (#231) CONTRIBUTING states that the version labels in the guides change only

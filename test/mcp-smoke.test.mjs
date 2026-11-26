@@ -269,6 +269,7 @@ test("reviewer processes list only tasks bound to their provider", async (t) => 
     await fsp.writeFile(
       path.join(reviewRoot, "review.json"),
       `${JSON.stringify({
+        version: 1,
         ...task,
         status: "WAITING_FOR_REVIEW",
         current_round: 1,
@@ -303,13 +304,14 @@ test("list_reviews requires repository_path and returns that repository's five-f
   t.after(() => fsp.rm(store, { recursive: true, force: true }));
   // Neither id order is the update order, so only updated_at sorts the rows.
   const reviews = [["a", 26], ["b", 28], ["c", 27]].map(([letter, day]) => ({
+    version: 1,
     id: `rb-2026-07-26T000000-000Z-${letter}0000000`,
     status: "WAITING_FOR_REVIEW",
     repository_path: "/repository",
     updated_at: `2026-07-${day}T00:00:00.000Z`,
     rounds: [
-      { round: 1, head_sha: "0".repeat(40) },
-      { round: 2, head_sha: letter.repeat(40) },
+      { version: 1, round: 1, head_sha: "0".repeat(40) },
+      { version: 1, round: 2, head_sha: letter.repeat(40) },
     ],
   }));
   const other = {
@@ -381,6 +383,7 @@ test("MCP errors preserve StoreError code and retryability details", async (t) =
   await fsp.writeFile(
     path.join(reviewRoot, "review.json"),
     `${JSON.stringify({
+      version: 1,
       id: reviewId,
       status: "WAITING_FOR_REVIEW",
       current_round: 1,

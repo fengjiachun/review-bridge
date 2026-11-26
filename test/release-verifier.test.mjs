@@ -366,6 +366,19 @@ test("the final phase records once, agrees on re-run, and refuses to overwrite",
       (entry) => entry.code === "RELEASE_RECORD_DIVERGED",
     ),
   );
+  // A record of another schema is refused, even where a moved boundary would
+  // otherwise pass as superseded, and is left as it was.
+  const newer = JSON.stringify({ ...stored, schema: "review-bridge/release-record/2" });
+  await fsp.writeFile(recordPath, newer, { mode: 0o600 });
+  const refused = runVerifier(withObservation(supersedingPath), fixture.repository);
+  assert.equal(refused.status, 1);
+  assert.equal(refused.report.record.status, "UNSUPPORTED");
+  assert.ok(
+    refused.report.failures.some(
+      (entry) => entry.code === "LEDGER_VERSION_UNSUPPORTED",
+    ),
+  );
+  assert.equal(await fsp.readFile(recordPath, "utf8"), newer);
 });
 
 test("a version whose tag does not exist reports that and needs no local build", async (t) => {
