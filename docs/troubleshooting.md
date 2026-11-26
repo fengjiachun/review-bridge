@@ -6,9 +6,10 @@ Describes Review Bridge v0.25.0.
 
 **The reviewer runs on the wrong model** — a `CODEX_TASK` reviewer started by
 `launch_local_reviewer` uses the model in the
-MCP host's Codex configuration, not a choice made in the author conversation.
-Change `model` in that host's `~/.codex/config.toml` (or the file under
-`CODEX_HOME`); reasoning effort is `high`. A
+MCP host's Codex configuration unless a model was chosen for that review in the
+author conversation; reasoning effort is `high` unless another was chosen.
+Choose one for the review, or change `model` in that host's
+`~/.codex/config.toml` (or the file under `CODEX_HOME`). A
 task you start yourself ([manual dispatch](local-review.md#start-a-reviewer-manually))
 uses the model and effort set in the client that creates it. See
 [reviewer configuration](reviewer-configuration.md).

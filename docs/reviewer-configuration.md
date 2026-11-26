@@ -27,15 +27,27 @@ Upgrade the CLI before using automatic launch.
 
 ## Model and reasoning effort
 
-The reviewer uses the model set in the MCP host's Codex configuration
-(`model` in `~/.codex/config.toml`, or the file under `CODEX_HOME`).
-`launch_local_reviewer` passes no `--model`, so
-a model Codex accepts there is the model that reviews. To change the reviewer
-model, change the Codex configuration.
+By default the reviewer uses the model set in the MCP host's Codex
+configuration (`model` in `~/.codex/config.toml`, or the file under
+`CODEX_HOME`). `launch_local_reviewer` passes no `--model`, so
+a model Codex accepts there is the model that reviews.
 
-Reasoning effort is always `high`: that tool passes
+The default reasoning effort is `high`: that tool passes
 `model_reasoning_effort="high"` on every launch it starts, so an everyday
-configuration set to a lighter effort does not weaken reviews. A `CODEX_TASK`
+configuration set to a lighter effort does not weaken reviews.
+
+To use another model or effort for one review, say so in the author
+conversation, for example "list the reviewer models" or "review this with
+gpt-6.2-sol at max effort". The author lists the models this host's Codex
+offers (`list_reviewer_models`), with each model's supported efforts, and
+launches with your choice. A model Codex does not list, or an effort the model
+does not support, is refused; the author never substitutes another. An effort
+chosen without a model is checked against the configured model. The choice
+carries to the review's later rounds until you choose again; a new review or a
+continuation starts back at the defaults. The author does not ask which model
+to use unless you raise it.
+
+A `CODEX_TASK`
 task you create yourself ([manual dispatch](local-review.md#start-a-reviewer-manually))
 runs with the model and effort set in that client. Neither choice affects
 GitHub's Codex review or the other reviewer providers, which use their own
@@ -49,7 +61,8 @@ connection (Codex, Claude, Hermes, DeepSeek Harness) uses the same tools:
 | Step | Tool | Result |
 | --- | --- | --- |
 | Prepare | `prepare_review` | Immutable snapshot and pending review |
-| Start | `launch_local_reviewer` | An independent Codex process at `high` effort |
+| Choose (only when asked) | `list_reviewer_models` | The configured model, the `high` default, and each listed model's supported efforts |
+| Start | `launch_local_reviewer` | An independent Codex process, at `high` effort unless another was chosen |
 | Inspect | `get_review_summary` | Requested configuration, process identity and exit record when available; ledger verdict remains authoritative |
 
 ## Runtime
@@ -72,8 +85,11 @@ replacement. Process exit is not a verdict; inspect the ledger before retrying.
 An absent exit record is deliberately indeterminate even if a host reboot killed
 the process; an operator must reconcile that attempt before replacing it.
 
-Requested configuration is a launch record: `{"reasoning_effort":"high"}`, with
-the model left to the Codex configuration. Observed remote model identity is
+Requested configuration is a launch record: the chosen model if any, the
+effort, and for each whether it was `selected` or came from the Codex
+configuration or the `high` default, for example
+`{"reasoning_effort":"high","model_source":"configuration","reasoning_effort_source":"default"}`.
+Reports print it per round. Observed remote model identity is
 `unavailable`; neither local logs nor provider binding authenticate it. Rounds
 that earlier releases launched keep the model, effort and `environment_id` the
 author selected, and reports print them per round as recorded. A round still

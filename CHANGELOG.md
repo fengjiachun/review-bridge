@@ -7,6 +7,30 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+### Added
+
+- (#228) `list_reviewer_models` lists, for `CODEX_TASK`, the models the MCP
+  host's Codex offers with each model's supported reasoning efforts, beside
+  the model the Codex configuration names and the `high` effort default.
+  Other providers answer that it is not available. The author calls it only
+  when the user asks to choose a reviewer model or effort, or names one.
+
+### Changed
+
+- (#228) `launch_local_reviewer` takes optional `model` and
+  `reasoning_effort`. Either one is checked against a fresh model list right
+  before launch; a model the list does not offer, or an effort that model
+  does not support, is refused, with nothing substituted. An effort given
+  alone is checked against the configured model. A choice carries to the
+  review's later rounds until the user chooses again; a new review or a
+  continuation starts at the defaults, which are unchanged: the configured
+  model at `high` effort. Each round's `requested` now also records
+  `model_source` (`configuration` or `selected`) and
+  `reasoning_effort_source` (`default` or `selected`); rounds recorded by
+  earlier releases read and render as before.
+
 ## 0.25.0 - 2026-11-25
 
 ### Changed

@@ -2,12 +2,14 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const server = fileURLToPath(new URL("./server.mjs", import.meta.url));
 
-// The reviewer model follows the operator's Codex configuration; only the
-// reasoning effort is pinned, so a lighter everyday default cannot weaken reviews.
+// Unless the user chooses, the reviewer model follows the operator's Codex
+// configuration and the reasoning effort is pinned, so a lighter everyday
+// default cannot weaken reviews.
 export const REVIEWER_REQUESTED = Object.freeze({ reasoning_effort: "high" });
 
 export async function reviewerRuntime(storeRoot) {
@@ -41,6 +43,116 @@ export async function reviewerRuntime(storeRoot) {
   throw new Error(`Codex executable unavailable: ${name}`);
 }
 
+// Asks the same executable, from the same cwd used for dispatch, which model
+// its configuration names and which models it offers.
+export async function queryCodexModels(runtime, { timeoutMs = 30000 } = {}) {
+  const child = spawn(runtime.command, ["app-server", "--listen", "stdio://"], {
+    cwd: runtime.cwd, stdio: ["pipe", "pipe", "ignore"],
+  });
+  const pending = new Map();
+  let sequence = 0;
+  let failure;
+  const fail = (error) => {
+    failure = error;
+    for (const { reject } of pending.values()) reject(error);
+    pending.clear();
+  };
+  child.on("error", fail);
+  child.stdin.on("error", fail);
+  child.on("exit", () => fail(new Error("Codex model listing process exited")));
+  const lines = createInterface({ input: child.stdout });
+  lines.on("line", (line) => {
+    let message;
+    try { message = JSON.parse(line); } catch { return; }
+    const waiter = pending.get(message.id);
+    if (!waiter) return;
+    pending.delete(message.id);
+    if (message.error) waiter.reject(new Error(`Codex model listing: ${message.error.message}`));
+    else waiter.resolve(message.result);
+  });
+  const request = (method, params) => new Promise((resolve, reject) => {
+    if (failure) return reject(failure);
+    const id = ++sequence;
+    pending.set(id, { resolve, reject });
+    child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+  });
+  const timer = setTimeout(() => {
+    fail(new Error("Codex model listing timed out"));
+    child.kill();
+  }, timeoutMs);
+  try {
+    await request("initialize", { clientInfo: { name: "review_bridge", version: "0" } });
+    child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
+    const config = await request("config/read", { includeLayers: false });
+    const models = [];
+    const cursors = new Set();
+    let cursor = null;
+    do {
+      const page = await request("model/list", { limit: 100, includeHidden: false, cursor });
+      if (!Array.isArray(page?.data)) throw new Error("Invalid Codex model/list response");
+      for (const entry of page.data) {
+        if (typeof entry.model !== "string" || !entry.model ||
+            !Array.isArray(entry.supportedReasoningEfforts) ||
+            entry.supportedReasoningEfforts.some((e) => typeof e.reasoningEffort !== "string")) {
+          throw new Error("Invalid Codex model capabilities");
+        }
+        models.push({
+          model: entry.model, display_name: entry.displayName ?? null,
+          reasoning_efforts: entry.supportedReasoningEfforts.map((e) => e.reasoningEffort),
+        });
+      }
+      cursor = page.nextCursor;
+      if (cursor != null && (typeof cursor !== "string" || cursors.has(cursor))) {
+        throw new Error("Invalid Codex model/list pagination cursor");
+      }
+      cursors.add(cursor);
+    } while (cursor != null);
+    return { configured_model: config?.config?.model ?? null, models };
+  } finally {
+    clearTimeout(timer);
+    lines.close();
+    child.kill();
+  }
+}
+
+export async function listReviewerModels(storeRoot, provider) {
+  if (provider !== "CODEX_TASK") {
+    return { reviewer_provider: provider, available: false, reason: "Review Bridge cannot list or choose models for this provider." };
+  }
+  const { configured_model, models } = await queryCodexModels(await reviewerRuntime(storeRoot));
+  return {
+    reviewer_provider: provider, available: true, configured_model,
+    default_reasoning_effort: { value: REVIEWER_REQUESTED.reasoning_effort, source: "launcher default" },
+    models,
+  };
+}
+
+// What the reviewer is asked to run with, and where each value came from.
+// A chosen model or effort is checked against a fresh listing; nothing
+// unlisted or unsupported is launched, and nothing is substituted for it.
+export async function reviewerRequest(runtime, { model, reasoning_effort }) {
+  const requested = {
+    ...(model == null ? {} : { model }),
+    reasoning_effort: reasoning_effort ?? REVIEWER_REQUESTED.reasoning_effort,
+    model_source: model == null ? "configuration" : "selected",
+    reasoning_effort_source: reasoning_effort == null ? "default" : "selected",
+  };
+  if (model == null && reasoning_effort == null) return requested;
+  const { configured_model, models } = await queryCodexModels(runtime);
+  const name = model ?? configured_model;
+  if (name == null) {
+    throw new Error("The Codex configuration names no model to check the reasoning effort against; choose a model too. Nothing was launched.");
+  }
+  const entry = models.find((candidate) => candidate.model === name);
+  if (entry == null) {
+    throw new Error(`${model == null ? "The configured model" : "Model"} ${name} is not in Codex's model list. Nothing was launched.`);
+  }
+  if (!entry.reasoning_efforts.includes(requested.reasoning_effort)) {
+    throw new Error(`Model ${name} does not support reasoning effort ${requested.reasoning_effort}; it supports ${entry.reasoning_efforts.join(", ")}. Nothing was launched.`);
+  }
+  return requested;
+}
+
 export function codexReviewerArguments(reviewId, requested, storeRoot) {
   const packagedSkill = fileURLToPath(new URL("./reviewer-skill.md", import.meta.url));
   const skill = fs.existsSync(packagedSkill) ? packagedSkill :
@@ -64,6 +176,7 @@ export function codexReviewerArguments(reviewId, requested, storeRoot) {
   };
   return [
     "exec", "--skip-git-repo-check", "--sandbox", "workspace-write",
+    ...(requested.model == null ? [] : ["--model", requested.model]),
     ...Object.entries(settings).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`]),
     "-c", "approval_policy={granular={rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false}}",
     `Independently review Review Bridge task ${reviewId} using the packaged Review Bridge reviewer skill. Require reviewer_provider: CODEX_TASK, follow the review strategy, and submit every actionable finding.`,

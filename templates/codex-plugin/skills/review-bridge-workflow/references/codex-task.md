@@ -13,9 +13,16 @@ launch between them.
    report the summary exactly as Prepare requires.
 2. Call `launch_local_reviewer` with `review_id` and the current
    `expected_state_version` after the user has authorized starting. This shared
-   author tool works from Codex, Claude, Hermes, or DeepSeek Harness. The
-   reviewer uses the model from the host's Codex configuration; the tool passes
-   no model and pins reasoning effort to `high`. It returns promptly; wait for
+   author tool works from Codex, Claude, Hermes, or DeepSeek Harness. By
+   default the reviewer uses the model from the host's Codex configuration;
+   the tool passes no model and pins reasoning effort to `high`. Never ask
+   which model to use. Only when the user asks to choose the reviewer model or
+   effort, or names one, call `list_reviewer_models`, show the user the
+   configured model, the `high` default, and each listed model with its
+   supported efforts, and pass what they choose as `model` and/or
+   `reasoning_effort`. The tool refuses a model the list does not offer or an
+   effort that model does not support; report the refusal and let the user
+   choose again rather than picking a substitute. It returns promptly; wait for
    the ledger verdict. Do not substitute a task in a different host/runtime or
    the author's model.
 
@@ -42,10 +49,11 @@ launch between them.
    > Review Bridge reviewer skill. Require `reviewer_provider: CODEX_TASK`,
    > follow the review strategy, and submit every actionable finding.
 
-   Each round records its launch. To change the reviewer model, change the
-   host's Codex configuration. `requested` records the pinned effort; `observed`
-   is unavailable. A process log cannot authenticate the remote model. Older
-   ledgers keep the model the author selected and remain readable.
+   Each round records its launch. `requested` records the model when one was
+   chosen, the effort, and whether each was chosen (`selected`) or came from
+   the Codex configuration or the `high` default; `observed` is unavailable. A
+   process log cannot authenticate the remote model. Older ledgers keep what
+   they recorded and remain readable.
 
    Single-quote that request: it contains backticks, and a double-quoted shell
    string would execute them instead of passing them through. Pass it as one
@@ -247,7 +255,10 @@ sandbox is therefore not an isolation boundary, so never point this launch at
 code someone else wrote.
 
 A round-two rereview uses `launch_local_reviewer` again with the current state
-version. Its process has the same
+version. Leave `model` and `reasoning_effort` out: the review's earlier choice
+carries to the new round, and passing either replaces the whole choice, so pass
+them only when the user chooses again for this round. A new review or a
+continuation starts back at the defaults. Its process has the same
 shape and the same reviewer request; the packaged reviewer skill finds the
 rereview from the round the ledger is in:
 

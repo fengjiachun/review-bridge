@@ -26,6 +26,7 @@ import {
   submitResolutions,
   waitForReviewState,
 } from "./core.mjs";
+import { listReviewerModels } from "./local-reviewer.mjs";
 import { writeReviewReport } from "./report.mjs";
 import {
   acknowledgeCodexReviewAmbiguity,
@@ -175,9 +176,18 @@ const rereviewDecisionSchema = z.union([
 if (role === "author") {
   register("launch_local_reviewer", {
     title: "Launch the local Codex reviewer",
-    description: "After authorization to start, launch Codex on this MCP host. The model comes from the host's Codex configuration; reasoning effort is pinned to high. Closed stdin, neutral cwd, sandbox and memory restrictions. A running or indeterminate dispatch blocks duplicates. Exit logs do not prove a review verdict or remote model identity.",
-    inputSchema: { review_id: z.string(), expected_state_version: z.number().int() },
-  }, (input) => summarized(launchLocalReviewer(storeRoot, input.review_id, input.expected_state_version)));
+    description: "After authorization to start, launch Codex on this MCP host. By default the model comes from the host's Codex configuration and reasoning effort is high. Pass model and/or reasoning_effort only when the user chose them (see list_reviewer_models): they are checked against a fresh listing, and an unlisted model or unsupported effort is refused, never substituted. A choice carries to the review's later rounds until the user chooses again; a new review starts at the defaults. Closed stdin, neutral cwd, sandbox and memory restrictions. A running or indeterminate dispatch blocks duplicates. Exit logs do not prove a review verdict or remote model identity.",
+    inputSchema: {
+      review_id: z.string(), expected_state_version: z.number().int(),
+      model: z.string().min(1).optional(), reasoning_effort: z.string().min(1).optional(),
+    },
+  }, (input) => summarized(launchLocalReviewer(storeRoot, input.review_id, input.expected_state_version, { model: input.model, reasoningEffort: input.reasoning_effort })));
+
+  register("list_reviewer_models", {
+    title: "List the local Codex reviewer's models",
+    description: "List the models this host's Codex offers the local reviewer, each with its supported reasoning efforts, beside the model its configuration names and the launcher's high effort default. Read-only; call it only when the user asks to choose the reviewer model or effort, or names one. CODEX_TASK only; other providers answer not available.",
+    inputSchema: { reviewer_provider: z.enum(REVIEWER_PROVIDERS).optional() },
+  }, (input) => listReviewerModels(storeRoot, input.reviewer_provider ?? "CODEX_TASK"));
 
   register(
     "prepare_review",
