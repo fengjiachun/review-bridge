@@ -17,7 +17,7 @@ if (process.argv[2] === "app-server") {
     process.stderr.write("error: unknown configuration key\n");
     process.exit(3);
   }
-  if (mode === "hang") process.on("SIGTERM", () => {});
+  if (mode === "hang") { process.on("SIGTERM", () => {}); setInterval(() => {}, 1000); }
   const efforts = (...values) => values.map((reasoningEffort) => ({ reasoningEffort, description: reasoningEffort }));
   const served = process.env.RB_TEST_MODELS?.split(",");
   const visible = (entries) => entries.filter((entry) => served == null || served.includes(entry.model));
