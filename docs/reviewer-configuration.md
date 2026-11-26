@@ -32,9 +32,10 @@ configuration (`model` in `~/.codex/config.toml`, or the file under
 `CODEX_HOME`). `launch_local_reviewer` passes no `--model`, so
 a model Codex accepts there is the model that reviews.
 
-The default reasoning effort is `high`: that tool passes
-`model_reasoning_effort="high"` on every launch it starts, so an everyday
-configuration set to a lighter effort does not weaken reviews.
+The default reasoning effort is `high`: unless an effort was chosen for the
+review, that tool passes `model_reasoning_effort="high"`, so an everyday
+configuration set to a lighter effort does not weaken reviews. A chosen effort
+is passed instead.
 
 To use another model or effort for one review, say so in the author
 conversation, for example "list the reviewer models" or "review this with

@@ -15,12 +15,12 @@ launch between them.
    `expected_state_version` after the user has authorized starting. This shared
    author tool works from Codex, Claude, Hermes, or DeepSeek Harness. By
    default the reviewer uses the model from the host's Codex configuration;
-   the tool passes no model and pins reasoning effort to `high`. Never ask
-   which model to use. Only when the user asks to choose the reviewer model or
-   effort, or names one, call `list_reviewer_models`, show the user the
-   configured model, the `high` default, and each listed model with its
-   supported efforts, and pass what they choose as `model` and/or
-   `reasoning_effort`. The tool refuses a model the list does not offer or an
+   the tool passes no model and pins reasoning effort to `high`. Do not ask
+   which model to use unprompted. Only when the user asks to choose the
+   reviewer model or effort, or names one, call `list_reviewer_models`, show
+   the user the configured model, the `high` default, and each listed model
+   with its supported efforts, wait for their pick if they have not made one,
+   and pass it as `model` and/or `reasoning_effort`. The tool refuses a model the list does not offer or an
    effort that model does not support; report the refusal and let the user
    choose again rather than picking a substitute. It returns promptly; wait for
    the ledger verdict. Do not substitute a task in a different host/runtime or

@@ -73,8 +73,9 @@ Commit the change on a topic branch. In the author conversation, ask:
 > "...", the implementation scope is "...", and the base ref is `origin/main`.
 
 Review Bridge captures the snapshot and launches an independent Codex process.
-The reviewer uses the model from the MCP host's Codex configuration at `high`
-reasoning effort; the author conversation's model does not choose it. Follow
+By default the reviewer uses the model from the MCP host's Codex configuration
+at `high` reasoning effort, unless you ask for another for this review; the
+author conversation's model does not choose it. Follow
 progress in the author
 conversation using the returned `review_id`.
 

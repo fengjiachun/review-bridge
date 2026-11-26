@@ -15,5 +15,7 @@ client yourself. Review Bridge does not automate Claude Desktop.
 3. Follow `get_review_summary` and `wait_for_review_state`; resolve findings and
    prepare rereview through author tools, then launch again for round two.
 
-To change the reviewer model, change the host's Codex configuration. Requested
-configuration is recorded; observed remote model identity is unavailable.
+To use another model or effort for one review, ask Claude to list the reviewer
+models (`list_reviewer_models`) and name your choice; it holds for that review's
+later rounds. To change the default for every review, change the host's Codex
+configuration. Requested configuration is recorded; observed remote model identity is unavailable.
