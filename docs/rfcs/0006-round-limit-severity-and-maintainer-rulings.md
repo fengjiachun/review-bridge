@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Draft |
+| Status | Accepted |
 | Authors | Review Bridge contributors |
 | Created | 2026-11-27 |
 | Target release | TBD |

@@ -1114,7 +1114,10 @@ function reviewerReview(review) {
   };
 }
 
-function actionRequired(status) {
+function actionRequired(review) {
+  if (isFinalizableAtRoundLimit(review)) {
+    return "FINALIZE_LOCAL_GATE";
+  }
   const actions = {
     WAITING_FOR_REVIEW: "REVIEWER_INITIAL_REVIEW",
     WAITING_FOR_LENS_REVIEW: "REVIEWER_INITIAL_REVIEW",
@@ -1126,7 +1129,7 @@ function actionRequired(status) {
     HUMAN_REQUIRED: "HUMAN_ARBITRATION",
     CONTINUABLE_FINDINGS: "ADDRESS_LOCAL_FINDINGS",
   };
-  return actions[status] ?? "INSPECT_REVIEW";
+  return actions[review.status] ?? "INSPECT_REVIEW";
 }
 
 function countBy(values) {
@@ -1141,6 +1144,30 @@ const RESOLVED_FINDING_STATUSES = new Set([
   "RESOLVED",
   "REBUTTAL_ACCEPTED",
 ]);
+
+// The findings the reviewer has not settled, the set the summary's
+// active_findings lists.
+export function openFindings(review) {
+  return review.findings.filter(
+    (finding) => !RESOLVED_FINDING_STATUSES.has(finding.status),
+  );
+}
+
+// A review that has used its last round, has not been continued, and holds
+// only minor or nit findings open can be finalized like a CLEAN one. This
+// decides eligibility before finalization only: once the gate is minted the
+// status is LOCAL_GATE_PASSED, and a review gated with open findings is
+// recognized by its open findings.
+export function isFinalizableAtRoundLimit(review) {
+  return (
+    ["CONTINUABLE_FINDINGS", "HUMAN_REQUIRED"].includes(review.status) &&
+    review.current_round === review.max_rounds &&
+    (review.continued_by_review_id ?? null) === null &&
+    openFindings(review).every((finding) =>
+      ["minor", "nit"].includes(finding.severity),
+    )
+  );
+}
 
 export function continuationFindingFingerprint(finding) {
   return sha256(
@@ -1237,10 +1264,8 @@ async function freezeContinuationSource(storeRoot, sourceReviewId, continuationI
 export function reviewSummary(review) {
   const currentSnapshot = review.rounds.at(-1) ?? null;
   const runs = review.rounds[0]?.runs;
-  const activeFindings = review.findings.filter(
-    (finding) => !RESOLVED_FINDING_STATUSES.has(finding.status),
-  );
-  const action = actionRequired(review.status);
+  const activeFindings = openFindings(review);
+  const action = actionRequired(review);
   return {
     id: review.id,
     status: review.status,
@@ -2511,15 +2536,24 @@ export async function finalizeLocalGate(storeRoot, reviewId) {
 
 async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
   const review = await loadReview(storeRoot, reviewId);
-  if (review.status !== "CLEAN") {
-    throw new Error(`only a CLEAN review can be finalized (status=${review.status})`);
+  // A review finalized at the round limit is gated over the snapshot its last
+  // reviewer judged; clean_snapshot_hash then names the snapshot the gate
+  // attests, and is set in the same write as LOCAL_GATE_PASSED.
+  const atRoundLimit = isFinalizableAtRoundLimit(review);
+  if (review.status !== "CLEAN" && !atRoundLimit) {
+    throw new Error(
+      `only a CLEAN review, or one at its round limit with only minor or nit findings open, can be finalized (status=${review.status})`,
+    );
   }
-  const cleanRound = review.rounds.find(
-    (round) => round.snapshot_hash === review.clean_snapshot_hash,
-  );
+  const cleanRound = atRoundLimit
+    ? review.rounds.at(-1)
+    : review.rounds.find(
+        (round) => round.snapshot_hash === review.clean_snapshot_hash,
+      );
   if (!cleanRound) {
     throw new Error("clean snapshot is not present in the review ledger");
   }
+  const gatedHash = cleanRound.snapshot_hash;
   await verifySuccessorArtifacts(storeRoot, reviewId, cleanRound);
   // The gate attests the snapshot the reviewer actually saw, so the stored
   // patch must still reproduce the committed hash — not merely the right
@@ -2530,7 +2564,7 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
     review,
     cleanRound,
   );
-  if (storedHash !== review.clean_snapshot_hash) {
+  if (storedHash !== gatedHash) {
     throw new Error(
       "stored review patch does not match its snapshot commitment",
     );
@@ -2543,23 +2577,30 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
     roundRoot: "",
     writeFiles: false,
   });
-  if (manifest.snapshot_hash !== review.clean_snapshot_hash) {
+  if (manifest.snapshot_hash !== gatedHash) {
     throw new Error(
       "working tree changed after the clean verdict; create a new review task",
     );
   }
+  const open = openFindings(review).map(({ id, severity, status }) => ({
+    id,
+    severity,
+    status,
+  }));
   const gate = {
     version: 1,
     review_id: review.id,
     passed_at: now(),
-    snapshot_hash: review.clean_snapshot_hash,
+    snapshot_hash: gatedHash,
     reviewer_provider: reviewerProviderFor(review),
     base_sha: manifest.base_sha,
     head_sha: manifest.head_sha,
     status: "LOCAL_GATE_PASSED",
+    ...(open.length === 0 ? {} : { open_findings: open }),
   };
   await atomicWriteJson(path.join(reviewDirectory(storeRoot, review.id), "gate.json"), gate);
   review.status = "LOCAL_GATE_PASSED";
+  review.clean_snapshot_hash = gatedHash;
   review.history.push({ at: now(), event: "LOCAL_GATE_PASSED" });
   await saveReviewTransition(storeRoot, review);
   return { review: publicReview(review), gate };

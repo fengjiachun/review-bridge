@@ -2,7 +2,13 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { loadReview, requireReviewVersions, reviewSummary } from "./core.mjs";
+import {
+  isFinalizableAtRoundLimit,
+  loadReview,
+  openFindings,
+  requireReviewVersions,
+  reviewSummary,
+} from "./core.mjs";
 import {
   canonicalDigest,
   checkRequiredRuns,
@@ -497,7 +503,18 @@ function outcomeSection(review) {
       ? `- Terminal state: ${code(review.status)}`
       : `- Current status: ${code(review.status)} (not terminal: the review is still in progress)`,
   ];
-  if (CLEAN_STATUSES.includes(review.status)) {
+  // A review gated at the round limit holds findings still open, so it is
+  // not called clean.
+  const gatedOpen =
+    review.status === "LOCAL_GATE_PASSED" ? openFindings(review).length : 0;
+  if (gatedOpen > 0) {
+    lines.push(
+      `- Gated at the round limit with ${count(gatedOpen, "finding")} open`,
+    );
+    if (review.clean_snapshot_hash != null) {
+      lines.push(`- Gated snapshot: ${code(review.clean_snapshot_hash)}`);
+    }
+  } else if (CLEAN_STATUSES.includes(review.status)) {
     lines.push(`- Rounds to CLEAN: ${review.current_round}`);
     if (review.clean_snapshot_hash != null) {
       lines.push(`- Clean snapshot: ${code(review.clean_snapshot_hash)}`);
@@ -741,7 +758,7 @@ export function summaryDigest(summary) {
 // Raise it by one in any change that alters the Markdown this module renders
 // -- wording, ordering, a new line, a heading -- so the reports the previous
 // version wrote stay readable at their own names.
-export const REPORT_FORMAT = 12;
+export const REPORT_FORMAT = 13;
 
 // `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
 // `p<revision>-s<summary digest>-f<format>` without one.
@@ -1014,7 +1031,9 @@ function destinationSentence(review, publication, summary) {
   if (review?.status === "LOCAL_GATE_PASSED") {
     return `The local gate passed over snapshot ${code(review.clean_snapshot_hash)}; no publication ledger was rendered, so nothing here is merged.`;
   }
-  const next = Object.hasOwn(LOCAL_NEXT_STEP, review?.status)
+  const next = isFinalizableAtRoundLimit(review)
+    ? `the local gate can be finalized next with ${count(openFindings(review).length, "minor or nit finding")} left open`
+    : Object.hasOwn(LOCAL_NEXT_STEP, review?.status)
     ? LOCAL_NEXT_STEP[review.status]
     : `its status ${code(review?.status)} names no next step here; inspect the ledger`;
   return `Next: ${next}. No publication ledger was rendered, so nothing here is merged or gated.`;

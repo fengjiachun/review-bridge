@@ -4,7 +4,8 @@ Use the selected provider
 ([CODEX_TASK](codex-task.md), [HERMES](hermes.md),
 [DEEPSEEK_HARNESS](deepseek-harness.md), [CLAUDE_DESKTOP](claude-desktop.md))
 for its round-two launch or resume rules. Use [Prepare](prepare.md) for a fresh
-continuation review and [Finish](finish.md) for CLEAN or human arbitration.
+continuation review and [Finish](finish.md) for CLEAN, a gate at the round
+limit, or human arbitration.
 
 1. Call `get_review_summary` first. If it reports `REVIEW_SUBMITTED`, call
    `get_review` once to load the full findings and evidence. Present every
@@ -51,7 +52,10 @@ continuation review and [Finish](finish.md) for CLEAN or human arbitration.
    completes, call `get_review` again. Present every per-finding decision and
    any new finding from its `rereview_decisions` and `findings`. If it reaches
    `HUMAN_REQUIRED`, state the concrete escalation reason from the full ledger.
-   If it reaches `CONTINUABLE_FINDINGS`, present the source ledger's `OPEN` and
+   If it reaches `CONTINUABLE_FINDINGS` or `HUMAN_REQUIRED` and
+   `get_review_summary` reports `FINALIZE_LOCAL_GATE`, only `minor` or `nit`
+   findings are open: follow [Finish](finish.md). Otherwise, if it reaches
+   `CONTINUABLE_FINDINGS`, present the source ledger's `OPEN` and
    `STILL_OPEN` `findings` before starting the fresh full review. After
    creating that review, call `get_review` with its new ID and read its
    `carried_findings` as the continuation scope.

@@ -3,7 +3,13 @@
 Only if publication is authorized, continue to [Publish through GitHub](publication.md).
 
 - If the reviewer returns `CLEAN`, call `finalize_local_gate`.
-- Finalization must fail if the working tree changed after the clean
+- If a round-two `CONTINUABLE_FINDINGS` or `HUMAN_REQUIRED` review's summary
+  reports `FINALIZE_LOCAL_GATE`, every open finding is `minor` or `nit`.
+  Present each one from `active_findings`, then call `finalize_local_gate`;
+  the gate lists them under `open_findings`. Continuing the review or
+  exporting it for arbitration instead remains available until the gate is
+  minted.
+- Finalization must fail if the working tree changed after the gated
   verdict.
 - Treat `LOCAL_GATE_PASSED` as permission to continue the user's publication
   workflow, not as permission by itself to push or create a pull request.

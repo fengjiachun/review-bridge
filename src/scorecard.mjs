@@ -2,13 +2,14 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import {
   MAX_ROUNDS,
+  openFindings,
   REVIEWER_PROVIDERS,
   requireRecordVersion,
   requireReviewVersions,
 } from "./core.mjs";
 import { SUPPORTED_PUBLICATION_VERSIONS } from "./publication.mjs";
 
-export const SCORECARD_SCHEMA_VERSION = 5;
+export const SCORECARD_SCHEMA_VERSION = 6;
 
 const SEVERITIES = ["blocker", "major", "minor", "nit"];
 const CONSTRAINT_KINDS = ["documented", "undocumented"];
@@ -41,7 +42,9 @@ const METRIC_SEMANTICS = {
   not_clean:
     "Counts statuses other than CLEAN/LOCAL_GATE_PASSED; it is not a failure count.",
   rounds_to_clean:
-    "Counts current_round for CLEAN/LOCAL_GATE_PASSED.",
+    "Counts current_round for CLEAN/LOCAL_GATE_PASSED, except a LOCAL_GATE_PASSED review gated with open findings.",
+  gated_with_open_findings:
+    "Counts LOCAL_GATE_PASSED reviews gated at the round limit with findings still open; they are not counted as clean.",
   intent:
     "Counts reviews with a recorded reconstructed_intent and round twos with a recorded intent_comparison, once per review. Missing fields count as zero; no free text is aggregated.",
 };
@@ -67,6 +70,7 @@ function emptyStats() {
     intent_comparison_recorded: 0,
     reviews_by_status: zeroCounts(REVIEW_STATUSES),
     rounds_to_clean: {},
+    gated_with_open_findings: 0,
     not_clean: 0,
     findings: 0,
     findings_by_severity: zeroCounts(SEVERITIES),
@@ -388,12 +392,18 @@ function humanRequiredReason(review) {
   return event?.event ?? "NOT_RECORDED";
 }
 
+function gatedWithOpenFindings(review) {
+  return review.status === "LOCAL_GATE_PASSED" && openFindings(review).length > 0;
+}
+
 function countReview(stats, review) {
   stats.reviews += 1;
   if (review.reconstructed_intent != null) stats.reconstructed_intent_recorded += 1;
   if (review.current_round === 2 && review.intent_comparison != null) stats.intent_comparison_recorded += 1;
   stats.reviews_by_status[review.status] += 1;
-  if (CLEAN_STATUSES.includes(review.status)) {
+  if (gatedWithOpenFindings(review)) {
+    stats.gated_with_open_findings += 1;
+  } else if (CLEAN_STATUSES.includes(review.status)) {
     const round = String(review.current_round);
     stats.rounds_to_clean[round] = (stats.rounds_to_clean[round] ?? 0) + 1;
   } else {
@@ -629,8 +639,10 @@ const COUNTING_RULES = [
   "  do not match a repository filter. Missing/null strategy means FULL,",
   "  matching the core compatibility default.",
   "- Rounds-to-CLEAN counts `current_round` for reviews whose status is `CLEAN`",
-  "  or `LOCAL_GATE_PASSED`. Every other review counts as `not_clean`: this is",
-  "  a status count, not a failure count.",
+  "  or `LOCAL_GATE_PASSED`, except a `LOCAL_GATE_PASSED` review with a finding",
+  "  still open: that review was gated at the round limit and counts under",
+  "  `gated_with_open_findings`, not as clean. Every other review counts as",
+  "  `not_clean`: this is a status count, not a failure count.",
   "- A finding's outcome is the author's disposition crossed with the reviewer's",
   "  round-two decision; `undecided` means no round-two decision was recorded.",
   "- A **rebuttal** is a finding the author dispositioned `rejected`. It is",
@@ -717,15 +729,17 @@ export function renderScorecardMarkdown(scorecard) {
         "Clean",
         "Clean in round 1",
         "Clean in round 2",
+        "Gated with open findings",
         "Human required",
         "Continuable",
         "In flight",
       ],
       providerRows(scorecard, (provider, stats) => {
-        const clean = CLEAN_STATUSES.reduce(
-          (total, status) => total + stats.reviews_by_status[status],
-          0,
-        );
+        const clean =
+          CLEAN_STATUSES.reduce(
+            (total, status) => total + stats.reviews_by_status[status],
+            0,
+          ) - stats.gated_with_open_findings;
         return [
           [
             provider,
@@ -733,9 +747,14 @@ export function renderScorecardMarkdown(scorecard) {
             clean,
             stats.rounds_to_clean["1"] ?? 0,
             stats.rounds_to_clean["2"] ?? 0,
+            stats.gated_with_open_findings,
             stats.human_required,
             stats.continuable_findings,
-            stats.reviews - clean - stats.human_required - stats.continuable_findings,
+            stats.reviews -
+              clean -
+              stats.gated_with_open_findings -
+              stats.human_required -
+              stats.continuable_findings,
           ],
         ];
       }),

@@ -1441,6 +1441,8 @@ test("two-round fixed finding reaches a local gate", async (t) => {
 
   const finalized = await finalizeLocalGate(store, prepared.id);
   assert.equal(finalized.gate.status, "LOCAL_GATE_PASSED");
+  // A gate minted from CLEAN lists no open findings.
+  assert.equal(Object.hasOwn(finalized.gate, "open_findings"), false);
   assert.equal((await getReview(store, prepared.id)).status, "LOCAL_GATE_PASSED");
 });
 
@@ -1629,7 +1631,7 @@ test("new findings after an uncontested rereview are continuable", async (t) => 
     [{ finding_id: "F-001", decision: "resolved", rationale: "The test exists." }],
     [
       {
-        severity: "minor",
+        severity: "major",
         title: "New edge case",
         explanation: "A separate edge case still needs a decision.",
       },

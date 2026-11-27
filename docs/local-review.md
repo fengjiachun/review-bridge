@@ -165,9 +165,18 @@ and the scorecard counts recordings without aggregating their contents.
 A first-round CLEAN review ends without a round-two comparison.
 Rereview ends in `CLEAN`,
 `CONTINUABLE_FINDINGS`, or `HUMAN_REQUIRED`. Finalize `CLEAN` with
-`finalize_local_gate` to reach `LOCAL_GATE_PASSED`:
+`finalize_local_gate` to reach `LOCAL_GATE_PASSED`. A round-two
+`CONTINUABLE_FINDINGS` or `HUMAN_REQUIRED` review that has not been continued
+and whose open findings are all `minor` or `nit` is finalizable at the round
+limit: its summary reports `FINALIZE_LOCAL_GATE`, and `finalize_local_gate`
+gates the last round's snapshot. The gate lists each open finding under
+`open_findings` (`id`, `severity`, `status`), the summary keeps listing them in
+`active_findings`, and the report and scorecard show the review as gated with
+open findings rather than clean. Until the gate is minted the review can still
+be continued or sent to arbitration, as below.
 
-- `LOCAL_GATE_PASSED`: the reviewer found no remaining issue and the working tree
+- `LOCAL_GATE_PASSED`: the reviewer found no remaining issue, or only the
+  `minor` and `nit` findings the gate lists at the round limit, and the working tree
   still matches the reviewed snapshot. The gate attests snapshot consistency,
   not test results: the deterministic check gate lives in the publication
   layer, where a failing required check blocks `MERGE_READY` on provider
@@ -299,4 +308,6 @@ WAITING_FOR_REVIEW
                                                └─ rebuttal still open -> HUMAN_REQUIRED
 
 CLEAN -> snapshot recheck -> LOCAL_GATE_PASSED
+CONTINUABLE_FINDINGS / HUMAN_REQUIRED at round two, only minor or nit open
+  -> snapshot recheck -> LOCAL_GATE_PASSED (gate lists the open findings)
 ```

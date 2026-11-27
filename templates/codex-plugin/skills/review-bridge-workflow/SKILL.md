@@ -58,7 +58,8 @@ load [Lock contention](references/lock-contention.md) before deciding to retry.
   revision or `state_version`. Use the ledger for findings and resolutions;
   session narration, reports, and launch exit codes are not review verdicts.
 - Never add a third round to a review ID. HUMAN_REQUIRED stops for arbitration; CONTINUABLE_FINDINGS uses a fresh
-  full review.
+  full review. Either one whose summary reports `FINALIZE_LOCAL_GATE` holds
+  only `minor` or `nit` findings and is finalized by default.
 - Honor terminal states and operator stops.
 
 ## Test quality in pre-commit cleanup
