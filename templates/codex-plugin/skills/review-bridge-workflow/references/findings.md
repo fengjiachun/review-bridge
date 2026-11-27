@@ -23,7 +23,14 @@ limit, or human arbitration.
      with evidence.
    - `rejected`: provide concrete technical evidence. A remedy that differs
      from the recommendation is `rejected`, not `fixed`: explain with evidence
-     why it satisfies the finding, and let the rereviewer decide.
+     why it satisfies the finding, and let the rereviewer decide. A finding
+     you want the user to decide as maintainer is `rejected` too, with a
+     rationale saying a maintainer ruling is being sought (step 4). Never
+     answer it `human_required`: that moves the review to `HUMAN_REQUIRED`,
+     and the ruling window never opens. If the round-two reviewer accepts it
+     under the ruling, as `rebuttal_accepted` or as `resolved` once the code
+     follows the ruling, the round is not contested; only `still_open` on a
+     rejected finding contests it.
    - `human_required`: stop and request human arbitration.
 
    A fix the rereviewer judges incomplete moves the review to
@@ -32,7 +39,16 @@ limit, or human arbitration.
 3. Call `submit_resolutions` with one entry for every finding, then call
    `get_review` again. Present every persisted disposition from its
    `resolutions`, including its rationale and evidence.
-4. If the state is `AUTHOR_RESPONDED`, require a new commit only when at least
+4. The ruling window is open while the state is `AUTHOR_RESPONDED` in round
+   one, until `prepare_rereview`. When the user decides a finding's trade-off
+   or corrects a requirement clause, record it with
+   `record_maintainer_ruling`: the `text` states the user's decision
+   faithfully and in full, as a property of the change, without depending on
+   the finding's text, `finding_ids` names the findings it decides, and
+   `operator_label` names the human who decided. Never put the decision in
+   resolution text, and never record a ruling the user did not make. To undo
+   a ruling, record one that withdraws it by ID. Then continue as usual.
+   If the state is `AUTHOR_RESPONDED`, require a new commit only when at least
    one resolution is `fixed` — after the pre-commit cleanup — then call
    `prepare_rereview` and `get_review`
    again. For fixed resolutions, compare the preceding and latest rounds'

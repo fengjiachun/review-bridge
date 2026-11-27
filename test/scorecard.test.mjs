@@ -428,7 +428,7 @@ test("a ledger of a version this release does not read is skipped", async (t) =>
   const newer = "rb-2026-08-12T000000-000Z-66666666";
   await writeReview(store, newer, {
     ...reviewLedger({ id: newer, status: "CLEAN" }),
-    version: 2,
+    version: 3,
   });
   const unversioned = "rb-2026-08-13T000000-000Z-77777777";
   const { version: _version, ...ledger } = reviewLedger({ id: unversioned, status: "CLEAN" });
@@ -443,8 +443,8 @@ test("a ledger of a version this release does not read is skipped", async (t) =>
   const scorecard = await buildScorecard(store);
   assert.equal(scorecard.corpus.reviews_counted, 0);
   assert.deepEqual(scorecard.skipped.map(({ reason }) => reason), [
-    "review ledger version 2; this release reads version 1",
-    "review ledger version is missing; this release reads version 1",
+    "review ledger version 3; this release reads version 1, 2",
+    "review ledger version is missing; this release reads version 1, 2",
   ]);
   assert.deepEqual(scorecard.skipped_publications, [
     { id: newer, reason: "publication ledger version 4; this release reads version 1, 2, 3" },

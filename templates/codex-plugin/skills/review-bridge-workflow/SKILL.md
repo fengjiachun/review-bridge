@@ -34,8 +34,11 @@ load [Lock contention](references/lock-contention.md) before deciding to retry.
   behavior change can turn red. Apply the test-quality criteria below to
   preparation and fix commits before rereview.
 - Keep the user's requirement and scope faithful to what the user currently
-  asks for. After a human ruling that changes what the code should do, that
-  is the ruled behavior, and the next review's requirement states it. Bind
+  asks for. A decision the user makes between rounds is recorded with
+  `record_maintainer_ruling` in the ruling window
+  ([Handle findings](references/findings.md) step 4). After any other human
+  ruling that changes what the code should do, that is the ruled behavior,
+  and the next review's requirement states it. Bind
   review to the exact repository, immutable base SHA, captured head and
   snapshot, and chosen provider. A changed head needs the applicable fresh
   review or authorization.

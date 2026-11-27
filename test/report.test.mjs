@@ -973,12 +973,12 @@ test("a review that moves after it was read fails the render closed", async (t) 
   const reviewPath = path.join(reviewDirectory(state), "review.json");
   const original = await fsp.readFile(reviewPath, "utf8");
   const upgradeBetweenReads = async (storeRoot, reviewId) => {
-    await fsp.writeFile(reviewPath, JSON.stringify({ ...JSON.parse(original), version: 2 }));
+    await fsp.writeFile(reviewPath, JSON.stringify({ ...JSON.parse(original), version: 3 }));
     return getPublication(storeRoot, reviewId);
   };
   await assert.rejects(
     loadReportLedgers(state.store, state.reviewId, { readPublication: upgradeBetweenReads }),
-    (error) => error.code === "LEDGER_VERSION_UNSUPPORTED" && error.details.version === 2,
+    (error) => error.code === "LEDGER_VERSION_UNSUPPORTED" && error.details.version === 3,
   );
   await fsp.writeFile(reviewPath, original);
   const finalizeBetweenReads = async (storeRoot, reviewId) => {
@@ -1640,7 +1640,7 @@ test("legacy full reports retain their contents and mark reviewer configuration 
   // The stored baseline retains its original rendering identity.
   assert.ok(baseline.includes("- Report revision: `9-f1`"));
   assert.ok(rendered.includes(`- Report revision: \`9-f${REPORT_FORMAT}\``));
-  assert.equal(REPORT_FORMAT, 13);
+  assert.equal(REPORT_FORMAT, 14);
 });
 
 test("a finding's heading names the constraint it records", () => {

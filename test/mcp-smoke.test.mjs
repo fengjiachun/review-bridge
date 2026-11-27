@@ -65,6 +65,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
     "prepare_review",
     "record_codex_review_request",
     "record_github_snapshot",
+    "record_maintainer_ruling",
     "render_review_report",
     "start_publication",
     "submit_resolutions",

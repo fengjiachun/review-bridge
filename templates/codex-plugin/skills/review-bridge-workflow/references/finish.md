@@ -27,9 +27,14 @@ Only if publication is authorized, continue to [Publish through GitHub](publicat
   Markdown to the human or externally coordinated reviewer. The export is
   read-only and does not authorize publication. Do not start a third model
   round.
-- A human ruling that changes what the code should do is a requirement
-  change. In the next review you prepare after such a ruling, pass the ruled
-  behavior as the `requirement`, stated as a property of the change itself.
+- A decision made between rounds is a maintainer ruling, recorded in the
+  ruling window ([Handle findings](findings.md) step 4). Any other human
+  ruling that changes what the code should do, such as one from a
+  `HUMAN_REQUIRED` arbitration, is a requirement change; so is a decision
+  made at `CONTINUABLE_FINDINGS`, unless it waits for the continuation's
+  ruling window. In the next review you prepare after such a ruling, pass
+  the ruled behavior as the `requirement`, stated as a property of the change
+  itself.
   Prepare it as a new review, not a continuation: a continuation must repeat
   its source review's requirement exactly.
   Do not address the reviewer in it, and do not cite the ruling as a reason

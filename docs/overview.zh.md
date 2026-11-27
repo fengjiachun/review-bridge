@@ -98,7 +98,7 @@ CLEAN -> 再核工作树等于快照 -> LOCAL_GATE_PASSED
 
 三个出口。`CLEAN` 在再核一次工作树等于快照之后成为 `LOCAL_GATE_PASSED`；这道门禁证明的是快照一致性，不是测试结果。用完最后一轮、没被继续、未完意见全是 `minor` 或 `nit` 的评审也可以这样对最后一轮快照过门禁：下一步动作是 `FINALIZE_LOCAL_GATE`，门禁里列出这些未完意见，报告和 scorecard 把它算作带未完意见过门禁，不算 CLEAN。过门禁之前它仍可以走下面的路线。`CONTINUABLE_FINDINGS` 是不存在仍有争议的驳回、但某条修复被判不完整或出现了新问题：作者提交新 head，开一条新评审，未完的意见作为范围提示携带进去。`HUMAN_REQUIRED` 只留给直接升级和复审者仍不认的驳回；可以为人导出一份仲裁包，不动账本。这个路由是根据账本数据改的：曾进入 HUMAN_REQUIRED 的评审绝大多数在十几分钟内于同仓库同 base 重开了新评审，于是「修了但没修完」被改成了「继续」。
 
-随改动一起交给评审者的还有两样。**规矩分类**：违反项目规矩的 finding 会标明这条规矩是否已写在仓库的 agent 指导文件里（`documented` 并注明出处，或 `undocumented`）；修一条 undocumented 的意见包括把规矩写下来。**设计理由**：作者可以在任何意见出现之前记下关键设计决策、放弃的方案和自己没把握的地方；评审者只在作者回应过第一轮之后才看到它，而且只当作又一份待核材料。
+随改动一起交给评审者的还有三样。**规矩分类**：违反项目规矩的 finding 会标明这条规矩是否已写在仓库的 agent 指导文件里（`documented` 并注明出处，或 `undocumented`）；修一条 undocumented 的意见包括把规矩写下来。**设计理由**：作者可以在任何意见出现之前记下关键设计决策、放弃的方案和自己没把握的地方；评审者只在作者回应过第一轮之后才看到它，而且只当作又一份待核材料。**维护者裁决**：第一轮与第二轮之间，作者可以用 `record_maintainer_ruling` 记下用户做出的决定，裁定点名意见引出的取舍，或者改正需求里写错的条款。与作者材料不同，裁决作为范围约束下一轮评审者，但有评审者 skill 写明的边界：试图跳过某个评审维度或压低严重度的裁决本身就是一条 `major` 意见。继续评审会把裁决带过去。
 
 同一分支上的后续提交可以作为 **successor** 继承上一条 `LOCAL_GATE_PASSED` 的评审，评审单位是父到子的 delta 及其波及之处，见 [local-review.md](local-review.md)；各提供方的派发方式见 [reviewer-configuration.md](reviewer-configuration.md)。
 
@@ -168,7 +168,7 @@ flowchart LR
 
 | 分组 | 工具 |
 | --- | --- |
-| 本地评审 | `launch_local_reviewer` `list_reviewer_models` `prepare_review` `list_reviews` `get_review` `get_review_summary` `wait_for_review_state` `submit_resolutions` `prepare_rereview` `append_review_erratum` `finalize_local_gate` `export_human_arbitration` `render_review_report` |
+| 本地评审 | `launch_local_reviewer` `list_reviewer_models` `prepare_review` `list_reviews` `get_review` `get_review_summary` `wait_for_review_state` `submit_resolutions` `prepare_rereview` `append_review_erratum` `record_maintainer_ruling` `finalize_local_gate` `export_human_arbitration` `render_review_report` |
 | 发布门禁 | `authorize_remote_publication` `start_publication` `get_publication` `get_publication_summary` `record_codex_review_request` `record_github_snapshot` `acknowledge_codex_review_ambiguity` `finalize_publication_gate` `verify_publication_gate` |
 
 ## 附录 B · 术语

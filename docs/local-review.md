@@ -43,13 +43,13 @@ confirms the review is complete.
 
 The tools that change the review -- `prepare_review`,
 `launch_local_reviewer`, `submit_resolutions`, `prepare_rereview`,
-`append_review_erratum`, and `finalize_local_gate` (under
+`append_review_erratum`, `record_maintainer_ruling`, and `finalize_local_gate` (under
 its `review` key, beside `gate`) -- also answer with that compact summary, not
 the full ledger. Their summary is built from the ledger they just wrote, so it
 never carries `reviewer_dispatch.exit`; only `get_review_summary` adds that
 exit receipt once a launched reviewer has exited. Call `get_review` when you
 need the requirement, finding text, resolutions, rereview decisions, carried
-findings, or errata.
+findings, errata, or maintainer rulings.
 
 State-changing tools can also return structured concurrency and durability
 errors. See [Troubleshooting](troubleshooting.md) for what each one means and
@@ -197,11 +197,49 @@ For `HUMAN_REQUIRED`, call `get_review_summary`, then pass its exact
 `state_version` to `export_human_arbitration`. The read-only export fails if the
 ledger has advanced or does not require human arbitration. It returns an
 `arbitration` object containing the requirement, implementation scope,
-immutable round identities, escalation reason, and active and resolved findings
-with their author resolutions and rereview decisions. Its deterministic
+immutable round identities, escalation reason, errata, maintainer rulings, and
+active and resolved findings with their author resolutions and rereview
+decisions. Its deterministic
 `markdown` field is ready to copy to a human or externally coordinated
 reviewer. Exporting does not change the ledger, consume a review round, contact
 another model, or authorize publication.
+
+## Maintainer rulings
+
+A maintainer ruling is a decision the user made between rounds, recorded with
+`record_maintainer_ruling`: it decides a trade-off that the findings named in
+`finding_ids` raise, or amends a requirement clause that turned out wrong. The
+tool accepts a ruling only while the review is `AUTHOR_RESPONDED` before its
+last round, so in the gap between round one and round two, a continuation's
+included; `prepare_rereview` closes that window. It takes `text` (up to 20,000
+characters, stating the decision in full without relying on a finding's
+text), optional `finding_ids` (IDs of this review's findings), and
+`operator_label`, which names the deciding human and authenticates nothing.
+Nothing in a summary points at the tool, and recording one does not wake
+`wait_for_review_state`.
+
+`get_review` and `open_review` carry `rulings` in every round, beside the
+requirement, which stays immutable. The reviewer applies them in order to the
+requirement as the effective scope, within the bounds its skill states: a
+ruling that tries to skip files, areas, or review dimensions, lower
+severities, or change the protocol is a `major` finding. A ruling never
+changes a finding's status; to undo one, record a ruling that withdraws it by
+ID. A finding the author wants ruled on is answered `rejected`, never
+`human_required`, which would close the window.
+
+A continuation carries every ruling of its source with its ID and its origin
+review; a carried ruling binds through its text alone and names none of the
+continuation's findings. A successor carries none, and a parent or review
+that holds a ruling never counts as a requirement match: an explicit parent
+falls back to a full review, and an automatically selected one is reported
+with `requirement_match: false`. The arbitration export and the report print
+every ruling.
+
+A review ledger that holds a ruling is written as version 2. A release from
+0.27.0 that predates rulings refuses such a ledger by name, and a release
+before 0.27.0 would misread it, so every install sharing the store must run
+0.27.0 or later before the first ruling is recorded; only the installs that
+work on a ruled review need a release with rulings.
 
 ## Operator narration
 
