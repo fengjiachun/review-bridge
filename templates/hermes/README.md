@@ -1,7 +1,7 @@
 # Review Bridge for Hermes
 
 This directory is the self-contained Hermes integration for Review Bridge
-v0.23.0. It contains the packaged server runtime, separate author and reviewer
+v0.27.0. It contains the packaged server runtime, separate author and reviewer
 MCP snippets, and a Review Bridge-owned reviewer skill. The reviewer snippet
 runs `node <absolute-versioned-path>/server/server.mjs --role reviewer
 --reviewer-provider HERMES`; the author snippet runs the same exact server with
@@ -26,16 +26,16 @@ tools as that surface evolves.
 
 ## Install
 
-1. Check out the exact `v0.23.0` tag, run `npm ci`, `npm test`, `npm run build`,
+1. Check out the exact `v0.27.0` tag, run `npm ci`, `npm test`, `npm run build`,
    and `npm run verify:build`. Keep the resulting
-   `dist/review-bridge-v0.23.0/hermes-integration` directory in place.
+   `dist/review-bridge-v0.27.0/hermes-integration` directory in place.
 2. Create dedicated author and reviewer profiles. Do not clone a profile after
    installing either Review Bridge MCP entry, because that would copy the
    opposite role's server into the new profile.
 3. Render both snippets before installing them:
    - `__REVIEW_BRIDGE_RELEASE_PATH__` → the absolute path of the versioned
      `hermes-integration` directory, ending in
-     `review-bridge-v0.23.0/hermes-integration`.
+     `review-bridge-v0.27.0/hermes-integration`.
    - `__REVIEW_BRIDGE_HOME__` → the absolute path of the shared store used by
      every Review Bridge participant.
 4. Merge the server entry from `mcp/reviewer.config.yaml` into the reviewer
@@ -73,7 +73,7 @@ toolset to show as disabled, with only `review-bridge-reviewer` under MCP
 servers. The reviewer profile must have no Review Bridge author/publication
 server or tools. The author profile must have no Review Bridge reviewer server and must
 retain the full author tool surface. Both rendered snippets must contain the
-same absolute `REVIEW_BRIDGE_HOME` and the same absolute v0.23.0 integration
+same absolute `REVIEW_BRIDGE_HOME` and the same absolute v0.27.0 integration
 path.
 
 ## Review
@@ -210,8 +210,7 @@ not keep a preload, which is why the round-two resume passes it again.
 
 Review Bridge records the review's `HERMES` binding; it observes nothing about
 how the instance was started, and this section adds no mechanism that would.
-Local autonomous task creation still accepts `CODEX_TASK` dispatch only. The
-`CLAUDE_DESKTOP` boundary is unchanged, and nothing above narrows it: never
+The `CLAUDE_DESKTOP` boundary is unchanged, and nothing above narrows it: never
 launch, script, or otherwise programmatically invoke a Claude reviewer from
 the driver session — the operator opens that conversation themselves, an
 account-compliance boundary rather than a convenience.
@@ -229,18 +228,14 @@ Every participant sharing that store must run one exact Review Bridge version.
 
 - `HERMES` is configured local reviewer provenance, not cryptographic model
   identity.
-- Local autonomous task creation remains `CODEX_TASK`-only; the Hermes
-  reviewer never creates or advances local autonomous workflow tasks.
 - Remote GitHub Codex publication is performed by the author/publication side
   only after the local HERMES reviewer gate has passed.
 
-## Select a local reviewer from the author profile
+## Launch a local reviewer from the author profile
 
-The author server exposes `discover_reviewer_options`, `select_reviewer_configuration`
-and `launch_local_reviewer`. For CODEX_TASK, query the execution host's catalog,
-show model/effort options and its suggested valid prior choice, then persist the
-explicit user choice before launching. Use a structured selection if available,
-otherwise conversation. Discovery alone does not authorize launch. Rereviews
-inherit the selection; invalid choices fail without fallback. Other reviewer
-providers report unavailable discovery/control rather than fabricated choices.
-Unattended work requires a preauthorized choice and must not wait for interaction.
+The author server exposes `launch_local_reviewer`. The CODEX_TASK reviewer uses
+the model from the execution host's Codex configuration at `high` reasoning
+effort; change `model` there to change the default model (the default effort
+stays `high`). For one review, ask
+the author to list the reviewer models (`list_reviewer_models`) and name a
+model or effort; the choice holds for that review's later rounds.

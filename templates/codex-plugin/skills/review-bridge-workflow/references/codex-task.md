@@ -12,19 +12,27 @@ launch between them.
    provider step. Record the returned `review_id` and `state_version` and
    report the summary exactly as Prepare requires.
 2. Call `launch_local_reviewer` with `review_id` and the current
-   `expected_state_version` after the user has chosen the reviewer configuration
-   and authorized starting. This shared author tool works from Codex, Claude,
-   Hermes, or DeepSeek Harness. It uses the same CLI, home, and neutral directory
-   as `discover_reviewer_options`, revalidates the selection, and passes explicit
-   model and effort arguments. It returns promptly; wait for the ledger verdict.
-   Do not substitute a task in a different host/runtime or the author's model.
+   `expected_state_version` after the user has authorized starting. This shared
+   author tool works from Codex, Claude, Hermes, or DeepSeek Harness. By
+   default the reviewer uses the model from the host's Codex configuration;
+   the tool passes no model and pins reasoning effort to `high`. Do not ask
+   which model to use unprompted. Only when the user asks to choose the
+   reviewer model or effort, or names one, call `list_reviewer_models`, show
+   the user the configured model, the `high` default, and each listed model
+   with its supported efforts, wait for their pick if they have not made one,
+   and pass it as `model` and/or `reasoning_effort`. The tool refuses a model the list does not offer or an
+   effort that model does not support; report the refusal and let the user
+   choose again rather than picking a substitute. A chosen model or effort is
+   checked before anything starts, which can take a few seconds; once the
+   reviewer has started the tool returns, and you wait for the ledger verdict. Do not substitute a task in a different host/runtime or
+   the author's model.
 
-   The tool executes this sandbox shape, with the selected values (this example
-   describes the launch; use the tool rather than constructing a shell command):
+   The tool executes this sandbox shape (this example describes the launch; use
+   the tool rather than constructing a shell command):
 
    ```bash
-   codex exec --skip-git-repo-check --sandbox workspace-write --model <selected-model> \
-     -c 'model_reasoning_effort="<selected-effort>"' \
+   codex exec --skip-git-repo-check --sandbox workspace-write \
+     -c 'model_reasoning_effort="high"' \
      -c 'sandbox_workspace_write.network_access=false' \
      -c 'sandbox_workspace_write.writable_roots=[]' \
      -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
@@ -42,14 +50,11 @@ launch between them.
    > Review Bridge reviewer skill. Require `reviewer_provider: CODEX_TASK`,
    > follow the review strategy, and submit every actionable finding.
 
-   Selection is stored per round. A rereview inherits it and revalidates before
-   launch. To change it explicitly, call `select_reviewer_configuration` before
-   dispatch; previous rounds keep their identity. Invalid or expired selections
-   fail without fallback. Query failures can be retried. `model/list` is a runtime
-   catalog, not a forced network refresh; its upstream cache age is unavailable.
-   `requested` records the launch choice; `observed` is unavailable. A process log
-   cannot authenticate the remote model. Older ledgers remain readable with no
-   invented historical configuration.
+   Each round records its launch. `requested` records the model when one was
+   chosen or an effort was checked against it, the effort, and whether each was chosen (`selected`) or came from
+   the Codex configuration or the `high` default; `observed` is unavailable. A
+   process log cannot authenticate the remote model. Older ledgers keep what
+   they recorded and remain readable.
 
    Single-quote that request: it contains backticks, and a double-quoted shell
    string would execute them instead of passing them through. Pass it as one
@@ -84,17 +89,31 @@ launch between them.
    `reviewer_dispatch.exit` once the process exits and its private log path is
    `<attempt_root>/process.log`. An absent exit means running or indeterminate;
    it never permits a concurrent replacement. After a confirmed exit without a
-   verdict, a new explicit selection can replace the failed configuration.
+   verdict, `launch_local_reviewer` can start a replacement.
+   In a lens round (`WAITING_FOR_LENS_REVIEW`) the launch starts three runs,
+   `general`, `tests`, and `design`, and `get_review_summary` lists each in
+   `runs` with its `submitted` flag and its `reviewer_dispatch`, which carries
+   `exit` once that run's process has exited; the `tests` and `design` runs get
+   a request naming their lens instead of the one above. Apply these rules per
+   run, judging each run by its own `submitted` flag rather than by the
+   round's verdict: a run without `exit` is never replaced, and a run with
+   `exit` and `submitted: false` exited without submitting and is relaunched
+   by calling `launch_local_reviewer` again, which starts only such runs. The
+   wait returns no exit receipts, so after each `timed_out` result in a lens
+   round call `get_review_summary` and inspect every run before waiting again
+   with the same `state_version`. The round's verdict forms when all three have
+   submitted.
 
 The launch discipline is fixed, and it states what must never happen rather
-than counting launches. Never run two reviewers on the same round at once, and
-never review from the author task: never fork that task, and never pass any
+than counting launches. Never run two reviewers on the same round at once —
+in a lens round, never two on the same run at once, because its three runs
+are that round's reviewers — and never review from the author task: never fork that task, and never pass any
 authoring history — not the diff you wrote, the requirement discussion, your
 reasoning, or this session's transcript. Within those two bars launches are not
 rationed. A round-two rereview is that review's next round, so its launch is
 required rather than an exception. A launch that has exited leaves the round to
-be judged from the ledger: if the ledger shows no verdict for this round, no
-reviewer is working it, so start a replacement launch in the same shape as the
+be judged from the ledger: if the ledger shows no verdict for this round (in a
+lens round, for that run), no reviewer is working it, so start a replacement launch in the same shape as the
 original; that replacement is the same round, and both bars still hold, because
 the reviewer it replaces is gone. The exit status, zero or not, establishes
 only that the process is gone — a run can submit its verdict and then fail
@@ -250,14 +269,17 @@ this launch does not shrink that set. For attacker-controllable input the
 sandbox is therefore not an isolation boundary, so never point this launch at
 code someone else wrote.
 
-A round-two rereview uses `launch_local_reviewer` again with the inherited
-selection and current state version. Its process has the same
-shape, carrying the same review ID and a request to rereview the author's
-resolutions with the packaged reviewer skill:
+A round-two rereview uses `launch_local_reviewer` again with the current state
+version. Leave `model` and `reasoning_effort` out: the review's earlier choice
+carries to the new round, and passing either replaces the whole choice, so pass
+them only when the user chooses again for this round. A new review or a
+continuation starts back at the defaults. Its process has the same
+shape and the same reviewer request; the packaged reviewer skill finds the
+rereview from the round the ledger is in:
 
 ```bash
-codex exec --skip-git-repo-check --sandbox workspace-write --model <selected-model> \
-  -c 'model_reasoning_effort="<selected-effort>"' \
+codex exec --skip-git-repo-check --sandbox workspace-write \
+  -c 'model_reasoning_effort="high"' \
   -c 'sandbox_workspace_write.network_access=false' \
   -c 'sandbox_workspace_write.writable_roots=[]' \
   -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
@@ -268,7 +290,7 @@ codex exec --skip-git-repo-check --sandbox workspace-write --model <selected-mod
   -c 'memories.generate_memories=false' \
   -c 'mcp_servers.review-bridge-author.command="node"' \
   -c 'mcp_servers.review-bridge-author.enabled=false' \
-  '<the rereview request>' < /dev/null
+  '<the same reviewer request>' < /dev/null
 ```
 
 `codex exec resume <session-id>` exists, and `codex exec` prints the session id
@@ -284,9 +306,7 @@ exactly the recall this design makes the reviewer re-derive.
 
 This launch may run unattended; it needs no operator at the keyboard. What the
 HERMES and DeepSeek Harness sections require of their own launches is stated
-there and is neither changed nor described by this one. Separately, the
-autonomous workflow's own state machine dispatches `CODEX_TASK` and no other
-provider; this shell launch is a different path from that one. Review Bridge
+there and is neither changed nor described by this one. Review Bridge
 records the review's `CODEX_TASK` binding and requested launch configuration;
 it does not authenticate the remote model identity. The
 `CLAUDE_DESKTOP` boundary is unchanged, and nothing above narrows it: never

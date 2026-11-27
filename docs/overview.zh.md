@@ -25,7 +25,7 @@ Review Bridge 的回答只有一句话：**每一步都留下机器能核的证�
 | --- | --- |
 | 不可变快照 | 评审的是一个冻结的改动：diff、需求、实现范围，带哈希。作者之后再改，审过的那个版本不会变；本地门禁封门前会再核一次工作树等于快照。 |
 | 隔离的评审者 | 评审者是一个没参与写代码的独立上下文。它拿到快照、需求和范围；作者的回应和设计理由要等它交出自己的意见之后才给它，而且是待核的材料，不是指令。评审者角色没有改仓库、推代码、开 PR 的工具。 |
-| 只追加的账本 | 意见提交后不能改写；第二轮追加裁决和新意见；发布记录带修订号，封门与校验事件以及自治工作流的动作审计带哈希链。驱动提议，账本裁定。 |
+| 只追加的账本 | 意见提交后不能改写；第二轮追加裁决和新意见；发布记录带修订号，封门与校验事件带哈希链。驱动提议，账本裁定。 |
 
 还有一个贯穿项目演进的偏好：**优先做减法，先证明一个状态可达再为它写防御。**状态空间只缩不扩，不为一次性的观察新增格式。
 
@@ -60,7 +60,7 @@ flowchart LR
   class A,G,S,L,P,R1,R2,R3,R4 n;
 ```
 
-同一台机器上的所有参与者共用一个私有 store（默认 `~/Library/Application Support/ReviewBridge`，可用 `REVIEW_BRIDGE_HOME` 覆盖）：一个文件目录，没有数据库，没有服务进程。核心记录是快照、评审账本和发布账本；自治工作流的账本放在它们旁边。并发进程靠文件锁协调。
+同一台机器上的所有参与者共用一个私有 store（默认 `~/Library/Application Support/ReviewBridge`，可用 `REVIEW_BRIDGE_HOME` 覆盖）：一个文件目录，没有数据库，没有服务进程。核心记录是快照、评审账本和发布账本。并发进程靠文件锁协调。
 
 作者角色和评审者角色是两个服务器进程、两套工具。评审者只能列出待审任务、打开任务、读和搜索快照、提交意见与复审裁决，别的都做不了。MCP 服务器不持有 GitHub 凭据；读 GitHub 由打包的收集器通过用户自己的 `gh` 完成，写 GitHub 是作者 agent 自己的 `gh` 和 `git`。
 
@@ -76,7 +76,7 @@ flowchart LR
   class A,B,C,D,E n;
 ```
 
-作者说明需求、实现范围、base ref，选择评审者；`prepare_review` 截快照、建账本。`CODEX_TASK` 评审者由服务端按操作者选定的模型和推理强度另起一个进程；其它提供方由操作者按各自安装页的说明派发。
+作者说明需求、实现范围、base ref，选择评审者；`prepare_review` 截快照、建账本。`CODEX_TASK` 评审者由服务端另起一个进程，默认模型取 MCP 主机的 Codex 配置、推理强度为 high，用户也可以为这次评审另选模型和强度；其它提供方由操作者按各自安装页的说明派发。
 
 第一轮评审者看到快照、需求和范围（以及作者追加过的勘误，勘误只修正关于外部世界的说法，不改 diff），提交结构化的 findings。没有意见直接 `CLEAN`。有意见则作者逐条回应，每条只能选一种：`fixed`（finding 点名的每个位置、每个子句在新 head 都做完了）、`rejected`（给出理由和证据，由复审者判）、`human_required`（交给人）。第二轮由同一评审者提供方对照新快照核每条回应：`resolved`、`rebuttal_accepted`、`still_open`，也可以报新意见。同一个 review ID 没有第三轮。
 
@@ -115,13 +115,7 @@ flowchart LR
 
 流程：先记一份 Codex feed 的**基线**（请求之前就存在的东西永远不算答复），再发出服务器组好的、带服务器签发请求 ID 的评审请求，然后由打包的只读收集器一次性读取 PR、检查、Codex feed 和评审线程，把观测交给账本。适配器 fail-closed：表情、沉默、未绑定的请求、分页不完整、歧义结果，都不算通过。`MERGE_READY` 的含义是：PR 的 head 等于授权的 head，关联到本次请求的 Codex 结果是干净的，所有必需检查通过，没有未 resolve 的评审线程，PR 已离开草稿且可合并。之后封门签发一张几分钟内过期的门票；合并前必须立刻校验通过，并且合并钉在校验过的 head 上。完整规则见 [publication-gate.md](publication-gate.md)。
 
-## 6. 自治工作流
-
-`start_autonomous_workflow` 把仓库、base、需求、分支和发布目标绑成一个工作流账本，之后由作者侧的驱动按账本的 `next_action` 沿 RFC 0003 的路径走：提交干净 head → 绑定 Codex 评审 → 本地两轮 → 本地门禁 → 推送门禁过的 head → 开草稿 PR → 发布账本 → 观察 → 标记 ready → 记录终态 `MERGE_READY` 然后**停下**。它不合并。
-
-除 Codex 评审请求评论之外，每个对外动作在发生前后都写进哈希链的动作审计，所以驱动崩溃后可以从账本接着走，不会重复评论、重复推送；请求评论是先发出去再绑定，两步之间崩溃会在下一次观测里显形为未绑定请求。Codex 结果歧义、合并冲突、PR 被人关掉、或者一次尝试毫无进展，都是带着证据暂停，而不是猜。分支、远端 head ref 和 PR 的所有权一次只属于一个工作流。细节见 [autonomous-workflow.md](autonomous-workflow.md)。
-
-## 7. 客户端、安装与升级
+## 6. 客户端、安装与升级
 
 | 客户端 | 形态 |
 | --- | --- |
@@ -132,13 +126,13 @@ flowchart LR
 
 每个版本从 release tag 的干净 clone 构建，所有参与者钉在同一个版本上，升级是在新目录构建新运行时再逐个切换客户端的路径。发版本身也留证据：验证脚本在打 tag 前对照 changelog 与合并记录，发布后核对已发布的资产。见 [install/upgrade.md](install/upgrade.md) 和 [CONTRIBUTING.md](../CONTRIBUTING.md)。
 
-## 8. 报告与统计
+## 7. 报告与统计
 
 - **评审报告。**`render_review_report` 把一条评审的账本（有发布账本则一并），或 REMOTE_ONLY 发布的账本和授权，渲染成 Markdown；打包的 `review-report.mjs` 默认打印摘要，`--full` 打印全文。报告是账本的投影，不是证据。
 - **scorecard。**`review-scorecard.mjs` 只读 store，按评审者提供方汇总：各严重度意见数、作者回应与复审裁决的交叉、驳回成立率、到 CLEAN 的轮数、继续评审、升级、规矩分类。每条计数规则写在报告里。
 - **意见检索。**`review-findings.mjs` 按仓库、文件、关键词、严重度、回应、裁决、规矩分类筛历史意见。见 [finding-search.md](finding-search.md)。
 
-## 9. 运行数据
+## 8. 运行数据
 
 下表是作者自己的 store 在 2026 年 7 月到 10 月之间、跨若干仓库积累的数据，按评审者提供方分组（来源：`review-scorecard`）：
 
@@ -153,11 +147,11 @@ flowchart LR
 
 对「需要人」的一次调查给了两条结论，并直接改了产品：第一，评审者九成有理，136 条「作者说修了、评审者说没修」里 74 条是只修了一部分，17 条是作者声称的验证不属实，由复审对照新快照核出；第二，这些评审绝大多数在十几分钟内于同仓库同 base 重开了新评审。于是作者指导里收紧了 `fixed` 的定义，路由上把这类意见改走 `CONTINUABLE_FINDINGS`。另一个未定的观察：Codex 复审驳回「已修」的比例约 19.5%，其它三家都在 5% 以下，抽样看 Codex 多半有理；其它三家是否放过了没修完的修复，还需要抽样核实。
 
-## 10. 安全边界与数据
+## 9. 安全边界与数据
 
 - 本地、REMOTE_ONLY 和发布门禁都是工作流层面的证明，不是 Git 或 GitHub 的安全边界。Review Bridge 不装 `pre-push` 钩子。提供方绑定和独立 Codex 任务都不是经过认证的人或模型身份；`CODEX_TASK` 评审改善的是上下文隔离，不等于换一家提供方带来的模型多样性。
 - 宿主沙箱限制写和网络，不限制读，所以挡不住能操纵评审者的文本。两轮「盲审」是工具面上的保证，挡不住直接读 store 的进程。
-- store 里有仓库路径、需求、patch、manifest、意见、操作者标签与理由，每一轮的 patch（含未提交改动，不限大小），以及未提交文件的单独副本（单个不超过 10 MiB）。删一条评审：先停掉进行中的 Review Bridge 操作，再删 `reviews/<review_id>`；若这条评审绑定过自治工作流，先取消该工作流并释放它的认领，它在 `workflows/<workflow_id>` 下的记录要删的话另行删除。删整个目录前要先退出所有 Review Bridge 进程。保留与权限见 [README](../README.md#data-handling-and-cleanup)。
+- store 里有仓库路径、需求、patch、manifest、意见、操作者标签与理由，每一轮的 patch（含未提交改动，不限大小），以及未提交文件的单独副本（单个不超过 10 MiB）。删一条评审：先停掉进行中的 Review Bridge 操作，再删 `reviews/<review_id>`。删整个目录前要先退出所有 Review Bridge 进程。保留与权限见 [README](../README.md#data-handling-and-cleanup)。
 - 所选客户端可能按其账号配置把评审工具返回的源码发给模型提供方。MCP 服务器进程不打开网络连接；打包的脚本通过用户的 `gh` 访问 GitHub。
 
 逐版本的变更见 [CHANGELOG](../CHANGELOG.md)。
@@ -172,11 +166,8 @@ flowchart LR
 
 | 分组 | 工具 |
 | --- | --- |
-| 本地评审 | `discover_reviewer_options` `select_reviewer_configuration` `launch_local_reviewer` `prepare_review` `list_reviews` `get_review` `get_review_summary` `wait_for_review_state` `submit_resolutions` `prepare_rereview` `append_review_erratum` `finalize_local_gate` `export_human_arbitration` `render_review_report` |
-| 发布门禁 | `authorize_remote_publication` `start_publication` `get_publication` `get_publication_summary` `record_codex_review_request` `record_github_snapshot` `acknowledge_codex_review_ambiguity` `finalize_publication_gate` `verify_publication_gate` `get_autonomous_pre_ready` `get_autonomous_terminal` |
-| 自治工作流 | `start_autonomous_workflow` `list_autonomous_workflows` `get_autonomous_workflow` `get_autonomous_workflow_summary` `record_workflow_head` `bind_workflow_review` `bind_workflow_publication` `advance_local_workflow` `advance_remote_workflow` `pause_autonomous_workflow` `resume_autonomous_workflow` `cancel_autonomous_workflow` `release_workflow_claims` `extend_change_size_budget` `acknowledge_change_size_warning` `extend_local_cycle_budget` `extend_remote_cycle_budget` |
-| 对外动作审计 | `plan_codex_task_dispatch` `launch_codex_task_dispatch` `record_codex_task_observation` `plan_workflow_push` `record_push_observation` `plan_draft_pull_request` `record_draft_pull_request_observation` `plan_mark_pull_request_ready` `record_mark_ready_observation` `plan_return_to_draft` `record_return_to_draft_observation` `mark_workflow_action_executing` `complete_workflow_action` `abandon_workflow_action` |
-| 线程处理 | `get_thread_resolution_plan` `get_invalidated_resolution_plan` `plan_thread_reply` `record_thread_reply_observation` `plan_thread_resolution` `record_thread_resolution_observation` `record_automatic_resolution` `plan_thread_unresolve` `record_thread_unresolve_observation` `record_automatic_unresolve` |
+| 本地评审 | `launch_local_reviewer` `list_reviewer_models` `prepare_review` `list_reviews` `get_review` `get_review_summary` `wait_for_review_state` `submit_resolutions` `prepare_rereview` `append_review_erratum` `finalize_local_gate` `export_human_arbitration` `render_review_report` |
+| 发布门禁 | `authorize_remote_publication` `start_publication` `get_publication` `get_publication_summary` `record_codex_review_request` `record_github_snapshot` `acknowledge_codex_review_ambiguity` `finalize_publication_gate` `verify_publication_gate` |
 
 ## 附录 B · 术语
 

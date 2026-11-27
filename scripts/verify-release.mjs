@@ -13,7 +13,6 @@ import path from "node:path";
 import { defaultStoreRoot } from "../src/core.mjs";
 import { canonicalJsonBytes, readSecureJson } from "../src/storage.mjs";
 import { digestOf, writeNoOverwrite } from "./release-store.mjs";
-import { MAX_WORKFLOW_BYTES, WORKFLOW_ID_RE } from "../src/workflow-binding.mjs";
 import {
   CHECKSUM_MANIFEST_NAME,
   compareReleaseRecords,
@@ -24,6 +23,9 @@ import {
   verifyRelease,
   versionFromTagName,
 } from "./release-evidence.mjs";
+
+const WORKFLOW_ID_RE = /^rbwf-[0-9TZ-]+-[a-f0-9]{8}$/;
+const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
 
 const USAGE = `Usage: verify-release.mjs --pre [--repo <path>]
        verify-release.mjs --final --observation <path> --build-dir <path> [options]
@@ -462,6 +464,13 @@ if (options.phase === "PRE") {
       result.status = "FAILED";
       result.failures.push({
         code: "RELEASE_RECORD_DIVERGED",
+        message: recordOutcome.message,
+      });
+    }
+    if (recordOutcome.status === "UNSUPPORTED") {
+      result.status = "FAILED";
+      result.failures.push({
+        code: "LEDGER_VERSION_UNSUPPORTED",
         message: recordOutcome.message,
       });
     }

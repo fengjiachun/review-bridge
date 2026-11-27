@@ -49,7 +49,7 @@ author is an operator rule.
 | --- | --- |
 | Immutable snapshot | What is reviewed is a frozen change: diff, requirement, implementation scope, with a hash. Later edits never change the version that was reviewed, and the local gate re-checks the working tree against the snapshot before it closes. |
 | Isolated reviewer | The reviewer is a separate context that did not write the code. It receives the snapshot, the requirement, and the scope; the author's responses and design rationale reach it only after it has delivered its own findings, and they are material to verify, never instructions. The reviewer role has no tool that edits the repository, pushes, or opens pull requests. |
-| Append-only ledger | A finding cannot be rewritten once submitted; round two appends its decisions and any new findings; publication records are revisioned, and the gate's finalization and verification events and the autonomous workflow's action trail are hash-chained. The driver proposes, the ledger decides what counts. |
+| Append-only ledger | A finding cannot be rewritten once submitted; round two appends its decisions and any new findings; publication records are revisioned, and the gate's finalization and verification events are hash-chained. The driver proposes, the ledger decides what counts. |
 
 One more bias shapes how the project evolves: **prefer subtraction, and prove
 a state is reachable before defending it.** The state space only shrinks, and
@@ -90,8 +90,7 @@ Every participant on one machine shares one private store (by default
 `~/Library/Application Support/ReviewBridge`, overridable with
 `REVIEW_BRIDGE_HOME`): a directory of files, no database and no service
 process. Its core records are the snapshots, the review ledger, and the
-publication ledger; the autonomous workflow keeps its own ledgers beside
-them. Concurrent processes coordinate through file locks.
+publication ledger. Concurrent processes coordinate through file locks.
 
 The author role and the reviewer role are two server processes with two tool
 sets. The reviewer can list pending reviews, open one, read and search the
@@ -115,7 +114,8 @@ flowchart LR
 The author states the requirement, the implementation scope, the base ref,
 and a reviewer choice; `prepare_review` captures the snapshot and creates the
 ledger. A `CODEX_TASK` reviewer is launched by the server as a separate
-process with the model and reasoning effort the operator chose; the other
+process on the MCP host's configured Codex model at high reasoning effort by default,
+or on a model and effort the user chose for that review; the other
 providers are dispatched by the operator as their install pages describe.
 
 In round one the reviewer sees the snapshot, the requirement, and the scope
@@ -200,26 +200,7 @@ that expires within minutes; verification must succeed immediately before
 the merge, and the merge is pinned to the verified head. The rules in full
 are in [publication-gate.md](publication-gate.md).
 
-## 6. The autonomous workflow
-
-`start_autonomous_workflow` binds the repository, base, requirement, branch,
-and publication target into a workflow ledger; the author-side driver then
-follows the ledger's `next_action` along RFC 0003's path: commit a clean head
-→ bind a Codex review → local rounds → local gate → push the gated head →
-draft pull request → publication ledger → observe → mark ready → record the
-terminal `MERGE_READY` and **stop**. It does not merge.
-
-Every external action except the Codex review request comment is recorded
-in a hash-chained action audit before and after it happens, so a driver that
-crashes resumes from the ledger without duplicating a comment or a push; the
-request comment is posted first and then bound, and a crash in between shows
-up as an unbound request in the next observation. An ambiguous Codex result, a merge
-conflict, a pull request someone closed, or an attempt that makes no progress
-pauses the run with the evidence rather than guessing. Ownership of the
-branch, the remote head ref, and the pull request belongs to one workflow at
-a time. Details are in [autonomous-workflow.md](autonomous-workflow.md).
-
-## 7. Clients, installation, and upgrades
+## 6. Clients, installation, and upgrades
 
 | Client | Shape |
 | --- | --- |
@@ -236,7 +217,7 @@ before the tag and checks the published assets afterwards. See
 [install/upgrade.md](install/upgrade.md) and
 [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-## 8. Reports and statistics
+## 7. Reports and statistics
 
 - **Review report.** `render_review_report` renders a review's ledger (with its
   publication ledger when one exists), or a remote-only publication's ledger
@@ -251,7 +232,7 @@ before the tag and checks the published assets afterwards. See
   repository, file, keyword, severity, disposition, decision, and rule kind.
   See [finding-search.md](finding-search.md).
 
-## 9. Usage data
+## 8. Usage data
 
 The table below is what the author's own store accumulated between July and
 October 2026 across several repositories, grouped by reviewer provider
@@ -280,7 +261,7 @@ of the time while the other three providers stay under 5%; sampling suggests
 Codex is usually right, and whether the others let partial fixes through
 still needs sampling.
 
-## 10. Security boundaries and data
+## 9. Security boundaries and data
 
 - The local, remote-only, and publication gates are workflow attestations, not Git
   or GitHub security boundaries. Review Bridge installs no `pre-push` hook.
@@ -295,10 +276,7 @@ still needs sampling.
   findings, operator labels and rationales, the patch of every round
   (uncommitted changes included, whatever their size), and separate copies of
   uncommitted files up to 10 MiB each. To remove one review, stop active Review Bridge
-  operations and delete `reviews/<review_id>`; if the review was bound to an
-  autonomous workflow, cancel that workflow and release its claims first,
-  and delete its records under `workflows/<workflow_id>` separately if they
-  should go too. Quit every Review Bridge process before
+  operations and delete `reviews/<review_id>`. Quit every Review Bridge process before
   deleting the whole directory. Retention and permissions are in the
   [README](../README.md#data-handling-and-cleanup).
 - The selected client may send source returned by the reviewer tools to its
@@ -321,11 +299,8 @@ source; this is an overview grouped by purpose.
 
 | Group | Tools |
 | --- | --- |
-| Local review | `discover_reviewer_options` `select_reviewer_configuration` `launch_local_reviewer` `prepare_review` `list_reviews` `get_review` `get_review_summary` `wait_for_review_state` `submit_resolutions` `prepare_rereview` `append_review_erratum` `finalize_local_gate` `export_human_arbitration` `render_review_report` |
-| Publication gate | `authorize_remote_publication` `start_publication` `get_publication` `get_publication_summary` `record_codex_review_request` `record_github_snapshot` `acknowledge_codex_review_ambiguity` `finalize_publication_gate` `verify_publication_gate` `get_autonomous_pre_ready` `get_autonomous_terminal` |
-| Autonomous workflow | `start_autonomous_workflow` `list_autonomous_workflows` `get_autonomous_workflow` `get_autonomous_workflow_summary` `record_workflow_head` `bind_workflow_review` `bind_workflow_publication` `advance_local_workflow` `advance_remote_workflow` `pause_autonomous_workflow` `resume_autonomous_workflow` `cancel_autonomous_workflow` `release_workflow_claims` `extend_change_size_budget` `acknowledge_change_size_warning` `extend_local_cycle_budget` `extend_remote_cycle_budget` |
-| External action trail | `plan_codex_task_dispatch` `launch_codex_task_dispatch` `record_codex_task_observation` `plan_workflow_push` `record_push_observation` `plan_draft_pull_request` `record_draft_pull_request_observation` `plan_mark_pull_request_ready` `record_mark_ready_observation` `plan_return_to_draft` `record_return_to_draft_observation` `mark_workflow_action_executing` `complete_workflow_action` `abandon_workflow_action` |
-| Thread handling | `get_thread_resolution_plan` `get_invalidated_resolution_plan` `plan_thread_reply` `record_thread_reply_observation` `plan_thread_resolution` `record_thread_resolution_observation` `record_automatic_resolution` `plan_thread_unresolve` `record_thread_unresolve_observation` `record_automatic_unresolve` |
+| Local review | `launch_local_reviewer` `list_reviewer_models` `prepare_review` `list_reviews` `get_review` `get_review_summary` `wait_for_review_state` `submit_resolutions` `prepare_rereview` `append_review_erratum` `finalize_local_gate` `export_human_arbitration` `render_review_report` |
+| Publication gate | `authorize_remote_publication` `start_publication` `get_publication` `get_publication_summary` `record_codex_review_request` `record_github_snapshot` `acknowledge_codex_review_ambiguity` `finalize_publication_gate` `verify_publication_gate` |
 
 ## Appendix B: glossary
 

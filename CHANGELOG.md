@@ -7,7 +7,215 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.27.0 - 2026-11-27
+
+### Added
+
+- (#232) The packaged collector's `--baseline` mode builds the Codex baseline
+  `start_publication` needs. Given a review ID, `--repo`, `--pr`, and the
+  pinned `--codex-actor-id`, it reads the authorized head from the store,
+  refuses a pull request whose head differs, walks every page of the three
+  Codex feeds, and writes the version-2 baseline into the private store,
+  printing only a receipt. It writes nothing while the baseline is
+  incomplete, such as when a Codex review is still pending, and names the
+  possible causes. `start_publication` takes that file as
+  `codex_review_baseline_path`; exactly one of it and the inline
+  `codex_review_baseline` is required, and the workflow skill now uses the
+  file. In both collector modes an explicit `--out` is now refused unless Git
+  positively reports the path outside any work tree, rather than whenever the
+  check fails to find one.
+
+### Fixed
+
+- (#233) A review ledger whose `version` this release does not read is
+  refused with `LEDGER_VERSION_UNSUPPORTED`, naming the record, the version
+  found, and the versions supported, instead of being read by older rules.
+  The same holds for the snapshot manifest and successor proof each round
+  carries. Installs sharing one store upgrade one at a time, so an older
+  process can meet a ledger a newer one wrote. A ledger with no `version` is
+  refused too: every release has written version 1. The packaged GitHub
+  collector refuses a publication ledger of an unknown version before any
+  GitHub request. The scorecard skips such review and publication ledgers
+  with that reason, the miss report lists such review ledgers among its
+  skipped ones, and release verification fails on an existing release record
+  of another schema rather than comparing it. CONTRIBUTING states when a
+  record's version is bumped.
+
+### Internal
+
+- (#234) Release 0.27.0.
+- (#231) CONTRIBUTING states that the version labels in the guides change only
+  in the release commit; a guide on `main` describes `main`.
+
+## 0.26.0 - 2026-11-26
+
+### Added
+
+- (#228) `list_reviewer_models` lists, for `CODEX_TASK`, the models the MCP
+  host's Codex offers with each model's supported reasoning efforts, beside
+  the model the Codex configuration names and the `high` effort default.
+  Other providers answer that it is not available. The author calls it only
+  when the user asks to choose a reviewer model or effort, or names one.
+- (#229) An optional lens review, as RFC 0005 specifies. `prepare_review`
+  takes `lens_review: true` with `force_full_review` for `CODEX_TASK`, from an
+  installation outside any Git work tree. Round one, in the new status
+  `WAITING_FOR_LENS_REVIEW`, runs the general reviewer plus `tests` and
+  `design` lens reviewers on the same snapshot; each run's submission waits in
+  its own entry until the third closes the round into the one ledger, each
+  lens finding tagged with its `lens`. Round two and later are unchanged. The
+  author passes `lens_review` only when the user asks for one, and never
+  offers it. Errata are refused during the lens round. Reports show lens runs
+  and lens findings (`REPORT_FORMAT` 12), and the scorecard counts the new
+  status (`SCORECARD_SCHEMA_VERSION` 5).
+
+### Changed
+
+- (#228) `launch_local_reviewer` takes optional `model` and
+  `reasoning_effort`. Either one is checked against a fresh model list right
+  before launch; a model the list does not offer, or an effort that model
+  does not support, is refused, with nothing substituted. An effort given
+  alone is checked against the configured model, and the reviewer is started
+  with that model. A choice carries to the
+  review's later rounds until the user chooses again; a new review or a
+  continuation starts at the defaults, which are unchanged: the configured
+  model at `high` effort. Each round's `requested` now also records
+  `model_source` (`configuration` or `selected`) and
+  `reasoning_effort_source` (`default` or `selected`); rounds recorded by
+  earlier releases read and render as before.
+
+### Internal
+
+- (#230) Release 0.26.0.
+- (#227) Accepted RFC 0005 specifies an optional lens review. On the user's
+  request, Review Bridge will run `tests` and `design` lens reviewers beside
+  the general reviewer in round one, with their findings in the same review
+  ledger.
+
+## 0.25.0 - 2026-11-25
+
+### Changed
+
+- (#219) `prepare_review` no longer requires `reviewer_provider`; a review
+  prepared without one is bound to `CODEX_TASK`. Pass another provider only
+  to use it.
+- (#221) Both report tiers open with a conclusion: one line naming the pull
+  request, base and head, reviewer, round count, review status, and the
+  publication summary's status; a findings table with each final disposition
+  and the round that raised it; and the open findings with the next step.
+  Statuses, open findings, and next steps come from the review and
+  publication summaries, finding details from the review ledger. The audit
+  detail follows unchanged.
+  `REPORT_FORMAT` is now 11.
+- (#212) `list_reviews` requires `repository_path` and returns only the
+  reviews whose stored `repository_path` equals it exactly. Callers must pass
+  the repository's resolved top-level path, as `prepare_review` stores it
+  and `get_review` reports it.
+  An unfiltered call over the whole store had grown past the client's
+  result size limit again.
+- (#213) The author tools that change a review -- `prepare_review`,
+  `launch_local_reviewer`, `submit_resolutions`, `prepare_rereview`, and
+  `append_review_erratum` --
+  return the compact review summary instead of the full ledger, and
+  `finalize_local_gate` returns that summary under `review` beside `gate`.
+  The summary is the `get_review_summary` shape without the dispatch exit
+  record. Call `get_review` for the requirement, finding text, resolutions,
+  decisions, or errata.
+- (#214) The local `CODEX_TASK` reviewer now runs on the model set in the MCP
+  host's Codex configuration (`model` in `~/.codex/config.toml`, or the file
+  under `CODEX_HOME`): `launch_local_reviewer` passes no `--model` for new
+  launches. After upgrading, reviews use that configured model, not
+  the one previously selected through Review Bridge. Reasoning effort is
+  always `high`, passed on every new launch. A round records
+  `{"reasoning_effort":"high"}` as its requested configuration, and reports
+  print it with the model as coming from the Codex configuration. Rounds that
+  earlier releases launched keep and report the model they recorded; a
+  pending round launched again after the upgrade records the new request,
+  and its history keeps the earlier selection.
+- (#216) A continuation from `CONTINUABLE_FINDINGS` no longer requires the
+  `implementation_scope` to match the source review; the new review records
+  the scope passed for the new head. The requirement must still match, and
+  only a `CONTINUABLE_FINDINGS` source can be continued. A refused
+  continuation now names each unmet check (source status, repository,
+  requirement, reviewer provider) instead of one combined message. The
+  manual summary's `prepare_review` inputs for `ADDRESS_LOCAL_FINDINGS`
+  describe `implementation_scope` as the scope for the new head.
+- (#220) The workflow skill waits on the host's pull-request event wake-ups,
+  where the host offers them, instead of repeatedly collecting GitHub
+  observations. A wake is not evidence: after a wake the agent collects and
+  records a fresh observation and follows the publication summary's
+  `next_action`. Hosts without such wake-ups keep the existing back-off rule,
+  and every collection still respects rate-limit and retry signals.
+
+### Removed
+
+- (#214) The `discover_reviewer_options` and `select_reviewer_configuration`
+  author tools, the stored per-repository reviewer preferences, and the
+  `environment_id` check on launch. Review Bridge no longer reads or writes
+  `reviewer-preferences/`; existing files there stay on disk and can be
+  deleted. To change the reviewer model, change the Codex configuration.
+- (#217) The autonomous workflow's author tools: the workflow lifecycle
+  (`start_autonomous_workflow`, `list_autonomous_workflows`,
+  `get_autonomous_workflow`, `get_autonomous_workflow_summary`,
+  `record_workflow_head`, `bind_workflow_review`,
+  `bind_workflow_publication`, `advance_local_workflow`,
+  `advance_remote_workflow`, `pause_autonomous_workflow`,
+  `resume_autonomous_workflow`, `cancel_autonomous_workflow`,
+  `release_workflow_claims`), its budgets (`extend_change_size_budget`,
+  `acknowledge_change_size_warning`, `extend_local_cycle_budget`,
+  `extend_remote_cycle_budget`), the external action trail
+  (`plan_codex_task_dispatch`, `launch_codex_task_dispatch`,
+  `record_codex_task_observation`, `plan_workflow_push`,
+  `record_push_observation`, `plan_draft_pull_request`,
+  `record_draft_pull_request_observation`, `plan_mark_pull_request_ready`,
+  `record_mark_ready_observation`, `plan_return_to_draft`,
+  `record_return_to_draft_observation`, `mark_workflow_action_executing`,
+  `complete_workflow_action`, `abandon_workflow_action`), thread handling
+  (`get_thread_resolution_plan`, `get_invalidated_resolution_plan`,
+  `plan_thread_reply`, `record_thread_reply_observation`,
+  `plan_thread_resolution`, `record_thread_resolution_observation`,
+  `record_automatic_resolution`, `plan_thread_unresolve`,
+  `record_thread_unresolve_observation`, `record_automatic_unresolve`), and
+  the autonomous publication projections (`get_autonomous_pre_ready`,
+  `get_autonomous_terminal`). `start_publication` no longer accepts
+  `workflow_id` or `expected_workflow_revision`: a call that still sends them
+  has both ignored and creates an unbound version-2 publication. The packaged skill's
+  autonomous route and `docs/autonomous-workflow.md` are gone. Manual local
+  review and the hand-driven publication ledger remain unchanged.
+  Upgrading: workflow records under `workflows/` in an existing store stay
+  on disk.
+- (#218) Version-3 (workflow-bound) publications can no longer be used:
+  `get_publication` still reads one, and the tools that act on an existing
+  publication (`get_publication_summary`, `record_codex_review_request`,
+  `record_github_snapshot`, `acknowledge_codex_review_ambiguity`,
+  `finalize_publication_gate`, `verify_publication_gate`, and
+  `render_review_report`) refuse it with `PUBLICATION_READ_ONLY`.
+  `start_publication` for that review still returns
+  `PUBLICATION_ALREADY_STARTED`.
+  No publication tool reads `workflows/` any more, so a version-3
+  publication no longer needs its workflow record. Reports no longer mark
+  review threads as resolved automatically, and their format number is now 10.
+- (#222) Remove workflow statistics from the scorecard: the "Workflow budgets
+  and repair cycles" section, the workflow and audit-log corpus rows, and the
+  JSON `workflows`, `skipped_workflows`, `skipped_audit_logs`, the scope's
+  workflow fields, and the corpus workflow and audit-log counts. Its JSON
+  schema is version 4. The state inventory no longer reads `workflows/` and
+  no longer counts `reviews/<id>/workflow-binding.json` as a ledger. Workflow
+  records under `workflows/` stay on disk; release verification still reads
+  their terminal records.
+- (#224) The remaining autonomous workflow code: its modules, its required-input
+  tables, and the `workflow` and `claims` lock domains. The `WORKFLOW_BUSY` and
+  `WORKFLOW_CLAIMS_BUSY` errors and the other workflow error codes are gone.
+  Manual review, publication, reports, and release verification are unchanged,
+  and version-3 publications stay readable.
+
+### Internal
+
+- (#226) Release 0.25.0.
+- (#225) Test that a review round with no `change_size`, as written before
+  v0.8.0, still passes `openReview`, `finalizeLocalGate`, and the successor
+  parent check.
+
+## 0.24.0 - 2026-11-13
 
 ### Added
 
@@ -16,6 +224,9 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   captured the thread's head in the same repository, as a table or, with
   `--json`, as a corpus with the full threads. A head with no local ledger is
   listed and marked. Read-only; no gate reads it. Closes issue #203.
+- (#211) `docs/miss-report.md` describes the script: what counts as a
+  thread, how a thread is paired with local reviews by head, the
+  `repository unverified` listing, and the two output forms.
 
 ### Changed
 
@@ -43,6 +254,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   2026-11-13 so the CI audit passes again. Both arrive through
   `@modelcontextprotocol/sdk`. Review Bridge uses the stdio transport only;
   the HTTP-side advisories do not apply.
+
+### Internal
+
+- (#210) Release 0.24.0.
 
 ## 0.23.0 - 2026-10-29
 

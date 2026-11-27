@@ -38,77 +38,76 @@ For either mode:
    source. Record its stable numeric actor ID and exact `Bot` type; the login is
    audit display only. Never learn or replace this identity from a candidate
    result.
-3. Immediately before `start_publication`, collect every page of the three
-   preexisting Codex feeds: issue comments, formal pull-request reviews, and
-   pull-request review comments. Supply their independent completion times and
-   pagination proof as the complete version-2 baseline. Version 2 recognizes
-   Review Bridge request IDs while preserving legacy request shapes as
-   fail-closed baseline evidence. Set `adapter_version: 2` in the normalizer
-   input. Use `EXPLICIT_ONLY`
+3. Immediately before `start_publication`, run the packaged read-only
+   `../../scripts/collect-github-observation.mjs` helper resolved relative to
+   the entrypoint SKILL as `--baseline --review-id <review_id> --repo
+   <owner/name> --pr <pr_number> --codex-actor-id <id>`, with the actor ID
+   from step 2. It reads the authorization head from the store, requires the
+   PR head to equal it, collects every page of the three preexisting Codex
+   feeds (issue comments, formal pull-request reviews, and pull-request review
+   comments), normalizes them as the complete version-2 baseline, writes it
+   into the private store beside the review, and prints only a receipt. Pass
+   the printed `codex_review_baseline_path` to `start_publication`; never
+   build, paste, or retype the baseline yourself. Use `EXPLICIT_ONLY`
    only when automatic Codex review is disabled and this workflow is the sole
    trigger actor. `AUTOMATIC_QUIESCENCE_ACKNOWLEDGED` requires direct human
    approval, an operator label, and a rationale immediately before this fresh
    baseline; never infer quiescence from elapsed time, silence, reactions, or a
-   general instruction to continue. Normalize the raw three-feed payload with
-   the packaged `../../scripts/normalize-codex-evidence.mjs` adapter resolved
-   relative to the entrypoint SKILL in `BASELINE` mode and set `authorization_head_sha`
-   to the immutable publication head; do not reproduce provider body parsing
-   ad hoc. The legacy
-   `local_gate_head_sha` input remains compatible only for older local-ledger
-   callers.
-4. Call `start_publication`. If its immutable baseline contains any request,
-   run the packaged read-only `../../scripts/collect-github-observation.mjs`
-   helper resolved relative to the entrypoint SKILL as `--review-id <review_id>`, and
-   call `record_github_snapshot` with the `observation_path` the helper prints.
-   The helper reads the ledger from the store and writes the observation into
-   the private store beside it — never into a repository worktree, where an
-   untracked observation would dirty the tree and fail gate verification — so
-   neither payload passes through this conversation. Then call
-   `get_publication_summary`, present its complete
-   `required_request_refs` and `required_ambiguous_results` sets to the human,
-   and call `acknowledge_codex_review_ambiguity` only after direct approval of
-   both exact sets and the `NO_FURTHER_RESULTS_EXPECTED` risk statement. If the
-   baseline contains no open legacy, unsupported, or unverified correlated
-   request, continue without an acknowledgement. A version-2 `BASELINE_CORRELATED` request with
+   general instruction to continue.
+4. Call `start_publication`. From then on, call `get_publication_summary`,
+   do what its `next_action` and `required_inputs` name, and read it again.
+   The summary decides the order; the notes below add only what it cannot say
+   about an action.
+   - To record or refresh a snapshot, run the packaged read-only
+     `../../scripts/collect-github-observation.mjs` helper resolved relative
+     to the entrypoint SKILL as `--review-id <review_id>`, and call
+     `record_github_snapshot` with the `observation_path` the helper prints.
+     The helper uses the user's authenticated `gh` CLI in read-only mode,
+     canonicalizes GitHub timestamps to UTC milliseconds, reads the ledger
+     from the store, and writes the observation into the private store beside
+     it — never into a repository worktree, where an untracked observation
+     would dirty the tree and fail gate verification. Never paste an
+     observation or a ledger into a tool call or a shell heredoc: the helper
+     reads and writes those files itself, and retyping them costs more than
+     every other step of this workflow combined. Call `get_publication` only
+     for an audit that genuinely needs the complete ledger in the transcript.
+   - `ACKNOWLEDGE_CODEX_REVIEW_AMBIGUITY` is a human decision. Present the
+     summary's entire `required_request_refs` and `required_ambiguous_results`
+     sets and the `NO_FURTHER_RESULTS_EXPECTED` risk statement, and call
+     `acknowledge_codex_review_ambiguity` only after direct approval of that exact
+     full set; partial approval, silence, retry intent, or earlier
+     permission to finish is insufficient.
+   - `POST_AND_RECORD_CODEX_REVIEW_REQUEST`: refresh the PR head and require it
+     to equal the publication authorization head. Post exactly one issue
+     comment whose entire body equals the returned `codex_review_request.body`;
+     do not edit, reconstruct, or shorten it. Then immediately call
+     `record_codex_review_request` with the post response's comment ID, URL,
+     `created_at`, the freshly read full head, and, when present, the returned
+     `codex_review_request.request_id`. Adapter-version-1 ledgers return the
+     legacy exact body without a request ID; omit that field when resuming
+     them. Never post an exact or trigger-shaped Codex review request manually
+     or outside this action. A crash between post and binding leaves an
+     unbound request and must fail closed.
+   - `MARK_PULL_REQUEST_READY` is the operator's step.
+   - `FINALIZE_PUBLICATION_GATE`. Run the collector once more for a fresh
+     observation, then finalize. The summary's `gate_expires_in_seconds`
+     says how much of that gate's window is left. It expires five minutes after the
+     oldest source collection in the observation it was minted over, not five
+     minutes after issuance, so a gate finalized over an old observation has
+     little left. Read it before starting the merge: too little left means
+     collect a fresh observation and finalize again, not hurry. Immediately
+     before merge call `verify_publication_gate`; only `valid: true`
+     authorizes the next operation. Merge with the returned full `head_sha`
+     using a head-matching operation such as
+     `gh pr merge --match-head-commit <head_sha>`. Never reuse a finalize
+     result, direct file read, cached verification, or older revision.
+
+   What counts as a Codex answer, which the summary applies but does not
+   explain: a version-2 `BASELINE_CORRELATED` request with
    server-verified issuance provenance from another head is not a candidate for
    a later markerless result; an unverified, same-head, or legacy unscoped
    baseline request remains a candidate. A same-head one stops being a
-   candidate the moment step 5 records the next request: the server supersedes
-   the prior requests it proved this chain issued. An unverified or legacy one
-   is never superseded and keeps the acknowledgement path.
-5. Refresh the PR head and require it to equal the publication authorization
-   head. Call `get_publication_summary` and require
-   `next_action: POST_AND_RECORD_CODEX_REVIEW_REQUEST`. Post exactly one issue
-   comment whose entire body equals the returned `codex_review_request.body`;
-   do not edit, reconstruct, or shorten it. Then immediately call
-   `record_codex_review_request` with the post response's comment ID, URL,
-   `created_at`, the freshly read full head, and, when present, the returned
-   `codex_review_request.request_id`. Adapter-version-1 ledgers return the
-   legacy exact body without a request ID; omit that field when resuming them.
-   Never post an exact or
-   trigger-shaped Codex review request manually or outside this sequence. A
-   crash between post and binding leaves an unbound request and must fail
-   closed.
-6. Run the packaged `../../scripts/collect-github-observation.mjs` helper
-   resolved relative to the entrypoint SKILL as `--review-id <review_id>`.
-   The helper uses the user's authenticated `gh` CLI in read-only
-   mode to collect the PR and both base comparisons, applicable rules, two
-   independent branch reads, classic protection when applicable, a single
-   page each of check runs using `filter=all`, commit statuses and review
-   threads -- a selection that prefers the newest evidence decides from them, so
-   they are read at one instant or refused -- and all pages of the three Codex
-   feeds, which are walked because a pull request may hold more than a page of
-   them. It
-   canonicalizes GitHub timestamps to UTC milliseconds, preserves pagination
-   proof, and fails closed when policy evidence is unavailable. Call
-   `record_github_snapshot` with the `observation_path` the helper prints,
-   then use `get_publication_summary` for the compact revision, blocker,
-   exact acknowledgement sets, gate state, and `next_action`. Never paste an
-   observation or a ledger into a tool call or a shell heredoc: the helper
-   reads and writes those files itself, and retyping them costs more than every
-   other step of this workflow combined. Call `get_publication` only for an
-   audit that genuinely needs the complete ledger in the transcript.
-7. For adapter version 2, prefer a clean issue comment or findings review that
+   candidate once the next request is recorded. For adapter version 2, prefer a clean issue comment or findings review that
    echoes the exact current Review Bridge request ID. When the GitHub Codex App
    omits it, accept only the server-replayed fallback of exactly one recorded
    open request, no preceding unbound or compatible unresolved baseline
@@ -120,37 +119,14 @@ For either mode:
    non-passing. Findings must be a formal review with its complete structurally
    attached Codex review comments. Never infer correlation from timestamps
    alone.
-8. If the ledger reports `GITHUB_REVIEW_UNKNOWN` because of ambiguity or an
-   unbound or unsupported request, call `get_publication_summary` and present
-   its entire `required_request_refs` and `required_ambiguous_results` sets to
-   the human. Invoke
-   `acknowledge_codex_review_ambiguity` only after direct approval of that exact
-   full set; partial approval, silence, retry intent, or earlier permission to
-   finish is insufficient. Then refresh the head, post and immediately bind one
-   new summary-provided correlated request, and record a new complete snapshot.
-9. If Codex reports an actionable finding, apply the pre-commit cleanup, then
-    commit and verify the fix. Start a
-    new local Review Bridge task in `LOCAL_GATE` mode or call
-    `authorize_remote_publication` again in `REMOTE_ONLY` mode. A new commit
-    invalidates this ledger and its prior GitHub Codex result. In `LOCAL_GATE`
-    mode that task is a successor by default: leave `parent_review_id` unset
-    and `force_full_review` off, so its reviewed unit is the fix delta over the
-    head this publication already gated.
-10. After `MERGE_READY`, run the packaged collector once more with
-    `--review-id <review_id>` for a final fresh GitHub observation and call
-    `record_github_snapshot` with the printed `observation_path`, then call
-    `finalize_publication_gate`. The summary's `gate_expires_in_seconds` says
-    how much of that gate's window is left. It expires five minutes after the
-    oldest source collection in the observation it was minted over, not five
-    minutes after issuance, so part of the window is already spent when the gate
-    first exists. Read it before starting the merge: too little left means
-    collect a fresh observation and finalize again, not hurry.
-    Immediately before merge call `verify_publication_gate`;
-    only `valid: true` authorizes the next operation. Merge with the returned full
-    `head_sha` using a head-matching operation such as
-    `gh pr merge --match-head-commit <head_sha>`. Never reuse a finalize result,
-    direct file read, cached verification, or older revision.
-11. Once the ledger reads `MERGE_READY`, call `render_review_report` with the
+5. If Codex reports an actionable finding, apply the pre-commit cleanup, then
+   commit and verify the fix. Start a
+   new local Review Bridge task in `LOCAL_GATE` mode or call
+   `authorize_remote_publication` again in `REMOTE_ONLY` mode. A new commit invalidates this ledger and its prior
+   GitHub Codex result. In `LOCAL_GATE` mode leave `parent_review_id` unset
+   and `force_full_review` off; the review uses whatever parent
+   `prepare_review` reports, which may be none (FULL).
+6. Once the ledger reads `MERGE_READY`, call `render_review_report` with the
     `review_id` — in `REMOTE_ONLY` mode the authorization's, since no local
     review exists and the report then renders from the publication and its
     authorization alone — and print the returned path. If `command -v plannotator` finds
@@ -161,19 +137,13 @@ For either mode:
     not evidence, and a failure in this step changes no gate and no workflow
     state, so it may run before or after the merge.
 
-The fifteen publication tools are `authorize_remote_publication`,
+The nine publication tools are `authorize_remote_publication`,
 `start_publication`, `get_publication`, `get_publication_summary`,
-`get_autonomous_pre_ready`, `get_autonomous_terminal`,
-`get_thread_resolution_plan`,
-`get_invalidated_resolution_plan`,
 `record_codex_review_request`, `record_github_snapshot`,
-`record_automatic_resolution`, `record_automatic_unresolve`,
 `acknowledge_codex_review_ambiguity`,
 `finalize_publication_gate`, and `verify_publication_gate`. Keep their
 revision ordering explicit and retry `PUBLICATION_BUSY` or `REVIEW_BUSY` only
-after rereading current state. `get_autonomous_pre_ready` exists only for a
-version-3 autonomous ledger; version-1 and version-2 ledgers keep their exact
-existing status and next-action behavior and can never bind a workflow.
+after rereading current state.
 
 Any new commit invalidates the GitHub review gate. Compare the reviewed PR head
 before merge; a squash merge naturally creates a different merge commit.

@@ -1,6 +1,6 @@
 # Install the Codex plugin
 
-Describes Review Bridge v0.23.0.
+Describes Review Bridge v0.27.0.
 
 For an existing installation, follow the [upgrade guide](upgrade.md).
 
@@ -11,10 +11,10 @@ the local marketplace:
 ```bash
 git clone https://github.com/fengjiachun/review-bridge.git
 cd review-bridge
-git checkout v0.23.0
+git checkout v0.27.0
 npm ci
 npm run build
-codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.23.0/codex-marketplace"
+codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.27.0/codex-marketplace"
 ```
 
 Build from a Git clone, not from the release's source archive: `scripts/build.mjs`
@@ -34,5 +34,5 @@ clone at a release tag satisfies both. See [Develop](../../README.md#develop) fo
 build and verification loop.
 
 Start a new author task and follow [your first local review](../../README.md#run-your-first-local-review).
-The author connection offers model discovery, selection, and launch; see
+The author connection launches the reviewer; see
 [reviewer configuration](../reviewer-configuration.md).

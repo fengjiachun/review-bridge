@@ -1,7 +1,7 @@
 # Review Bridge for DeepSeek Harness
 
 This directory is the self-contained DeepSeek Harness integration for Review
-Bridge v0.23.0. It contains the packaged server runtime, separate author and
+Bridge v0.27.0. It contains the packaged server runtime, separate author and
 reviewer profile patch snippets, and a Review Bridge-owned reviewer skill. The
 reviewer snippet runs `node <absolute-versioned-path>/server/server.mjs --role
 reviewer --reviewer-provider DEEPSEEK_HARNESS`; the author snippet runs the
@@ -47,9 +47,9 @@ is why they are part of the snippet rather than install prose.
 
 ## Install
 
-1. Check out the exact `v0.23.0` tag, run `npm ci`, `npm test`, `npm run build`,
+1. Check out the exact `v0.27.0` tag, run `npm ci`, `npm test`, `npm run build`,
    and `npm run verify:build`. Keep the resulting
-   `dist/review-bridge-v0.23.0/deepseek-harness` directory in place.
+   `dist/review-bridge-v0.27.0/deepseek-harness` directory in place.
 2. Create dedicated author and reviewer profile directories under
    `$DSH_HOME/profiles/<name>`. Each needs a `package.json` carrying a
    `dsh.profile.bundles` list, an empty `cordis.patch.yml` holding `[]`, and
@@ -65,7 +65,7 @@ is why they are part of the snippet rather than install prose.
 3. Render both snippets before installing them:
    - `__REVIEW_BRIDGE_RELEASE_PATH__` → the absolute path of the versioned
      `deepseek-harness` directory, ending in
-     `review-bridge-v0.23.0/deepseek-harness`.
+     `review-bridge-v0.27.0/deepseek-harness`.
    - `__REVIEW_BRIDGE_HOME__` → the absolute path of the shared store used by
      every Review Bridge participant.
 4. Append the rendered entries from `cordis/reviewer.patch.yml` to the reviewer
@@ -122,7 +122,7 @@ mcp__review-bridge-reviewer__submit_rereview
 The reviewer profile must have no Review Bridge author/publication server or
 tools. The author profile must have no Review Bridge reviewer server and must
 retain the full author tool surface. Both rendered snippets must contain the
-same absolute `REVIEW_BRIDGE_HOME` and the same absolute v0.23.0 integration
+same absolute `REVIEW_BRIDGE_HOME` and the same absolute v0.27.0 integration
 path.
 
 ## Review
@@ -244,8 +244,7 @@ not be replaced; this runtime does not wait.
 
 Review Bridge records the review's `DEEPSEEK_HARNESS` binding; it observes
 nothing about how the session was started, and this section adds no
-mechanism that would. Local autonomous task creation still accepts
-`CODEX_TASK` dispatch only. The `CLAUDE_DESKTOP` boundary is unchanged, and
+mechanism that would. The `CLAUDE_DESKTOP` boundary is unchanged, and
 nothing above narrows it: never launch, script, or otherwise programmatically
 invoke a Claude reviewer from the driver session — the operator opens that
 conversation themselves, an account-compliance boundary rather than a
@@ -266,21 +265,17 @@ its plugin configuration is still a developer preview.
 
 - `DEEPSEEK_HARNESS` is configured local reviewer provenance, not cryptographic
   model identity.
-- Local autonomous task creation remains `CODEX_TASK`-only; the DeepSeek
-  Harness reviewer never creates or advances local autonomous workflow tasks.
 - Remote GitHub Codex publication is performed by the author/publication side
   only after a local reviewer gate has passed. On a publish-bound change that
   gate is a `CODEX_TASK` review by default, and a `DEEPSEEK_HARNESS` review is
   the verification-shape second opinion beside it — how a change is tested,
   pinned, and fixtured — rather than the gate that authorizes the publication.
 
-## Select a local reviewer from the author session
+## Launch a local reviewer from the author session
 
-Use the author server's `discover_reviewer_options` for the execution host's
-CODEX_TASK models and efforts. Show the suggested valid prior choice; use the
-client's structured selection if supported, otherwise conversation. Persist an
-explicit choice with `select_reviewer_configuration`, then use
-`launch_local_reviewer` when authorized. Discovery is not launch authorization.
-Rereviews inherit selection, invalid choices fail without fallback, and other
-providers report unavailable discovery/control. Unattended work requires a
-preauthorized choice and stops without waiting for interactive input.
+Use the author server's `launch_local_reviewer` when authorized. The CODEX_TASK
+reviewer uses the model from the execution host's Codex configuration at `high`
+reasoning effort; change `model` there to change the default model (the
+default effort stays `high`). For one
+review, ask the author to list the reviewer models (`list_reviewer_models`) and
+name a model or effort; the choice holds for that review's later rounds.

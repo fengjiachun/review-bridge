@@ -1,6 +1,6 @@
 # Run a local review
 
-Describes Review Bridge v0.23.0.
+Describes Review Bridge v0.27.0.
 
 Local review, step by step: selecting and starting Codex, manual reviewer requests,
 the states a review ends in, successor reviews, and the state machine. For
@@ -13,16 +13,16 @@ Use an author connection in Codex, Claude, Hermes, or DeepSeek Harness. For an
 independent Codex reviewer, ask:
 
 > Review the current change using `CODEX_TASK`. The requirement is "...", the
-> implementation scope is "...", and the base ref is `origin/main`. Show the
-> available reviewer models and reasoning levels before starting.
+> implementation scope is "...", and the base ref is `origin/main`.
 
-Choose from the returned options and authorize the start. The author calls
-`discover_reviewer_options`, captures the snapshot with `prepare_review`, saves
-your choice with `select_reviewer_configuration`, then calls
-`launch_local_reviewer`. Selection requires the discovered `environment_id` and
-the current review `state_version`; launch uses the new state version returned
-after selection. See [reviewer configuration](reviewer-configuration.md) for
-client setup and runtime limits. The launcher starts an independent process;
+`CODEX_TASK` is the default reviewer provider; name another only to use it.
+The author captures the snapshot with `prepare_review`, then calls
+`launch_local_reviewer` with the review's `state_version`. The reviewer uses the
+model from the MCP host's Codex configuration at `high` reasoning effort unless
+you ask the author for another model or effort; that choice holds for the
+review's later rounds. See
+[reviewer configuration](reviewer-configuration.md) for choosing, client setup
+and runtime limits. The launcher starts an independent process;
 you follow it from the author conversation rather than creating a UI task.
 `prepare_review` also takes an optional `rationale`: the author's design
 decisions, dropped alternatives, and doubts, written before any finding exists.
@@ -41,9 +41,46 @@ polling. A timed-out wait is expected while a human-paced review is still in
 progress; call it again with the same `state_version`, or resume when the user
 confirms the review is complete.
 
+The tools that change the review -- `prepare_review`,
+`launch_local_reviewer`, `submit_resolutions`, `prepare_rereview`,
+`append_review_erratum`, and `finalize_local_gate` (under
+its `review` key, beside `gate`) -- also answer with that compact summary, not
+the full ledger. Their summary is built from the ledger they just wrote, so it
+never carries `reviewer_dispatch.exit`; only `get_review_summary` adds that
+exit receipt once a launched reviewer has exited. Call `get_review` when you
+need the requirement, finding text, resolutions, rereview decisions, carried
+findings, or errata.
+
 State-changing tools can also return structured concurrency and durability
 errors. See [Troubleshooting](troubleshooting.md) for what each one means and
 whether retrying is safe.
+
+## Lens review
+
+On request, a `CODEX_TASK` review can run a lens round first. Ask the author
+for a lens review of this change; the author passes `lens_review: true` with
+`force_full_review: true` only when you ask, and never offers one. Round one
+then runs three reviewers on the same snapshot at once: the general reviewer,
+a `tests` lens that looks for changed behavior no test would catch breaking,
+and a `design` lens that looks for a simpler shape. Both lenses report only
+defects worth fixing before merge, never nits. The round costs about three
+times a plain round one, can return more findings to answer, and waits for the
+last run's submission, including any relaunch.
+
+The review waits in `WAITING_FOR_LENS_REVIEW` until all three runs have
+submitted. Its runs are started only by `launch_local_reviewer`, which binds
+each run's reviewer server to the review; a reviewer started by hand, as
+below, cannot list or submit to a lens round. `get_review_summary` lists each
+run with its `submitted` flag and exit receipt, and `launch_local_reviewer`
+relaunches only a run that exited without submitting. Errata are refused until the round closes. The close puts every
+finding into the one ledger, general first, each lens finding tagged with its
+`lens`, and ends `CLEAN` or `REVIEW_SUBMITTED`. From there the review is a
+plain one: one general reviewer decides every finding in round two, and a
+continuation has no lenses unless you ask again.
+
+The lens instructions are read only from an installed package outside any Git
+work tree, so a source checkout refuses `lens_review`. Every install sharing
+the store must run a release with lens reviews before you start one.
 
 ## Start a reviewer manually
 
@@ -108,10 +145,10 @@ Fixing an undocumented one includes writing the rule into that guidance in the
 same change. Findings without it record no constraint kind.
 
 For a Codex review started with `launch_local_reviewer`, prepare rereview and
-call the launcher again with the current state version. Round two inherits the
-selected pair; change it explicitly before launch if needed. For manual Codex
+call the launcher again with the current state version; it reuses the model and
+effort chosen for the review, if any, unless you choose again. For manual Codex
 dispatch, create another new task with the same review ID and request a rereview
-of the author's resolutions, retaining your selected model and effort.
+of the author's resolutions.
 
 For other providers, resume the same reviewer context for round two where
 allowed. A `DEEPSEEK_HARNESS` reviewer cannot: every headless run starts a fresh session,
@@ -138,7 +175,11 @@ Rereview ends in `CLEAN`,
 - `CONTINUABLE_FINDINGS`: no rebuttal is still disputed, but round two judged
   a fix incomplete or found a new issue. Commit a changed head and call `prepare_review` with
   `continued_from_review_id` and `force_full_review: true`; the fresh reviewer
-  receives only the bare finding descriptions as scope hints.
+  receives only the bare finding descriptions as scope hints. The
+  continuation must repeat the source review's `requirement` exactly, while
+  its `implementation_scope` may be rewritten for the new head. A refusal
+  names each unmet check: source status, repository, requirement, reviewer
+  provider.
 - `HUMAN_REQUIRED`: round two kept a rejected finding open, so the rebuttal is
   disputed. Any incomplete fix from the same round goes into the same
   arbitration packet.
@@ -244,6 +285,9 @@ it sees the same bytes.
 ## State machine
 
 ```text
+WAITING_FOR_LENS_REVIEW (lens review, until all three runs submit)
+  └─ closes like WAITING_FOR_REVIEW below
+
 WAITING_FOR_REVIEW
   ├─ no findings ──────────────────────────────> CLEAN
   └─ findings -> REVIEW_SUBMITTED

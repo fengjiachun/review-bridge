@@ -41,10 +41,10 @@ Build the plugin from a clone at a release tag:
 ```bash
 git clone https://github.com/fengjiachun/review-bridge.git
 cd review-bridge
-git checkout v0.23.0
+git checkout v0.27.0
 npm ci
 npm run build
-codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.23.0/codex-marketplace"
+codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.27.0/codex-marketplace"
 ```
 
 Restart the Codex desktop app, open Plugins, select **Review Bridge Local**, and
@@ -71,28 +71,23 @@ Commit the change on a topic branch. In the author conversation, ask:
 
 > Review this change with Review Bridge using `CODEX_TASK`. The requirement is
 > "...", the implementation scope is "...", and the base ref is `origin/main`.
-> Show me the available reviewer models and reasoning levels before starting.
 
-The author queries the Codex runtime on the MCP host and presents its available
-choices. Choose a pair and authorize the review, for example:
-
-> Use `<model from the list>` with `<supported reasoning level>` and start.
-
-Review Bridge captures the snapshot, records your selection, and launches an
-independent Codex process. The author conversation's model does not choose the
-reviewer. A client may present a picker or ask in conversation; Review Bridge
-does not provide its own selection window. Follow progress in the author
+Review Bridge captures the snapshot and launches an independent Codex process.
+By default the reviewer uses the model from the MCP host's Codex configuration
+at `high` reasoning effort, unless you ask for another for this review; the
+author conversation's model does not choose it. Follow
+progress in the author
 conversation using the returned `review_id`.
 
 If there are findings, ask the author to address them and prepare round two.
-Rereview inherits your selected model and effort. When the ledger reports
+When the ledger reports
 `CLEAN`, the author finalizes the local gate, rechecking that the working tree
 still matches the reviewed snapshot. `LOCAL_GATE_PASSED` completes local review;
 you can stop here without publishing anything to GitHub.
 
 See [local review](docs/local-review.md) for manual reviewer sessions, other
 providers, and handling unresolved findings. [Reviewer configuration](docs/reviewer-configuration.md)
-explains the same selection flow from Codex, Claude, Hermes, and DeepSeek Harness.
+explains where the reviewer model comes from and how to start a review from Codex, Claude, Hermes, and DeepSeek Harness.
 
 ## From local review to `MERGE_READY`
 
@@ -120,15 +115,15 @@ and explains why each step exists.
 | Page | For |
 | --- | --- |
 | [How Review Bridge reviews a change](docs/review-flow.md) | The narrative: commit to merge-ready, and why |
-| [Product overview](docs/overview.md) | Problem, principles, store layout, local review, publication gate, workflow, clients, usage data |
+| [Product overview](docs/overview.md) | Problem, principles, store layout, local review, publication gate, clients, usage data |
 | [产品说明（中文）](docs/overview.zh.md) | The same overview in Chinese |
-| [Choose reviewer model and reasoning](docs/reviewer-configuration.md) | Cross-client selection, launch, and runtime limitations |
+| [Reviewer model and reasoning](docs/reviewer-configuration.md) | Where the model comes from, launch, and runtime limitations |
 | [Upgrade an existing installation](docs/install/upgrade.md) | Switch clients together and verify the new runtime |
 | [Run a local review](docs/local-review.md) | Every provider's request, round two, successor reviews, the state machine |
 | [GitHub publication gate](docs/publication-gate.md) | `LOCAL_GATE` and `REMOTE_ONLY` publication |
 | [Search historical findings](docs/finding-search.md) | Read-only CLI filters, provenance, and ledger diagnostics |
+| [Pair remote review threads with local reviews](docs/miss-report.md) | Read-only CLI listing a pull request's GitHub threads beside the local reviews of the same head |
 | [Review statistics](docs/publication-gate.md#review-statistics) | Monthly rebuttal outcomes and filtering rules |
-| [Autonomous workflow](docs/autonomous-workflow.md) | The authorized end-to-end workflow |
 | [Reference](docs/reference.md) | Every tool and error code, generated from the source |
 | [Troubleshooting](docs/troubleshooting.md) | Structured errors and build failures |
 | [Install pages](docs/install/) | Claude Desktop, Codex plugin, Hermes, DeepSeek Harness |
@@ -186,7 +181,7 @@ npm run build
 npm run verify:build
 ```
 
-`npm run build` writes to `dist/review-bridge-v0.23.0/`; set
+`npm run build` writes to `dist/review-bridge-v0.27.0/`; set
 `REVIEW_BRIDGE_OUTPUT_ROOT` to write elsewhere. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the pull request process,
 [docs/rfcs/](docs/rfcs/) for design records, and [CHANGELOG.md](CHANGELOG.md)

@@ -1,15 +1,24 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { defaultStoreRoot } from "../server/core.mjs";
-import { collectGithubObservation } from "../server/github-observation.mjs";
+import { defaultStoreRoot, requireRecordVersion } from "../server/core.mjs";
+import {
+  collectCodexBaseline,
+  collectGithubObservation,
+} from "../server/github-observation.mjs";
+import { assertOutsideGitRepository } from "../server/local-reviewer.mjs";
+import {
+  readPublicationStartAuthorization,
+  SUPPORTED_PUBLICATION_VERSIONS,
+} from "../server/publication.mjs";
 import { atomicWriteFile } from "../server/storage.mjs";
 
 const USAGE = `Usage: collect-github-observation.mjs [publication.json]
        collect-github-observation.mjs --review-id <id> [--out <path>]
+       collect-github-observation.mjs --baseline --review-id <id> --repo <owner/name>
+                                      --pr <n> --codex-actor-id <n> [--out <path>]
 
   --review-id <id>  Read the publication ledger straight from the store instead
                     of a get_publication result pasted through the model. The
@@ -18,9 +27,18 @@ const USAGE = `Usage: collect-github-observation.mjs [publication.json]
                     observation_path to record_github_snapshot. Never retype
                     the observation itself.
   --publication <p> Read the ledger from an explicit file.
-  --out <path>      Override the observation file location. Refused inside any
-                    Git worktree: an untracked observation would dirty the
-                    reviewed repository and fail publication-gate verification.
+  --baseline        Collect the preexisting Codex baseline start_publication
+                    needs, before any ledger exists. The head is read from the
+                    review's local gate or remote-only authorization in the
+                    store and must equal the pull request's head. --repo,
+                    --pr, and --codex-actor-id (the pinned Codex Bot's
+                    numeric ID) are required. The baseline is written to the
+                    private store next to the review, and only a receipt is
+                    printed; pass the printed codex_review_baseline_path to
+                    start_publication.
+  --out <path>      Override the output file location. Refused inside any
+                    Git worktree: an untracked file would dirty the reviewed
+                    repository and fail publication-gate verification.
 
 With neither --review-id nor a path, the ledger is read from stdin and the
 observation is written to stdout.
@@ -43,14 +61,14 @@ async function assertOutsideGitWorktree(resolved) {
       probe = parent;
     }
   }
-  const result = spawnSync("git", ["-C", probe, "rev-parse", "--show-toplevel"], {
-    encoding: "utf8",
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
-  });
-  if (result.status === 0) {
-    process.stderr.write(
-      `refusing to write the observation inside the Git worktree at ${result.stdout.trim()}; omit --out to use the private store, or choose a path outside any repository\n`,
+  try {
+    assertOutsideGitRepository(
+      probe,
+      "output file",
+      "omit --out to use the private store, or choose a path outside any repository",
     );
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
     process.exit(2);
   }
 }
@@ -62,6 +80,36 @@ function option(argv, name) {
   }
   const index = argv.indexOf(`--${name}`);
   return index >= 0 ? argv[index + 1] ?? null : null;
+}
+
+function positiveInteger(argv, name) {
+  const value = option(argv, name);
+  const parsed = Number(value);
+  if (value == null || !/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(parsed)) {
+    process.stderr.write(`--${name} must be a positive safe integer\n`);
+    process.exit(2);
+  }
+  return parsed;
+}
+
+async function writeReceipt(out, value, receipt) {
+  const serialized = `${JSON.stringify(value)}\n`;
+  const resolved = path.resolve(out);
+  // Atomic replace through a fresh 0600 temp file: writeFile's mode option
+  // is ignored when the target already exists, so reusing an --out path
+  // must not inherit that file's old permissions.
+  await atomicWriteFile(resolved, serialized);
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        ...receipt(resolved),
+        bytes: Buffer.byteLength(serialized),
+        sha256: crypto.createHash("sha256").update(serialized).digest("hex"),
+      },
+      null,
+      2,
+    )}\n`,
+  );
 }
 
 function readStdin() {
@@ -97,49 +145,79 @@ if (argv[0] === "--help") {
     reviewId == null
       ? null
       : path.join(defaultStoreRoot(), "reviews", reviewId);
+  const baselineMode = argv.includes("--baseline");
+  if (baselineMode && reviewId == null) {
+    process.stderr.write("--baseline requires --review-id\n");
+    process.exit(2);
+  }
   const out =
     explicitOut ??
     (reviewDirectory == null
       ? null
-      : path.join(reviewDirectory, "observation.json"));
+      : path.join(
+          reviewDirectory,
+          baselineMode ? "codex-review-baseline.json" : "observation.json",
+        ));
   if (explicitOut != null) {
     // Fail fast, before any GitHub traffic is spent on a doomed run.
     await assertOutsideGitWorktree(path.resolve(explicitOut));
   }
 
-  const publicationPath =
-    reviewDirectory != null
-      ? path.join(reviewDirectory, "publication.json")
-      : (explicitPublication ?? positional ?? null);
-
-  const input =
-    publicationPath == null
-      ? await readStdin()
-      : await readFile(publicationPath, "utf8");
-
-  const observation = collectGithubObservation(JSON.parse(input));
-
-  if (out == null) {
-    process.stdout.write(`${JSON.stringify(observation, null, 2)}\n`);
-  } else {
-    const serialized = `${JSON.stringify(observation)}\n`;
-    const resolved = path.resolve(out);
-    // Atomic replace through a fresh 0600 temp file: writeFile's mode option
-    // is ignored when the target already exists, so reusing an --out path
-    // must not inherit that file's old permissions.
-    await atomicWriteFile(resolved, serialized);
-    process.stdout.write(
-      `${JSON.stringify(
-        {
-          observation_path: resolved,
-          bytes: Buffer.byteLength(serialized),
-          sha256: crypto.createHash("sha256").update(serialized).digest("hex"),
-          observed_at: observation.observed_at ?? null,
-          head_sha: observation.pull_request?.head_sha ?? null,
-        },
-        null,
-        2,
-      )}\n`,
+  if (baselineMode) {
+    const repository = option(argv, "repo");
+    if (repository == null || !/^[^/]+\/[^/]+$/.test(repository)) {
+      process.stderr.write("--repo must be <owner/name>\n");
+      process.exit(2);
+    }
+    const [owner, repo] = repository.split("/");
+    const prNumber = positiveInteger(argv, "pr");
+    const codexActorId = positiveInteger(argv, "codex-actor-id");
+    const { head_sha: headSha } = await readPublicationStartAuthorization(
+      defaultStoreRoot(),
+      reviewId,
     );
+    let baseline;
+    try {
+      baseline = collectCodexBaseline({
+        owner,
+        repo,
+        prNumber,
+        headSha,
+        codexActorId,
+      });
+    } catch (error) {
+      process.stderr.write(`no baseline written: ${error.message}\n`);
+      process.exit(1);
+    }
+    await writeReceipt(out, baseline, (resolved) => ({
+      codex_review_baseline_path: resolved,
+      observed_at: baseline.observed_at,
+      head_sha: headSha,
+      pr_number: prNumber,
+    }));
+  } else {
+    const publicationPath =
+      reviewDirectory != null
+        ? path.join(reviewDirectory, "publication.json")
+        : (explicitPublication ?? positional ?? null);
+
+    const input =
+      publicationPath == null
+        ? await readStdin()
+        : await readFile(publicationPath, "utf8");
+
+    const publication = JSON.parse(input);
+    requireRecordVersion(publication, "publication ledger", SUPPORTED_PUBLICATION_VERSIONS);
+    const observation = collectGithubObservation(publication);
+
+    if (out == null) {
+      process.stdout.write(`${JSON.stringify(observation, null, 2)}\n`);
+    } else {
+      await writeReceipt(out, observation, (resolved) => ({
+        observation_path: resolved,
+        observed_at: observation.observed_at ?? null,
+        head_sha: observation.pull_request?.head_sha ?? null,
+      }));
+    }
   }
 }

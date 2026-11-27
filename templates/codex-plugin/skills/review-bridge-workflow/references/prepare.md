@@ -34,12 +34,23 @@ After a verdict, load [Handle findings](findings.md) for findings or
    A verified `SUCCESSOR` is the default and stands: on a long-lived branch its
    delta is a small fraction of the cumulative patch, and re-reviewing
    already-gated code costs the reviewer far more context than it buys.
-   `force_full_review: true` is the deliberate exception, and one scenario
-   names it. A continuation from `CONTINUABLE_FINDINGS` passes it beside
-   `continued_from_review_id`, which the server requires. Outside it,
+   `force_full_review: true` is the deliberate exception, and two scenarios
+   name it. A continuation from `CONTINUABLE_FINDINGS` passes it beside
+   `continued_from_review_id`, which the server requires. The continuation
+   repeats the source review's `requirement` exactly; its
+   `implementation_scope` may describe the new head. A refused continuation
+   names each unmet check: source status, repository, requirement, reviewer
+   provider. A lens review is the other exception: `lens_review: true`
+   requires `force_full_review: true` and `CODEX_TASK`, and its round one runs
+   the general reviewer plus `tests` and `design` lens runs on the same
+   snapshot, at about three times the round-one cost. Pass `lens_review: true`
+   only when the user has asked, in this conversation, for a lens review of
+   this review; never offer, suggest, or start one otherwise. A continuation
+   gets lenses only when the user asks again. Outside these,
    demanding a full patch buys a re-review of gated code, so state the reason
    in the session before passing it.
-6. Choose `reviewer_provider` explicitly:
+6. `CODEX_TASK` is the default `reviewer_provider`; omitting it prepares a
+   `CODEX_TASK` review. Pass another provider only when the user names one:
    - `CLAUDE_DESKTOP` for a fresh Claude Desktop conversation.
    - `CODEX_TASK` for a newly created Codex task that is not a fork of the
      author task and has no authoring history for the change.
@@ -55,9 +66,10 @@ After a verdict, load [Handle findings](findings.md) for findings or
    to repair; the same defect found at the local gate costs one local round.
    `DEEPSEEK_HARNESS` is the verification-shape second opinion beside that
    gate — pins that match a substring, fixtures that do not cover the case, a
-   refusal test passing on a neighbour's message. Run it in addition to the
-   `CODEX_TASK` gate when the risk in a change is how it is verified; never as
-   the sole gate on a publication path.
+   refusal test passing on a neighbour's message. When the risk in a change is
+   how it is verified, suggest it to the user and run it in addition to the
+   `CODEX_TASK` gate only when they name it; never as the sole gate on a
+   publication path.
 
    Never call reviewer tools from the author task; provider binding and task
    separation are workflow attestations, not authenticated model identity.
@@ -68,14 +80,6 @@ After a verdict, load [Handle findings](findings.md) for findings or
    binding first: each review is immutably bound to one provider, and a
    `CLAUDE_DESKTOP`, `CODEX_TASK`, `HERMES`, or `DEEPSEEK_HARNESS` reviewer
    cannot list or open a review bound to any of the other providers.
-   Before preparation, call `discover_reviewer_options` for the repository and
-   selected provider. This queries the reviewer host/runtime/account, independently
-   of the author conversation. Show the returned visible models and their efforts,
-   with `suggested` preselected when present. Use a structured choice if the client
-   supports one; otherwise ask in conversation. Explicit user choices need no repeat
-   question. A suggestion or displayed catalog is not a selection or permission to
-   start. Unattended work needs a preauthorized choice; missing choices stop without
-   waiting for interaction. Other providers report their discovery/control limits.
 7. Call `prepare_review` with the base SHA captured in step 1, the selected
    provider, and the optional verified parent from step 5.
    Pass `rationale` written from your own session context: the key design
@@ -86,21 +90,22 @@ After a verdict, load [Handle findings](findings.md) for findings or
    because..." does not. State your uncertainty plainly; the reviewer checks it
    first in round two. The rationale is frozen before any finding exists and
    the reviewer does not see it in round one.
-   For `CODEX_TASK`, call `select_reviewer_configuration` with the explicitly
-   selected `model`, `reasoning_effort`, and catalog `environment_id`, using the
-   prepared review's `state_version`. Do this before binding an autonomous workflow.
 8. Call `get_review_summary`, record its `state_version`, and report the
-   returned `review_id`, `reviewer_provider`, `review_strategy`, and state
-   `WAITING_FOR_REVIEW`. Also report `current_snapshot.change_size`: manual
+   returned `review_id`, `reviewer_provider`, `review_strategy`, and the
+   `status` it gives: `WAITING_FOR_REVIEW`, or `WAITING_FOR_LENS_REVIEW` for a
+   lens review. Also report `current_snapshot.change_size`: manual
    review continues even when `over_budget` is true, because the operator is
    already present to decide whether the change should be split. When
    `warning_threshold_crossed` is true, state the total and
    `remaining_headroom` and say whether the change will continue or split.
-9. Start a fresh reviewer context for every new `review_id`. For
+9. Start a fresh reviewer context for every new `review_id`. For a
+   `WAITING_FOR_LENS_REVIEW` review, call `launch_local_reviewer` as in
+   [Dispatching a CODEX_TASK review](codex-task.md): only its bound runs can
+   list or submit to the lens round, so a reviewer task started by hand cannot
+   serve it. For
    `CLAUDE_DESKTOP`, use a fresh Claude conversation. For `CODEX_TASK`, create
    a new Codex task rather than forking this task, and send it only the review
-   ID and a request to follow the packaged reviewer skill. Use the persisted reviewer configuration. To launch on the same runtime
-   that supplied the catalog, follow [Dispatching a CODEX_TASK review](codex-task.md). For
+   ID and a request to follow the packaged reviewer skill. To launch it from this session, follow [Dispatching a CODEX_TASK review](codex-task.md). For
    `HERMES`, start
    a fresh, independent Hermes reviewer context in the packaged Hermes reviewer
    profile, and send it only the review ID and a request to follow the packaged

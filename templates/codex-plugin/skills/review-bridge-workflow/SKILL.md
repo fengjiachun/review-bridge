@@ -18,13 +18,13 @@ not a list to preload.
 | Handle local findings or rereview | [Handle findings](references/findings.md) | Selected provider for round two; Prepare for a continuation |
 | Finish a CLEAN review or escalate HUMAN_REQUIRED | [Finish](references/finish.md) | Publication only if authorized |
 | Publish through LOCAL_GATE or explicitly authorized REMOTE_ONLY | [Publish through GitHub](references/publication.md) | Prepare if a local gate is required |
-| Run an explicitly authorized autonomous workflow | [Autonomous workflow](references/autonomous.md) | Publication at START_PUBLICATION; use the server's task dispatch |
+| List the local Codex reviewer's models | Nothing: call `list_reviewer_models` and show the configured model, the `high` default, and each model's supported efforts | [CODEX_TASK](references/codex-task.md) only to launch with a choice |
 
 For a manual local review, select the provider in Prepare and load only
 [CODEX_TASK](references/codex-task.md), [HERMES](references/hermes.md),
 [DEEPSEEK_HARNESS](references/deepseek-harness.md), or
 [CLAUDE_DESKTOP](references/claude-desktop.md). A local preparation task needs
-no autonomous or publication playbook. On a lock or indeterminate write error,
+no publication playbook. On a lock or indeterminate write error,
 load [Lock contention](references/lock-contention.md) before deciding to retry.
 
 ## Common boundaries
@@ -35,33 +35,31 @@ load [Lock contention](references/lock-contention.md) before deciding to retry.
   preparation and fix commits before rereview.
 - Keep the user's requirement and scope faithful to what the user currently
   asks for. After a human ruling that changes what the code should do, that
-  is the ruled behavior, and the next review's requirement states it. An
-  autonomous workflow's requirement is fixed when the workflow starts and
-  every review bound to it must repeat it exactly, so a ruled requirement
-  needs a workflow started with it. Bind
+  is the ruled behavior, and the next review's requirement states it. Bind
   review to the exact repository, immutable base SHA, captured head and
   snapshot, and chosen provider. A changed head needs the applicable fresh
   review or authorization.
 - Never call reviewer tools from the author task. Each new review ID needs a
   fresh independent reviewer with only the review ID and the reviewer request,
   no authoring history or other reviewer's findings. Never run two reviewers
-  on the same round at once. Use the selected provider's round-two rules.
+  on the same round at once; in a lens round its three runs are that round's
+  reviewers, and the rule holds per run. Use the selected provider's round-two
+  rules.
+- Pass `lens_review: true` only when the user has asked, in this conversation,
+  for a lens review of this review; never offer, suggest, or start one
+  otherwise.
 - Never programmatically launch a CLAUDE_DESKTOP reviewer. The operator opens
   the conversation themselves; this account-compliance boundary applies in
   every mode.
 - A local gate attests snapshot consistency; it does not itself authorize a
   push, pull request, merge, or release. REMOTE_ONLY needs direct approval to
-  skip local review. Autonomous mode needs its exact capability authorization;
-  a general instruction to implement, test, review, or continue is insufficient.
+  skip local review.
 - Follow server-derived `next_action` and `required_inputs` with the current
   revision or `state_version`. Use the ledger for findings and resolutions;
   session narration, reports, and launch exit codes are not review verdicts.
-- Preserve review and change-size budgets. Extend them only on the explicit
-  decisions required by the selected route. Never add a third round to a review
-  ID. HUMAN_REQUIRED stops for arbitration; CONTINUABLE_FINDINGS uses a fresh
+- Never add a third round to a review ID. HUMAN_REQUIRED stops for arbitration; CONTINUABLE_FINDINGS uses a fresh
   full review.
-- Honor terminal states and operator stops. An autonomous workflow ends at
-  MERGE_READY and never merges; AWAIT_OPERATOR is not an instruction to poll.
+- Honor terminal states and operator stops.
 
 ## Test quality in pre-commit cleanup
 
@@ -85,9 +83,8 @@ and style alone do not justify removal; keep cleanup within the change's scope.
 
 ## Waiting and retries
 
-Unchanged observations do not advance the workflow revision. This ledger rule
-says nothing about observation cost or polling frequency. Prefer supported
-state-change waits or long polling over repeatedly collecting the same state.
+Prefer supported state-change waits or long polling over repeatedly collecting
+the same state.
 
 For local review, use `wait_for_review_state` with the recorded `state_version`.
 It waits 25 seconds by default and accepts at most 30 seconds. A `timed_out`
@@ -96,8 +93,13 @@ result is expected while review remains in progress: call again with the same
 the user confirms completion. A timeout is neither a failed review nor proof
 that its reviewer has exited; never use it to launch a concurrent replacement.
 
-For remote GitHub observation collection, back off when relevant state remains
-unchanged, respect rate-limit and retry signals, and reset the cadence when
-relevant state changes. Do not invoke the collector in a tight loop. A local
-review wait does not watch GitHub. Fresh complete evidence is still required
-before each gated action; a wait, elapsed time, or unchanged revision proves none.
+For remote GitHub observation collection, when the host can wake the agent on
+pull-request events such as check results, new comments or reviews, and
+conflicts, wait on that wake instead of collecting repeatedly. Without such a
+host, back off when relevant state remains unchanged and reset the cadence when
+relevant state changes. Every collection, including one after a wake, respects
+rate-limit and retry signals. Do not invoke the collector in a tight loop. A
+local review wait does not watch GitHub. Fresh complete evidence is still
+required before each gated action; a wait, a host wake, elapsed time, or
+unchanged revision proves none. After a wake, collect and record a fresh
+observation and follow the publication summary's `next_action`.

@@ -7,8 +7,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { REVIEWER_PROVIDERS, prepareReview, prepareRereview, submitResolutions } from "../src/core.mjs";
-import { fixture, git } from "./helpers/repository-fixture";
-import { AUTONOMOUS_PAUSE_REASON_CODES } from "../src/workflow.mjs";
+import { commit, fixture, git } from "./helpers/repository-fixture";
 
 const serverPath = path.resolve("src/server.mjs");
 
@@ -49,68 +48,24 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
   const reviewer = await listToolNames("reviewer", store);
 
   assert.deepEqual(author, [
-    "abandon_workflow_action",
-    "acknowledge_change_size_warning",
     "acknowledge_codex_review_ambiguity",
-    "advance_local_workflow",
-    "advance_remote_workflow",
     "append_review_erratum",
     "authorize_remote_publication",
-    "bind_workflow_publication",
-    "bind_workflow_review",
-    "cancel_autonomous_workflow",
-    "complete_workflow_action",
-    "discover_reviewer_options",
     "export_human_arbitration",
-    "extend_change_size_budget",
-    "extend_local_cycle_budget",
-    "extend_remote_cycle_budget",
     "finalize_local_gate",
     "finalize_publication_gate",
-    "get_autonomous_pre_ready",
-    "get_autonomous_terminal",
-    "get_autonomous_workflow",
-    "get_autonomous_workflow_summary",
-    "get_invalidated_resolution_plan",
     "get_publication",
     "get_publication_summary",
     "get_review",
     "get_review_summary",
-    "get_thread_resolution_plan",
-    "launch_codex_task_dispatch",
     "launch_local_reviewer",
-    "list_autonomous_workflows",
+    "list_reviewer_models",
     "list_reviews",
-    "mark_workflow_action_executing",
-    "pause_autonomous_workflow",
-    "plan_codex_task_dispatch",
-    "plan_draft_pull_request",
-    "plan_mark_pull_request_ready",
-    "plan_return_to_draft",
-    "plan_thread_reply",
-    "plan_thread_resolution",
-    "plan_thread_unresolve",
-    "plan_workflow_push",
     "prepare_rereview",
     "prepare_review",
-    "record_automatic_resolution",
-    "record_automatic_unresolve",
     "record_codex_review_request",
-    "record_codex_task_observation",
-    "record_draft_pull_request_observation",
     "record_github_snapshot",
-    "record_mark_ready_observation",
-    "record_push_observation",
-    "record_return_to_draft_observation",
-    "record_thread_reply_observation",
-    "record_thread_resolution_observation",
-    "record_thread_unresolve_observation",
-    "record_workflow_head",
-    "release_workflow_claims",
     "render_review_report",
-    "resume_autonomous_workflow",
-    "select_reviewer_configuration",
-    "start_autonomous_workflow",
     "start_publication",
     "submit_resolutions",
     "verify_publication_gate",
@@ -144,132 +99,17 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       prepare.inputSchema.properties.reviewer_provider.enum,
       ["CLAUDE_DESKTOP", "CODEX_TASK", "HERMES", "DEEPSEEK_HARNESS"],
     );
-    assert.ok(prepare.inputSchema.required.includes("reviewer_provider"));
+    assert.equal(prepare.inputSchema.required.includes("reviewer_provider"), false);
 
-    const startWorkflow = authorTools.tools.find(
-      (tool) => tool.name === "start_autonomous_workflow",
-    );
-    assert.deepEqual(
-      startWorkflow.inputSchema.properties.capabilities.items.enum,
-      [
-        "EDIT_AND_TEST",
-        "CREATE_COMMITS",
-        "CREATE_CODEX_REVIEWER_TASKS",
-        "PUSH_TOPIC_BRANCH",
-        "CREATE_OR_UPDATE_DRAFT_PR",
-        "POST_CODEX_REVIEW_REQUESTS",
-        "MARK_PR_READY",
-        "RETURN_PR_TO_DRAFT_FOR_REPAIR",
-        "RESOLVE_ELIGIBLE_CODEX_THREADS",
-        "UNRESOLVE_INVALIDATED_CODEX_THREADS",
-      ],
-    );
-    assert.ok(
-      startWorkflow.inputSchema.required.includes("publication_target"),
-    );
-    assert.ok(startWorkflow.inputSchema.properties.remote_cycle_budget);
-    assert.ok(startWorkflow.inputSchema.properties.local_cycle_budget);
-    assert.ok(startWorkflow.inputSchema.properties.change_size_budget);
-    assert.equal(
-      startWorkflow.inputSchema.required.includes("local_cycle_budget"),
-      false,
-    );
-    assert.equal(
-      startWorkflow.inputSchema.required.includes("change_size_budget"),
-      false,
-    );
-    assert.equal(
-      startWorkflow.inputSchema.required.includes("remote_cycle_budget"),
-      false,
-    );
-    const planDispatch = authorTools.tools.find(
-      (tool) => tool.name === "plan_codex_task_dispatch",
-    );
-    assert.deepEqual(planDispatch.inputSchema.required.sort(), [
-      "expected_revision",
-      "review_id",
-      "workflow_id",
-    ]);
-    const releaseClaims = authorTools.tools.find(
-      (tool) => tool.name === "release_workflow_claims",
-    );
-    assert.deepEqual(
-      releaseClaims.inputSchema.properties.reconciled_claims.items.required.sort(),
-      [
-        "canonical_key_sha256",
-        "kind",
-        "observed_at",
-        "present",
-        "target",
-        "workflow_revision",
-      ],
-    );
-    const resumeWorkflow = authorTools.tools.find(
-      (tool) => tool.name === "resume_autonomous_workflow",
-    );
-    assert.deepEqual(resumeWorkflow.inputSchema.required.sort(), [
-      "expected_revision",
-      "operator_label",
-      "rationale",
-      "workflow_id",
-    ]);
-    // The registered enum is the only gate a driver meets; the core allowlist
-    // is the one it must agree with. Assert them equal so a reason the
-    // workflow accepts can never become unreachable through MCP.
-    const pauseWorkflow = authorTools.tools.find(
-      (tool) => tool.name === "pause_autonomous_workflow",
-    );
-    assert.deepEqual(pauseWorkflow.inputSchema.properties.reason_code.enum, [
-      ...AUTONOMOUS_PAUSE_REASON_CODES,
-    ]);
-    const extendBudget = authorTools.tools.find(
-      (tool) => tool.name === "extend_remote_cycle_budget",
-    );
-    assert.deepEqual(extendBudget.inputSchema.required.sort(), [
-      "expected_revision",
-      "new_budget",
-      "operator_label",
-      "rationale",
-      "workflow_id",
-    ]);
-    const extendLocalBudget = authorTools.tools.find(
-      (tool) => tool.name === "extend_local_cycle_budget",
-    );
-    assert.deepEqual(extendLocalBudget.inputSchema.required.sort(), [
-      "expected_revision",
-      "new_budget",
-      "operator_label",
-      "rationale",
-      "workflow_id",
-    ]);
-    const extendChangeSizeBudget = authorTools.tools.find(
-      (tool) => tool.name === "extend_change_size_budget",
-    );
-    assert.deepEqual(extendChangeSizeBudget.inputSchema.required.sort(), [
-      "expected_revision",
-      "new_budget",
-      "operator_label",
-      "rationale",
-      "workflow_id",
-    ]);
-    const acknowledgeWarning = authorTools.tools.find(
-      (tool) => tool.name === "acknowledge_change_size_warning",
-    );
-    assert.deepEqual(acknowledgeWarning.inputSchema.required.sort(), [
-      "decision",
-      "expected_revision",
-      "operator_label",
-      "rationale",
-      "workflow_id",
-    ]);
-    assert.deepEqual(acknowledgeWarning.inputSchema.properties.decision.enum, [
-      "continue",
-      "split",
-    ]);
     const prepareReview = authorTools.tools.find(
       (tool) => tool.name === "prepare_review",
     );
     assert.ok(prepareReview.inputSchema.properties.continued_from_review_id);
+    const startPublication = authorTools.tools.find(
+      (tool) => tool.name === "start_publication",
+    );
+    assert.equal("workflow_id" in startPublication.inputSchema.properties, false);
+    assert.equal("expected_workflow_revision" in startPublication.inputSchema.properties, false);
 
     const arbitrationExport = authorTools.tools.find(
       (tool) => tool.name === "export_human_arbitration",
@@ -429,6 +269,7 @@ test("reviewer processes list only tasks bound to their provider", async (t) => 
     await fsp.writeFile(
       path.join(reviewRoot, "review.json"),
       `${JSON.stringify({
+        version: 1,
         ...task,
         status: "WAITING_FOR_REVIEW",
         current_round: 1,
@@ -458,21 +299,28 @@ test("reviewer processes list only tasks bound to their provider", async (t) => 
   }
 });
 
-test("list_reviews returns one five-field row per review, newest first", async (t) => {
+test("list_reviews requires repository_path and returns that repository's five-field rows, newest first", async (t) => {
   const store = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-mcp-"));
   t.after(() => fsp.rm(store, { recursive: true, force: true }));
   // Neither id order is the update order, so only updated_at sorts the rows.
   const reviews = [["a", 26], ["b", 28], ["c", 27]].map(([letter, day]) => ({
+    version: 1,
     id: `rb-2026-07-26T000000-000Z-${letter}0000000`,
     status: "WAITING_FOR_REVIEW",
     repository_path: "/repository",
     updated_at: `2026-07-${day}T00:00:00.000Z`,
     rounds: [
-      { round: 1, head_sha: "0".repeat(40) },
-      { round: 2, head_sha: letter.repeat(40) },
+      { version: 1, round: 1, head_sha: "0".repeat(40) },
+      { version: 1, round: 2, head_sha: letter.repeat(40) },
     ],
   }));
-  for (const review of reviews) {
+  const other = {
+    ...reviews[0],
+    id: "rb-2026-07-26T000000-000Z-d0000000",
+    repository_path: "/other-repository",
+    updated_at: "2026-07-29T00:00:00.000Z",
+  };
+  for (const review of [...reviews, other]) {
     const reviewRoot = path.join(store, "reviews", review.id);
     await fsp.mkdir(reviewRoot, { recursive: true, mode: 0o700 });
     await fsp.writeFile(
@@ -484,7 +332,13 @@ test("list_reviews returns one five-field row per review, newest first", async (
 
   const author = await connectClient("author", store);
   t.after(() => author.close());
-  const result = await author.callTool({ name: "list_reviews", arguments: {} });
+  const missing = await author.callTool({ name: "list_reviews", arguments: {} });
+  assert.equal(missing.isError, true);
+  assert.match(missing.content[0].text, /repository_path/);
+  const result = await author.callTool({
+    name: "list_reviews",
+    arguments: { repository_path: "/repository" },
+  });
   const rows = JSON.parse(result.content[0].text);
   assert.deepEqual(
     rows.map((row) => [row.id, row.head_sha]),
@@ -529,6 +383,7 @@ test("MCP errors preserve StoreError code and retryability details", async (t) =
   await fsp.writeFile(
     path.join(reviewRoot, "review.json"),
     `${JSON.stringify({
+      version: 1,
       id: reviewId,
       status: "WAITING_FOR_REVIEW",
       current_round: 1,
@@ -621,6 +476,78 @@ test("record_github_snapshot takes an observation file instead of an inline payl
   );
 });
 
+test("start_publication takes a baseline file instead of an inline payload", async (t) => {
+  const { root, repository, store, baseSha } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(repository, "app.js"), "export const value = 2;\n");
+  git(repository, "add", "app.js");
+  git(repository, "commit", "-m", "change value");
+  const author = await connectClient("author", store);
+  t.after(() => author.close());
+  const authorized = await author.callTool({
+    name: "authorize_remote_publication",
+    arguments: {
+      repository_path: repository,
+      base_sha: baseSha,
+      head_sha: git(repository, "rev-parse", "HEAD"),
+      acknowledgement: "LOCAL_REVIEW_SKIPPED",
+      operator_label: "maintainer",
+      rationale: "Exercise the baseline file handoff.",
+    },
+  });
+  assert.notEqual(authorized.isError, true, JSON.stringify(authorized));
+  const reviewId = JSON.parse(authorized.content[0].text).review_id;
+  const invalidBaseline = { observed_at: 1 };
+  const baselinePath = path.join(root, "codex-review-baseline.json");
+  await fsp.writeFile(baselinePath, `${JSON.stringify(invalidBaseline)}\n`);
+  const start = async (baseline) => {
+    const result = await author.callTool({
+      name: "start_publication",
+      arguments: {
+        review_id: reviewId,
+        repository_id: 42,
+        owner: "owner",
+        repo: "repo",
+        pr_number: 7,
+        base_branch: "main",
+        head_branch: "feature",
+        codex_actor_id: 99,
+        codex_actor_type: "Bot",
+        codex_actor_login: "codex[bot]",
+        codex_trigger_mode: "EXPLICIT_ONLY",
+        ...baseline,
+      },
+    });
+    assert.equal(result.isError, true);
+    return JSON.parse(result.content[0].text);
+  };
+
+  for (const baseline of [
+    {
+      codex_review_baseline_path: baselinePath,
+      codex_review_baseline: invalidBaseline,
+    },
+    {},
+  ]) {
+    assert.match(
+      (await start(baseline)).error,
+      /exactly one of codex_review_baseline_path or codex_review_baseline/,
+    );
+  }
+
+  assert.equal(
+    (await start({ codex_review_baseline_path: path.join(root, "absent.json") })).code,
+    "BASELINE_FILE_UNREADABLE",
+  );
+
+  const inline = await start({ codex_review_baseline: invalidBaseline });
+  assert.match(inline.error, /baseline\.observed_at/);
+  assert.deepEqual(
+    await start({ codex_review_baseline_path: baselinePath }),
+    inline,
+  );
+});
+
 test("MCP preserves immutable intent texts and only serves the reconstruction in round two", async (t) => {
   const { root, repository, store, baseSha } = await fixture();
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
@@ -633,6 +560,7 @@ test("MCP preserves immutable intent texts and only serves the reconstruction in
     requirement: "Export the new value.",
     implementationScope: "app.js",
     rationale: "Consumers need value 2.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   const reviewer = await connectClient("reviewer", store);
   const author = await connectClient("author", store);
@@ -689,4 +617,39 @@ test("reviewer instructions read changed prose under a FULL review", async (t) =
     reviewer.getInstructions(),
     /skipping sections whose behavior the review does not depend on, except changed prose that asserts behavior, which is read and checked against the code/,
   );
+});
+
+test("MCP prepare_review binds CODEX_TASK unless another provider is passed", async (t) => {
+  const { root, repository, store, baseSha } = await fixture();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await commit(repository, "export const value = 2;\n");
+  const author = await connectClient("author", store);
+  t.after(() => author.close());
+  const prepare = (extra) =>
+    author.callTool({
+      name: "prepare_review",
+      arguments: {
+        repository_path: repository,
+        base_ref: baseSha,
+        requirement: "Export the new value.",
+        implementation_scope: "app.js",
+        ...extra,
+      },
+    });
+  const bound = async (extra) => {
+    const result = await prepare(extra);
+    assert.notEqual(result.isError, true, JSON.stringify(result));
+    const { id, reviewer_provider } = JSON.parse(result.content[0].text);
+    const stored = JSON.parse(
+      await fsp.readFile(path.join(store, "reviews", id, "review.json"), "utf8"),
+    );
+    assert.equal(stored.reviewer_provider, reviewer_provider);
+    return reviewer_provider;
+  };
+
+  assert.equal(await bound({}), "CODEX_TASK");
+  assert.equal(await bound({ reviewer_provider: "HERMES" }), "HERMES");
+  const invalid = await prepare({ reviewer_provider: "OTHER" });
+  assert.equal(invalid.isError, true);
+  assert.match(invalid.content[0].text, /reviewer_provider/);
 });

@@ -1,29 +1,81 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import { createInterface } from "node:readline";
-const config = () => process.env.RB_TEST_CATALOG ? JSON.parse(fs.readFileSync(process.env.RB_TEST_CATALOG)) : {};
 if (process.argv[2] === "exec") {
-  fs.writeFileSync("executed.json", JSON.stringify({ args: process.argv.slice(2), stdin: fs.readFileSync(0, "utf8") }));
+  // A lens-round run records under its run name and waits on its own hold file too.
+  const bound = process.argv.join(" ").includes('"--review-id"');
+  const run = /"--lens","(\w+)"/.exec(process.argv.join(" "))?.[1] ?? "general";
+  fs.writeFileSync(bound ? `executed-${run}.json` : "executed.json",
+    JSON.stringify({ args: process.argv.slice(2), stdin: fs.readFileSync(0, "utf8") }));
   // Waits while the configured hold file exists, so removing the fixture root also ends it.
-  const { hold } = config();
-  const exitWhenReleased = () => hold && fs.existsSync(hold) ? setTimeout(exitWhenReleased, 10) : process.exit(0);
+  const hold = process.env.RB_TEST_HOLD;
+  const held = () => hold && (fs.existsSync(hold) || fs.existsSync(`${hold}-${run}`));
+  const exitWhenReleased = () => held() ? setTimeout(exitWhenReleased, 10) : process.exit(0);
   exitWhenReleased();
-} else if (process.argv[2] === "app-server") {
+}
+if (process.argv[2] === "app-server") {
+  // RB_TEST_CONFIG_MODEL overrides the configured model ("" for none),
+  // RB_TEST_MODELS limits the models served, RB_TEST_APP_SERVER picks a failure,
+  // and model/list waits while RB_TEST_LIST_HOLD exists.
+  const mode = process.env.RB_TEST_APP_SERVER;
+  const args = process.argv.slice(3);
+  if (args.length !== 2 || args[0] !== "--listen" || args[1] !== "stdio://") {
+    process.stderr.write("error: only --listen stdio:// is served\n");
+    process.exit(2);
+  }
+  if (mode === "exit") {
+    process.stderr.write("error: unknown configuration key\n");
+    process.exit(3);
+  }
+  if (mode === "unterminated") {
+    process.stdout.write("x".repeat(1000));
+    setInterval(() => {}, 1000);
+  }
+  // Ignores SIGTERM and fails initialize only after writing its pid.
+  if (mode === "stubborn") {
+    process.on("SIGTERM", () => {});
+    setInterval(() => {}, 1000);
+    fs.writeFileSync("stubborn.pid", String(process.pid));
+  }
+  const efforts = (...values) => values.map((reasoningEffort) => ({ reasoningEffort, description: reasoningEffort }));
+  const served = process.env.RB_TEST_MODELS?.split(",");
+  const visible = (entries) => entries.filter((entry) => served == null || served.includes(entry.model));
+  const hidden = { model: "fixture-hidden", hidden: true, supportedReasoningEfforts: efforts("low") };
+  const pages = {
+    null: { data: [{ model: "fixture-sol", displayName: "Fixture Sol", isDefault: true, supportedReasoningEfforts: efforts("low", "medium", "high", "xhigh", "max", "ultra") }], nextCursor: "page-2" },
+    "page-2": { data: [
+      { model: "fixture-luna", displayName: "Fixture Luna", supportedReasoningEfforts: efforts("low", "medium", "high", "xhigh", "max") },
+      { model: "fixture-mini", displayName: "Fixture Mini", supportedReasoningEfforts: efforts("low", "medium") },
+    ], nextCursor: mode === "repeat-cursor" ? "page-2" : null },
+  };
+  const configured = process.env.RB_TEST_CONFIG_MODEL ?? "fixture-luna";
+  let initializeAnswered = false;
+  let initialized = false;
+  const results = {
+    initialize: () => ({ userAgent: "fixture" }),
+    "config/read": () => ({ "invalid-config": {}, "array-config": { config: [] } })[mode] ??
+      { config: { model: configured || null, model_reasoning_effort: "low" } },
+    "model/list": ({ cursor, includeHidden }) => mode === "invalid-page"
+      ? { data: [{ model: "fixture-sol", supportedReasoningEfforts: [{ effort: "high" }] }], nextCursor: null }
+      : { ...pages[cursor], data: [...visible(pages[cursor].data), ...(includeHidden === false || cursor ? [] : [hidden])] },
+  };
+  const hold = process.env.RB_TEST_LIST_HOLD;
+  const whenReleased = (reply) => hold && fs.existsSync(hold)
+    ? (fs.writeFileSync("list-held", ""), setTimeout(() => whenReleased(reply), 10)) : reply();
   createInterface({ input: process.stdin }).on("line", (line) => {
-    const { id, method, params } = JSON.parse(line);
-    if (id == null) return;
-    const c = config();
-    let result;
-    if (method === "initialize") result = { userAgent: "test-runtime/1" };
-    if (method === "account/read") result = { account: { id: c.account ?? "fixture" } };
-    if (method === "config/read") result = { config: { model: "author-model" } };
-    if (method === "model/list") {
-      if (c.failure) { console.log(JSON.stringify({ id, error: { message: "catalog unavailable" } })); return; }
-      const entry = (name, hidden = false) => ({ id: name, model: name, displayName: name, hidden, isDefault: name === "review-model", defaultReasoningEffort: "medium", supportedReasoningEfforts: (c.efforts ?? ["medium", "high"]).map(reasoningEffort => ({ reasoningEffort })) });
-      result = params.cursor == null
-        ? { data: [entry(c.model ?? "review-model"), entry("hidden-model", true)], nextCursor: "page-two" }
-        : { data: [entry("second-model")], nextCursor: null };
+    const message = JSON.parse(line);
+    if (message.method === "initialized" && initializeAnswered) initialized = true;
+    if (message.id == null || mode === "hang" || mode === "unterminated") return;
+    if (mode === "malformed") process.stdout.write("null\n[]\n");
+    const reply = (body) => process.stdout.write(`${JSON.stringify({ id: message.id, ...body })}\n`);
+    if (mode === "stubborn") return reply({ error: { message: "stubborn listing refuses" } });
+    if (message.method === "initialize") {
+      initializeAnswered = true;
+      return reply({ result: results.initialize() });
     }
-    console.log(JSON.stringify({ id, result }));
+    if (!initialized) return reply({ error: { message: "Not initialized" } });
+    if (mode === "malformed" && message.method === "model/list") return reply({ error: { message: { toString: 1 } } });
+    if (message.method === "model/list") return whenReleased(() => reply({ result: results["model/list"](message.params) }));
+    reply({ result: results[message.method](message.params) });
   });
 }

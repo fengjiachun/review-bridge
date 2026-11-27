@@ -1,26 +1,32 @@
 # Troubleshooting
 
-Describes Review Bridge v0.23.0.
+Describes Review Bridge v0.27.0.
 
 ## Models, launch, and upgrades
 
-**No model picker appears** — Review Bridge supplies options through author MCP
-tools; the client supplies the UI. Ask the author to list available
-`CODEX_TASK` models and reasoning levels, then choose in conversation if the
-client has no picker. An already explicit valid choice does not need another
-confirmation. See [reviewer configuration](reviewer-configuration.md).
+**The reviewer runs on the wrong model** — a `CODEX_TASK` reviewer started by
+`launch_local_reviewer` uses the model in the
+MCP host's Codex configuration unless a model was chosen for that review in the
+author conversation; reasoning effort is `high` unless another was chosen.
+Choose one for the review, or change `model` in that host's
+`~/.codex/config.toml` (or the file under `CODEX_HOME`). A
+task you start yourself ([manual dispatch](local-review.md#start-a-reviewer-manually))
+uses the model and effort set in the client that creates it. See
+[reviewer configuration](reviewer-configuration.md).
 
-**A new model is missing, or the list differs from the author app** — discovery
-uses the Codex CLI on the MCP host, with that process's account and configuration.
-Check the executable and account used there. `REVIEW_BRIDGE_CODEX_COMMAND` can
-pin an absolute executable when a desktop app has a different PATH. The query
-time is not the upstream catalog's age, and discovery cannot force a network
-refresh. Retry after correcting the runtime; do not substitute a guessed model.
-
-**Selection or launch says the model, effort, or environment is unavailable** —
-query the runtime again and explicitly select a supported pair. An environment
-change between discovery and launch requires a new selection; Review Bridge
-never silently downgrades the model or reasoning effort.
+**The reviewer exits at once with a model error** — the Codex CLI on the MCP
+host rejected the model for that account, or the model does not support the
+requested reasoning effort. The round's `reviewer_configuration.requested`
+(in `get_review_summary`) shows the effort, whether the model and effort were
+chosen for the review or came from the defaults, and the model name when one
+was chosen or an effort was checked against it. A default launch names no
+model: the model is `model` in the host's Codex configuration, and the
+attempt's `process.log` may show what Codex reported. Read both. If both came from the defaults, configure a
+model the account can use at `high`. If either was chosen, launching again
+without a new choice repeats it, so ask the author to launch with another
+model or effort for this review. In either case check the executable and
+account used on that host (`REVIEW_BRIDGE_CODEX_COMMAND` can pin an absolute
+executable when a desktop app has a different PATH).
 
 **No new reviewer task window appears** — `launch_local_reviewer` starts an
 independent Codex process on the MCP host. Follow its `review_id` from the author
@@ -39,7 +45,15 @@ reviewer connection, restart clients, and open new sessions. Check the runtime
 paths and MCP server version as described in the [upgrade guide](install/upgrade.md).
 The Claude Desktop reviewer extension alone does not provide author tools;
 install the separate [author connection](install/claude-desktop.md#use-claude-as-an-author)
-to select and launch a Codex reviewer from Claude.
+to launch a Codex reviewer from Claude.
+
+**`LEDGER_VERSION_UNSUPPORTED`** — the process that read a stored record does
+not know its version. In a tool error, `details` names the record, the version
+found, and the versions this process reads. A version newer than those means a
+newer Review Bridge wrote the record into the shared store: upgrade the older
+install as in the [upgrade guide](install/upgrade.md) and leave the record as
+it is. A missing version was not written by any release, since every release
+writes one: find out where that file came from before trusting it.
 
 **Codex marketplace is “already added from a different source”** — replace the
 old marketplace registration using the [Codex upgrade steps](install/upgrade.md#codex-plugin).

@@ -53,7 +53,8 @@ continuation review and [Finish](finish.md) for CLEAN or human arbitration.
    `HUMAN_REQUIRED`, state the concrete escalation reason from the full ledger.
    If it reaches `CONTINUABLE_FINDINGS`, present the source ledger's `OPEN` and
    `STILL_OPEN` `findings` before starting the fresh full review. After
-   creating that review, read its `carried_findings` as the continuation scope.
+   creating that review, call `get_review` with its new ID and read its
+   `carried_findings` as the continuation scope.
 
 Keep fixes surgical.
 Session narration is operator observability only. Never use it as review

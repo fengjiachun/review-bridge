@@ -17,35 +17,49 @@ import { isLocalObjectId } from "../src/object-id.mjs";
 import {
   authorizeRemotePublication,
   getPublication,
+  recordCodexReviewRequest,
   recordGithubSnapshot,
   startPublication,
 } from "../src/publication.mjs";
-import { atomicWriteCanonicalJson } from "../src/storage.mjs";
-import {
-  advanceRemoteWorkflow,
-  getAutonomousWorkflow,
-  listAutonomousWorkflows,
-  planThreadReply,
-  recordWorkflowHead,
-  startAutonomousWorkflow,
-} from "../src/workflow.mjs";
-import { iso } from "./helpers/github-observation.mjs";
-import { commit, fixture, git } from "./helpers/repository-fixture";
-import {
-  CODEX_ACTOR_ID,
-  draftObservation,
-  findingsResult,
-  gateAndPublishHead,
-  reachRemoteWait,
-  startInput,
-  workflowInput,
-} from "./helpers/publication-chain";
+import { baseline, iso, observation } from "./helpers/github-observation.mjs";
+import { commit, fixture, git, TOPIC_BRANCH } from "./helpers/repository-fixture";
+
+const REPOSITORY_ID = 101;
+const PR_NUMBER = 7;
 
 const SHA1_WIDTH = 40;
 const SHA256_WIDTH = 64;
 
-// A publication with no autonomous workflow behind it.
-const NO_WORKFLOW = { workflow_id: null, revision: null };
+function startInput(reviewId, startedAt) {
+  return {
+    reviewId,
+    repositoryId: REPOSITORY_ID,
+    owner: "example",
+    repo: "review-bridge",
+    prNumber: PR_NUMBER,
+    baseBranch: "main",
+    headBranch: TOPIC_BRANCH,
+    codexActorId: 99,
+    codexActorType: "Bot",
+    codexActorLogin: "chatgpt-codex-connector[bot]",
+    codexTriggerMode: "EXPLICIT_ONLY",
+    baseline: baseline(startedAt - 100),
+  };
+}
+
+function draftObservation(state, headSha, options) {
+  return observation({
+    baseSha: state.baseSha,
+    headSha,
+    repositoryId: REPOSITORY_ID,
+    prNumber: PR_NUMBER,
+    headBranch: TOPIC_BRANCH,
+    owner: "example",
+    repo: "review-bridge",
+    isDraft: true,
+    ...options,
+  });
+}
 
 function sha256Fixture() {
   return fixture({ objectFormat: "sha256" });
@@ -99,6 +113,7 @@ test("a sha256 repository runs a full local review and local gate", async (t) =>
     baseRef: state.baseSha,
     requirement: "Review a sha256 repository.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   assert.equal(review.status, "WAITING_FOR_REVIEW");
   await submitInitialReview(state.store, review.id, [LOCAL_FINDING.finding]);
@@ -111,31 +126,6 @@ test("a sha256 repository runs a full local review and local gate", async (t) =>
   assert.equal(gated.review.status, "LOCAL_GATE_PASSED");
   assert.equal(gated.gate.head_sha.length, SHA256_WIDTH);
   assert.equal(gated.gate.base_sha, state.baseSha);
-});
-
-test("starting an autonomous workflow on a sha256 repository is refused by name", async (t) => {
-  const state = await sha256Fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  assert.equal(state.baseSha.length, SHA256_WIDTH);
-
-  await assert.rejects(
-    startAutonomousWorkflow(
-      state.store,
-      workflowInput(state.repository, state.baseSha),
-    ),
-    (error) => {
-      assert.equal(error.code, "REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE");
-      assert.match(error.message, /GitHub does not host sha256 repositories/);
-      assert.equal(error.details.object_format, "sha256");
-      return true;
-    },
-  );
-  // The refusal happens before anything is authorized, so no ledger exists to
-  // carry a half-run push, draft pull request, or publication.
-  await assert.rejects(fsp.readdir(path.join(state.store, "workflows")), {
-    code: "ENOENT",
-  });
-  assert.deepEqual(await listAutonomousWorkflows(state.store), []);
 });
 
 test("remote authorization on a sha256 repository is refused by name", async (t) => {
@@ -165,9 +155,6 @@ test("remote authorization on a sha256 repository is refused by name", async (t)
   assert.equal(isLocalObjectId(headSha), true);
 });
 
-// A local gate needs no autonomous workflow, so it is still reachable on a
-// repository no workflow can be authorized over. Publishing one is the remaining
-// way to ask GitHub about a sha256 repository, and it is refused by the same name.
 test("starting a publication over a sha256 local gate is refused by name", async (t) => {
   const state = await sha256Fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
@@ -177,6 +164,7 @@ test("starting a publication over a sha256 local gate is refused by name", async
     baseRef: state.baseSha,
     requirement: "Review a sha256 repository.",
     implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(state.store, review.id, []);
   const gated = await finalizeLocalGate(state.store, review.id);
@@ -185,7 +173,7 @@ test("starting a publication over a sha256 local gate is refused by name", async
   await assert.rejects(
     startPublication(
       state.store,
-      startInput(state, review.id, NO_WORKFLOW, Date.now()),
+      startInput(review.id, Date.now()),
     ),
     (error) => {
       assert.equal(error.code, "REPOSITORY_OBJECT_FORMAT_UNPUBLISHABLE");
@@ -243,131 +231,6 @@ for (const answer of ["--show-object-format", "", "usage: git rev-parse"]) {
     assert.equal(authorization.head_sha, headSha);
   });
 }
-
-/** Drive a workflow to a planned reply over one eligible Codex thread. */
-async function reachPlannedThreadReply(t) {
-  const state = await fixture();
-  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
-  const firstHead = await commit(state.repository, "export const value = 2;\n");
-  const first = await gateAndPublishHead(state, workflow, firstHead, "one");
-  const { workflow: waiting } = await reachRemoteWait(
-    state,
-    first.workflow,
-    first.reviewId,
-    firstHead,
-    Date.now(),
-    findingsResult,
-  );
-  const repairing = await advanceRemoteWorkflow(
-    state.store,
-    workflow.workflow_id,
-    waiting.revision,
-  );
-  const secondHead = await commit(state.repository, "export const value = 3;\n");
-  const repaired = await recordWorkflowHead(
-    state.store,
-    workflow.workflow_id,
-    repairing.revision,
-    secondHead,
-  );
-  const second = await gateAndPublishHead(
-    state,
-    { workflow_id: workflow.workflow_id, revision: repaired.revision },
-    secondHead,
-    "two",
-  );
-  const threadAt = Date.now();
-  const codex = {
-    id: CODEX_ACTOR_ID,
-    type: "Bot",
-    login: "chatgpt-codex-connector[bot]",
-  };
-  const { workflow: waitingAgain } = await reachRemoteWait(
-    state,
-    second.workflow,
-    second.reviewId,
-    secondHead,
-    threadAt,
-    (payload) => {
-      payload.review_threads.total_count = 1;
-      payload.review_threads.unresolved_count = 1;
-      payload.review_threads.threads = [
-        {
-          id: "PRRT_1",
-          is_resolved: false,
-          is_outdated: false,
-          path: null,
-          line: null,
-          comment_count: 1,
-          comments_pagination_complete: true,
-          provenance_complete: true,
-          comments: [
-            {
-              id: "PRRC_1",
-              database_id: 900,
-              created_at: iso(threadAt - 5_000),
-              updated_at: iso(threadAt - 5_000),
-              actor: codex,
-              review: {
-                id: "PRR_1",
-                database_id: 101,
-                state: "COMMENTED",
-                reviewed_head_sha: firstHead,
-                actor: codex,
-              },
-            },
-          ],
-        },
-      ];
-      payload.review_threads.ancestry = [
-        {
-          finding_head_sha: firstHead,
-          status: "AHEAD",
-          descends: true,
-          endpoint: `GET /repos/example/review-bridge/compare/${firstHead}...${secondHead}`,
-          collected_at: iso(threadAt + 1_600),
-        },
-      ];
-      return payload;
-    },
-  );
-  const resolving = await advanceRemoteWorkflow(
-    state.store,
-    workflow.workflow_id,
-    waitingAgain.revision,
-  );
-  await planThreadReply(state.store, workflow.workflow_id, resolving.revision, {
-    threadId: "PRRT_1",
-    actorId: 555,
-    actorType: "User",
-  });
-  return { state, workflow };
-}
-
-test("a thread-reply action naming a malformed addressed-by commit is refused", async (t) => {
-  const { state, workflow } = await reachPlannedThreadReply(t);
-  const workflowPath = path.join(
-    state.store,
-    "workflows",
-    workflow.workflow_id,
-    "workflow.json",
-  );
-  const stored = JSON.parse(await fsp.readFile(workflowPath, "utf8"));
-  stored.active_action.target.addressed_by = ["nope"];
-  await atomicWriteCanonicalJson(workflowPath, stored);
-
-  await assert.rejects(
-    getAutonomousWorkflow(state.store, workflow.workflow_id),
-    (error) => {
-      assert.equal(error.code, "WORKFLOW_ACTION_INVALID");
-      return true;
-    },
-  );
-});
 
 test("the observation schema keeps GitHub's own object ids at 40", async (t) => {
   const wide = "a".repeat(SHA256_WIDTH);
@@ -437,34 +300,36 @@ test("the observation schema keeps GitHub's own object ids at 40", async (t) => 
   ];
   const state = await fixture();
   t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
-  const workflow = await startAutonomousWorkflow(
-    state.store,
-    workflowInput(state.repository, state.baseSha),
-  );
   const headSha = await commit(state.repository, "export const value = 2;\n");
-  const { workflow: atPublication, reviewId } = await gateAndPublishHead(
-    state,
-    workflow,
-    headSha,
-    "one",
-  );
+  const review = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: "Publish one head.",
+    implementationScope: "Change app.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
+  });
+  await submitInitialReview(state.store, review.id, []);
+  await finalizeLocalGate(state.store, review.id);
+  const reviewId = review.id;
   const at = Date.now();
-  const [firstScenario, ...otherScenarios] = cases;
-  await assert.rejects(
-    reachRemoteWait(
-      state,
-      atPublication,
-      reviewId,
-      headSha,
-      at,
-      firstScenario.mutate,
-    ),
-    firstScenario.expected ?? /must be a 40-character lowercase Git SHA/,
-    firstScenario.name,
+  await startPublication(state.store, startInput(reviewId, at), {
+    clock: () => at,
+  });
+  await recordCodexReviewRequest(
+    state.store,
+    reviewId,
+    {
+      expectedRevision: 1,
+      commentId: 100,
+      url: `https://github.com/example/review-bridge/issues/${PR_NUMBER}#issuecomment-100`,
+      createdAt: iso(at + 1_000),
+      requestedHeadSha: headSha,
+    },
+    { clock: () => at + 1_010 },
   );
-  // A refused snapshot persists nothing, so every other scenario meets the
-  // same writer over the same ledger the first one reached.
-  for (const scenario of otherScenarios) {
+  // A refused snapshot persists nothing, so every scenario meets the same
+  // writer over the same ledger.
+  for (const scenario of cases) {
     await assert.rejects(
       recordGithubSnapshot(
         state.store,

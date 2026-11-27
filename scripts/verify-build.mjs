@@ -13,6 +13,8 @@ import {
   assertDispatchContract,
   assertConventionsSection,
   assertDeletionLens,
+  assertLensPolicy,
+  assertLensReviewRequestRule,
   assertThirdPartyMaterialBoundary,
   CODEX_TASK_DISPATCH_CONTRACT,
   DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
@@ -430,7 +432,14 @@ assert.match(
 );
 assert.match(workflowSkill, /legacy exact body without a request ID/);
 assert.match(workflowSkill, /Never infer\s+correlation from\s+timestamps/);
-assert.match(workflowSkill, /Set `adapter_version: 2` in the normalizer\s+input/);
+assert.match(
+  workflowSkill,
+  /`--baseline --review-id <review_id> --repo\s+<owner\/name> --pr <pr_number> --codex-actor-id <id>`/,
+);
+assert.match(
+  workflowSkill,
+  /Pass\s+the printed `codex_review_baseline_path` to `start_publication`/,
+);
 assert.match(
   workflowSkill,
   /Require the PR head commit to equal the immutable publication authorization\s+`head_sha`/,
@@ -496,24 +505,17 @@ assert.match(
   /Leave `parent_review_id` unset unless you have a specific parent in mind/,
 );
 assert.match(workflowSkill, /`force_full_review: true`/);
+for (const name of ["SKILL.md", "references/prepare.md"]) {
+  assertLensReviewRequestRule(packagedWorkflowDocuments.get(name), `packaged Codex workflow ${name}`);
+}
 assert.match(workflowSkill, /`current_snapshot\.patch_index`/);
-assert.match(workflowSkill, /Choose `reviewer_provider` explicitly/);
+assert.match(workflowSkill, /`CODEX_TASK` is the default `reviewer_provider`/);
 assert.match(workflowSkill, /newly created Codex task/);
 assert.match(workflowSkill, /is not a fork of the\s+author task/);
 assert.match(workflowSkill, /Never call reviewer tools from the author task/);
 assert.match(
   workflowSkill,
   /ID, severity, one-line summary,\s+and location/,
-);
-assert.match(
-  workflowSkill,
-  /persisted\s+disposition, rationale, and evidence from its `resolutions`/,
-);
-assert.match(workflowSkill, /every per-finding decision and any new finding/);
-assert.match(workflowSkill, /state the escalation and why it needs a human/);
-assert.match(
-  workflowSkill,
-  /After\s+`prepare_rereview` captures the result, call `get_review` again/,
 );
 assert.match(
   workflowSkill,
@@ -526,10 +528,6 @@ assert.match(
 assert.match(workflowSkill, /rereview is rebuttal-only and no\s+code commit was required/);
 assert.match(
   workflowSkill,
-  /Any author `human_required` resolution moves directly to `HUMAN_REQUIRED`\s+without capturing a rereview round/,
-);
-assert.match(
-  workflowSkill,
   /If the state is instead `HUMAN_REQUIRED`[\s\S]*stop and follow the human-arbitration flow/,
 );
 assert.match(
@@ -540,18 +538,16 @@ assert.match(
   workflowSkill,
   /`CONTINUABLE_FINDINGS`, present the source ledger's `OPEN` and\s+`STILL_OPEN` `findings`/,
 );
-assert.match(workflowSkill, /read its `carried_findings` as the continuation scope/);
-assert.match(
-  workflowSkill,
-  /When a round reports findings, call `get_review`/,
+assert.match(workflowSkill, /call `get_review` with its new ID and read its\s+`carried_findings` as the continuation scope/);
+assert.ok(
+  packagedWorkflowDocuments.get("references/prepare.md").replace(/\s+/g, " ").includes(
+    "A continuation from `CONTINUABLE_FINDINGS` passes it beside `continued_from_review_id`, which the server requires. The continuation repeats the source review's `requirement` exactly; its `implementation_scope` may describe the new head. A refused continuation names each unmet check: source status, repository, requirement, reviewer provider.",
+  ),
+  "packaged Codex workflow skill: continuation rule",
 );
 assert.match(
   workflowSkill,
   /When rereview\s+completes, call `get_review` again/,
-);
-assert.match(
-  workflowSkill,
-  /After\s+`submit_resolutions`, call `get_review` again/,
 );
 assert.match(workflowSkill, /persisted disposition from its\s+`resolutions`/);
 assert.match(
@@ -625,10 +621,6 @@ assert.match(
 assert.match(workflowSkill, /Immediately\s+before merge call `verify_publication_gate`/);
 assert.match(
   workflowSkill,
-  /\.\.\/\.\.\/scripts\/normalize-codex-evidence\.mjs/,
-);
-assert.match(
-  workflowSkill,
   /\.\.\/\.\.\/scripts\/collect-github-observation\.mjs/,
 );
 assert.match(workflowSkill, /canonicalizes GitHub timestamps to UTC milliseconds/);
@@ -644,9 +636,40 @@ const collectorPath = path.join(
 );
 assert.ok(await fsp.stat(collectorPath));
 const collectorHelp = run(process.execPath, [collectorPath, "--help"], pluginRoot);
+// A publication ledger a newer release wrote is refused before any GitHub
+// request: gh is off PATH, and the same ledger at a supported version does
+// reach it.
+const newerPublicationRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-newer-"));
+const newerPublicationPath = path.join(newerPublicationRoot, "publication.json");
+const collectPublicationAt = async (version) => {
+  await fsp.writeFile(newerPublicationPath, JSON.stringify({
+    version,
+    review_id: "rb-x",
+    target: { owner: "owner", repo: "repo", base_branch: "main", pr_number: 7 },
+    authorization: { base_sha: "a".repeat(40), head_sha: "b".repeat(40) },
+  }));
+  return spawnSync(
+    process.execPath,
+    [collectorPath, "--publication", newerPublicationPath],
+    { cwd: pluginRoot, encoding: "utf8", env: { ...process.env, PATH: "/nonexistent" } },
+  );
+};
+const newerCollection = await collectPublicationAt(99);
+const supportedCollection = await collectPublicationAt(2);
+await fsp.rm(newerPublicationRoot, { recursive: true, force: true });
+assert.equal(newerCollection.status, 1);
+assert.match(
+  newerCollection.stderr,
+  /publication ledger version 99; this release reads version 1, 2, 3/,
+);
+assert.notEqual(supportedCollection.status, 0);
+assert.match(supportedCollection.stderr, /\bgh\b/);
+assert.doesNotMatch(supportedCollection.stderr, /LEDGER_VERSION_UNSUPPORTED/);
 assert.match(collectorHelp, /Usage: collect-github-observation\.mjs/);
 assert.match(collectorHelp, /--review-id <id>/);
 assert.match(collectorHelp, /--out <path>/);
+assert.match(collectorHelp, /--baseline --review-id <id> --repo <owner\/name>/);
+assert.match(collectorHelp, /pass the printed codex_review_baseline_path/);
 assert.match(collectorHelp, /Never retype\s+the observation itself/);
 assert.match(workflowSkill, /--review-id <review_id>/);
 assert.match(collectorHelp, /Refused inside any\s+Git worktree/);
@@ -698,7 +721,38 @@ const collectorWorktreeOut = spawnSync(
 assert.equal(collectorWorktreeOut.status, 2);
 assert.match(
   collectorWorktreeOut.stderr,
-  /refusing to write the observation inside the Git worktree/,
+  /The output file must be outside a Git repository; omit --out/,
+);
+const dubiousGitDirectory = path.join(collectorStore, "dubious-git");
+await fsp.mkdir(dubiousGitDirectory);
+await fsp.writeFile(
+  path.join(dubiousGitDirectory, "git"),
+  `#!/bin/sh\necho "fatal: detected dubious ownership in repository" >&2\nexit 128\n`,
+  { mode: 0o755 },
+);
+const collectorIndeterminateOut = spawnSync(
+  process.execPath,
+  [
+    collectorPath,
+    "--review-id",
+    "rb-2026-07-26T000000-000Z-deadbeef",
+    "--out",
+    path.join(collectorStore, "observation.json"),
+  ],
+  {
+    cwd: pluginRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${dubiousGitDirectory}${path.delimiter}${process.env.PATH}`,
+      REVIEW_BRIDGE_HOME: collectorStore,
+    },
+  },
+);
+assert.equal(collectorIndeterminateOut.status, 2);
+assert.match(
+  collectorIndeterminateOut.stderr,
+  /Cannot verify the output file is outside a Git repository: fatal: detected dubious ownership/,
 );
 const collectorBadId = spawnSync(
   process.execPath,
@@ -733,9 +787,10 @@ try {
   const directory = path.join(findingsStore, "reviews", findingReviewId);
   await fsp.mkdir(directory, { recursive: true });
   await fsp.writeFile(path.join(directory, "review.json"), JSON.stringify({
+    version: 1,
     id: findingReviewId,
     repository_path: "/deleted/historical/worktree",
-    rounds: [{ round: 1, head_sha: "a".repeat(40), snapshot_hash: "b".repeat(64) }],
+    rounds: [{ version: 1, round: 1, head_sha: "a".repeat(40), snapshot_hash: "b".repeat(64) }],
     findings: [{ id: "F-001", introduced_round: 1, severity: "major", title: "Historical probe", explanation: "Snapshot evidence", path: "src/probe.mjs" }],
     resolutions: [],
     rereview_decisions: [],
@@ -1132,10 +1187,17 @@ const sourceReviewerSkill = await fsp.readFile(
 );
 for (const root of [pluginRoot, reviewerRoot, hermesIntegration, deepseekHarness]) {
   assert.equal(await fsp.readFile(path.join(root, "server", "reviewer-skill.md"), "utf8"), sourceReviewerSkill);
-  const { codexReviewerArguments } = await import(pathToFileURL(path.join(root, "server", "local-reviewer.mjs")));
-  const args = codexReviewerArguments("package-check", { model: "fixture", reasoning_effort: "high" }, root);
+  const { REVIEWER_REQUESTED, codexReviewerArguments } = await import(pathToFileURL(path.join(root, "server", "local-reviewer.mjs")));
+  const args = codexReviewerArguments("package-check", REVIEWER_REQUESTED, root);
   const instructions = args.find((value) => value.startsWith("developer_instructions="));
   assert.equal(JSON.parse(instructions.slice("developer_instructions=".length)), sourceReviewerSkill);
+  assert.ok(!args.includes("--model") && !args.some((value) => value.startsWith("model=")));
+  assert.ok(args.includes('model_reasoning_effort="high"'));
+  for (const lens of ["tests", "design"]) {
+    const packaged = await fsp.readFile(path.join(root, "server", `lens-${lens}.md`), "utf8");
+    assert.equal(packaged, await fsp.readFile(path.join(projectRoot, `templates/codex-plugin/skills/review-bridge-reviewer/lenses/${lens}.md`), "utf8"));
+    assertLensPolicy(packaged, `packaged ${lens} lens`);
+  }
 }
 
 const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-build-"));
@@ -1221,18 +1283,51 @@ try {
   const claudeAuthor = new Client({ name: "claude-author-smoke", version: releaseVersion });
   await claudeAuthor.connect(claudeAuthorTransport);
   try {
-    const options = await call(claudeAuthor, "discover_reviewer_options", { repository_path: repository, reviewer_provider: "CODEX_TASK" });
-    assert.deepEqual(options.models.map((entry) => entry.model), ["review-model", "second-model"]);
     const pending = await call(claudeAuthor, "prepare_review", {
-      repository_path: repository, base_ref: baseSha, requirement: "Package author smoke", implementation_scope: "value.js", reviewer_provider: "CODEX_TASK",
+      repository_path: repository, base_ref: baseSha, requirement: "Package author smoke", implementation_scope: "value.js",
     });
-    const selected = await call(claudeAuthor, "select_reviewer_configuration", {
-      review_id: pending.id, expected_state_version: pending.state_version, ...options.suggested,
+    assert.equal(pending.reviewer_provider, "CODEX_TASK");
+    const launched = await call(claudeAuthor, "launch_local_reviewer", {
+      review_id: pending.id, expected_state_version: pending.state_version,
     });
-    assert.equal(selected.reviewer_configuration.requested.model, options.suggested.model);
-    assert.equal(selected.reviewer_configuration.observed.status, "unavailable");
+    assert.deepEqual(launched.reviewer_configuration.requested, { reasoning_effort: "high", model_source: "configuration", reasoning_effort_source: "default" });
+    assert.equal(launched.reviewer_configuration.observed.status, "unavailable");
+    const { waitForExit } = await import(pathToFileURL(path.join(projectRoot, "test", "helpers", "codex-runtime.mjs")));
+    assert.equal((await waitForExit(launched.reviewer_dispatch.attempt_root)).code, 0);
+    const executed = JSON.parse(await fsp.readFile(path.join(temporary, "claude-author-store", "codex-runtime", "executed.json"), "utf8"));
+    assert.ok(executed.args.includes('model_reasoning_effort="high"') && !executed.args.includes("--model"));
   } finally {
     await claudeAuthor.close();
+  }
+
+  // A lens review reads its instructions from an installation outside any
+  // work tree, so the package is launched from a copy of it.
+  const installed = path.join(temporary, "installed-plugin");
+  await fsp.cp(pluginRoot, installed, { recursive: true });
+  const lensStore = path.join(temporary, "lens-store");
+  const lensAuthor = new Client({ name: "lens-author-smoke", version: releaseVersion });
+  await lensAuthor.connect(new StdioClientTransport({
+    command: process.execPath, args: [path.join(installed, "server", "server.mjs"), "--role", "author"], stderr: "pipe",
+    env: { ...process.env, REVIEW_BRIDGE_HOME: lensStore, REVIEW_BRIDGE_CODEX_COMMAND: path.join(projectRoot, "test", "fixtures", "codex-runtime.mjs") },
+  }));
+  try {
+    const pending = await call(lensAuthor, "prepare_review", {
+      repository_path: repository, base_ref: baseSha, requirement: "Package lens smoke", implementation_scope: "value.js",
+      force_full_review: true, lens_review: true,
+    });
+    assert.equal(pending.status, "WAITING_FOR_LENS_REVIEW");
+    await call(lensAuthor, "launch_local_reviewer", { review_id: pending.id, expected_state_version: pending.state_version });
+    const { waitForExit } = await import(pathToFileURL(path.join(projectRoot, "test", "helpers", "codex-runtime.mjs")));
+    const summary = await call(lensAuthor, "get_review_summary", { review_id: pending.id });
+    for (const entry of summary.runs) assert.equal((await waitForExit(entry.reviewer_dispatch.attempt_root)).code, 0);
+    for (const lens of ["tests", "design"]) {
+      const executed = JSON.parse(await fsp.readFile(path.join(lensStore, "codex-runtime", `executed-${lens}.json`), "utf8"));
+      const instructions = executed.args.find((value) => value.startsWith("developer_instructions="));
+      assert.equal(JSON.parse(instructions.slice("developer_instructions=".length)),
+        `${sourceReviewerSkill}\n\n${await fsp.readFile(path.join(installed, "server", `lens-${lens}.md`), "utf8")}`);
+    }
+  } finally {
+    await lensAuthor.close();
   }
 
   const author = await connect(authorServer, "author", store);
@@ -1275,6 +1370,7 @@ try {
     });
     assert.equal(summary.action_required, "REVIEWER_INITIAL_REVIEW");
     assert.equal(summary.reviewer_provider, "CLAUDE_DESKTOP");
+    assert.deepEqual(prepared, summary);
     const timedOut = await call(author, "wait_for_review_state", {
       review_id: prepared.id,
       known_state_version: summary.state_version,
@@ -1317,7 +1413,7 @@ try {
     const observed = await observedPromise;
     assert.equal(observed.changed, true);
     assert.equal(observed.summary.status, "REVIEW_SUBMITTED");
-    await call(author, "submit_resolutions", {
+    const responded = await call(author, "submit_resolutions", {
       review_id: prepared.id,
       resolutions: [
         {
@@ -1334,7 +1430,15 @@ try {
     );
     run("git", ["add", "."], repository);
     run("git", ["commit", "-m", "add focused test"], repository);
-    await call(author, "prepare_rereview", { review_id: prepared.id });
+    assert.deepEqual(
+      responded,
+      await call(author, "get_review_summary", { review_id: prepared.id }),
+    );
+    const rereview = await call(author, "prepare_rereview", { review_id: prepared.id });
+    assert.deepEqual(
+      rereview,
+      await call(author, "get_review_summary", { review_id: prepared.id }),
+    );
     const clean = await call(reviewer, "submit_rereview", {
       review_id: prepared.id,
       decisions: [
@@ -1351,6 +1455,10 @@ try {
       review_id: prepared.id,
     });
     assert.equal(finalized.gate.status, "LOCAL_GATE_PASSED");
+    assert.deepEqual(
+      finalized.review,
+      await call(author, "get_review_summary", { review_id: prepared.id }),
+    );
     const headSha = finalized.gate.head_sha;
     const startedAt = Date.now();
     const publication = await call(author, "start_publication", {
@@ -1420,8 +1528,9 @@ try {
     assert.equal(auditInspection.status, 0, auditInspection.stderr);
     assert.equal(JSON.parse(auditInspection.stdout).valid, true);
 
-    // The packaged report script's default tier: a brief, whose first two
-    // lines carry the verdict and where the review goes next.
+    // The packaged report script's default tier: a brief that opens with the
+    // conclusion line, and below the conclusion carries the verdict and where
+    // the review goes next.
     const packagedBrief = spawnSync(
       process.execPath,
       [reportScript, prepared.id, "--store", store],
@@ -1429,8 +1538,12 @@ try {
     );
     assert.equal(packagedBrief.status, 0, packagedBrief.stderr);
     assert.match(packagedBrief.stdout.split("\n")[0], /^# Review report /);
-    assert.match(packagedBrief.stdout.split("\n")[2], /^\*\*[A-Z_]+\*\* — /);
-    assert.match(packagedBrief.stdout.split("\n")[3], /^Publication owner\/repo#7: /);
+    assert.match(packagedBrief.stdout.split("\n")[2], /^\*\*Conclusion:\*\* owner\/repo#7 · /);
+    const briefDetail = packagedBrief.stdout
+      .slice(packagedBrief.stdout.indexOf("\n---\n") + 6)
+      .split("\n");
+    assert.match(briefDetail[0], /^\*\*[A-Z_]+\*\* — /);
+    assert.match(briefDetail[1], /^Publication owner\/repo#7: /);
     assert.match(packagedBrief.stdout, /\| Outcome \| \d+ fixed and verified · \d+ open · \d+ rebutted \|/);
     assert.match(packagedBrief.stdout, /projection of the ledger, not evidence/);
     // The packaged report script under --full and the author tool render the
@@ -1478,6 +1591,112 @@ try {
       renderedReport.sha256,
     );
     assert.equal(renderedBytes.toString("utf8"), packagedReport.stdout.replace(/- Rendered at: [^\n]+/, renderedBytes.toString("utf8").match(/- Rendered at: [^\n]+/)[0]));
+
+    // The packaged baseline mode end to end: the head comes from the stored
+    // authorization, the feeds from gh, and start_publication reads the file.
+    const baselineAuthorization = await call(
+      author,
+      "authorize_remote_publication",
+      {
+        repository_path: repository,
+        base_sha: baseSha,
+        head_sha: headSha,
+        acknowledgement: "LOCAL_REVIEW_SKIPPED",
+        operator_label: "maintainer",
+        rationale: "Verify the packaged baseline collector.",
+      },
+    );
+    const fakeGhDirectory = path.join(temporary, "fake-gh");
+    await fsp.mkdir(fakeGhDirectory);
+    await fsp.writeFile(
+      path.join(fakeGhDirectory, "gh"),
+      `#!${process.execPath}
+const args = process.argv.slice(2);
+if (args[1] === "-i") {
+  const items = args[2].startsWith("/repos/owner/repo/issues/7/comments?") ? [${JSON.stringify({
+        id: 501,
+        html_url: "https://github.com/owner/repo/pull/7#issuecomment-501",
+        created_at: "2026-01-01T00:00:00Z",
+        body: "Codex Review: Didn't find any major issues.",
+        user: { id: 4242, type: "Bot", login: "codex[bot]" },
+      })}] : [];
+  process.stdout.write("HTTP/2.0 200 OK\\r\\n\\r\\n" + JSON.stringify(items));
+} else if (args[1] === "/repos/owner/repo/pulls/7") {
+  process.stdout.write(JSON.stringify({ head: { sha: ${JSON.stringify(headSha)} } }));
+} else {
+  process.exit(1);
+}
+`,
+      { mode: 0o755 },
+    );
+    const baselineArgs = [
+      collectorPath,
+      "--baseline",
+      "--review-id",
+      baselineAuthorization.review_id,
+      "--repo",
+      "owner/repo",
+      "--pr",
+      "7",
+    ];
+    const baselineEnv = {
+      ...process.env,
+      PATH: `${fakeGhDirectory}${path.delimiter}${process.env.PATH}`,
+      REVIEW_BRIDGE_HOME: store,
+    };
+    const baselineNoActor = spawnSync(process.execPath, baselineArgs, {
+      cwd: pluginRoot,
+      encoding: "utf8",
+      env: baselineEnv,
+    });
+    assert.equal(baselineNoActor.status, 2);
+    assert.match(baselineNoActor.stderr, /--codex-actor-id must be a positive safe integer/);
+    const baselineUnsafePr = spawnSync(
+      process.execPath,
+      [...baselineArgs.slice(0, -1), "9007199254740993", "--codex-actor-id", "4242"],
+      { cwd: pluginRoot, encoding: "utf8", env: baselineEnv },
+    );
+    assert.equal(baselineUnsafePr.status, 2);
+    assert.match(baselineUnsafePr.stderr, /--pr must be a positive safe integer/);
+    const baselineRun = spawnSync(
+      process.execPath,
+      [...baselineArgs, "--codex-actor-id", "4242"],
+      { cwd: pluginRoot, encoding: "utf8", env: baselineEnv },
+    );
+    assert.equal(baselineRun.status, 0, baselineRun.stderr);
+    const baselineReceipt = JSON.parse(baselineRun.stdout);
+    assert.equal(
+      baselineReceipt.codex_review_baseline_path,
+      path.join(store, "reviews", baselineAuthorization.review_id, "codex-review-baseline.json"),
+    );
+    assert.equal(baselineReceipt.head_sha, headSha);
+    const baselineBytes = await fsp.readFile(baselineReceipt.codex_review_baseline_path);
+    assert.equal(
+      crypto.createHash("sha256").update(baselineBytes).digest("hex"),
+      baselineReceipt.sha256,
+    );
+    const baselinePublication = await call(author, "start_publication", {
+      review_id: baselineAuthorization.review_id,
+      repository_id: 42,
+      owner: "owner",
+      repo: "repo",
+      pr_number: 7,
+      base_branch: "main",
+      head_branch: "agent/change",
+      codex_actor_id: 4242,
+      codex_actor_type: "Bot",
+      codex_actor_login: "codex[bot]",
+      codex_trigger_mode: "EXPLICIT_ONLY",
+      codex_review_baseline_path: baselineReceipt.codex_review_baseline_path,
+    });
+    assert.equal(baselinePublication.status, "PR_PENDING");
+    assert.equal(baselinePublication.codex_review_baseline.collection.adapter_version, 2);
+    assert.deepEqual(
+      baselinePublication.codex_review_baseline.candidate_results.map(
+        (result) => [result.result_id, result.actor.id],
+      ),
+      [[501, 4242]],
+    );
 
     const remoteAuthorization = await call(
       author,
@@ -1571,7 +1790,11 @@ try {
     assert.equal(packagedRemoteBrief.status, 0, packagedRemoteBrief.stderr);
     assert.match(
       packagedRemoteBrief.stdout.split("\n")[2],
-      /^\*\*REMOTE_ONLY\*\* — this publication was authorized with local review skipped/,
+      /^\*\*Conclusion:\*\* owner\/repo#7 · .+ · local review skipped, authorization `REMOTE_ONLY` · publication summary /,
+    );
+    assert.match(
+      packagedRemoteBrief.stdout,
+      /\n---\n\n\*\*REMOTE_ONLY\*\* — this publication was authorized with local review skipped/,
     );
     assert.match(
       packagedRemoteBrief.stdout,

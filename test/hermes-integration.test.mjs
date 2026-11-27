@@ -30,7 +30,7 @@ const projectRoot = path.resolve(
 );
 const hermesTemplates = path.join(projectRoot, "templates", "hermes");
 const serverPath = path.join(projectRoot, "src", "server.mjs");
-const RELEASE_VERSION = "0.23.0";
+const RELEASE_VERSION = "0.27.0";
 const RELEASE_PATH_PLACEHOLDER = "__REVIEW_BRIDGE_RELEASE_PATH__";
 const STORE_PLACEHOLDER = "__REVIEW_BRIDGE_HOME__";
 
@@ -474,7 +474,6 @@ test("Hermes author MCP snippet is separate, unfiltered, and starts only --role 
     "prepare_review",
     "start_publication",
     "record_github_snapshot",
-    "start_autonomous_workflow",
   ]) {
     assert.ok(authorTools.includes(tool), `author server is missing ${tool}`);
   }
@@ -555,30 +554,24 @@ test("noise comments and decorative tests are contracted on both ends", async ()
   const workflowSkill = flatten(
     await readWorkflowSkill(path.join(projectRoot, WORKFLOW_SKILL)),
   );
-  // Both author paths — autonomous COMMIT_HEAD and the manual Prepare flow —
-  // must carry the obligation, so one occurrence is a silent exemption.
   const countOf = (text, phrase) => text.split(phrase).length - 1;
   assert.ok(
     countOf(
       workflowSkill,
       "remove comments that do not state a constraint the code cannot express",
     ) >= 2,
-    "noise-comment cleanup must cover both the autonomous and manual author paths",
+    "the routed skill must state the noise-comment cleanup at least twice",
   );
   assert.ok(
     countOf(
       workflowSkill,
       "remove tests that no behavior change can turn red",
     ) >= 2,
-    "decorative-test cleanup must cover both the autonomous and manual author paths",
-  );
-  assert.ok(
-    workflowSkill.includes("every later fix commit the workflow records"),
-    "the cleanup obligation must scope to fix commits, not only COMMIT_HEAD",
+    "the routed skill must state the decorative-test cleanup at least twice",
   );
   assert.ok(
     countOf(workflowSkill, "pre-commit cleanup") >= 6,
-    "every commit instruction site must reference the pre-commit cleanup: the step-7 fix head, ADDRESS_LOCAL_FINDINGS, the step-12 repair phases, the manual rereview fix, and both REMOTE_ONLY commit paths",
+    "the routed skill must mention the pre-commit cleanup at least six times",
   );
   for (const file of [
     path.join(
@@ -636,24 +629,20 @@ test("publish-bound work states its gate provider and its review strategy", asyn
       "the second opinion must never read as a substitute for the gate",
     ],
     [
+      "run it in addition to the `CODEX_TASK` gate only when they name it",
+      "the second opinion must run only when the user names it",
+    ],
+    [
       "A verified `SUCCESSOR` is the default and stands",
       "successor must be stated as the default review strategy",
     ],
     [
-      "`force_full_review: true` is the deliberate exception, and one scenario names it.",
+      "`force_full_review: true` is the deliberate exception, and two scenarios name it.",
       "a full-patch review must read as the exception, with its scenarios named",
     ],
     [
-      "That review is a successor by default: leave `parent_review_id` unset and `force_full_review` off",
-      "the review after a remote finding must read as successor-by-default",
-    ],
-    [
-      "In `LOCAL_GATE` mode that task is a successor by default",
-      "the manual publication path must read as successor-by-default too",
-    ],
-    [
-      "also pass its `continued_from_review_id` and `force_full_review: true`",
-      "the carried-findings continuation keeps its deliberate full review",
+      "In `LOCAL_GATE` mode leave `parent_review_id` unset and `force_full_review` off",
+      "the repair review must leave parent selection to prepare_review",
     ],
     [
       "The summary's `gate_expires_in_seconds` says how much of that gate's window is left.",
@@ -679,7 +668,7 @@ test("Codex workflow skill documents manual Hermes provider selection and handof
   // Keyed on each step's text rather than its number, so inserting a Prepare
   // step renumbers the list without reading as a missing section.
   const providerSelection = skill.match(
-    /Choose `reviewer_provider` explicitly:(?<body>[\s\S]*?)\n\d+\. Call `prepare_review`/,
+    /`CODEX_TASK` is the default `reviewer_provider`;[\s\S]*?Pass another provider only when the user names one:(?<body>[\s\S]*?)\n\d+\. Call `prepare_review`/,
   );
   assert.ok(providerSelection, "manual reviewer provider section is missing");
   assert.match(
@@ -783,7 +772,7 @@ test("Hermes README documents profile separation, exact release pinning, absolut
   assert.match(readme, /one exact Review Bridge (release|build|version)/i);
   assert.match(readme, /absolute path/i);
   assert.match(readme, /__REVIEW_BRIDGE_RELEASE_PATH__/);
-  assert.match(readme, /v0\.23\.0/);
+  assert.match(readme, /v0\.27\.0/);
   assert.match(readme, /install/i);
   assert.match(readme, /upgrade/i);
   assert.match(readme, /verify/i);
@@ -794,7 +783,7 @@ test("Hermes README documents profile separation, exact release pinning, absolut
   assert.match(readme, /author\/publication side/i);
 });
 
-test("Hermes install and release artifacts use the 0.23.0 release identity", async () => {
+test("Hermes install and release artifacts use the 0.27.0 release identity", async () => {
   const [
     packageJson,
     packageLock,
@@ -837,7 +826,7 @@ test("Hermes install and release artifacts use the 0.23.0 release identity", asy
 
   // v0.5.0 was released before Hermes support existed, so it cannot be the
   // tag or output path used by the current Hermes installation instructions.
-  assert.match(hermesReadme, /exact `v0\.23\.0` tag/);
+  assert.match(hermesReadme, /exact `v0\.27\.0` tag/);
 
   const rootPackage = JSON.parse(packageJson);
   const lock = JSON.parse(packageLock);
@@ -846,7 +835,7 @@ test("Hermes install and release artifacts use the 0.23.0 release identity", asy
   assert.equal(lock.packages[""].version, RELEASE_VERSION);
   assert.equal(JSON.parse(claudeManifest).version, RELEASE_VERSION);
   assert.equal(JSON.parse(codexManifest).version, RELEASE_VERSION);
-  assert.match(server, /version: "0\.23\.0"/);
+  assert.match(server, /version: "0\.27\.0"/);
 
   for (const currentReleaseText of [
     build,
@@ -864,24 +853,24 @@ test("Hermes install and release artifacts use the 0.23.0 release identity", asy
 
   assert.match(build, /releaseVersion/);
   assert.match(verifyBuild, /releaseVersion/);
-  assert.match(rootReadme, /v0\.23\.0/);
-  assert.match(hermesReadme, /v0\.23\.0/);
-  assert.match(hermesAuthorConfig, /v0\.23\.0/);
-  assert.match(hermesReviewerConfig, /v0\.23\.0/);
-  assert.match(deepseekReadme, /exact `v0\.23\.0` tag/);
-  assert.match(deepseekAuthorPatch, /v0\.23\.0/);
-  assert.match(deepseekReviewerPatch, /v0\.23\.0/);
+  assert.match(rootReadme, /v0\.27\.0/);
+  assert.match(hermesReadme, /v0\.27\.0/);
+  assert.match(hermesAuthorConfig, /v0\.27\.0/);
+  assert.match(hermesReviewerConfig, /v0\.27\.0/);
+  assert.match(deepseekReadme, /exact `v0\.27\.0` tag/);
+  assert.match(deepseekAuthorPatch, /v0\.27\.0/);
+  assert.match(deepseekReviewerPatch, /v0\.27\.0/);
   // The DeepSeek Harness plugin API is a developer preview, so the pinned
   // runtime release belongs to this identity too.
   assert.match(deepseekReadme, /@deepseek-ai\/dsh@0\.1\.0-rc\.6/);
 
   const currentChangelog = changelog.match(
-    /^## 0\.23\.0[^\n]*\n(?<body>[\s\S]*?)(?=^## )/m,
+    /^## 0\.27\.0[^\n]*\n(?<body>[\s\S]*?)(?=^## )/m,
   );
   const previousChangelog = changelog.match(
     /^## 0\.5\.0[^\n]*\n(?<body>[\s\S]*?)(?=^## )/m,
   );
-  assert.ok(currentChangelog, "the 0.23.0 changelog entry is missing");
+  assert.ok(currentChangelog, "the 0.27.0 changelog entry is missing");
   // What holds across releases is the convention, not any one release's
   // subject: the current entry names the pull requests it describes. A check
   // on this release's own wording would have to be rewritten every time the
@@ -994,7 +983,6 @@ test("the workflow skill states Hermes provenance and provider binding", async (
   ]);
   const hermesText = hermes.replace(/\s+/g, " ");
   assert.match(hermesText, /configured.*provenance.*not cryptographic/is);
-  assert.match(hermesText, /Autonomous local task creation remains `CODEX_TASK`-only\./);
   assert.match(hermesText, /local HERMES gate passes/i);
   assert.match(hermesText, /author\/publication-side operation/i);
 

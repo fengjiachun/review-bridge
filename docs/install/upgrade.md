@@ -1,6 +1,6 @@
 # Upgrade an existing installation
 
-Describes upgrading to Review Bridge v0.23.0. For a first installation, use the
+Describes upgrading to Review Bridge v0.27.0. For a first installation, use the
 [Codex](codex-plugin.md), [Claude](claude-desktop.md), [Hermes](hermes.md), or
 [DeepSeek Harness](deepseek-harness.md) instructions.
 
@@ -16,8 +16,8 @@ newer** on the MCP host. Run `codex --version` there before switching clients.
 If `REVIEW_BRIDGE_CODEX_COMMAND` points to a specific executable, check that
 executable instead of the one on your shell's PATH. Update an older CLI through
 its installation method before launching a reviewer; updating Review Bridge or
-the Codex desktop app alone does not verify the CLI used by MCP. Discovery can
-succeed on an older CLI even though its first reviewer MCP call is cancelled.
+the Codex desktop app alone does not verify the CLI used by MCP. An older CLI
+can start a reviewer whose first reviewer MCP call is cancelled.
 
 ## Prepare the new runtime
 
@@ -27,17 +27,17 @@ succeed on an older CLI even though its first reviewer MCP call is cancelled.
 2. Record the current runtime paths, shared store path, and enabled roles. Back
    up client configuration files privately; they may contain credentials.
 3. Build in a new directory, keeping the previous installation intact. For
-   example, from a parent directory where `review-bridge-v0.23.0` does not exist:
+   example, from a parent directory where `review-bridge-v0.27.0` does not exist:
 
    ```bash
-   git clone --branch v0.23.0 https://github.com/fengjiachun/review-bridge.git review-bridge-v0.23.0
-   cd review-bridge-v0.23.0
+   git clone --branch v0.27.0 https://github.com/fengjiachun/review-bridge.git review-bridge-v0.27.0
+   cd review-bridge-v0.27.0
    npm ci
    npm run build
    npm run verify:build
    ```
 
-Keep this checkout and its `dist/review-bridge-v0.23.0` output in a permanent
+Keep this checkout and its `dist/review-bridge-v0.27.0` output in a permanent
 location. Use absolute paths in client configurations; do not overwrite the old
 runtime or retarget a shared symlink beneath running processes.
 
@@ -56,7 +56,7 @@ and install the plugin from the new one:
 
 ```bash
 codex plugin marketplace remove review-bridge-local
-codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.23.0/codex-marketplace"
+codex plugin marketplace add "$(pwd)/dist/review-bridge-v0.27.0/codex-marketplace"
 codex plugin add review-bridge@review-bridge-local
 ```
 
@@ -87,13 +87,13 @@ lists even when the files on disk are new.
 
 - Check the installed plugin/extension version and each configured runtime
   path. Where the client exposes MCP initialization details, its server version
-  should be `0.23.0`.
-- An author connection should expose `discover_reviewer_options`,
-  `select_reviewer_configuration`, and `launch_local_reviewer`. A reviewer
-  connection should expose reviewer tools, without author/publication tools.
-- Ask an author connection to list available `CODEX_TASK` models and efforts
-  for your repository. Discovery is read-only with respect to the review
-  ledger and does not start a review. See [reviewer configuration](../reviewer-configuration.md).
+  should be `0.27.0`.
+- An author connection's tool list should match the author tools listed in
+  the `docs/reference.md` of the checkout you just built. A reviewer connection should
+  expose reviewer tools, without author/publication tools.
+- A `CODEX_TASK` launch should follow the launch procedure and recorded
+  request described in `docs/reviewer-configuration.md` of the checkout you
+  just built.
 - Confirm an existing review can still be read from the same store. An empty
   history usually warrants checking the store path before creating new work.
 

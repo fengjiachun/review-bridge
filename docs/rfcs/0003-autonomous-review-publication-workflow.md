@@ -3,6 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Status | Implemented |
+| Removed | Removed in 0.25.0: #217 removed the workflow's tools, packaged skill route, and documentation; #218 made version-3 publications read-only; #222 removed the workflow statistics; #224 deleted the remaining workflow code. |
 | Authors | Review Bridge contributors |
 | Created | 2026-07-29 |
 | Target release | TBD |

@@ -110,8 +110,7 @@ not be replaced; this runtime does not wait.
 
 Review Bridge records the review's `DEEPSEEK_HARNESS` binding; it observes
 nothing about how the session was started, and this section adds no
-mechanism that would. The autonomous workflow continues to accept
-`CODEX_TASK` dispatch only. The `CLAUDE_DESKTOP` boundary is unchanged, and
+mechanism that would. The `CLAUDE_DESKTOP` boundary is unchanged, and
 nothing above narrows it: never launch, script, or otherwise programmatically
 invoke a Claude reviewer from this session — the operator opens that
 conversation themselves, an account-compliance boundary rather than a

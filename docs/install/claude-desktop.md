@@ -1,10 +1,10 @@
 # Install the Claude Desktop extension
 
-Describes Review Bridge v0.23.0. For an existing setup, see [upgrading](upgrade.md).
+Describes Review Bridge v0.27.0. For an existing setup, see [upgrading](upgrade.md).
 
 Choose the role you need: the extension below lets Claude **review** a snapshot;
 the separate [author connection](#use-claude-as-an-author) lets Claude **request
-a Codex review**, including model and reasoning selection.
+a Codex review**.
 
 Download `review-bridge-reviewer-<version>.mcpb` from the
 [latest release](https://github.com/fengjiachun/review-bridge/releases/latest),
@@ -37,7 +37,7 @@ reviewing confidential code.
 The reviewer extension above only exposes reviewer tools. For authoring, render
 and install the separate [author MCP entry](../../templates/claude-extension/author/mcp.json)
 and follow its [local review instructions](../../templates/claude-extension/author/README.md).
-It exposes discovery, explicit selection and Codex launch on the MCP server host;
+It exposes Codex launch on the MCP server host;
 no shell or computer use in Claude is required. Keep author and reviewer contexts
 separate. The entry is included under `claude-extension-source/author` in builds.
 
@@ -49,6 +49,6 @@ entries. Restart that client and open a new author conversation. An author
 connection in Claude Code and an extension in Claude Desktop are separate
 installations; updating one does not configure the other.
 
-Then follow the [choose-and-start example](../reviewer-configuration.md#choose-and-start-from-your-author-client).
-The choice controls the independent Codex reviewer, not the Claude model in
+Then follow [start from your author client](../reviewer-configuration.md#start-from-your-author-client).
+The reviewer runs on the host's Codex configuration, not the Claude model in
 this conversation. Keep a reviewer conversation separate from the author.

@@ -1,16 +1,11 @@
 # Local reviewer configuration
 
-## Choose and start from your author client
+## Start from your author client
 
 Ask in the conversation where you authored the change:
 
-> Use Review Bridge to review this change with Codex. Show the available models
-> and reasoning levels first. Use `origin/main` as the base; the requirement is
-> "..." and the implementation scope is "...".
-
-After seeing the choices, reply:
-
-> Use `<model from the list>` with `<supported reasoning level>` and start.
+> Use Review Bridge to review this change with Codex. Use `origin/main` as the
+> base; the requirement is "..." and the implementation scope is "...".
 
 The reviewer runs as an independent Codex process on the MCP host. It need not
 appear as a new task window in the author app. Ask the author for the review's
@@ -26,90 +21,87 @@ status or findings; [local review](local-review.md) explains the next steps.
 The MCP host needs an authenticated Codex CLI **0.153.4 or newer**. Check
 `codex --version` on that host before launching (or check the executable set by
 `REVIEW_BRIDGE_CODEX_COMMAND`). Older versions such as 0.145.0 can cancel the
-reviewer's first MCP call even when discovery succeeds; see the
+reviewer's first MCP call; see the
 [launcher compatibility notes](../templates/codex-plugin/skills/review-bridge-workflow/references/codex-task.md).
-Upgrade the CLI before using automatic launch. Selection controls
-local `CODEX_TASK` reviews; it does not choose the model used by GitHub's Codex
-review or by the other reviewer providers. A picker depends on the author
-client; ordinary conversation works when no picker is available. If you already
-specified a valid pair and authorized starting, the author need not ask again.
+Upgrade the CLI before using automatic launch.
 
-## Tool sequence and defaults
+## Model and reasoning effort
+
+By default the reviewer uses the model set in the MCP host's Codex
+configuration (`model` in `~/.codex/config.toml`, or the file under
+`CODEX_HOME`). `launch_local_reviewer` passes no `--model`, so
+a model Codex accepts there is the model that reviews.
+
+The default reasoning effort is `high`: unless an effort was chosen for the
+review, that tool passes `model_reasoning_effort="high"`, so an everyday
+configuration set to a lighter effort does not weaken reviews. A chosen effort
+is passed instead.
+
+To use another model or effort for one review, say so in the author
+conversation, for example "list the reviewer models" or "review this with
+gpt-6.2-sol at max effort". The author lists the models this host's Codex
+offers (`list_reviewer_models`), with each model's supported efforts, and
+launches with your choice. A model Codex does not list, or an effort the model
+does not support, is refused; the author never substitutes another. An effort
+chosen without a model is checked against the configured model, and the
+reviewer is started with that model even if the configuration changes before
+launch. The choice
+carries to the review's later rounds until you choose again; a new review or a
+continuation starts back at the defaults. The author does not ask which model
+to use unless you raise it.
+
+A `CODEX_TASK`
+task you create yourself ([manual dispatch](local-review.md#start-a-reviewer-manually))
+runs with the model and effort set in that client. Neither choice affects
+GitHub's Codex review or the other reviewer providers, which use their own
+clients' settings.
+
+## Tool sequence
 
 The author conversation's model does not select the reviewer. Every author MCP
 connection (Codex, Claude, Hermes, DeepSeek Harness) uses the same tools:
 
 | Step | Tool | Result |
 | --- | --- | --- |
-| Discover | `discover_reviewer_options` | Visible models and per-model efforts from the target runtime; a suggestion, not a selection |
 | Prepare | `prepare_review` | Immutable snapshot and pending review |
-| Select | `select_reviewer_configuration` | Validated requested configuration on the current round; no process starts |
-| Start | `launch_local_reviewer` | Explicit model/effort passed to an independent Codex process |
+| Choose (only when asked) | `list_reviewer_models` | The configured model, the `high` default, and each listed model's supported efforts |
+| Start | `launch_local_reviewer` | An independent Codex process, at `high` effort unless another was chosen |
 | Inspect | `get_review_summary` | Requested configuration, process identity and exit record when available; ledger verdict remains authoritative |
 
-Present a light choice before the first review if the user has not specified it.
-Use a structured picker only where the author client supports one; ordinary
-conversation is the fallback. Prefer the last still-valid pair for this repository
-and execution environment. Otherwise suggest the runtime's default model with
-`high` if that model advertises it (the #162 review default), or its advertised
-default effort. A suggestion never authorizes a start. Unattended drivers require
-a preauthorized pair; missing or invalid configuration stops without waiting for
-an interactive answer.
+## Runtime
 
-## Runtime availability
-
-Discovery starts the Codex CLI on the MCP host, using that process's account,
-configuration, environment and neutral cwd. `REVIEW_BRIDGE_CODEX_COMMAND` may name
-an absolute CLI executable (use this for desktop applications with a different
-PATH). The same resolved executable and cwd are used for launch. A store inside
-a Git repository is refused as a reviewer cwd. Models and efforts are not copied
-from the author client or the public API catalog. The opaque `environment_id`
-binds host, runtime, Codex home, account and effective configuration; raw account
-and configuration responses are not saved. Selection and start both re-query the
-runtime, so environment changes or unsupported pairs cause explicit failures.
-No automatic downgrade or replacement is performed. Every integration package
-ships the matching CODEX_TASK reviewer skill with its server. The launcher passes
-that skill as process-local developer instructions, so a Claude/Hermes/DeepSeek
-author does not need a separately installed Codex plugin. Global configuration
-is not modified.
-
-[OpenAI's app-server contract](https://learn.chatgpt.com/docs/app-server#list-models-modellist)
-provides `model/list` with `supportedReasoningEfforts`, `defaultReasoningEffort`,
-`isDefault`, `hidden` and cursor pagination. The adapter follows every page and
-only presents picker-visible models. `queried_at` is when Review Bridge queried
-the runtime. The protocol does not expose an upstream catalog cache timestamp or
-a force-network-refresh parameter. Review Bridge neither caches model lists nor
-claims a network refresh: `freshness` explicitly says upstream source and age are
-unavailable. Discovery failure is an error and can be retried; stored preferences
-are never used as availability evidence.
+Launch starts the Codex CLI on the MCP host, using that process's account,
+configuration, environment and a neutral cwd under the store.
+`REVIEW_BRIDGE_CODEX_COMMAND` may name an absolute CLI executable (use this for
+desktop applications with a different PATH). A store inside a Git repository is
+refused as a reviewer cwd. Every integration package ships the matching
+CODEX_TASK reviewer skill with its server. The launcher passes that skill as
+process-local developer instructions, so a Claude/Hermes/DeepSeek author does
+not need a separately installed Codex plugin. Global configuration is not
+modified. The attempt's `process.log` captures the CLI's output, which may
+include the model and effort Codex reports for itself; it does not prove them.
 
 ## Rereview and launch recovery
 
-Round two inherits the requested pair. Explicit changes before dispatch preserve
-prior rounds; after an exited failed launch, changing selection preserves the
-old attempt in history. Live or indeterminate attempts block replacement. Process
-exit is not a verdict; inspect the ledger before retrying. An absent exit record
-is deliberately indeterminate even if a host reboot killed the process; an
-operator must reconcile that attempt before replacing it.
+Each round records its own launch. Live or indeterminate attempts block
+replacement. Process exit is not a verdict; inspect the ledger before retrying.
+An absent exit record is deliberately indeterminate even if a host reboot killed
+the process; an operator must reconcile that attempt before replacing it.
 
-The autonomous controller stores the selected configuration in its dispatch
-intent. Select before binding the review. After marking the action EXECUTING,
-`launch_codex_task_dispatch` starts the same runtime and returns its task identity,
-title and prompt for the existing observation/completion protocol. Repeating it
-recovers the recorded identity instead of launching a duplicate. If validation fails before any launch attempt, `abandon_workflow_action` can
-release that local intent after checking the ledger; reselect explicitly and plan
-a new intent. Attempted, live or indeterminate launches are never abandoned this
-way. Legacy intents without the local-launch contract remain readable but need
-reconciliation or workflow cancellation before replacement. Round-two launch uses
-`launch_local_reviewer` after the controller advances to WAIT_LOCAL_REREVIEW.
-
-Requested configuration is a launch record. Observed remote model identity is
-`unavailable`; neither local logs nor provider binding authenticate it. Older
-ledgers stay readable and report unavailable rather than acquiring invented
-historical defaults. Reports retain per-round requested identity. Other reviewer
-providers currently have no discovery/control adapter and return that limitation
-with no fabricated options.
+Requested configuration is a launch record: the model when one was chosen or
+an effort was checked against it, the effort, and for each whether it was
+`selected` or came from the Codex configuration or the `high` default. A
+default launch names no model, for example
+`{"reasoning_effort":"high","model_source":"configuration","reasoning_effort_source":"default"}`.
+Reports print it per round. Observed remote model identity is
+`unavailable`; neither local logs nor provider binding authenticate it. Rounds
+that earlier releases launched keep the fields each release recorded, and
+reports print them per round as recorded: 0.25.0 recorded only
+`{"reasoning_effort":"high"}`, and older releases the model, effort and
+`environment_id` the author selected. A round still
+pending at the upgrade and launched again records the new request; its
+history keeps the earlier selection.
 
 The Claude author connection is shipped separately from the reviewer extension;
 see [installation](install/claude-desktop.md#use-claude-as-an-author). No computer
-use is needed to discover, select, or launch from the author MCP connection.
+use is needed to launch from the author MCP connection.

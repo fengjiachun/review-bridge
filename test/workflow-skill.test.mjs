@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { assertLensReviewRequestRule } from "../scripts/dispatch-contract.mjs";
 import { readWorkflowDocuments } from "../scripts/workflow-skill.mjs";
 
 const root = fileURLToPath(new URL(
@@ -19,12 +20,11 @@ test("manual preparation routes to each provider without loading other playbooks
   for (const provider of ["codex-task", "hermes", "deepseek-harness", "claude-desktop"]) {
     assert.ok(prepare.includes(`](${provider}.md)`));
     const route = `${entry}\n${prepare}\n${docs.get(`references/${provider}.md`)}`;
-    assert.doesNotMatch(route, /start_autonomous_workflow|start_publication/);
+    assert.doesNotMatch(route, /start_publication/);
     for (const [other, launch] of [["codex-task", "codex exec --"], ["hermes", "hermes -p"], ["deepseek-harness", "dsh --profile"]]) {
       if (provider !== other) assert.ok(!route.includes(launch), `${provider} loads ${other}'s launch`);
     }
   }
-  assert.match(docs.get("references/autonomous.md"), /\[Publish through GitHub\]\(publication\.md\)/);
   for (const [name, text] of docs) {
     for (const [, helper] of text.matchAll(/\.\.\/\.\.\/scripts\/([\w-]+\.mjs)/g)) {
       await fsp.access(path.resolve(root, "../../scripts", helper));
@@ -43,17 +43,28 @@ test("a fresh findings route includes the cleanup required before its fix commit
   assert.match(route, /fix commits before rereview/);
 });
 
-test("waiting keeps ledger revisions separate from cadence and local timeouts", async () => {
+test("waiting keeps cadence separate from local timeouts", async () => {
   const docs = await readWorkflowDocuments(path.join(root, "SKILL.md"));
   const entry = docs.get("SKILL.md").replace(/\s+/g, " ");
-  assert.match(entry, /Unchanged observations do not advance the workflow revision/);
   assert.match(entry, /Prefer supported state-change waits or long polling/);
-  assert.match(entry, /back off.*respect rate-limit and retry signals.*reset the cadence/);
+  const remote = docs.get("SKILL.md").split(/\n\s*\n/)
+    .map((paragraph) => paragraph.replace(/\s+/g, " ").trim())
+    .find((paragraph) => paragraph.startsWith("For remote GitHub observation collection,"));
+  assert.equal(remote,
+    "For remote GitHub observation collection, when the host can wake the agent on "
+    + "pull-request events such as check results, new comments or reviews, and conflicts, "
+    + "wait on that wake instead of collecting repeatedly. Without such a host, back off "
+    + "when relevant state remains unchanged and reset the cadence when relevant state "
+    + "changes. Every collection, including one after a wake, respects rate-limit and "
+    + "retry signals. Do not invoke the collector in a tight loop. A local review wait "
+    + "does not watch GitHub. Fresh complete evidence is still required before each gated "
+    + "action; a wait, a host wake, elapsed time, or unchanged revision proves none. After "
+    + "a wake, collect and record a fresh observation and follow the publication summary's "
+    + "`next_action`.");
   assert.match(entry, /25 seconds by default and accepts at most 30 seconds/);
   assert.match(entry, /call again with the same `state_version` until `changed` is true/);
   assert.match(entry, /timeout is neither a failed review nor proof that its reviewer has exited/);
   assert.match(docs.get("references/publication.md"), /shared waiting rules in \[the entrypoint\]/);
-  assert.match(docs.get("references/autonomous.md"), /back off on\s+unchanged results/);
 });
 
 test("reference validation rejects broken routes and unreachable files", async (t) => {
@@ -65,4 +76,13 @@ test("reference validation rejects broken routes and unreachable files", async (
   await fsp.writeFile(path.join(fixture, "SKILL.md"), "# No routes\n");
   await fsp.writeFile(path.join(fixture, "references", "orphan.md"), "# Orphan\n");
   await assert.rejects(readWorkflowDocuments(path.join(fixture, "SKILL.md")), /unreachable workflow reference: orphan.md/);
+});
+
+test("the author guidance limits lens_review to an explicit user request", async () => {
+  const docs = await readWorkflowDocuments(path.join(root, "SKILL.md"));
+  for (const name of ["SKILL.md", "references/prepare.md"]) {
+    assertLensReviewRequestRule(docs.get(name), name);
+    assert.throws(() => assertLensReviewRequestRule(docs.get(name).replace("never offer, suggest,", "offer,"), name),
+      /does not limit lens_review to an explicit user request/);
+  }
 });

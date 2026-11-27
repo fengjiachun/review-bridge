@@ -8,7 +8,11 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { defaultStoreRoot, repositoryIdentity } from "../src/core.mjs";
+import {
+  defaultStoreRoot,
+  repositoryIdentity,
+  requireReviewVersions,
+} from "../src/core.mjs";
 
 const USAGE = `Usage: miss-report.mjs <owner/name> <pull-request> --repository <path>
                        [--store <path>] [--json]
@@ -50,6 +54,7 @@ async function readReviews(storeRoot) {
       const review = JSON.parse(
         await fsp.readFile(path.join(root, id, "review.json"), "utf8"),
       );
+      requireReviewVersions(review);
       if (!Array.isArray(review.rounds)) throw new Error("no rounds");
       reviews.push({ id, review });
     } catch (error) {

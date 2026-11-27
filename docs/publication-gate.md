@@ -1,6 +1,6 @@
 # GitHub publication gate
 
-Describes Review Bridge v0.23.0.
+Describes Review Bridge v0.27.0.
 
 Publishing to GitHub requires an explicit authorization, in one of two modes:
 
@@ -53,8 +53,7 @@ not access GitHub or return the full ledger. A finalized gate also reports
 `gate_expires_in_seconds`: the gate expires five minutes after the oldest source
 collection in the observation it was minted over, not five minutes after
 issuance, so part of that window is already spent when the gate first exists.
-Its `required_inputs` — like the one on `get_review_summary`,
-`get_autonomous_workflow_summary`, and `list_autonomous_workflows` — names the
+Its `required_inputs` — like the one on `get_review_summary` — names the
 calls the current action implies as `{tool: [[field, source], ...]}`, so a
 driver never has to discover a schema by sending empty arguments. When
 `next_action` is
@@ -69,14 +68,29 @@ Every fix pushed during a remote-only loop is a new head and so a new ledger.
 store target the same `repository_id` and `pr_number`. It is counted from the
 store at call time and never written to the ledger. It is a signal for the
 operator only and never changes `status`, `blocking_reason`, or
-`next_action`. The autonomous workflow has a remote cycle budget; this is the
-manual path's only sign of how many heads came before.
+`next_action`.
+
+Before `start_publication`, collect the baseline with the same packaged
+collector in baseline mode, naming the review ID, the pull request, and the
+pinned Codex Bot's numeric actor ID:
+
+```bash
+node dist/review-bridge-v0.27.0/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --baseline --review-id <review_id> --repo <owner/name> --pr <pr_number> --codex-actor-id <id>
+```
+
+It reads the head from the review's local gate or remote-only authorization in
+the store and refuses a pull request whose head differs, then walks every page
+of the three Codex feeds and normalizes them as the complete version-2
+baseline. It writes the baseline into the private store beside the review and
+prints only a receipt; pass the printed path to `start_publication` as
+`codex_review_baseline_path`. The baseline must be at most five minutes old
+when the publication starts.
 
 For a fresh snapshot, run the
 packaged read-only collector against the review ID:
 
 ```bash
-node dist/review-bridge-v0.23.0/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id>
+node dist/review-bridge-v0.27.0/codex-marketplace/plugins/review-bridge/scripts/collect-github-observation.mjs --review-id <review_id>
 ```
 
 Run that command from the repository root after `npm run build`. Inside an
@@ -95,9 +109,12 @@ Neither the ledger nor the observation should be routed through the reviewing
 or authoring model. Both run to tens of thousands of tokens, and a model that
 retypes them pays for the same bytes twice — once to read them and again to
 emit them — while adding a transcription failure mode the file handoff does not
-have. The collector still accepts a ledger path or stdin, and
-`record_github_snapshot` still accepts an inline `observation`, for callers that
-have already loaded the data by other means.
+have. The baseline file saves the same retyping, although the
+`start_publication` result still returns the baseline. The collector still
+accepts a ledger path or stdin, `record_github_snapshot` still accepts an
+inline `observation`, and `start_publication` still accepts an inline
+`codex_review_baseline`, for callers that have already loaded the data by
+other means.
 
 The packaged Codex plugin also includes
 `scripts/inspect-publication-audit.mjs <review_id>` for read-only, full-chain
@@ -108,8 +125,8 @@ offline audit validation.
 `scripts/review-scorecard.mjs` aggregates the ledgers already in the configured
 store into one report: findings by severity, author dispositions crossed with
 reviewer decisions, rebuttal outcomes before and after the verification
-obligation, rounds to CLEAN, continuations, workflow budget events, and human
-arbitration escalations, each per reviewer provider and overall. A
+obligation, rounds to CLEAN, continuations, and human arbitration escalations,
+each per reviewer provider and overall. A
 ledgers-per-pull-request section groups publication ledgers by `repository_id`
 and `pr_number`, bins the pull requests at 1, 2, 3-5, 6-10 and more than 10
 ledgers, and lists the three with the most. It prints
@@ -122,7 +139,7 @@ For example, to summarize September 2026 reviews by reviewer provider, including
 recorded rebuttal outcomes:
 
 ```bash
-node dist/review-bridge-v0.23.0/codex-marketplace/plugins/review-bridge/scripts/review-scorecard.mjs \
+node dist/review-bridge-v0.27.0/codex-marketplace/plugins/review-bridge/scripts/review-scorecard.mjs \
   --since 2026-09-01 --until 2026-10-01
 ```
 
@@ -134,7 +151,7 @@ Use review filters together to compare the same period, repository, and
 strategy:
 
 ```bash
-node dist/review-bridge-v0.23.0/codex-marketplace/plugins/review-bridge/scripts/review-scorecard.mjs \
+node dist/review-bridge-v0.27.0/codex-marketplace/plugins/review-bridge/scripts/review-scorecard.mjs \
   --since 2026-09-01 --until 2026-10-01 \
   --repository /path/persisted/in/the/ledger \
   --strategy FULL --json
@@ -164,23 +181,21 @@ review counts. Valid reviews excluded by the filters are counted separately
 as `corpus.reviews_filtered_out`. An empty selection has zero counters and
 null corpus timestamps and rates whose denominator is zero.
 
-Review filters do not identify an entire workflow or its audit events. With
-any filter enabled, the helper does not read workflow ledgers or audit logs:
-JSON `workflows`, corpus workflow/audit counts, and workflow/audit diagnostic
-lists are null, and
-`scope.workflow_omission_reason` explains their omission. Markdown gives the
-same explanation. With no filters, existing workflow statistics remain
-included over the whole store. Publication ledgers follow the same rule: a
-review filter does not select them, so with any filter enabled JSON
-`publications`, `skipped_publications`, and the corpus publication counts are
-null, and `scope.publication_omission_reason` says why.
+Review filters do not select publication ledgers. With any filter enabled,
+the helper does not read them: JSON `publications`, `skipped_publications`, and
+the corpus publication counts are null, `scope.publication_omission_reason`
+says why, and Markdown gives the same explanation. With no filters, publication
+statistics cover the whole store.
 
-The JSON schema is version 3. Version 2 added `filters`, `scope`,
+The JSON schema is version 4. Version 2 added `filters`, `scope`,
 `metric_semantics`, and `corpus.reviews_filtered_out`; version 3 removes the
 review-type filter and each provider's `reviews_by_type` and
-`advisory_reported`. Consumers should check `schema_version` and handle the
-null workflow fields in filtered reports. The raw `not_clean` counter means a
-status other than `CLEAN` or `LOCAL_GATE_PASSED`; it is not a failure count.
+`advisory_reported`; version 4 removes the workflow statistics (`workflows`,
+`skipped_workflows`, `skipped_audit_logs`, the scope's workflow fields, and the
+corpus workflow and audit-log counts). Consumers should check `schema_version`
+and handle the null publication fields in filtered reports. The raw
+`not_clean` counter means a status other than `CLEAN` or `LOCAL_GATE_PASSED`;
+it is not a failure count.
 
 These are recorded outcomes, not model accuracy: `fixed`/`resolved` does not
 establish accuracy, and `rebuttal_accepted` does not establish a false
@@ -196,16 +211,30 @@ Markdown report a person can read in one sitting (a `REMOTE_ONLY` publication,
 which has no review ledger, renders from its publication and authorization
 alone).
 
-The script prints a brief by default: the terminal state and where the review
-goes next in the first two lines, a fact table, the findings still open before
+Both tiers open with a conclusion that judges nothing itself. From the review
+summary it takes the latest round's base and head, the reviewer and the model
+it requested, the round count, the review status, which findings are open,
+and, without a publication, the next action; from the publication summary, its
+status, blocking reason, and next action. From the review ledger it takes the
+pull request name, each finding's title and the round that raised it, the
+author disposition and rereview decision a settled finding was closed with,
+and the carried findings, listed apart. It is one conclusion line, a findings
+table, and the open items: the open findings and the next step. A
+`REMOTE_ONLY` conclusion says local review was skipped. The audit detail follows
+unchanged; in the full report it lists the latest observation's Codex results,
+checks, and review threads.
+
+The script prints a brief by default: below the conclusion, the terminal state
+and where the review goes next, a fact table, the findings still open before
 the ones already settled, the round-level facts, and a pointer to the full
 rendering. Every number in it is counted over the ledger and every grouping is
 one the ledger decides -- severity, the round a finding was introduced in,
 whether two findings name the same title at the same location -- because the
 renderer calls no model; a line that would read across findings to say what
 they have in common is out of its reach, and it states the counting rule
-instead. A review with nothing open says so rather than heading an empty
-section, and a `REMOTE_ONLY` publication briefs in the same shape.
+instead. A review with nothing open leaves the still-open section out, since
+the conclusion's open items already answer it, and a `REMOTE_ONLY`
+publication briefs in the same shape.
 
 `--full` prints the full rendering, which is also what the tool writes:
 requirement and scope, each round's findings

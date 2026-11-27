@@ -7,12 +7,12 @@ import {
   atomicWriteFile,
   canonicalJson,
   removeAndSync,
+  StoreError,
   withStateLock,
 } from "./storage.mjs";
 import { reviewRequiredInputs } from "./tool-inputs.mjs";
 
-import { validateReviewerSelection, rememberReviewerSelection } from "./reviewer-options.mjs";
-import { codexReviewerArguments, startLocalReviewer, readDispatchReceipt } from "./local-reviewer.mjs";
+import { LENS_RUNS, codexReviewerArguments, lensInstructions, readDispatchReceipt, reviewerRequest, reviewerRuntime, startLocalReviewer } from "./local-reviewer.mjs";
 
 export const MAX_ROUNDS = 2;
 export const DEFAULT_CHANGE_SIZE_BUDGET = 2000;
@@ -53,7 +53,7 @@ function assertString(value, name, { allowEmpty = false, max = MAX_TEXT_FIELD } 
   return value;
 }
 
-function assertReviewId(reviewId) {
+export function assertReviewId(reviewId) {
   if (typeof reviewId !== "string" || !/^rb-[0-9TZ-]+-[a-f0-9]{8}$/.test(reviewId)) {
     throw new Error("invalid review_id");
   }
@@ -81,6 +81,16 @@ function requireReviewerProvider(review, expectedProvider) {
     throw new Error(
       `reviewer provider mismatch (expected=${boundProvider}, actual=${provider})`,
     );
+  }
+}
+
+// A reviewer server started with --review-id, whose tools refuse any other
+// review ID, serves its lens round and nothing else, so a round-one run cannot
+// open or decide round two.
+function requireReviewer(review, expectedProvider, binding) {
+  requireReviewerProvider(review, expectedProvider);
+  if (binding != null && review.status !== "WAITING_FOR_LENS_REVIEW") {
+    throw new Error(`this reviewer server serves its review only during the lens round (status=${review.status})`);
   }
 }
 
@@ -183,16 +193,53 @@ async function loadJson(filePath) {
   return JSON.parse(await fsp.readFile(filePath, "utf8"));
 }
 
+// Every release has written version 1 of the review ledger, of each round's
+// snapshot manifest, and of each successor proof (see CONTRIBUTING.md on when
+// to bump).
+const SUPPORTED_REVIEW_VERSIONS = [1];
+const SUPPORTED_MANIFEST_VERSIONS = [1];
+const SUPPORTED_SUCCESSOR_VERSIONS = [1];
+
+// Installs sharing one store upgrade one at a time, so a reader can meet a
+// record a newer release wrote. It refuses a version it does not know rather
+// than acting on that record by its own older rules.
+export function requireRecordVersion(record, kind, supported) {
+  if (supported.includes(record?.version)) {
+    return;
+  }
+  const found = record?.version ?? null;
+  throw new StoreError(
+    "LEDGER_VERSION_UNSUPPORTED",
+    `${kind} version ${found == null ? "is missing" : JSON.stringify(found)}; this release reads version ${supported.join(", ")}`,
+    { record: kind, version: found, supported: [...supported] },
+  );
+}
+
+// The rounds carry their own manifest and successor versions, so a newer
+// release could bump one of those inside a version 1 ledger.
+export function requireReviewVersions(review) {
+  requireRecordVersion(review, "review ledger", SUPPORTED_REVIEW_VERSIONS);
+  for (const round of Array.isArray(review.rounds) ? review.rounds : []) {
+    requireRecordVersion(round, "snapshot manifest", SUPPORTED_MANIFEST_VERSIONS);
+    if (round.successor != null) {
+      requireRecordVersion(round.successor, "successor proof", SUPPORTED_SUCCESSOR_VERSIONS);
+    }
+  }
+}
+
 export async function loadReview(storeRoot, reviewId) {
   assertReviewId(reviewId);
+  let review;
   try {
-    return await loadJson(reviewFile(storeRoot, reviewId));
+    review = await loadJson(reviewFile(storeRoot, reviewId));
   } catch (error) {
     if (error?.code === "ENOENT") {
-      throw new Error(`review ${reviewId} not found`);
+      throw new Error(`review ${reviewId} not found`, { cause: error });
     }
     throw error;
   }
+  requireReviewVersions(review);
+  return review;
 }
 
 async function saveReview(storeRoot, review) {
@@ -797,8 +844,12 @@ async function buildSuccessorArtifacts({
   let gate;
   try {
     parent = await loadReview(storeRoot, parentReviewId);
-  } catch {
-    return fullStrategy("parent review is unavailable");
+  } catch (error) {
+    return fullStrategy(
+      error?.code === "LEDGER_VERSION_UNSUPPORTED"
+        ? `parent ${error.message}`
+        : "parent review is unavailable",
+    );
   }
   if (parent.id !== parentReviewId) {
     return fullStrategy("parent review id does not match the requested review");
@@ -1054,9 +1105,10 @@ function rationaleVisibleToReviewer(review) {
 }
 
 function reviewerReview(review) {
-  const { rationale, reconstructed_intent, ...rest } = publicReview(review);
+  const { rationale, reconstructed_intent, rounds, ...rest } = publicReview(review);
   return {
     ...rest,
+    rounds: rounds.map(({ runs, ...round }) => round),
     ...(rationaleVisibleToReviewer(review) ? { rationale } : {}),
     ...(review.current_round === 2 && reconstructed_intent != null ? { reconstructed_intent } : {}),
   };
@@ -1065,6 +1117,7 @@ function reviewerReview(review) {
 function actionRequired(status) {
   const actions = {
     WAITING_FOR_REVIEW: "REVIEWER_INITIAL_REVIEW",
+    WAITING_FOR_LENS_REVIEW: "REVIEWER_INITIAL_REVIEW",
     REVIEW_SUBMITTED: "AUTHOR_RESOLUTIONS",
     AUTHOR_RESPONDED: "PREPARE_REREVIEW",
     WAITING_FOR_REREVIEW: "REVIEWER_REREVIEW",
@@ -1143,6 +1196,12 @@ function continuationErrata(review) {
   }));
 }
 
+function continuationStatusRefusal(source) {
+  return source.status === "CONTINUABLE_FINDINGS"
+    ? null
+    : `source status is ${source.status}, but only CONTINUABLE_FINDINGS can be continued`;
+}
+
 // A continuation freezes its source. The errata copy, the carried findings,
 // the freeze marker, and its history event land in one write under the
 // source's own mutation lock, so the copy cannot race a concurrent append.
@@ -1155,10 +1214,9 @@ function continuationErrata(review) {
 async function freezeContinuationSource(storeRoot, sourceReviewId, continuationId) {
   return withReviewMutationLock(storeRoot, sourceReviewId, async () => {
     const source = await loadReview(storeRoot, sourceReviewId);
-    if (source.status !== "CONTINUABLE_FINDINGS") {
-      throw new Error(
-        "continued review does not match the repository, requirement, provider, base, scope, and continuable state",
-      );
+    const statusRefusal = continuationStatusRefusal(source);
+    if (statusRefusal != null) {
+      throw new Error(`cannot continue review ${sourceReviewId}: ${statusRefusal}`);
     }
     const carriedFindings = continuationFindings(source);
     if (carriedFindings.length === 0) {
@@ -1176,8 +1234,9 @@ async function freezeContinuationSource(storeRoot, sourceReviewId, continuationI
   });
 }
 
-function reviewSummary(review) {
+export function reviewSummary(review) {
   const currentSnapshot = review.rounds.at(-1) ?? null;
+  const runs = review.rounds[0]?.runs;
   const activeFindings = review.findings.filter(
     (finding) => !RESOLVED_FINDING_STATUSES.has(finding.status),
   );
@@ -1234,7 +1293,15 @@ function reviewSummary(review) {
       status: finding.status,
       ...(finding.path == null ? {} : { path: finding.path }),
       ...(finding.line == null ? {} : { line: finding.line }),
+      ...(finding.lens == null ? {} : { lens: finding.lens }),
     })),
+    ...(runs == null ? {} : {
+      runs: runs.map((entry) => ({
+        run: entry.run,
+        submitted: entry.submitted_at != null,
+        reviewer_dispatch: entry.reviewer_dispatch,
+      })),
+    }),
     // Server-derived errata evidence, so a driver comparing bound state can
     // tell erratum-only drift from a real review transition.
     errata_watermark: errataWatermark(review),
@@ -1452,7 +1519,8 @@ export async function prepareReview(
     parentReviewId = null,
     forceFullReview = false,
     continuedFromReviewId = null,
-    reviewerProvider = "CLAUDE_DESKTOP",
+    reviewerProvider = "CODEX_TASK",
+    lensReview = false,
   },
 ) {
   assertString(baseRef, "base_ref", { max: 1024 });
@@ -1474,22 +1542,34 @@ export async function prepareReview(
     }
   }
   assertReviewerProvider(reviewerProvider);
+  if (lensReview) {
+    if (!forceFullReview) throw new Error("lens_review requires force_full_review");
+    if (reviewerProvider !== "CODEX_TASK") throw new Error("lens_review requires reviewer_provider CODEX_TASK");
+    lensInstructions();
+  }
   const repositoryRoot = await resolveRepositoryRoot(repositoryPath);
   const continuedReview =
     continuedFromReviewId == null
       ? null
       : await loadReview(storeRoot, continuedFromReviewId);
-  if (
-    continuedReview != null &&
-    (continuedReview.status !== "CONTINUABLE_FINDINGS" ||
-      continuedReview.repository_path !== repositoryRoot ||
-      continuedReview.requirement !== requirement ||
-      continuedReview.implementation_scope !== implementationScope ||
-      reviewerProviderFor(continuedReview) !== reviewerProvider)
-  ) {
-    throw new Error(
-      "continued review does not match the repository, requirement, provider, base, scope, and continuable state",
-    );
+  if (continuedReview != null) {
+    const refusals = [
+      continuationStatusRefusal(continuedReview),
+      continuedReview.repository_path === repositoryRoot
+        ? null
+        : `repository ${repositoryRoot} differs from the source review's ${continuedReview.repository_path}`,
+      continuedReview.requirement === requirement
+        ? null
+        : "requirement differs from the source review's requirement",
+      reviewerProviderFor(continuedReview) === reviewerProvider
+        ? null
+        : `reviewer_provider ${reviewerProvider} differs from the source review's ${reviewerProviderFor(continuedReview)}`,
+    ].filter((refusal) => refusal != null);
+    if (refusals.length > 0) {
+      throw new Error(
+        `cannot continue review ${continuedFromReviewId}: ${refusals.join("; ")}`,
+      );
+    }
   }
   // A cheap pre-check before any directory exists; the authoritative copy is
   // taken again under the source's own mutation lock below.
@@ -1567,10 +1647,13 @@ export async function prepareReview(
       ...(rationale == null ? {} : { rationale }),
       reviewer_provider: reviewerProvider,
       review_strategy: successorResult.strategy,
-      status: "WAITING_FOR_REVIEW",
+      status: lensReview ? "WAITING_FOR_LENS_REVIEW" : "WAITING_FOR_REVIEW",
       current_round: 1,
       max_rounds: MAX_ROUNDS,
-      rounds: [{ round: 1, ...manifest, successor: successorResult.successor }],
+      rounds: [{
+        round: 1, ...manifest, successor: successorResult.successor,
+        ...(lensReview ? { runs: LENS_RUNS.map((run) => ({ run, reviewer_dispatch: null, submitted_at: null })) } : {}),
+      }],
       findings: [],
       resolutions: [],
       rereview_decisions: [],
@@ -1588,6 +1671,16 @@ export async function prepareReview(
     await atomicWriteJson(reviewFile(storeRoot, review.id), review);
     return publicReview(review);
   }, { allowMissing: true });
+}
+
+function reviewRow(review) {
+  return {
+    id: review.id,
+    status: review.status,
+    repository_path: review.repository_path,
+    head_sha: review.rounds?.at(-1)?.head_sha ?? null,
+    updated_at: review.updated_at,
+  };
 }
 
 export async function listReviews(
@@ -1621,13 +1714,7 @@ export async function listReviews(
         (providerFilter == null ||
           reviewerProviderFor(review) === providerFilter)
       ) {
-        result.push({
-          id: review.id,
-          status: review.status,
-          repository_path: review.repository_path,
-          head_sha: review.rounds?.at(-1)?.head_sha ?? null,
-          updated_at: review.updated_at,
-        });
+        result.push(reviewRow(review));
       }
     } catch {
       // Ignore incomplete directories; normal writes are atomic.
@@ -1638,7 +1725,15 @@ export async function listReviews(
 
 // A reviewer's queue carries no rationale: open_review alone decides when the
 // reviewer may read it.
-export async function listPendingReviews(storeRoot, reviewerProvider) {
+export async function listPendingReviews(storeRoot, reviewerProvider, binding = null) {
+  if (binding != null) {
+    const review = await loadReview(storeRoot, binding.reviewId).catch((error) => {
+      if (error.cause?.code === "ENOENT") return null;
+      throw error;
+    });
+    return review?.status === "WAITING_FOR_LENS_REVIEW" && reviewerProviderFor(review) === reviewerProvider
+      ? [reviewRow(review)] : [];
+  }
   return listReviews(
     storeRoot,
     ["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"],
@@ -1652,45 +1747,11 @@ export async function getReview(storeRoot, reviewId) {
 
 export async function getReviewSummary(storeRoot, reviewId) {
   const summary = reviewSummary(await loadReview(storeRoot, reviewId));
-  const dispatch = summary.reviewer_dispatch;
-  if (dispatch) {
-    try { dispatch.exit = await loadJson(path.join(dispatch.attempt_root, "exit.json")); }
-    catch (error) { if (error.code !== "ENOENT") throw error; }
+  for (const dispatch of [summary.reviewer_dispatch, ...(summary.runs ?? []).map((entry) => entry.reviewer_dispatch)]) {
+    const exit = dispatch && await readDispatchReceipt(dispatch.attempt_root, "exit.json");
+    if (exit) dispatch.exit = exit;
   }
   return summary;
-}
-
-export async function getReviewSnapshot(storeRoot, reviewId, operation = null) {
-  return withReviewMutationLock(storeRoot, reviewId, async () => {
-    const review = await loadReview(storeRoot, reviewId);
-    const round = review.rounds?.find(
-      (entry) => entry.round === review.current_round,
-    );
-    if (round == null) {
-      throw new Error("current review round is missing from its ledger");
-    }
-    const patch = await fsp.readFile(
-      path.join(roundDirectory(storeRoot, reviewId, round.round), "patch.diff"),
-    );
-    const snapshotHash = await snapshotHashFromReviewRound(
-      storeRoot,
-      reviewId,
-      review,
-      round,
-      patch,
-    );
-    if (snapshotHash !== round.snapshot_hash) {
-      throw new Error("stored review patch does not match its snapshot commitment");
-    }
-    if (round.change_size == null) {
-      round.change_size = patchChangeSize(patch);
-    }
-    const snapshot = {
-      review: publicReview(review),
-      summary: reviewSummary(review),
-    };
-    return operation == null ? snapshot : operation(snapshot);
-  });
 }
 
 function arbitrationFinding(
@@ -1970,6 +2031,7 @@ export async function submitInitialReview(
   findingsInput,
   reviewerProvider = "CLAUDE_DESKTOP",
   reconstructedIntent,
+  binding = null,
 ) {
   return withReviewMutationLock(storeRoot, reviewId, () =>
     submitInitialReviewWhileLocked(
@@ -1978,8 +2040,13 @@ export async function submitInitialReview(
       findingsInput,
       reviewerProvider,
       reconstructedIntent,
+      binding,
     ),
   );
+}
+
+function findingId(index) {
+  return `F-${String(index + 1).padStart(3, "0")}`;
 }
 
 async function submitInitialReviewWhileLocked(
@@ -1988,10 +2055,15 @@ async function submitInitialReviewWhileLocked(
   findingsInput,
   reviewerProvider,
   reconstructedIntent,
+  binding,
 ) {
   const review = await loadReview(storeRoot, reviewId);
-  requireReviewerProvider(review, reviewerProvider);
-  if (review.status !== "WAITING_FOR_REVIEW" || review.current_round !== 1) {
+  requireReviewer(review, reviewerProvider, binding);
+  const lensRound = review.status === "WAITING_FOR_LENS_REVIEW";
+  if (lensRound && binding == null) {
+    throw new Error("a lens round accepts submissions only from its bound runs");
+  }
+  if (!lensRound && (review.status !== "WAITING_FOR_REVIEW" || review.current_round !== 1)) {
     throw new Error(
       `review is not waiting for its initial review (status=${review.status})`,
     );
@@ -2002,18 +2074,44 @@ async function submitInitialReviewWhileLocked(
     );
   }
   const findings = findingsInput.map((finding, index) =>
-    normalizeFinding(finding, `F-${String(index + 1).padStart(3, "0")}`, 1),
+    normalizeFinding(finding, findingId(index), 1),
   );
-  review.findings = findings;
-  if (reconstructedIntent !== undefined) {
-    review.reconstructed_intent = assertString(reconstructedIntent, "reconstructed_intent");
+  // Only the general run's intent has a reader, the round-two comparison.
+  const run = lensRound ? binding.lens ?? "general" : null;
+  const intent = reconstructedIntent === undefined || (run != null && run !== "general")
+    ? undefined : assertString(reconstructedIntent, "reconstructed_intent");
+  if (lensRound) {
+    const runs = review.rounds[0].runs;
+    const entry = runs.find((candidate) => candidate.run === run);
+    if (entry.submitted_at != null) {
+      throw new Error(`the ${run} run has already submitted`);
+    }
+    entry.findings = findings.map(({ id, ...finding }) => finding);
+    if (intent !== undefined) entry.reconstructed_intent = intent;
+    entry.submitted_at = now();
+    if (runs.some((candidate) => candidate.submitted_at == null)) {
+      await saveReview(storeRoot, review);
+      return reviewerReview(review);
+    }
+    // The close: IDs follow the runs' fixed order, not the arrival order.
+    review.findings = runs.flatMap((candidate) => candidate.findings.map((finding) =>
+      candidate.run === "general" ? finding : { ...finding, lens: candidate.run }),
+    ).map((finding, index) => ({ id: findingId(index), ...finding }));
+    if (runs[0].reconstructed_intent !== undefined) review.reconstructed_intent = runs[0].reconstructed_intent;
+    for (const candidate of runs) {
+      delete candidate.findings;
+      delete candidate.reconstructed_intent;
+    }
+  } else {
+    review.findings = findings;
+    if (intent !== undefined) review.reconstructed_intent = intent;
   }
   // Each verdict records the errata watermark the server last witnessed
   // being served to the reviewer through open_review, so which decision
   // weighed which corrections stays replayable; an erratum appended after
   // that open — even one landing before submission — never enters this
   // record, because the reviewer was never shown it.
-  if (findings.length === 0) {
+  if (review.findings.length === 0) {
     await verifySuccessorArtifacts(storeRoot, reviewId, review.rounds[0]);
     review.status = "CLEAN";
     review.clean_snapshot_hash = review.rounds[0].snapshot_hash;
@@ -2029,7 +2127,7 @@ async function submitInitialReviewWhileLocked(
       at: now(),
       event: "FINDINGS_SUBMITTED",
       round: 1,
-      count: findings.length,
+      count: review.findings.length,
       errata_watermark: review.last_opened_errata_watermark ?? 0,
     });
   }
@@ -2147,6 +2245,10 @@ async function appendReviewErratumWhileLocked(storeRoot, reviewId, text) {
       "the local gate has passed; the review record is history and accepts no further errata",
     );
   }
+  // Every run of a lens round is served the same errata.
+  if (review.status === "WAITING_FOR_LENS_REVIEW") {
+    throw new Error("errata are refused during the lens round; append it once the round closes");
+  }
   assertString(text, "erratum.text", { max: MAX_ERRATUM_TEXT });
   const errata = review.errata ?? [];
   if (errata.length >= MAX_ERRATA) {
@@ -2237,9 +2339,6 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
     round,
     ...manifest,
     successor: successorResult.successor,
-    ...(review.rounds?.at(-1)?.reviewer_configuration == null ? {} : {
-      reviewer_configuration: review.rounds.at(-1).reviewer_configuration,
-    }),
   });
   review.review_strategy = successorResult.strategy;
   review.status = "WAITING_FOR_REREVIEW";
@@ -2260,6 +2359,7 @@ export async function submitRereview(
   newFindingInputs,
   reviewerProvider = "CLAUDE_DESKTOP",
   intentComparison,
+  binding = null,
 ) {
   return withReviewMutationLock(storeRoot, reviewId, () =>
     submitRereviewWhileLocked(
@@ -2269,6 +2369,7 @@ export async function submitRereview(
       newFindingInputs,
       reviewerProvider,
       intentComparison,
+      binding,
     ),
   );
 }
@@ -2280,9 +2381,10 @@ async function submitRereviewWhileLocked(
   newFindingInputs,
   reviewerProvider,
   intentComparison,
+  binding,
 ) {
   const review = await loadReview(storeRoot, reviewId);
-  requireReviewerProvider(review, reviewerProvider);
+  requireReviewer(review, reviewerProvider, binding);
   if (review.status !== "WAITING_FOR_REREVIEW") {
     throw new Error(`review is not waiting for rereview (status=${review.status})`);
   }
@@ -2471,6 +2573,7 @@ export async function readReviewArtifact(
   offset = 0,
   limit = 65_536,
   reviewerProvider = "CLAUDE_DESKTOP",
+  binding = null,
 ) {
   assertReviewId(reviewId);
   if (
@@ -2492,7 +2595,7 @@ export async function readReviewArtifact(
     throw new Error(`limit must be between 1 and ${MAX_READ_BYTES}`);
   }
   const review = await loadReview(storeRoot, reviewId);
-  requireReviewerProvider(review, reviewerProvider);
+  requireReviewer(review, reviewerProvider, binding);
   const selectedRound = findRound(review, round);
   if (artifact.startsWith("successor.") && selectedRound.successor == null) {
     throw new Error("successor artifact is not available for this review round");
@@ -2579,9 +2682,10 @@ export async function readSnapshotFile(
   offset = 0,
   limit = 65_536,
   reviewerProvider = "CLAUDE_DESKTOP",
+  binding = null,
 ) {
   const review = await loadReview(storeRoot, reviewId);
-  requireReviewerProvider(review, reviewerProvider);
+  requireReviewer(review, reviewerProvider, binding);
   const selectedRound = findRound(review, round);
   const safePath = safeRelativePath(relativePath);
   if (selectedRound.deleted_files.includes(safePath)) {
@@ -2623,13 +2727,14 @@ export async function searchSnapshot(
   pathPrefix = null,
   maxResults = 100,
   reviewerProvider = "CLAUDE_DESKTOP",
+  binding = null,
 ) {
   assertString(pattern, "pattern", { max: 1000 });
   if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 500) {
     throw new Error("max_results must be between 1 and 500");
   }
   const review = await loadReview(storeRoot, reviewId);
-  requireReviewerProvider(review, reviewerProvider);
+  requireReviewer(review, reviewerProvider, binding);
   const selectedRound = findRound(review, round);
   const prefix =
     pathPrefix == null || pathPrefix === ""
@@ -2776,10 +2881,11 @@ export async function openReview(
   storeRoot,
   reviewId,
   reviewerProvider = "CLAUDE_DESKTOP",
+  binding = null,
 ) {
   return withReviewMutationLock(storeRoot, reviewId, async () => {
     const review = await loadReview(storeRoot, reviewId);
-    requireReviewerProvider(review, reviewerProvider);
+    requireReviewer(review, reviewerProvider, binding);
     // A verdict's errata watermark is what the server witnessed serving to
     // the reviewer, not what the ledger holds at submission: each open
     // records the watermark it serves, and verdicts copy that value. An
@@ -2801,11 +2907,12 @@ export async function openReview(
       current,
     );
     const { rounds, ...rest } = reviewerReview(review);
+    const { runs, ...currentSnapshot } = current;
     return {
       ...rest,
       rounds: rounds.map(roundDescriptor),
       current_snapshot: {
-        ...current,
+        ...currentSnapshot,
         patch_index: patchIndex.entries,
         patch_index_truncated: patchIndex.truncated,
       },
@@ -2831,79 +2938,75 @@ export async function openReview(
   });
 }
 
-export async function selectReviewerConfiguration(storeRoot, reviewId, expectedStateVersion, selection) {
-  return withReviewMutationLock(storeRoot, reviewId, async () => {
-    const review = await loadReview(storeRoot, reviewId);
-    if (review.state_version !== expectedStateVersion) throw new Error("review state_version mismatch");
-    if (reviewerProviderFor(review) !== "CODEX_TASK") throw new Error("Provider configuration control unavailable");
-    const round = review.rounds.at(-1);
-    if (!["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"].includes(review.status)) {
-      throw new Error("Reviewer configuration can only change before dispatch of a pending round");
-    }
-    if (round.reviewer_dispatch) {
-      try { await loadJson(path.join(round.reviewer_dispatch.attempt_root, "exit.json")); }
-      catch (error) {
-        if (error.code !== "ENOENT") throw error;
-        throw new Error("Cannot change a running or indeterminate reviewer dispatch");
-      }
-    }
-    const configuration = await validateReviewerSelection(storeRoot, selection);
-    delete round.reviewer_dispatch;
-    round.reviewer_configuration = configuration;
-    review.history.push({ at: now(), event: "REVIEWER_CONFIGURATION_SELECTED", round: review.current_round, requested: configuration.requested });
-    await saveReview(storeRoot, review);
-    await rememberReviewerSelection(storeRoot, review.repository_path, configuration);
-    return publicReview(review);
-  });
+// A choice carries to the review's later launches until the user chooses
+// again; values that were not chosen, including any a ledger recorded
+// without a source, start back at the defaults.
+function carriedSelection(review) {
+  const requested = review.rounds.findLast((round) => round.reviewer_configuration)?.reviewer_configuration.requested ?? {};
+  return {
+    model: requested.model_source === "selected" ? requested.model : undefined,
+    reasoning_effort: requested.reasoning_effort_source === "selected" ? requested.reasoning_effort : undefined,
+  };
 }
 
-export async function launchLocalReviewer(storeRoot, reviewId, expectedStateVersion, workflowDispatch = null) {
-  return withReviewMutationLock(storeRoot, reviewId, async () => {
-    const review = await loadReview(storeRoot, reviewId);
+export async function launchLocalReviewer(storeRoot, reviewId, expectedStateVersion, { model, reasoningEffort } = {}) {
+  // A lens round launches every run that has not submitted and has no live
+  // or indeterminate attempt; a plain round has one slot, the round itself.
+  const launchSlots = async (review) => {
     if (review.state_version !== expectedStateVersion) throw new Error("review state_version mismatch");
     if (reviewerProviderFor(review) !== "CODEX_TASK") throw new Error("Automatic launch unavailable for this provider");
     const round = review.rounds.at(-1);
-    const prior = round.reviewer_dispatch;
-    if (prior) {
-      if (workflowDispatch && prior.marker === workflowDispatch.marker) {
-        const started = await readDispatchReceipt(prior.attempt_root, "started.json");
-        const exited = await readDispatchReceipt(prior.attempt_root, "exit.json");
-        if (prior.status === "FAILED" || exited?.error) throw new Error("Reviewer launch failed; do not adopt this attempt");
-        if (!started) throw new Error("Reviewer startup is indeterminate; no started process receipt exists");
-        if (exited && ["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"].includes(review.status)) {
-          throw new Error("Reviewer exited without a verdict; reconcile the failed attempt before replacing it");
-        }
-        if (prior.status !== "STARTED") {
-          Object.assign(prior, started, { status: "STARTED" });
-          await saveReview(storeRoot, review);
-        }
-        return publicReview(review);
-      }
-      let exited;
-      try { exited = await loadJson(path.join(prior.attempt_root, "exit.json")); }
-      catch (error) { if (error.code !== "ENOENT") throw error; }
-      if (!exited) throw new Error("Reviewer dispatch is running or indeterminate; do not launch a concurrent replacement");
+    const slots = review.status === "WAITING_FOR_LENS_REVIEW"
+      ? round.runs.filter((entry) => entry.submitted_at == null) : [round];
+    const free = [];
+    for (const slot of slots) {
+      if (!slot.reviewer_dispatch || await readDispatchReceipt(slot.reviewer_dispatch.attempt_root, "exit.json")) free.push(slot);
     }
-    if (!["WAITING_FOR_REVIEW", "WAITING_FOR_REREVIEW"].includes(review.status)) throw new Error("Review is not pending");
-    const configuration = await validateReviewerSelection(storeRoot, round.reviewer_configuration?.requested);
-    const attemptRoot = path.join(roundDirectory(storeRoot, reviewId, review.current_round), `dispatch-${crypto.randomUUID()}`);
-    await fsp.mkdir(attemptRoot, { recursive: true, mode: 0o700 });
-    const dispatch = { attempt_root: attemptRoot, requested: configuration.requested, observed: { status: "unavailable" }, started_at: now(), status: "STARTING", task_id: path.basename(attemptRoot), marker: workflowDispatch?.marker ?? null };
+    if (free.length === 0) throw new Error("Reviewer dispatch is running or indeterminate; do not launch a concurrent replacement");
+    if (!["WAITING_FOR_REVIEW", "WAITING_FOR_LENS_REVIEW", "WAITING_FOR_REREVIEW"].includes(review.status)) throw new Error("Review is not pending");
+    return free;
+  };
+  // A model listing can outlast the lock's wait, so the request is resolved
+  // first; the checks repeated under the lock confirm the review it was
+  // resolved from is unchanged.
+  const loaded = await loadReview(storeRoot, reviewId);
+  await launchSlots(loaded);
+  const instructions = loaded.status === "WAITING_FOR_LENS_REVIEW" ? lensInstructions() : null;
+  const runtime = await reviewerRuntime(storeRoot);
+  const requested = await reviewerRequest(runtime, model == null && reasoningEffort == null
+    ? carriedSelection(loaded) : { model, reasoning_effort: reasoningEffort });
+  return withReviewMutationLock(storeRoot, reviewId, async () => {
+    const review = await loadReview(storeRoot, reviewId);
+    const slots = await launchSlots(review);
+    const round = review.rounds.at(-1);
+    const configuration = { requested, observed: { status: "unavailable" }, runtime };
     round.reviewer_configuration = configuration;
-    round.reviewer_dispatch = dispatch;
-    review.history.push({ at: now(), event: "REVIEWER_DISPATCH_REQUESTED", round: review.current_round, ...dispatch });
-    await saveReview(storeRoot, review);
-    try {
-      const process = await startLocalReviewer(configuration.runtime, codexReviewerArguments(reviewId, configuration.requested, storeRoot, workflowDispatch?.prompt), attemptRoot);
-      Object.assign(dispatch, process, { status: "STARTED" });
-    } catch (error) {
-      if (error.code === "DISPATCH_INDETERMINATE") throw error;
-      dispatch.status = "FAILED";
-      await atomicWriteJson(path.join(attemptRoot, "exit.json"), { error: error.message });
-      await saveReview(storeRoot, review);
-      throw error;
+    const dispatches = [];
+    for (const slot of slots) {
+      const attemptRoot = path.join(roundDirectory(storeRoot, reviewId, review.current_round), `dispatch-${crypto.randomUUID()}`);
+      await fsp.mkdir(attemptRoot, { recursive: true, mode: 0o700 });
+      const dispatch = { attempt_root: attemptRoot, requested: configuration.requested, observed: { status: "unavailable" }, started_at: now(), status: "STARTING", task_id: path.basename(attemptRoot), marker: null };
+      slot.reviewer_dispatch = dispatch;
+      review.history.push({ at: now(), event: "REVIEWER_DISPATCH_REQUESTED", round: review.current_round, ...(slot.run == null ? {} : { run: slot.run }), ...dispatch });
+      dispatches.push({ dispatch, lens: slot.run == null ? null : { run: slot.run, instructions } });
     }
     await saveReview(storeRoot, review);
+    const results = await Promise.allSettled(dispatches.map(async ({ dispatch, lens }) => {
+      try {
+        const process = await startLocalReviewer(configuration.runtime, codexReviewerArguments(reviewId, configuration.requested, storeRoot, lens), dispatch.attempt_root);
+        Object.assign(dispatch, process, { status: "STARTED" });
+      } catch (error) {
+        if (error.code !== "DISPATCH_INDETERMINATE") {
+          dispatch.status = "FAILED";
+          await atomicWriteJson(path.join(dispatch.attempt_root, "exit.json"), { error: error.message });
+        }
+        throw error;
+      }
+    }));
+    // An indeterminate start stays STARTING, as it was saved.
+    if (dispatches.some(({ dispatch }) => dispatch.status !== "STARTING")) await saveReview(storeRoot, review);
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure) throw failure.reason;
     return publicReview(review);
   });
 }

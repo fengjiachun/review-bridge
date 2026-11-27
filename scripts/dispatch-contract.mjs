@@ -89,7 +89,6 @@ const SHARED_REQUIREMENTS = [
     "nothing verifies the dispatch",
     /observes nothing about how the (?:instance|session) was started/,
   ],
-  ["autonomous dispatch stays CODEX_TASK-only", /`CODEX_TASK` dispatch only/],
   // The boundary these contracts must never quietly lose: an unattended
   // HERMES or DeepSeek Harness launch is cleared, a programmatic Claude
   // launch never is.
@@ -125,9 +124,8 @@ const SHARED_STRUCTURAL = [
 ];
 
 // CODEX_TASK does not reuse SHARED_REQUIREMENTS. Those claims are worded for a
-// reviewer "instance" or "session" launched from a profile, and they close
-// each provider's section by handing autonomous dispatch back to CODEX_TASK.
-// CODEX_TASK is that provider: it launches a "task", and its launch has a
+// reviewer "instance" or "session" launched from a profile. CODEX_TASK
+// launches a "task", and its launch has a
 // boundary the other two do not — Codex's own `workspace-write` sandbox
 // around the reviewer's shell, with the MCP calls that sandbox leaves gated
 // routed to Codex's guardian subagent. So its contract states the genuinely
@@ -156,8 +154,8 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       /states what must never happen rather than counting launches/,
     ],
     [
-      "no two reviewers on one round at once",
-      /Never run two reviewers on the same round at once/,
+      "no two reviewers on one round, or on one lens run, at once",
+      /Never run two reviewers on the same round at once — in a lens round, never two on the same run at once, because its three runs are that round's reviewers/,
     ],
     ["no reviewing from the author task", /never review from the author task/],
     [
@@ -451,10 +449,6 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
       "the section makes no claim about the other providers' launches",
       /What the HERMES and DeepSeek Harness sections require of their own launches is stated there and is neither changed nor described by this one/,
     ],
-    [
-      "only the autonomous state machine is CODEX_TASK-only",
-      /autonomous workflow's own state machine dispatches `CODEX_TASK` and no other provider/,
-    ],
     ["remote identity is not authenticated", /does not authenticate the remote model identity/],
     // The one boundary this launch must never be read as loosening: an
     // unattended Codex launch is cleared, a programmatic Claude launch never is.
@@ -485,15 +479,15 @@ export const CODEX_TASK_DISPATCH_CONTRACT = {
     // the launch blocks on EOF.
     [
       "match",
-      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write --model <selected-model> \\\n *-c 'model_reasoning_effort="<selected-effort>"' \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'memories\.use_memories=false' \\\n *-c 'memories\.generate_memories=false' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
-      "launch is not the sandboxed one-shot form with the git-repo check skipped, selected model and reasoning effort, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, memories pinned off, the author server disabled, and stdin closed",
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'model_reasoning_effort="high"' \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'memories\.use_memories=false' \\\n *-c 'memories\.generate_memories=false' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the reviewer request below>' < \/dev\/null/,
+      "launch is not the sandboxed one-shot form with the git-repo check skipped, no model and high reasoning effort, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, memories pinned off, the author server disabled, and stdin closed",
     ],
     // Round two is another launch, not a resume, and needs its own runnable
     // form in the same shape.
     [
       "match",
-      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write --model <selected-model> \\\n *-c 'model_reasoning_effort="<selected-effort>"' \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'memories\.use_memories=false' \\\n *-c 'memories\.generate_memories=false' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the rereview request>' < \/dev\/null/,
-      "round-two launch form with the git-repo check skipped, selected model and reasoning effort, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, memories pinned off, the author server disabled, and stdin closed",
+      /```bash\n *codex exec --skip-git-repo-check --sandbox workspace-write \\\n *-c 'model_reasoning_effort="high"' \\\n *-c 'sandbox_workspace_write\.network_access=false' \\\n *-c 'sandbox_workspace_write\.writable_roots=\[\]' \\\n *-c 'sandbox_workspace_write\.exclude_slash_tmp=true' \\\n *-c 'sandbox_workspace_write\.exclude_tmpdir_env_var=true' \\\n *-c 'approvals_reviewer="guardian_subagent"' \\\n *-c 'approval_policy=\{granular=\{rules=false,sandbox_approval=false,skill_approval=false,request_permissions=false,mcp_elicitations=false\}\}' \\\n *-c 'memories\.use_memories=false' \\\n *-c 'memories\.generate_memories=false' \\\n *-c 'mcp_servers\.[^']+\.command="node"' \\\n *-c 'mcp_servers\.[^']+\.enabled=false' \\\n *'<the same reviewer request>' < \/dev\/null/,
+      "round-two launch form with the git-repo check skipped, no model and high reasoning effort, the sandbox, network policy, and writable roots named, the guardian named, escalation refused by configuration, memories pinned off, the author server disabled, and stdin closed",
     ],
     [
       "doesNotMatch",
@@ -881,6 +875,26 @@ const CONVENTIONS_SECTION = [
   "code, and a misplaced module boundary are not requests for abstraction, so it",
   "does not cover them.",
 ].join(" ");
+
+// The server cannot tell where a lens review was asked for, so this sentence
+// in the author guidance is the whole rule.
+export const LENS_REVIEW_REQUEST_RULE =
+  "Pass `lens_review: true` only when the user has asked, in this conversation, for a lens review of this review; never offer, suggest, or start one otherwise.";
+
+export function assertLensReviewRequestRule(document, label) {
+  assert.ok(
+    document.replace(/^ *(?:- )?/gm, "").replace(/\s+/g, " ").includes(LENS_REVIEW_REQUEST_RULE),
+    `${label} does not limit lens_review to an explicit user request`,
+  );
+}
+
+// The bar each lens file exists to carry, which a byte comparison between the
+// source and the package cannot protect.
+const LENS_BAR = "worth fixing before merge, and no nits";
+
+export function assertLensPolicy(document, label) {
+  assert.ok(document.replace(/\s+/g, " ").includes(LENS_BAR), `${label} lost its "${LENS_BAR}" bar`);
+}
 
 export function assertConventionsSection(document, label) {
   const body = extractMarkdownSection(`\n${document}`, CONVENTIONS_HEADING);
