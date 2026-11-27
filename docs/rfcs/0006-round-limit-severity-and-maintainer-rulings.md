@@ -179,8 +179,9 @@ reports `action_required: FINALIZE_LOCAL_GATE`, the action `CLEAN` already
 reports, with today's `required_inputs`. Otherwise every status keeps
 today's action.
 
-Until the gate is minted, an eligible review can still be continued or
-exported for arbitration. The summary names the default, not the only
+Until the gate is minted, an eligible `CONTINUABLE_FINDINGS` review can
+still be continued, and an eligible `HUMAN_REQUIRED` review exported for
+arbitration. The summary names the default, not the only
 option.
 
 #### Lens and successor reviews
@@ -216,8 +217,10 @@ Publication decides nothing differently. Its only local-gate check is
 `validateOpenedLocalGate` (version 1, matching review ID and provider, a
 review in `LOCAL_GATE_PASSED`, and at start a clean worktree whose HEAD is
 the gate's head), and a D1 gate meets it. Publication never compares the
-gate's snapshot, base, or head with the ledger; `localGateReviewMismatch`
-runs only in the report. So what keeps a wrongly minted D1 gate out of
+gate's snapshot, base, or head with the review ledger;
+`localGateReviewMismatch` runs only in the report. Later publication steps
+compare the gate with the authorization copied into the publication ledger
+at start, which a D1 gate meets as well. So what keeps a wrongly minted D1 gate out of
 publication is `finalize_local_gate` itself (the predicate and today's
 snapshot checks) under the store's single-user trust, as for a `CLEAN` gate,
 and the report exposes a mismatch afterwards. `authorize_remote_publication`
@@ -301,9 +304,9 @@ entries keep their IDs and gain `continued_from_review_id`, the ledger they
 were recorded in, kept through chains of continuations as errata keep
 theirs (see Continuations). A ruling that names an earlier one by ID
 therefore still names it after any number of continuations. `finding_ids`
-are IDs in the ledger the ruling was recorded in. How a carried ruling's IDs
-resolve is stated under What a ruling may say (Checked). A named finding may
-not reach a later reviewer, so a ruling's text must state the resulting
+are IDs in the ledger the ruling was recorded in. They link only within that
+ledger (What a ruling may say, Checked), and a named finding may not reach a
+later reviewer, so a ruling's text must state the resulting
 behavior in full, without relying on the finding's text.
 
 Per CONTRIBUTING step 7, a ledger that holds a ruling is written as
@@ -370,22 +373,15 @@ one statement of these rules; other sections refer to it.
 - **Checked.** The reviewer checks the code against the effective scope and
   raises a finding where the code contradicts it. A superseded clause
   produces no contradiction finding. `finding_ids` are needed only to tie a
-  trade-off decision to specific findings, and they resolve as follows:
-  - A ruling recorded in this ledger names this ledger's findings.
-  - A carried ruling names only carried findings: the `carried_findings`
-    entries whose `continued_from_review_id` equals the ruling's and whose
-    `finding_id` is among its `finding_ids`. It never names a finding this
-    ledger raised, even one with the same ID. `carried_findings` hold only
-    the immediate source's open findings, so a ruling carried from further
-    back, or one whose finding closed, names nothing and binds through its
-    text alone.
-
-  A carried finding a ruling names has its trade-off decided and is not
-  raised again. A finding of this ledger a ruling names is decided under it:
-  if the code satisfies the ruled behavior it is `resolved` or
-  `rebuttal_accepted`, with `verification` citing the ruling and the code
-  read. The link is `finding_ids`, not the resolution text, which predates
-  the ruling.
+  trade-off decision to specific findings, and they link only within the
+  ledger the ruling was recorded in. A finding there that a ruling names is
+  decided under it: if the code satisfies the ruled behavior it is
+  `resolved` or `rebuttal_accepted`, with `verification` citing the ruling
+  and the code read. The link is `finding_ids`, not the resolution text,
+  which predates the ruling. A carried ruling names no finding of the
+  continuation, whatever their IDs, and binds through its text alone;
+  carried findings stay scope hints (see Predicate), so the continuation's
+  reviewer raises again whatever still contradicts the effective scope.
 - **Bounded.** A ruling may not tell the reviewer to skip files, areas, or
   review dimensions. It may not lower or cap severities, declare a finding
   resolved without code that carries it, or change the review protocol. A
@@ -416,8 +412,8 @@ requirement text is unchanged and bound into the snapshot hash. Its
 amendments travel beside it. `freezeContinuationSource` takes the source's
 rulings under the source's lock, together with its errata and carried
 findings, and `prepareReview` writes them into the continuation's ledger in
-order, with their IDs unchanged. Carried rulings link only to carried
-findings, as stated under Checked, and the continuation records its own
+order, with their IDs unchanged. Carried rulings name no finding of the
+continuation, as stated under Checked, and the continuation records its own
 rulings in its own W1.
 
 #### Successors
@@ -634,7 +630,7 @@ Each test fails if the behavior it names is removed.
   case the ruled finding closed in round two and another finding caused the
   continuation; the child still receives the full text and origin finding
   ID. A carried ruling naming origin F-003 sits beside the continuation's
-  own F-003, and the carried entry links to the carried finding only. A
+  own F-003 and is not linked to it. A
   successor of a ruled review carries none.
 - A finding answered `rejected` pending a ruling, then decided
   `rebuttal_accepted` under a W1 ruling, closes without making the round
