@@ -6,11 +6,8 @@ const directory = process.argv[2];
 const { command, args } = JSON.parse(process.env.REVIEW_BRIDGE_LAUNCH);
 delete process.env.REVIEW_BRIDGE_LAUNCH;
 const child = spawn(command, args, { stdio: ["ignore", "inherit", "inherit"] });
-// A child that spawned has its exit recorded only after its start, so an exit
-// receipt this runner writes without a start receipt means the spawn failed.
-let started;
-child.once("spawn", () => {
-  started = atomicWriteFile(path.join(directory, "started.json"), JSON.stringify({
+child.once("spawn", async () => {
+  await atomicWriteFile(path.join(directory, "started.json"), JSON.stringify({
     task_id: path.basename(directory), pid: child.pid, runner_pid: process.pid, process_started_at: new Date().toISOString(),
   }));
 });
@@ -18,10 +15,8 @@ let recorded = false;
 async function finish(result) {
   if (recorded) return;
   recorded = true;
-  const exitedAt = new Date().toISOString();
-  await started;
   await atomicWriteFile(path.join(directory, "exit.json"), JSON.stringify({
-    ...result, exited_at: exitedAt,
+    ...result, exited_at: new Date().toISOString(),
   }));
 }
 child.once("error", (error) => finish({ error: error.message }));

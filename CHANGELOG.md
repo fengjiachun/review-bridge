@@ -12,9 +12,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 ### Fixed
 
 - (#237) A local reviewer that started and exited before the launch saw its
-  start is reported as started, not as `Reviewer failed to start: <code>`.
-  The runner now records a spawned reviewer's exit only after its start, and
-  the launch reads the exit receipt before the start receipt.
+  start receipt is no longer reported as `Reviewer failed to start: <code>`.
+  An exit receipt with an exit code or signal means the reviewer spawned, so
+  the launch keeps waiting for the start receipt until its startup deadline.
+  Only an exit receipt carrying a spawn error is reported as a failed start.
 
 ### Internal
 

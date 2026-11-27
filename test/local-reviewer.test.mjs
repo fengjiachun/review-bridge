@@ -376,8 +376,8 @@ test("a reviewer that starts and exits between the poll's receipt reads is repor
   await fsp.writeFile(hook, "const fs = require('node:fs');\nwhile (fs.existsSync(process.env.RB_TEST_RUNNER_HOLD ?? '')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);\n");
   setEnv(t, { NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${JSON.stringify(hook)}`].filter(Boolean).join(" "), RB_TEST_RUNNER_HOLD: hold });
   // That read reports its ENOENT only once the reviewer has started and
-  // exited, so both receipts are on disk at the poll's next exit.json read,
-  // which in origin/main's order followed it in the same iteration.
+  // exited, so the exit.json read after it finds an exit with a code while
+  // the poll still holds no start receipt.
   const readFile = fsp.readFile;
   let held = false;
   t.mock.method(fsp, "readFile", async function (file, ...rest) {
@@ -394,38 +394,37 @@ test("a reviewer that starts and exits between the poll's receipt reads is repor
   assert.equal((await waitForExit(attempt)).code, 0);
 });
 
-test("the runner writes a spawned reviewer's exit receipt only after its start receipt", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "reviewer-receipt-order-"));
+test("an exit with a code and no start receipt leaves the launch indeterminate, not failed to start", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "reviewer-start-missing-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const attempt = path.join(root, "attempt");
   await fsp.mkdir(attempt);
-  // The rename that publishes started.json waits until the runner's event
-  // loop has drained. An exit write that does not wait for the start write
-  // has landed by then; one that waits is still pending on the held start.
-  const order = path.join(root, "order");
-  const hook = path.join(root, "order-hook.cjs");
-  await fsp.writeFile(hook, `const fs = require("node:fs");
-const fsp = require("node:fs/promises");
-const path = require("node:path");
-const rename = fsp.rename;
-let release;
-const held = new Promise((resolve) => { release = resolve; });
-fsp.rename = function (from, to) {
-  return path.basename(to) === "started.json" ? held.then(() => rename.call(this, from, to)) : rename.call(this, from, to);
-};
-process.once("beforeExit", () => {
-  fs.writeFileSync(process.env.RB_TEST_RECEIPT_ORDER, fs.existsSync(path.join(process.argv[2], "exit.json")) ? "exit first" : "start first");
-  release();
-});
+  // In the runner only (the reviewer is node too and inherits NODE_OPTIONS),
+  // the rename that publishes started.json never completes.
+  const hook = path.join(root, "start-hook.cjs");
+  await fsp.writeFile(hook, `const path = require("node:path");
+if (path.basename(process.argv[1] ?? "") === "reviewer-runner.mjs") {
+  const fsp = require("node:fs/promises");
+  const rename = fsp.rename;
+  fsp.rename = function (from, to) {
+    return path.basename(to) === "started.json" ? new Promise(() => {}) : rename.call(this, from, to);
+  };
+}
 `);
-  const runner = spawnSync(process.execPath, ["--require", hook, path.resolve("src/reviewer-runner.mjs"), attempt], {
-    encoding: "utf8",
-    env: { ...process.env, RB_TEST_RECEIPT_ORDER: order, REVIEW_BRIDGE_LAUNCH: JSON.stringify({ command: process.execPath, args: ["-e", ""] }) },
+  setEnv(t, { NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${JSON.stringify(hook)}`].filter(Boolean).join(" ") });
+  // Once the poll has read the exit receipt, the clock moves past its deadline.
+  const readFile = fsp.readFile;
+  let exitRead = false;
+  t.mock.method(fsp, "readFile", async function (file, ...rest) {
+    const content = await readFile.call(this, file, ...rest);
+    if (path.basename(file) === "exit.json") exitRead = true;
+    return content;
   });
-  assert.equal(runner.status, 0, runner.stderr);
-  assert.equal(await fsp.readFile(order, "utf8"), "start first");
-  assert.equal(JSON.parse(await fsp.readFile(path.join(attempt, "started.json"))).task_id, "attempt");
-  assert.equal(JSON.parse(await fsp.readFile(path.join(attempt, "exit.json"))).code, 0);
+  const now = Date.now;
+  t.mock.method(Date, "now", () => now() + (exitRead ? 10_000 : 0));
+  await assert.rejects(startLocalReviewer({ command: process.execPath, cwd: root }, ["-e", ""], attempt), (error) => error.code === "DISPATCH_INDETERMINATE");
+  assert.equal(JSON.parse(await readFile(path.join(attempt, "exit.json"))).code, 0);
+  await assert.rejects(fsp.access(path.join(attempt, "started.json")));
 });
 
 test("runtime lookup skips non-directory PATH entries and a directory named codex, and needs git to start", async (t) => {
