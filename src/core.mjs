@@ -2387,12 +2387,10 @@ async function recordMaintainerRulingWhileLocked(
   if (rulings.length >= MAX_RULINGS) {
     throw new Error(`rulings must contain at most ${MAX_RULINGS} entries`);
   }
-  const next =
-    Math.max(0, ...rulings.map((entry) => Number(entry.id.slice(2)))) + 1;
   review.rulings = [
     ...rulings,
     {
-      id: `R-${String(next).padStart(3, "0")}`,
+      id: `R-${String(rulings.length + 1).padStart(3, "0")}`,
       at: now(),
       round: review.current_round,
       operator_label: operatorLabel,

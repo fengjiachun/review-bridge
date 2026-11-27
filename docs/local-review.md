@@ -216,7 +216,8 @@ characters, stating the decision in full without relying on a finding's
 text), optional `finding_ids` (IDs of this review's findings), and
 `operator_label`, which names the deciding human and authenticates nothing.
 Nothing in a summary points at the tool, and recording one does not wake
-`wait_for_review_state`.
+`wait_for_review_state`, except on a ledger written before transitions were
+stamped, where any change wakes it.
 
 `get_review` and `open_review` carry `rulings` in every round, beside the
 requirement, which stays immutable. The reviewer applies them in order to the

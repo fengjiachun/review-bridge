@@ -80,21 +80,20 @@ const rule = (store, reviewId, text, findingIds = []) =>
     operatorLabel: "Jordan (maintainer)",
   });
 
-const accepted = (findingId) => ({
+const accepted = (findingId, verification = "Read app.js; the rebuttal holds.") => ({
   finding_id: findingId,
   decision: "rebuttal_accepted",
-  rationale: "Decided under the ruling.",
-  verification: "Read app.js against R-001.",
+  rationale: "The rebuttal holds.",
+  verification,
 });
 
-// A review whose round two leaves the given findings open with no dispute.
-async function cleanRoundTwo(state, reviewId) {
+async function cleanRoundTwo(state, reviewId, verification) {
   await prepareRereview(state.store, reviewId);
   const review = await getReview(state.store, reviewId);
   return submitRereview(
     state.store,
     reviewId,
-    review.findings.map((entry) => accepted(entry.id)),
+    review.findings.map((entry) => accepted(entry.id, verification)),
     [],
   );
 }
@@ -169,12 +168,12 @@ test("a finding rejected pending a ruling closes under it without contesting the
   const state = await repositoryFixture(t);
   const reviewId = await inRulingWindow(state, ["major"]);
   await rule(state.store, reviewId, "The value may stay a literal.", ["F-001"]);
-  const review = await cleanRoundTwo(state, reviewId);
+  const review = await cleanRoundTwo(state, reviewId, "Read app.js against R-001.");
   assert.equal(review.status, "CLEAN");
   assert.equal(review.findings[0].status, "REBUTTAL_ACCEPTED");
 });
 
-test("a continuation carries every ruling with its ID and origin, and a successor carries none", async (t) => {
+test("a continuation carries every ruling with its ID and origin across two hops", async (t) => {
   const state = await repositoryFixture(t);
   // Source: F-001 is ruled on and closes in round two; F-002's fix is judged
   // incomplete, which is what continues the review.
@@ -198,7 +197,7 @@ test("a continuation carries every ruling with its ID and origin, and a successo
     state.store,
     prepared.id,
     [
-      accepted("F-001"),
+      accepted("F-001", "Read app.js against R-001."),
       { finding_id: "F-002", decision: "still_open", rationale: "Half done." },
       accepted("F-003"),
     ],
@@ -248,26 +247,57 @@ test("a continuation carries every ruling with its ID and origin, and a successo
   );
 
   // A ruled review at its round limit with only minor and nit findings open
-  // is gated under D1, and serves as a parent whose successor carries none.
+  // is D1-eligible; continuing it instead carries every ruling again, each
+  // still naming the ledger it was recorded in.
   await prepareRereview(state.store, continuation.id);
-  const gated = await submitRereview(
+  const eligible = await submitRereview(
     state.store,
     continuation.id,
-    [
-      accepted("F-001"),
-      accepted("F-002"),
-      { finding_id: "F-003", decision: "rebuttal_accepted", rationale: "Under R-004.", verification: "Read app.js against R-004." },
-    ],
+    [accepted("F-001"), accepted("F-002"), accepted("F-003", "Read app.js against R-004.")],
     [finding("minor", "New")],
   );
-  assert.equal(gated.status, "CONTINUABLE_FINDINGS");
-  await finalizeLocalGate(state.store, continuation.id);
+  assert.equal(eligible.status, "CONTINUABLE_FINDINGS");
+  assert.equal(
+    (await getReviewSummary(state.store, continuation.id)).action_required,
+    "FINALIZE_LOCAL_GATE",
+  );
   await commitValue(state.repository, 5);
-  const successor = await prepare(state);
-  assert.equal(successor.review_strategy.mode, "SUCCESSOR");
-  assert.equal(successor.review_strategy.parent_review_id, continuation.id);
-  assert.deepEqual(successor.rulings, []);
-  assert.equal((await readLedger(state.store, successor.id)).version, 1);
+  const second = await prepare(state, {
+    continuedFromReviewId: continuation.id,
+    forceFullReview: true,
+  });
+  assert.deepEqual(
+    second.rulings.map((entry) => [entry.id, entry.continued_from_review_id]),
+    [
+      ["R-001", prepared.id],
+      ["R-002", prepared.id],
+      ["R-003", prepared.id],
+      ["R-004", continuation.id],
+    ],
+  );
+  const report = renderReviewReport(await readLedger(state.store, second.id));
+  assert.match(report, new RegExp(`Ruling \`R-001\` by [^\\n]+ \\(round 1 of \`${prepared.id}\`, carried from that review, `));
+  assert.match(report, new RegExp(`Ruling \`R-004\` by [^\\n]+ \\(round 1 of \`${continuation.id}\`, carried from that review, `));
+});
+
+test("a ruling is refused once the ledger holds 100, carried ones included", async (t) => {
+  const state = await repositoryFixture(t);
+  const reviewId = await inRulingWindow(state, ["minor"]);
+  const ledger = await readLedger(state.store, reviewId);
+  ledger.version = 2;
+  ledger.rulings = Array.from({ length: 99 }, (_, index) => ({
+    id: `R-${String(index + 1).padStart(3, "0")}`,
+    at: ledger.updated_at,
+    round: 1,
+    operator_label: "Jordan",
+    finding_ids: [],
+    text: `Ruling ${index + 1}.`,
+    ...(index < 50 ? { continued_from_review_id: "rb-2026-01-01T000000-000Z-00000000" } : {}),
+  }));
+  await fsp.writeFile(ledgerPath(state.store, reviewId), `${JSON.stringify(ledger, null, 2)}\n`);
+  const last = await rule(state.store, reviewId, "The hundredth.");
+  assert.equal(last.rulings.at(-1).id, "R-100");
+  await assert.rejects(rule(state.store, reviewId, "One too many."), /at most 100 entries/);
 });
 
 test("a ruling on either side keeps equal requirement texts from matching", async (t) => {
@@ -279,7 +309,7 @@ test("a ruling on either side keeps equal requirement texts from matching", asyn
   await commitValue(state.repository, 3);
   const ruled = await inRulingWindow(state, ["minor"], { forceFullReview: true });
   await rule(state.store, ruled, "The literal stays.", ["F-001"]);
-  assert.equal((await cleanRoundTwo(state, ruled)).status, "CLEAN");
+  assert.equal((await cleanRoundTwo(state, ruled, "Read app.js against R-001.")).status, "CLEAN");
   await finalizeLocalGate(state.store, ruled);
 
   // An untouched file changes, so the delta does not touch the ruled code.
@@ -304,6 +334,9 @@ test("a ruling on either side keeps equal requirement texts from matching", asyn
   assert.equal(onlyRuled.review_strategy.mode, "SUCCESSOR");
   assert.equal(onlyRuled.review_strategy.parent_review_id, ruled);
   assert.equal((await proof(onlyRuled.id, 1)).requirement_match, false);
+  // A successor carries none of its parent's rulings.
+  assert.deepEqual(onlyRuled.rulings, []);
+  assert.equal((await readLedger(state.store, onlyRuled.id)).version, 1);
 
   // Round two of a successor after a W1 ruling: an explicit parent falls back
   // to FULL, an automatic one stays SUCCESSOR and reports the mismatch.

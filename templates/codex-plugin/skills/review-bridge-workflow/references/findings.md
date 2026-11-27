@@ -40,14 +40,19 @@ limit, or human arbitration.
    `get_review` again. Present every persisted disposition from its
    `resolutions`, including its rationale and evidence.
 4. The ruling window is open while the state is `AUTHOR_RESPONDED` in round
-   one, until `prepare_rereview`. When the user decides a finding's trade-off
-   or corrects a requirement clause, record it with
-   `record_maintainer_ruling`: the `text` states the user's decision
-   faithfully and in full, as a property of the change, without depending on
-   the finding's text, `finding_ids` names the findings it decides, and
-   `operator_label` names the human who decided. Never put the decision in
-   resolution text, and never record a ruling the user did not make. To undo
-   a ruling, record one that withdraws it by ID. Then continue as usual.
+   one, until `prepare_rereview`. If a resolution says a ruling is being
+   sought, ask the user for the decision and wait for it before
+   `prepare_rereview`, unless the user chooses to continue without one. When
+   the user decides a finding's trade-off or corrects a requirement clause,
+   record it with `record_maintainer_ruling`: the `text` states the user's
+   decision faithfully and in full, as a property of the change, without
+   depending on the finding's text, `finding_ids` names the findings it
+   decides, and `operator_label` names the human who decided. Never put the
+   decision in resolution text, and never record a ruling the user did not
+   make. To undo a ruling, record one that withdraws it by ID. Then check the
+   head against every recorded ruling: if the ruled behavior needs a code
+   change, make, verify, and commit it before `prepare_rereview`, and count it
+   as a fix below.
    If the state is `AUTHOR_RESPONDED`, require a new commit only when at least
    one resolution is `fixed` — after the pre-commit cleanup — then call
    `prepare_rereview` and `get_review`
@@ -55,8 +60,8 @@ limit, or human arbitration.
    authoritative `head_sha` values with `git diff --name-only` to derive the
    actual fix files, and present them with the latest `head_sha` as the
    committed fix head. If every
-   resolution is `rejected`, report that the rereview is rebuttal-only and no
-   code commit was required.
+   resolution is `rejected` and no ruling required a change, report that the
+   rereview is rebuttal-only and no code commit was required.
    If the state is instead `HUMAN_REQUIRED`, report the escalation reason and
    all persisted resolutions, then stop and follow the human-arbitration flow.
    When at least one of those resolutions is `fixed`, also state that no

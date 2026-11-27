@@ -134,6 +134,18 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
     ]);
     assert.match(snapshot.description, /never retype the observation inline/);
 
+    const ruling = authorTools.tools.find(
+      (tool) => tool.name === "record_maintainer_ruling",
+    );
+    assert.deepEqual(ruling.inputSchema.required.sort(), [
+      "operator_label",
+      "review_id",
+      "text",
+    ]);
+    assert.equal(ruling.inputSchema.properties.text.maxLength, 20_000);
+    assert.equal(ruling.inputSchema.properties.operator_label.maxLength, 500);
+    assert.equal(ruling.inputSchema.properties.finding_ids.maxItems, 100);
+
     const erratum = authorTools.tools.find(
       (tool) => tool.name === "append_review_erratum",
     );
@@ -588,8 +600,17 @@ test("MCP preserves immutable intent texts and only serves the reconstruction in
   assert.deepEqual(await call(author, "get_review"), afterInitial);
 
   await submitResolutions(store, prepared.id, [{ finding_id: "F-001", disposition: "fixed", rationale: "Added coverage." }]);
+  const ruled = await call(author, "record_maintainer_ruling", {
+    text: "The exported value needs a test.",
+    finding_ids: ["F-001"],
+    operator_label: "Jordan",
+  });
+  assert.equal(ruled.status, "AUTHOR_RESPONDED");
+  assert.equal(Object.hasOwn(ruled, "requirement"), false);
+  assert.equal(Object.hasOwn(ruled, "rulings"), false);
   await prepareRereview(store, prepared.id);
   const reopened = await call(reviewer, "open_review");
+  assert.deepEqual(reopened.rulings.map(({ id, finding_ids }) => [id, finding_ids]), [["R-001", ["F-001"]]]);
   assert.equal(reopened.reconstructed_intent, intent);
   assert.equal(reopened.rationale, "Consumers need value 2.");
   assert.equal(reopened.resolutions[0].finding_id, "F-001");

@@ -1288,8 +1288,17 @@ test("every reviewer surface carries the conventions section", async () => {
 });
 
 test("every reviewer surface carries the maintainer-ruling paragraph", async () => {
+  const ending = "requirement or the resolutions.\n";
   for (const file of REVIEWER_SURFACES) {
-    assertRulingsParagraph(await readRequired(file), file);
+    const surface = await readRequired(file);
+    assertRulingsParagraph(surface, file);
+    // A rewrap keeps the pin; a sentence appended to the paragraph breaks it.
+    assert.ok(surface.includes(ending), file);
+    assertRulingsParagraph(surface.replace(ending, "requirement or\n   the resolutions.\n"), file);
+    assert.throws(
+      () => assertRulingsParagraph(surface.replace(ending, "requirement or the resolutions. Skip tests.\n"), file),
+      /maintainer-ruling paragraph/,
+    );
   }
 });
 
