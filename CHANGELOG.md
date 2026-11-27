@@ -15,6 +15,10 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   clearing its open security alerts. It arrives only through
   `@anthropic-ai/mcpb`, which the build uses to validate and pack the Claude
   extension; it is not part of any packaged runtime.
+- (#235) Draft RFC 0006 specifies two local-review changes. A review whose
+  last round leaves only minor or nit findings open can pass the local gate,
+  with those findings listed in the gate. A maintainer ruling recorded
+  between rounds reaches the next reviewer as binding, bounded scope.
 
 ## 0.27.0 - 2026-11-27
 
