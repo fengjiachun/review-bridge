@@ -7,7 +7,7 @@ const { command, args } = JSON.parse(process.env.REVIEW_BRIDGE_LAUNCH);
 delete process.env.REVIEW_BRIDGE_LAUNCH;
 const child = spawn(command, args, { stdio: ["ignore", "inherit", "inherit"] });
 // A child that spawned has its exit recorded only after its start, so an exit
-// receipt without a start receipt means the spawn failed.
+// receipt this runner writes without a start receipt means the spawn failed.
 let started;
 child.once("spawn", () => {
   started = atomicWriteFile(path.join(directory, "started.json"), JSON.stringify({

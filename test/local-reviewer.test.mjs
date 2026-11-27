@@ -374,9 +374,10 @@ test("a reviewer that starts and exits between the poll's receipt reads is repor
   const hook = path.join(root, "hold-hook.cjs");
   await fsp.writeFile(hold, "");
   await fsp.writeFile(hook, "const fs = require('node:fs');\nwhile (fs.existsSync(process.env.RB_TEST_RUNNER_HOLD ?? '')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);\n");
-  setEnv(t, { NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${hook}`].filter(Boolean).join(" "), RB_TEST_RUNNER_HOLD: hold });
-  // That read is held until the reviewer has started and exited, so both
-  // receipts land before the poll reads exit.json.
+  setEnv(t, { NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${JSON.stringify(hook)}`].filter(Boolean).join(" "), RB_TEST_RUNNER_HOLD: hold });
+  // That read reports its ENOENT only once the reviewer has started and
+  // exited, so both receipts are on disk at the poll's next exit.json read,
+  // which in origin/main's order followed it in the same iteration.
   const readFile = fsp.readFile;
   let held = false;
   t.mock.method(fsp, "readFile", async function (file, ...rest) {
