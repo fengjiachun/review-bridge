@@ -117,6 +117,10 @@ code the predicate can hold only in round two. Only the initial review sets
 `REVIEW_SUBMITTED`, so an author's `human_required` answer occurs only in
 round one, and a round-two `HUMAN_REQUIRED` comes from `REREVIEW_UNRESOLVED`.
 Rule 4 covers disputed and undisputed findings alike, as the owner decided.
+Ledgers continued by releases before 0.10.0 carry no continuation marker, so
+rule 3 cannot see those continuations and the summary may report
+`FINALIZE_LOCAL_GATE` for such a source; finalizing one still requires its
+round-two tree, and no scan of other ledgers is made.
 
 One exported function in `src/core.mjs` computes the predicate, for the
 summary, `finalize_local_gate`, and the report's next-step line. It decides
