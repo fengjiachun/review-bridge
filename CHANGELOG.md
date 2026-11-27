@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.28.0 - 2026-11-27
 
 ### Added
 
@@ -37,6 +37,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Internal
 
+- (#241) Release 0.28.0.
 - (#209) Move the development dependency `node-forge` from 1.4.0 to 1.4.3,
   clearing its open security alerts. It arrives only through
   `@anthropic-ai/mcpb`, which the build uses to validate and pack the Claude
