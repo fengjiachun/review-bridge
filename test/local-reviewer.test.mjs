@@ -399,32 +399,33 @@ test("the runner writes a spawned reviewer's exit receipt only after its start r
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const attempt = path.join(root, "attempt");
   await fsp.mkdir(attempt);
-  // In the runner only (the reviewer is node too and inherits NODE_OPTIONS),
-  // the rename that publishes started.json waits until the event loop has
-  // drained. An exit write that does not wait for the start write has landed
-  // by then; one that waits is still pending on the held start.
+  // The rename that publishes started.json waits until the runner's event
+  // loop has drained. An exit write that does not wait for the start write
+  // has landed by then; one that waits is still pending on the held start.
   const order = path.join(root, "order");
   const hook = path.join(root, "order-hook.cjs");
   await fsp.writeFile(hook, `const fs = require("node:fs");
+const fsp = require("node:fs/promises");
 const path = require("node:path");
-if (path.basename(process.argv[1] ?? "") === "reviewer-runner.mjs") {
-  const fsp = require("node:fs/promises");
-  const rename = fsp.rename;
-  let release;
-  const held = new Promise((resolve) => { release = resolve; });
-  fsp.rename = function (from, to) {
-    return path.basename(to) === "started.json" ? held.then(() => rename.call(this, from, to)) : rename.call(this, from, to);
-  };
-  process.once("beforeExit", () => {
-    fs.writeFileSync(process.env.RB_TEST_RECEIPT_ORDER, fs.existsSync(path.join(process.argv[2], "exit.json")) ? "exit first" : "start first");
-    release();
-  });
-}
+const rename = fsp.rename;
+let release;
+const held = new Promise((resolve) => { release = resolve; });
+fsp.rename = function (from, to) {
+  return path.basename(to) === "started.json" ? held.then(() => rename.call(this, from, to)) : rename.call(this, from, to);
+};
+process.once("beforeExit", () => {
+  fs.writeFileSync(process.env.RB_TEST_RECEIPT_ORDER, fs.existsSync(path.join(process.argv[2], "exit.json")) ? "exit first" : "start first");
+  release();
+});
 `);
-  setEnv(t, { NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${JSON.stringify(hook)}`].filter(Boolean).join(" "), RB_TEST_RECEIPT_ORDER: order });
-  assert.equal((await startLocalReviewer({ command: process.execPath, cwd: root }, ["-e", ""], attempt)).task_id, "attempt");
-  assert.equal((await waitForExit(attempt)).code, 0);
+  const runner = spawnSync(process.execPath, ["--require", hook, path.resolve("src/reviewer-runner.mjs"), attempt], {
+    encoding: "utf8",
+    env: { ...process.env, RB_TEST_RECEIPT_ORDER: order, REVIEW_BRIDGE_LAUNCH: JSON.stringify({ command: process.execPath, args: ["-e", ""] }) },
+  });
+  assert.equal(runner.status, 0, runner.stderr);
   assert.equal(await fsp.readFile(order, "utf8"), "start first");
+  assert.equal(JSON.parse(await fsp.readFile(path.join(attempt, "started.json"))).task_id, "attempt");
+  assert.equal(JSON.parse(await fsp.readFile(path.join(attempt, "exit.json"))).code, 0);
 });
 
 test("runtime lookup skips non-directory PATH entries and a directory named codex, and needs git to start", async (t) => {

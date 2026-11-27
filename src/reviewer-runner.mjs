@@ -18,9 +18,10 @@ let recorded = false;
 async function finish(result) {
   if (recorded) return;
   recorded = true;
+  const exitedAt = new Date().toISOString();
   await started;
   await atomicWriteFile(path.join(directory, "exit.json"), JSON.stringify({
-    ...result, exited_at: new Date().toISOString(),
+    ...result, exited_at: exitedAt,
   }));
 }
 child.once("error", (error) => finish({ error: error.message }));
