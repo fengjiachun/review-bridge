@@ -123,14 +123,14 @@ test("a ruling is recorded only in the window between round one and round two", 
   assert.equal("rulings" in before, false);
   assert.deepEqual((await getReview(state.store, prepared.id)).rulings, []);
 
-  const summary = await rule(state.store, prepared.id, "The literal stays a number.", ["F-001"]);
+  const recorded = await rule(state.store, prepared.id, "The literal stays a number.", ["F-001"]);
   const after = await readLedger(state.store, prepared.id);
   assert.equal(after.version, 2);
   assert.equal(after.state_version, before.state_version + 1);
   assert.equal(after.last_transition_state_version, before.last_transition_state_version);
   assert.equal(after.status, "AUTHOR_RESPONDED");
   assert.deepEqual(after.history, before.history);
-  assert.deepEqual(summary.rulings, [
+  assert.deepEqual(recorded.rulings, [
     {
       id: "R-001",
       at: after.rulings[0].at,
@@ -161,7 +161,7 @@ test("a ruling is recorded only in the window between round one and round two", 
   await assert.rejects(rule(state.store, prepared.id, "Too late."), refused);
   const opened = await openReview(state.store, prepared.id);
   assert.equal(opened.current_round, 2);
-  assert.deepEqual(opened.rulings, summary.rulings);
+  assert.deepEqual(opened.rulings, recorded.rulings);
 });
 
 test("a finding rejected pending a ruling closes under it without contesting the round", async (t) => {
@@ -190,7 +190,7 @@ test("a continuation carries every ruling with its ID and origin across two hops
     { finding_id: "F-003", disposition: "rejected", rationale: "Ruling sought." },
   ]);
   await rule(state.store, prepared.id, "The value may stay a literal.", ["F-001"]);
-  await rule(state.store, prepared.id, "The third issue is accepted as is.", ["F-003"]);
+  await rule(state.store, prepared.id, "app.js may export the value without a JSDoc comment.", ["F-003"]);
   await rule(state.store, prepared.id, "R-002 is withdrawn.");
   await prepareRereview(state.store, prepared.id);
   const source = await submitRereview(
@@ -235,7 +235,7 @@ test("a continuation carries every ruling with its ID and origin across two hops
       rationale: "Ruling sought.",
     })),
   );
-  const own = await rule(state.store, continuation.id, "Own third is fine.", ["F-003"]);
+  const own = await rule(state.store, continuation.id, "app.js exports exactly one binding, named value.", ["F-003"]);
   assert.deepEqual(
     own.rulings.map((entry) => [entry.id, entry.finding_ids, entry.continued_from_review_id ?? null]),
     [
@@ -396,4 +396,29 @@ test("the arbitration export and both report tiers show every ruling, withdrawn 
     renderReviewBrief(ledger),
     /- 2 maintainer rulings: `R-001` by Jordan \(maintainer\), `R-002` by Jordan \(maintainer\); the full report prints each\./,
   );
+});
+
+test("a CLEAN round two on an unchanged head is gated with its own successor proof", async (t) => {
+  const state = await repositoryFixture(t);
+  const parent = await prepare(state, { forceFullReview: true });
+  await submitInitialReview(state.store, parent.id, []);
+  await finalizeLocalGate(state.store, parent.id);
+  await commitValue(state.repository, 3);
+  // Round two captures the same head, so both rounds share one snapshot hash,
+  // but the ruling turns round two's proof into a requirement mismatch.
+  const child = await inRulingWindow(state, ["minor"]);
+  await rule(state.store, child, "The literal stays.", ["F-001"]);
+  const clean = await cleanRoundTwo(state, child, "Read app.js against R-001.");
+  assert.equal(clean.status, "CLEAN");
+  assert.equal(clean.rounds[0].snapshot_hash, clean.rounds[1].snapshot_hash);
+  assert.equal(clean.rounds[0].successor.requirement_match, true);
+  assert.equal(clean.rounds[1].successor.requirement_match, false);
+
+  const proof = path.join(state.store, "reviews", child, "rounds", "2", "successor.json");
+  const bytes = await fsp.readFile(proof);
+  await fsp.rm(proof);
+  await assert.rejects(finalizeLocalGate(state.store, child), /successor/);
+  await fsp.writeFile(proof, bytes);
+  const { review } = await finalizeLocalGate(state.store, child);
+  assert.equal(review.status, "LOCAL_GATE_PASSED");
 });

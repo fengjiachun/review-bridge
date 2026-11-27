@@ -2653,9 +2653,11 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
       `only a CLEAN review, or one at its round limit with only minor or nit findings open, can be finalized (status=${review.status})`,
     );
   }
+  // A round two on an unchanged head shares round one's snapshot hash, yet a
+  // ruling can change its successor proof, so the verdict's round is the last.
   const gatedRound = atRoundLimit
     ? review.rounds.at(-1)
-    : review.rounds.find(
+    : review.rounds.findLast(
         (round) => round.snapshot_hash === review.clean_snapshot_hash,
       );
   if (!gatedRound) {

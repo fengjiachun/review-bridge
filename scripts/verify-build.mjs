@@ -524,7 +524,7 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /require a new commit only when at least\s+one resolution is `fixed`/,
+  /require a new commit only when at least\s+one resolution is `fixed` or the effective scope needs a code change/,
 );
 assert.match(workflowSkill, /rereview is rebuttal-only and no\s+code commit was required/);
 assert.match(

@@ -39,24 +39,29 @@ limit, or human arbitration.
 3. Call `submit_resolutions` with one entry for every finding, then call
    `get_review` again. Present every persisted disposition from its
    `resolutions`, including its rationale and evidence.
-4. The ruling window is open while the state is `AUTHOR_RESPONDED` in round
-   one, until `prepare_rereview`. If a resolution says a ruling is being
-   sought, ask the user for the decision and wait for it before
-   `prepare_rereview`, unless the user chooses to continue without one. When
-   the user decides a finding's trade-off or corrects a requirement clause,
-   record it with `record_maintainer_ruling`: the `text` states the user's
-   decision faithfully and in full, as a property of the change, without
-   depending on the finding's text, `finding_ids` names the findings it
-   decides, and `operator_label` names the human who decided. Never put the
+4. Read the persisted status first. Any `human_required` resolution moves the
+   whole batch to `HUMAN_REQUIRED`, where no ruling can be recorded: go
+   straight to the `HUMAN_REQUIRED` paragraph below. In `AUTHOR_RESPONDED`
+   the ruling window is open until `prepare_rereview`. If a resolution says
+   a ruling is being sought, ask the user for the decision and wait for it
+   before `prepare_rereview`, unless the user chooses to continue without
+   one. When the user decides a finding's trade-off or corrects a requirement
+   clause, record it with `record_maintainer_ruling`: the `text` states the
+   user's decision faithfully and in full, as a property of the change,
+   without depending on the finding's text, `finding_ids` names the findings
+   it decides, and `operator_label` names the human who decided. Never put the
    decision in resolution text, and never record a ruling the user did not
-   make. To undo a ruling, record one that withdraws it by ID. Then check the
-   head against every recorded ruling: if the ruled behavior needs a code
-   change, make, verify, and commit it before `prepare_rereview`, and count it
-   as a fix below.
+   make. To undo a ruling, record one that withdraws it by ID. A ledger that
+   already holds 100 rulings refuses another; then the decision goes to
+   arbitration or to a fresh review that is not a continuation, whose
+   requirement states every decision that should still bind. Then apply the
+   rulings in ledger order, withdrawals and replacements included, and check
+   the head against the resulting effective scope.
    If the state is `AUTHOR_RESPONDED`, require a new commit only when at least
-   one resolution is `fixed` — after the pre-commit cleanup — then call
-   `prepare_rereview` and `get_review`
-   again. For fixed resolutions, compare the preceding and latest rounds'
+   one resolution is `fixed` or the effective scope needs a code change —
+   after the pre-commit cleanup — then call `prepare_rereview` and
+   `get_review` again. When a commit was required,
+   compare the preceding and latest rounds'
    authoritative `head_sha` values with `git diff --name-only` to derive the
    actual fix files, and present them with the latest `head_sha` as the
    committed fix head. If every

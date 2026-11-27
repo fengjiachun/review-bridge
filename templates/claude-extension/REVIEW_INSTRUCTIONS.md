@@ -16,11 +16,10 @@ When the user asks to review a pending Codex task:
      the delta changes a contract used by files outside it, it touches a
      security or compatibility surface, or the successor proof fails to verify.
      Delta size alone is not a reason, and neither is unfocused doubt.
-     When the proof reports `requirement_match: false`, the parent gate was
-     granted while reviewing for `parent_requirement`, not for this task's
-     requirement, or a ruling on either side amended an equal text. The
-     parent's code was reviewed, but not with this question in mind: read the
-     already-gated code the current effective scope bears on, using
+     When the proof reports `requirement_match: false`, the parent's recorded
+     text, `parent_requirement`, differs from this task's, or either review
+     holds a ruling. The parent's code was reviewed, but not against this
+     effective scope: read the already-gated code it bears on, using
      `read_snapshot_file` and `search_snapshot`, before trusting the delta
      alone.
    - `FULL`: read `patch.diff` through `current_snapshot.patch_index`, which
@@ -154,8 +153,9 @@ When the user asks to review a pending Codex task:
       the cited code, concrete enough that an auditor can replay it.
       Conclusions are not verification. The server enforces only presence and
       length, not whether the verification is true. `verification` is optional
-      for `resolved` and `still_open` decisions, except a decision under a
-      ruling, which cites the ruling and the code read.
+      for `resolved` and `still_open` decisions, except that a `resolved`
+      decision closing a finding a ruling names cites the ruling and the code
+      read.
     - `still_open`: the concern remains.
 11. Report new findings separately. A `still_open` decision on a rebuttal sends
     the task to human arbitration. Otherwise a `still_open` fix and any new

@@ -29,8 +29,8 @@ After a verdict, load [Handle findings](findings.md) for findings or
    still has to pass the full successor proof. It prefers a parent gated for
    the same requirement, and when none exists it records the parent's
    requirement and `requirement_match: false` in the proof so the reviewer
-   knows the gate was granted while reviewing for different work. A ruling on
-   either side also makes equal texts a mismatch. Naming a
+   knows the gate was not granted against the current requirement as it now
+   stands. A match needs equal texts and no ruling on either review. Naming a
    parent explicitly still requires the requirement to match exactly, because
    there a mismatch means you picked the wrong parent. The
    result reports `review_strategy.parent_selection` as `AUTOMATIC`,

@@ -406,7 +406,7 @@ if (role === "author") {
       summarized(
         recordMaintainerRuling(storeRoot, input.review_id, {
           text: input.text,
-          findingIds: input.finding_ids ?? [],
+          findingIds: input.finding_ids,
           operatorLabel: input.operator_label,
         }),
       ),

@@ -142,7 +142,9 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       "review_id",
       "text",
     ]);
+    assert.equal(ruling.inputSchema.properties.text.minLength, 1);
     assert.equal(ruling.inputSchema.properties.text.maxLength, 20_000);
+    assert.equal(ruling.inputSchema.properties.operator_label.minLength, 1);
     assert.equal(ruling.inputSchema.properties.operator_label.maxLength, 500);
     assert.equal(ruling.inputSchema.properties.finding_ids.maxItems, 100);
 
@@ -601,7 +603,7 @@ test("MCP preserves immutable intent texts and only serves the reconstruction in
 
   await submitResolutions(store, prepared.id, [{ finding_id: "F-001", disposition: "fixed", rationale: "Added coverage." }]);
   const ruled = await call(author, "record_maintainer_ruling", {
-    text: "The exported value needs a test.",
+    text: "The exported value needs no dedicated test: app.js exports the plain literal 2.",
     finding_ids: ["F-001"],
     operator_label: "Jordan",
   });
@@ -615,7 +617,12 @@ test("MCP preserves immutable intent texts and only serves the reconstruction in
   assert.equal(reopened.rationale, "Consumers need value 2.");
   assert.equal(reopened.resolutions[0].finding_id, "F-001");
   const comparison = "  Agrees on the new constant.\nConsumer motivation was inferred.  ";
-  const decisions = [{ finding_id: "F-001", decision: "resolved", rationale: "Coverage now exists." }];
+  const decisions = [{
+    finding_id: "F-001",
+    decision: "resolved",
+    rationale: "Decided under R-001.",
+    verification: "R-001 rules the test unwanted; read app.js, which exports the literal 2.",
+  }];
   await call(reviewer, "submit_rereview", { decisions, new_findings: [], intent_comparison: comparison });
   const complete = await call(author, "get_review");
   assert.equal(complete.status, "CLEAN");

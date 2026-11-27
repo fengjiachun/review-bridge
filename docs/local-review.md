@@ -288,9 +288,10 @@ it means the wrong parent was named. Server-side selection asserts nothing:
 requirements are free text that authors reword between rounds of the same work,
 so equality there would reject nearly every real continuation. Selection prefers
 a parent gated for the same requirement, and otherwise records the parent's
-requirement and `requirement_match: false` in the proof. A reviewer that sees
-`requirement_match: false` knows the parent's code was reviewed, but not with
-the current question in mind, and reads the gated code that question bears on
+requirement and `requirement_match: false` in the proof. A match needs equal
+texts and no maintainer ruling on either review. A reviewer that sees
+`requirement_match: false` knows the parent's code was not reviewed against
+the current effective scope, and reads the gated code that scope bears on
 rather than trusting the delta alone.
 
 A valid `SUCCESSOR` task includes:

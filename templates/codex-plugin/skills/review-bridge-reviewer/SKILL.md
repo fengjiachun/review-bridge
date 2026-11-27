@@ -27,10 +27,10 @@ reviewer task.
      the delta changes a contract used outside it, touches a security or
      compatibility surface, or the successor proof fails to verify. Delta size
      alone is not a reason. When the proof reports `requirement_match: false`,
-     the parent gate was granted while reviewing for `parent_requirement`, or
-     a ruling on either side amended an equal text: read the already-gated
-     code the current effective scope bears on before trusting the delta
-     alone.
+     the parent's recorded text, `parent_requirement`, differs from this
+     review's, or either review holds a ruling, so the gate was not granted
+     against this effective scope: read the already-gated code it bears on
+     before trusting the delta alone.
    - `FULL`: read `patch.diff` through `current_snapshot.patch_index`, which
      gives each file's byte offset and length. Read the sections the reviewed
      behavior depends on and skip sections that cannot affect it, such as
@@ -155,7 +155,8 @@ reviewer task.
    an auditor can replay it. Conclusions are not verification. The server
    enforces only presence and length, not whether the verification is true.
    `verification` is optional for `resolved` and `still_open` decisions,
-   except a decision under a ruling, which cites the ruling and the code read.
+   except that a `resolved` decision closing a finding a ruling names cites
+   the ruling and the code read.
 
 The immutable snapshot and Review Bridge ledger are the source of truth. Do not
 substitute the live working tree or inherited chat context.
