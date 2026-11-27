@@ -3,7 +3,13 @@
 Only if publication is authorized, continue to [Publish through GitHub](publication.md).
 
 - If the reviewer returns `CLEAN`, call `finalize_local_gate`.
-- Finalization must fail if the working tree changed after the clean
+- If a round-two `CONTINUABLE_FINDINGS` or `HUMAN_REQUIRED` review's summary
+  reports `FINALIZE_LOCAL_GATE`, every open finding is `minor` or `nit`.
+  Present each one from `active_findings`, then call `finalize_local_gate`;
+  the gate lists them under `open_findings`. Until the gate is minted, a
+  `CONTINUABLE_FINDINGS` review can instead be continued and a
+  `HUMAN_REQUIRED` one exported for arbitration.
+- Finalization must fail if the working tree changed after the gated
   verdict.
 - Treat `LOCAL_GATE_PASSED` as permission to continue the user's publication
   workflow, not as permission by itself to push or create a pull request.
@@ -15,8 +21,9 @@ Only if publication is authorized, continue to [Publish through GitHub](publicat
   goes through the ordinary tools. The report is a projection of the ledger,
   not evidence, and a failure in this step changes no gate and no workflow
   state.
-- If the state is `HUMAN_REQUIRED`, call `get_review_summary`, then call
-  `export_human_arbitration` with its exact `state_version`. Give the returned
+- If the state is `HUMAN_REQUIRED`, call `get_review_summary`. Unless it
+  reports `FINALIZE_LOCAL_GATE`, call `export_human_arbitration` with its
+  exact `state_version`. Give the returned
   Markdown to the human or externally coordinated reviewer. The export is
   read-only and does not authorize publication. Do not start a third model
   round.

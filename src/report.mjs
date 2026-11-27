@@ -2,7 +2,13 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { loadReview, requireReviewVersions, reviewSummary } from "./core.mjs";
+import {
+  isFinalizableAtRoundLimit,
+  loadReview,
+  openFindings,
+  requireReviewVersions,
+  reviewSummary,
+} from "./core.mjs";
 import {
   canonicalDigest,
   checkRequiredRuns,
@@ -490,6 +496,15 @@ function changesSection(review) {
   ];
 }
 
+// A final-round HUMAN_REQUIRED review with only minor or nit findings open can
+// be finalized instead, so arbitration is then an alternative.
+function arbitrationLine(review, reason) {
+  const event = reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`;
+  return isFinalizableAtRoundLimit(review)
+    ? `Human arbitration available: ${event}; the local gate can be finalized instead`
+    : `Human arbitration required: ${event}`;
+}
+
 function outcomeSection(review) {
   const history = review.history ?? [];
   const lines = [
@@ -497,7 +512,18 @@ function outcomeSection(review) {
       ? `- Terminal state: ${code(review.status)}`
       : `- Current status: ${code(review.status)} (not terminal: the review is still in progress)`,
   ];
-  if (CLEAN_STATUSES.includes(review.status)) {
+  // A review gated at the round limit holds findings still open, so it is
+  // not called clean.
+  const gatedOpen =
+    review.status === "LOCAL_GATE_PASSED" ? openFindings(review).length : 0;
+  if (gatedOpen > 0) {
+    lines.push(
+      `- Gated at the round limit with ${count(gatedOpen, "finding")} open`,
+    );
+    if (review.clean_snapshot_hash != null) {
+      lines.push(`- Gated snapshot: ${code(review.clean_snapshot_hash)}`);
+    }
+  } else if (CLEAN_STATUSES.includes(review.status)) {
     lines.push(`- Rounds to CLEAN: ${review.current_round}`);
     if (review.clean_snapshot_hash != null) {
       lines.push(`- Clean snapshot: ${code(review.clean_snapshot_hash)}`);
@@ -507,9 +533,7 @@ function outcomeSection(review) {
     const reason = [...history]
       .reverse()
       .find((entry) => HUMAN_REQUIRED_EVENTS.includes(entry?.event));
-    lines.push(
-      `- Human arbitration required: ${reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`}`,
-    );
+    lines.push(`- ${arbitrationLine(review, reason)}`);
   }
   const carried = review.carried_findings ?? [];
   if (carried.length > 0) {
@@ -741,7 +765,7 @@ export function summaryDigest(summary) {
 // Raise it by one in any change that alters the Markdown this module renders
 // -- wording, ordering, a new line, a heading -- so the reports the previous
 // version wrote stay readable at their own names.
-export const REPORT_FORMAT = 12;
+export const REPORT_FORMAT = 13;
 
 // `r<state_version>[-p<revision>-s<summary digest>]-f<format>` with a review,
 // `p<revision>-s<summary digest>-f<format>` without one.
@@ -769,10 +793,6 @@ export function reportRevision(review, publication, summary = null) {
 // and states the counting rule instead of the conclusion.
 
 const SEVERITY_ORDER = ["blocker", "major", "minor", "nit"];
-// Settled where core says settled: submitRereview writes exactly these two
-// statuses as an end. Everything else -- raised, answered, escalated, or
-// contested -- is open, and is what the brief leads with.
-const SETTLED_STATUSES = new Set(["RESOLVED", "REBUTTAL_ACCEPTED"]);
 // What an open finding is still waiting on, from its own status alone.
 const OPEN_FINDING_STATE = {
   OPEN: "no author response yet",
@@ -790,7 +810,7 @@ function partitionFindings(review) {
   const findings = review.findings ?? [];
   return {
     all: findings,
-    open: findings.filter((finding) => !SETTLED_STATUSES.has(finding.status)),
+    open: openFindings({ findings }),
     resolved: findings.filter((finding) => finding.status === "RESOLVED"),
     rebutted: findings.filter((finding) => finding.status === "REBUTTAL_ACCEPTED"),
   };
@@ -1007,14 +1027,20 @@ const LOCAL_NEXT_STEP = {
   CONTINUABLE_FINDINGS: "the open findings are addressed in a fresh full review",
 };
 
-function destinationSentence(review, publication, summary) {
+function finalizableNextStep(openCount) {
+  return `the local gate can be finalized next with ${count(openCount, "minor or nit finding")} left open`;
+}
+
+function destinationSentence(review, publication, summary, openCount) {
   if (publication != null) {
     return `Publication ${pullRequestName(publication)}: ${publicationStanding(publication, summary)}.`;
   }
   if (review?.status === "LOCAL_GATE_PASSED") {
     return `The local gate passed over snapshot ${code(review.clean_snapshot_hash)}; no publication ledger was rendered, so nothing here is merged.`;
   }
-  const next = Object.hasOwn(LOCAL_NEXT_STEP, review?.status)
+  const next = isFinalizableAtRoundLimit(review)
+    ? finalizableNextStep(openCount)
+    : Object.hasOwn(LOCAL_NEXT_STEP, review?.status)
     ? LOCAL_NEXT_STEP[review.status]
     : `its status ${code(review?.status)} names no next step here; inspect the ledger`;
   return `Next: ${next}. No publication ledger was rendered, so nothing here is merged or gated.`;
@@ -1048,7 +1074,7 @@ function verdictLines(review, publication, summary, partition) {
     : " (not a terminal state: the review is still in progress)";
   return [
     `**${inline(review.status)}** — ${standing}${carried}${qualifier}.`,
-    destinationSentence(review, publication, summary),
+    destinationSentence(review, publication, summary, open),
   ];
 }
 
@@ -1214,7 +1240,13 @@ function nextStepLine(local, publication, summary) {
       ? null
       : `- Next step: ${code(summary.next_action)}, from the publication summary.`;
   }
-  return `- Next step: ${code(local.action_required)}, from the review summary.`;
+  // A review that is not CLEAN reports FINALIZE_LOCAL_GATE only when it is
+  // finalizable at the round limit, with its open findings left open.
+  const leftOpen =
+    local.action_required === "FINALIZE_LOCAL_GATE" && local.status !== "CLEAN"
+      ? `: ${finalizableNextStep(local.active_findings.length)}`
+      : "";
+  return `- Next step: ${code(local.action_required)}, from the review summary${leftOpen}.`;
 }
 
 function openItemsSection(local, publication, summary) {
@@ -1305,9 +1337,7 @@ function aboutReviewSection(review, partition, timings) {
     const reason = [...(review.history ?? [])]
       .reverse()
       .find((entry) => HUMAN_REQUIRED_EVENTS.includes(entry?.event));
-    lines.push(
-      `- Human arbitration required: ${reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`}.`,
-    );
+    lines.push(`- ${arbitrationLine(review, reason)}.`);
   }
   return ["## About this review", lines.join("\n")];
 }
@@ -1572,7 +1602,7 @@ export async function loadReportLedgers(
     if (mismatch != null) {
       throw reportError(
         "LOCAL_GATE_INVALID",
-        `gate.json of ${reviewId} attests ${mismatch.field} ${JSON.stringify(mismatch.gate)}, but the review holds ${JSON.stringify(mismatch.review)}`,
+        `gate.json of ${reviewId} attests ${mismatch.field} ${mismatch.gate_absent ? "absent" : JSON.stringify(mismatch.gate)}, but the review holds ${mismatch.review_absent ? "none" : JSON.stringify(mismatch.review)}`,
         { review_id: reviewId, path: path.join(directory, "gate.json"), ...mismatch },
       );
     }

@@ -141,11 +141,17 @@ WAITING_FOR_REVIEW
                                                 └─ rebuttal still open -> HUMAN_REQUIRED
 
 CLEAN -> working tree re-checked against the snapshot -> LOCAL_GATE_PASSED
+CONTINUABLE_FINDINGS / HUMAN_REQUIRED at round two, not continued, only minor or nit open
+  -> working tree re-checked against the snapshot -> LOCAL_GATE_PASSED
 ```
 
 Three exits. `CLEAN` becomes `LOCAL_GATE_PASSED` once the working tree is
 re-checked against the snapshot; this gate attests snapshot consistency, not
-test results. `CONTINUABLE_FINDINGS` means a fix was judged incomplete or a
+test results. A review that has used its last round, has not been continued,
+and holds only `minor` or `nit` findings open can be gated the same way over
+its last snapshot: its next action is `FINALIZE_LOCAL_GATE`, the gate lists
+the open findings, and the report and scorecard count it as gated with open
+findings, not clean. Until then it can still take the routes below. `CONTINUABLE_FINDINGS` means a fix was judged incomplete or a
 new issue appeared with no disputed rebuttal: the author commits a new head
 and opens a fresh review that carries the unfinished findings in as scope
 hints. `HUMAN_REQUIRED` is reserved for a direct escalation or a rebuttal the

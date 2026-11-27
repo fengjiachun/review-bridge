@@ -3,11 +3,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   codexRequestBody,
   isCodexRequestId,
 } from "./codex-request.mjs";
-import { loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
+import { gateOpenFindings, loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
 // One derivation of the App's notice markers, shared with the adapter that
 // records them. A notice is only non-blocking because its body carries a
 // marker, so the claim has to be checked here against that body.
@@ -2704,6 +2705,9 @@ function normalizedLocalGate(localGate) {
     rationale: null,
     authorized_at: null,
     repository_path: localGate.review.repository_path,
+    ...(Object.hasOwn(localGate.gate, "open_findings")
+      ? { open_findings: localGate.gate.open_findings }
+      : {}),
   };
 }
 
@@ -2959,6 +2963,22 @@ export function localGateReviewMismatch(gate, review) {
     if (attested !== held) {
       return { field, gate: attested ?? null, review: held ?? null };
     }
+  }
+  // A gate carries the member only when findings were left open, so an
+  // explicit empty or null list is a difference too.
+  const heldOpen = gateOpenFindings(review);
+  const attestedOpen = Object.hasOwn(gate, "open_findings")
+    ? gate.open_findings
+    : undefined;
+  const expectedOpen = heldOpen.length === 0 ? undefined : heldOpen;
+  if (!isDeepStrictEqual(attestedOpen, expectedOpen)) {
+    return {
+      field: "open_findings",
+      gate: attestedOpen ?? null,
+      review: expectedOpen ?? null,
+      ...(attestedOpen === undefined ? { gate_absent: true } : {}),
+      ...(expectedOpen === undefined ? { review_absent: true } : {}),
+    };
   }
   return null;
 }

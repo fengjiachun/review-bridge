@@ -82,7 +82,9 @@ conversation using the returned `review_id`.
 If there are findings, ask the author to address them and prepare round two.
 When the ledger reports
 `CLEAN`, the author finalizes the local gate, rechecking that the working tree
-still matches the reviewed snapshot. `LOCAL_GATE_PASSED` completes local review;
+still matches the reviewed snapshot. A review that has used its last round,
+has not been continued, and has only `minor` or `nit` findings open can be
+finalized the same way; the gate lists those findings. `LOCAL_GATE_PASSED` completes local review;
 you can stop here without publishing anything to GitHub.
 
 See [local review](docs/local-review.md) for manual reviewer sessions, other

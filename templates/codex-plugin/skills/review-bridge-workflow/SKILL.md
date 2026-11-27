@@ -16,7 +16,7 @@ not a list to preload.
 | --- | --- | --- |
 | Prepare a manual local review | [Prepare](references/prepare.md) | Only its selected provider, then findings or finish after a verdict |
 | Handle local findings or rereview | [Handle findings](references/findings.md) | Selected provider for round two; Prepare for a continuation |
-| Finish a CLEAN review or escalate HUMAN_REQUIRED | [Finish](references/finish.md) | Publication only if authorized |
+| Finish a CLEAN review, gate one at the round limit, or escalate HUMAN_REQUIRED | [Finish](references/finish.md) | Publication only if authorized |
 | Publish through LOCAL_GATE or explicitly authorized REMOTE_ONLY | [Publish through GitHub](references/publication.md) | Prepare if a local gate is required |
 | List the local Codex reviewer's models | Nothing: call `list_reviewer_models` and show the configured model, the `high` default, and each model's supported efforts | [CODEX_TASK](references/codex-task.md) only to launch with a choice |
 
@@ -57,8 +57,10 @@ load [Lock contention](references/lock-contention.md) before deciding to retry.
 - Follow server-derived `next_action` and `required_inputs` with the current
   revision or `state_version`. Use the ledger for findings and resolutions;
   session narration, reports, and launch exit codes are not review verdicts.
-- Never add a third round to a review ID. HUMAN_REQUIRED stops for arbitration; CONTINUABLE_FINDINGS uses a fresh
-  full review.
+- Never add a third round to a review ID. When the summary reports
+  `FINALIZE_LOCAL_GATE`, every open finding is `minor` or `nit` and the review
+  is finalized by default. Otherwise HUMAN_REQUIRED stops for arbitration and
+  CONTINUABLE_FINDINGS uses a fresh full review.
 - Honor terminal states and operator stops.
 
 ## Test quality in pre-commit cleanup

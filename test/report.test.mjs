@@ -1568,8 +1568,14 @@ test("the brief names the next local step when no publication exists", () => {
     CONTINUABLE_FINDINGS: /^Next: the open findings are addressed in a fresh full review\./,
   };
   const seen = new Set();
+  // A major finding still open keeps a final-round review from being
+  // finalizable at the round limit, so each status names its own step.
+  const openMajor = [finding("F-001", "major", "STILL_OPEN")];
   for (const [status, pattern] of Object.entries(expected)) {
-    const markdown = brief(cleanInTwoRounds({ status }));
+    const markdown = brief(cleanInTwoRounds({
+      status,
+      ...(["HUMAN_REQUIRED", "CONTINUABLE_FINDINGS"].includes(status) ? { findings: openMajor } : {}),
+    }));
     const second = markdown.split("\n").find((line) => line.startsWith("Next: "));
     assert.match(second, pattern, status);
     assert.match(second, /nothing here is merged or gated\.$/, status);
@@ -1579,6 +1585,14 @@ test("the brief names the next local step when no publication exists", () => {
   // A status the table does not know is not silently generic.
   const odd = brief(cleanInTwoRounds({ status: "SOMETHING_NEW" }));
   assert.match(odd.split("\n").find((line) => line.startsWith("Next: ")), /names no next step here; inspect the ledger/);
+});
+
+// A round-two gate whose findings were all settled is a clean gate, not one
+// gated with open findings.
+test("a round-two gate with every finding settled renders rounds to CLEAN", () => {
+  const markdown = render(cleanInTwoRounds({ status: "LOCAL_GATE_PASSED" }));
+  assert.match(markdown, /- Rounds to CLEAN: 2\n- Clean snapshot: /);
+  assert.doesNotMatch(markdown, /Gated at the round limit|Gated snapshot/);
 });
 
 // Submitted findings with no author response are open, and the brief says so.
@@ -1626,7 +1640,7 @@ test("legacy full reports retain their contents and mark reviewer configuration 
   // The stored baseline retains its original rendering identity.
   assert.ok(baseline.includes("- Report revision: `9-f1`"));
   assert.ok(rendered.includes(`- Report revision: \`9-f${REPORT_FORMAT}\``));
-  assert.equal(REPORT_FORMAT, 12);
+  assert.equal(REPORT_FORMAT, 13);
 });
 
 test("a finding's heading names the constraint it records", () => {

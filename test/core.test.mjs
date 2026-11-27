@@ -1629,7 +1629,7 @@ test("new findings after an uncontested rereview are continuable", async (t) => 
     [{ finding_id: "F-001", decision: "resolved", rationale: "The test exists." }],
     [
       {
-        severity: "minor",
+        severity: "major",
         title: "New edge case",
         explanation: "A separate edge case still needs a decision.",
       },

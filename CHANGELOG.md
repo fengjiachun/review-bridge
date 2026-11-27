@@ -9,6 +9,16 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Added
+
+- (#238) A local review that has used its last round, has not been
+  continued, and has only `minor` or `nit` findings open can now be
+  finalized by `finalize_local_gate` (RFC 0006, D1). Its summary reports
+  `FINALIZE_LOCAL_GATE`, the gate attests the last round's snapshot and
+  lists the open findings under `open_findings`, and the report
+  (`REPORT_FORMAT` 13) and scorecard (schema 6, `gated_with_open_findings`)
+  show such a review as gated with open findings rather than clean.
+
 ### Fixed
 
 - (#237) A local reviewer that started and exited before the launch saw its
