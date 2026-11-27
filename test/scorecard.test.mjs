@@ -917,20 +917,30 @@ test("review outcomes count clean reviews and leave the rest in flight", async (
     currentRound: 2,
     findings: [{ id: "F-001", severity: "minor", status: "OPEN" }],
   }));
+  // Gated from CLEAN in round two: every finding settled, so it is clean.
+  await writeReview(store, "clean-round-two", reviewLedger({
+    id: "clean-round-two",
+    status: "LOCAL_GATE_PASSED",
+    currentRound: 2,
+    findings: [
+      { id: "F-001", severity: "major", status: "RESOLVED" },
+      { id: "F-002", severity: "blocker", status: "REBUTTAL_ACCEPTED" },
+    ],
+  }));
   const scorecard = await buildScorecard(store);
   const stats = scorecard.providers.ALL;
-  assert.equal(stats.reviews_by_status.LOCAL_GATE_PASSED, 1);
+  assert.equal(stats.reviews_by_status.LOCAL_GATE_PASSED, 2);
   assert.equal(stats.gated_with_open_findings, 1);
   assert.equal(stats.reviews_by_status.REVIEW_SUBMITTED, 1);
   assert.equal(stats.reviews_by_status.CLEAN, 1);
   assert.equal(stats.reviews_by_status.WAITING_FOR_REVIEW, 1);
   assert.equal(stats.reviews_by_status.WAITING_FOR_LENS_REVIEW, 1);
   assert.equal(stats.not_clean, 3);
-  assert.deepEqual(stats.rounds_to_clean, { 1: 1 });
+  assert.deepEqual(stats.rounds_to_clean, { 1: 1, 2: 1 });
   assert.match(scorecard.metric_semantics.not_clean, /not a failure count/);
   assert.match(
     renderScorecardMarkdown(scorecard),
-    /\| Provider \| Reviews \| Clean \| Clean in round 1 \| Clean in round 2 \| Gated with open findings \| Human required \| Continuable \| In flight \|\n[^\n]*\n\| ALL \| 5 \| 1 \| 1 \| 0 \| 1 \| 0 \| 0 \| 3 \|/,
+    /\| Provider \| Reviews \| Clean \| Clean in round 1 \| Clean in round 2 \| Gated with open findings \| Human required \| Continuable \| In flight \|\n[^\n]*\n\| ALL \| 6 \| 2 \| 1 \| 1 \| 1 \| 0 \| 0 \| 3 \|/,
   );
 });
 

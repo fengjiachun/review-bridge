@@ -48,8 +48,8 @@ is the gated head, so a commit made after review means reviewing again.
 The system captures an **immutable snapshot** of the change and hands it to a
 reviewer that had no part in writing it. The reviewer reads the snapshot,
 never your live working tree, and submits structured findings. No findings
-means `CLEAN`. A review that has not been continued and whose last round leaves
-only `minor` or `nit` findings open can also be gated; the gate lists them.
+means `CLEAN`. A review that has not been continued, has used its last allowed round,
+and has only `minor` or `nit` findings open can also be gated; the gate lists them.
 
 You choose the reviewer — a Codex process that `launch_local_reviewer` starts
 with the [model from the Codex configuration at high effort](reviewer-configuration.md)
@@ -143,7 +143,9 @@ design rationale, after round one formed its findings from the code alone, so
 a mismatch between the two shows where the code does not carry its intent.
 A rebuttal that stays open escalates to a human. A fix judged
 incomplete, or a new issue, goes back to the author, who addresses it and
-starts a fresh full review carrying only the bare finding as a scope hint. There is no third round for the same review ID.
+starts a fresh full review carrying only the bare finding as a scope hint.
+When every finding left open is `minor` or `nit`, finalizing the gate with
+them listed is the default instead. There is no third round for the same review ID.
 
 **Why some reads refuse to paginate.** Paginated reads do not describe one
 moment. If page one says "checks green" and a check fails while you fetch

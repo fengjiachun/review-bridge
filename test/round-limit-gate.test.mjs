@@ -234,7 +234,11 @@ test("a round-two human-required review with only a minor finding open is gated"
     );
   await writeGate([{ status: "STILL_OPEN", severity: "minor", id: "F-001" }]);
   await writeReviewReport(state.store, state.reviewId);
-  for (const open_findings of [undefined, [{ id: "F-001", severity: "nit", status: "STILL_OPEN" }]]) {
+  for (const open_findings of [
+    undefined,
+    [{ id: "F-001", severity: "nit", status: "STILL_OPEN" }],
+    [{ id: "F-001", severity: "minor", status: "OPEN" }],
+  ]) {
     await writeGate(open_findings);
     await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
       assert.equal(error.code, "LOCAL_GATE_INVALID");

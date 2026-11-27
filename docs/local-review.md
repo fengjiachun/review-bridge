@@ -217,7 +217,8 @@ files or commit, so the driver explicitly reports that metadata as unavailable
 instead of inferring it. After rereview, it presents
 every per-finding decision and any new finding. It states why a review reached
 `HUMAN_REQUIRED`, or presents the carried-findings list before continuing from
-`CONTINUABLE_FINDINGS` in a fresh full review.
+`CONTINUABLE_FINDINGS` in a fresh full review. When the summary reports
+`FINALIZE_LOCAL_GATE`, it presents the open findings and finalizes instead.
 
 This narration is observability, not evidence. The review ledger remains the
 sole source of truth: the driver reads the full review ledger after findings

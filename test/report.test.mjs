@@ -1587,6 +1587,14 @@ test("the brief names the next local step when no publication exists", () => {
   assert.match(odd.split("\n").find((line) => line.startsWith("Next: ")), /names no next step here; inspect the ledger/);
 });
 
+// A round-two gate whose findings were all settled is a clean gate, not one
+// gated with open findings.
+test("a round-two gate with every finding settled renders rounds to CLEAN", () => {
+  const markdown = render(cleanInTwoRounds({ status: "LOCAL_GATE_PASSED" }));
+  assert.match(markdown, /- Rounds to CLEAN: 2\n- Clean snapshot: /);
+  assert.doesNotMatch(markdown, /Gated at the round limit|Gated snapshot/);
+});
+
 // Submitted findings with no author response are open, and the brief says so.
 test("the brief calls submitted findings open and awaiting the author", () => {
   const submitted = {

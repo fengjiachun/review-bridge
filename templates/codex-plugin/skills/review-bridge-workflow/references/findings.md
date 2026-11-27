@@ -27,7 +27,8 @@ limit, or human arbitration.
    - `human_required`: stop and request human arbitration.
 
    A fix the rereviewer judges incomplete moves the review to
-   `CONTINUABLE_FINDINGS`, and the finding is carried into the next full review.
+   `CONTINUABLE_FINDINGS`, and the finding is carried into the next full review,
+   unless the summary then reports `FINALIZE_LOCAL_GATE` (step 5).
 3. Call `submit_resolutions` with one entry for every finding, then call
    `get_review` again. Present every persisted disposition from its
    `resolutions`, including its rationale and evidence.

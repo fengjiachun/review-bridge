@@ -187,12 +187,16 @@ the corpus publication counts are null, `scope.publication_omission_reason`
 says why, and Markdown gives the same explanation. With no filters, publication
 statistics cover the whole store.
 
-The JSON schema is version 4. Version 2 added `filters`, `scope`,
+The JSON schema is version 6. Version 2 added `filters`, `scope`,
 `metric_semantics`, and `corpus.reviews_filtered_out`; version 3 removes the
 review-type filter and each provider's `reviews_by_type` and
 `advisory_reported`; version 4 removes the workflow statistics (`workflows`,
 `skipped_workflows`, `skipped_audit_logs`, the scope's workflow fields, and the
-corpus workflow and audit-log counts). Consumers should check `schema_version`
+corpus workflow and audit-log counts); version 5 adds the lens round's
+`WAITING_FOR_LENS_REVIEW` to `reviews_by_status`; version 6 adds
+`gated_with_open_findings`, which counts `LOCAL_GATE_PASSED` reviews gated at
+the round limit with findings still open, and leaves those reviews out of
+`rounds_to_clean` and the Clean column. Consumers should check `schema_version`
 and handle the null publication fields in filtered reports. The raw
 `not_clean` counter means a status other than `CLEAN` or `LOCAL_GATE_PASSED`;
 it is not a failure count.
