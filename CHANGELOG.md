@@ -15,7 +15,6 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   start receipt is no longer reported as `Reviewer failed to start: <code>`.
   An exit receipt with an exit code or signal means the reviewer spawned, so
   the launch keeps waiting for the start receipt until its startup deadline.
-  Only an exit receipt carrying a spawn error is reported as a failed start.
 
 ### Internal
 
