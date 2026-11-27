@@ -23,7 +23,14 @@ limit, or human arbitration.
      with evidence.
    - `rejected`: provide concrete technical evidence. A remedy that differs
      from the recommendation is `rejected`, not `fixed`: explain with evidence
-     why it satisfies the finding, and let the rereviewer decide.
+     why it satisfies the finding, and let the rereviewer decide. A finding
+     you want the user to decide as maintainer is `rejected` too, with a
+     rationale saying a maintainer ruling is being sought (step 4). Never
+     answer it `human_required`: that moves the review to `HUMAN_REQUIRED`,
+     and the ruling window never opens. If the round-two reviewer accepts it
+     under the ruling, as `rebuttal_accepted` or as `resolved` once the code
+     follows the ruling, the round is not contested; only `still_open` on a
+     rejected finding contests it.
    - `human_required`: stop and request human arbitration.
 
    A fix the rereviewer judges incomplete moves the review to
@@ -32,15 +39,34 @@ limit, or human arbitration.
 3. Call `submit_resolutions` with one entry for every finding, then call
    `get_review` again. Present every persisted disposition from its
    `resolutions`, including its rationale and evidence.
-4. If the state is `AUTHOR_RESPONDED`, require a new commit only when at least
-   one resolution is `fixed` — after the pre-commit cleanup — then call
-   `prepare_rereview` and `get_review`
-   again. For fixed resolutions, compare the preceding and latest rounds'
+4. Read the persisted status first. Any `human_required` resolution moves the
+   whole batch to `HUMAN_REQUIRED`, where no ruling can be recorded: go
+   straight to the `HUMAN_REQUIRED` paragraph below. In `AUTHOR_RESPONDED`
+   the ruling window is open until `prepare_rereview`. If a resolution says
+   a ruling is being sought, ask the user for the decision and wait for it
+   before `prepare_rereview`, unless the user chooses to continue without
+   one. When the user decides a finding's trade-off or corrects a requirement
+   clause, record it with `record_maintainer_ruling`: the `text` states the
+   user's decision faithfully and in full, as a property of the change,
+   without depending on the finding's text, `finding_ids` names the findings
+   it decides, and `operator_label` names the human who decided. Never put the
+   decision in resolution text, and never record a ruling the user did not
+   make. To undo a ruling, record one that withdraws it by ID. A ledger that
+   already holds 100 rulings refuses another; then the decision goes to
+   arbitration or to a fresh review that is not a continuation, whose
+   requirement states every decision that should still bind. Then apply the
+   rulings in ledger order, withdrawals and replacements included, and check
+   the head against the resulting effective scope.
+   If the state is `AUTHOR_RESPONDED`, require a new commit only when at least
+   one resolution is `fixed` or the effective scope needs a code change —
+   after the pre-commit cleanup — then call `prepare_rereview` and
+   `get_review` again. When a commit was required,
+   compare the preceding and latest rounds'
    authoritative `head_sha` values with `git diff --name-only` to derive the
    actual fix files, and present them with the latest `head_sha` as the
    committed fix head. If every
-   resolution is `rejected`, report that the rereview is rebuttal-only and no
-   code commit was required.
+   resolution is `rejected` and no ruling required a change, report that the
+   rereview is rebuttal-only and no code commit was required.
    If the state is instead `HUMAN_REQUIRED`, report the escalation reason and
    all persisted resolutions, then stop and follow the human-arbitration flow.
    When at least one of those resolutions is `fixed`, also state that no

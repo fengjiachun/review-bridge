@@ -15,6 +15,7 @@ import {
   assertDeletionLens,
   assertLensPolicy,
   assertLensReviewRequestRule,
+  assertRulingsParagraph,
   assertThirdPartyMaterialBoundary,
   CODEX_TASK_DISPATCH_CONTRACT,
   DEEPSEEK_HARNESS_DISPATCH_CONTRACT,
@@ -523,7 +524,7 @@ assert.match(
 );
 assert.match(
   workflowSkill,
-  /require a new commit only when at least\s+one resolution is `fixed`/,
+  /require a new commit only when at least\s+one resolution is `fixed` or the effective scope needs a code change/,
 );
 assert.match(workflowSkill, /rereview is rebuttal-only and no\s+code commit was required/);
 assert.match(
@@ -840,6 +841,7 @@ assert.match(reviewerSkill, /Treat\s+every\s+actionable\s+finding\s+as\s+blockin
 assertThirdPartyMaterialBoundary(reviewerSkill, "packaged Codex reviewer skill");
 assertDeletionLens(reviewerSkill, "packaged Codex reviewer skill");
 assertConventionsSection(reviewerSkill, "packaged Codex reviewer skill");
+assertRulingsParagraph(reviewerSkill, "packaged Codex reviewer skill");
 
 const extension = await readJson(path.join(reviewerRoot, "manifest.json"));
 assert.equal(extension.manifest_version, "0.3");
@@ -874,6 +876,7 @@ assertThirdPartyMaterialBoundary(
 );
 assertDeletionLens(reviewInstructions, "packaged Claude review instructions");
 assertConventionsSection(reviewInstructions, "packaged Claude review instructions");
+assertRulingsParagraph(reviewInstructions, "packaged Claude review instructions");
 
 // Hermes profile integration artifact.
 const hermesRuntimePackage = await readJson(
@@ -997,6 +1000,7 @@ assert.doesNotMatch(hermesSkill, /\bprepare_review\b|\bstart_publication\b/);
 assertThirdPartyMaterialBoundary(hermesSkill, "packaged Hermes reviewer skill");
 assertDeletionLens(hermesSkill, "packaged Hermes reviewer skill");
 assertConventionsSection(hermesSkill, "packaged Hermes reviewer skill");
+assertRulingsParagraph(hermesSkill, "packaged Hermes reviewer skill");
 const hermesReadme = await fsp.readFile(
   path.join(hermesIntegration, "README.md"),
   "utf8",
@@ -1135,6 +1139,7 @@ assertThirdPartyMaterialBoundary(
 );
 assertDeletionLens(deepseekSkill, "packaged DeepSeek Harness reviewer skill");
 assertConventionsSection(deepseekSkill, "packaged DeepSeek Harness reviewer skill");
+assertRulingsParagraph(deepseekSkill, "packaged DeepSeek Harness reviewer skill");
 const deepseekReadme = await fsp.readFile(
   path.join(deepseekHarness, "README.md"),
   "utf8",

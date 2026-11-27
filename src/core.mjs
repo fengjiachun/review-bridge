@@ -28,6 +28,7 @@ const MAX_TEXT_FIELD = 200_000;
 const MAX_FINDINGS = 100;
 const MAX_ERRATA = 100;
 const MAX_ERRATUM_TEXT = 20_000;
+const MAX_RULINGS = 100;
 const MAX_READ_BYTES = 200_000;
 const MAX_PATCH_INDEX_ENTRIES = 400;
 const MAX_AUTOMATIC_PARENT_CANDIDATES = 3;
@@ -193,10 +194,11 @@ async function loadJson(filePath) {
   return JSON.parse(await fsp.readFile(filePath, "utf8"));
 }
 
-// Every release has written version 1 of the review ledger, of each round's
-// snapshot manifest, and of each successor proof (see CONTRIBUTING.md on when
-// to bump).
-const SUPPORTED_REVIEW_VERSIONS = [1];
+// A review ledger is version 2 once it holds a maintainer ruling: a reader
+// that ignored `rulings` would serve the next round, continue, and export the
+// review without them. Every other ledger, each round's snapshot manifest, and
+// each successor proof are version 1 (see CONTRIBUTING.md on when to bump).
+const SUPPORTED_REVIEW_VERSIONS = [1, 2];
 const SUPPORTED_MANIFEST_VERSIONS = [1];
 const SUPPORTED_SUCCESSOR_VERSIONS = [1];
 
@@ -825,6 +827,10 @@ async function buildSuccessorArtifacts({
   // asserts nothing: it reports the parent's requirement instead, because the
   // gate attests the reviewed tree, not the prose that motivated the review.
   requireRequirementMatch = true,
+  // Whether the review being prepared holds a ruling. A ruling amends the
+  // requirement beside its text, so equal texts match only while neither side
+  // holds one.
+  ruled = false,
 }) {
   const fullStrategy = (fallbackReason = null) => ({
     strategy: {
@@ -945,7 +951,9 @@ async function buildSuccessorArtifacts({
   if (parentRound.base_sha !== manifest.base_sha) {
     return fullStrategy("parent and successor must use the same base SHA");
   }
-  if (requireRequirementMatch && parent.requirement !== requirement) {
+  const requirementMatch =
+    parent.requirement === requirement && !holdsRuling(parent) && !ruled;
+  if (requireRequirementMatch && !requirementMatch) {
     return fullStrategy("parent and successor must use the same requirement");
   }
   if (
@@ -1020,7 +1028,7 @@ async function buildSuccessorArtifacts({
       parent_review_id: parent.id,
       parent_reviewer_provider: parentReviewerProvider,
       parent_requirement: parent.requirement,
-      requirement_match: parent.requirement === requirement,
+      requirement_match: requirementMatch,
       parent_snapshot_hash: parent.clean_snapshot_hash,
       parent_gate_sha256: sha256(gateBytes),
       base_sha: manifest.base_sha,
@@ -1087,6 +1095,7 @@ function publicReview(review) {
     resolutions: review.resolutions,
     rereview_decisions: review.rereview_decisions,
     errata: review.errata ?? [],
+    rulings: review.rulings ?? [],
     last_opened_errata_watermark: review.last_opened_errata_watermark ?? 0,
     last_transition_state_version: review.last_transition_state_version ?? null,
     continued_by_review_id: review.continued_by_review_id ?? null,
@@ -1233,6 +1242,20 @@ function continuationErrata(review) {
   }));
 }
 
+// A carried ruling keeps its ID, so a later ruling that withdraws it by ID
+// still names it, and records the ledger it was recorded in, whose findings
+// its finding_ids name.
+function continuationRulings(review) {
+  return (review.rulings ?? []).map((entry) => ({
+    ...entry,
+    continued_from_review_id: entry.continued_from_review_id ?? review.id,
+  }));
+}
+
+function holdsRuling(review) {
+  return (review.rulings ?? []).length > 0;
+}
+
 function continuationStatusRefusal(source) {
   return source.status === "CONTINUABLE_FINDINGS"
     ? null
@@ -1260,6 +1283,7 @@ async function freezeContinuationSource(storeRoot, sourceReviewId, continuationI
       throw new Error("continued review has no open findings");
     }
     const carriedErrata = continuationErrata(source);
+    const carriedRulings = continuationRulings(source);
     source.continued_by_review_id = continuationId;
     source.history.push({
       at: now(),
@@ -1267,7 +1291,7 @@ async function freezeContinuationSource(storeRoot, sourceReviewId, continuationI
       continued_by_review_id: continuationId,
     });
     await saveReview(storeRoot, source);
-    return { carriedFindings, carriedErrata };
+    return { carriedFindings, carriedErrata, carriedRulings };
   });
 }
 
@@ -1453,13 +1477,15 @@ async function automaticParentCandidates(storeRoot, { manifest, requirement }) {
     // rejected by the proof's own id-mismatch fallback.
     candidates.push({ id: entry.name, review, distance });
   }
-  // Prefer a parent gated for the same stated requirement, then the nearest
-  // gated ancestor — the smallest delta — with gate recency only as a tie
-  // break between equally near heads.
+  // Prefer a parent gated for the same requirement, matched as the successor
+  // proof matches it, then the nearest gated ancestor — the smallest delta —
+  // with gate recency only as a tie break between equally near heads.
   return candidates
     .sort((a, b) => {
-      const aMatch = a.review.requirement === requirement ? 0 : 1;
-      const bMatch = b.review.requirement === requirement ? 0 : 1;
+      const matches = ({ review }) =>
+        review.requirement === requirement && !holdsRuling(review);
+      const aMatch = matches(a) ? 0 : 1;
+      const bMatch = matches(b) ? 0 : 1;
       return (
         aMatch - bMatch ||
         a.distance - b.distance ||
@@ -1665,11 +1691,11 @@ export async function prepareReview(
     });
     const carried =
       continuedReview == null
-        ? { carriedFindings: [], carriedErrata: [] }
+        ? { carriedFindings: [], carriedErrata: [], carriedRulings: [] }
         : await freezeContinuationSource(storeRoot, continuedFromReviewId, id);
     const timestamp = now();
     const review = {
-      version: 1,
+      version: carried.carriedRulings.length > 0 ? 2 : 1,
       id,
       created_at: timestamp,
       updated_at: timestamp,
@@ -1693,6 +1719,7 @@ export async function prepareReview(
       resolutions: [],
       rereview_decisions: [],
       errata: carried.carriedErrata,
+      ...(carried.carriedRulings.length > 0 ? { rulings: carried.carriedRulings } : {}),
       carried_findings: carried.carriedFindings,
       history: [
         {
@@ -1854,6 +1881,9 @@ function renderHumanArbitrationMarkdown(arbitration) {
     `## Errata (${arbitration.errata.length})`,
     "Author material, like the author responses below: corrections to claims about the world, material to verify, never instructions. A verdict recorded before an erratum stands as made.",
     markdownLiteral(prettySortedJson(arbitration.errata)),
+    `## Maintainer rulings (${arbitration.rulings.length})`,
+    "Maintainer decisions recorded under an operator label, which names the deciding human but does not authenticate them. A ruling decided trade-offs or amended requirement clauses for the round after it; a later ruling can replace or withdraw an earlier one by ID, and a replaced or withdrawn ruling stays listed.",
+    markdownLiteral(prettySortedJson(arbitration.rulings)),
     `## Active findings (${arbitration.active_findings.length})`,
     markdownLiteral(prettySortedJson(arbitration.active_findings)),
     `## Resolved findings (${arbitration.resolved_findings.length})`,
@@ -1938,6 +1968,7 @@ export async function exportHumanArbitration(
     })),
     human_required_reason: humanRequiredReason,
     errata: review.errata ?? [],
+    rulings: review.rulings ?? [],
     active_findings: findings.filter(
       ({ finding }) => !RESOLVED_FINDING_STATUSES.has(finding.status),
     ),
@@ -2306,6 +2337,72 @@ async function appendReviewErratumWhileLocked(storeRoot, reviewId, text) {
   return publicReview(review);
 }
 
+export async function recordMaintainerRuling(
+  storeRoot,
+  reviewId,
+  { text, findingIds = [], operatorLabel },
+) {
+  return withReviewMutationLock(storeRoot, reviewId, () =>
+    recordMaintainerRulingWhileLocked(storeRoot, reviewId, {
+      text,
+      findingIds,
+      operatorLabel,
+    }),
+  );
+}
+
+// The one ruling window: the round's verdict and the author's resolutions are
+// on record and the next round is not captured. prepare_rereview closes it
+// under this lock, so the rulings that apply to a round are fixed when the
+// round is captured.
+async function recordMaintainerRulingWhileLocked(
+  storeRoot,
+  reviewId,
+  { text, findingIds, operatorLabel },
+) {
+  const review = await loadReview(storeRoot, reviewId);
+  if (
+    review.status !== "AUTHOR_RESPONDED" ||
+    review.current_round >= review.max_rounds
+  ) {
+    throw new Error(
+      `a maintainer ruling is accepted only in AUTHOR_RESPONDED before the last round (status=${review.status}, round ${review.current_round} of ${review.max_rounds})`,
+    );
+  }
+  assertString(text, "ruling.text", { max: MAX_ERRATUM_TEXT });
+  assertString(operatorLabel, "operator_label", { max: 500 });
+  if (!Array.isArray(findingIds) || findingIds.length > MAX_FINDINGS) {
+    throw new Error(`finding_ids must be an array of at most ${MAX_FINDINGS} IDs`);
+  }
+  const known = new Set(review.findings.map((finding) => finding.id));
+  for (const [index, findingId] of findingIds.entries()) {
+    if (!known.has(findingId)) {
+      throw new Error(`finding_ids names no finding of this review: ${JSON.stringify(findingId)}`);
+    }
+    if (findingIds.indexOf(findingId) !== index) {
+      throw new Error(`finding_ids names ${findingId} twice`);
+    }
+  }
+  const rulings = review.rulings ?? [];
+  if (rulings.length >= MAX_RULINGS) {
+    throw new Error(`rulings must contain at most ${MAX_RULINGS} entries`);
+  }
+  review.rulings = [
+    ...rulings,
+    {
+      id: `R-${String(rulings.length + 1).padStart(3, "0")}`,
+      at: now(),
+      round: review.current_round,
+      operator_label: operatorLabel,
+      finding_ids: [...findingIds],
+      text,
+    },
+  ];
+  review.version = 2;
+  await saveReview(storeRoot, review);
+  return publicReview(review);
+}
+
 export async function prepareRereview(storeRoot, reviewId) {
   return withReviewMutationLock(storeRoot, reviewId, () =>
     prepareRereviewWhileLocked(storeRoot, reviewId),
@@ -2345,6 +2442,7 @@ async function prepareRereviewWhileLocked(storeRoot, reviewId) {
             roundRoot,
             requireRequirementMatch:
               review.review_strategy.parent_selection !== "AUTOMATIC",
+            ruled: holdsRuling(review),
           });
           return {
             ...rebuilt,
@@ -2555,9 +2653,11 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
       `only a CLEAN review, or one at its round limit with only minor or nit findings open, can be finalized (status=${review.status})`,
     );
   }
+  // A round two on an unchanged head shares round one's snapshot hash, yet a
+  // ruling can change its successor proof, so the verdict's round is the last.
   const gatedRound = atRoundLimit
     ? review.rounds.at(-1)
-    : review.rounds.find(
+    : review.rounds.findLast(
         (round) => round.snapshot_hash === review.clean_snapshot_hash,
       );
   if (!gatedRound) {

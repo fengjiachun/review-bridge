@@ -10,9 +10,12 @@ After a verdict, load [Handle findings](findings.md) for findings or
    immutable commit SHA before creating or committing publication changes, and
    pass that SHA to `prepare_review`. Do not silently guess between `HEAD`,
    `origin/main`, or another release branch.
-2. Summarize the user's requirement faithfully. After a human ruling that
-   changed what the code should do, the requirement is the ruled behavior; see
-   [Finish](finish.md).
+2. Summarize the user's requirement faithfully. After a human ruling outside
+   the ruling window that changed what the code should do, the requirement is
+   the ruled behavior; see [Finish](finish.md). A continuation carries its
+   source's maintainer rulings beside the repeated requirement. A successor
+   carries none of its parent's: state in its requirement every decision that
+   should still bind.
 3. State the implementation scope, changed behavior, and verification evidence.
 4. If the user intends to publish the change, create a topic branch and commit
    the intended diff before review. Before each commit, remove comments that
@@ -26,7 +29,8 @@ After a verdict, load [Handle findings](findings.md) for findings or
    still has to pass the full successor proof. It prefers a parent gated for
    the same requirement, and when none exists it records the parent's
    requirement and `requirement_match: false` in the proof so the reviewer
-   knows the gate was granted while reviewing for different work. Naming a
+   knows the gate was not granted against the current requirement as it now
+   stands. A match needs equal texts and no ruling on either review. Naming a
    parent explicitly still requires the requirement to match exactly, because
    there a mismatch means you picked the wrong parent. The
    result reports `review_strategy.parent_selection` as `AUTOMATIC`,

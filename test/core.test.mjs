@@ -570,16 +570,16 @@ test("a review ledger of an unknown or missing version is refused by name", asyn
   const reviewPath = path.join(store, "reviews", prepared.id, "review.json");
   const review = JSON.parse(await fsp.readFile(reviewPath, "utf8"));
   assert.equal(review.version, 1);
-  const refusal = (record, version) => ({
+  const refusal = (record, version, supported = [1]) => ({
     record,
     version,
-    supported: [1],
+    supported,
     retryable: false,
   });
   const [round] = review.rounds;
   for (const [stored, details] of [
-    [{ ...review, version: 2 }, refusal("review ledger", 2)],
-    [{ ...review, version: undefined }, refusal("review ledger", null)],
+    [{ ...review, version: 3 }, refusal("review ledger", 3, [1, 2])],
+    [{ ...review, version: undefined }, refusal("review ledger", null, [1, 2])],
     // A newer release could bump a round's own record inside a v1 ledger.
     [{ ...review, rounds: [{ ...round, version: 2 }] }, refusal("snapshot manifest", 2)],
     [
@@ -601,7 +601,7 @@ test("a review ledger of an unknown or missing version is refused by name", asyn
     assert.deepEqual(await listReviews(store), []);
   }
   // A parent named explicitly keeps the diagnosis in its fallback reason.
-  await fsp.writeFile(reviewPath, `${JSON.stringify({ ...review, version: 2 }, null, 2)}\n`);
+  await fsp.writeFile(reviewPath, `${JSON.stringify({ ...review, version: 3 }, null, 2)}\n`);
   const successor = await prepareReview(store, {
     repositoryPath: repository,
     baseRef: review.rounds[0].base_sha,
@@ -611,7 +611,7 @@ test("a review ledger of an unknown or missing version is refused by name", asyn
   });
   assert.equal(
     successor.review_strategy.fallback_reason,
-    "parent review ledger version 2; this release reads version 1",
+    "parent review ledger version 3; this release reads version 1, 2",
   );
 });
 

@@ -65,6 +65,7 @@ test("author and reviewer roles expose separate capabilities", async (t) => {
     "prepare_review",
     "record_codex_review_request",
     "record_github_snapshot",
+    "record_maintainer_ruling",
     "render_review_report",
     "start_publication",
     "submit_resolutions",
@@ -132,6 +133,20 @@ test("MCP schemas expose successor preparation and review artifacts", async (t) 
       "review_id",
     ]);
     assert.match(snapshot.description, /never retype the observation inline/);
+
+    const ruling = authorTools.tools.find(
+      (tool) => tool.name === "record_maintainer_ruling",
+    );
+    assert.deepEqual(ruling.inputSchema.required.sort(), [
+      "operator_label",
+      "review_id",
+      "text",
+    ]);
+    assert.equal(ruling.inputSchema.properties.text.minLength, 1);
+    assert.equal(ruling.inputSchema.properties.text.maxLength, 20_000);
+    assert.equal(ruling.inputSchema.properties.operator_label.minLength, 1);
+    assert.equal(ruling.inputSchema.properties.operator_label.maxLength, 500);
+    assert.equal(ruling.inputSchema.properties.finding_ids.maxItems, 100);
 
     const erratum = authorTools.tools.find(
       (tool) => tool.name === "append_review_erratum",
@@ -587,13 +602,27 @@ test("MCP preserves immutable intent texts and only serves the reconstruction in
   assert.deepEqual(await call(author, "get_review"), afterInitial);
 
   await submitResolutions(store, prepared.id, [{ finding_id: "F-001", disposition: "fixed", rationale: "Added coverage." }]);
+  const ruled = await call(author, "record_maintainer_ruling", {
+    text: "The exported value needs no dedicated test: app.js exports the plain literal 2.",
+    finding_ids: ["F-001"],
+    operator_label: "Jordan",
+  });
+  assert.equal(ruled.status, "AUTHOR_RESPONDED");
+  assert.equal(Object.hasOwn(ruled, "requirement"), false);
+  assert.equal(Object.hasOwn(ruled, "rulings"), false);
   await prepareRereview(store, prepared.id);
   const reopened = await call(reviewer, "open_review");
+  assert.deepEqual(reopened.rulings.map(({ id, finding_ids }) => [id, finding_ids]), [["R-001", ["F-001"]]]);
   assert.equal(reopened.reconstructed_intent, intent);
   assert.equal(reopened.rationale, "Consumers need value 2.");
   assert.equal(reopened.resolutions[0].finding_id, "F-001");
   const comparison = "  Agrees on the new constant.\nConsumer motivation was inferred.  ";
-  const decisions = [{ finding_id: "F-001", decision: "resolved", rationale: "Coverage now exists." }];
+  const decisions = [{
+    finding_id: "F-001",
+    decision: "resolved",
+    rationale: "Decided under R-001.",
+    verification: "R-001 rules the test unwanted; read app.js, which exports the literal 2.",
+  }];
   await call(reviewer, "submit_rereview", { decisions, new_findings: [], intent_comparison: comparison });
   const complete = await call(author, "get_review");
   assert.equal(complete.status, "CLEAN");

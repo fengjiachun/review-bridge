@@ -161,13 +161,20 @@ reviews that had reached `HUMAN_REQUIRED` were followed within minutes by a
 new review on the same repository and base, so "fixed but incomplete" was
 made to mean "keep going".
 
-Two things the reviewer may be given with the change. **Rule kinds**: a
+Three things the reviewer may be given with the change. **Rule kinds**: a
 finding that violates a project rule says whether the rule was already
 written in the repository's agent guidance (`documented`, with its source) or
 not (`undocumented`); fixing an undocumented one includes writing the rule
 down. **Rationale**: the author may record its key design decisions, dropped
 alternatives, and doubts before any finding exists; the reviewer sees it only
 after the author has answered round one, as one more thing to verify.
+**Maintainer rulings**: between rounds one and two, the author can record
+with `record_maintainer_ruling` a decision the user made, settling a
+trade-off that named findings raise or correcting a requirement clause.
+Unlike author material, a ruling binds the next reviewer as scope, within
+bounds the reviewer skill states: one that tries to skip a review dimension
+or lower a severity is itself a `major` finding. A continuation carries the
+rulings forward.
 
 A later commit on the same branch can continue a previous
 `LOCAL_GATE_PASSED` review as a **successor**, where the reviewed unit is the
@@ -305,7 +312,7 @@ source; this is an overview grouped by purpose.
 
 | Group | Tools |
 | --- | --- |
-| Local review | `launch_local_reviewer` `list_reviewer_models` `prepare_review` `list_reviews` `get_review` `get_review_summary` `wait_for_review_state` `submit_resolutions` `prepare_rereview` `append_review_erratum` `finalize_local_gate` `export_human_arbitration` `render_review_report` |
+| Local review | `launch_local_reviewer` `list_reviewer_models` `prepare_review` `list_reviews` `get_review` `get_review_summary` `wait_for_review_state` `submit_resolutions` `prepare_rereview` `append_review_erratum` `record_maintainer_ruling` `finalize_local_gate` `export_human_arbitration` `render_review_report` |
 | Publication gate | `authorize_remote_publication` `start_publication` `get_publication` `get_publication_summary` `record_codex_review_request` `record_github_snapshot` `acknowledge_codex_review_ambiguity` `finalize_publication_gate` `verify_publication_gate` |
 
 ## Appendix B: glossary

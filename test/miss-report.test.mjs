@@ -95,7 +95,7 @@ test("pairs threads across pages with the ledgers for their heads", async (t) =>
   await writeReview(store, "rb-gone", gone, [HEAD_A]);
   await writeReview(store, "rb-gone-only", gone, [HEAD_D]);
   await writeReview(store, "rb-other-head", repo, ["c".repeat(40)]);
-  await writeReview(store, "rb-newer", repo, [HEAD_A], 2);
+  await writeReview(store, "rb-newer", repo, [HEAD_A], 3);
   await fsp.mkdir(path.join(store, "reviews", "rb-publication-only"));
   await fsp.mkdir(path.join(store, "reviews", "rb-damaged"));
   await fsp.writeFile(
