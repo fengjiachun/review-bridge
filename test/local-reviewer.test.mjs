@@ -364,16 +364,17 @@ test("a failed executable spawn cannot produce a started-process receipt", async
 });
 
 // Serves the launch poll's reads of the attempt's receipts from a script, in
-// which null is a missing file and the last entry repeats, and counts them.
-// The real runner and reviewer still run; their receipts are read after the
-// mock is restored.
+// which null is a missing file, and counts them. A read past the end of a
+// receipt's script fails the launch. The real runner and reviewer still run;
+// each test waits for them after restoring the mocks.
 function scriptReceipts(t, attempt, script) {
   const readFile = fsp.readFile;
   const reads = Object.fromEntries(Object.keys(script).map((name) => [name, 0]));
   t.mock.method(fsp, "readFile", async function (file, ...rest) {
     const name = path.basename(file);
     if (path.dirname(file) !== attempt || !(name in script)) return readFile.call(this, file, ...rest);
-    const value = script[name][Math.min(reads[name]++, script[name].length - 1)];
+    if (reads[name] === script[name].length) throw new Error(`unexpected read ${reads[name] + 1} of ${name}`);
+    const value = script[name][reads[name]++];
     if (value === null) throw Object.assign(new Error(`ENOENT: ${file}`), { code: "ENOENT" });
     return JSON.stringify(value);
   });
@@ -391,10 +392,13 @@ test("an exit receipt with a code read before the start receipt keeps the launch
   const now = Date.now();
   t.mock.method(Date, "now", () => now);
   const reads = scriptReceipts(t, attempt, { "started.json": [null, start], "exit.json": [{ code: 0, signal: null, exited_at: "2026-11-27T00:00:01.000Z" }] });
-  assert.deepEqual(await startLocalReviewer({ command: process.execPath, cwd: root }, ["-e", ""], attempt), start);
-  assert.deepEqual(reads, { "started.json": 2, "exit.json": 1 });
-  t.mock.restoreAll();
-  assert.equal((await waitForExit(attempt)).code, 0);
+  try {
+    assert.deepEqual(await startLocalReviewer({ command: process.execPath, cwd: root }, ["-e", ""], attempt), start);
+    assert.deepEqual(reads, { "started.json": 2, "exit.json": 1 });
+  } finally {
+    t.mock.restoreAll();
+    await waitForExit(attempt);
+  }
 });
 
 test("an exit with a code and no start receipt leaves the launch indeterminate, not failed to start", async (t) => {
@@ -407,10 +411,13 @@ test("an exit with a code and no start receipt leaves the launch indeterminate, 
   const reads = scriptReceipts(t, attempt, { "started.json": [null], "exit.json": [{ code: 0, signal: null, exited_at: "2026-11-27T00:00:01.000Z" }] });
   const now = Date.now();
   t.mock.method(Date, "now", () => now + (reads["exit.json"] > 0 ? 10_000 : 0));
-  await assert.rejects(startLocalReviewer({ command: process.execPath, cwd: root }, ["-e", ""], attempt), (error) => error.code === "DISPATCH_INDETERMINATE");
-  assert.deepEqual(reads, { "started.json": 1, "exit.json": 1 });
-  t.mock.restoreAll();
-  assert.equal((await waitForExit(attempt)).code, 0);
+  try {
+    await assert.rejects(startLocalReviewer({ command: process.execPath, cwd: root }, ["-e", ""], attempt), (error) => error.code === "DISPATCH_INDETERMINATE");
+    assert.deepEqual(reads, { "started.json": 1, "exit.json": 1 });
+  } finally {
+    t.mock.restoreAll();
+    await waitForExit(attempt);
+  }
 });
 
 test("runtime lookup skips non-directory PATH entries and a directory named codex, and needs git to start", async (t) => {
