@@ -363,6 +363,82 @@ test("a failed executable spawn cannot produce a started-process receipt", async
   assert.match(JSON.parse(await fsp.readFile(path.join(directory, "exit.json"))).error, /ENOENT/);
 });
 
+// Serves the launch poll's reads of the attempt's receipts from a script, in
+// which null is a missing file, and counts them. A read past the end of a
+// receipt's script fails the launch. The real runner and reviewer still run;
+// each test restores the mocks and waits for waitForRunner before removing
+// the attempt directory.
+function scriptReceipts(t, attempt, script) {
+  const readFile = fsp.readFile;
+  const reads = Object.fromEntries(Object.keys(script).map((name) => [name, 0]));
+  t.mock.method(fsp, "readFile", async function (file, ...rest) {
+    const name = path.basename(file);
+    if (path.dirname(file) !== attempt || !(name in script)) return readFile.call(this, file, ...rest);
+    if (reads[name] === script[name].length) throw new Error(`unexpected read ${reads[name] + 1} of ${name}`);
+    const value = script[name][reads[name]++];
+    if (value === null) throw Object.assign(new Error(`ENOENT: ${file}`), { code: "ENOENT" });
+    return JSON.stringify(value);
+  });
+  return reads;
+}
+
+// The detached runner writes its two receipts independently, so the attempt
+// directory is settled only once both exist and the runner process is gone.
+async function waitForRunner(attempt) {
+  await waitForExit(attempt);
+  for (let i = 0; i < 100; i++) {
+    try {
+      process.kill(JSON.parse(await fsp.readFile(path.join(attempt, "started.json"), "utf8")).runner_pid, 0);
+    } catch (error) {
+      if (error.code === "ESRCH") return;
+      if (error.code !== "ENOENT") throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  }
+  throw new Error("reviewer runner did not exit");
+}
+
+test("an exit receipt with a code or signal read before the start receipt keeps the launch polling until the start appears", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "reviewer-start-race-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  // For each exit shape, the first poll finds no start receipt and that exit;
+  // the second finds the start receipt. The clock stays inside the deadline.
+  for (const exit of [{ code: 1, signal: null }, { code: null, signal: "SIGTERM" }]) {
+    const attempt = path.join(root, `attempt-${exit.code ?? exit.signal}`);
+    await fsp.mkdir(attempt);
+    const start = { task_id: path.basename(attempt), pid: 4242, runner_pid: 4241, process_started_at: "2026-11-27T00:00:00.000Z" };
+    const now = Date.now();
+    t.mock.method(Date, "now", () => now);
+    const reads = scriptReceipts(t, attempt, { "started.json": [null, start], "exit.json": [{ ...exit, exited_at: "2026-11-27T00:00:01.000Z" }] });
+    try {
+      assert.deepEqual(await startLocalReviewer({ command: process.execPath, cwd: root }, ["-e", ""], attempt), start);
+      assert.deepEqual(reads, { "started.json": 2, "exit.json": 1 });
+    } finally {
+      t.mock.restoreAll();
+      await waitForRunner(attempt);
+    }
+  }
+});
+
+test("an exit with a code and no start receipt leaves the launch indeterminate, not failed to start", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "reviewer-start-missing-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const attempt = path.join(root, "attempt");
+  await fsp.mkdir(attempt);
+  // The poll finds no start receipt and an exit with code 0. The clock stays
+  // fixed until the poll has read that exit, then moves past the deadline.
+  const reads = scriptReceipts(t, attempt, { "started.json": [null], "exit.json": [{ code: 0, signal: null, exited_at: "2026-11-27T00:00:01.000Z" }] });
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now + (reads["exit.json"] > 0 ? 10_000 : 0));
+  try {
+    await assert.rejects(startLocalReviewer({ command: process.execPath, cwd: root }, ["-e", ""], attempt), (error) => error.code === "DISPATCH_INDETERMINATE");
+    assert.deepEqual(reads, { "started.json": 1, "exit.json": 1 });
+  } finally {
+    t.mock.restoreAll();
+    await waitForRunner(attempt);
+  }
+});
+
 test("runtime lookup skips non-directory PATH entries and a directory named codex, and needs git to start", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "reviewer-path-"));
   const saved = Object.fromEntries(["PATH", "REVIEW_BRIDGE_CODEX_COMMAND", "LC_ALL", "GIT_DIR", "GIT_CEILING_DIRECTORIES"].map((key) => [key, process.env[key]]));

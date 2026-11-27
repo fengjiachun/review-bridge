@@ -239,7 +239,11 @@ export async function startLocalReviewer(runtime, args, attemptRoot) {
     const started = await readDispatchReceipt(attemptRoot, "started.json");
     if (started) return started;
     const exited = await readDispatchReceipt(attemptRoot, "exit.json");
-    if (exited) throw new Error(`Reviewer failed to start: ${exited.error ?? exited.code}`);
+    // Only a spawn error means the reviewer never started. An exit with a code
+    // or signal follows a spawn: Node emits "spawn" before "exit", and the
+    // runner begins the started.json write in its spawn handler, so that
+    // receipt may still be landing and the poll waits for it.
+    if (exited?.error !== undefined) throw new Error(`Reviewer failed to start: ${exited.error}`);
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   const error = new Error("Reviewer startup is indeterminate; reconcile this attempt before retrying");
