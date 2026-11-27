@@ -7,7 +7,7 @@ describes, and merges deliberately absent from the prose are listed under an
 `### Internal` heading in the same entry. Earlier entries predate the
 convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## 0.27.0 - 2026-11-27
 
 ### Added
 
@@ -43,6 +43,7 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Internal
 
+- (#234) Release 0.27.0.
 - (#231) CONTRIBUTING states that the version labels in the guides change only
   in the release commit; a guide on `main` describes `main`.
 
