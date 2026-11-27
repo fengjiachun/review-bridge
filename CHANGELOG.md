@@ -18,6 +18,15 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
   lists the open findings under `open_findings`, and the report
   (`REPORT_FORMAT` 13) and scorecard (schema 6, `gated_with_open_findings`)
   show such a review as gated with open findings rather than clean.
+- (#239) Between round one and round two, `record_maintainer_ruling` records
+  a decision the user made, deciding a trade-off the named findings raise or
+  amending a requirement clause (RFC 0006, D2). The next reviewer receives
+  the rulings beside the requirement and applies them as binding scope
+  within bounds every reviewer skill states; a continuation carries them,
+  and a ruled parent or review never counts as a requirement match. A ledger
+  holding a ruling is version 2, so every install sharing the store must run
+  0.27.0 or later before the first ruling. The arbitration export and the
+  report (`REPORT_FORMAT` 14) print every ruling.
 
 ### Fixed
 
