@@ -48,8 +48,8 @@ is the gated head, so a commit made after review means reviewing again.
 The system captures an **immutable snapshot** of the change and hands it to a
 reviewer that had no part in writing it. The reviewer reads the snapshot,
 never your live working tree, and submits structured findings. No findings
-means `CLEAN`. A review whose last round leaves only `minor` or `nit` findings
-open can also be gated; the gate lists them.
+means `CLEAN`. A review that has not been continued and whose last round leaves
+only `minor` or `nit` findings open can also be gated; the gate lists them.
 
 You choose the reviewer — a Codex process that `launch_local_reviewer` starts
 with the [model from the Codex configuration at high effort](reviewer-configuration.md)

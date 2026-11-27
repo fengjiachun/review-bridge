@@ -92,7 +92,7 @@ WAITING_FOR_REVIEW
                                              └─ 驳回仍 still_open -> HUMAN_REQUIRED
 
 CLEAN -> 再核工作树等于快照 -> LOCAL_GATE_PASSED
-第二轮的 CONTINUABLE_FINDINGS / HUMAN_REQUIRED，未完意见只剩 minor 或 nit
+第二轮的 CONTINUABLE_FINDINGS / HUMAN_REQUIRED，未被继续，未完意见只剩 minor 或 nit
   -> 再核工作树等于快照 -> LOCAL_GATE_PASSED
 ```
 

@@ -1153,6 +1153,16 @@ export function openFindings(review) {
   );
 }
 
+// The record a local gate lists for each open finding, in ledger order. The
+// finalizer writes it and the report compares a gate against it.
+export function gateOpenFindings(review) {
+  return openFindings(review).map(({ id, severity, status }) => ({
+    id,
+    severity,
+    status,
+  }));
+}
+
 // A review that has used its last round, has not been continued, and holds
 // only minor or nit findings open can be finalized like a CLEAN one. This
 // decides eligibility before finalization only: once the gate is minted the
@@ -2545,16 +2555,16 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
       `only a CLEAN review, or one at its round limit with only minor or nit findings open, can be finalized (status=${review.status})`,
     );
   }
-  const cleanRound = atRoundLimit
+  const gatedRound = atRoundLimit
     ? review.rounds.at(-1)
     : review.rounds.find(
         (round) => round.snapshot_hash === review.clean_snapshot_hash,
       );
-  if (!cleanRound) {
-    throw new Error("clean snapshot is not present in the review ledger");
+  if (!gatedRound) {
+    throw new Error("gated snapshot is not present in the review ledger");
   }
-  const gatedHash = cleanRound.snapshot_hash;
-  await verifySuccessorArtifacts(storeRoot, reviewId, cleanRound);
+  const gatedHash = gatedRound.snapshot_hash;
+  await verifySuccessorArtifacts(storeRoot, reviewId, gatedRound);
   // The gate attests the snapshot the reviewer actually saw, so the stored
   // patch must still reproduce the committed hash — not merely the right
   // byte length — before the live worktree is compared against it.
@@ -2562,7 +2572,7 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
     storeRoot,
     reviewId,
     review,
-    cleanRound,
+    gatedRound,
   );
   if (storedHash !== gatedHash) {
     throw new Error(
@@ -2579,14 +2589,10 @@ async function finalizeLocalGateWhileLocked(storeRoot, reviewId) {
   });
   if (manifest.snapshot_hash !== gatedHash) {
     throw new Error(
-      "working tree changed after the clean verdict; create a new review task",
+      `working tree changed after the ${atRoundLimit ? "final-round" : "clean"} verdict; create a new review task`,
     );
   }
-  const open = openFindings(review).map(({ id, severity, status }) => ({
-    id,
-    severity,
-    status,
-  }));
+  const open = gateOpenFindings(review);
   const gate = {
     version: 1,
     review_id: review.id,

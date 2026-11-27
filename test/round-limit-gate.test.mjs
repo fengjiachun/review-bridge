@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fsp from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
@@ -19,39 +17,18 @@ import { getPublication, startPublication } from "../src/publication.mjs";
 import { loadReportLedgers, renderReviewBrief, writeReviewReport } from "../src/report.mjs";
 import { buildScorecard, renderScorecardMarkdown } from "../src/scorecard.mjs";
 import { baseline } from "./helpers/github-observation.mjs";
+import { commit, fixture, TOPIC_BRANCH } from "./helpers/repository-fixture";
 
 const REQUIREMENT = "Change the exported value.";
 
-function git(cwd, ...args) {
-  const result = spawnSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" },
-  });
-  assert.equal(result.status, 0, result.stderr);
-  return result.stdout.trim();
-}
-
-async function commitValue(repository, value) {
-  await fsp.writeFile(path.join(repository, "value.js"), `export const value = ${value};\n`);
-  git(repository, "add", ".");
-  git(repository, "commit", "-m", `value ${value}`);
-  return git(repository, "rev-parse", "HEAD");
-}
+const commitValue = (repository, value) =>
+  commit(repository, `export const value = ${value};\n`);
 
 async function repositoryFixture(t) {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-round-limit-"));
-  t.after(() => fsp.rm(root, { recursive: true, force: true }));
-  const repository = path.join(root, "repo");
-  const store = path.join(root, "store");
-  await fsp.mkdir(repository);
-  git(repository, "init", "-b", "main");
-  git(repository, "config", "user.name", "Review Bridge Test");
-  git(repository, "config", "user.email", "review-bridge@example.invalid");
-  const baseSha = await commitValue(repository, 1);
-  git(repository, "switch", "-c", "agent/change");
-  await commitValue(repository, 2);
-  return { repository, store, baseSha };
+  const state = await fixture();
+  t.after(() => fsp.rm(state.root, { recursive: true, force: true }));
+  await commitValue(state.repository, 2);
+  return state;
 }
 
 function finding(severity, title = `A ${severity} issue`) {
@@ -110,6 +87,8 @@ async function humanRequiredAtRoundTwo(t) {
     { finding_id: "F-001", disposition: "rejected", rationale: "Intended." },
   ]);
   await prepareRereview(state.store, prepared.id);
+  // Round two is captured but not yet judged, so its finding is undecided.
+  await assert.rejects(finalizeLocalGate(state.store, prepared.id), /only a CLEAN review/);
   const review = await submitRereview(
     state.store,
     prepared.id,
@@ -129,7 +108,7 @@ function startArgs(state, startedAt) {
     repo: "repo",
     prNumber: 7,
     baseBranch: "main",
-    headBranch: "agent/change",
+    headBranch: TOPIC_BRANCH,
     codexActorId: 99,
     codexActorType: "Bot",
     codexActorLogin: "chatgpt-codex-connector[bot]",
@@ -168,7 +147,6 @@ test("a round-two continuable review with only minor or nit findings open is gat
   assert.equal(gated.clean_snapshot_hash, roundTwo.snapshot_hash);
   assert.deepEqual(gated.active_findings.map((entry) => entry.id), ["F-003", "F-004"]);
 
-  // The report and scorecard call it gated with open findings, not clean.
   const report = await fsp.readFile(
     (await writeReviewReport(state.store, state.reviewId)).path,
     "utf8",
@@ -184,7 +162,6 @@ test("a round-two continuable review with only minor or nit findings open is gat
     /\| ALL \| 1 \| 0 \| 0 \| 0 \| 1 \| 0 \| 0 \| 0 \|/,
   );
 
-  // Publication takes the gate as it takes a CLEAN one.
   const startedAt = Date.now();
   await startPublication(state.store, startArgs(state, startedAt), { clock: () => startedAt });
   const gateBytes = await fsp.readFile(gatePath(state));
@@ -201,8 +178,8 @@ test("a round-two continuable review with only minor or nit findings open is gat
     authorized_at: null,
   });
 
-  // With a publication bound to the gate, the report still holds the gate's
-  // list to the ledger's open findings.
+  // Bound to a publication, the gate's list is still held to the ledger.
+  await writeReviewReport(state.store, state.reviewId);
   const ledger = JSON.parse(await fsp.readFile(reviewPath(state), "utf8"));
   ledger.findings.find((entry) => entry.id === "F-004").severity = "minor";
   await fsp.writeFile(reviewPath(state), `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
@@ -219,22 +196,66 @@ test("a round-two human-required review with only a minor finding open is gated"
     (await getReviewSummary(state.store, state.reviewId)).action_required,
     "FINALIZE_LOCAL_GATE",
   );
+  const report = await fsp.readFile(
+    (await writeReviewReport(state.store, state.reviewId)).path,
+    "utf8",
+  );
+  assert.match(report, /- Human arbitration available: `REREVIEW_UNRESOLVED` at [^;]+; the local gate can be finalized instead\n/);
+  assert.match(
+    report,
+    /- Next step: `FINALIZE_LOCAL_GATE`, from the review summary: the local gate can be finalized next with 1 minor or nit finding left open\./,
+  );
+  const { review: ledger } = await loadReportLedgers(state.store, state.reviewId);
+  assert.match(renderReviewBrief(ledger), /- Human arbitration available: `REREVIEW_UNRESOLVED` at [^;]+; the local gate can be finalized instead\./);
+
   const { gate } = await finalizeLocalGate(state.store, state.reviewId);
   assert.deepEqual(gate.open_findings, [
     { id: "F-001", severity: "minor", status: "STILL_OPEN" },
   ]);
   assert.equal(gate.snapshot_hash, state.review.rounds[1].snapshot_hash);
 
-  // A standalone gate whose list differs from the ledger fails the report.
+  // A standalone gate is compared by value, so key order inside an entry does
+  // not matter, but a missing list or a different entry does.
   const original = JSON.parse(await fsp.readFile(gatePath(state), "utf8"));
-  for (const open_findings of [undefined, [{ id: "F-001", severity: "nit", status: "STILL_OPEN" }]]) {
-    await fsp.writeFile(
+  const writeGate = (open_findings) =>
+    fsp.writeFile(
       gatePath(state),
       `${JSON.stringify({ ...original, open_findings }, null, 2)}\n`,
       { mode: 0o600 },
     );
+  await writeGate([{ status: "STILL_OPEN", severity: "minor", id: "F-001" }]);
+  await writeReviewReport(state.store, state.reviewId);
+  for (const open_findings of [undefined, [{ id: "F-001", severity: "nit", status: "STILL_OPEN" }]]) {
+    await writeGate(open_findings);
     await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
       assert.equal(error.code, "LOCAL_GATE_INVALID");
+      assert.equal(error.details.field, "open_findings");
+      return true;
+    });
+  }
+});
+
+test("a CLEAN gate carries no open_findings member, and an explicit empty one fails the report", async (t) => {
+  const state = await repositoryFixture(t);
+  const prepared = await prepareReview(state.store, {
+    repositoryPath: state.repository,
+    baseRef: state.baseSha,
+    requirement: REQUIREMENT,
+    implementationScope: "Update value.js.",
+    reviewerProvider: "CLAUDE_DESKTOP",
+  });
+  await submitInitialReview(state.store, prepared.id, []);
+  const { gate } = await finalizeLocalGate(state.store, prepared.id);
+  assert.equal(Object.hasOwn(gate, "open_findings"), false);
+  const gated = { ...state, reviewId: prepared.id };
+  await writeReviewReport(gated.store, gated.reviewId);
+  for (const open_findings of [null, []]) {
+    await fsp.writeFile(
+      gatePath(gated),
+      `${JSON.stringify({ ...gate, open_findings }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    await assert.rejects(writeReviewReport(gated.store, gated.reviewId), (error) => {
       assert.equal(error.details.field, "open_findings");
       return true;
     });
@@ -311,7 +332,10 @@ test("a gate written before its status was saved is inert, and finalization can 
     (await writeReviewReport(state.store, state.reviewId)).path,
     "utf8",
   );
-  assert.match(report, /- Next step: `FINALIZE_LOCAL_GATE`, from the review summary\./);
+  assert.match(
+    report,
+    /- Next step: `FINALIZE_LOCAL_GATE`, from the review summary: the local gate can be finalized next with 2 minor or nit findings left open\./,
+  );
   assert.doesNotMatch(report, /Gated at the round limit/);
   const { review: ledger } = await loadReportLedgers(state.store, state.reviewId);
   assert.match(

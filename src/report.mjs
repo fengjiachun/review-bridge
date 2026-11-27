@@ -496,6 +496,15 @@ function changesSection(review) {
   ];
 }
 
+// A final-round HUMAN_REQUIRED review with only minor or nit findings open can
+// be finalized instead, so arbitration is then an alternative.
+function arbitrationLine(review, reason) {
+  const event = reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`;
+  return isFinalizableAtRoundLimit(review)
+    ? `Human arbitration available: ${event}; the local gate can be finalized instead`
+    : `Human arbitration required: ${event}`;
+}
+
 function outcomeSection(review) {
   const history = review.history ?? [];
   const lines = [
@@ -524,9 +533,7 @@ function outcomeSection(review) {
     const reason = [...history]
       .reverse()
       .find((entry) => HUMAN_REQUIRED_EVENTS.includes(entry?.event));
-    lines.push(
-      `- Human arbitration required: ${reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`}`,
-    );
+    lines.push(`- ${arbitrationLine(review, reason)}`);
   }
   const carried = review.carried_findings ?? [];
   if (carried.length > 0) {
@@ -789,7 +796,6 @@ const SEVERITY_ORDER = ["blocker", "major", "minor", "nit"];
 // Settled where core says settled: submitRereview writes exactly these two
 // statuses as an end. Everything else -- raised, answered, escalated, or
 // contested -- is open, and is what the brief leads with.
-const SETTLED_STATUSES = new Set(["RESOLVED", "REBUTTAL_ACCEPTED"]);
 // What an open finding is still waiting on, from its own status alone.
 const OPEN_FINDING_STATE = {
   OPEN: "no author response yet",
@@ -807,7 +813,7 @@ function partitionFindings(review) {
   const findings = review.findings ?? [];
   return {
     all: findings,
-    open: findings.filter((finding) => !SETTLED_STATUSES.has(finding.status)),
+    open: openFindings({ findings }),
     resolved: findings.filter((finding) => finding.status === "RESOLVED"),
     rebutted: findings.filter((finding) => finding.status === "REBUTTAL_ACCEPTED"),
   };
@@ -1233,7 +1239,13 @@ function nextStepLine(local, publication, summary) {
       ? null
       : `- Next step: ${code(summary.next_action)}, from the publication summary.`;
   }
-  return `- Next step: ${code(local.action_required)}, from the review summary.`;
+  // A review that is not CLEAN reports FINALIZE_LOCAL_GATE only when it is
+  // finalizable at the round limit, with its open findings left open.
+  const leftOpen =
+    local.action_required === "FINALIZE_LOCAL_GATE" && local.status !== "CLEAN"
+      ? `: the local gate can be finalized next with ${count(local.active_findings.length, "minor or nit finding")} left open`
+      : "";
+  return `- Next step: ${code(local.action_required)}, from the review summary${leftOpen}.`;
 }
 
 function openItemsSection(local, publication, summary) {
@@ -1324,9 +1336,7 @@ function aboutReviewSection(review, partition, timings) {
     const reason = [...(review.history ?? [])]
       .reverse()
       .find((entry) => HUMAN_REQUIRED_EVENTS.includes(entry?.event));
-    lines.push(
-      `- Human arbitration required: ${reason == null ? "reason NOT_RECORDED" : `${code(reason.event)} at ${inline(reason.at)}`}.`,
-    );
+    lines.push(`- ${arbitrationLine(review, reason)}.`);
   }
   return ["## About this review", lines.join("\n")];
 }

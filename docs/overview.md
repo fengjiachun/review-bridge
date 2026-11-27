@@ -141,7 +141,7 @@ WAITING_FOR_REVIEW
                                                 └─ rebuttal still open -> HUMAN_REQUIRED
 
 CLEAN -> working tree re-checked against the snapshot -> LOCAL_GATE_PASSED
-CONTINUABLE_FINDINGS / HUMAN_REQUIRED at round two, only minor or nit open
+CONTINUABLE_FINDINGS / HUMAN_REQUIRED at round two, not continued, only minor or nit open
   -> working tree re-checked against the snapshot -> LOCAL_GATE_PASSED
 ```
 

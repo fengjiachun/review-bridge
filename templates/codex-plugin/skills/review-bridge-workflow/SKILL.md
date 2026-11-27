@@ -16,7 +16,7 @@ not a list to preload.
 | --- | --- | --- |
 | Prepare a manual local review | [Prepare](references/prepare.md) | Only its selected provider, then findings or finish after a verdict |
 | Handle local findings or rereview | [Handle findings](references/findings.md) | Selected provider for round two; Prepare for a continuation |
-| Finish a CLEAN review or escalate HUMAN_REQUIRED | [Finish](references/finish.md) | Publication only if authorized |
+| Finish a CLEAN review, gate one at the round limit, or escalate HUMAN_REQUIRED | [Finish](references/finish.md) | Publication only if authorized |
 | Publish through LOCAL_GATE or explicitly authorized REMOTE_ONLY | [Publish through GitHub](references/publication.md) | Prepare if a local gate is required |
 | List the local Codex reviewer's models | Nothing: call `list_reviewer_models` and show the configured model, the `high` default, and each model's supported efforts | [CODEX_TASK](references/codex-task.md) only to launch with a choice |
 

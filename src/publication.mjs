@@ -7,7 +7,7 @@ import {
   codexRequestBody,
   isCodexRequestId,
 } from "./codex-request.mjs";
-import { loadReview, openFindings, REVIEWER_PROVIDERS } from "./core.mjs";
+import { gateOpenFindings, loadReview, REVIEWER_PROVIDERS } from "./core.mjs";
 // One derivation of the App's notice markers, shared with the adapter that
 // records them. A notice is only non-blocking because its body carries a
 // marker, so the claim has to be checked here against that body.
@@ -2704,7 +2704,9 @@ function normalizedLocalGate(localGate) {
     rationale: null,
     authorized_at: null,
     repository_path: localGate.review.repository_path,
-    open_findings: localGate.gate.open_findings ?? null,
+    ...(Object.hasOwn(localGate.gate, "open_findings")
+      ? { open_findings: localGate.gate.open_findings }
+      : {}),
   };
 }
 
@@ -2946,13 +2948,6 @@ export async function readLocalGateAuthorization(storeRoot, reviewId) {
 // the first differing field with both values, or null.
 export function localGateReviewMismatch(gate, review) {
   const lastRound = review.rounds?.at(-1) ?? {};
-  // A gate lists the open findings it accepted only when there are any, each
-  // as {id, severity, status} in ledger order.
-  const heldOpen = openFindings(review).map(({ id, severity, status }) => ({
-    id,
-    severity,
-    status,
-  }));
   const expectations = [
     ["base_sha", gate.base_sha, lastRound.base_sha],
     ["head_sha", gate.head_sha, lastRound.head_sha],
@@ -2962,22 +2957,38 @@ export function localGateReviewMismatch(gate, review) {
       gate.reviewer_provider,
       review.reviewer_provider ?? "CLAUDE_DESKTOP",
     ],
-    [
-      "open_findings",
-      gate.open_findings ?? null,
-      heldOpen.length === 0 ? null : heldOpen,
-    ],
   ];
   for (const [field, attested, held] of expectations) {
-    if (
-      field === "open_findings"
-        ? JSON.stringify(attested) !== JSON.stringify(held)
-        : attested !== held
-    ) {
+    if (attested !== held) {
       return { field, gate: attested ?? null, review: held ?? null };
     }
   }
+  // A gate carries the member only when findings were left open, so an
+  // explicit empty or null list is a difference too.
+  const heldOpen = gateOpenFindings(review);
+  const attestedOpen = Object.hasOwn(gate, "open_findings")
+    ? gate.open_findings
+    : undefined;
+  const expectedOpen = heldOpen.length === 0 ? undefined : heldOpen;
+  if (!sameOpenFindings(attestedOpen, expectedOpen)) {
+    return {
+      field: "open_findings",
+      gate: attestedOpen ?? null,
+      review: expectedOpen ?? null,
+    };
+  }
   return null;
+}
+
+function sameOpenFindings(attested, expected) {
+  if (attested === undefined || expected === undefined) {
+    return attested === expected;
+  }
+  try {
+    return sameCanonical(attested, expected);
+  } catch {
+    return false;
+  }
 }
 
 async function openAuthorizationFiles(
