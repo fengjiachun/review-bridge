@@ -57,9 +57,10 @@ load [Lock contention](references/lock-contention.md) before deciding to retry.
 - Follow server-derived `next_action` and `required_inputs` with the current
   revision or `state_version`. Use the ledger for findings and resolutions;
   session narration, reports, and launch exit codes are not review verdicts.
-- Never add a third round to a review ID. HUMAN_REQUIRED stops for arbitration; CONTINUABLE_FINDINGS uses a fresh
-  full review. Either one whose summary reports `FINALIZE_LOCAL_GATE` holds
-  only `minor` or `nit` findings and is finalized by default.
+- Never add a third round to a review ID. When the summary reports
+  `FINALIZE_LOCAL_GATE`, every open finding is `minor` or `nit` and the review
+  is finalized by default. Otherwise HUMAN_REQUIRED stops for arbitration and
+  CONTINUABLE_FINDINGS uses a fresh full review.
 - Honor terminal states and operator stops.
 
 ## Test quality in pre-commit cleanup

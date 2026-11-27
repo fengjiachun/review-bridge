@@ -793,9 +793,6 @@ export function reportRevision(review, publication, summary = null) {
 // and states the counting rule instead of the conclusion.
 
 const SEVERITY_ORDER = ["blocker", "major", "minor", "nit"];
-// Settled where core says settled: submitRereview writes exactly these two
-// statuses as an end. Everything else -- raised, answered, escalated, or
-// contested -- is open, and is what the brief leads with.
 // What an open finding is still waiting on, from its own status alone.
 const OPEN_FINDING_STATE = {
   OPEN: "no author response yet",
@@ -1030,7 +1027,11 @@ const LOCAL_NEXT_STEP = {
   CONTINUABLE_FINDINGS: "the open findings are addressed in a fresh full review",
 };
 
-function destinationSentence(review, publication, summary) {
+function finalizableNextStep(openCount) {
+  return `the local gate can be finalized next with ${count(openCount, "minor or nit finding")} left open`;
+}
+
+function destinationSentence(review, publication, summary, openCount) {
   if (publication != null) {
     return `Publication ${pullRequestName(publication)}: ${publicationStanding(publication, summary)}.`;
   }
@@ -1038,7 +1039,7 @@ function destinationSentence(review, publication, summary) {
     return `The local gate passed over snapshot ${code(review.clean_snapshot_hash)}; no publication ledger was rendered, so nothing here is merged.`;
   }
   const next = isFinalizableAtRoundLimit(review)
-    ? `the local gate can be finalized next with ${count(openFindings(review).length, "minor or nit finding")} left open`
+    ? finalizableNextStep(openCount)
     : Object.hasOwn(LOCAL_NEXT_STEP, review?.status)
     ? LOCAL_NEXT_STEP[review.status]
     : `its status ${code(review?.status)} names no next step here; inspect the ledger`;
@@ -1073,7 +1074,7 @@ function verdictLines(review, publication, summary, partition) {
     : " (not a terminal state: the review is still in progress)";
   return [
     `**${inline(review.status)}** — ${standing}${carried}${qualifier}.`,
-    destinationSentence(review, publication, summary),
+    destinationSentence(review, publication, summary, open),
   ];
 }
 
@@ -1243,7 +1244,7 @@ function nextStepLine(local, publication, summary) {
   // finalizable at the round limit, with its open findings left open.
   const leftOpen =
     local.action_required === "FINALIZE_LOCAL_GATE" && local.status !== "CLEAN"
-      ? `: the local gate can be finalized next with ${count(local.active_findings.length, "minor or nit finding")} left open`
+      ? `: ${finalizableNextStep(local.active_findings.length)}`
       : "";
   return `- Next step: ${code(local.action_required)}, from the review summary${leftOpen}.`;
 }
@@ -1601,7 +1602,7 @@ export async function loadReportLedgers(
     if (mismatch != null) {
       throw reportError(
         "LOCAL_GATE_INVALID",
-        `gate.json of ${reviewId} attests ${mismatch.field} ${JSON.stringify(mismatch.gate)}, but the review holds ${JSON.stringify(mismatch.review)}`,
+        `gate.json of ${reviewId} attests ${mismatch.field} ${mismatch.gate_absent ? "absent" : JSON.stringify(mismatch.gate)}, but the review holds ${mismatch.review_absent ? "none" : JSON.stringify(mismatch.review)}`,
         { review_id: reviewId, path: path.join(directory, "gate.json"), ...mismatch },
       );
     }

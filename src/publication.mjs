@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   codexRequestBody,
   isCodexRequestId,
@@ -2970,25 +2971,16 @@ export function localGateReviewMismatch(gate, review) {
     ? gate.open_findings
     : undefined;
   const expectedOpen = heldOpen.length === 0 ? undefined : heldOpen;
-  if (!sameOpenFindings(attestedOpen, expectedOpen)) {
+  if (!isDeepStrictEqual(attestedOpen, expectedOpen)) {
     return {
       field: "open_findings",
       gate: attestedOpen ?? null,
       review: expectedOpen ?? null,
+      ...(attestedOpen === undefined ? { gate_absent: true } : {}),
+      ...(expectedOpen === undefined ? { review_absent: true } : {}),
     };
   }
   return null;
-}
-
-function sameOpenFindings(attested, expected) {
-  if (attested === undefined || expected === undefined) {
-    return attested === expected;
-  }
-  try {
-    return sameCanonical(attested, expected);
-  } catch {
-    return false;
-  }
 }
 
 async function openAuthorizationFiles(

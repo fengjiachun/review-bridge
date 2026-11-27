@@ -45,7 +45,7 @@ async function continuableAtRoundTwo(t, newSeverities = ["minor", "nit"]) {
     repositoryPath: state.repository,
     baseRef: state.baseSha,
     requirement: REQUIREMENT,
-    implementationScope: "Update value.js.",
+    implementationScope: "Update app.js.",
     reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(state.store, prepared.id, [finding("major"), finding("blocker")]);
@@ -64,7 +64,7 @@ async function continuableAtRoundTwo(t, newSeverities = ["minor", "nit"]) {
         finding_id: "F-002",
         decision: "rebuttal_accepted",
         rationale: "Unreachable.",
-        verification: "Read value.js and found no caller.",
+        verification: "Read app.js and found no caller.",
       },
     ],
     newSeverities.map((severity) => finding(severity)),
@@ -79,7 +79,7 @@ async function humanRequiredAtRoundTwo(t) {
     repositoryPath: state.repository,
     baseRef: state.baseSha,
     requirement: REQUIREMENT,
-    implementationScope: "Update value.js.",
+    implementationScope: "Update app.js.",
     reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(state.store, prepared.id, [finding("minor")]);
@@ -178,16 +178,25 @@ test("a round-two continuable review with only minor or nit findings open is gat
     authorized_at: null,
   });
 
-  // Bound to a publication, the gate's list is still held to the ledger.
   await writeReviewReport(state.store, state.reviewId);
-  const ledger = JSON.parse(await fsp.readFile(reviewPath(state), "utf8"));
-  ledger.findings.find((entry) => entry.id === "F-004").severity = "minor";
-  await fsp.writeFile(reviewPath(state), `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
-  await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
-    assert.equal(error.code, "LOCAL_GATE_INVALID");
-    assert.equal(error.details.field, "open_findings");
-    return true;
-  });
+  const original = await fsp.readFile(reviewPath(state), "utf8");
+  const reordered = (ledger) => {
+    const [, , third, fourth] = ledger.findings;
+    ledger.findings.splice(2, 2, fourth, third);
+  };
+  const reSeverity = (ledger) => {
+    ledger.findings.find((entry) => entry.id === "F-004").severity = "minor";
+  };
+  for (const mutate of [reordered, reSeverity]) {
+    const ledger = JSON.parse(original);
+    mutate(ledger);
+    await fsp.writeFile(reviewPath(state), `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
+    await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
+      assert.equal(error.code, "LOCAL_GATE_INVALID");
+      assert.equal(error.details.field, "open_findings");
+      return true;
+    });
+  }
 });
 
 test("a round-two human-required review with only a minor finding open is gated", async (t) => {
@@ -230,6 +239,7 @@ test("a round-two human-required review with only a minor finding open is gated"
     await assert.rejects(writeReviewReport(state.store, state.reviewId), (error) => {
       assert.equal(error.code, "LOCAL_GATE_INVALID");
       assert.equal(error.details.field, "open_findings");
+      assert.equal(error.details.gate_absent, open_findings === undefined ? true : undefined);
       return true;
     });
   }
@@ -241,7 +251,7 @@ test("a CLEAN gate carries no open_findings member, and an explicit empty one fa
     repositoryPath: state.repository,
     baseRef: state.baseSha,
     requirement: REQUIREMENT,
-    implementationScope: "Update value.js.",
+    implementationScope: "Update app.js.",
     reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(state.store, prepared.id, []);
@@ -257,6 +267,9 @@ test("a CLEAN gate carries no open_findings member, and an explicit empty one fa
     );
     await assert.rejects(writeReviewReport(gated.store, gated.reviewId), (error) => {
       assert.equal(error.details.field, "open_findings");
+      assert.equal(error.details.gate_absent, undefined);
+      assert.equal(error.details.review_absent, true);
+      assert.match(error.message, /attests open_findings (null|\[\]), but the review holds none$/);
       return true;
     });
   }
@@ -279,7 +292,7 @@ test("finalization refuses a round-one escalation, a continued source, and a cha
     repositoryPath: escalated.repository,
     baseRef: escalated.baseSha,
     requirement: REQUIREMENT,
-    implementationScope: "Update value.js.",
+    implementationScope: "Update app.js.",
     reviewerProvider: "CLAUDE_DESKTOP",
   });
   await submitInitialReview(escalated.store, prepared.id, [finding("nit")]);
@@ -297,7 +310,7 @@ test("finalization refuses a round-one escalation, a continued source, and a cha
     repositoryPath: continued.repository,
     baseRef: continued.baseSha,
     requirement: REQUIREMENT,
-    implementationScope: "Update value.js.",
+    implementationScope: "Update app.js.",
     reviewerProvider: "CLAUDE_DESKTOP",
     continuedFromReviewId: continued.reviewId,
     forceFullReview: true,
@@ -309,10 +322,10 @@ test("finalization refuses a round-one escalation, a continued source, and a cha
   await assert.rejects(finalizeLocalGate(continued.store, continued.reviewId), /only a CLEAN review/);
 
   const changed = await continuableAtRoundTwo(t);
-  await fsp.writeFile(path.join(changed.repository, "value.js"), "export const value = 9;\n");
+  await fsp.writeFile(path.join(changed.repository, "app.js"), "export const value = 9;\n");
   await assert.rejects(
     finalizeLocalGate(changed.store, changed.reviewId),
-    /working tree changed/,
+    /working tree changed after the final-round verdict/,
   );
 });
 
@@ -355,7 +368,7 @@ test("a review gated with open findings is a successor parent with a verifying p
     repositoryPath: parent.repository,
     baseRef: parent.baseSha,
     requirement: REQUIREMENT,
-    implementationScope: "Update value.js.",
+    implementationScope: "Update app.js.",
     reviewerProvider: "CLAUDE_DESKTOP",
     parentReviewId: parent.reviewId,
   });
