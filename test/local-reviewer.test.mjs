@@ -363,6 +363,36 @@ test("a failed executable spawn cannot produce a started-process receipt", async
   assert.match(JSON.parse(await fsp.readFile(path.join(directory, "exit.json"))).error, /ENOENT/);
 });
 
+test("a reviewer that starts and exits between the poll's receipt reads is reported as started", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "reviewer-start-race-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const attempt = path.join(root, "attempt");
+  await fsp.mkdir(attempt);
+  // The runner waits at startup while the hold file exists, so the poll's
+  // first read of started.json is certain to find nothing.
+  const hold = path.join(root, "runner-hold");
+  const hook = path.join(root, "hold-hook.cjs");
+  await fsp.writeFile(hold, "");
+  await fsp.writeFile(hook, "const fs = require('node:fs');\nwhile (fs.existsSync(process.env.RB_TEST_RUNNER_HOLD ?? '')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);\n");
+  setEnv(t, { NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${hook}`].filter(Boolean).join(" "), RB_TEST_RUNNER_HOLD: hold });
+  // That read is held until the reviewer has started and exited, so both
+  // receipts land before the poll reads exit.json.
+  const readFile = fsp.readFile;
+  let held = false;
+  t.mock.method(fsp, "readFile", async function (file, ...rest) {
+    const read = readFile.call(this, file, ...rest);
+    if (held || path.basename(file) !== "started.json") return read;
+    held = true;
+    assert.equal((await read.then(() => null, (error) => error))?.code, "ENOENT");
+    await fsp.rm(hold);
+    await waitForExit(attempt);
+    return read;
+  });
+  const started = await startLocalReviewer({ command: process.execPath, cwd: root }, ["-e", ""], attempt);
+  assert.equal(started.task_id, "attempt");
+  assert.equal((await waitForExit(attempt)).code, 0);
+});
+
 test("runtime lookup skips non-directory PATH entries and a directory named codex, and needs git to start", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "reviewer-path-"));
   const saved = Object.fromEntries(["PATH", "REVIEW_BRIDGE_CODEX_COMMAND", "LC_ALL", "GIT_DIR", "GIT_CEILING_DIRECTORIES"].map((key) => [key, process.env[key]]));

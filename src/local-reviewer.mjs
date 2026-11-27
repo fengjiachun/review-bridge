@@ -236,9 +236,11 @@ export async function startLocalReviewer(runtime, args, attemptRoot) {
   });
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
+    // The runner records a start before its exit, so reading exit.json first
+    // means a start the exit follows is already visible.
+    const exited = await readDispatchReceipt(attemptRoot, "exit.json");
     const started = await readDispatchReceipt(attemptRoot, "started.json");
     if (started) return started;
-    const exited = await readDispatchReceipt(attemptRoot, "exit.json");
     if (exited) throw new Error(`Reviewer failed to start: ${exited.error ?? exited.code}`);
     await new Promise((resolve) => setTimeout(resolve, 25));
   }

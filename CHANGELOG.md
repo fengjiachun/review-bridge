@@ -9,6 +9,14 @@ convention. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+### Fixed
+
+- (#237) A local reviewer that started and exited before the launch saw its
+  start is reported as started, not as `Reviewer failed to start: <code>`.
+  The runner now records a spawned reviewer's exit only after its start, and
+  the launch reads the exit receipt before the start receipt, so an exit
+  receipt with no start receipt means only a failed spawn.
+
 ### Internal
 
 - (#209) Move the development dependency `node-forge` from 1.4.0 to 1.4.3,
